@@ -15,9 +15,10 @@ use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::storage::trie::merkle_trie;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use informalsystems_malachitebft_config::TimeoutConfig;
+use informalsystems_malachitebft_core_consensus::ValuePayload;
+use informalsystems_malachitebft_metrics::Metrics;
 use libp2p::identity::ed25519::Keypair;
-use malachite_config::TimeoutConfig;
-use malachite_metrics::Metrics;
 use ractor::ActorRef;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -76,10 +77,11 @@ impl SnapchainNode {
             );
             let shard_validator_set = SnapchainValidatorSet::new(vec![shard_validator]);
             let shard_consensus_params = ConsensusParams {
-                start_height: Height::new(shard.shard_id(), 1),
+                initial_height: Height::new(shard.shard_id(), 1),
                 initial_validator_set: shard_validator_set,
                 address: validator_address.clone(),
                 threshold_params: Default::default(),
+                value_payload: ValuePayload::ProposalAndParts,
             };
             let ctx = SnapchainValidatorContext::new(keypair.clone());
 
@@ -147,10 +149,11 @@ impl SnapchainNode {
         let block_validator_set = SnapchainValidatorSet::new(vec![block_validator]);
 
         let block_consensus_params = ConsensusParams {
-            start_height: Height::new(block_shard.shard_id(), 1),
+            initial_height: Height::new(block_shard.shard_id(), 1),
             initial_validator_set: block_validator_set,
             address: validator_address.clone(),
             threshold_params: Default::default(),
+            value_payload: ValuePayload::ProposalAndParts,
         };
 
         let engine = BlockEngine::new(block_store.clone());
