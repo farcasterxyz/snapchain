@@ -306,7 +306,7 @@ impl Subscriber {
                         event_type: IdRegisterEventType::Register as i32,
                         to: to.to_vec(),
                         recovery_address: recovery.to_vec(),
-                        from: vec![], // TODO(aditi) : What to do about this?
+                        from: vec![],
                     }),
                 )
                 .await;
