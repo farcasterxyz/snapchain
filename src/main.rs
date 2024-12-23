@@ -114,14 +114,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         info!("Gossip Stopped");
     });
 
-    if !app_config.fnames.disable {
-        let mut fetcher = snapchain::connectors::fname::Fetcher::new(app_config.fnames.clone());
-
-        tokio::spawn(async move {
-            fetcher.run().await;
-        });
-    }
-
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
     let registry = SharedRegistry::global();
@@ -148,6 +140,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         app_config.consensus.num_shards,
         Box::new(routing::ShardRouter {}),
     );
+
+    if !app_config.fnames.disable {
+        let mut fetcher = snapchain::connectors::fname::Fetcher::new(
+            app_config.fnames.clone(),
+            node.shard_senders.clone(),
+            app_config.consensus.num_shards,
+            Box::new(routing::ShardRouter {}),
+        );
+
+        tokio::spawn(async move {
+            fetcher.run().await;
+        });
+    }
 
     if !app_config.onchain_events.rpc_url.is_empty() {
         let mut onchain_events_subscriber = snapchain::connectors::onchain_events::Subscriber::new(
