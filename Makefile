@@ -1,6 +1,6 @@
 .PHONY: build
 build:
-	docker compose build --ssh default
+	docker compose build
 
 .PHONY: dev
 dev: build

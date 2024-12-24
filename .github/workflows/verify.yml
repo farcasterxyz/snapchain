@@ -4,8 +4,6 @@ on:
   pull_request:
     branches: [main]
   workflow_call:
-    secrets:
-      MALACHITE_PRIVATE_REPO_SSH_KEY:
 
 permissions:
   contents: read
@@ -13,9 +11,6 @@ permissions:
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
-
-env:
-  MALACHITE_GIT_REF: "8a9f3702eb41199bc8a7f45139adba233a04744a"
 
 jobs:
   build:
@@ -25,11 +20,8 @@ jobs:
       - runner=64cpu-linux-arm64
     steps:
       - uses: actions/checkout@v4
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.MALACHITE_PRIVATE_REPO_SSH_KEY }}
-      - name: Build via Docker Compose, exposing SSH agent to build container
-        run: docker compose build --ssh default
+      - name: Build via Docker Compose
+        run: docker compose build
 
   test:
     timeout-minutes: 20
@@ -41,27 +33,15 @@ jobs:
         uses: arduino/setup-protoc@v3
 
       - uses: actions/checkout@v4
-        with:
-          repository: farcasterxyz/malachite
-          ref: ${{ env.MALACHITE_GIT_REF }}
-          path: ./malachite
-          ssh-key: ${{ secrets.MALACHITE_PRIVATE_REPO_SSH_KEY }}
 
-      - uses: actions/checkout@v4
-        with:
-          path: ./snapchain
-
-      - working-directory: ./snapchain
-        env:
+      - env:
           RUSTFLAGS: "-Dwarnings"
         run: cargo test
 
-      - working-directory: ./snapchain
-        env:
+      - env:
           RUSTFLAGS: "-Dwarnings"
         run: cargo build --bins
 
-      - working-directory: ./snapchain
-        env:
+      - env:
           RUSTFLAGS: "-Dwarnings"
         run: cargo fmt --all --check
