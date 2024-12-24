@@ -17,7 +17,7 @@ The main goals of this implementation are:
 
 2. **Data Availability**: Can be run in the cloud for under $1,000/month and provide real-time access to the entire network. 
 
-3. **Canonical Implementation**: Is the reference implementation that is the most accurate and complete implementation of the specification. 
+3. **Canonical Implementation**: Is the most accurate reference for how Snapchain and Farcaster should work. 
 
 ## Status 
 
