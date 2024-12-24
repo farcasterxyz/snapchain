@@ -2,7 +2,8 @@
 
 The open-source, canonical implementation of Farcaster's [Snapchain](https://github.com/farcasterxyz/protocol/discussions/207) network. 
 
-<!-- TODO:  logo -->
+![snapchain](https://github.com/user-attachments/assets/e5a041db-e3ae-4250-ad6b-7043ad648d34)
+
 
 <!-- TODO:  links to installation, user docs, contributor docs -->
 
