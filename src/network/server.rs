@@ -1,6 +1,6 @@
 use super::rpc_extensions::{AsMessagesResponse, AsSingleMessageResponse};
 use crate::connectors::onchain_events::L1Client;
-use crate::core::error::HubError;
+use crate::core::error::NodeError;
 use crate::mempool::routing;
 use crate::proto;
 use crate::proto::hub_service_server::HubService;
@@ -385,7 +385,6 @@ impl HubService for MyHubService {
         &self,
         request: Request<ShardChunksRequest>,
     ) -> Result<Response<ShardChunksResponse>, Status> {
-        // TODO(aditi): Write unit tests for these functions.
         let shard_index = request.get_ref().shard_id;
         let start_block_number = request.get_ref().start_block_number;
         let stop_block_number = request.get_ref().stop_block_number;
@@ -396,7 +395,7 @@ impl HubService for MyHubService {
         let stores = self.shard_stores.get(&shard_index);
         match stores {
             None => Err(Status::from_error(Box::new(
-                HubError::invalid_internal_state("Missing shard store"),
+                NodeError::invalid_internal_state("Missing shard store"),
             ))),
             Some(stores) => {
                 match stores
@@ -452,15 +451,13 @@ impl HubService for MyHubService {
         &self,
         request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
-        // TODO(aditi): Incorporate event types
         info!("Received call to [subscribe] RPC");
-        // TODO(aditi): Rethink the channel size
         let (server_tx, client_rx) = mpsc::channel::<Result<HubEvent, Status>>(100);
         let events_txs = match request.get_ref().shard_index {
             Some(shard_id) => match self.shard_senders.get(&(shard_id)) {
                 None => {
                     return Err(Status::from_error(Box::new(
-                        HubError::invalid_internal_state("Missing shard event tx"),
+                        NodeError::invalid_internal_state("Missing shard event tx"),
                     )))
                 }
                 Some(senders) => vec![senders.events_tx.clone()],
@@ -485,7 +482,6 @@ impl HubService for MyHubService {
             let mut page_token = None;
             for store in shard_stores {
                 loop {
-                    // TODO(aditi): We should stop pulling the raw db out of the shard store and create a new store type for events to house the db.
                     let old_events = HubEvent::get_events(
                         store.shard_store.db.clone(),
                         start_id,
@@ -511,22 +507,18 @@ impl HubService for MyHubService {
                 }
             }
 
-            // TODO(aditi): It's possible that events show up between when we finish reading from the db and the subscription starts. We don't handle this case in the current hub code, but we may want to down the line.
             for event_tx in events_txs {
                 let tx = server_tx.clone();
                 tokio::spawn(async move {
                     let mut event_rx = event_tx.subscribe();
                     loop {
                         match event_rx.recv().await {
-                            Ok(hub_event) => {
-                                match tx.send(Ok(hub_event)).await {
-                                    Ok(_) => {}
-                                    Err(_) => {
-                                        // This means the client hung up
-                                        break;
-                                    }
+                            Ok(hub_event) => match tx.send(Ok(hub_event)).await {
+                                Ok(_) => {}
+                                Err(_) => {
+                                    break;
                                 }
-                            }
+                            },
                             Err(err) => {
                                 error!(
                                     { err = err.to_string() },

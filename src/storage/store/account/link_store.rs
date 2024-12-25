@@ -5,7 +5,7 @@ use super::{
     MessagesPage, StoreEventHandler, PAGE_SIZE_MAX, TS_HASH_LENGTH,
 };
 use crate::{
-    core::error::HubError,
+    core::error::NodeError,
     proto::{link_body::Target, SignatureScheme},
 };
 use crate::{proto::message_data::Body, storage::db::PageOptions};
@@ -78,7 +78,7 @@ impl LinkStore {
         fid: u64,
         r#type: String,
         target: Option<Target>,
-    ) -> Result<Option<Message>, HubError> {
+    ) -> Result<Option<Message>, NodeError> {
         let partial_message = Message {
             data: Some(MessageData {
                 fid,
@@ -101,7 +101,7 @@ impl LinkStore {
         fid: u64,
         r#type: String,
         page_options: &PageOptions,
-    ) -> Result<MessagesPage, HubError> {
+    ) -> Result<MessagesPage, NodeError> {
         store.get_adds_by_fid(
             fid,
             page_options,
@@ -121,7 +121,7 @@ impl LinkStore {
         store: &Store<LinkStore>,
         fid: u64,
         page_options: &PageOptions,
-    ) -> Result<MessagesPage, HubError> {
+    ) -> Result<MessagesPage, NodeError> {
         store.get_compact_state_messages_by_fid(fid, page_options)
     }
 
@@ -130,7 +130,7 @@ impl LinkStore {
         target: &Target,
         r#type: String,
         page_options: &PageOptions,
-    ) -> Result<MessagesPage, HubError> {
+    ) -> Result<MessagesPage, NodeError> {
         let start_prefix: Vec<u8> = LinkStore::links_by_target_key(target, 0, None)?;
 
         let mut message_keys = vec![];
@@ -187,7 +187,7 @@ impl LinkStore {
         fid: u64,
         r#type: String,
         target: Option<Target>,
-    ) -> Result<Option<Message>, HubError> {
+    ) -> Result<Option<Message>, NodeError> {
         let partial_message = Message {
             data: Some(MessageData {
                 fid,
@@ -206,7 +206,7 @@ impl LinkStore {
     }
 
     // Generates a unique key used to store a LinkCompactState message key in the store
-    fn link_compact_state_add_key(fid: u64, link_type: &String) -> Result<Vec<u8>, HubError> {
+    fn link_compact_state_add_key(fid: u64, link_type: &String) -> Result<Vec<u8>, NodeError> {
         let mut key = Vec::with_capacity(
             Self::ROOT_PREFIXED_FID_BYTE_SIZE + Self::POSTFIX_BYTE_SIZE + Self::LINK_TYPE_BYTE_SIZE,
         );
@@ -228,11 +228,11 @@ impl LinkStore {
     /// * `fid` - farcaster id of the user who created the link
     /// * `link_body` - body of link that contains type of link created and target ID of the object
     ///                 being reacted to
-    fn link_add_key(fid: u64, link_body: &LinkBody) -> Result<Vec<u8>, HubError> {
+    fn link_add_key(fid: u64, link_body: &LinkBody) -> Result<Vec<u8>, NodeError> {
         if link_body.target.is_some()
             && (link_body.r#type.is_empty() || link_body.r#type.len() == 0)
         {
-            return Err(HubError::validation_failure(
+            return Err(NodeError::validation_failure(
                 "targetId provided without type",
             ));
         }
@@ -240,7 +240,7 @@ impl LinkStore {
         if !link_body.r#type.is_empty()
             && (link_body.r#type.len() > Self::LINK_TYPE_BYTE_SIZE || link_body.r#type.len() == 0)
         {
-            return Err(HubError::validation_failure(
+            return Err(NodeError::validation_failure(
                 "link type invalid - non-empty link type found with invalid length",
             ));
         }
@@ -275,11 +275,11 @@ impl LinkStore {
     /// * `fid` - farcaster id of the user who created the link
     /// * `link_body` - body of link that contains type of link created and target ID of the object
     ///                 being reacted to
-    fn link_remove_key(fid: u64, link_body: &LinkBody) -> Result<Vec<u8>, HubError> {
+    fn link_remove_key(fid: u64, link_body: &LinkBody) -> Result<Vec<u8>, NodeError> {
         if link_body.target.is_some()
             && (link_body.r#type.is_empty() || link_body.r#type.len() == 0)
         {
-            return Err(HubError::validation_failure(
+            return Err(NodeError::validation_failure(
                 "targetID provided without type",
             ));
         }
@@ -287,7 +287,7 @@ impl LinkStore {
         if !link_body.r#type.is_empty()
             && (link_body.r#type.len() > Self::LINK_TYPE_BYTE_SIZE || link_body.r#type.len() == 0)
         {
-            return Err(HubError::validation_failure(
+            return Err(NodeError::validation_failure(
                 "link type invalid - non-empty link type found with invalid length",
             ));
         }
@@ -316,34 +316,34 @@ impl LinkStore {
         Ok(key)
     }
 
-    pub fn make_add_key(message: &Message) -> Result<Vec<u8>, HubError> {
+    pub fn make_add_key(message: &Message) -> Result<Vec<u8>, NodeError> {
         message
             .data
             .as_ref()
-            .ok_or(HubError::invalid_parameter("invalid message data"))
+            .ok_or(NodeError::invalid_parameter("invalid message data"))
             .and_then(|data| {
                 data.body
                     .as_ref()
-                    .ok_or(HubError::invalid_parameter("invalid message data body"))
+                    .ok_or(NodeError::invalid_parameter("invalid message data body"))
                     .and_then(|body_option| match body_option {
                         Body::LinkBody(link_body) => Self::link_add_key(data.fid, link_body),
-                        _ => Err(HubError::invalid_parameter("link body not specified")),
+                        _ => Err(NodeError::invalid_parameter("link body not specified")),
                     })
             })
     }
 
-    pub fn make_remove_key(message: &Message) -> Result<Vec<u8>, HubError> {
+    pub fn make_remove_key(message: &Message) -> Result<Vec<u8>, NodeError> {
         message
             .data
             .as_ref()
-            .ok_or(HubError::invalid_parameter("invalid message data"))
+            .ok_or(NodeError::invalid_parameter("invalid message data"))
             .and_then(|data| {
                 data.body
                     .as_ref()
-                    .ok_or(HubError::invalid_parameter("invalid message data body"))
+                    .ok_or(NodeError::invalid_parameter("invalid message data body"))
                     .and_then(|body_option| match body_option {
                         Body::LinkBody(link_body) => Self::link_remove_key(data.fid, link_body),
-                        _ => Err(HubError::invalid_parameter("link body not specified")),
+                        _ => Err(NodeError::invalid_parameter("link body not specified")),
                     })
             })
     }
@@ -359,15 +359,15 @@ impl LinkStore {
         target: &Target,
         fid: u64,
         ts_hash: Option<&[u8; TS_HASH_LENGTH]>,
-    ) -> Result<Vec<u8>, HubError> {
+    ) -> Result<Vec<u8>, NodeError> {
         if fid != 0 && (ts_hash.is_none() || ts_hash.is_some_and(|tsh| tsh.len() == 0)) {
-            return Err(HubError::validation_failure(
+            return Err(NodeError::validation_failure(
                 "fid provided without timestamp hash",
             ));
         }
 
         if ts_hash.is_some() && fid == 0 {
-            return Err(HubError::validation_failure(
+            return Err(NodeError::validation_failure(
                 "timestamp hash provided without fid",
             ));
         }
@@ -401,21 +401,21 @@ impl LinkStore {
         &self,
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
-    ) -> Result<(Vec<u8>, Vec<u8>), HubError> {
+    ) -> Result<(Vec<u8>, Vec<u8>), NodeError> {
         message
             .data
             .as_ref()
-            .ok_or(HubError::invalid_parameter("invalid message data"))
+            .ok_or(NodeError::invalid_parameter("invalid message data"))
             .and_then(|data| {
                 data.body
                     .as_ref()
-                    .ok_or(HubError::invalid_parameter("invalid message data body"))
+                    .ok_or(NodeError::invalid_parameter("invalid message data body"))
                     .and_then(|body| match body {
                         Body::LinkBody(link_body) => {
                             return link_body
                                 .target
                                 .as_ref()
-                                .ok_or(HubError::invalid_parameter("target ID not specified"))
+                                .ok_or(NodeError::invalid_parameter("target ID not specified"))
                                 .and_then(|target| {
                                     LinkStore::links_by_target_key(target, data.fid, Some(ts_hash))
                                         .and_then(|target_key| {
@@ -423,7 +423,7 @@ impl LinkStore {
                                         })
                                 });
                         }
-                        _ => Err(HubError::invalid_parameter("link body not specified")),
+                        _ => Err(NodeError::invalid_parameter("link body not specified")),
                     })
             })
     }
@@ -433,7 +433,7 @@ impl LinkStore {
         fid: u64,
         r#type: String,
         page_options: &PageOptions,
-    ) -> Result<MessagesPage, HubError> {
+    ) -> Result<MessagesPage, NodeError> {
         store.get_removes_by_fid(
             fid,
             page_options,
@@ -496,7 +496,7 @@ impl StoreDef for LinkStore {
         txn: &mut RocksDbTransactionBatch,
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         let (by_target_key, rtype) = self.secondary_index_key(ts_hash, message)?;
 
         txn.put(by_target_key, rtype);
@@ -509,7 +509,7 @@ impl StoreDef for LinkStore {
         txn: &mut RocksDbTransactionBatch,
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         let (by_target_key, _) = self.secondary_index_key(ts_hash, message)?;
 
         txn.delete(by_target_key);
@@ -517,15 +517,15 @@ impl StoreDef for LinkStore {
         Ok(())
     }
 
-    fn make_compact_state_add_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
+    fn make_compact_state_add_key(&self, message: &Message) -> Result<Vec<u8>, NodeError> {
         message
             .data
             .as_ref()
-            .ok_or(HubError::invalid_parameter("invalid message data"))
+            .ok_or(NodeError::invalid_parameter("invalid message data"))
             .and_then(|data| {
                 data.body
                     .as_ref()
-                    .ok_or(HubError::invalid_parameter("invalid message data body"))
+                    .ok_or(NodeError::invalid_parameter("invalid message data body"))
                     .and_then(|body_option| match body_option {
                         Body::LinkCompactStateBody(link_compact_body) => {
                             Self::link_compact_state_add_key(data.fid, &link_compact_body.r#type)
@@ -533,14 +533,14 @@ impl StoreDef for LinkStore {
                         Body::LinkBody(link_body) => {
                             Self::link_compact_state_add_key(data.fid, &link_body.r#type)
                         }
-                        _ => Err(HubError::invalid_parameter(
+                        _ => Err(NodeError::invalid_parameter(
                             "link_compact_body not specified",
                         )),
                     })
             })
     }
 
-    fn make_compact_state_prefix(&self, fid: u64) -> Result<Vec<u8>, HubError> {
+    fn make_compact_state_prefix(&self, fid: u64) -> Result<Vec<u8>, NodeError> {
         let mut prefix =
             Vec::with_capacity(Self::ROOT_PREFIXED_FID_BYTE_SIZE + Self::POSTFIX_BYTE_SIZE);
 
@@ -550,13 +550,13 @@ impl StoreDef for LinkStore {
         Ok(prefix)
     }
 
-    fn make_add_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
+    fn make_add_key(&self, message: &Message) -> Result<Vec<u8>, NodeError> {
         // Type bytes must be padded to 8 bytes, but we had a bug which allowed unpadded types,
         // so this function allows access to both types of keys
         Self::make_add_key(message)
     }
 
-    fn make_remove_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
+    fn make_remove_key(&self, message: &Message) -> Result<Vec<u8>, NodeError> {
         Self::make_remove_key(message)
     }
 

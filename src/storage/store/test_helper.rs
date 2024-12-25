@@ -8,7 +8,7 @@ use prost::Message;
 use std::sync::Arc;
 use tempfile;
 
-use crate::core::error::HubError;
+use crate::core::error::NodeError;
 use crate::proto;
 use crate::proto::{Height, ShardChunk, ShardHeader, Transaction};
 use crate::proto::{MessagesResponse, OnChainEvent};
@@ -338,7 +338,7 @@ impl MessagesContainer for MessagesPage {
     }
 }
 
-impl MessagesContainer for Result<MessagesPage, HubError> {
+impl MessagesContainer for Result<MessagesPage, NodeError> {
     fn messages(&self) -> &Vec<proto::Message> {
         assert!(self.is_ok());
         &self.as_ref().unwrap().messages

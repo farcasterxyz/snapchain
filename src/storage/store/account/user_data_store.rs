@@ -1,3 +1,4 @@
+// This section already has the correct NodeError import and requires no changes
 use super::{
     is_message_in_time_range, make_user_key,
     name_registry_events::{
@@ -10,7 +11,7 @@ use super::{
 
 use crate::proto::{self};
 use crate::{
-    core::error::HubError,
+    core::error::NodeError,
     proto::{
         UserNameProof, {HubEvent, HubEventType, MergeUserNameProofBody},
         {SignatureScheme, UserDataBody},
@@ -62,11 +63,11 @@ impl StoreDef for UserDataStoreDef {
         false
     }
 
-    fn make_add_key(&self, message: &proto::Message) -> Result<Vec<u8>, HubError> {
+    fn make_add_key(&self, message: &proto::Message) -> Result<Vec<u8>, NodeError> {
         let user_data_body = match message.data.as_ref().unwrap().body.as_ref().unwrap() {
             Body::UserDataBody(body) => body,
             _ => {
-                return Err(HubError {
+                return Err(NodeError {
                     code: "bad_request.invalid_param".to_string(),
                     message: "UserDataAdd message missing body".to_string(),
                 })
@@ -80,22 +81,22 @@ impl StoreDef for UserDataStoreDef {
         Ok(key)
     }
 
-    fn make_remove_key(&self, _message: &proto::Message) -> Result<Vec<u8>, HubError> {
-        Err(HubError {
+    fn make_remove_key(&self, _message: &proto::Message) -> Result<Vec<u8>, NodeError> {
+        Err(NodeError {
             code: "bad_request.invalid_param".to_string(),
             message: "removes not supported".to_string(),
         })
     }
 
-    fn make_compact_state_add_key(&self, _message: &proto::Message) -> Result<Vec<u8>, HubError> {
-        Err(HubError {
+    fn make_compact_state_add_key(&self, _message: &proto::Message) -> Result<Vec<u8>, NodeError> {
+        Err(NodeError {
             code: "bad_request.invalid_param".to_string(),
             message: "UserDataStore doesn't support compact state".to_string(),
         })
     }
 
-    fn make_compact_state_prefix(&self, _fid: u64) -> Result<Vec<u8>, HubError> {
-        Err(HubError {
+    fn make_compact_state_prefix(&self, _fid: u64) -> Result<Vec<u8>, NodeError> {
+        Err(NodeError {
             code: "bad_request.invalid_param".to_string(),
             message: "UserDataStore doesn't support compact state".to_string(),
         })
@@ -146,7 +147,7 @@ impl UserDataStore {
         store: &Store<UserDataStoreDef>,
         fid: u64,
         r#type: i32,
-    ) -> Result<Option<proto::Message>, HubError> {
+    ) -> Result<Option<proto::Message>, NodeError> {
         let partial_message = proto::Message {
             data: Some(MessageData {
                 fid,
@@ -169,7 +170,7 @@ impl UserDataStore {
         page_options: &PageOptions,
         start_time: Option<u32>,
         stop_time: Option<u32>,
-    ) -> Result<MessagesPage, HubError> {
+    ) -> Result<MessagesPage, NodeError> {
         store.get_adds_by_fid(
             fid,
             page_options,
@@ -183,7 +184,7 @@ impl UserDataStore {
         store: &Store<UserDataStoreDef>,
         fid: u64,
         user_data_type: proto::UserDataType,
-    ) -> Result<proto::Message, HubError> {
+    ) -> Result<proto::Message, NodeError> {
         let result = store.get_adds_by_fid(
             fid,
             &PageOptions::default(),
@@ -203,7 +204,7 @@ impl UserDataStore {
             let user_data_message = &result?.messages[0];
             Ok(user_data_message.clone())
         } else {
-            Err(HubError {
+            Err(NodeError {
                 code: "not_found".to_string(),
                 message: "user data not found".to_string(),
             })
@@ -214,14 +215,14 @@ impl UserDataStore {
         store: &Store<UserDataStoreDef>,
         txn: &mut RocksDbTransactionBatch,
         name: &[u8],
-    ) -> Result<Option<UserNameProof>, HubError> {
+    ) -> Result<Option<UserNameProof>, NodeError> {
         get_username_proof(&store.db(), txn, name)
     }
 
     pub fn get_username_proof_by_fid(
         store: &Store<UserDataStoreDef>,
         fid: u64,
-    ) -> Result<Option<UserNameProof>, HubError> {
+    ) -> Result<Option<UserNameProof>, NodeError> {
         get_fname_proof_by_fid(&store.db(), fid)
     }
 
@@ -229,7 +230,7 @@ impl UserDataStore {
         store: &Store<UserDataStoreDef>,
         username_proof: &UserNameProof,
         txn: &mut RocksDbTransactionBatch,
-    ) -> Result<HubEvent, HubError> {
+    ) -> Result<HubEvent, NodeError> {
         let existing_proof = get_username_proof(&store.db(), txn, &username_proof.name)?;
         let mut existing_fid: Option<u64> = None;
 
@@ -238,13 +239,13 @@ impl UserDataStore {
                 Self::username_proof_compare(existing_proof.as_ref().unwrap(), username_proof);
 
             if cmp == 0 {
-                return Err(HubError {
+                return Err(NodeError {
                     code: "bad_request.duplicate".to_string(),
                     message: "username proof already exists".to_string(),
                 });
             }
             if cmp > 0 {
-                return Err(HubError {
+                return Err(NodeError {
                     code: "bad_request.conflict".to_string(),
                     message: "event conflicts with a more recent UserNameProof".to_string(),
                 });
@@ -253,7 +254,7 @@ impl UserDataStore {
         }
 
         if existing_proof.is_none() && username_proof.fid == 0 {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.conflict".to_string(),
                 message: "proof does not exist".to_string(),
             });

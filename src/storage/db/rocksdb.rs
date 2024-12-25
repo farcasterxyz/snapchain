@@ -1,4 +1,4 @@
-use crate::core::error::HubError;
+use crate::core::error::NodeError;
 use crate::storage::util::increment_vec_u8;
 use rocksdb::{Options, TransactionDB};
 use std::collections::HashMap;
@@ -282,9 +282,9 @@ impl RocksDB {
         stop_prefix: Option<Vec<u8>>,
         page_options: &PageOptions,
         mut f: F,
-    ) -> Result<bool, HubError>
+    ) -> Result<bool, NodeError>
     where
-        F: FnMut(&[u8], &[u8]) -> Result<bool, HubError>,
+        F: FnMut(&[u8], &[u8]) -> Result<bool, NodeError>,
     {
         let iter_opts = RocksDB::get_iterator_options(start_prefix, stop_prefix, page_options);
 
@@ -333,9 +333,9 @@ impl RocksDB {
         stop_prefix: Option<Vec<u8>>,
         page_options: &PageOptions,
         f: F,
-    ) -> Result<bool, HubError>
+    ) -> Result<bool, NodeError>
     where
-        F: FnMut(&[u8], &[u8]) -> Result<bool, HubError>,
+        F: FnMut(&[u8], &[u8]) -> Result<bool, NodeError>,
     {
         let unbounded_page_options = PageOptions {
             page_size: None,
@@ -394,7 +394,7 @@ impl RocksDB {
     /**
      * Count the number of keys with a given prefix.
      */
-    pub fn count_keys_at_prefix(&self, prefix: Vec<u8>) -> Result<u32, HubError> {
+    pub fn count_keys_at_prefix(&self, prefix: Vec<u8>) -> Result<u32, NodeError> {
         let iter_opts = RocksDB::get_iterator_options(
             Some(prefix.clone()),
             Some(increment_vec_u8(&prefix.to_vec())),

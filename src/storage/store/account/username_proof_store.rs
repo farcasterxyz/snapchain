@@ -12,7 +12,7 @@ use crate::proto::{self, HubEvent, HubEventType, MergeUserNameProofBody, Message
 use crate::proto::message_data::Body;
 use crate::proto::UserNameType;
 
-use crate::core::error::HubError;
+use crate::core::error::NodeError;
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::util;
 use std::sync::Arc;
@@ -31,9 +31,9 @@ impl StoreDef for UsernameProofStoreDef {
         MessageType::UsernameProof.into_u8()
     }
 
-    fn make_add_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
+    fn make_add_key(&self, message: &Message) -> Result<Vec<u8>, NodeError> {
         if message.data.is_none() {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "Message data is missing".to_string(),
             });
@@ -41,7 +41,7 @@ impl StoreDef for UsernameProofStoreDef {
 
         let data = message.data.as_ref().unwrap();
         if data.body.is_none() {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "Message body is missing".to_string(),
             });
@@ -50,7 +50,7 @@ impl StoreDef for UsernameProofStoreDef {
         let name = match &data.body {
             Some(Body::UsernameProofBody(body)) => &body.name,
             _ => {
-                return Err(HubError {
+                return Err(NodeError {
                     code: "bad_request.validation_failure".to_string(),
                     message: "Message body is missing".to_string(),
                 })
@@ -75,22 +75,22 @@ impl StoreDef for UsernameProofStoreDef {
         false
     }
 
-    fn make_remove_key(&self, _message: &Message) -> Result<Vec<u8>, HubError> {
-        Err(HubError {
+    fn make_remove_key(&self, _message: &Message) -> Result<Vec<u8>, NodeError> {
+        Err(NodeError {
             code: "bad_request.validation_failure".to_string(),
             message: "Remove not supported".to_string(),
         })
     }
 
-    fn make_compact_state_add_key(&self, _message: &Message) -> Result<Vec<u8>, HubError> {
-        Err(HubError {
+    fn make_compact_state_add_key(&self, _message: &Message) -> Result<Vec<u8>, NodeError> {
+        Err(NodeError {
             code: "bad_request.invalid_param".to_string(),
             message: "Username Proof Store doesn't support compact state".to_string(),
         })
     }
 
-    fn make_compact_state_prefix(&self, _fid: u64) -> Result<Vec<u8>, HubError> {
-        Err(HubError {
+    fn make_compact_state_prefix(&self, _fid: u64) -> Result<Vec<u8>, NodeError> {
+        Err(NodeError {
             code: "bad_request.invalid_param".to_string(),
             message: "Username Proof Store doesn't support compact state".to_string(),
         })
@@ -108,9 +108,9 @@ impl StoreDef for UsernameProofStoreDef {
         txn: &mut RocksDbTransactionBatch,
         _ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         if message.data.is_none() {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "Message data is missing".to_string(),
             });
@@ -119,7 +119,7 @@ impl StoreDef for UsernameProofStoreDef {
         let data = message.data.as_ref().unwrap();
         if let Some(Body::UsernameProofBody(body)) = &data.body {
             if body.name.len() == 0 {
-                return Err(HubError {
+                return Err(NodeError {
                     code: "bad_request.invalid_param".to_string(),
                     message: "name empty".to_string(),
                 });
@@ -132,7 +132,7 @@ impl StoreDef for UsernameProofStoreDef {
             );
             Ok(())
         } else {
-            Err(HubError {
+            Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "Message body is missing or incorrect".to_string(),
             })
@@ -144,9 +144,9 @@ impl StoreDef for UsernameProofStoreDef {
         txn: &mut RocksDbTransactionBatch,
         _ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         if message.data.is_none() {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "Message data is missing".to_string(),
             });
@@ -155,7 +155,7 @@ impl StoreDef for UsernameProofStoreDef {
         let data = message.data.as_ref().unwrap();
         if let Some(Body::UsernameProofBody(body)) = &data.body {
             if body.name.len() == 0 {
-                return Err(HubError {
+                return Err(NodeError {
                     code: "bad_request.invalid_param".to_string(),
                     message: "name empty".to_string(),
                 });
@@ -165,7 +165,7 @@ impl StoreDef for UsernameProofStoreDef {
             txn.delete(by_name_key);
             Ok(())
         } else {
-            Err(HubError {
+            Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "Message data body is missing or incorrect".to_string(),
             })
@@ -178,9 +178,9 @@ impl StoreDef for UsernameProofStoreDef {
         txn: &mut RocksDbTransactionBatch,
         message: &Message,
         ts_hash: &[u8; TS_HASH_LENGTH],
-    ) -> Result<Vec<Message>, HubError> {
+    ) -> Result<Vec<Message>, NodeError> {
         if message.data.is_none() {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "Message data is missing".to_string(),
             });
@@ -190,7 +190,7 @@ impl StoreDef for UsernameProofStoreDef {
         let name = match &data.body {
             Some(Body::UsernameProofBody(body)) => &body.name,
             _ => {
-                return Err(HubError {
+                return Err(NodeError {
                     code: "bad_request.validation_failure".to_string(),
                     message: "Message data body is missing".to_string(),
                 })
@@ -223,13 +223,13 @@ impl StoreDef for UsernameProofStoreDef {
                         );
 
                         if message_compare > 0 {
-                            return Err(HubError {
+                            return Err(NodeError {
                                 code: "bad_request.conflict".to_string(),
                                 message: "message conflicts with a more recent add".to_string(),
                             });
                         }
                         if message_compare == 0 {
-                            return Err(HubError {
+                            return Err(NodeError {
                                 code: "bad_request.duplicate".to_string(),
                                 message: "message has already been merged".to_string(),
                             });
@@ -365,9 +365,9 @@ impl UsernameProofStore {
         store: &Store<UsernameProofStoreDef>,
         name: &Vec<u8>,
         name_type: u8,
-    ) -> Result<Option<Message>, HubError> {
+    ) -> Result<Option<Message>, NodeError> {
         if name_type != UserNameType::UsernameTypeEnsL1 as u8 {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request".to_string(),
                 message: format!(
                     "Unsupported username type {}. Only ENS L1 is supported",
@@ -379,7 +379,7 @@ impl UsernameProofStore {
         let by_name_key = UsernameProofStoreDef::make_username_proof_by_name_key(name);
         let fid_result = store.db().get(by_name_key.as_slice())?;
         if fid_result.is_none() {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "not_found".to_string(),
                 message: format!(
                     "NotFound: Username proof not found for name {}",
@@ -408,7 +408,7 @@ impl UsernameProofStore {
         store: &Store<UsernameProofStoreDef>,
         fid: u64,
         page_options: &PageOptions,
-    ) -> Result<MessagesPage, HubError> {
+    ) -> Result<MessagesPage, NodeError> {
         store.get_adds_by_fid::<fn(&Message) -> bool>(fid, page_options, None)
     }
 
@@ -416,7 +416,7 @@ impl UsernameProofStore {
         store: &Store<UsernameProofStoreDef>,
         name: &Vec<u8>,
         fid: u64,
-    ) -> Result<Option<Message>, HubError> {
+    ) -> Result<Option<Message>, NodeError> {
         let partial_message = Message {
             data: Some(proto::MessageData {
                 fid,

@@ -1,5 +1,5 @@
 use super::super::constants::PAGE_SIZE_MAX;
-use crate::core::error::HubError;
+use crate::core::error::NodeError;
 use crate::proto::ShardChunk;
 use crate::storage::constants::RootPrefix;
 use crate::storage::db::{PageOptions, RocksDB, RocksdbError};
@@ -25,8 +25,8 @@ pub enum ShardStorageError {
     #[error("Too many shards in result")]
     TooManyShardsInResult,
 
-    #[error("Hub error")]
-    HubError,
+    #[error("Node error")]
+    NodeError,
 }
 
 /** A page of messages returned from various APIs */
@@ -72,7 +72,7 @@ fn get_shard_page_by_prefix(
         Some(stop_prefix),
         page_options,
         |key, value| {
-            let shard_chunk = ShardChunk::decode(value).map_err(|e| HubError::from(e))?;
+            let shard_chunk = ShardChunk::decode(value).map_err(|e| NodeError::from(e))?;
 
             shard_chunks.push(shard_chunk);
 
@@ -84,7 +84,7 @@ fn get_shard_page_by_prefix(
             Ok(false) // Continue iterating
         },
     )
-    .map_err(|_| ShardStorageError::HubError)?; // TODO: Return the right error
+    .map_err(|_| ShardStorageError::NodeError)?; // TODO: Return the right error
 
     let next_page_token = if last_key.len() > 0 {
         Some(last_key)

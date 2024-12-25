@@ -1,10 +1,10 @@
-use crate::core::error::HubError;
+use crate::core::error::NodeError;
 use crate::core::types::FARCASTER_EPOCH;
 
 #[allow(dead_code)]
-pub fn to_farcaster_time(time_ms: u64) -> Result<u64, HubError> {
+pub fn to_farcaster_time(time_ms: u64) -> Result<u64, NodeError> {
     if time_ms < FARCASTER_EPOCH {
-        return Err(HubError {
+        return Err(NodeError {
             code: "bad_request.invalid_param".to_string(),
             message: format!("time_ms is before the farcaster epoch: {}", time_ms),
         });
@@ -12,7 +12,7 @@ pub fn to_farcaster_time(time_ms: u64) -> Result<u64, HubError> {
 
     let seconds_since_epoch = (time_ms - FARCASTER_EPOCH) / 1000;
     if seconds_since_epoch > u32::MAX as u64 {
-        return Err(HubError {
+        return Err(NodeError {
             code: "bad_request.invalid_param".to_string(),
             message: format!("time too far in future: {}", time_ms),
         });
@@ -27,10 +27,10 @@ pub fn from_farcaster_time(time: u64) -> u64 {
 }
 
 #[allow(dead_code)]
-pub fn get_farcaster_time() -> Result<u64, HubError> {
+pub fn get_farcaster_time() -> Result<u64, NodeError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| HubError {
+        .map_err(|e| NodeError {
             code: "internal_error".to_string(),
             message: format!("failed to get time: {}", e),
         })?;

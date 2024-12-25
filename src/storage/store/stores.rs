@@ -2,7 +2,7 @@ use super::account::{
     ReactionStore, ReactionStoreDef, UserDataStore, UserDataStoreDef, VerificationStore,
     VerificationStoreDef,
 };
-use crate::core::error::HubError;
+use crate::core::error::NodeError;
 use crate::proto::MessageType;
 use crate::proto::{
     HubEvent, StorageLimit, StorageLimitsResponse, StorageUnitDetails, StorageUnitType, StoreType,
@@ -28,7 +28,7 @@ pub enum StoresError {
 
     #[error("store error")]
     StoreError {
-        inner: HubError, // TODO: move away from HubError when we can
+        inner: NodeError, // TODO: move away from NodeError when we can
         hash: Vec<u8>,
     },
 }

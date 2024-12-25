@@ -4,7 +4,7 @@ use super::{
     MessagesPage, StoreEventHandler, TS_HASH_LENGTH,
 };
 use crate::{
-    core::error::HubError,
+    core::error::NodeError,
     proto::{Protocol, SignatureScheme, VerificationAddAddressBody, VerificationRemoveBody},
 };
 use crate::{proto::message_data::Body, storage::db::PageOptions};
@@ -78,11 +78,11 @@ impl StoreDef for VerificationStoreDef {
         txn: &mut RocksDbTransactionBatch,
         _ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         let address = match message.data.as_ref().unwrap().body.as_ref().unwrap() {
             Body::VerificationAddAddressBody(body) => &body.address,
             _ => {
-                return Err(HubError {
+                return Err(NodeError {
                     code: "bad_request.invalid_param".to_string(),
                     message: "address empty".to_string(),
                 })
@@ -90,7 +90,7 @@ impl StoreDef for VerificationStoreDef {
         };
 
         if address.is_empty() {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.invalid_param".to_string(),
                 message: "address empty".to_string(),
             });
@@ -111,11 +111,11 @@ impl StoreDef for VerificationStoreDef {
         txn: &mut RocksDbTransactionBatch,
         _ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         let address = match message.data.as_ref().unwrap().body.as_ref().unwrap() {
             Body::VerificationAddAddressBody(body) => &body.address,
             _ => {
-                return Err(HubError {
+                return Err(NodeError {
                     code: "bad_request.invalid_param".to_string(),
                     message: "address empty".to_string(),
                 })
@@ -123,7 +123,7 @@ impl StoreDef for VerificationStoreDef {
         };
 
         if address.is_empty() {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.invalid_param".to_string(),
                 message: "address empty".to_string(),
             });
@@ -136,12 +136,12 @@ impl StoreDef for VerificationStoreDef {
         Ok(())
     }
 
-    fn make_add_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
+    fn make_add_key(&self, message: &Message) -> Result<Vec<u8>, NodeError> {
         let address = match message.data.as_ref().unwrap().body.as_ref().unwrap() {
             Body::VerificationAddAddressBody(body) => &body.address,
             Body::VerificationRemoveBody(body) => &body.address,
             _ => {
-                return Err(HubError {
+                return Err(NodeError {
                     code: "bad_request.validation_failure".to_string(),
                     message: "Invalid verification body".to_string(),
                 })
@@ -154,12 +154,12 @@ impl StoreDef for VerificationStoreDef {
         ))
     }
 
-    fn make_remove_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
+    fn make_remove_key(&self, message: &Message) -> Result<Vec<u8>, NodeError> {
         let address = match message.data.as_ref().unwrap().body.as_ref().unwrap() {
             Body::VerificationAddAddressBody(body) => &body.address,
             Body::VerificationRemoveBody(body) => &body.address,
             _ => {
-                return Err(HubError {
+                return Err(NodeError {
                     code: "bad_request.validation_failure".to_string(),
                     message: "Invalid verification body".to_string(),
                 })
@@ -172,15 +172,15 @@ impl StoreDef for VerificationStoreDef {
         ))
     }
 
-    fn make_compact_state_add_key(&self, _message: &Message) -> Result<Vec<u8>, HubError> {
-        Err(HubError {
+    fn make_compact_state_add_key(&self, _message: &Message) -> Result<Vec<u8>, NodeError> {
+        Err(NodeError {
             code: "bad_request.invalid_param".to_string(),
             message: "Verification Store doesn't support compact state".to_string(),
         })
     }
 
-    fn make_compact_state_prefix(&self, _fid: u64) -> Result<Vec<u8>, HubError> {
-        Err(HubError {
+    fn make_compact_state_prefix(&self, _fid: u64) -> Result<Vec<u8>, NodeError> {
+        Err(NodeError {
             code: "bad_request.invalid_param".to_string(),
             message: "Verification Store doesn't support compact state".to_string(),
         })
@@ -236,7 +236,7 @@ impl VerificationStore {
         store: &Store<VerificationStoreDef>,
         fid: u64,
         address: &[u8],
-    ) -> Result<Option<Message>, HubError> {
+    ) -> Result<Option<Message>, NodeError> {
         let partial_message = Message {
             data: Some(MessageData {
                 fid,
@@ -259,7 +259,7 @@ impl VerificationStore {
         store: &Store<VerificationStoreDef>,
         fid: u64,
         address: &[u8],
-    ) -> Result<Option<Message>, HubError> {
+    ) -> Result<Option<Message>, NodeError> {
         let partial_message = Message {
             data: Some(MessageData {
                 fid,
@@ -280,7 +280,7 @@ impl VerificationStore {
         store: &Store<VerificationStoreDef>,
         fid: u64,
         page_options: &PageOptions,
-    ) -> Result<MessagesPage, HubError> {
+    ) -> Result<MessagesPage, NodeError> {
         store.get_adds_by_fid::<fn(&Message) -> bool>(fid, page_options, None)
     }
 
@@ -288,7 +288,7 @@ impl VerificationStore {
         store: &Store<VerificationStoreDef>,
         fid: u64,
         page_options: &PageOptions,
-    ) -> Result<MessagesPage, HubError> {
+    ) -> Result<MessagesPage, NodeError> {
         store.get_removes_by_fid::<fn(&Message) -> bool>(fid, page_options, None)
     }
 }

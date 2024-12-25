@@ -1,4 +1,4 @@
-use crate::core::error::HubError;
+use crate::core::error::NodeError;
 use crate::proto::HubEvent;
 use crate::storage::constants::{RootPrefix, PAGE_SIZE_MAX};
 use crate::storage::db::RocksDbTransactionBatch;
@@ -38,7 +38,7 @@ impl HubEventIdGenerator {
         }
     }
 
-    fn generate_id(&mut self, current_timestamp: Option<u64>) -> Result<u64, HubError> {
+    fn generate_id(&mut self, current_timestamp: Option<u64>) -> Result<u64, NodeError> {
         let current_timestamp = current_timestamp.unwrap_or_else(|| {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -54,14 +54,14 @@ impl HubEventIdGenerator {
         }
 
         if self.last_timestamp >= 2u64.pow(TIMESTAMP_BITS) {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.invalid_param".to_string(),
                 message: format!("timestamp > {} bits", TIMESTAMP_BITS),
             });
         }
 
         if self.last_seq >= 2u64.pow(SEQUENCE_BITS) {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.invalid_param".to_string(),
                 message: format!("sequence > {} bits", SEQUENCE_BITS),
             });
@@ -95,7 +95,7 @@ impl StoreEventHandler {
         &self,
         txn: &mut RocksDbTransactionBatch,
         raw_event: &mut HubEvent,
-    ) -> Result<u64, HubError> {
+    ) -> Result<u64, NodeError> {
         // Acquire the lock so we don't generate multiple IDs. This also serves as the commit lock
         let mut generator = self.generator.lock().unwrap();
 
@@ -125,7 +125,7 @@ impl HubEvent {
     pub fn put_event_transaction(
         txn: &mut RocksDbTransactionBatch,
         event: &HubEvent,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         let key = Self::make_event_key(event.id);
         let value = event.encode_to_vec();
 
@@ -139,7 +139,7 @@ impl HubEvent {
         start_id: u64,
         stop_id: Option<u64>,
         page_options: Option<PageOptions>,
-    ) -> Result<EventsPage, HubError> {
+    ) -> Result<EventsPage, NodeError> {
         let start_prefix = Self::make_event_key(start_id);
         let stop_prefix = match stop_id {
             Some(id) => Self::make_event_key(id),
@@ -155,7 +155,7 @@ impl HubEvent {
             Some(stop_prefix),
             &page_options,
             |key, value| {
-                let event = HubEvent::decode(value).map_err(|e| HubError::from(e))?;
+                let event = HubEvent::decode(value).map_err(|e| NodeError::from(e))?;
                 events.push(event);
                 if events.len() >= page_options.page_size.unwrap_or(PAGE_SIZE_MAX) {
                     last_key = key.to_vec();

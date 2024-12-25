@@ -4,7 +4,7 @@ use super::{
     store::{Store, StoreDef},
     MessagesPage, StoreEventHandler, PAGE_SIZE_MAX, TS_HASH_LENGTH,
 };
-use crate::{core::error::HubError, proto::SignatureScheme};
+use crate::{core::error::NodeError, proto::SignatureScheme};
 use crate::{proto::message_data::Body, storage::db::PageOptions};
 use crate::{
     proto::MessageData,
@@ -65,7 +65,7 @@ impl StoreDef for ReactionStoreDef {
         txn: &mut RocksDbTransactionBatch,
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         let (by_target_key, rtype) = self.secondary_index_key(ts_hash, message)?;
 
         txn.put(by_target_key, vec![rtype]);
@@ -78,7 +78,7 @@ impl StoreDef for ReactionStoreDef {
         txn: &mut RocksDbTransactionBatch,
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         let (by_target_key, _) = self.secondary_index_key(ts_hash, message)?;
 
         txn.delete(by_target_key);
@@ -86,11 +86,11 @@ impl StoreDef for ReactionStoreDef {
         Ok(())
     }
 
-    fn make_add_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
+    fn make_add_key(&self, message: &Message) -> Result<Vec<u8>, NodeError> {
         let reaction_body = match message.data.as_ref().unwrap().body.as_ref().unwrap() {
             Body::ReactionBody(reaction_body) => reaction_body,
             _ => {
-                return Err(HubError {
+                return Err(NodeError {
                     code: "bad_request.validation_failure".to_string(),
                     message: "Invalid reaction body".to_string(),
                 })
@@ -104,11 +104,11 @@ impl StoreDef for ReactionStoreDef {
         )
     }
 
-    fn make_remove_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
+    fn make_remove_key(&self, message: &Message) -> Result<Vec<u8>, NodeError> {
         let reaction_body = match message.data.as_ref().unwrap().body.as_ref().unwrap() {
             Body::ReactionBody(reaction_body) => reaction_body,
             _ => {
-                return Err(HubError {
+                return Err(NodeError {
                     code: "bad_request.validation_failure".to_string(),
                     message: "Invalid reaction body".to_string(),
                 })
@@ -122,15 +122,15 @@ impl StoreDef for ReactionStoreDef {
         )
     }
 
-    fn make_compact_state_add_key(&self, _message: &Message) -> Result<Vec<u8>, HubError> {
-        Err(HubError {
+    fn make_compact_state_add_key(&self, _message: &Message) -> Result<Vec<u8>, NodeError> {
+        Err(NodeError {
             code: "bad_request.invalid_param".to_string(),
             message: "Reaction Store doesn't support compact state".to_string(),
         })
     }
 
-    fn make_compact_state_prefix(&self, _fid: u64) -> Result<Vec<u8>, HubError> {
-        Err(HubError {
+    fn make_compact_state_prefix(&self, _fid: u64) -> Result<Vec<u8>, NodeError> {
+        Err(NodeError {
             code: "bad_request.invalid_param".to_string(),
             message: "Reaction Store doesn't support compact state".to_string(),
         })
@@ -146,16 +146,16 @@ impl ReactionStoreDef {
         &self,
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
-    ) -> Result<(Vec<u8>, u8), HubError> {
+    ) -> Result<(Vec<u8>, u8), NodeError> {
         // Make sure at least one of targetCastId or targetUrl is set
         let reaction_body = match message.data.as_ref().unwrap().body.as_ref().unwrap() {
             Body::ReactionBody(reaction_body) => reaction_body,
-            _ => Err(HubError {
+            _ => Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "Invalid reaction body".to_string(),
             })?,
         };
-        let target = reaction_body.target.as_ref().ok_or(HubError {
+        let target = reaction_body.target.as_ref().ok_or(NodeError {
             code: "bad_request.validation_failure".to_string(),
             message: "Invalid reaction body".to_string(),
         })?;
@@ -199,9 +199,9 @@ impl ReactionStoreDef {
         fid: u64,
         r#type: i32,
         target: Option<&Target>,
-    ) -> Result<Vec<u8>, HubError> {
+    ) -> Result<Vec<u8>, NodeError> {
         if target.is_some() && r#type == 0 {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "targetId provided without type".to_string(),
             });
@@ -225,9 +225,9 @@ impl ReactionStoreDef {
         fid: u64,
         r#type: i32,
         target: Option<&Target>,
-    ) -> Result<Vec<u8>, HubError> {
+    ) -> Result<Vec<u8>, NodeError> {
         if target.is_some() && r#type == 0 {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "targetId provided without type".to_string(),
             });
@@ -268,7 +268,7 @@ impl ReactionStore {
         fid: u64,
         r#type: i32,
         target: Option<Target>,
-    ) -> Result<Option<Message>, HubError> {
+    ) -> Result<Option<Message>, NodeError> {
         let partial_message = Message {
             data: Some(MessageData {
                 fid,
@@ -290,7 +290,7 @@ impl ReactionStore {
         fid: u64,
         r#type: i32,
         target: Option<Target>,
-    ) -> Result<Option<Message>, HubError> {
+    ) -> Result<Option<Message>, NodeError> {
         let partial_message = Message {
             data: Some(MessageData {
                 fid,
@@ -315,7 +315,7 @@ impl ReactionStore {
         fid: u64,
         reaction_type: i32,
         page_options: &PageOptions,
-    ) -> Result<MessagesPage, HubError> {
+    ) -> Result<MessagesPage, NodeError> {
         store.get_adds_by_fid(
             fid,
             page_options,
@@ -338,7 +338,7 @@ impl ReactionStore {
         fid: u64,
         reaction_type: i32,
         page_options: &PageOptions,
-    ) -> Result<MessagesPage, HubError> {
+    ) -> Result<MessagesPage, NodeError> {
         store.get_removes_by_fid(
             fid,
             page_options,
@@ -361,7 +361,7 @@ impl ReactionStore {
         target: &Target,
         reaction_type: i32,
         page_options: &PageOptions,
-    ) -> Result<MessagesPage, HubError> {
+    ) -> Result<MessagesPage, NodeError> {
         let start_prefix = ReactionStoreDef::make_reactions_by_target_key(target, 0, None);
 
         let mut message_keys = vec![];

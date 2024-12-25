@@ -4,7 +4,7 @@ use super::{
     is_message_in_time_range, make_message_primary_key, make_ts_hash, message_decode,
     message_encode, put_message_transaction, MessagesPage, StoreEventHandler, TS_HASH_LENGTH,
 };
-use crate::core::error::HubError;
+use crate::core::error::NodeError;
 use crate::proto::{
     hub_event, HubEvent, HubEventType, MergeMessageBody, PruneMessageBody, RevokeMessageBody,
 };
@@ -62,7 +62,7 @@ pub trait StoreDef: Send + Sync {
         _txn: &mut RocksDbTransactionBatch,
         _ts_hash: &[u8; TS_HASH_LENGTH],
         _message: &Message,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         Ok(())
     }
 
@@ -71,14 +71,14 @@ pub trait StoreDef: Send + Sync {
         _txn: &mut RocksDbTransactionBatch,
         _ts_hash: &[u8; TS_HASH_LENGTH],
         _message: &Message,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         Ok(())
     }
 
-    fn make_add_key(&self, message: &Message) -> Result<Vec<u8>, HubError>;
-    fn make_remove_key(&self, message: &Message) -> Result<Vec<u8>, HubError>;
-    fn make_compact_state_add_key(&self, message: &Message) -> Result<Vec<u8>, HubError>;
-    fn make_compact_state_prefix(&self, fid: u64) -> Result<Vec<u8>, HubError>;
+    fn make_add_key(&self, message: &Message) -> Result<Vec<u8>, NodeError>;
+    fn make_remove_key(&self, message: &Message) -> Result<Vec<u8>, NodeError>;
+    fn make_compact_state_add_key(&self, message: &Message) -> Result<Vec<u8>, NodeError>;
+    fn make_compact_state_prefix(&self, fid: u64) -> Result<Vec<u8>, NodeError>;
 
     fn get_prune_size_limit(&self) -> u32;
 
@@ -88,7 +88,7 @@ pub trait StoreDef: Send + Sync {
         txn: &mut RocksDbTransactionBatch,
         message: &Message,
         ts_hash: &[u8; TS_HASH_LENGTH],
-    ) -> Result<Vec<Message>, HubError> {
+    ) -> Result<Vec<Message>, NodeError> {
         let mut conflicts = vec![];
 
         if self.remove_type_supported() {
@@ -104,13 +104,13 @@ pub trait StoreDef: Send + Sync {
                 );
 
                 if remove_compare > 0 {
-                    return Err(HubError {
+                    return Err(NodeError {
                         code: "bad_request.conflict".to_string(),
                         message: "message conflicts with a more recent remove".to_string(),
                     });
                 }
                 if remove_compare == 0 {
-                    return Err(HubError {
+                    return Err(NodeError {
                         code: "bad_request.duplicate".to_string(),
                         message: "message has already been merged".to_string(),
                     });
@@ -150,13 +150,13 @@ pub trait StoreDef: Send + Sync {
             );
 
             if add_compare > 0 {
-                return Err(HubError {
+                return Err(NodeError {
                     code: "bad_request.conflict".to_string(),
                     message: "message conflicts with a more recent add".to_string(),
                 });
             }
             if add_compare == 0 {
-                return Err(HubError {
+                return Err(NodeError {
                     code: "bad_request.duplicate".to_string(),
                     message: "message has already been merged".to_string(),
                 });
@@ -298,10 +298,10 @@ impl<T: StoreDef + Clone> Store<T> {
         self.store_def.postfix()
     }
 
-    pub fn get_add(&self, partial_message: &Message) -> Result<Option<Message>, HubError> {
+    pub fn get_add(&self, partial_message: &Message) -> Result<Option<Message>, NodeError> {
         // First check the fid
         if partial_message.data.is_none() || partial_message.data.as_ref().unwrap().fid == 0 {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.invalid_param".to_string(),
                 message: "fid is required".to_string(),
             });
@@ -324,9 +324,9 @@ impl<T: StoreDef + Clone> Store<T> {
         )
     }
 
-    pub fn get_remove(&self, partial_message: &Message) -> Result<Option<Message>, HubError> {
+    pub fn get_remove(&self, partial_message: &Message) -> Result<Option<Message>, NodeError> {
         if !self.store_def.remove_type_supported() {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "remove type not supported".to_string(),
             });
@@ -334,7 +334,7 @@ impl<T: StoreDef + Clone> Store<T> {
 
         // First check the fid
         if partial_message.data.is_none() || partial_message.data.as_ref().unwrap().fid == 0 {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.invalid_param".to_string(),
                 message: "fid is required".to_string(),
             });
@@ -362,7 +362,7 @@ impl<T: StoreDef + Clone> Store<T> {
         fid: u64,
         page_options: &PageOptions,
         filter: Option<F>,
-    ) -> Result<MessagesPage, HubError>
+    ) -> Result<MessagesPage, NodeError>
     where
         F: Fn(&Message) -> bool,
     {
@@ -381,12 +381,12 @@ impl<T: StoreDef + Clone> Store<T> {
         fid: u64,
         page_options: &PageOptions,
         filter: Option<F>,
-    ) -> Result<MessagesPage, HubError>
+    ) -> Result<MessagesPage, NodeError>
     where
         F: Fn(&Message) -> bool,
     {
         if !self.store_def.remove_type_supported() {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "remove type not supported".to_string(),
             });
@@ -405,9 +405,9 @@ impl<T: StoreDef + Clone> Store<T> {
         &self,
         txn: &mut RocksDbTransactionBatch,
         message: &Message,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         if !self.store_def.compact_state_type_supported() {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "compact state type not supported".to_string(),
             });
@@ -424,7 +424,7 @@ impl<T: StoreDef + Clone> Store<T> {
         txn: &mut RocksDbTransactionBatch,
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         put_message_transaction(txn, &message)?;
 
         let adds_key = self.store_def.make_add_key(message)?;
@@ -441,9 +441,9 @@ impl<T: StoreDef + Clone> Store<T> {
         &self,
         txn: &mut RocksDbTransactionBatch,
         message: &Message,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         if !self.store_def.compact_state_type_supported() {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "compact state type not supported".to_string(),
             });
@@ -460,7 +460,7 @@ impl<T: StoreDef + Clone> Store<T> {
         txn: &mut RocksDbTransactionBatch,
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         self.store_def
             .delete_secondary_indices(txn, ts_hash, message)?;
 
@@ -475,9 +475,9 @@ impl<T: StoreDef + Clone> Store<T> {
         txn: &mut RocksDbTransactionBatch,
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         if !self.store_def.remove_type_supported() {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "remove type not supported".to_string(),
             });
@@ -495,9 +495,9 @@ impl<T: StoreDef + Clone> Store<T> {
         &self,
         txn: &mut RocksDbTransactionBatch,
         message: &Message,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         if !self.store_def.remove_type_supported() {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "remove type not supported".to_string(),
             });
@@ -513,7 +513,7 @@ impl<T: StoreDef + Clone> Store<T> {
         &self,
         txn: &mut RocksDbTransactionBatch,
         messages: &Vec<Message>,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         for message in messages {
             if self.store_def.is_compact_state_type(message) {
                 self.delete_compact_state_transaction(txn, message)?;
@@ -534,7 +534,7 @@ impl<T: StoreDef + Clone> Store<T> {
         &self,
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
-    ) -> Result<HubEvent, HubError> {
+    ) -> Result<HubEvent, NodeError> {
         // Grab a merge lock. The typescript code does this by individual fid, but we don't have a
         // good way of doing that efficiently here. We'll just use an array of locks, with each fid
         // deterministically mapped to a lock.
@@ -548,7 +548,7 @@ impl<T: StoreDef + Clone> Store<T> {
             && !(self.store_def.compact_state_type_supported()
                 && self.store_def.is_compact_state_type(message))
         {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "invalid message type".to_string(),
             });
@@ -569,7 +569,7 @@ impl<T: StoreDef + Clone> Store<T> {
         &self,
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
-    ) -> Result<HubEvent, HubError> {
+    ) -> Result<HubEvent, NodeError> {
         // Get the message ts_hash
         let ts_hash = make_ts_hash(message.data.as_ref().unwrap().timestamp, &message.hash)?;
 
@@ -580,7 +580,7 @@ impl<T: StoreDef + Clone> Store<T> {
         } else if self.store_def.remove_type_supported() && self.store_def.is_remove_type(message) {
             self.delete_remove_transaction(txn, message)?;
         } else {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.invalid_param".to_string(),
                 message: "invalid message type".to_string(),
             });
@@ -599,7 +599,7 @@ impl<T: StoreDef + Clone> Store<T> {
     fn read_compact_state_details(
         &self,
         message: &Message,
-    ) -> Result<(u64, u32, Vec<u64>), HubError> {
+    ) -> Result<(u64, u32, Vec<u64>), NodeError> {
         if let Some(data) = &message.data {
             if let Some(Body::LinkCompactStateBody(link_compact_body)) = &data.body {
                 Ok((
@@ -608,14 +608,14 @@ impl<T: StoreDef + Clone> Store<T> {
                     link_compact_body.target_fids.clone(),
                 ))
             } else {
-                return Err(HubError {
+                return Err(NodeError {
                     code: "bad_request.validation_failure".to_string(),
                     message: "Invalid compact state message: No link compact state body"
                         .to_string(),
                 });
             }
         } else {
-            return Err(HubError {
+            return Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "Invalid compact state message: no data".to_string(),
             });
@@ -626,7 +626,7 @@ impl<T: StoreDef + Clone> Store<T> {
         &self,
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
-    ) -> Result<HubEvent, HubError> {
+    ) -> Result<HubEvent, NodeError> {
         let mut merge_conflicts = vec![];
 
         // First, find if there's an existing compact state message, and if there is,
@@ -648,7 +648,7 @@ impl<T: StoreDef + Clone> Store<T> {
                     merge_conflicts.push(existing_compact_state_message);
                 } else {
                     // Can't merge an older compact state message
-                    return Err(HubError {
+                    return Err(NodeError {
                         code: "bad_request.conflict".to_string(),
                         message: "A newer Compact State message is already merged".to_string(),
                     });
@@ -718,7 +718,7 @@ impl<T: StoreDef + Clone> Store<T> {
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
-    ) -> Result<HubEvent, HubError> {
+    ) -> Result<HubEvent, NodeError> {
         // If the store supports compact state messages, we don't merge messages that don't exist in the compact state
         if self.store_def.compact_state_type_supported() {
             // Get the compact state message
@@ -737,7 +737,7 @@ impl<T: StoreDef + Clone> Store<T> {
                         if message.data.as_ref().unwrap().timestamp < compact_state_timestamp
                             && !target_fids.contains(&target_fid)
                         {
-                            return Err(HubError {
+                            return Err(NodeError {
                                 code: "bad_request.conflict".to_string(),
                                 message: format!(
                                     "Target fid {} not in the compact state target fids",
@@ -778,7 +778,7 @@ impl<T: StoreDef + Clone> Store<T> {
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
-    ) -> Result<HubEvent, HubError> {
+    ) -> Result<HubEvent, NodeError> {
         // If the store supports compact state messages, we don't merge remove messages before its timestamp
         // If the store supports compact state messages, we don't merge messages that don't exist in the compact state
         if self.store_def.compact_state_type_supported() {
@@ -794,7 +794,7 @@ impl<T: StoreDef + Clone> Store<T> {
 
                 // If the message is older than the compact state message, and the target fid is not in the target_fids list
                 if message.data.as_ref().unwrap().timestamp < compact_state_timestamp {
-                    return Err(HubError {
+                    return Err(NodeError {
                         code: "bad_request.prunable".to_string(),
                         message: format!(
                             "Remove message earlier than the compact state message will be immediately pruned",
@@ -833,7 +833,7 @@ impl<T: StoreDef + Clone> Store<T> {
         current_count: u32,
         max_count: u32,
         txn: &mut RocksDbTransactionBatch,
-    ) -> Result<Vec<HubEvent>, HubError> {
+    ) -> Result<Vec<HubEvent>, NodeError> {
         let mut pruned_events = vec![];
 
         let mut count = current_count;
@@ -893,7 +893,7 @@ impl<T: StoreDef + Clone> Store<T> {
         fid: u64,
         key: &Vec<u8>,
         txn: &mut RocksDbTransactionBatch,
-    ) -> Result<Vec<HubEvent>, HubError> {
+    ) -> Result<Vec<HubEvent>, NodeError> {
         let mut revoke_events = vec![];
 
         let prefix = &make_message_primary_key(fid, self.store_def.postfix(), None);
@@ -934,7 +934,7 @@ impl<T: StoreDef + Clone> Store<T> {
         start_time: Option<u32>,
         stop_time: Option<u32>,
         page_options: &PageOptions,
-    ) -> Result<MessagesPage, HubError> {
+    ) -> Result<MessagesPage, NodeError> {
         let prefix = make_message_primary_key(fid, self.store_def.postfix(), None);
         let messages = get_messages_page_by_prefix(&self.db, &prefix, &page_options, |message| {
             is_message_in_time_range(start_time, stop_time, message)
@@ -950,9 +950,9 @@ impl<T: StoreDef + Clone> Store<T> {
         &self,
         fid: u64,
         page_options: &PageOptions,
-    ) -> Result<MessagesPage, HubError> {
+    ) -> Result<MessagesPage, NodeError> {
         if !self.store_def.compact_state_type_supported() {
-            return Err(HubError::invalid_parameter("compact state not supported"));
+            return Err(NodeError::invalid_parameter("compact state not supported"));
         }
 
         match self.store_def.make_compact_state_prefix(fid) {

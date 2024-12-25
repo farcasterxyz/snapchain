@@ -4,7 +4,7 @@ use super::{
     store::{Store, StoreDef},
     MessagesPage, StoreEventHandler, HASH_LENGTH, PAGE_SIZE_MAX, TRUE_VALUE, TS_HASH_LENGTH,
 };
-use crate::core::error::HubError;
+use crate::core::error::NodeError;
 use crate::storage::constants::{RootPrefix, UserPostfix};
 use crate::storage::db::PageOptions;
 use crate::storage::util::{bytes_compare, increment_vec_u8};
@@ -116,7 +116,7 @@ impl StoreDef for CastStoreDef {
         txn: &mut RocksDbTransactionBatch,
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         if let Ok(Some(by_parent_key)) = self.by_parent_secondary_index_key(ts_hash, message) {
             txn.put(by_parent_key, vec![TRUE_VALUE]);
         }
@@ -133,7 +133,7 @@ impl StoreDef for CastStoreDef {
         txn: &mut RocksDbTransactionBatch,
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), NodeError> {
         let by_parent_key = self.by_parent_secondary_index_key(ts_hash, message);
 
         if let Ok(Some(by_parent_key)) = by_parent_key {
@@ -149,14 +149,14 @@ impl StoreDef for CastStoreDef {
         Ok(())
     }
 
-    fn make_add_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
+    fn make_add_key(&self, message: &Message) -> Result<Vec<u8>, NodeError> {
         let hash = match message.data.as_ref().unwrap().body.as_ref() {
             Some(message::message_data::Body::CastAddBody(_)) => message.hash.as_ref(),
             Some(message::message_data::Body::CastRemoveBody(cast_remove_body)) => {
                 cast_remove_body.target_hash.as_ref()
             }
             _ => {
-                return Err(HubError {
+                return Err(NodeError {
                     code: "bad_request.validation_failure".to_string(),
                     message: "Invalid cast body for add key".to_string(),
                 })
@@ -168,14 +168,14 @@ impl StoreDef for CastStoreDef {
         ))
     }
 
-    fn make_remove_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
+    fn make_remove_key(&self, message: &Message) -> Result<Vec<u8>, NodeError> {
         let hash = match message.data.as_ref().unwrap().body.as_ref() {
             Some(message::message_data::Body::CastAddBody(_)) => message.hash.as_ref(),
             Some(message::message_data::Body::CastRemoveBody(cast_remove_body)) => {
                 cast_remove_body.target_hash.as_ref()
             }
             _ => {
-                return Err(HubError {
+                return Err(NodeError {
                     code: "bad_request.validation_failure".to_string(),
                     message: "Invalid cast body for remove key".to_string(),
                 })
@@ -188,15 +188,15 @@ impl StoreDef for CastStoreDef {
         ))
     }
 
-    fn make_compact_state_add_key(&self, _message: &Message) -> Result<Vec<u8>, HubError> {
-        Err(HubError {
+    fn make_compact_state_add_key(&self, _message: &Message) -> Result<Vec<u8>, NodeError> {
+        Err(NodeError {
             code: "bad_request.invalid_param".to_string(),
             message: "Cast Store doesn't support compact state".to_string(),
         })
     }
 
-    fn make_compact_state_prefix(&self, _fid: u64) -> Result<Vec<u8>, HubError> {
-        Err(HubError {
+    fn make_compact_state_prefix(&self, _fid: u64) -> Result<Vec<u8>, NodeError> {
+        Err(NodeError {
             code: "bad_request.invalid_param".to_string(),
             message: "Cast Store doesn't support compact state".to_string(),
         })
@@ -212,17 +212,17 @@ impl CastStoreDef {
         &self,
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
-    ) -> Result<Option<Vec<u8>>, HubError> {
+    ) -> Result<Option<Vec<u8>>, NodeError> {
         // For cast add, make sure at least one of parentCastId or parentUrl is set
         let cast_body = match message.data.as_ref().unwrap().body.as_ref().unwrap() {
             message::message_data::Body::CastAddBody(cast_add_body) => cast_add_body,
             message::message_data::Body::CastRemoveBody(_) => return Ok(None),
-            _ => Err(HubError {
+            _ => Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "Invalid cast body".to_string(),
             })?,
         };
-        let parent = cast_body.parent.as_ref().ok_or(HubError {
+        let parent = cast_body.parent.as_ref().ok_or(NodeError {
             code: "bad_request.validation_failure".to_string(),
             message: "Invalid cast body".to_string(),
         })?;
@@ -267,12 +267,12 @@ impl CastStoreDef {
         &self,
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
-    ) -> Result<Option<Vec<Vec<u8>>>, HubError> {
+    ) -> Result<Option<Vec<Vec<u8>>>, NodeError> {
         // For cast add, make sure at least one of parentCastId or parentUrl is set
         let cast_body = match message.data.as_ref().unwrap().body.as_ref().unwrap() {
             message::message_data::Body::CastAddBody(cast_add_body) => cast_add_body,
             message::message_data::Body::CastRemoveBody(_) => return Ok(None),
-            _ => Err(HubError {
+            _ => Err(NodeError {
                 code: "bad_request.validation_failure".to_string(),
                 message: "Invalid cast body".to_string(),
             })?,
@@ -353,7 +353,7 @@ impl CastStore {
         store: &Store<CastStoreDef>,
         fid: u64,
         hash: Vec<u8>,
-    ) -> Result<Option<Message>, HubError> {
+    ) -> Result<Option<Message>, NodeError> {
         let partial_message = Message {
             data: Some(message::MessageData {
                 fid,
@@ -376,7 +376,7 @@ impl CastStore {
         store: &Store<CastStoreDef>,
         fid: u64,
         hash: Vec<u8>,
-    ) -> Result<Option<Message>, HubError> {
+    ) -> Result<Option<Message>, NodeError> {
         let partial_message = Message {
             data: Some(message::MessageData {
                 fid,
@@ -398,7 +398,7 @@ impl CastStore {
         store: &Store<CastStoreDef>,
         fid: u64,
         page_options: &PageOptions,
-    ) -> Result<MessagesPage, HubError> {
+    ) -> Result<MessagesPage, NodeError> {
         store.get_adds_by_fid::<fn(&Message) -> bool>(fid, page_options, None)
     }
 
@@ -406,7 +406,7 @@ impl CastStore {
         store: &Store<CastStoreDef>,
         fid: u64,
         page_options: &PageOptions,
-    ) -> Result<MessagesPage, HubError> {
+    ) -> Result<MessagesPage, NodeError> {
         store.get_removes_by_fid::<fn(&Message) -> bool>(fid, page_options, None)
     }
 
@@ -414,7 +414,7 @@ impl CastStore {
         store: &Store<CastStoreDef>,
         parent: &Parent,
         page_options: &PageOptions,
-    ) -> Result<MessagesPage, HubError> {
+    ) -> Result<MessagesPage, NodeError> {
         let prefix = CastStoreDef::make_cast_by_parent_key(parent, 0, None);
 
         let mut message_keys = vec![];
@@ -460,7 +460,7 @@ impl CastStore {
         store: &Store<CastStoreDef>,
         mention: u64,
         page_options: &PageOptions,
-    ) -> Result<MessagesPage, HubError> {
+    ) -> Result<MessagesPage, NodeError> {
         let prefix = CastStoreDef::make_cast_by_mention_key(mention, 0, None);
 
         let mut message_keys = vec![];
