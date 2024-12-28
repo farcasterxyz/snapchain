@@ -1,13 +1,10 @@
 use core::fmt;
-use ed25519_dalek::ed25519::signature::{self, SignerMut};
-use ed25519_dalek::{Signature as ed25519Signature, SigningKey};
 use informalsystems_malachitebft_core_types::{self, Context, SignedMessage, SigningProvider};
 use informalsystems_malachitebft_core_types::{
     Extension, NilOrVal, Round, SignedProposal, SignedProposalPart, SignedVote, Validator,
     VoteType, VotingPower,
 };
-// use libp2p::identity::ed25519::Keypair;
-use libp2p::identity::Keypair;
+use libp2p::identity::ed25519::Keypair;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Display};
@@ -100,35 +97,12 @@ pub struct Ed25519 {}
 #[derive(Debug)]
 pub struct Ed25519Provider {
     private_key: PrivateKey,
-    public_key: PublicKey,
 }
 
 impl Ed25519Provider {
-    pub fn new(private_key: PrivateKey, public_key: PublicKey) -> Self {
-        Self {
-            private_key: private_key.into(),
-            public_key,
-        }
+    pub fn new(private_key: PrivateKey) -> Self {
+        Self { private_key }
     }
-
-    pub fn private_key(&self) -> &PrivateKey {
-        &self.private_key
-    }
-
-    pub fn public_key(&self) -> &PublicKey {
-        &self.public_key
-    }
-
-    pub fn sign(&self, data: &[u8]) -> Signature {
-        // Clone the private key's bytes, avoiding mutable borrow of self
-        let kp = Keypair::from_protobuf_encoding(&self.private_key.as_ref()).unwrap();
-        let sig = kp.sign(data).unwrap();
-        Signature(sig)
-    }
-
-    // pub fn verify(&self, data: &[u8], signature: &Signature, public_key: &PublicKey) -> bool {
-    //     public_key.verify(data, signature).is_ok()
-    // }
 }
 
 impl SigningProvider<SnapchainValidatorContext> for Ed25519Provider {
@@ -139,8 +113,7 @@ impl SigningProvider<SnapchainValidatorContext> for Ed25519Provider {
         SnapchainValidatorContext,
         <SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::Vote,
     > {
-        let sig = self.sign(&vote.to_sign_bytes());
-        SignedMessage::new(vote, sig)
+        todo!()
     }
 
     fn verify_signed_vote(
@@ -225,11 +198,11 @@ impl informalsystems_malachitebft_core_types::SigningScheme for Ed25519 {
     type PrivateKey = PrivateKey;
 
     fn decode_signature(_bytes: &[u8]) -> Result<Self::Signature, Self::DecodingError> {
-        Ok(Signature(_bytes.to_vec()))
+        todo!()
     }
 
     fn encode_signature(_signature: &Self::Signature) -> Vec<u8> {
-        _signature.0.clone()
+        todo!()
     }
 }
 
@@ -589,24 +562,18 @@ pub enum ProposalPart {
 
 #[derive(Clone, Debug)]
 pub struct SnapchainValidatorContext {
-    keypair: Arc<Ed25519Provider>,
+    keypair: Arc<Keypair>,
 }
 
 impl SnapchainValidatorContext {
     pub fn new(keypair: Keypair) -> Self {
-        let pk = keypair.to_protobuf_encoding().unwrap();
-        let p = PrivateKey::try_from_bytes(pk).unwrap();
-        let provider = Ed25519Provider {
-            private_key: p,
-            public_key: keypair.public().try_into_ed25519().unwrap(),
-        };
         Self {
-            keypair: Arc::new(provider),
+            keypair: Arc::new(keypair),
         }
     }
 
     pub fn public_key(&self) -> PublicKey {
-        self.keypair.public_key.clone()
+        self.keypair.public()
     }
 }
 
@@ -683,7 +650,7 @@ impl informalsystems_malachitebft_core_types::Context for SnapchainValidatorCont
     }
 
     fn signing_provider(&self) -> &Self::SigningProvider {
-        &self.keypair
+        todo!()
     }
 }
 
