@@ -4,10 +4,10 @@ use crate::core::types::{
     SnapchainValidatorContext, Vote,
 };
 use futures::StreamExt;
+use informalsystems_malachitebft_core_types::{SignedProposal, SignedVote};
 use libp2p::identity::ed25519::Keypair;
 use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::{gossipsub, noise, swarm::NetworkBehaviour, swarm::SwarmEvent, tcp, yamux, Swarm};
-use malachite_common::{SignedProposal, SignedVote};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
