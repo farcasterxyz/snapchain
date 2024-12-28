@@ -10,7 +10,7 @@ use tracing::{debug, error, info, warn};
 
 use informalsystems_malachitebft_config::TimeoutConfig;
 use informalsystems_malachitebft_core_consensus::{
-    Effect, ProposedValue, Resume, SignedConsensusMsg, ValueToPropose,
+    Effect, ProposedValue, Resumable, Resume, SignedConsensusMsg, ValueToPropose,
 };
 use informalsystems_malachitebft_core_types::{
     Context, Extension, Round, SignedProposal, SignedProposalPart, SignedVote, Timeout, TimeoutKind,
@@ -146,8 +146,8 @@ impl Timeouts {
             TimeoutKind::Prevote => self.config.timeout_prevote,
             TimeoutKind::Precommit => self.config.timeout_precommit,
             TimeoutKind::Commit => self.config.timeout_commit,
-            TimeoutKind::PrevoteTimeLimit => todo!(),
-            TimeoutKind::PrecommitTimeLimit => todo!(),
+            TimeoutKind::PrevoteTimeLimit => self.config.timeout_step,
+            TimeoutKind::PrecommitTimeLimit => self.config.timeout_step,
         }
     }
 
@@ -508,11 +508,24 @@ impl Consensus {
             Effect::PersistMessage(_, _) => {
                 todo!()
             }
-            Effect::PersistTimeout(_, _) => {
-                todo!()
+            Effect::PersistTimeout(timeout, r) => {
+                // self.wal_append(shard_validator.get_current_height(), WalEntry::Timeout(timeout), phase)
+                //     .await?;
+
+                // Ok(r.resume_with(()))
+                info!("Timeout for {:?}", timeout.round.as_i64());
+                Ok(r.resume_with(()))
             }
-            Effect::SignVote(_, _) => {
-                todo!()
+            Effect::SignVote(vote, r) => {
+                let start = Instant::now();
+
+                let signed_vote = self.ctx.signing_provider().sign_vote(vote);
+
+                self.metrics
+                    .signature_signing_time
+                    .observe(start.elapsed().as_secs_f64());
+
+                Ok(r.resume_with(signed_vote))
             }
             Effect::SignProposal(_, _) => {
                 todo!()

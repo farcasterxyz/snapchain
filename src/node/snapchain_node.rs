@@ -83,7 +83,7 @@ impl SnapchainNode {
                 threshold_params: Default::default(),
                 value_payload: ValuePayload::ProposalAndParts,
             };
-            let ctx = SnapchainValidatorContext::new(keypair.clone());
+            let ctx = SnapchainValidatorContext::new(keypair.clone().into());
 
             let db = RocksDB::new(format!("{}/shard{}", rocksdb_dir, shard_id).as_str());
             db.open().unwrap();
@@ -173,7 +173,7 @@ impl SnapchainNode {
             Some(block_proposer),
             None,
         );
-        let ctx = SnapchainValidatorContext::new(keypair.clone());
+        let ctx = SnapchainValidatorContext::new(keypair.clone().into());
         let block_consensus_actor = Consensus::spawn(
             ctx,
             block_shard,
