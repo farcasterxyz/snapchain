@@ -1,5 +1,5 @@
 use core::fmt;
-use informalsystems_malachitebft_core_types::{self, Context, SignedMessage, SigningProvider};
+use informalsystems_malachitebft_core_types::{self, SignedMessage, SigningProvider};
 use informalsystems_malachitebft_core_types::{
     Extension, NilOrVal, Round, SignedProposal, SignedProposalPart, SignedVote, Validator,
     VoteType, VotingPower,
@@ -157,9 +157,9 @@ impl SigningProvider<SnapchainValidatorContext> for Ed25519Provider {
 
     fn verify_signed_proposal_part(
         &self,
-        proposal_part: &<SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::ProposalPart,
-        signature: &informalsystems_malachitebft_core_types::Signature<SnapchainValidatorContext>,
-        public_key: &informalsystems_malachitebft_core_types::PublicKey<SnapchainValidatorContext>,
+        _proposal_part: &<SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::ProposalPart,
+        _signature: &informalsystems_malachitebft_core_types::Signature<SnapchainValidatorContext>,
+        _public_key: &informalsystems_malachitebft_core_types::PublicKey<SnapchainValidatorContext>,
     ) -> bool {
         // TODO(aditi): We don't handle proposal parts yet in consensus
         todo!()
