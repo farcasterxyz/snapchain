@@ -53,10 +53,11 @@ mod tests {
             .unwrap()
             .as_millis() as u64;
         assert!(time <= now);
+        assert_eq!(time, now / 1000 - FARCASTER_EPOCH / 1000);
     }
 
     #[test]
-    fn to_farcaster_time_test() {
+    fn test_to_farcaster_time() {
         // It is an error to pass a time before the farcaster epoch
         let time = to_farcaster_time(0);
         assert!(time.is_err());
@@ -69,5 +70,14 @@ mod tests {
 
         let time = to_farcaster_time(FARCASTER_EPOCH + 1000).unwrap();
         assert_eq!(time, 1);
+    }
+
+    #[test]
+    fn test_from_farcaster_time() {
+        let time = from_farcaster_time(0);
+        assert_eq!(time, FARCASTER_EPOCH);
+
+        let time = from_farcaster_time(1);
+        assert_eq!(time, FARCASTER_EPOCH + 1000);
     }
 }

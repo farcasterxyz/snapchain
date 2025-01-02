@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::core::util::calculate_message_hash;
+    use crate::core::util::{calculate_message_hash, from_farcaster_time};
     use crate::proto::ShardChunk;
     use crate::proto::{self, ReactionType};
     use crate::proto::{HubEvent, ValidatorMessage};
@@ -1013,7 +1013,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_revoking_a_signer_deletes_all_messages_from_that_signer() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
         let signer = SigningKey::generate(&mut rand::rngs::OsRng);
@@ -1078,11 +1077,12 @@ mod tests {
         assert_eq!(1, messages.messages.len());
 
         // Revoke a single signer
+        let revoke_timestamp = (from_farcaster_time((timestamp + 3) as u64) / 1000) as u32;
         let revoke_event = events_factory::create_signer_event(
             FID_FOR_TEST,
             signer.clone(),
             proto::SignerEventType::Remove,
-            Some(timestamp + 3),
+            Some(revoke_timestamp),
         );
         test_helper::commit_event(&mut engine, &revoke_event).await;
         assert_onchain_hub_event(&event_rx.try_recv().unwrap(), &revoke_event);

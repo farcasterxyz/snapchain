@@ -12,13 +12,14 @@ pub mod time {
     use super::*;
 
     pub fn farcaster_time() -> u32 {
-        (current_timestamp() as u64 - FARCASTER_EPOCH) as u32
+        current_timestamp() - (FARCASTER_EPOCH / 1000) as u32
     }
 
     pub fn farcaster_time_with_offset(offset: i32) -> u32 {
         (farcaster_time() as i32 + offset) as u32
     }
 
+    // Returns the current timestamp in seconds since the unix epoch
     pub fn current_timestamp() -> u32 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -114,6 +115,9 @@ pub mod events_factory {
         event_type: proto::SignerEventType,
         timestamp: Option<u32>,
     ) -> OnChainEvent {
+        if timestamp.is_some() && !(timestamp.unwrap() > (FARCASTER_EPOCH / 1000) as u32) {
+            panic!("Block timestamps must be unix epoch in seconds");
+        }
         let signer_event_body = proto::SignerEventBody {
             key: signer.verifying_key().as_bytes().to_vec(),
             event_type: event_type as i32,
@@ -148,6 +152,9 @@ pub mod events_factory {
         custody_address: Vec<u8>,
         timestamp: Option<u32>,
     ) -> OnChainEvent {
+        if timestamp.is_some() && !(timestamp.unwrap() > (FARCASTER_EPOCH / 1000) as u32) {
+            panic!("Block timestamps must be unix epoch in seconds");
+        }
         let id_register_event_body = proto::IdRegisterEventBody {
             to: custody_address,
             event_type: event_type as i32,
@@ -181,11 +188,7 @@ pub mod messages_factory {
     use crate::core::util::calculate_message_hash;
 
     pub fn farcaster_time() -> u32 {
-        (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            - FARCASTER_EPOCH) as u32
+        time::farcaster_time()
     }
 
     pub fn create_message_with_data(
