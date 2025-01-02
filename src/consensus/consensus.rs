@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use informalsystems_malachitebft_core_types::{
-    CommitCertificate, SigningProvider, ValidatorSet, ValueOrigin,
+    CommitCertificate, SignedMessage, SigningProvider, SigningProviderExt, ValidatorSet,
+    ValueOrigin,
 };
 use libp2p::identity::ed25519::{Keypair, SecretKey};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
@@ -96,7 +97,12 @@ pub enum ConsensusMsg<Ctx: SnapchainContext> {
     /// Start consensus for the given height
     StartHeight(Ctx::Height),
     /// The proposal builder has built a value and can be used in a new proposal consensus message
-    ProposeValue(Ctx::Height, Round, Ctx::Value, Option<Extension>),
+    ProposeValue(
+        Ctx::Height,
+        Round,
+        Ctx::Value,
+        Option<SignedMessage<Ctx, Extension>>,
+    ),
     /// Received and assembled the full value proposed by a validator
     ReceivedProposedValue(ProposedValue<Ctx>),
 
@@ -141,14 +147,7 @@ impl Timeouts {
     }
 
     fn duration_for(&self, step: TimeoutKind) -> Duration {
-        match step {
-            TimeoutKind::Propose => self.config.timeout_propose,
-            TimeoutKind::Prevote => self.config.timeout_prevote,
-            TimeoutKind::Precommit => self.config.timeout_precommit,
-            TimeoutKind::Commit => self.config.timeout_commit,
-            TimeoutKind::PrevoteTimeLimit => todo!(),
-            TimeoutKind::PrecommitTimeLimit => todo!(),
-        }
+        self.config.timeout_duration(step)
     }
 
     fn increase_timeout(&mut self, step: TimeoutKind) {
@@ -158,8 +157,8 @@ impl Timeouts {
             TimeoutKind::Prevote => c.timeout_prevote += c.timeout_prevote_delta,
             TimeoutKind::Precommit => c.timeout_precommit += c.timeout_precommit_delta,
             TimeoutKind::Commit => (),
-            TimeoutKind::PrevoteTimeLimit => todo!(),
-            TimeoutKind::PrecommitTimeLimit => todo!(),
+            TimeoutKind::PrevoteTimeLimit => (),
+            TimeoutKind::PrecommitTimeLimit => (),
         };
     }
 }
@@ -253,7 +252,7 @@ impl Consensus {
                 Ok(())
             }
 
-            ConsensusMsg::ProposeValue(height, round, value, _) => {
+            ConsensusMsg::ProposeValue(height, round, value, extension) => {
                 let result = self
                     .process_input(
                         &myself,
@@ -263,7 +262,7 @@ impl Consensus {
                             round,
                             valid_round: round,
                             value,
-                            extension: todo!(),
+                            extension,
                         }),
                     )
                     .await;
@@ -492,33 +491,83 @@ impl Consensus {
         effect: Effect<SnapchainValidatorContext>,
     ) -> Result<Resume<SnapchainValidatorContext>, ActorProcessingErr> {
         match effect {
-            Effect::Publish(_, _) => {
-                todo!()
+            Effect::Publish(gossip_msg, _) => {
+                match gossip_msg {
+                    SignedConsensusMsg::Proposal(proposal) => {
+                        debug!(
+                            "Broadcasting proposal gossip message: {:?} {:?} from {:?}",
+                            proposal.height, proposal.round, proposal.proposer
+                        );
+                        gossip_tx
+                            .send(GossipEvent::BroadcastSignedProposal(proposal))
+                            .await?;
+                    }
+                    SignedConsensusMsg::Vote(vote) => {
+                        debug!(
+                            "Broadcasting vote gossip message: {:?} {:?} {:?} from {:?}",
+                            vote.vote_type, vote.height, vote.round, vote.voter
+                        );
+                        gossip_tx
+                            .send(GossipEvent::BroadcastSignedVote(vote))
+                            .await?;
+                    }
+                }
+
+                Ok(Resume::Continue)
             }
 
             Effect::RestreamValue(_, _, _, _, _, _) => {
-                todo!()
+                // This is for interacting with host actor
+                Ok(Resume::Continue)
             }
             Effect::GetVoteSet(_, _, _) => {
-                todo!()
+                // TODO(aditi): We need to incorporate the sync actor for this. Only relevant if consensus is stuck.
+                Ok(Resume::Continue)
             }
             Effect::SendVoteSetResponse(_, _, _, _, _) => {
-                todo!()
+                // TODO(aditi): We need to incorporate the sync actor for this. Only relevant if consensus is stuck.
+                Ok(Resume::Continue)
             }
             Effect::PersistMessage(_, _) => {
-                todo!()
+                // TODO(aditi): This is for the WAL, which is used for crash recovery.
+                Ok(Resume::Continue)
             }
             Effect::PersistTimeout(_, _) => {
-                todo!()
+                // TODO(aditi): This is for the WAL, which is used for crash recovery.
+                Ok(Resume::Continue)
             }
-            Effect::SignVote(_, _) => {
-                todo!()
+            Effect::SignProposal(proposal, _) => {
+                let start = Instant::now();
+
+                let signed_proposal = self.ctx.signing_provider().sign_proposal(proposal);
+
+                self.metrics
+                    .signature_signing_time
+                    .observe(start.elapsed().as_secs_f64());
+
+                Ok(Resume::SignedProposal(signed_proposal))
             }
-            Effect::SignProposal(_, _) => {
-                todo!()
+
+            Effect::SignVote(vote, _) => {
+                let start = Instant::now();
+
+                let signed_vote = self.ctx.signing_provider().sign_vote(vote);
+
+                self.metrics
+                    .signature_signing_time
+                    .observe(start.elapsed().as_secs_f64());
+
+                Ok(Resume::SignedVote(signed_vote))
             }
-            Effect::VerifyCertificate(_, _, _, _) => {
-                todo!()
+
+            Effect::VerifyCertificate(certificate, validator_set, thresholds, _) => {
+                let valid = self.ctx.signing_provider().verify_certificate(
+                    &certificate,
+                    &validator_set,
+                    thresholds,
+                );
+
+                Ok(Resume::CertificateValidity(valid))
             }
 
             Effect::ResetTimeouts(_) => {
@@ -572,32 +621,6 @@ impl Consensus {
 
                 Ok(Resume::SignatureValidity(valid))
             }
-
-            //Not available in Effect anymore
-            // Effect::Broadcast(gossip_msg) => {
-            //     match gossip_msg {
-            //         SignedConsensusMsg::Proposal(proposal) => {
-            //             debug!(
-            //                 "Broadcasting proposal gossip message: {:?} {:?} from {:?}",
-            //                 proposal.height, proposal.round, proposal.proposer
-            //             );
-            //             gossip_tx
-            //                 .send(GossipEvent::BroadcastSignedProposal(proposal))
-            //                 .await?;
-            //         }
-            //         SignedConsensusMsg::Vote(vote) => {
-            //             debug!(
-            //                 "Broadcasting vote gossip message: {:?} {:?} {:?} from {:?}",
-            //                 vote.vote_type, vote.height, vote.round, vote.voter
-            //             );
-            //             gossip_tx
-            //                 .send(GossipEvent::BroadcastSignedVote(vote))
-            //                 .await?;
-            //         }
-            //     }
-
-            //     Ok(Resume::Continue)
-            // }
             Effect::GetValue(height, round, timeout, _) => {
                 let timeout = timeouts.duration_for(timeout.kind);
                 let full_proposal = shard_validator.propose_value(height, round, timeout).await;
@@ -617,7 +640,7 @@ impl Consensus {
                 Ok(Resume::Continue)
             }
 
-            Effect::GetValidatorSet(height, _) => Ok(Resume::ValidatorSet(Some(
+            Effect::GetValidatorSet(_, _) => Ok(Resume::ValidatorSet(Some(
                 shard_validator.get_validator_set(),
             ))),
 
