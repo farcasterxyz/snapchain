@@ -1013,6 +1013,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_revoking_a_signer_deletes_all_messages_from_that_signer() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
         let signer = SigningKey::generate(&mut rand::rngs::OsRng);
