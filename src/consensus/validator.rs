@@ -134,7 +134,7 @@ impl ShardValidator {
         ProposedValue {
             height: full_proposal.height(),
             round: full_proposal.round(),
-            valid_round: full_proposal.round(),
+            valid_round: Round::Nil,
             proposer: full_proposal.proposer_address(),
             value,
             validity,

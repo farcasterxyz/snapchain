@@ -11,7 +11,7 @@ use tracing::{debug, error, info, warn};
 
 use informalsystems_malachitebft_config::TimeoutConfig;
 use informalsystems_malachitebft_core_consensus::{
-    Effect, ProposedValue, Resume, SignedConsensusMsg, ValueToPropose,
+    Effect, ProposedValue, Resumable, Resume, SignedConsensusMsg, ValueToPropose,
 };
 use informalsystems_malachitebft_core_types::{
     Context, Extension, Round, SignedProposal, SignedProposalPart, SignedVote, Timeout, TimeoutKind,
@@ -260,7 +260,7 @@ impl Consensus {
                         ConsensusInput::Propose(ValueToPropose {
                             height,
                             round,
-                            valid_round: round,
+                            valid_round: Round::Nil,
                             value,
                             extension,
                         }),
@@ -491,7 +491,7 @@ impl Consensus {
         effect: Effect<SnapchainValidatorContext>,
     ) -> Result<Resume<SnapchainValidatorContext>, ActorProcessingErr> {
         match effect {
-            Effect::Publish(gossip_msg, _) => {
+            Effect::Publish(gossip_msg, r) => {
                 match gossip_msg {
                     SignedConsensusMsg::Proposal(proposal) => {
                         debug!(
@@ -513,30 +513,30 @@ impl Consensus {
                     }
                 }
 
-                Ok(Resume::Continue)
+                Ok(r.resume_with(()))
             }
 
-            Effect::RestreamValue(_, _, _, _, _, _) => {
+            Effect::RestreamValue(_, _, _, _, _, r) => {
                 // This is for interacting with host actor
-                Ok(Resume::Continue)
+                Ok(r.resume_with(()))
             }
-            Effect::GetVoteSet(_, _, _) => {
+            Effect::GetVoteSet(_, _, r) => {
                 // TODO(aditi): We need to incorporate the sync actor for this. Only relevant if consensus is stuck.
-                Ok(Resume::Continue)
+                Ok(r.resume_with(()))
             }
-            Effect::SendVoteSetResponse(_, _, _, _, _) => {
+            Effect::SendVoteSetResponse(_, _, _, _, r) => {
                 // TODO(aditi): We need to incorporate the sync actor for this. Only relevant if consensus is stuck.
-                Ok(Resume::Continue)
+                Ok(r.resume_with(()))
             }
-            Effect::PersistMessage(_, _) => {
+            Effect::PersistMessage(_, r) => {
                 // TODO(aditi): This is for the WAL, which is used for crash recovery.
-                Ok(Resume::Continue)
+                Ok(r.resume_with(()))
             }
-            Effect::PersistTimeout(_, _) => {
+            Effect::PersistTimeout(_, r) => {
                 // TODO(aditi): This is for the WAL, which is used for crash recovery.
-                Ok(Resume::Continue)
+                Ok(r.resume_with(()))
             }
-            Effect::SignProposal(proposal, _) => {
+            Effect::SignProposal(proposal, r) => {
                 let start = Instant::now();
 
                 let signed_proposal = self.ctx.signing_provider().sign_proposal(proposal);
@@ -545,10 +545,10 @@ impl Consensus {
                     .signature_signing_time
                     .observe(start.elapsed().as_secs_f64());
 
-                Ok(Resume::SignedProposal(signed_proposal))
+                Ok(r.resume_with(signed_proposal))
             }
 
-            Effect::SignVote(vote, _) => {
+            Effect::SignVote(vote, r) => {
                 let start = Instant::now();
 
                 let signed_vote = self.ctx.signing_provider().sign_vote(vote);
@@ -557,47 +557,47 @@ impl Consensus {
                     .signature_signing_time
                     .observe(start.elapsed().as_secs_f64());
 
-                Ok(Resume::SignedVote(signed_vote))
+                Ok(r.resume_with(signed_vote))
             }
 
-            Effect::VerifyCertificate(certificate, validator_set, thresholds, _) => {
+            Effect::VerifyCertificate(certificate, validator_set, thresholds, r) => {
                 let valid = self.ctx.signing_provider().verify_certificate(
                     &certificate,
                     &validator_set,
                     thresholds,
                 );
 
-                Ok(Resume::CertificateValidity(valid))
+                Ok(r.resume_with(valid))
             }
 
-            Effect::ResetTimeouts(_) => {
+            Effect::ResetTimeouts(r) => {
                 timeouts.reset(self.timeout_config);
-                Ok(Resume::Continue)
+                Ok(r.resume_with(()))
             }
 
-            Effect::CancelAllTimeouts(_) => {
+            Effect::CancelAllTimeouts(r) => {
                 timers.cancel_all();
-                Ok(Resume::Continue)
+                Ok(r.resume_with(()))
             }
 
-            Effect::CancelTimeout(timeout, _) => {
+            Effect::CancelTimeout(timeout, r) => {
                 timers.cancel(&timeout);
-                Ok(Resume::Continue)
+                Ok(r.resume_with(()))
             }
 
-            Effect::ScheduleTimeout(timeout, _) => {
+            Effect::ScheduleTimeout(timeout, r) => {
                 let duration = timeouts.duration_for(timeout.kind);
                 timers.start_timer(timeout, duration);
-                Ok(Resume::Continue)
+                Ok(r.resume_with(()))
             }
 
-            Effect::StartRound(height, round, proposer, _) => {
+            Effect::StartRound(height, round, proposer, r) => {
                 debug!("Starting height: {height}, round: {round}, proposer: {proposer}");
                 shard_validator.start_round(height, round, proposer);
-                Ok(Resume::Continue)
+                Ok(r.resume_with(()))
             }
 
-            Effect::VerifySignature(msg, pk, _) => {
+            Effect::VerifySignature(msg, pk, r) => {
                 use informalsystems_malachitebft_core_consensus::ConsensusMsg as Msg;
 
                 let start = Instant::now();
@@ -619,9 +619,9 @@ impl Consensus {
                     .signature_verification_time
                     .observe(start.elapsed().as_secs_f64());
 
-                Ok(Resume::SignatureValidity(valid))
+                Ok(r.resume_with(valid))
             }
-            Effect::GetValue(height, round, timeout, _) => {
+            Effect::GetValue(height, round, timeout, r) => {
                 let timeout = timeouts.duration_for(timeout.kind);
                 let full_proposal = shard_validator.propose_value(height, round, timeout).await;
 
@@ -637,12 +637,12 @@ impl Consensus {
                     .send(GossipEvent::BroadcastFullProposal(full_proposal))
                     .await?;
 
-                Ok(Resume::Continue)
+                Ok(r.resume_with(()))
             }
 
-            Effect::GetValidatorSet(_, _) => Ok(Resume::ValidatorSet(Some(
-                shard_validator.get_validator_set(),
-            ))),
+            Effect::GetValidatorSet(_, r) => {
+                Ok(r.resume_with(Some(shard_validator.get_validator_set())))
+            }
 
             Effect::Decide(
                 CommitCertificate {
@@ -651,7 +651,7 @@ impl Consensus {
                     value_id: value,
                     aggregated_signature: commits,
                 },
-                _,
+                r,
             ) => {
                 info!(
                     "Deciding value: {value} for height: {height} at {:?} with {:?} commits",
@@ -663,7 +663,7 @@ impl Consensus {
                 if let Err(e) = result {
                     error!("Error when starting next height after decision on {height}: {e:?}");
                 }
-                Ok(Resume::Continue)
+                Ok(r.resume_with(()))
             }
         }
     }
