@@ -567,7 +567,7 @@ impl Proposal {
             height: proto.height.unwrap(),
             round: Round::new(proto.round.try_into().unwrap()),
             shard_hash: proto.value.unwrap(),
-            pol_round: Round::new(proto.pol_round.try_into().unwrap()),
+            pol_round: Round::try_from(proto.pol_round).unwrap(),
             proposer: Address::from_vec(proto.proposer),
         }
     }
