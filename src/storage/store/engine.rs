@@ -1,5 +1,5 @@
 use super::account::{IntoU8, OnchainEventStorageError, UserDataStore};
-use crate::core::error::HubError;
+use crate::core::error::NodeError;
 use crate::core::types::Height;
 use crate::core::validations;
 use crate::proto::HubEvent;
@@ -31,10 +31,7 @@ pub enum EngineError {
     TrieError(#[from] trie::errors::TrieError),
 
     #[error("store error")]
-    StoreError {
-        inner: HubError, // TODO: move away from HubError when we can
-        hash: Vec<u8>,
-    },
+    StoreError { inner: NodeError, hash: Vec<u8> },
 
     #[error("unsupported message type")]
     UnsupportedMessageType(MessageType),
@@ -73,21 +70,21 @@ pub enum MessageValidationError {
     InvalidMessageType(i32),
 
     #[error("store error")]
-    StoreError { inner: HubError, hash: Vec<u8> },
+    StoreError { inner: NodeError, hash: Vec<u8> },
 
     #[error("fname not registered for fid")]
     MissingFname,
 }
 
 impl MessageValidationError {
-    pub fn new_store_error(hash: Vec<u8>) -> impl FnOnce(HubError) -> Self {
-        move |inner: HubError| MessageValidationError::StoreError { inner, hash }
+    pub fn new_store_error(hash: Vec<u8>) -> impl FnOnce(NodeError) -> Self {
+        move |inner: NodeError| MessageValidationError::StoreError { inner, hash }
     }
 }
 
 impl EngineError {
-    pub fn new_store_error(hash: Vec<u8>) -> impl FnOnce(HubError) -> Self {
-        move |inner: HubError| EngineError::StoreError { inner, hash }
+    pub fn new_store_error(hash: Vec<u8>) -> impl FnOnce(NodeError) -> Self {
+        move |inner: NodeError| EngineError::StoreError { inner, hash }
     }
 }
 
@@ -1052,7 +1049,7 @@ impl ShardEngine {
             Ok((_, _, errors)) => {
                 self.stores.trie.reload(&self.db).map_err(|e| {
                     MessageValidationError::StoreError {
-                        inner: HubError::invalid_internal_state(&*e.to_string()),
+                        inner: NodeError::invalid_internal_state(&*e.to_string()),
                         hash: vec![],
                     }
                 })?;
@@ -1065,7 +1062,7 @@ impl ShardEngine {
             Err(err) => {
                 error!("Error simulating message: {:?}", err);
                 Err(MessageValidationError::StoreError {
-                    inner: HubError::invalid_internal_state(&*err.to_string()),
+                    inner: NodeError::invalid_internal_state(&*err.to_string()),
                     hash: vec![],
                 })
             }
@@ -1099,11 +1096,11 @@ impl ShardEngine {
         }
     }
 
-    pub fn get_casts_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
+    pub fn get_casts_by_fid(&self, fid: u64) -> Result<MessagesPage, NodeError> {
         CastStore::get_cast_adds_by_fid(&self.stores.cast_store, fid, &PageOptions::default())
     }
 
-    pub fn get_links_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
+    pub fn get_links_by_fid(&self, fid: u64) -> Result<MessagesPage, NodeError> {
         self.stores
             .link_store
             .get_adds_by_fid::<fn(&Message) -> bool>(fid, &PageOptions::default(), None)
@@ -1112,19 +1109,19 @@ impl ShardEngine {
     pub fn get_link_compact_state_messages_by_fid(
         &self,
         fid: u64,
-    ) -> Result<MessagesPage, HubError> {
+    ) -> Result<MessagesPage, NodeError> {
         self.stores
             .link_store
             .get_compact_state_messages_by_fid(fid, &PageOptions::default())
     }
 
-    pub fn get_reactions_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
+    pub fn get_reactions_by_fid(&self, fid: u64) -> Result<MessagesPage, NodeError> {
         self.stores
             .reaction_store
             .get_adds_by_fid::<fn(&Message) -> bool>(fid, &PageOptions::default(), None)
     }
 
-    pub fn get_user_data_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
+    pub fn get_user_data_by_fid(&self, fid: u64) -> Result<MessagesPage, NodeError> {
         self.stores
             .user_data_store
             .get_adds_by_fid::<fn(&Message) -> bool>(fid, &PageOptions::default(), None)
@@ -1134,7 +1131,7 @@ impl ShardEngine {
         &self,
         fid: u64,
         user_data_type: proto::UserDataType,
-    ) -> Result<Message, HubError> {
+    ) -> Result<Message, NodeError> {
         UserDataStore::get_user_data_by_fid_and_type(
             &self.stores.user_data_store,
             fid,
@@ -1142,19 +1139,19 @@ impl ShardEngine {
         )
     }
 
-    pub fn get_verifications_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
+    pub fn get_verifications_by_fid(&self, fid: u64) -> Result<MessagesPage, NodeError> {
         self.stores
             .verification_store
             .get_adds_by_fid::<fn(&Message) -> bool>(fid, &PageOptions::default(), None)
     }
 
-    pub fn get_username_proofs_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
+    pub fn get_username_proofs_by_fid(&self, fid: u64) -> Result<MessagesPage, NodeError> {
         self.stores
             .username_proof_store
             .get_adds_by_fid::<fn(&Message) -> bool>(fid, &PageOptions::default(), None)
     }
 
-    pub fn get_fname_proof(&self, name: &String) -> Result<Option<UserNameProof>, HubError> {
+    pub fn get_fname_proof(&self, name: &String) -> Result<Option<UserNameProof>, NodeError> {
         UserDataStore::get_username_proof(
             &self.stores.user_data_store,
             &mut RocksDbTransactionBatch::new(),

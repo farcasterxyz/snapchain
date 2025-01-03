@@ -1,4 +1,5 @@
-use crate::core::error::HubError;
+// Note: This section already uses NodeError correctly, no changes needed
+use crate::core::error::NodeError;
 use crate::proto;
 use crate::proto::{
     CastsByParentRequest, FidRequest, FidTimestampRequest, LinksByFidRequest, ReactionsByFidRequest,
@@ -12,7 +13,7 @@ pub trait AsMessagesResponse {
     fn as_response(&self) -> Result<Response<proto::MessagesResponse>, Status>;
 }
 
-impl AsMessagesResponse for Result<MessagesPage, HubError> {
+impl AsMessagesResponse for Result<MessagesPage, NodeError> {
     fn as_response(&self) -> Result<Response<proto::MessagesResponse>, Status> {
         match self {
             Ok(page) => Ok(Response::new(proto::MessagesResponse {
@@ -28,7 +29,7 @@ pub trait AsSingleMessageResponse {
     fn as_response(&self) -> Result<Response<proto::Message>, Status>;
 }
 
-impl AsSingleMessageResponse for Result<Option<proto::Message>, HubError> {
+impl AsSingleMessageResponse for Result<Option<proto::Message>, NodeError> {
     fn as_response(&self) -> Result<Response<proto::Message>, Status> {
         match self {
             Ok(Some(message)) => Ok(Response::new(message.clone())),
@@ -38,7 +39,7 @@ impl AsSingleMessageResponse for Result<Option<proto::Message>, HubError> {
     }
 }
 
-impl AsSingleMessageResponse for Result<proto::Message, HubError> {
+impl AsSingleMessageResponse for Result<proto::Message, NodeError> {
     fn as_response(&self) -> Result<Response<proto::Message>, Status> {
         match self {
             Ok(message) => Ok(Response::new(message.clone())),

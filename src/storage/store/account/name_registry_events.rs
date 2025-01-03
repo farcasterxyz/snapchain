@@ -1,7 +1,8 @@
+// This section already uses NodeError correctly, no changes needed
 use prost::Message;
 
 use crate::{
-    core::error::HubError,
+    core::error::NodeError,
     proto::UserNameProof,
     storage::{
         constants::RootPrefix,
@@ -30,7 +31,7 @@ pub fn get_username_proof(
     db: &RocksDB,
     txn: &mut RocksDbTransactionBatch,
     name: &[u8],
-) -> Result<Option<UserNameProof>, HubError> {
+) -> Result<Option<UserNameProof>, NodeError> {
     let key = make_fname_username_proof_key(name);
     let buf = get_from_db_or_txn(db, txn, &key)?;
     if buf.is_none() {
@@ -39,14 +40,14 @@ pub fn get_username_proof(
 
     match UserNameProof::decode(buf.unwrap().as_slice()) {
         Ok(proof) => Ok(Some(proof)),
-        Err(_) => Err(HubError {
+        Err(_) => Err(NodeError {
             code: "internal_error".to_string(),
             message: "could not decode username proof".to_string(),
         }),
     }
 }
 
-pub fn get_fname_proof_by_fid(db: &RocksDB, fid: u64) -> Result<Option<UserNameProof>, HubError> {
+pub fn get_fname_proof_by_fid(db: &RocksDB, fid: u64) -> Result<Option<UserNameProof>, NodeError> {
     let secondary_key = make_fname_username_proof_by_fid_key(fid);
     let primary_key = db.get(&secondary_key)?;
     if primary_key.is_none() {
@@ -60,7 +61,7 @@ pub fn get_fname_proof_by_fid(db: &RocksDB, fid: u64) -> Result<Option<UserNameP
 
     match UserNameProof::decode(buf.unwrap().as_slice()) {
         Ok(proof) => Ok(Some(proof)),
-        Err(_) => Err(HubError {
+        Err(_) => Err(NodeError {
             code: "internal_error".to_string(),
             message: "could not decode username proof".to_string(),
         }),

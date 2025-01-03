@@ -1,5 +1,5 @@
 use super::PAGE_SIZE_MAX;
-use crate::core::error::HubError;
+use crate::core::error::NodeError;
 use crate::core::types::FidOnDisk;
 use crate::storage::constants::{RootPrefix, UserPostfix};
 use crate::storage::db::{PageOptions, RocksdbError};
@@ -73,11 +73,11 @@ pub fn type_to_set_postfix(message_type: MessageType) -> UserPostfix {
     panic!("invalid type");
 }
 
-pub fn make_ts_hash(timestamp: u32, hash: &Vec<u8>) -> Result<[u8; TS_HASH_LENGTH], HubError> {
+pub fn make_ts_hash(timestamp: u32, hash: &Vec<u8>) -> Result<[u8; TS_HASH_LENGTH], NodeError> {
     // No need to check if timestamp > 2^32 because it's already a u32
 
     if hash.len() != HASH_LENGTH {
-        return Err(HubError {
+        return Err(NodeError {
             code: "internal_error".to_string(),
             message: "hash length is not 20".to_string(),
         });
@@ -160,7 +160,7 @@ pub fn get_message(
     fid: u64,
     set: u8,
     ts_hash: &[u8; TS_HASH_LENGTH],
-) -> Result<Option<MessageProto>, HubError> {
+) -> Result<Option<MessageProto>, NodeError> {
     let key = make_message_primary_key(fid, set, Some(ts_hash));
     get_message_by_key(db, txn, &key)
 }
@@ -171,7 +171,7 @@ pub fn get_from_db_or_txn(
     db: &RocksDB,
     txn: &mut RocksDbTransactionBatch,
     key: &[u8],
-) -> Result<Option<Vec<u8>>, HubError> {
+) -> Result<Option<Vec<u8>>, NodeError> {
     if let Some(value) = txn.batch.get(key) {
         Ok(value.clone())
     } else {
@@ -183,7 +183,7 @@ pub fn get_message_by_key(
     db: &RocksDB,
     txn: &mut RocksDbTransactionBatch,
     key: &[u8],
-) -> Result<Option<MessageProto>, HubError> {
+) -> Result<Option<MessageProto>, NodeError> {
     match get_from_db_or_txn(db, txn, &key)? {
         Some(bytes) => match message_decode(&bytes) {
             Ok(message) => Ok(Some(message)),
@@ -200,17 +200,17 @@ pub fn get_message_by_key(
 pub fn get_many_messages(
     db: &RocksDB,
     primary_keys: Vec<Vec<u8>>,
-) -> Result<Vec<MessageProto>, HubError> {
+) -> Result<Vec<MessageProto>, NodeError> {
     let mut messages = Vec::new();
 
     for key in primary_keys {
         if let Ok(Some(value)) = db.get(&key) {
             match message_decode(&value) {
                 Ok(message) => messages.push(message),
-                Err(e) => Err(HubError::from(e))?,
+                Err(e) => Err(NodeError::from(e))?,
             }
         } else {
-            return Err(HubError::not_found(
+            return Err(NodeError::not_found(
                 format!("could not get message with key: {:?}", key).as_str(),
             ));
         }
@@ -224,7 +224,7 @@ pub fn get_messages_page_by_prefix<F>(
     prefix: &[u8],
     page_options: &PageOptions,
     filter: F,
-) -> Result<MessagesPage, HubError>
+) -> Result<MessagesPage, NodeError>
 where
     F: Fn(&MessageProto) -> bool,
 {
@@ -249,7 +249,7 @@ where
 
                     Ok(false) // Continue iterating
                 }
-                Err(e) => Err(HubError::from(e)),
+                Err(e) => Err(NodeError::from(e)),
             }
         },
     )?;
@@ -299,7 +299,7 @@ pub fn message_decode(bytes: &[u8]) -> Result<MessageProto, RocksdbError> {
 pub fn put_message_transaction(
     txn: &mut RocksDbTransactionBatch,
     message: &MessageProto,
-) -> Result<(), HubError> {
+) -> Result<(), NodeError> {
     let ts_hash = make_ts_hash(message.data.as_ref().unwrap().timestamp, &message.hash)?;
 
     let primary_key = make_message_primary_key(
@@ -316,7 +316,7 @@ pub fn put_message_transaction(
 pub fn delete_message_transaction(
     txn: &mut RocksDbTransactionBatch,
     message: &MessageProto,
-) -> Result<(), HubError> {
+) -> Result<(), NodeError> {
     let ts_hash = make_ts_hash(message.data.as_ref().unwrap().timestamp, &message.hash)?;
 
     let primary_key = make_message_primary_key(

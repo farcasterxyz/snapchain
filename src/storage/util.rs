@@ -1,4 +1,4 @@
-use crate::core::error::HubError;
+use crate::core::error::NodeError;
 
 /**
  * The hashes in the sync trie are 20 bytes (160 bits) long, so we use the first 20 bytes of the blake3 hash
@@ -59,20 +59,20 @@ pub fn increment_vec_u8(vec: &Vec<u8>) -> Vec<u8> {
 /**
  * Helper function to cast a vec into a [u8; 24] for TsHash
  */
-pub fn vec_to_u8_24(vec: &Option<Vec<u8>>) -> Result<[u8; 24], HubError> {
+pub fn vec_to_u8_24(vec: &Option<Vec<u8>>) -> Result<[u8; 24], NodeError> {
     if let Some(vec) = vec {
         if vec.len() == 24 {
             let mut arr = [0u8; 24];
             arr.copy_from_slice(&vec);
             Ok(arr)
         } else {
-            Err(HubError {
+            Err(NodeError {
                 code: "bad_request.internal_error".to_string(),
                 message: format!("message_ts_hash is not 24 bytes: {:x?}", vec),
             })
         }
     } else {
-        Err(HubError {
+        Err(NodeError {
             code: "bad_request.internal_error".to_string(),
             message: "message_ts_hash is not 24 bytes: None".to_string(),
         })

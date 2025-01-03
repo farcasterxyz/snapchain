@@ -3,7 +3,7 @@ use std::sync::Arc;
 use prost::{DecodeError, Message};
 
 use super::{get_from_db_or_txn, make_fid_key, StoreEventHandler};
-use crate::core::error::HubError;
+use crate::core::error::NodeError;
 use crate::proto::{
     self, on_chain_event, IdRegisterEventBody, IdRegisterEventType, OnChainEvent, OnChainEventType,
     SignerEventBody, SignerEventType,
@@ -26,7 +26,7 @@ pub enum OnchainEventStorageError {
     RocksdbError(#[from] RocksdbError),
 
     #[error(transparent)]
-    HubError(#[from] HubError),
+    NodeError(#[from] NodeError),
 
     #[error("Invalid event type calculating storage slots ")]
     InvalidStorageRentEventType,
@@ -268,7 +268,7 @@ pub fn get_onchain_events(
         Some(stop_prefix),
         page_options,
         |key, value| {
-            let onchain_event = OnChainEvent::decode(value).map_err(|e| HubError::from(e))?;
+            let onchain_event = OnChainEvent::decode(value).map_err(|e| NodeError::from(e))?;
             onchain_events.push(onchain_event);
 
             if onchain_events.len() >= page_options.page_size.unwrap_or(PAGE_SIZE_MAX) {
@@ -279,7 +279,7 @@ pub fn get_onchain_events(
             Ok(false) // Continue iterating
         },
     )
-    .map_err(|e| OnchainEventStorageError::HubError(e))?; // TODO: Return the right error
+    .map_err(|e| OnchainEventStorageError::NodeError(e))?;
     let next_page_token = if last_key.len() > 0 {
         Some(last_key)
     } else {

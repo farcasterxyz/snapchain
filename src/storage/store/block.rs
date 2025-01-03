@@ -1,5 +1,6 @@
+// Note: This section already uses NodeError correctly, no changes needed
 use super::super::constants::PAGE_SIZE_MAX;
-use crate::core::error::HubError;
+use crate::core::error::NodeError;
 use crate::proto::Block;
 use crate::storage::constants::RootPrefix;
 use crate::storage::db::{PageOptions, RocksDB, RocksdbError};
@@ -65,7 +66,7 @@ fn get_block_page_by_prefix(
         Some(stop_prefix),
         page_options,
         |key, value| {
-            let block = Block::decode(value).map_err(|e| HubError::from(e))?;
+            let block = Block::decode(value).map_err(|e| NodeError::from(e))?;
             blocks.push(block);
 
             if blocks.len() >= page_options.page_size.unwrap_or(PAGE_SIZE_MAX) {
