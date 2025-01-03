@@ -4,6 +4,7 @@ use crate::storage::store::stores::StoreLimits;
 use crate::storage::trie::merkle_trie;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use ed25519_dalek::{SecretKey, SigningKey};
+use prost::Message;
 use std::sync::Arc;
 use tempfile;
 
@@ -224,13 +225,22 @@ pub fn default_storage_event(fid: u64) -> OnChainEvent {
     events_factory::create_rent_event(fid, None, Some(1), false)
 }
 
-pub async fn register_user(fid: u64, signer: SigningKey, engine: &mut ShardEngine) {
+pub async fn register_user(
+    fid: u64,
+    signer: SigningKey,
+    custody_address: Vec<u8>,
+    engine: &mut ShardEngine,
+) {
     commit_event(engine, &default_storage_event(fid)).await;
-    let id_register_event =
-        events_factory::create_id_register_event(fid, proto::IdRegisterEventType::Register);
+    let id_register_event = events_factory::create_id_register_event(
+        fid,
+        proto::IdRegisterEventType::Register,
+        custody_address,
+        None,
+    );
     commit_event(engine, &id_register_event).await;
     let signer_event =
-        events_factory::create_signer_event(fid, signer, proto::SignerEventType::Add);
+        events_factory::create_signer_event(fid, signer, proto::SignerEventType::Add, None);
     commit_event(engine, &signer_event).await;
 }
 
@@ -260,9 +270,18 @@ pub fn default_signer() -> SigningKey {
     )
 }
 
+pub fn default_custody_address() -> Vec<u8> {
+    "000000000000000000".to_string().encode_to_vec()
+}
+
+#[allow(dead_code)]
+pub fn generate_signer() -> SigningKey {
+    SigningKey::generate(&mut rand::thread_rng())
+}
+
 #[allow(dead_code)]
 pub fn enable_logging() {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .try_init();

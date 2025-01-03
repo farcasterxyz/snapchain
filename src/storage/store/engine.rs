@@ -1,6 +1,7 @@
 use super::account::{IntoU8, OnchainEventStorageError, UserDataStore};
 use crate::core::error::HubError;
 use crate::core::types::Height;
+use crate::core::validations;
 use crate::proto::HubEvent;
 use crate::proto::Message;
 use crate::proto::UserNameProof;
@@ -64,6 +65,9 @@ pub enum MessageValidationError {
 
     #[error("missing signer")]
     MissingSigner,
+
+    #[error(transparent)]
+    MessageValidationError(#[from] validations::ValidationError),
 
     #[error("invalid message type")]
     InvalidMessageType(i32),
@@ -445,7 +449,7 @@ impl ShardEngine {
                     );
                 }
 
-                match fname_transfer.verify_signature() {
+                match validations::validate_fname_transfer(fname_transfer) {
                     Ok(_) => {}
                     Err(err) => {
                         warn!("Error validating fname transfer: {:?}", err);
@@ -814,7 +818,7 @@ impl ShardEngine {
         Ok(())
     }
 
-    fn validate_user_message(
+    pub(crate) fn validate_user_message(
         &self,
         message: &proto::Message,
         txn_batch: &mut RocksDbTransactionBatch,
@@ -826,6 +830,8 @@ impl ShardEngine {
             .ok_or(MessageValidationError::NoMessageData)?;
 
         // TODO(aditi): Check network
+
+        validations::validate_message(message)?;
 
         // Check that the user has a custody address
         self.stores
@@ -850,9 +856,7 @@ impl ShardEngine {
             Some(proto::message_data::Body::UsernameProofBody(_)) => {
                 // Validate ens
             }
-            Some(proto::message_data::Body::VerificationAddAddressBody(__add)) => {
-                // Validate verification
-            }
+            Some(proto::message_data::Body::VerificationAddAddressBody(add)) => validate,
             Some(proto::message_data::Body::LinkCompactStateBody(_)) => {
                 // Validate link state length
             }
@@ -875,27 +879,25 @@ impl ShardEngine {
         let fname = fname.to_string();
         // TODO: validate fname string
 
-        if fname.ends_with(".eth") {
-            // TODO: Validate ens names
-        } else {
-            let proof = UserDataStore::get_username_proof(
-                &self.stores.user_data_store,
-                txn,
-                fname.as_bytes(),
-            )
-            .map_err(|e| MessageValidationError::StoreError {
-                inner: e,
-                hash: vec![],
-            })?;
-            match proof {
-                Some(proof) => {
-                    if proof.fid != fid {
-                        return Err(MessageValidationError::MissingFname);
-                    }
-                }
-                None => {
+        let proof =
+            UserDataStore::get_username_proof(&self.stores.user_data_store, txn, fname.as_bytes())
+                .map_err(|e| MessageValidationError::StoreError {
+                    inner: e,
+                    hash: vec![],
+                })?;
+        match proof {
+            Some(proof) => {
+                if proof.fid != fid {
                     return Err(MessageValidationError::MissingFname);
                 }
+
+                if fname.ends_with(".eth") {
+                    // TODO: Validate ens names
+                } else {
+                }
+            }
+            None => {
+                return Err(MessageValidationError::MissingFname);
             }
         }
         Ok(())

@@ -88,10 +88,13 @@ pub mod events_factory {
             units: rent_units,
             payer: rand::random::<[u8; 32]>().to_vec(),
         };
+        let random_number_under_1000 = rand::random::<u32>() % 1000;
+        // Ensure higher timestamp always has higher block number by left shifting the timestamp by 10 bits (1024)
+        let block_number = timestamp.checked_shl(10).unwrap() + random_number_under_1000;
         OnChainEvent {
             r#type: OnChainEventType::EventTypeStorageRent as i32,
             chain_id: 10,
-            block_number: rand::random::<u32>(),
+            block_number,
             block_hash: vec![],
             block_timestamp: timestamp as u64,
             transaction_hash: rand::random::<[u8; 32]>().to_vec(),
@@ -109,6 +112,7 @@ pub mod events_factory {
         fid: u64,
         signer: SigningKey,
         event_type: proto::SignerEventType,
+        timestamp: Option<u32>,
     ) -> OnChainEvent {
         let signer_event_body = proto::SignerEventBody {
             key: signer.verifying_key().as_bytes().to_vec(),
@@ -117,12 +121,16 @@ pub mod events_factory {
             key_type: 1,
             metadata_type: 1,
         };
+        let block_timestamp = timestamp.unwrap_or_else(|| time::current_timestamp_with_offset(-10));
+        let random_number_under_1000 = rand::random::<u32>() % 1000;
+        // Ensure higher timestamp always has higher block number by left shifting the timestamp by 10 bits (1024)
+        let block_number = block_timestamp.checked_shl(10).unwrap() + random_number_under_1000;
         OnChainEvent {
             r#type: OnChainEventType::EventTypeSigner as i32,
             chain_id: 10,
-            block_number: rand::random::<u32>(),
+            block_number,
             block_hash: vec![],
-            block_timestamp: time::current_timestamp_with_offset(-10) as u64,
+            block_timestamp: block_timestamp as u64,
             transaction_hash: rand::random::<[u8; 32]>().to_vec(),
             log_index: 0,
             fid,
@@ -137,19 +145,25 @@ pub mod events_factory {
     pub fn create_id_register_event(
         fid: u64,
         event_type: proto::IdRegisterEventType,
+        custody_address: Vec<u8>,
+        timestamp: Option<u32>,
     ) -> OnChainEvent {
         let id_register_event_body = proto::IdRegisterEventBody {
-            to: vec![],
+            to: custody_address,
             event_type: event_type as i32,
             from: vec![],
             recovery_address: vec![],
         };
+        let block_timestamp = timestamp.unwrap_or_else(|| time::current_timestamp_with_offset(-10));
+        let random_number_under_1000 = rand::random::<u32>() % 1000;
+        // Ensure higher timestamp always has higher block number by left shifting the timestamp by 10 bits (1024)
+        let block_number = block_timestamp.checked_shl(10).unwrap() + random_number_under_1000;
         OnChainEvent {
-            r#type: OnChainEventType::EventTypeSigner as i32,
+            r#type: OnChainEventType::EventTypeIdRegister as i32,
             chain_id: 10,
-            block_number: rand::random::<u32>(),
+            block_number,
             block_hash: vec![],
-            block_timestamp: time::current_timestamp_with_offset(-10) as u64,
+            block_timestamp: block_timestamp as u64,
             transaction_hash: rand::random::<[u8; 32]>().to_vec(),
             log_index: 0,
             fid,
@@ -164,6 +178,7 @@ pub mod events_factory {
 
 pub mod messages_factory {
     use super::*;
+    use crate::core::util::calculate_message_hash;
 
     pub fn farcaster_time() -> u32 {
         (std::time::SystemTime::now()
@@ -202,7 +217,7 @@ pub mod messages_factory {
         };
 
         let msg_data_bytes = msg_data.encode_to_vec();
-        let hash = blake3::hash(&msg_data_bytes).as_bytes()[0..20].to_vec();
+        let hash = calculate_message_hash(&msg_data_bytes);
 
         let signature = key.sign(&hash).to_bytes();
         message::Message {
@@ -411,14 +426,14 @@ pub mod messages_factory {
         pub fn create_verification_add(
             fid: u64,
             verification_type: u32,
-            address: String,
+            address: Vec<u8>,
             claim_signature: String,
             block_hash: String,
             timestamp: Option<u32>,
             private_key: Option<&SigningKey>,
         ) -> message::Message {
             let body = VerificationAddAddressBody {
-                address: address.encode_to_vec(),
+                address: address,
                 claim_signature: claim_signature.encode_to_vec(),
                 block_hash: block_hash.encode_to_vec(),
                 verification_type,
@@ -462,7 +477,7 @@ pub mod messages_factory {
             fid: u64,
             username_type: crate::proto::UserNameType,
             name: String,
-            owner: String,
+            owner: Vec<u8>,
             signature: String,
             timestamp: u64,
             private_key: Option<&SigningKey>,
@@ -470,7 +485,7 @@ pub mod messages_factory {
             let proof = UserNameProof {
                 timestamp,
                 name: name.encode_to_vec(),
-                owner: owner.encode_to_vec(),
+                owner,
                 signature: signature.encode_to_vec(),
                 fid,
                 r#type: username_type as i32,

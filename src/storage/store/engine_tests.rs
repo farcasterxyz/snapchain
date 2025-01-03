@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use crate::core::util::calculate_message_hash;
     use crate::proto::ShardChunk;
     use crate::proto::{self, ReactionType};
     use crate::proto::{HubEvent, ValidatorMessage};
@@ -13,6 +14,7 @@ mod tests {
     use crate::storage::trie::merkle_trie::TrieKey;
     use crate::utils::factory::{self, events_factory, messages_factory, time, username_factory};
     use ed25519_dalek::SigningKey;
+    use prost::Message;
 
     fn from_hex(s: &str) -> Vec<u8> {
         hex::decode(s).unwrap()
@@ -175,6 +177,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_engine_rejects_message_with_invalid_hash() {
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+        let mut message = default_message("msg1");
+        let current_timestamp = message.data.as_ref().unwrap().timestamp;
+        // Modify the message so the hash is no longer correct
+        message.data.as_mut().unwrap().timestamp = current_timestamp + 1;
+
+        assert_commit_fails(&mut engine, &message).await;
+
+        assert_eq!(
+            engine
+                .validate_user_message(&message, &mut RocksDbTransactionBatch::new())
+                .unwrap_err()
+                .to_string(),
+            "Invalid message hash"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_engine_rejects_message_with_invalid_signature() {
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+        let mut message = default_message("msg1");
+        let current_timestamp = message.data.as_ref().unwrap().timestamp;
+        // Modify the message so the signatures is no longer correct
+        message.data.as_mut().unwrap().timestamp = current_timestamp + 1;
+        message.hash = calculate_message_hash(&message.data.as_ref().unwrap().encode_to_vec());
+
+        assert_commit_fails(&mut engine, &message).await;
+
+        assert_eq!(
+            engine
+                .validate_user_message(&message, &mut RocksDbTransactionBatch::new())
+                .unwrap_err()
+                .to_string(),
+            "Invalid message signature"
+        );
+    }
+
+    #[tokio::test]
     async fn test_engine_commit_no_messages_happy_path() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
         let state_change = engine.propose_state_change(1, vec![]);
@@ -193,7 +248,13 @@ mod tests {
         // enable_logging();
         let (msg1, _) = entities();
         let (mut engine, _tmpdir) = test_helper::new_engine();
-        test_helper::register_user(FID_FOR_TEST, test_helper::default_signer(), &mut engine).await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
         let mut event_rx = engine.get_senders().events_tx.subscribe();
 
         // Registering a user generates events
@@ -251,7 +312,13 @@ mod tests {
         let cast =
             messages_factory::casts::create_cast_add(FID_FOR_TEST, "msg1", Some(timestamp), None);
         let (mut engine, _tmpdir) = test_helper::new_engine();
-        test_helper::register_user(FID_FOR_TEST, test_helper::default_signer(), &mut engine).await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
 
         commit_message(&mut engine, &cast).await;
 
@@ -285,7 +352,13 @@ mod tests {
         let timestamp = messages_factory::farcaster_time();
         let target_fid = 15;
         let (mut engine, _tmpdir) = test_helper::new_engine();
-        test_helper::register_user(FID_FOR_TEST, test_helper::default_signer(), &mut engine).await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
 
         let link_add = messages_factory::links::create_link_add(
             FID_FOR_TEST,
@@ -332,7 +405,13 @@ mod tests {
         let timestamp = messages_factory::farcaster_time();
         let target_url = "exampleurl".to_string();
         let (mut engine, _tmpdir) = test_helper::new_engine();
-        test_helper::register_user(FID_FOR_TEST, test_helper::default_signer(), &mut engine).await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
 
         let reaction_add = messages_factory::reactions::create_reaction_add(
             FID_FOR_TEST,
@@ -365,7 +444,13 @@ mod tests {
     async fn test_commit_user_data_messages() {
         let timestamp = messages_factory::farcaster_time();
         let (mut engine, _tmpdir) = test_helper::new_engine();
-        test_helper::register_user(FID_FOR_TEST, test_helper::default_signer(), &mut engine).await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
 
         let user_data_add = messages_factory::user_data::create_user_data_add(
             FID_FOR_TEST,
@@ -385,13 +470,19 @@ mod tests {
     async fn test_commit_verification_messages() {
         let timestamp = messages_factory::farcaster_time();
         let (mut engine, _tmpdir) = test_helper::new_engine();
-        test_helper::register_user(FID_FOR_TEST, test_helper::default_signer(), &mut engine).await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
         let address = "address".to_string();
 
         let verification_add = messages_factory::verifications::create_verification_add(
             FID_FOR_TEST,
             0,
-            address.clone(),
+            address.clone().encode_to_vec(),
             "signature".to_string(),
             "hash".to_string(),
             Some(timestamp),
@@ -421,17 +512,23 @@ mod tests {
         let timestamp = messages_factory::farcaster_time();
         let (mut engine, _tmpdir) = test_helper::new_engine();
         let name = "username".to_string();
-        let owner = "owner".to_string();
+        let owner = "owner".to_string().encode_to_vec();
         let signature = "signature".to_string();
         let signer = test_helper::default_signer();
 
-        test_helper::register_user(FID_FOR_TEST, signer.clone(), &mut engine).await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            signer.clone(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
 
         let username_proof_add = messages_factory::username_proof::create_username_proof(
             FID_FOR_TEST as u64,
             proto::UserNameType::UsernameTypeFname,
             name.clone(),
-            owner.clone(),
+            owner,
             signature.clone(),
             timestamp as u64,
             Some(&signer),
@@ -475,7 +572,13 @@ mod tests {
         assert_eq!(account_root.len(), 0);
         assert_eq!(shard_root.len(), 0);
 
-        test_helper::register_user(FID_FOR_TEST, test_helper::default_signer(), &mut engine).await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
         commit_message(&mut engine, &cast).await;
 
         let updated_account_root =
@@ -519,7 +622,13 @@ mod tests {
         assert_eq!(height.shard_index, 1);
         assert_eq!(height.block_number, 0);
 
-        test_helper::register_user(FID_FOR_TEST, test_helper::default_signer(), &mut engine).await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
 
         {
             let state_change =
@@ -573,7 +682,13 @@ mod tests {
         // enable_logging();
         let (msg1, msg2) = entities();
         let (mut engine, _tmpdir) = test_helper::new_engine();
-        test_helper::register_user(FID_FOR_TEST, test_helper::default_signer(), &mut engine).await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
         let mut previous_root = "".to_string();
 
         {
@@ -611,7 +726,13 @@ mod tests {
     #[tokio::test]
     async fn test_add_remove_in_same_tx_respects_crdt_rules() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
-        register_user(FID_FOR_TEST, test_helper::default_signer(), &mut engine).await;
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
 
         let ts = time::farcaster_time();
         let cast1 = &messages_factory::casts::create_cast_add(FID_FOR_TEST, "msg1", Some(ts), None);
@@ -728,7 +849,13 @@ mod tests {
     #[tokio::test]
     async fn test_messages_pruned_with_exceeded_storage() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
-        test_helper::register_user(FID_FOR_TEST, test_helper::default_signer(), &mut engine).await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
         let mut event_rx = engine.get_senders().events_tx.subscribe();
         let current_time = factory::time::farcaster_time();
         let cast1 = messages_factory::casts::create_cast_add(
@@ -789,7 +916,13 @@ mod tests {
     async fn test_messages_partially_merged_with_insufficient_storage() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
         let signer = test_helper::default_signer();
-        test_helper::register_user(FID_FOR_TEST, signer.clone(), &mut engine).await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            signer.clone(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
         let mut event_rx = engine.get_senders().events_tx.subscribe();
         let current_time = factory::time::farcaster_time();
         let cast1 = messages_factory::casts::create_cast_add(
@@ -905,14 +1038,27 @@ mod tests {
         );
         let different_fid_same_signer =
             messages_factory::casts::create_cast_add(FID_FOR_TEST + 1, "msg4", None, Some(&signer));
-        test_helper::register_user(FID_FOR_TEST, signer.clone(), &mut engine).await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            signer.clone(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
         let another_signer_event = events_factory::create_signer_event(
             FID_FOR_TEST,
             another_signer.clone(),
             proto::SignerEventType::Add,
+            None,
         );
         test_helper::commit_event(&mut engine, &another_signer_event).await;
-        test_helper::register_user(FID_FOR_TEST + 1, signer.clone(), &mut engine).await;
+        test_helper::register_user(
+            FID_FOR_TEST + 1,
+            signer.clone(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
         let mut event_rx = engine.get_senders().events_tx.subscribe();
 
         commit_message(&mut engine, &msg1).await;
@@ -935,6 +1081,7 @@ mod tests {
             FID_FOR_TEST,
             signer.clone(),
             proto::SignerEventType::Remove,
+            Some(timestamp + 3),
         );
         test_helper::commit_event(&mut engine, &revoke_event).await;
         assert_onchain_hub_event(&event_rx.try_recv().unwrap(), &revoke_event);
@@ -950,13 +1097,28 @@ mod tests {
         // Different Fid with the same signer is unaffected
         let messages = engine.get_casts_by_fid(FID_FOR_TEST + 1).unwrap();
         assert_eq!(1, messages.messages.len());
+
+        // Submitting a message from the revoked signer should fail
+        let post_revoke_message = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "after revoke",
+            Some(timestamp + 5),
+            Some(&signer),
+        );
+        assert_commit_fails(&mut engine, &post_revoke_message).await;
     }
 
     #[tokio::test]
     async fn test_merge_fname() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
 
-        test_helper::register_user(FID_FOR_TEST, test_helper::default_signer(), &mut engine).await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
 
         let fname = &"farcaster".to_string();
 
@@ -994,7 +1156,13 @@ mod tests {
     async fn test_username_revoked_when_proof_transferred() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
 
-        test_helper::register_user(FID_FOR_TEST, test_helper::default_signer(), &mut engine).await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
 
         let fname = &"farcaster".to_string();
         test_helper::register_fname(FID_FOR_TEST, fname, None, &mut engine).await;
@@ -1066,6 +1234,7 @@ mod tests {
                 FID_FOR_TEST,
                 test_helper::default_signer(),
                 proto::SignerEventType::Add,
+                None,
             ),
         )
         .await;
@@ -1075,6 +1244,8 @@ mod tests {
         let id_register = events_factory::create_id_register_event(
             FID_FOR_TEST,
             proto::IdRegisterEventType::Register,
+            vec![],
+            None,
         );
         test_helper::commit_event(&mut engine, &id_register).await;
         commit_message(&mut engine, &default_message("msg1")).await;
@@ -1095,6 +1266,8 @@ mod tests {
             &events_factory::create_id_register_event(
                 FID_FOR_TEST,
                 proto::IdRegisterEventType::Register,
+                vec![],
+                None,
             ),
         )
         .await;
@@ -1107,6 +1280,7 @@ mod tests {
                 FID_FOR_TEST,
                 test_helper::default_signer(),
                 proto::SignerEventType::Add,
+                None,
             ),
         )
         .await;
@@ -1119,8 +1293,20 @@ mod tests {
     async fn test_fname_validation() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
         let fname = &"farcaster".to_string();
-        test_helper::register_user(FID_FOR_TEST, test_helper::default_signer(), &mut engine).await;
-        test_helper::register_user(FID2_FOR_TEST, test_helper::default_signer(), &mut engine).await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+        test_helper::register_user(
+            FID2_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
 
         // When fname is not registered, message is not merged
         {
@@ -1190,7 +1376,13 @@ mod tests {
         assert_eq!(result.is_ok(), false);
         assert_eq!(result.unwrap_err().to_string(), "missing fid");
 
-        register_user(FID_FOR_TEST, test_helper::default_signer(), &mut engine).await;
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
 
         let result = engine.simulate_message(&message);
         assert_eq!(result.is_ok(), true);
