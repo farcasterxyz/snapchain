@@ -1,10 +1,5 @@
-use alloy_dyn_abi::TypedData;
-use serde_json::json;
-
 use crate::proto;
 use crate::proto::MessageType;
-
-use super::error::HubError;
 
 impl proto::Message {
     pub fn is_type(&self, message_type: proto::MessageType) -> bool {
