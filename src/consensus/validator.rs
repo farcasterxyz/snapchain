@@ -4,8 +4,8 @@ use crate::core::types::{
     SnapchainValidatorSet,
 };
 use crate::proto::FullProposal;
-use malachite_common::{Round, ValidatorSet};
-use malachite_consensus::ProposedValue;
+use informalsystems_malachitebft_core_consensus::ProposedValue;
+use informalsystems_malachitebft_core_types::{Round, ValidatorSet};
 use std::collections::HashSet;
 use std::time::Duration;
 use tracing::error;
@@ -134,7 +134,8 @@ impl ShardValidator {
         ProposedValue {
             height: full_proposal.height(),
             round: full_proposal.round(),
-            validator_address: full_proposal.proposer_address(),
+            valid_round: Round::Nil,
+            proposer: full_proposal.proposer_address(),
             value,
             validity,
             extension: None,
