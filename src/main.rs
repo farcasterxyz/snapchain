@@ -13,11 +13,11 @@ use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::storage::db::RocksDB;
 use snapchain::storage::store::BlockStore;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
+use std::collections::HashMap;
 use std::error::Error;
 use std::net;
 use std::net::SocketAddr;
 use std::process;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal::ctrl_c;
 use tokio::sync::mpsc;
@@ -81,9 +81,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let addr = app_config.gossip.address.clone();
     let grpc_addr = app_config.rpc_address.clone();
     let grpc_socket_addr: SocketAddr = grpc_addr.parse()?;
-    let db_path = format!("{}/farcaster", app_config.rocksdb_dir);
-    let db = Arc::new(RocksDB::new(db_path.clone().as_str()));
-    db.open().unwrap();
+    let db = RocksDB::open_block_db(app_config.rocksdb_dir.as_str());
     let block_store = BlockStore::new(db);
 
     info!(addr = addr, grpc_addr = grpc_addr, "HubService listening",);
@@ -205,6 +203,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         shutdown_tx.send(()).await.ok();
     });
+
+    if app_config.backup_dir != "" {
+        let backup_dir = app_config.backup_dir.clone();
+        let shard_ids = app_config.consensus.shard_ids.clone();
+        let block_db = block_store.db.clone();
+        let mut dbs = HashMap::new();
+        dbs.insert(0, block_db.clone());
+        node.shard_stores
+            .iter()
+            .for_each(|(shard_id, shard_store)| {
+                dbs.insert(*shard_id, shard_store.shard_store.db.clone());
+            });
+        tokio::spawn(async move {
+            info!(
+                "Backing up {:?} shard databases to {:?}",
+                shard_ids, backup_dir
+            );
+            let timestamp = chrono::Utc::now().timestamp_millis();
+            dbs.iter().for_each(|(shard_id, db)| {
+                RocksDB::backup_db(db.clone(), &backup_dir, *shard_id, timestamp).unwrap();
+            });
+        });
+    }
 
     // Create a timer for block creation
     let mut block_interval = time::interval(Duration::from_secs(2));

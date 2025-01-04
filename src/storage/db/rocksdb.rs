@@ -1,12 +1,13 @@
 use crate::core::error::HubError;
+use crate::storage::db::multi_chunk_writer::MultiChunkWriter;
 use crate::storage::util::increment_vec_u8;
-use rocksdb::{Options, TransactionDB};
+use rocksdb::{Options, TransactionDB, DB};
 use std::collections::HashMap;
 use std::fs::{self};
-use std::path::Path;
-use std::sync::{RwLock, RwLockReadGuard};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 use thiserror::Error;
-use tracing::info;
+use tracing::{info, warn};
 use walkdir::WalkDir;
 
 #[derive(Error, Debug)]
@@ -19,6 +20,9 @@ pub enum RocksdbError {
 
     #[error("DB is not open")]
     DbNotOpen,
+
+    #[error(transparent)]
+    BackupError(#[from] std::io::Error),
 }
 
 /** Hold a transaction. List of key/value pairs that will be committed together */
@@ -84,6 +88,136 @@ impl RocksDB {
             db: RwLock::new(None),
             path: path.to_string(),
         }
+    }
+
+    pub fn open_shard_db(db_dir: &str, shard_id: u32) -> Arc<RocksDB> {
+        let db = RocksDB::new(format!("{}/shard-{}", db_dir, shard_id).as_str());
+        db.open().unwrap();
+        Arc::new(db)
+    }
+
+    pub fn open_block_db(db_dir: &str) -> Arc<RocksDB> {
+        let db = RocksDB::new(format!("{}/block", db_dir).as_str());
+        db.open().unwrap();
+        Arc::new(db)
+    }
+
+    pub fn backup_db(
+        db: Arc<RocksDB>,
+        backup_dir: &str,
+        shard_id: u32,
+        timestamp_ms: i64,
+    ) -> Result<String, RocksdbError> {
+        let now = chrono::DateTime::from_timestamp_millis(timestamp_ms)
+            .unwrap()
+            .naive_utc();
+        let backup_path =
+            Path::new(backup_dir).join(format!("backup-{}", now.format("%Y-%m-%d-%s")));
+        let span = tracing::span!(
+            tracing::Level::INFO,
+            "backup_db",
+            path = backup_path.to_str().unwrap()
+        );
+        let _enter = span.enter();
+        info!("Backing up db to {:?}", backup_path);
+        if backup_path.exists() {
+            warn!("Backup path already exists, removing it");
+            fs::remove_dir_all(&backup_path).map_err(|e| RocksdbError::BackupError(e))?;
+        }
+        let backup_path = backup_path.into_os_string().into_string().unwrap();
+
+        let backup_db =
+            DB::open_default(&backup_path).map_err(|e| RocksdbError::InternalError(e))?;
+        let mut write_options = rocksdb::WriteOptions::default();
+        write_options.disable_wal(true); // Significantly faster, WAL doesn't provide benefits for backups
+        let mut write_batch = rocksdb::WriteBatch::default();
+
+        let backup_thread = std::thread::spawn(move || {
+            let main_db = db.db();
+            let main_db_snapshot = main_db.as_ref().unwrap().snapshot();
+
+            let iterator = main_db_snapshot.iterator(rocksdb::IteratorMode::Start);
+            let mut count = 0;
+            for item in iterator {
+                let (key, value) = item.unwrap();
+                write_batch.put(key, value);
+                if write_batch.len() >= 10_000 {
+                    backup_db.write_opt(write_batch, &write_options).unwrap();
+                    write_batch = rocksdb::WriteBatch::default();
+                }
+
+                count += 1;
+                if count % 1_000_000 == 0 {
+                    backup_db.flush().unwrap();
+                    info!("Snapshot backup progress: {}M keys", count / 1_000_000);
+                }
+            }
+
+            // write any leftover keys
+            backup_db.write_opt(write_batch, &write_options).unwrap();
+
+            info!("Backup completed: {}", count);
+            drop(main_db_snapshot);
+            drop(backup_db);
+        });
+
+        backup_thread.join().unwrap();
+        info!(
+            "Backup completed, time taken = {:?}",
+            chrono::Utc::now().naive_utc() - now
+        );
+        let output_file = Self::create_tar_gzip(&backup_path, backup_dir, shard_id)?;
+        fs::remove_dir_all(&backup_path).map_err(|e| RocksdbError::BackupError(e))?;
+
+        Ok(output_file)
+    }
+
+    pub fn create_tar_gzip(
+        input_dir: &str,
+        output_dir: &str,
+        shard_id: u32,
+    ) -> Result<String, RocksdbError> {
+        let base_name = Path::new(input_dir)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap();
+
+        let chunked_output_dir = Path::new(output_dir)
+            .join(format!("{}-{}.tar.gz", base_name, shard_id.to_string()))
+            .as_os_str()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let start = std::time::SystemTime::now();
+        info!(
+            output_file_path = &chunked_output_dir,
+            base_name = &base_name,
+            "Creating chunked tar.gz snapshot for directory: {}",
+            input_dir
+        );
+
+        let mut multi_chunk_writer = MultiChunkWriter::new(
+            PathBuf::from(chunked_output_dir.clone()),
+            4 * 1024 * 1024 * 1024, // 4GB
+        );
+
+        let mut tar = tar::Builder::new(&mut multi_chunk_writer);
+        tar.append_dir_all(base_name, input_dir)?;
+        tar.finish()?;
+        drop(tar); // Needed so we can call multi_chunk_writer.finish() next
+        multi_chunk_writer.finish()?;
+
+        let metadata = fs::metadata(&chunked_output_dir)?;
+        let time_taken = start.elapsed().expect("Time went backwards");
+        info!(
+            "Created chunked tar.gz archive for snapshot: path = {}, size = {} bytes, time taken = {:?}",
+            chunked_output_dir,
+            metadata.len(),
+            time_taken
+        );
+
+        Ok(chunked_output_dir)
     }
 
     pub fn open(&self) -> Result<(), RocksdbError> {
