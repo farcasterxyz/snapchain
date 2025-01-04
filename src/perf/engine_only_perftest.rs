@@ -46,7 +46,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     let mut shard_stores = HashMap::new();
     shard_stores.insert(1, engine.get_stores());
-    let mut mempool = Mempool::new(mempool_rx, messages_request_rx, 1, shard_stores);
+    let mut mempool = Mempool::new(mempool_rx, messages_request_rx, 1, shard_stores, None);
 
     tokio::spawn(async move {
         mempool.run().await;

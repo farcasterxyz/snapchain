@@ -6,7 +6,7 @@ use tokio::{
     time::Instant,
 };
 
-use crate::storage::{
+use crate::{core::types::SnapchainValidatorContext, network::gossip::GossipEvent, storage::{
     db::RocksDbTransactionBatch,
     store::{
         account::{
@@ -16,10 +16,10 @@ use crate::storage::{
         engine::MempoolMessage,
         stores::Stores,
     },
-};
+}};
 
 use super::routing::{MessageRouter, ShardRouter};
-use tracing::error;
+use tracing::{error, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -50,6 +50,7 @@ pub struct Mempool {
     mempool_rx: mpsc::Receiver<MempoolMessage>,
     messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
     messages: HashMap<u32, BTreeMap<MempoolKey, MempoolMessage>>,
+    gossip_tx: Option<mpsc::Sender<GossipEvent<SnapchainValidatorContext>>>,
 }
 
 impl Mempool {
@@ -58,6 +59,7 @@ impl Mempool {
         messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
         num_shards: u32,
         shard_stores: HashMap<u32, Stores>,
+        gossip_tx: Option<mpsc::Sender<GossipEvent<SnapchainValidatorContext>>>,
     ) -> Self {
         Mempool {
             shard_stores,
@@ -66,6 +68,7 @@ impl Mempool {
             message_router: Box::new(ShardRouter {}),
             messages: HashMap::new(),
             messages_request_rx,
+            gossip_tx,
         }
     }
 
@@ -186,6 +189,21 @@ impl Mempool {
                                 Some(messages) => {
                                     messages.insert(MempoolKey { inserted_at: Instant::now()}, message.clone());
                                 }
+                            }
+
+                            match message {
+                                MempoolMessage::UserMessage(_) => {
+                                    if let Some(gossip_tx) = &self.gossip_tx {
+                                        let result = gossip_tx
+                                        .send(GossipEvent::BroadcastMempoolMessage(message))
+                                        .await;
+
+                                        if let Err(e) = result {
+                                            warn!("Failed to gossip message {:?}", e);
+                                        }
+                                    }
+                                },
+                                _ => {},
                             }
                         }
                     }

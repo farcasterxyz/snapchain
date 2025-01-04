@@ -107,6 +107,18 @@ impl MempoolMessage {
             MempoolMessage::ValidatorMessage(msg) => msg.fid(),
         }
     }
+
+    pub fn to_proto(&self) -> proto::MempoolMessage {
+        let msg = match self {
+            MempoolMessage::UserMessage(msg) => {
+                proto::mempool_message::MempoolMessage::UserMessage(msg.clone())
+            }
+            _ => todo!(),
+        };
+        proto::MempoolMessage {
+            mempool_message: Some(msg),
+        }
+    }
 }
 
 // Shard state root and the transactions

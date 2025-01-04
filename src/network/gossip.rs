@@ -3,6 +3,7 @@ use crate::core::types::{
     proto, Proposal, ShardId, Signature, SnapchainContext, SnapchainShard, SnapchainValidator,
     SnapchainValidatorContext, Vote,
 };
+use crate::storage::store::engine::MempoolMessage;
 use futures::StreamExt;
 use libp2p::identity::ed25519::Keypair;
 use libp2p::swarm::dial_opts::DialOpts;
@@ -61,6 +62,7 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
     BroadcastSignedProposal(SignedProposal<Ctx>),
     BroadcastFullProposal(proto::FullProposal),
     RegisterValidator(proto::RegisterValidator),
+    BroadcastMempoolMessage(MempoolMessage),
 }
 
 #[derive(NetworkBehaviour)]
@@ -137,6 +139,13 @@ impl SnapchainGossip {
         // Create a Gossipsub topic
         let topic = gossipsub::IdentTopic::new("test-net");
         // subscribes to our topic
+        let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
+        if let Err(e) = result {
+            warn!("Failed to subscribe to topic: {:?}", e);
+            return Err(Box::new(e));
+        }
+
+        let topic = gossipsub::IdentTopic::new("test-net-mempool");
         let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
         if let Err(e) = result {
             warn!("Failed to subscribe to topic: {:?}", e);
@@ -239,6 +248,16 @@ impl SnapchainGossip {
                                             }
 
                                         }
+                                        Some(proto::gossip_message::GossipMessage::MempoolMessage(message)) => {
+                                            debug!("Received mempool message from peer: {}", peer_id);
+                                            if let Some(mempool_message) = message.mempool_message {
+
+                                                //let res = self.system_tx.send(SystemMessage::Consensus(consensus_message)).await;
+                                                //if let Err(e) = res {
+                                                //    warn!("Failed to send system register validator message: {:?}", e);
+                                                //}
+                                            }
+                                        },
                                         _ => warn!("Unhandled message from peer: {}", peer_id),
                                     }
                                 },
@@ -287,6 +306,15 @@ impl SnapchainGossip {
                             let encoded_message = gossip_message.encode_to_vec();
                             self.publish(encoded_message);
                         },
+                        Some(GossipEvent::BroadcastMempoolMessage(message)) => {
+                            debug!("Broadcasting mempool message");
+                            let proto_message = message.to_proto();
+                            let gossip_message = proto::GossipMessage {
+                                gossip_message: Some(proto::gossip_message::GossipMessage::MempoolMessage(proto_message)),
+                            };
+                            let encoded_message = gossip_message.encode_to_vec();
+                            self.publish_mempool(encoded_message);
+                        },
                         None => {
                             // no-op
                         }
@@ -298,6 +326,13 @@ impl SnapchainGossip {
 
     fn publish(&mut self, message: Vec<u8>) {
         let topic = gossipsub::IdentTopic::new("test-net");
+        if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, message) {
+            warn!("Failed to publish gossip message: {:?}", e);
+        }
+    }
+
+    fn publish_mempool(&mut self, message: Vec<u8>) {
+        let topic = gossipsub::IdentTopic::new("test-net-mempool");
         if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, message) {
             warn!("Failed to publish gossip message: {:?}", e);
         }
