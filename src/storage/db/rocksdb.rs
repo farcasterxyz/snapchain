@@ -129,8 +129,8 @@ impl RocksDB {
         let mut backup_db_options = Options::default();
         backup_db_options.set_compression_type(rocksdb::DBCompressionType::Lz4);
 
-        let backup_db =
-            DB::open(&backup_db_options, &backup_path).map_err(|e| RocksdbError::InternalError(e))?;
+        let backup_db = DB::open(&backup_db_options, &backup_path)
+            .map_err(|e| RocksdbError::InternalError(e))?;
         let mut write_options = rocksdb::WriteOptions::default();
         write_options.disable_wal(true); // Significantly faster, WAL doesn't provide benefits for backups
         let mut write_batch = rocksdb::WriteBatch::default();
