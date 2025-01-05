@@ -782,7 +782,10 @@ impl ShardEngine {
                     )?;
                 }
                 if let Some(proof) = &merge.username_proof {
-                    if proof.r#type == proto::UserNameType::UsernameTypeFname as i32 {
+                    if proof.r#type == proto::UserNameType::UsernameTypeFname as i32
+                        && proof.fid != 0
+                    // Deletes should not be added to the trie
+                    {
                         let name = str::from_utf8(&proof.name).unwrap().to_string();
                         self.stores.trie.insert(
                             ctx,

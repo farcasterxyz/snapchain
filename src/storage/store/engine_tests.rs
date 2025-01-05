@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use crate::core::types::FARCASTER_EPOCH;
     use crate::core::util::{calculate_message_hash, from_farcaster_time};
     use crate::proto::ShardChunk;
     use crate::proto::{self, ReactionType};
@@ -1124,7 +1125,8 @@ mod tests {
         let fname = &"farcaster".to_string();
 
         let mut event_rx = engine.get_senders().events_tx.subscribe();
-        let fname_transfer = username_factory::create_transfer(FID_FOR_TEST, fname, None, None);
+        let fname_transfer =
+            username_factory::create_transfer(FID_FOR_TEST, fname, Some(FARCASTER_EPOCH), None);
 
         let state_change = engine.propose_state_change(
             1,
@@ -1151,6 +1153,34 @@ mod tests {
         let proof = engine.get_fname_proof(fname).unwrap();
         assert!(proof.is_some());
         assert_eq!(proof.unwrap().fid, FID_FOR_TEST);
+
+        let fname_transfer = username_factory::create_transfer(
+            0,
+            fname,
+            Some(FARCASTER_EPOCH + 1),
+            Some(FID_FOR_TEST),
+        );
+
+        let state_change = engine.propose_state_change(
+            1,
+            vec![MempoolMessage::ValidatorMessage(ValidatorMessage {
+                on_chain_event: None,
+                fname_transfer: Some(fname_transfer.clone()),
+            })],
+        );
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+
+        let transfer_event = &event_rx.try_recv().unwrap();
+        assert_eq!(
+            transfer_event.r#type,
+            proto::HubEventType::MergeUsernameProof as i32
+        );
+
+        // don't insert an fname for fid 0 into the trie
+        assert!(!test_helper::key_exists_in_trie(
+            &mut engine,
+            &TrieKey::for_fname(0, fname)
+        ));
     }
 
     #[tokio::test]
