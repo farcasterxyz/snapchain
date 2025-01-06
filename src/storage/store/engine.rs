@@ -24,7 +24,6 @@ use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
-use tracing_subscriber::fmt::format;
 
 #[derive(Error, Debug)]
 pub enum EngineError {
