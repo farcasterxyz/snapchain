@@ -349,6 +349,52 @@ impl ShardEngine {
         result
     }
 
+    fn txn_summary(txn: &Transaction) -> String {
+        let mut summary = String::new();
+        for message in &txn.user_messages {
+            let msg_type = message.msg_type().as_str_name();
+            let fid = message.fid();
+            let message_summary = format!("fid: {}, message_type: {}\n", fid, msg_type);
+            summary += message_summary.as_str()
+        }
+
+        for message in &txn.system_messages {
+            let onchain_event_summary = match &message.on_chain_event {
+                Some(onchain_event) => {
+                    format!(
+                        "fid: {}, message_type: onchain_event, type: {}\n",
+                        message.fid(),
+                        onchain_event.r#type().as_str_name()
+                    )
+                }
+                None => "".to_string(),
+            };
+            summary += onchain_event_summary.as_str();
+
+            let fname_transfer_summary = match &message.fname_transfer {
+                Some(fname_transfer) => {
+                    format!(
+                        "fid: {}, message_type: fname_transfer, from_fid: {}, to_fid: {}\n",
+                        message.fid(),
+                        fname_transfer.from_fid,
+                        fname_transfer.id
+                    )
+                }
+                None => "".to_string(),
+            };
+            summary += fname_transfer_summary.as_str()
+        }
+        summary
+    }
+
+    fn txns_summary(transactions: &[Transaction]) -> String {
+        let mut summary = String::new();
+        for snapchain_txn in transactions {
+            summary += Self::txn_summary(snapchain_txn).as_str()
+        }
+        summary
+    }
+
     fn replay_proposal(
         &mut self,
         trie_ctx: &merkle_trie::Context,
@@ -368,6 +414,7 @@ impl ShardEngine {
                     new_account_root = hex::encode(&account_root),
                     tx_account_root = hex::encode(&snapchain_txn.account_root),
                     source,
+                    summary = Self::txn_summary(snapchain_txn),
                     "Account root mismatch"
                 );
                 return Err(EngineError::HashMismatch);
@@ -382,6 +429,7 @@ impl ShardEngine {
                 new_shard_root = hex::encode(&root1),
                 tx_shard_root = hex::encode(shard_root),
                 source,
+                summary = Self::txns_summary(transactions),
                 "Shard root mismatch"
             );
             return Err(EngineError::HashMismatch);
