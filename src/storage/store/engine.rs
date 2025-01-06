@@ -24,6 +24,7 @@ use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
+use tracing_subscriber::fmt::format;
 
 #[derive(Error, Debug)]
 pub enum EngineError {
@@ -351,10 +352,15 @@ impl ShardEngine {
 
     fn txn_summary(txn: &Transaction) -> String {
         let mut summary = String::new();
+        let fid = format!("fid: {}\n", txn.fid);
+        summary += fid.as_str();
         for message in &txn.user_messages {
             let msg_type = message.msg_type().as_str_name();
-            let fid = message.fid();
-            let message_summary = format!("fid: {}, message_type: {}\n", fid, msg_type);
+            let message_summary = format!(
+                "message_type: {}, msg_hash: {}\n",
+                hex::encode(&message.hash),
+                msg_type
+            );
             summary += message_summary.as_str()
         }
 
@@ -362,26 +368,28 @@ impl ShardEngine {
             let onchain_event_summary = match &message.on_chain_event {
                 Some(onchain_event) => {
                     format!(
-                        "fid: {}, message_type: onchain_event, type: {}\n",
-                        message.fid(),
-                        onchain_event.r#type().as_str_name()
+                        "message_type: onchain_event, type: {}, tx_hash: {}, log_index: {}\n",
+                        onchain_event.r#type().as_str_name(),
+                        hex::encode(&onchain_event.transaction_hash),
+                        onchain_event.log_index
                     )
                 }
                 None => "".to_string(),
             };
             summary += onchain_event_summary.as_str();
 
-            let fname_transfer_summary = match &message.fname_transfer {
-                Some(fname_transfer) => {
-                    format!(
-                        "fid: {}, message_type: fname_transfer, from_fid: {}, to_fid: {}\n",
-                        message.fid(),
+            let fname_transfer_summary =
+                match &message.fname_transfer {
+                    Some(fname_transfer) => {
+                        format!(
+                        "message_type: fname_transfer, from_fid: {}, to_fid: {}, username: {:#?}",
                         fname_transfer.from_fid,
-                        fname_transfer.id
+                        fname_transfer.id,
+                        fname_transfer.proof.as_ref().map(|proof| proof.name.clone())
                     )
-                }
-                None => "".to_string(),
-            };
+                    }
+                    None => "".to_string(),
+                };
             summary += fname_transfer_summary.as_str()
         }
         summary
