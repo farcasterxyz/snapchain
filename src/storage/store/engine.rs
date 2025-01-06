@@ -404,6 +404,29 @@ impl ShardEngine {
         source: String,
     ) -> Result<Vec<HubEvent>, EngineError> {
         let mut events = vec![];
+        // Validate that the trie is in a good place to start with
+        match self.get_last_shard_chunk() {
+            None => { // There are places where it's hard to provide a parent hash-- e.g. tests so make this an option and skip validation if not present
+            }
+            Some(shard_chunk) => match self.stores.trie.root_hash() {
+                Err(err) => {
+                    warn!(source, "Unable to compute trie root hash {:#?}", err)
+                }
+                Ok(root_hash) => {
+                    let parent_shard_root = shard_chunk.header.unwrap().shard_root;
+                    if root_hash != parent_shard_root {
+                        warn!(
+                            shard_id = self.shard_id,
+                            our_shard_root = hex::encode(&root_hash),
+                            parent_shard_root = hex::encode(parent_shard_root),
+                            source,
+                            "Parent shard root mismatch"
+                        );
+                    }
+                }
+            },
+        }
+
         for snapchain_txn in transactions {
             let (account_root, txn_events, _) =
                 self.replay_snapchain_txn(trie_ctx, snapchain_txn, txn_batch, source.clone())?;
@@ -951,32 +974,7 @@ impl ShardEngine {
         Ok(())
     }
 
-    pub fn validate_state_change(
-        &mut self,
-        shard_state_change: &ShardStateChange,
-        parent_hash: Option<Vec<u8>>,
-    ) -> bool {
-        // Validate that the trie is in a good place to start with
-        match parent_hash {
-            None => { // There are places where it's hard to provide a parent hash-- e.g. tests so make this an option and skip validation if not present
-            }
-            Some(parent_hash) => match self.stores.trie.root_hash() {
-                Err(err) => {
-                    warn!("Unable to compute trie root hash {:#?}", err)
-                }
-                Ok(root_hash) => {
-                    if root_hash != parent_hash {
-                        warn!(
-                            shard_id = self.shard_id,
-                            our_shard_root = hex::encode(&root_hash),
-                            parent_shard_root = hex::encode(parent_hash),
-                            "Parent shard root mismatch"
-                        );
-                    }
-                }
-            },
-        }
-
+    pub fn validate_state_change(&mut self, shard_state_change: &ShardStateChange) -> bool {
         let mut txn = RocksDbTransactionBatch::new();
 
         let transactions = &shard_state_change.transactions;

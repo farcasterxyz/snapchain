@@ -211,7 +211,7 @@ pub fn validate_and_commit_state_change(
     engine: &mut ShardEngine,
     state_change: &ShardStateChange,
 ) -> ShardChunk {
-    let valid = engine.validate_state_change(state_change, None);
+    let valid = engine.validate_state_change(state_change);
     assert!(valid);
 
     let height = engine.get_confirmed_height();
