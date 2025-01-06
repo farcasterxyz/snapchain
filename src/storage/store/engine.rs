@@ -367,6 +367,7 @@ impl ShardEngine {
                     fid = snapchain_txn.fid,
                     new_account_root = hex::encode(&account_root),
                     tx_account_root = hex::encode(&snapchain_txn.account_root),
+                    source,
                     "Account root mismatch"
                 );
                 return Err(EngineError::HashMismatch);
@@ -375,12 +376,12 @@ impl ShardEngine {
         }
 
         let root1 = self.stores.trie.root_hash()?;
-
         if &root1 != shard_root {
             warn!(
                 shard_id = self.shard_id,
                 new_shard_root = hex::encode(&root1),
                 tx_shard_root = hex::encode(shard_root),
+                source,
                 "Shard root mismatch"
             );
             return Err(EngineError::HashMismatch);
@@ -902,7 +903,32 @@ impl ShardEngine {
         Ok(())
     }
 
-    pub fn validate_state_change(&mut self, shard_state_change: &ShardStateChange) -> bool {
+    pub fn validate_state_change(
+        &mut self,
+        shard_state_change: &ShardStateChange,
+        parent_hash: Option<Vec<u8>>,
+    ) -> bool {
+        // Validate that the trie is in a good place to start with
+        match parent_hash {
+            None => { // There are places where it's hard to provide a parent hash-- e.g. tests so make this an option and skip validation if not present
+            }
+            Some(parent_hash) => match self.stores.trie.root_hash() {
+                Err(err) => {
+                    warn!("Unable to compute trie root hash {:#?}", err)
+                }
+                Ok(root_hash) => {
+                    if root_hash != parent_hash {
+                        warn!(
+                            shard_id = self.shard_id,
+                            our_shard_root = hex::encode(&root_hash),
+                            parent_shard_root = hex::encode(parent_hash),
+                            "Parent shard root mismatch"
+                        );
+                    }
+                }
+            },
+        }
+
         let mut txn = RocksDbTransactionBatch::new();
 
         let transactions = &shard_state_change.transactions;

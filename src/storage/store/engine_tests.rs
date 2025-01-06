@@ -160,13 +160,13 @@ mod tests {
         let invalid_hash = from_hex("ffffffffffffffffffffffffffffffffffffffff");
 
         {
-            let valid = engine.validate_state_change(&state_change);
+            let valid = engine.validate_state_change(&state_change, None);
             assert!(valid);
         }
 
         {
             state_change.new_state_root = invalid_hash.clone();
-            let valid = engine.validate_state_change(&state_change);
+            let valid = engine.validate_state_change(&state_change, None);
             assert!(!valid);
         }
 
@@ -240,7 +240,7 @@ mod tests {
 
         assert_eq!(expected_roots[0], to_hex(&engine.trie_root_hash()));
 
-        let valid = engine.validate_state_change(&state_change);
+        let valid = engine.validate_state_change(&state_change, None);
         assert!(valid);
     }
 
@@ -282,7 +282,7 @@ mod tests {
         // And it's not inserted into the trie
         assert_eq!(message_exists_in_trie(&mut engine, &msg1), false);
 
-        let valid = engine.validate_state_change(&state_change);
+        let valid = engine.validate_state_change(&state_change, None);
         assert!(valid);
 
         // validate does not write to the store
