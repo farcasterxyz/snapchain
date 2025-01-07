@@ -21,7 +21,6 @@ use informalsystems_malachitebft_metrics::Metrics;
 use libp2p::identity::ed25519::Keypair;
 use ractor::ActorRef;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -85,12 +84,10 @@ impl SnapchainNode {
             };
             let ctx = SnapchainValidatorContext::new(keypair.clone());
 
-            let db = RocksDB::new(format!("{}/shard{}", rocksdb_dir, shard_id).as_str());
-            db.open().unwrap();
-
+            let db = RocksDB::open_shard_db(rocksdb_dir.as_str(), shard_id);
             let trie = merkle_trie::MerkleTrie::new(trie_branching_factor).unwrap(); //TODO: don't unwrap()
             let engine = ShardEngine::new(
-                Arc::new(db),
+                db,
                 trie,
                 shard_id,
                 StoreLimits::default(),

@@ -7,6 +7,8 @@ use crate::proto::hub_service_server::HubService;
 use crate::proto::on_chain_event::Body;
 use crate::proto::GetInfoResponse;
 use crate::proto::HubEvent;
+use crate::proto::TrieNodeMetadataRequest;
+use crate::proto::TrieNodeMetadataResponse;
 use crate::proto::UserNameProof;
 use crate::proto::UserNameType;
 use crate::proto::{Block, CastId, DbStats};
@@ -163,14 +165,18 @@ impl MyHubService {
         Ok(message)
     }
 
-    fn get_stores_for(&self, fid: u64) -> Result<&Stores, Status> {
-        let shard_id = self.message_router.route_message(fid, self.num_shards);
+    fn get_stores_for_shard(&self, shard_id: u32) -> Result<&Stores, Status> {
         match self.shard_stores.get(&shard_id) {
             Some(store) => Ok(store),
             None => Err(Status::invalid_argument(
                 "no shard store for fid".to_string(),
             )),
         }
+    }
+
+    fn get_stores_for(&self, fid: u64) -> Result<&Stores, Status> {
+        let shard_id = self.message_router.route_message(fid, self.num_shards);
+        self.get_stores_for_shard(shard_id)
     }
 
     pub async fn validate_ens_username_proof(
@@ -775,5 +781,37 @@ impl HubService for MyHubService {
             .get_storage_limits(request.fid)
             .map_err(|err| Status::internal(err.to_string()))?;
         Ok(Response::new(limits))
+    }
+
+    async fn get_trie_metadata_by_prefix(
+        &self,
+        request: Request<TrieNodeMetadataRequest>,
+    ) -> Result<Response<TrieNodeMetadataResponse>, Status> {
+        let request = request.into_inner();
+        let stores = self.get_stores_for_shard(request.shard_id)?;
+        let trie_node = stores
+            .trie
+            .get_trie_node_metadata(
+                &stores.db,
+                &mut RocksDbTransactionBatch::new(),
+                &request.prefix,
+            )
+            .map_err(|err| Status::internal(err.to_string()))?;
+        let children = trie_node
+            .children
+            .values()
+            .map(|child_node| TrieNodeMetadataResponse {
+                prefix: child_node.prefix.clone(),
+                num_messages: child_node.num_messages as u64,
+                hash: child_node.hash.clone(),
+                children: vec![],
+            })
+            .collect();
+        Ok(Response::new(TrieNodeMetadataResponse {
+            prefix: trie_node.prefix,
+            num_messages: trie_node.num_messages as u64,
+            hash: trie_node.hash,
+            children,
+        }))
     }
 }

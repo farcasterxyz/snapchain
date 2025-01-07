@@ -120,5 +120,17 @@ mod tests {
             event_key[(5 + event.transaction_hash.len())..],
             event.log_index.to_be_bytes()
         );
+
+        let username = "longishusername";
+        let event_key = TrieKey::for_fname(1234, &username.to_string());
+        assert_eq!(event_key[0..4], TrieKey::for_fid(1234));
+        assert_eq!(event_key[4], 7);
+        // Username is padded to length 20
+        assert_eq!(
+            event_key[5..],
+            format!("{}{}", username, "\0\0\0\0\0")
+                .bytes()
+                .collect::<Vec<_>>()
+        );
     }
 }

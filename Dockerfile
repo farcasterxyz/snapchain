@@ -2,7 +2,7 @@ FROM rust:1.83 AS builder
 
 WORKDIR /usr/src/app
 
-RUN apt-get update && apt-get install -y libclang-dev libjemalloc-dev llvm-dev make protobuf-compiler
+RUN apt-get update && apt-get install -y libclang-dev libjemalloc-dev llvm-dev make protobuf-compiler cmake
 
 # Unfortunately, we can't prefetch creates without including the source code,
 # since the Cargo configuration references files in src.

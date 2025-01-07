@@ -9,6 +9,7 @@ use tracing::info;
 pub use trie_node::Context;
 
 pub const TRIE_DBPATH_PREFIX: &str = "trieDb";
+pub const USERNAME_MAX_LENGTH: u32 = 20;
 
 pub struct TrieKey {}
 
@@ -41,7 +42,14 @@ impl TrieKey {
         let mut key = Vec::new();
         key.extend_from_slice(&Self::for_fid(fid));
         key.push(7); // 1-6 is for onchain events, use 7 for fnames, and everything else for messages
-        key.extend_from_slice(&name.as_bytes());
+
+        // Pad the name with null bytes to ensure all names have the same length. The trie cannot handle entries that are substrings for another (e.g. "net" and "network")
+        let mut padded_name = String::with_capacity(USERNAME_MAX_LENGTH as usize);
+        padded_name.push_str(name.as_str());
+        while padded_name.len() < USERNAME_MAX_LENGTH as usize {
+            padded_name.push('\0');
+        }
+        key.extend_from_slice(&padded_name.as_bytes());
         key
     }
 

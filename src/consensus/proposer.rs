@@ -155,7 +155,11 @@ impl Proposer for ShardProposer {
             return if self.engine.validate_state_change(&state) {
                 Validity::Valid
             } else {
-                error!("Invalid state change for shard: {:?}", state.shard_id);
+                error!(
+                    shard = state.shard_id,
+                    height = chunk.header.unwrap().height.unwrap().block_number,
+                    "Invalid state change"
+                );
                 Validity::Invalid
             };
         }

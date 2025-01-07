@@ -249,3 +249,15 @@ message BulkMessageResponse {
 message SubmitBulkMessagesResponse {
   repeated BulkMessageResponse messages = 1;
 }
+
+message TrieNodeMetadataRequest {
+  uint32 shard_id = 1;
+  bytes prefix = 2;
+}
+
+message TrieNodeMetadataResponse {
+  bytes prefix = 1;
+  uint64 num_messages = 2;
+  string hash = 3;
+  repeated TrieNodeMetadataResponse children = 4;
+}
