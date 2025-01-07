@@ -115,10 +115,12 @@ impl NodeForTest {
         let addr = grpc_addr.clone();
         let (mempool_tx, mempool_rx) = mpsc::channel(100);
         let mut mempool = Mempool::new(
+            1024,
             mempool_rx,
             messages_request_rx,
             num_shards,
             node.shard_stores.clone(),
+            None,
         );
         tokio::spawn(async move { mempool.run().await });
 

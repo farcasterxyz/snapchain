@@ -24,7 +24,7 @@ mod tests {
         shard_senders.insert(1, engine.get_senders());
         let mut shard_stores = HashMap::new();
         shard_stores.insert(1, engine.get_stores());
-        let mempool = Mempool::new(mempool_rx, messages_request_rx, 1, shard_stores);
+        let mempool = Mempool::new(1024, mempool_rx, messages_request_rx, 1, shard_stores, None);
         (engine, mempool)
     }
 

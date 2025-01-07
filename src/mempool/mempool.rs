@@ -44,6 +44,7 @@ pub struct MempoolMessagesRequest {
 }
 
 pub struct Mempool {
+    capacity_per_shard: usize,
     shard_stores: HashMap<u32, Stores>,
     message_router: Box<dyn MessageRouter>,
     num_shards: u32,
@@ -55,6 +56,7 @@ pub struct Mempool {
 
 impl Mempool {
     pub fn new(
+        capacity_per_shard: usize,
         mempool_rx: mpsc::Receiver<MempoolMessage>,
         messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
         num_shards: u32,
@@ -62,6 +64,7 @@ impl Mempool {
         gossip_tx: Option<mpsc::Sender<GossipEvent<SnapchainValidatorContext>>>,
     ) -> Self {
         Mempool {
+            capacity_per_shard,
             shard_stores,
             num_shards,
             mempool_rx,
@@ -173,6 +176,7 @@ impl Mempool {
                         self.pull_messages(messages_request).await
                     }
                 }
+                // TODO: Evict based on blocks
                 message = self.mempool_rx.recv() => {
                     if let Some(message) = message {
                         // TODO(aditi): Maybe we don't need to run validations here?
@@ -187,7 +191,10 @@ impl Mempool {
                                     self.messages.insert(shard_id, messages);
                                 }
                                 Some(messages) => {
-                                    messages.insert(MempoolKey { inserted_at: Instant::now()}, message.clone());
+                                    // For now, mempool messages are dropped here if the mempool is full.
+                                    if messages.len() < self.capacity_per_shard {
+                                        messages.insert(MempoolKey { inserted_at: Instant::now()}, message.clone());
+                                    }
                                 }
                             }
 

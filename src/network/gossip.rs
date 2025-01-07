@@ -75,6 +75,7 @@ pub struct SnapchainGossip {
     pub tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     rx: mpsc::Receiver<GossipEvent<SnapchainValidatorContext>>,
     system_tx: Sender<SystemMessage>,
+    mempool_tx: Sender<MempoolMessage>,
 }
 
 impl SnapchainGossip {
@@ -82,6 +83,7 @@ impl SnapchainGossip {
         keypair: Keypair,
         config: Config,
         system_tx: Sender<SystemMessage>,
+        mempool_tx: Sender<MempoolMessage>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair.clone().into())
             .with_tokio()
@@ -161,6 +163,7 @@ impl SnapchainGossip {
             tx,
             rx,
             system_tx,
+            mempool_tx,
         })
     }
 
@@ -250,12 +253,16 @@ impl SnapchainGossip {
                                         }
                                         Some(proto::gossip_message::GossipMessage::MempoolMessage(message)) => {
                                             debug!("Received mempool message from peer: {}", peer_id);
-                                            if let Some(mempool_message) = message.mempool_message {
+                                            if let Some(mempool_message_proto) = message.mempool_message {
 
-                                                //let res = self.system_tx.send(SystemMessage::Consensus(consensus_message)).await;
-                                                //if let Err(e) = res {
-                                                //    warn!("Failed to send system register validator message: {:?}", e);
-                                                //}
+                                                let mempool_message = match mempool_message_proto {
+                                                    proto::mempool_message::MempoolMessage::UserMessage(message) => MempoolMessage::UserMessage(message),
+                                                };
+
+                                                let res = self.mempool_tx.send(mempool_message).await;
+                                                if let Err(e) = res {
+                                                    warn!("Failed to add to local mempool: {:?}", e);
+                                                }
                                             }
                                         },
                                         _ => warn!("Unhandled message from peer: {}", peer_id),
