@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use hex;
 use libp2p::identity::ed25519::Keypair;
+use snapchain::mempool::mempool::Mempool;
 use snapchain::mempool::{mempool, routing};
 use snapchain::network::server::MyHubService;
 use snapchain::node::snapchain_node::SnapchainNode;
@@ -72,7 +73,6 @@ impl NodeForTest {
         let node = SnapchainNode::create(
             keypair.clone(),
             config,
-            mempool::Config::default(),
             None,
             gossip_tx,
             Some(block_tx),
@@ -112,6 +112,10 @@ impl NodeForTest {
         let grpc_block_store = block_store.clone();
         let grpc_shard_stores = node.shard_stores.clone();
         let grpc_shard_senders = node.shard_senders.clone();
+        let (mempool_tx, mempool_rx) = mpsc::channel(100);
+        let mut mempool = Mempool::new(mempool_rx, num_shards, node.shard_senders.clone());
+        tokio::spawn(async move { mempool.run().await });
+
         tokio::spawn(async move {
             let service = MyHubService::new(
                 grpc_block_store,
@@ -120,6 +124,7 @@ impl NodeForTest {
                 statsd_client.clone(),
                 num_shards,
                 Box::new(routing::EvenOddRouterForTest {}),
+                mempool_tx,
                 None,
             );
 
