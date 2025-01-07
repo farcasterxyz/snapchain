@@ -8,7 +8,7 @@ mod tests {
     use crate::proto::{OnChainEvent, OnChainEventType};
     use crate::storage::db::{PageOptions, RocksDbTransactionBatch};
     use crate::storage::store::engine::{MempoolMessage, ShardEngine};
-    use crate::storage::store::test_helper;
+    use crate::storage::store::test_helper::{self, FID3_FOR_TEST};
     use crate::storage::store::test_helper::{
         commit_message, message_exists_in_trie, register_user, FID2_FOR_TEST, FID_FOR_TEST,
     };
@@ -472,32 +472,31 @@ mod tests {
         let timestamp = messages_factory::farcaster_time();
         let (mut engine, _tmpdir) = test_helper::new_engine();
         test_helper::register_user(
-            FID_FOR_TEST,
+            FID3_FOR_TEST,
             test_helper::default_signer(),
             test_helper::default_custody_address(),
             &mut engine,
         )
         .await;
-        let address = "address".to_string();
 
         let verification_add = messages_factory::verifications::create_verification_add(
-            FID_FOR_TEST,
+            FID3_FOR_TEST,
             0,
-            address.clone().encode_to_vec(),
-            "signature".to_string(),
-            "hash".to_string(),
+            hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap(),
+            hex::decode("b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c").unwrap(),
+            hex::decode("d74860c4bbf574d5ad60f03a478a30f990e05ac723e138a5c860cdb3095f4296").unwrap(),
             Some(timestamp),
             None,
         );
 
         commit_message(&mut engine, &verification_add).await;
 
-        let verification_result = engine.get_verifications_by_fid(FID_FOR_TEST);
+        let verification_result = engine.get_verifications_by_fid(FID3_FOR_TEST);
         assert_eq!(1, verification_result.unwrap().messages.len());
 
         let verification_remove = messages_factory::verifications::create_verification_remove(
-            FID_FOR_TEST,
-            address.clone(),
+            FID3_FOR_TEST,
+            "91031dcfdea024b4d51e775486111d2b2a715871".to_string(),
             Some(timestamp),
             None,
         );

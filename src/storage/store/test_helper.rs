@@ -28,6 +28,9 @@ pub const FID_FOR_TEST: u64 = 1234;
 #[cfg(test)]
 pub const FID2_FOR_TEST: u64 = 1235;
 
+#[cfg(test)]
+pub const FID3_FOR_TEST: u64 = 2;
+
 pub mod limits {
     use crate::storage::store::stores::Limits;
 

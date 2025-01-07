@@ -49,8 +49,9 @@ mod tests {
             &self,
             _name: String,
         ) -> Result<alloy_primitives::Address, EnsError> {
-            let addr =
-                alloy_primitives::Address::from_slice(&test_helper::default_custody_address());
+            let addr = alloy_primitives::Address::from_slice(
+                &hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap(),
+            );
             future::ready(Ok(addr)).await
         }
     }
@@ -250,7 +251,7 @@ mod tests {
     async fn test_good_ens_proof() {
         let (_stores, _senders, [mut engine1, mut _engine2], service) = make_server();
         let signer = test_helper::default_signer();
-        let owner = test_helper::default_custody_address();
+        let owner = hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap();
         let fid = SHARD1_FID;
 
         test_helper::register_user(fid, signer.clone(), owner.clone(), &mut engine1).await;
@@ -329,36 +330,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_ens_proof_with_verified_address() {
-        let (_stores, _senders, [mut engine1, mut _engine2], service) = make_server();
+        let (_stores, _senders, [mut _engine1, mut engine2], service) = make_server();
         let signer = test_helper::default_signer();
+        let fid = 2;
         let owner = test_helper::default_custody_address();
-        let fid = SHARD1_FID;
         let signature = "signature".to_string();
 
-        test_helper::register_user(
-            fid,
-            signer.clone(),
-            "100000000000000000".to_string().encode_to_vec(),
-            &mut engine1,
-        )
-        .await;
+        test_helper::register_user(fid, signer.clone(), owner.clone(), &mut engine2).await;
 
         let verification_add = messages_factory::verifications::create_verification_add(
             fid,
             0,
-            owner.clone(),
-            signature.clone(),
-            "hash".to_string(),
+            hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap(),
+            hex::decode("b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c").unwrap(),
+            hex::decode("d74860c4bbf574d5ad60f03a478a30f990e05ac723e138a5c860cdb3095f4296").unwrap(),
             None,
             None,
         );
 
-        test_helper::commit_message(&mut engine1, &verification_add).await;
+        test_helper::commit_message(&mut engine2, &verification_add).await;
 
         let username_proof = UserNameProof {
             timestamp: messages_factory::farcaster_time() as u64,
             name: "username.eth".to_string().encode_to_vec(),
-            owner,
+            owner: hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap(),
             signature: signature.encode_to_vec(),
             fid,
             r#type: UserNameType::UsernameTypeEnsL1 as i32,
