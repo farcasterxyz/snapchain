@@ -2,6 +2,7 @@ use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::onchain_events::{L1Client, RealL1Client};
 use snapchain::consensus::consensus::SystemMessage;
 use snapchain::core::types::proto;
+use snapchain::mempool::mempool::Mempool;
 use snapchain::mempool::routing;
 use snapchain::network::admin_server::{DbManager, MyAdminService};
 use snapchain::network::gossip::GossipEvent;
@@ -121,7 +122,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let node = SnapchainNode::create(
         keypair.clone(),
         app_config.consensus.clone(),
-        app_config.mempool.clone(),
         Some(app_config.rpc_address.clone()),
         gossip_tx.clone(),
         None,
@@ -132,19 +132,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
     )
     .await;
 
-    let admin_service = MyAdminService::new(
-        db_manager,
-        node.shard_senders.clone(),
+    let (mempool_tx, mempool_rx) = mpsc::channel(app_config.mempool.queue_size as usize);
+    let mut mempool = Mempool::new(
+        mempool_rx,
         app_config.consensus.num_shards,
-        Box::new(routing::ShardRouter {}),
+        node.shard_senders.clone(),
     );
+    tokio::spawn(async move { mempool.run().await });
+
+    let admin_service = MyAdminService::new(db_manager, mempool_tx.clone());
 
     if !app_config.fnames.disable {
         let mut fetcher = snapchain::connectors::fname::Fetcher::new(
             app_config.fnames.clone(),
-            node.shard_senders.clone(),
-            app_config.consensus.num_shards,
-            Box::new(routing::ShardRouter {}),
+            mempool_tx.clone(),
         );
 
         tokio::spawn(async move {
@@ -155,9 +156,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if !app_config.onchain_events.rpc_url.is_empty() {
         let mut onchain_events_subscriber = snapchain::connectors::onchain_events::Subscriber::new(
             app_config.onchain_events,
-            node.shard_senders.clone(),
-            app_config.consensus.num_shards,
-            Box::new(routing::ShardRouter {}),
+            mempool_tx.clone(),
         )?;
         tokio::spawn(async move {
             let result = onchain_events_subscriber.run(false).await;
@@ -186,6 +185,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             statsd_client.clone(),
             app_config.consensus.num_shards,
             Box::new(routing::ShardRouter {}),
+            mempool_tx.clone(),
             l1_client,
         );
 

@@ -1,12 +1,11 @@
-use crate::mempool::routing::MessageRouter;
 use crate::proto::admin_service_server::AdminService;
 use crate::proto::{self, FnameTransfer, OnChainEvent};
 use crate::proto::{UserNameProof, ValidatorMessage};
-use crate::storage::store::engine::{MempoolMessage, Senders};
+use crate::storage::store::engine::MempoolMessage;
 use rocksdb;
-use std::collections::HashMap;
 use std::{io, path, process};
 use thiserror::Error;
+use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
@@ -62,9 +61,7 @@ impl DbManager {
 
 pub struct MyAdminService {
     db_manager: DbManager,
-    num_shards: u32,
-    message_router: Box<dyn MessageRouter>,
-    pub shard_senders: HashMap<u32, Senders>,
+    pub mempool_tx: mpsc::Sender<MempoolMessage>,
 }
 
 #[derive(Debug, Error)]
@@ -79,17 +76,10 @@ pub enum AdminServiceError {
 const DB_DESTROY_KEY: &[u8] = b"__destroy_all_databases_on_start__";
 
 impl MyAdminService {
-    pub fn new(
-        db_manager: DbManager,
-        shard_senders: HashMap<u32, Senders>,
-        num_shards: u32,
-        message_router: Box<dyn MessageRouter>,
-    ) -> Self {
+    pub fn new(db_manager: DbManager, mempool_tx: mpsc::Sender<MempoolMessage>) -> Self {
         Self {
             db_manager,
-            shard_senders,
-            num_shards,
-            message_router,
+            mempool_tx,
         }
     }
 }
@@ -136,19 +126,8 @@ impl AdminService for MyAdminService {
             ));
         }
 
-        let dst_shard = self.message_router.route_message(fid, self.num_shards);
-
-        let sender = match self.shard_senders.get(&dst_shard) {
-            Some(sender) => sender,
-            None => {
-                return Err(Status::invalid_argument(
-                    "no shard sender for fid".to_string(),
-                ))
-            }
-        };
-
-        let result = sender
-            .messages_tx
+        let result = self
+            .mempool_tx
             .send(MempoolMessage::ValidatorMessage(ValidatorMessage {
                 on_chain_event: Some(onchain_event.clone()),
                 fname_transfer: None,
@@ -179,19 +158,8 @@ impl AdminService for MyAdminService {
             ));
         }
 
-        let dst_shard = self.message_router.route_message(fid, self.num_shards);
-
-        let sender = match self.shard_senders.get(&dst_shard) {
-            Some(sender) => sender,
-            None => {
-                return Err(Status::invalid_argument(
-                    "no shard sender for fid".to_string(),
-                ))
-            }
-        };
-
-        let result = sender
-            .messages_tx
+        let result = self
+            .mempool_tx
             .send(MempoolMessage::ValidatorMessage(ValidatorMessage {
                 on_chain_event: None,
                 fname_transfer: Some(FnameTransfer {

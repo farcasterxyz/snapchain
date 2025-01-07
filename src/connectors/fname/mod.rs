@@ -1,14 +1,14 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::time::{sleep, Duration};
+use tokio::{
+    sync::mpsc,
+    time::{sleep, Duration},
+};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    mempool::routing::MessageRouter,
     proto::{FnameTransfer, UserNameProof, UserNameType, ValidatorMessage},
-    storage::store::engine::{MempoolMessage, Senders},
+    storage::store::engine::MempoolMessage,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -77,25 +77,16 @@ pub struct Fetcher {
     position: u64,
     transfers: Vec<Transfer>,
     cfg: Config,
-    shard_senders: HashMap<u32, Senders>,
-    message_router: Box<dyn MessageRouter>,
-    num_shards: u32,
+    mempool_tx: mpsc::Sender<MempoolMessage>,
 }
 
 impl Fetcher {
-    pub fn new(
-        cfg: Config,
-        shard_senders: HashMap<u32, Senders>,
-        num_shards: u32,
-        message_router: Box<dyn MessageRouter>,
-    ) -> Self {
+    pub fn new(cfg: Config, mempool_tx: mpsc::Sender<MempoolMessage>) -> Self {
         Fetcher {
             position: cfg.start_from,
             transfers: vec![],
             cfg: cfg,
-            shard_senders,
-            num_shards,
-            message_router,
+            mempool_tx,
         }
     }
 
@@ -127,41 +118,32 @@ impl Fetcher {
                 self.position = t.id;
                 self.transfers.push(t.clone()); // Just store these for now, we'll use them later
 
-                let shard = self.message_router.route_message(t.to, self.num_shards);
-                let senders = self.shard_senders.get(&shard);
-                match senders {
-                    None => {
-                        error!(id = t.id, "Unable to find shard to send fname transfer to")
-                    }
-                    Some(senders) => {
-                        let username_proof = UserNameProof {
-                            timestamp: t.timestamp,
-                            name: t.username.into_bytes(),
-                            owner: t.owner.into_bytes(),
-                            signature: t.server_signature.into_bytes(),
-                            fid: t.to,
-                            r#type: UserNameType::UsernameTypeFname as i32,
-                        };
-                        if let Err(err) = senders
-                            .messages_tx
-                            .send(MempoolMessage::ValidatorMessage(ValidatorMessage {
-                                on_chain_event: None,
-                                fname_transfer: Some(FnameTransfer {
-                                    id: t.to,
-                                    from_fid: t.from,
-                                    proof: Some(username_proof),
-                                }),
-                            }))
-                            .await
-                        {
-                            error!(
-                                from = t.from,
-                                to = t.to,
-                                err = err.to_string(),
-                                "Unable to send fname transfer to mempool"
-                            )
-                        }
-                    }
+                let username_proof = UserNameProof {
+                    timestamp: t.timestamp,
+                    name: t.username.into_bytes(),
+                    owner: t.owner.into_bytes(),
+                    signature: t.server_signature.into_bytes(),
+                    fid: t.to,
+                    r#type: UserNameType::UsernameTypeFname as i32,
+                };
+                if let Err(err) = self
+                    .mempool_tx
+                    .send(MempoolMessage::ValidatorMessage(ValidatorMessage {
+                        on_chain_event: None,
+                        fname_transfer: Some(FnameTransfer {
+                            id: t.to,
+                            from_fid: t.from,
+                            proof: Some(username_proof),
+                        }),
+                    }))
+                    .await
+                {
+                    error!(
+                        from = t.from,
+                        to = t.to,
+                        err = err.to_string(),
+                        "Unable to send fname transfer to mempool"
+                    )
                 }
             }
         }

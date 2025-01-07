@@ -10,16 +10,16 @@ use foundry_common::ens::EnsError;
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use crate::{
-    mempool::routing::MessageRouter,
     proto::{
         on_chain_event, IdRegisterEventBody, IdRegisterEventType, OnChainEvent, OnChainEventType,
         SignerEventBody, SignerEventType, SignerMigratedEventBody, StorageRentEventBody,
         ValidatorMessage,
     },
-    storage::store::engine::{MempoolMessage, Senders},
+    storage::store::engine::MempoolMessage,
 };
 
 sol!(
@@ -135,9 +135,7 @@ impl L1Client for RealL1Client {
 pub struct Subscriber {
     provider: RootProvider<Http<Client>>,
     onchain_events_by_block: HashMap<u32, Vec<OnChainEvent>>,
-    shard_senders: HashMap<u32, Senders>,
-    message_router: Box<dyn MessageRouter>,
-    num_shards: u32,
+    mempool_tx: mpsc::Sender<MempoolMessage>,
     start_block_number: u64,
     stop_block_number: u64,
 }
@@ -146,9 +144,7 @@ pub struct Subscriber {
 impl Subscriber {
     pub fn new(
         config: Config,
-        shard_senders: HashMap<u32, Senders>,
-        num_shards: u32,
-        message_router: Box<dyn MessageRouter>,
+        mempool_tx: mpsc::Sender<MempoolMessage>,
     ) -> Result<Subscriber, SubscribeError> {
         if config.rpc_url.is_empty() {
             return Err(SubscribeError::EmptyRpcUrl);
@@ -158,9 +154,7 @@ impl Subscriber {
         Ok(Subscriber {
             provider,
             onchain_events_by_block: HashMap::new(),
-            shard_senders,
-            num_shards,
-            message_router,
+            mempool_tx,
             start_block_number: config.start_block_number,
             stop_block_number: config.stop_block_number,
         })
@@ -208,35 +202,21 @@ impl Subscriber {
             }
             Some(events) => events.push(event.clone()),
         }
-        let shard = self.message_router.route_message(fid, self.num_shards);
-        let senders = self.shard_senders.get(&shard);
-        match senders {
-            None => {
-                error!(
-                    block_number = event.block_number,
-                    tx_hash = hex::encode(&event.transaction_hash),
-                    log_index = event.log_index,
-                    "Unable to find shard to send onchain event to"
-                )
-            }
-            Some(senders) => {
-                if let Err(err) = senders
-                    .messages_tx
-                    .send(MempoolMessage::ValidatorMessage(ValidatorMessage {
-                        on_chain_event: Some(event.clone()),
-                        fname_transfer: None,
-                    }))
-                    .await
-                {
-                    error!(
-                        block_number = event.block_number,
-                        tx_hash = hex::encode(&event.transaction_hash),
-                        log_index = event.log_index,
-                        err = err.to_string(),
-                        "Unable to send onchain event to mempool"
-                    )
-                }
-            }
+        if let Err(err) = self
+            .mempool_tx
+            .send(MempoolMessage::ValidatorMessage(ValidatorMessage {
+                on_chain_event: Some(event.clone()),
+                fname_transfer: None,
+            }))
+            .await
+        {
+            error!(
+                block_number = event.block_number,
+                tx_hash = hex::encode(&event.transaction_hash),
+                log_index = event.log_index,
+                err = err.to_string(),
+                "Unable to send onchain event to mempool"
+            )
         }
     }
 

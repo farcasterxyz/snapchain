@@ -46,6 +46,7 @@ pub struct MyHubService {
     message_router: Box<dyn routing::MessageRouter>,
     statsd_client: StatsdClientWrapper,
     l1_client: Option<Box<dyn L1Client>>,
+    mempool_tx: mpsc::Sender<MempoolMessage>,
 }
 
 impl MyHubService {
@@ -56,6 +57,7 @@ impl MyHubService {
         statsd_client: StatsdClientWrapper,
         num_shards: u32,
         message_router: Box<dyn routing::MessageRouter>,
+        mempool_tx: mpsc::Sender<MempoolMessage>,
         l1_client: Option<Box<dyn L1Client>>,
     ) -> Self {
         Self {
@@ -66,6 +68,7 @@ impl MyHubService {
             message_router,
             num_shards,
             l1_client,
+            mempool_tx,
         }
     }
 
@@ -82,15 +85,6 @@ impl MyHubService {
         }
 
         let dst_shard = self.message_router.route_message(fid, self.num_shards);
-
-        let sender = match self.shard_senders.get(&dst_shard) {
-            Some(sender) => sender,
-            None => {
-                return Err(Status::invalid_argument(
-                    "no shard sender for fid".to_string(),
-                ))
-            }
-        };
 
         let stores = match self.shard_stores.get(&dst_shard) {
             Some(store) => store,
@@ -110,7 +104,6 @@ impl MyHubService {
                 stores.store_limits.clone(),
                 self.statsd_client.clone(),
                 100,
-                200,
             );
             let result = readonly_engine.simulate_message(&message);
 
@@ -142,8 +135,8 @@ impl MyHubService {
             }
         }
 
-        match sender
-            .messages_tx
+        match self
+            .mempool_tx
             .try_send(MempoolMessage::UserMessage(message.clone()))
         {
             Ok(_) => {

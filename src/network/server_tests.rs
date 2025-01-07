@@ -8,6 +8,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::connectors::onchain_events::L1Client;
+    use crate::mempool::mempool::Mempool;
     use crate::mempool::routing;
     use crate::mempool::routing::MessageRouter;
     use crate::network::server::MyHubService;
@@ -118,7 +119,7 @@ mod tests {
         db
     }
 
-    fn make_server() -> (
+    async fn make_server() -> (
         HashMap<u32, Stores>,
         HashMap<u32, Senders>,
         [ShardEngine; 2],
@@ -167,6 +168,10 @@ mod tests {
         assert_eq!(message_router.route_message(SHARD1_FID, 2), 1);
         assert_eq!(message_router.route_message(SHARD2_FID, 2), 2);
 
+        let (mempool_tx, mempool_rx) = mpsc::channel(1000);
+        let mut mempool = Mempool::new(mempool_rx, num_shards, senders.clone());
+        tokio::spawn(async move { mempool.run().await });
+
         (
             stores.clone(),
             senders.clone(),
@@ -178,6 +183,7 @@ mod tests {
                 statsd_client,
                 num_shards,
                 message_router,
+                mempool_tx,
                 Some(Box::new(MockL1Client {})),
             ),
         )
@@ -185,7 +191,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscribe_rpc() {
-        let (stores, senders, _, service) = make_server();
+        let (stores, senders, _, service) = make_server().await;
 
         let num_shard1_pre_existing_events = 10;
         let num_shard2_pre_existing_events = 20;
@@ -233,7 +239,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_submit_message_fails_with_error_for_invalid_messages() {
-        let (_stores, _senders, _, service) = make_server();
+        let (_stores, _senders, _, service) = make_server().await;
 
         // Message with no fid registration
         let invalid_message = messages_factory::casts::create_cast_add(123, "test", None, None);
@@ -249,7 +255,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_good_ens_proof() {
-        let (_stores, _senders, [mut engine1, mut _engine2], service) = make_server();
+        let (_stores, _senders, [mut engine1, mut _engine2], service) = make_server().await;
         let signer = test_helper::default_signer();
         let owner = hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap();
         let fid = SHARD1_FID;
@@ -274,7 +280,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ens_proof_with_bad_owner() {
-        let (_stores, _senders, [mut engine1, mut _engine2], service) = make_server();
+        let (_stores, _senders, [mut engine1, mut _engine2], service) = make_server().await;
         let signer = test_helper::default_signer();
         let owner = test_helper::default_custody_address();
         let fid = SHARD1_FID;
@@ -299,7 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ens_proof_with_bad_custody_address() {
-        let (_stores, _senders, [mut engine1, mut _engine2], service) = make_server();
+        let (_stores, _senders, [mut engine1, mut _engine2], service) = make_server().await;
         let signer = test_helper::default_signer();
         let owner = test_helper::default_custody_address();
         let fid = SHARD1_FID;
@@ -330,7 +336,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ens_proof_with_verified_address() {
-        let (_stores, _senders, [mut _engine1, mut engine2], service) = make_server();
+        let (_stores, _senders, [mut _engine1, mut engine2], service) = make_server().await;
         let signer = test_helper::default_signer();
         let fid = 2;
         let owner = test_helper::default_custody_address();
@@ -368,7 +374,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cast_apis() {
-        let (_, _, [mut engine1, mut engine2], service) = make_server();
+        let (_, _, [mut engine1, mut engine2], service) = make_server().await;
         let engine1 = &mut engine1;
         let engine2 = &mut engine2;
         test_helper::register_user(
@@ -498,7 +504,7 @@ mod tests {
     #[tokio::test]
     async fn test_storage_limits() {
         // Works with no storage
-        let (_, _, [mut engine1, _], service) = make_server();
+        let (_, _, [mut engine1, _], service) = make_server().await;
 
         let response = service
             .get_current_storage_limits_by_fid(FidRequest::for_fid(SHARD1_FID))

@@ -5,7 +5,6 @@ use crate::core::types::{
     Address, Height, ShardId, SnapchainShard, SnapchainValidator, SnapchainValidatorContext,
     SnapchainValidatorSet,
 };
-use crate::mempool::mempool;
 use crate::network::gossip::GossipEvent;
 use crate::proto::{Block, ShardChunk};
 use crate::storage::db::RocksDB;
@@ -37,7 +36,6 @@ impl SnapchainNode {
     pub async fn create(
         keypair: Keypair,
         config: Config,
-        mempool_config: mempool::Config,
         rpc_address: Option<String>,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         block_tx: Option<mpsc::Sender<Block>>,
@@ -93,7 +91,6 @@ impl SnapchainNode {
                 StoreLimits::default(),
                 statsd_client.clone(),
                 config.max_messages_per_block,
-                mempool_config.queue_size,
             );
 
             shard_senders.insert(shard_id, engine.get_senders());
