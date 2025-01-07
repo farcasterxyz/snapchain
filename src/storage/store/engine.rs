@@ -445,6 +445,8 @@ impl ShardEngine {
                     tx_account_root = hex::encode(&snapchain_txn.account_root),
                     source,
                     summary = Self::txn_summary(snapchain_txn),
+                    num_system_messages = snapchain_txn.system_messages.len(),
+                    num_user_messages = snapchain_txn.user_messages.len(),
                     "Account root mismatch"
                 );
                 return Err(EngineError::HashMismatch);
@@ -460,6 +462,7 @@ impl ShardEngine {
                 tx_shard_root = hex::encode(shard_root),
                 source,
                 summary = Self::txns_summary(transactions),
+                num_txns = transactions.len(),
                 "Shard root mismatch"
             );
             return Err(EngineError::HashMismatch);
