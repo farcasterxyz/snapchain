@@ -134,29 +134,31 @@ mod tests {
         let (engine1, _) = test_helper::new_engine_with_options(test_helper::EngineOptions {
             limits: Some(limits.clone()),
             db_name: Some("db1.db".to_string()),
+            messages_request_tx: None,
         });
         let (engine2, _) = test_helper::new_engine_with_options(test_helper::EngineOptions {
             limits: Some(limits.clone()),
             db_name: Some("db2.db".to_string()),
+            messages_request_tx: None,
         });
         let db1 = engine1.db.clone();
         let db2 = engine2.db.clone();
 
-        let (msgs_tx, _msgs_rx) = mpsc::channel(100);
+        let (_msgs_request_tx, msgs_request_rx) = mpsc::channel(100);
 
         let shard1_stores = Stores::new(
             db1,
             merkle_trie::MerkleTrie::new(16).unwrap(),
             limits.clone(),
         );
-        let shard1_senders = Senders::new(msgs_tx.clone());
+        let shard1_senders = Senders::new();
 
         let shard2_stores = Stores::new(
             db2,
             merkle_trie::MerkleTrie::new(16).unwrap(),
             limits.clone(),
         );
-        let shard2_senders = Senders::new(msgs_tx.clone());
+        let shard2_senders = Senders::new();
         let stores = HashMap::from([(1, shard1_stores), (2, shard2_stores)]);
         let senders = HashMap::from([(1, shard1_senders), (2, shard2_senders)]);
         let num_shards = senders.len() as u32;
@@ -169,7 +171,7 @@ mod tests {
         assert_eq!(message_router.route_message(SHARD2_FID, 2), 2);
 
         let (mempool_tx, mempool_rx) = mpsc::channel(1000);
-        let mut mempool = Mempool::new(mempool_rx, num_shards, senders.clone(), stores.clone());
+        let mut mempool = Mempool::new(mempool_rx, msgs_request_rx, num_shards, stores.clone());
         tokio::spawn(async move { mempool.run().await });
 
         (

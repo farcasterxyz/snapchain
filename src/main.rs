@@ -119,12 +119,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Use the new non-global metrics registry when we upgrade to newer version of malachite
     let _ = Metrics::register(registry);
 
+    let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
     let node = SnapchainNode::create(
         keypair.clone(),
         app_config.consensus.clone(),
         Some(app_config.rpc_address.clone()),
         gossip_tx.clone(),
         None,
+        messages_request_tx,
         block_store.clone(),
         app_config.rocksdb_dir.clone(),
         statsd_client.clone(),
@@ -135,8 +137,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (mempool_tx, mempool_rx) = mpsc::channel(app_config.mempool.queue_size as usize);
     let mut mempool = Mempool::new(
         mempool_rx,
+        messages_request_rx,
         app_config.consensus.num_shards,
-        node.shard_senders.clone(),
         node.shard_stores.clone(),
     );
     tokio::spawn(async move { mempool.run().await });

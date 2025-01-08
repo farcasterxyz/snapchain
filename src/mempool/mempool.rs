@@ -1,13 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::storage::{
-    store::{
-        engine::{MempoolMessage, Senders},
-        stores::Stores,
-    },
+    store::{engine::MempoolMessage, stores::Stores},
     trie::merkle_trie::{self, TrieKey},
 };
 
@@ -25,27 +22,34 @@ impl Default for Config {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MempoolKey {
+    trie_key: Vec<u8>,
+}
+
 pub struct Mempool {
-    shard_senders: HashMap<u32, Senders>,
     shard_stores: HashMap<u32, Stores>,
     message_router: Box<dyn MessageRouter>,
     num_shards: u32,
     mempool_rx: mpsc::Receiver<MempoolMessage>,
+    messages_request_rx: mpsc::Receiver<(u32, oneshot::Sender<Option<MempoolMessage>>)>,
+    messages: HashMap<u32, BTreeMap<MempoolKey, MempoolMessage>>,
 }
 
 impl Mempool {
     pub fn new(
         mempool_rx: mpsc::Receiver<MempoolMessage>,
+        messages_request_rx: mpsc::Receiver<(u32, oneshot::Sender<Option<MempoolMessage>>)>,
         num_shards: u32,
-        shard_senders: HashMap<u32, Senders>,
         shard_stores: HashMap<u32, Stores>,
     ) -> Self {
         Mempool {
-            shard_senders,
             shard_stores,
             num_shards,
             mempool_rx,
             message_router: Box::new(ShardRouter {}),
+            messages: HashMap::new(),
+            messages_request_rx,
         }
     }
 
@@ -75,29 +79,57 @@ impl Mempool {
         }
     }
 
-    fn is_message_already_merged(&mut self, message: &MempoolMessage) -> bool {
-        let fid = message.fid();
-        match message {
-            MempoolMessage::UserMessage(message) => {
-                self.message_exists_in_trie(fid, TrieKey::for_message(message))
+    async fn pull_message(&mut self, shard_id: u32, tx: oneshot::Sender<Option<MempoolMessage>>) {
+        let mut message = None;
+        loop {
+            let messages = self.messages.get_mut(&shard_id);
+            match messages {
+                None => break,
+                Some(messages) => {
+                    match messages.pop_first() {
+                        None => break,
+                        Some((_, next_message)) => {
+                            if self.message_is_valid(&next_message) {
+                                message = Some(next_message);
+                                break;
+                            }
+                        }
+                    };
+                }
             }
+        }
+
+        if let Err(_) = tx.send(message) {
+            error!("Unable to send message from mempool");
+        }
+    }
+
+    fn get_trie_key(message: &MempoolMessage) -> Option<Vec<u8>> {
+        match message {
+            MempoolMessage::UserMessage(message) => return Some(TrieKey::for_message(message)),
             MempoolMessage::ValidatorMessage(validator_message) => {
                 if let Some(onchain_event) = &validator_message.on_chain_event {
-                    return self
-                        .message_exists_in_trie(fid, TrieKey::for_onchain_event(&onchain_event));
+                    return Some(TrieKey::for_onchain_event(&onchain_event));
                 }
 
                 if let Some(fname_transfer) = &validator_message.fname_transfer {
                     if let Some(proof) = &fname_transfer.proof {
                         let name = String::from_utf8(proof.name.clone()).unwrap();
-                        return self.message_exists_in_trie(
-                            fid,
-                            TrieKey::for_fname(fname_transfer.id, &name),
-                        );
+                        return Some(TrieKey::for_fname(fname_transfer.id, &name));
                     }
                 }
-                false
+
+                return None;
             }
+        }
+    }
+
+    fn is_message_already_merged(&mut self, message: &MempoolMessage) -> bool {
+        let fid = message.fid();
+        let trie_key = Self::get_trie_key(&message);
+        match trie_key {
+            Some(trie_key) => self.message_exists_in_trie(fid, trie_key),
+            None => false,
         }
     }
 
@@ -110,20 +142,33 @@ impl Mempool {
     }
 
     pub async fn run(&mut self) {
-        while let Some(message) = self.mempool_rx.recv().await {
-            if self.message_is_valid(&message) {
-                let fid = message.fid();
-                let shard = self.message_router.route_message(fid, self.num_shards);
-                let senders = self.shard_senders.get(&shard);
-                match senders {
-                    None => {
-                        error!("Unable to find shard to send message to")
-                    }
-                    Some(senders) => {
-                        if let Err(err) = senders.messages_tx.send(message).await {
-                            error!("Unable to send message to engine: {}", err.to_string())
+        tokio::select! {
+            message = self.mempool_rx.recv() => {
+                if let Some(message) = message {
+                    // TODO(aditi): Maybe we don't need to run validations here?
+                    if self.message_is_valid(&message) {
+                        let fid = message.fid();
+                        let shard_id = self.message_router.route_message(fid, self.num_shards);
+                        let trie_key = Self::get_trie_key(&message);
+                        match trie_key {
+                            None => (),
+                            Some(trie_key) => match self.messages.get_mut(&shard_id) {
+                                None => {
+                                    let mut messages = BTreeMap::new();
+                                    messages.insert(MempoolKey { trie_key }, message.clone());
+                                    self.messages.insert(shard_id, messages);
+                                }
+                                Some(messages) => {
+                                    messages.insert(MempoolKey { trie_key }, message.clone());
+                                }
+                            },
                         }
                     }
+                }
+            }
+            message_request = self.messages_request_rx.recv() => {
+                if let Some((shard_id, tx)) = message_request {
+                    self.pull_message(shard_id, tx).await
                 }
             }
         }

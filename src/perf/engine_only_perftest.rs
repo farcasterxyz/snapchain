@@ -1,8 +1,12 @@
+use tokio::sync::mpsc;
+
+use crate::mempool::mempool::Mempool;
 use crate::proto::{Height, ShardChunk, ShardHeader};
 use crate::storage::store::engine::{MempoolMessage, ShardStateChange};
 use crate::storage::store::stores::StoreLimits;
 use crate::storage::store::test_helper;
 use crate::utils::cli::compose_message;
+use std::collections::HashMap;
 use std::error::Error;
 use std::time::Duration;
 
@@ -28,16 +32,27 @@ fn state_change_to_shard_chunk(
 }
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
+    let (mempool_tx, mempool_rx) = mpsc::channel(1000);
+    let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
+
     let (mut engine, _tmpdir) = test_helper::new_engine_with_options(test_helper::EngineOptions {
         limits: Some(StoreLimits {
             limits: test_helper::limits::unlimited(),
             legacy_limits: test_helper::limits::unlimited(),
         }),
         db_name: None,
+        messages_request_tx: Some(messages_request_tx),
+    });
+
+    let mut shard_stores = HashMap::new();
+    shard_stores.insert(1, engine.get_stores());
+    let mut mempool = Mempool::new(mempool_rx, messages_request_rx, 1, shard_stores);
+
+    tokio::spawn(async move {
+        mempool.run().await;
     });
 
     let mut i = 0;
-    let messages_tx = engine.messages_tx();
 
     let fid = test_helper::FID_FOR_TEST;
 
@@ -54,7 +69,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
             let text = format!("For benchmarking {}", i);
             let msg = compose_message(fid, text.as_str(), None, None);
 
-            messages_tx
+            mempool_tx
                 .send(MempoolMessage::UserMessage(msg.clone()))
                 .await
                 .unwrap();

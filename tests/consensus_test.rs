@@ -11,6 +11,7 @@ use snapchain::node::snapchain_node::SnapchainNode;
 use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::proto::Block;
 use snapchain::storage::db::{PageOptions, RocksDB};
+use snapchain::storage::store::engine::MempoolMessage;
 use snapchain::storage::store::BlockStore;
 use snapchain::utils::factory::messages_factory;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
@@ -33,6 +34,7 @@ struct NodeForTest {
     grpc_addr: String,
     db: Arc<RocksDB>,
     block_store: BlockStore,
+    mempool_tx: mpsc::Sender<MempoolMessage>,
 }
 
 impl Drop for NodeForTest {
@@ -70,12 +72,14 @@ impl NodeForTest {
         let db = Arc::new(RocksDB::new(&make_tmp_path()));
         db.open().unwrap();
         let block_store = BlockStore::new(db.clone());
+        let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
         let node = SnapchainNode::create(
             keypair.clone(),
             config,
             None,
             gossip_tx,
             Some(block_tx),
+            messages_request_tx,
             block_store.clone(),
             make_tmp_path(),
             statsd_client.clone(),
@@ -109,30 +113,27 @@ impl NodeForTest {
 
         let grpc_addr = format!("0.0.0.0:{}", grpc_port);
         let addr = grpc_addr.clone();
-        let grpc_block_store = block_store.clone();
-        let grpc_shard_stores = node.shard_stores.clone();
-        let grpc_shard_senders = node.shard_senders.clone();
         let (mempool_tx, mempool_rx) = mpsc::channel(100);
         let mut mempool = Mempool::new(
             mempool_rx,
+            messages_request_rx,
             num_shards,
-            node.shard_senders.clone(),
             node.shard_stores.clone(),
         );
         tokio::spawn(async move { mempool.run().await });
 
-        tokio::spawn(async move {
-            let service = MyHubService::new(
-                grpc_block_store,
-                grpc_shard_stores,
-                grpc_shard_senders,
-                statsd_client.clone(),
-                num_shards,
-                Box::new(routing::EvenOddRouterForTest {}),
-                mempool_tx,
-                None,
-            );
+        let service = MyHubService::new(
+            block_store.clone(),
+            node.shard_stores.clone(),
+            node.shard_senders.clone(),
+            statsd_client.clone(),
+            num_shards,
+            Box::new(routing::EvenOddRouterForTest {}),
+            mempool_tx.clone(),
+            None,
+        );
 
+        tokio::spawn(async move {
             let grpc_socket_addr: SocketAddr = addr.parse().unwrap();
             let resp = Server::builder()
                 .add_service(HubServiceServer::new(service))
@@ -154,6 +155,7 @@ impl NodeForTest {
             grpc_addr: grpc_addr.clone(),
             db: db.clone(),
             block_store,
+            mempool_tx,
         }
     }
 
@@ -327,13 +329,7 @@ async fn test_basic_consensus() {
     let num_shards = 2;
     let mut network = TestNetwork::create(3, num_shards, 3380).await;
 
-    let messages_tx1 = network.nodes[0]
-        .node
-        .shard_senders
-        .get(&1u32)
-        .expect("message channel should exist")
-        .messages_tx
-        .clone();
+    let messages_tx1 = network.nodes[0].mempool_tx.clone();
 
     tokio::spawn(async move {
         let mut i: i32 = 0;

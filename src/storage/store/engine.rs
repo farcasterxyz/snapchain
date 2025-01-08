@@ -22,6 +22,7 @@ use std::str;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
+use tokio::sync::oneshot;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -92,7 +93,7 @@ impl EngineError {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum MempoolMessage {
     UserMessage(proto::Message),
     ValidatorMessage(proto::ValidatorMessage),
@@ -117,17 +118,13 @@ pub struct ShardStateChange {
 
 #[derive(Clone)]
 pub struct Senders {
-    pub messages_tx: mpsc::Sender<MempoolMessage>,
     pub events_tx: broadcast::Sender<HubEvent>,
 }
 
 impl Senders {
-    pub fn new(messages_tx: mpsc::Sender<MempoolMessage>) -> Senders {
+    pub fn new() -> Senders {
         let (events_tx, _events_rx) = broadcast::channel::<HubEvent>(100);
-        Senders {
-            events_tx,
-            messages_tx,
-        }
+        Senders { events_tx }
     }
 }
 
@@ -142,9 +139,9 @@ pub struct ShardEngine {
     pub db: Arc<RocksDB>,
     senders: Senders,
     stores: Stores,
-    messages_rx: mpsc::Receiver<MempoolMessage>,
     statsd_client: StatsdClientWrapper,
     max_messages_per_block: u32,
+    messages_request_tx: Option<mpsc::Sender<(u32, oneshot::Sender<Option<MempoolMessage>>)>>,
 }
 
 impl ShardEngine {
@@ -155,22 +152,18 @@ impl ShardEngine {
         store_limits: StoreLimits,
         statsd_client: StatsdClientWrapper,
         max_messages_per_block: u32,
+        messages_request_tx: Option<mpsc::Sender<(u32, oneshot::Sender<Option<MempoolMessage>>)>>,
     ) -> ShardEngine {
         // TODO: adding the trie here introduces many calls that want to return errors. Rethink unwrap strategy.
-        let (messages_tx, messages_rx) = mpsc::channel::<MempoolMessage>(100);
         ShardEngine {
             shard_id,
             stores: Stores::new(db.clone(), trie, store_limits),
-            senders: Senders::new(messages_tx),
-            messages_rx,
+            senders: Senders::new(),
             db,
             statsd_client,
             max_messages_per_block,
+            messages_request_tx,
         }
-    }
-
-    pub fn messages_tx(&self) -> mpsc::Sender<MempoolMessage> {
-        self.senders.messages_tx.clone()
     }
 
     // statsd
@@ -203,30 +196,41 @@ impl ShardEngine {
         &mut self,
         max_wait: Duration,
     ) -> Result<Vec<MempoolMessage>, EngineError> {
-        let mut messages = Vec::new();
-        let start_time = Instant::now();
+        if let Some(messages_request_tx) = &self.messages_request_tx {
+            let mut messages = Vec::new();
+            let start_time = Instant::now();
 
-        loop {
-            if start_time.elapsed() >= max_wait {
-                break;
-            }
-
-            while messages.len() < self.max_messages_per_block as usize {
-                match self.messages_rx.try_recv() {
-                    Ok(msg) => messages.push(msg),
-                    Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(err) => return Err(EngineError::from(err)),
+            loop {
+                if start_time.elapsed() >= max_wait {
+                    break;
                 }
-            }
 
-            if messages.len() >= self.max_messages_per_block as usize {
-                break;
-            }
+                while messages.len() < self.max_messages_per_block as usize {
+                    let (message_tx, message_rx) = oneshot::channel();
 
-            sleep(Duration::from_millis(5)).await;
+                    if let Err(err) = messages_request_tx.send((self.shard_id, message_tx)).await {
+                        error!(
+                            "Could not send request for messages to mempool {}",
+                            err.to_string()
+                        )
+                    }
+
+                    match message_rx.await {
+                        Ok(Some(msg)) => messages.push(msg),
+                        _ => {}
+                    }
+                }
+
+                if messages.len() >= self.max_messages_per_block as usize {
+                    break;
+                }
+
+                sleep(Duration::from_millis(5)).await;
+            }
+            Ok(messages)
+        } else {
+            Ok(vec![])
         }
-
-        Ok(messages)
     }
 
     fn prepare_proposal(

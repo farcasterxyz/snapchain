@@ -104,6 +104,7 @@ impl MyHubService {
                 stores.store_limits.clone(),
                 self.statsd_client.clone(),
                 100,
+                None,
             );
             let result = readonly_engine.simulate_message(&message);
 

@@ -17,12 +17,13 @@ mod tests {
 
     fn setup() -> (ShardEngine, Mempool) {
         let (_mempool_tx, mempool_rx) = mpsc::channel(100);
+        let (_mempool_tx, messages_request_rx) = mpsc::channel(100);
         let (engine, _) = test_helper::new_engine();
         let mut shard_senders = HashMap::new();
         shard_senders.insert(1, engine.get_senders());
         let mut shard_stores = HashMap::new();
         shard_stores.insert(1, engine.get_stores());
-        let mempool = Mempool::new(mempool_rx, 1, shard_senders, shard_stores);
+        let mempool = Mempool::new(mempool_rx, messages_request_rx, 1, shard_stores);
         (engine, mempool)
     }
 
