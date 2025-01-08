@@ -48,7 +48,7 @@ pub enum EngineError {
     UsageCountError,
 
     #[error("message receive error")]
-    MessageReceiveError(#[from] mpsc::error::TryRecvError),
+    MessageReceiveError(#[from] oneshot::error::RecvError),
 
     #[error(transparent)]
     MergeOnchainEventError(#[from] OnchainEventStorageError),
@@ -217,7 +217,8 @@ impl ShardEngine {
 
                     match message_rx.await {
                         Ok(Some(msg)) => messages.push(msg),
-                        _ => {}
+                        Ok(None) => break,
+                        Err(err) => return Err(EngineError::from(err)),
                     }
                 }
 
