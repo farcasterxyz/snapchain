@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::Instant,
+};
 
 use crate::storage::{
     store::{engine::MempoolMessage, stores::Stores},
@@ -24,7 +27,7 @@ impl Default for Config {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MempoolKey {
-    trie_key: Vec<u8>,
+    inserted_at: Instant,
 }
 
 pub struct Mempool {
@@ -149,19 +152,16 @@ impl Mempool {
                     if self.message_is_valid(&message) {
                         let fid = message.fid();
                         let shard_id = self.message_router.route_message(fid, self.num_shards);
-                        let trie_key = Self::get_trie_key(&message);
-                        match trie_key {
-                            None => (),
-                            Some(trie_key) => match self.messages.get_mut(&shard_id) {
-                                None => {
-                                    let mut messages = BTreeMap::new();
-                                    messages.insert(MempoolKey { trie_key }, message.clone());
-                                    self.messages.insert(shard_id, messages);
-                                }
-                                Some(messages) => {
-                                    messages.insert(MempoolKey { trie_key }, message.clone());
-                                }
-                            },
+                        // TODO(aditi): We need a size limit on the mempool and we need to figure out what to do if it's exceeded
+                        match self.messages.get_mut(&shard_id) {
+                            None => {
+                                let mut messages = BTreeMap::new();
+                                messages.insert(MempoolKey { inserted_at: Instant::now()}, message.clone());
+                                self.messages.insert(shard_id, messages);
+                            }
+                            Some(messages) => {
+                                messages.insert(MempoolKey { inserted_at: Instant::now()}, message.clone());
+                            }
                         }
                     }
                 }
