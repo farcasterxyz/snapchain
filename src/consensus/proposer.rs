@@ -99,7 +99,7 @@ impl Proposer for ShardProposer {
             .engine
             .pull_messages(self.propose_value_delay)
             .await
-            .unwrap_or(vec![]); // TODO: don't unwrap
+            .unwrap(); // TODO: don't unwrap
 
         let previous_chunk = self.engine.get_last_shard_chunk();
         let parent_hash = match previous_chunk {

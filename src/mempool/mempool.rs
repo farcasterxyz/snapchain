@@ -12,7 +12,7 @@ use crate::storage::{
 };
 
 use super::routing::{MessageRouter, ShardRouter};
-use tracing::{error, info};
+use tracing::error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
