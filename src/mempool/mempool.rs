@@ -12,7 +12,7 @@ use crate::storage::{
 };
 
 use super::routing::{MessageRouter, ShardRouter};
-use tracing::error;
+use tracing::{error, info};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -145,30 +145,32 @@ impl Mempool {
     }
 
     pub async fn run(&mut self) {
-        tokio::select! {
-            message = self.mempool_rx.recv() => {
-                if let Some(message) = message {
-                    // TODO(aditi): Maybe we don't need to run validations here?
-                    if self.message_is_valid(&message) {
-                        let fid = message.fid();
-                        let shard_id = self.message_router.route_message(fid, self.num_shards);
-                        // TODO(aditi): We need a size limit on the mempool and we need to figure out what to do if it's exceeded
-                        match self.messages.get_mut(&shard_id) {
-                            None => {
-                                let mut messages = BTreeMap::new();
-                                messages.insert(MempoolKey { inserted_at: Instant::now()}, message.clone());
-                                self.messages.insert(shard_id, messages);
-                            }
-                            Some(messages) => {
-                                messages.insert(MempoolKey { inserted_at: Instant::now()}, message.clone());
+        loop {
+            tokio::select! {
+                message = self.mempool_rx.recv() => {
+                    if let Some(message) = message {
+                        // TODO(aditi): Maybe we don't need to run validations here?
+                        if self.message_is_valid(&message) {
+                            let fid = message.fid();
+                            let shard_id = self.message_router.route_message(fid, self.num_shards);
+                            // TODO(aditi): We need a size limit on the mempool and we need to figure out what to do if it's exceeded
+                            match self.messages.get_mut(&shard_id) {
+                                None => {
+                                    let mut messages = BTreeMap::new();
+                                    messages.insert(MempoolKey { inserted_at: Instant::now()}, message.clone());
+                                    self.messages.insert(shard_id, messages);
+                                }
+                                Some(messages) => {
+                                    messages.insert(MempoolKey { inserted_at: Instant::now()}, message.clone());
+                                }
                             }
                         }
                     }
                 }
-            }
-            message_request = self.messages_request_rx.recv() => {
-                if let Some((shard_id, tx)) = message_request {
-                    self.pull_message(shard_id, tx).await
+                message_request = self.messages_request_rx.recv() => {
+                    if let Some((shard_id, tx)) = message_request {
+                        self.pull_message(shard_id, tx).await
+                    }
                 }
             }
         }
