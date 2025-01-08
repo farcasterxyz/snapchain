@@ -1,12 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
-use tokio::{
-    sync::{mpsc, oneshot},
-    time::Instant,
-};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
-use crate::{core::types::SnapchainValidatorContext, network::gossip::GossipEvent, storage::{
+use crate::{core::types::SnapchainValidatorContext, network::gossip::GossipEvent, proto::ShardChunk, storage::{
     db::RocksDbTransactionBatch,
     store::{
         account::{
@@ -32,11 +29,6 @@ impl Default for Config {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct MempoolKey {
-    inserted_at: Instant,
-}
-
 pub struct MempoolMessagesRequest {
     pub shard_id: u32,
     pub message_tx: oneshot::Sender<Vec<MempoolMessage>>,
@@ -50,8 +42,9 @@ pub struct Mempool {
     num_shards: u32,
     mempool_rx: mpsc::Receiver<MempoolMessage>,
     messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
-    messages: HashMap<u32, BTreeMap<MempoolKey, MempoolMessage>>,
-    gossip_tx: Option<mpsc::Sender<GossipEvent<SnapchainValidatorContext>>>,
+    messages: HashMap<u32, BTreeMap<String, MempoolMessage>>,
+    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+    shard_decision_rx: broadcast::Receiver<ShardChunk>,
 }
 
 impl Mempool {
@@ -61,7 +54,8 @@ impl Mempool {
         messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
         num_shards: u32,
         shard_stores: HashMap<u32, Stores>,
-        gossip_tx: Option<mpsc::Sender<GossipEvent<SnapchainValidatorContext>>>,
+        gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+        shard_decision_rx: broadcast::Receiver<ShardChunk>,
     ) -> Self {
         Mempool {
             capacity_per_shard,
@@ -72,6 +66,7 @@ impl Mempool {
             messages: HashMap::new(),
             messages_request_rx,
             gossip_tx,
+            shard_decision_rx,
         }
     }
 
@@ -166,6 +161,42 @@ impl Mempool {
         return true;
     }
 
+    async fn insert(&mut self, message: MempoolMessage) {
+        // TODO(aditi): Maybe we don't need to run validations here?
+        if self.message_is_valid(&message) {
+            let fid = message.fid();
+            let shard_id = self.message_router.route_message(fid, self.num_shards);
+            // TODO(aditi): We need a size limit on the mempool and we need to figure out what to do if it's exceeded
+            match self.messages.get_mut(&shard_id) {
+                None => {
+                    let mut messages = BTreeMap::new();
+                    messages.insert(message.hex_hash(), message.clone());
+                    self.messages.insert(shard_id, messages);
+                }
+                Some(messages) => {
+                    // For now, mempool messages are dropped here if the mempool is full.
+                    if messages.len() < self.capacity_per_shard {
+                        messages.insert(message.hex_hash(), message.clone());
+                    }
+                }
+            }
+
+            match message {
+                MempoolMessage::UserMessage(_) => {
+                    let result = self
+                        .gossip_tx
+                        .send(GossipEvent::BroadcastMempoolMessage(message))
+                        .await;
+
+                    if let Err(e) = result {
+                        warn!("Failed to gossip message {:?}", e);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub async fn run(&mut self) {
         loop {
             tokio::select! {
@@ -176,43 +207,25 @@ impl Mempool {
                         self.pull_messages(messages_request).await
                     }
                 }
-                // TODO: Evict based on blocks
-                message = self.mempool_rx.recv() => {
-                    if let Some(message) = message {
-                        // TODO(aditi): Maybe we don't need to run validations here?
-                        if self.message_is_valid(&message) {
-                            let fid = message.fid();
-                            let shard_id = self.message_router.route_message(fid, self.num_shards);
-                            // TODO(aditi): We need a size limit on the mempool and we need to figure out what to do if it's exceeded
-                            match self.messages.get_mut(&shard_id) {
-                                None => {
-                                    let mut messages = BTreeMap::new();
-                                    messages.insert(MempoolKey { inserted_at: Instant::now()}, message.clone());
-                                    self.messages.insert(shard_id, messages);
+                chunk = self.shard_decision_rx.recv() => {
+                    if let Ok(chunk) = chunk {
+                        let header = chunk.header.expect("Expects chunk to have a header");
+                        let height = header.height.expect("Expects header to have a height");
+                        if let Some(mempool) = self.messages.get_mut(&height.shard_index) {
+                            for transaction in chunk.transactions {
+                                for user_message in transaction.user_messages {
+                                    mempool.remove(&user_message.hex_hash());
                                 }
-                                Some(messages) => {
-                                    // For now, mempool messages are dropped here if the mempool is full.
-                                    if messages.len() < self.capacity_per_shard {
-                                        messages.insert(MempoolKey { inserted_at: Instant::now()}, message.clone());
-                                    }
+                                for system_message in transaction.system_messages {
+                                    mempool.remove(&system_message.hex_hash());
                                 }
-                            }
-
-                            match message {
-                                MempoolMessage::UserMessage(_) => {
-                                    if let Some(gossip_tx) = &self.gossip_tx {
-                                        let result = gossip_tx
-                                        .send(GossipEvent::BroadcastMempoolMessage(message))
-                                        .await;
-
-                                        if let Err(e) = result {
-                                            warn!("Failed to gossip message {:?}", e);
-                                        }
-                                    }
-                                },
-                                _ => {},
                             }
                         }
+                    }
+                }
+                message = self.mempool_rx.recv() => {
+                    if let Some(message) = message {
+                        self.insert(message).await;
                     }
                 }
             }

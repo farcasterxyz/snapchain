@@ -1,4 +1,4 @@
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::mempool::mempool::Mempool;
 use crate::proto::{Height, ShardChunk, ShardHeader};
@@ -34,6 +34,8 @@ fn state_change_to_shard_chunk(
 pub async fn run() -> Result<(), Box<dyn Error>> {
     let (mempool_tx, mempool_rx) = mpsc::channel(1000);
     let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
+    let (gossip_tx, _gossip_rx) = mpsc::channel(100);
+    let (_shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
 
     let (mut engine, _tmpdir) = test_helper::new_engine_with_options(test_helper::EngineOptions {
         limits: Some(StoreLimits {
@@ -46,7 +48,15 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     let mut shard_stores = HashMap::new();
     shard_stores.insert(1, engine.get_stores());
-    let mut mempool = Mempool::new(1024, mempool_rx, messages_request_rx, 1, shard_stores, None);
+    let mut mempool = Mempool::new(
+        1024,
+        mempool_rx,
+        messages_request_rx,
+        1,
+        shard_stores,
+        gossip_tx,
+        shard_decision_rx,
+    );
 
     tokio::spawn(async move {
         mempool.run().await;

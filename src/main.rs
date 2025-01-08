@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use std::process;
 use std::time::Duration;
 use tokio::signal::ctrl_c;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::{select, time};
 use tonic::transport::Server;
 use tracing::{error, info, warn};
@@ -135,11 +135,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let _ = Metrics::register(registry);
 
     let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
+    let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
+
     let node = SnapchainNode::create(
         keypair.clone(),
         app_config.consensus.clone(),
         Some(app_config.rpc_address.clone()),
         gossip_tx.clone(),
+        shard_decision_tx,
         None,
         messages_request_tx,
         block_store.clone(),
@@ -155,7 +158,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         messages_request_rx,
         app_config.consensus.num_shards,
         node.shard_stores.clone(),
-        Some(gossip_tx.clone()),
+        gossip_tx.clone(),
+        shard_decision_rx,
     );
     tokio::spawn(async move { mempool.run().await });
 

@@ -39,4 +39,17 @@ impl proto::ValidatorMessage {
         }
         0
     }
+
+    // TODO: Determine if these hashes are good enough for the mempool.
+    pub fn hex_hash(&self) -> String {
+        if let Some(fname) = &self.fname_transfer {
+            if let Some(proof) = &fname.proof {
+                return hex::encode(&proof.signature);
+            }
+        }
+        if let Some(event) = &self.on_chain_event {
+            return hex::encode(&event.transaction_hash);
+        }
+        todo!("Not implemented");
+    }
 }

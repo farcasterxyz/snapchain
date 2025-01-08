@@ -2,7 +2,7 @@
 mod tests {
     use std::collections::HashMap;
 
-    use tokio::sync::mpsc;
+    use tokio::sync::{broadcast, mpsc};
 
     use crate::{
         mempool::mempool::Mempool,
@@ -19,12 +19,22 @@ mod tests {
     fn setup() -> (ShardEngine, Mempool) {
         let (_mempool_tx, mempool_rx) = mpsc::channel(100);
         let (_mempool_tx, messages_request_rx) = mpsc::channel(100);
+        let (gossip_tx, _gossip_rx) = mpsc::channel(100);
+        let (_shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
         let (engine, _) = test_helper::new_engine();
         let mut shard_senders = HashMap::new();
         shard_senders.insert(1, engine.get_senders());
         let mut shard_stores = HashMap::new();
         shard_stores.insert(1, engine.get_stores());
-        let mempool = Mempool::new(1024, mempool_rx, messages_request_rx, 1, shard_stores, None);
+        let mempool = Mempool::new(
+            1024,
+            mempool_rx,
+            messages_request_rx,
+            1,
+            shard_stores,
+            gossip_tx,
+            shard_decision_rx,
+        );
         (engine, mempool)
     }
 

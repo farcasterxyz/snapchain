@@ -108,6 +108,13 @@ impl MempoolMessage {
         }
     }
 
+    pub fn hex_hash(&self) -> String {
+        match self {
+            MempoolMessage::UserMessage(msg) => msg.hex_hash(),
+            MempoolMessage::ValidatorMessage(msg) => msg.hex_hash(),
+        }
+    }
+
     pub fn to_proto(&self) -> proto::MempoolMessage {
         let msg = match self {
             MempoolMessage::UserMessage(msg) => {
