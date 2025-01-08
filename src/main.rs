@@ -1,4 +1,4 @@
-use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
+use malachite_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::onchain_events::{L1Client, RealL1Client};
 use snapchain::consensus::consensus::SystemMessage;
 use snapchain::core::types::proto;

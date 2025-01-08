@@ -25,10 +25,11 @@ async-trait = "0.1.68"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt", "json"] }
 hex = "0.4.3"
 ractor = "0.11.2"
-informalsystems-malachitebft-core-consensus = { version = "0.0.1" }
-informalsystems-malachitebft-core-types = { version = "0.0.1"}
-informalsystems-malachitebft-config = { version = "0.0.1"}
-informalsystems-malachitebft-metrics = { version = "0.0.1" }
+malachite-consensus = { path = "../malachite/code/crates/consensus" }
+malachite-common = { path = "../malachite/code/crates/common" }
+malachite-config = { path = "../malachite/code/crates/config" }
+malachite-node = { path = "../malachite/code/crates/node" }
+malachite-metrics = { path = "../malachite/code/crates/metrics" }
 blake3 = "1.4.1"
 tracing = "0.1.40"
 thiserror = "1.0.66"

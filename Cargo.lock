@@ -1553,18 +1553,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "config"
-version = "0.14.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68578f196d2a33ff61b27fae256c3164f65e36382648e30666dde05b8cc9dfdf"
-dependencies = [
- "nom",
- "pathdiff",
- "serde",
- "toml 0.8.19",
-]
-
-[[package]]
 name = "const-hex"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3510,105 +3498,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "informalsystems-malachitebft-config"
-version = "0.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "298211c1623c3c52053985d5142889467ebfc69d1353b58adf3efaf1991f879d"
-dependencies = [
- "bytesize",
- "config",
- "humantime-serde",
- "informalsystems-malachitebft-core-types",
- "multiaddr",
- "serde",
-]
-
-[[package]]
-name = "informalsystems-malachitebft-core-consensus"
-version = "0.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d30e3ac751eea2722a48628e5942df1d479b9294286cd68cf5c2cc837f50dc6"
-dependencies = [
- "async-recursion",
- "derive-where",
- "genawaiter",
- "informalsystems-malachitebft-core-driver",
- "informalsystems-malachitebft-core-types",
- "informalsystems-malachitebft-metrics",
- "informalsystems-malachitebft-peer",
- "multiaddr",
- "thiserror 2.0.3",
- "tracing",
-]
-
-[[package]]
-name = "informalsystems-malachitebft-core-driver"
-version = "0.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6be2dc3e680a9ae3fc3f679b9be48276614d85227b79bfa1401b2c4fa739436a"
-dependencies = [
- "derive-where",
- "informalsystems-malachitebft-core-state-machine",
- "informalsystems-malachitebft-core-types",
- "informalsystems-malachitebft-core-votekeeper",
- "thiserror 2.0.3",
-]
-
-[[package]]
-name = "informalsystems-malachitebft-core-state-machine"
-version = "0.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c9efb2e03d77dc1c74341fbf2ce7c361dde971c48aa0b518218392ab5ddbac0"
-dependencies = [
- "derive-where",
- "displaydoc",
- "informalsystems-malachitebft-core-types",
-]
-
-[[package]]
-name = "informalsystems-malachitebft-core-types"
-version = "0.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99d291b3b39cdbf972bba3706458f9009dac26341c638270d3b62b77213a075a"
-dependencies = [
- "bytes",
- "derive-where",
- "thiserror 2.0.3",
-]
-
-[[package]]
-name = "informalsystems-malachitebft-core-votekeeper"
-version = "0.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64fa18f6a2f9165bdd2777e3e48355948db66da5f3d7ba50e7e6d7ac520d18f3"
-dependencies = [
- "derive-where",
- "informalsystems-malachitebft-core-types",
- "thiserror 2.0.3",
-]
-
-[[package]]
-name = "informalsystems-malachitebft-metrics"
-version = "0.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2c8c07b0209939dacf44613af1badccae12d426181ce542f06f50692318d312"
-dependencies = [
- "informalsystems-malachitebft-core-state-machine",
- "prometheus-client",
-]
-
-[[package]]
-name = "informalsystems-malachitebft-peer"
-version = "0.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9bba9c096458e76678ea52c1956523e749a5a9740bda98716f3ba224139ba61e"
-dependencies = [
- "bs58",
- "multihash",
- "thiserror 2.0.3",
-]
-
-[[package]]
 name = "inlinable_string"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4327,6 +4216,85 @@ dependencies = [
 ]
 
 [[package]]
+name = "malachite-common"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "derive-where",
+]
+
+[[package]]
+name = "malachite-config"
+version = "0.1.0"
+dependencies = [
+ "bytesize",
+ "humantime-serde",
+ "malachite-common",
+ "multiaddr",
+ "serde",
+]
+
+[[package]]
+name = "malachite-consensus"
+version = "0.1.0"
+dependencies = [
+ "async-recursion",
+ "derive-where",
+ "genawaiter",
+ "libp2p-identity",
+ "malachite-common",
+ "malachite-driver",
+ "malachite-metrics",
+ "multiaddr",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "malachite-driver"
+version = "0.1.0"
+dependencies = [
+ "derive-where",
+ "malachite-common",
+ "malachite-round",
+ "malachite-vote",
+]
+
+[[package]]
+name = "malachite-metrics"
+version = "0.1.0"
+dependencies = [
+ "malachite-round",
+ "prometheus-client",
+]
+
+[[package]]
+name = "malachite-node"
+version = "0.1.0"
+dependencies = [
+ "malachite-common",
+ "rand",
+ "serde",
+]
+
+[[package]]
+name = "malachite-round"
+version = "0.1.0"
+dependencies = [
+ "derive-where",
+ "displaydoc",
+ "malachite-common",
+]
+
+[[package]]
+name = "malachite-vote"
+version = "0.1.0"
+dependencies = [
+ "derive-where",
+ "malachite-common",
+]
+
+[[package]]
 name = "match_cfg"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4439,9 +4407,9 @@ dependencies = [
 
 [[package]]
 name = "multihash"
-version = "0.19.3"
+version = "0.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b430e7953c29dd6a09afc29ff0bb69c6e306329ee6794700aee27b76a1aea8d"
+checksum = "cc41f430805af9d1cf4adae4ed2149c759b877b01d909a1f40256188d09345d2"
 dependencies = [
  "core2",
  "unsigned-varint 0.8.0",
@@ -4863,12 +4831,6 @@ name = "path-slash"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e91099d4268b0e11973f036e885d652fb0b21fedcf69738c627f94db6a44f42"
-
-[[package]]
-name = "pathdiff"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
 
 [[package]]
 name = "pear"
@@ -6312,12 +6274,13 @@ dependencies = [
  "hex",
  "humantime",
  "humantime-serde",
- "informalsystems-malachitebft-config",
- "informalsystems-malachitebft-core-consensus",
- "informalsystems-malachitebft-core-types",
- "informalsystems-malachitebft-metrics",
  "itertools 0.13.0",
  "libp2p",
+ "malachite-common",
+ "malachite-config",
+ "malachite-consensus",
+ "malachite-metrics",
+ "malachite-node",
  "once_cell",
  "parking_lot",
  "pre-commit",
@@ -7101,9 +7064,9 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracing"
-version = "0.1.41"
+version = "0.1.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "784e0ac535deb450455cbfa28a6f0df145ea1bb7ae51b821cf5e7927fdcfbdd0"
+checksum = "c3523ab5a71916ccf420eebdf5521fcef02141234bbc0b8a49f2fdc4544364ef"
 dependencies = [
  "log",
  "pin-project-lite",
@@ -7113,9 +7076,9 @@ dependencies = [
 
 [[package]]
 name = "tracing-attributes"
-version = "0.1.28"
+version = "0.1.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "395ae124c09f9e6918a2310af6038fba074bcf474ac352496d5910dd59a2226d"
+checksum = "34704c8d6ebcbc939824180af020566b01a7c01f80641264eba0999f6c2b6be7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7124,9 +7087,9 @@ dependencies = [
 
 [[package]]
 name = "tracing-core"
-version = "0.1.33"
+version = "0.1.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e672c95779cf947c5311f83787af4fa8fffd12fb27e4993211a84bdfd9610f9c"
+checksum = "c06d3da6113f116aaee68e4d601191614c9053067f9ab7f6edbcb161237daa54"
 dependencies = [
  "once_cell",
  "valuable",

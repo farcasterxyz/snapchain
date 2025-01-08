@@ -14,6 +14,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  MALACHITE_GIT_REF: "8a9f3702eb41199bc8a7f45139adba233a04744a"
+
 jobs:
   build:
     timeout-minutes: 20
@@ -35,15 +38,26 @@ jobs:
         uses: arduino/setup-protoc@v3
 
       - uses: actions/checkout@v4
+        with:
+          repository: informalsystems/malachite
+          ref: ${{ env.MALACHITE_GIT_REF }}
+          path: ./malachite
 
-      - env:
+      - uses: actions/checkout@v4
+        with:
+          path: ./snapchain
+
+      - working-directory: ./snapchain
+        env:
           RUSTFLAGS: "-Dwarnings"
         run: cargo test
 
-      - env:
+      - working-directory: ./snapchain
+        env:
           RUSTFLAGS: "-Dwarnings"
         run: cargo build --bins
 
-      - env:
+      - working-directory: ./snapchain
+        env:
           RUSTFLAGS: "-Dwarnings"
         run: cargo fmt --all --check
