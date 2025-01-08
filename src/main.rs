@@ -137,6 +137,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         mempool_rx,
         app_config.consensus.num_shards,
         node.shard_senders.clone(),
+        node.shard_stores.clone(),
     );
     tokio::spawn(async move { mempool.run().await });
 

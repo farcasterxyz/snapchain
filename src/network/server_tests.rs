@@ -169,7 +169,7 @@ mod tests {
         assert_eq!(message_router.route_message(SHARD2_FID, 2), 2);
 
         let (mempool_tx, mempool_rx) = mpsc::channel(1000);
-        let mut mempool = Mempool::new(mempool_rx, num_shards, senders.clone());
+        let mut mempool = Mempool::new(mempool_rx, num_shards, senders.clone(), stores.clone());
         tokio::spawn(async move { mempool.run().await });
 
         (
