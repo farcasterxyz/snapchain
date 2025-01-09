@@ -100,7 +100,6 @@ impl Mempool {
                         Some((_, next_message)) => {
                             if self.message_is_valid(&next_message) {
                                 messages.push(next_message);
-                                break;
                             }
                         }
                     };

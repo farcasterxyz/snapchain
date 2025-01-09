@@ -21,11 +21,11 @@ use merkle_trie::TrieKey;
 use std::collections::HashSet;
 use std::str;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::oneshot;
 use tokio::sync::{broadcast, mpsc};
-use tokio::time::sleep;
+use tokio::time::timeout;
 use tracing::{error, info, warn};
 
 #[derive(Error, Debug)]
@@ -198,44 +198,33 @@ impl ShardEngine {
         max_wait: Duration,
     ) -> Result<Vec<MempoolMessage>, EngineError> {
         if let Some(messages_request_tx) = &self.messages_request_tx {
-            let mut messages = Vec::new();
-            let start_time = Instant::now();
+            let (message_tx, message_rx) = oneshot::channel();
 
-            loop {
-                if start_time.elapsed() >= max_wait {
-                    break;
-                }
-
-                while messages.len() < self.max_messages_per_block as usize {
-                    let (message_tx, message_rx) = oneshot::channel();
-
-                    if let Err(err) = messages_request_tx
-                        .send(MempoolMessagesRequest {
-                            shard_id: self.shard_id,
-                            message_tx,
-                            max_messages_per_block: self.max_messages_per_block,
-                        })
-                        .await
-                    {
-                        error!(
-                            "Could not send request for messages to mempool {}",
-                            err.to_string()
-                        )
-                    }
-
-                    match message_rx.await {
-                        Ok(mut new_messages) => messages.append(&mut new_messages),
-                        Err(err) => return Err(EngineError::from(err)),
-                    }
-                }
-
-                if messages.len() >= self.max_messages_per_block as usize {
-                    break;
-                }
-
-                sleep(Duration::from_millis(5)).await;
+            if let Err(err) = messages_request_tx
+                .send(MempoolMessagesRequest {
+                    shard_id: self.shard_id,
+                    message_tx,
+                    max_messages_per_block: self.max_messages_per_block,
+                })
+                .await
+            {
+                error!(
+                    "Could not send request for messages to mempool {}",
+                    err.to_string()
+                )
             }
-            Ok(messages)
+
+            match timeout(max_wait, message_rx).await {
+                Ok(response) => match response {
+                    Ok(new_messages) => Ok(new_messages),
+                    Err(err) => Err(EngineError::from(err)),
+                },
+                Err(_) => {
+                    error!("Did not receive messages from mempool in time");
+                    // Just proceed with no messages
+                    Ok(vec![])
+                }
+            }
         } else {
             Ok(vec![])
         }
