@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use alloy_primitives::{address, Address, FixedBytes, Uint};
+use alloy_primitives::{address, ruint::FromUintError, Address, FixedBytes};
 use alloy_provider::{Provider, ProviderBuilder, RootProvider};
 use alloy_rpc_types::{Filter, Log};
 use alloy_sol_types::{sol, SolEvent};
@@ -80,6 +80,12 @@ pub enum SubscribeError {
 
     #[error(transparent)]
     UnableToParseLog(#[from] alloy_sol_types::Error),
+
+    #[error(transparent)]
+    UnableToConvertToU64(#[from] FromUintError<u64>),
+
+    #[error(transparent)]
+    UnableToConvertToU32(#[from] FromUintError<u32>),
 
     #[error("Empty rpc url")]
     EmptyRpcUrl,
@@ -263,13 +269,13 @@ impl Subscriber {
         match event.topic0() {
             Some(&StorageRegistryAbi::Rent::SIGNATURE_HASH) => {
                 let StorageRegistryAbi::Rent { payer, fid, units } = event.log_decode()?.inner.data;
-                let fid = Uint::to::<u64>(&fid);
+                let fid = fid.try_into()?;
                 add_event(
                     fid,
                     OnChainEventType::EventTypeStorageRent,
                     on_chain_event::Body::StorageRentEventBody(StorageRentEventBody {
                         payer: payer.to_vec(),
-                        units: Uint::to::<u32>(&units),
+                        units: units.try_into()?,
                         expiry: (block_timestamp + RENT_EXPIRY_IN_SECONDS) as u32,
                     }),
                 )
@@ -278,7 +284,7 @@ impl Subscriber {
             }
             Some(&IdRegistryAbi::Register::SIGNATURE_HASH) => {
                 let IdRegistryAbi::Register { to, id, recovery } = event.log_decode()?.inner.data;
-                let fid = Uint::to::<u64>(&id);
+                let fid = id.try_into()?;
                 add_event(
                     fid,
                     OnChainEventType::EventTypeIdRegister,
@@ -294,7 +300,7 @@ impl Subscriber {
             }
             Some(&IdRegistryAbi::Transfer::SIGNATURE_HASH) => {
                 let IdRegistryAbi::Transfer { from, to, id } = event.log_decode()?.inner.data;
-                let fid = Uint::to::<u64>(&id);
+                let fid = id.try_into()?;
                 add_event(
                     fid,
                     OnChainEventType::EventTypeIdRegister,
@@ -311,7 +317,7 @@ impl Subscriber {
             Some(&IdRegistryAbi::ChangeRecoveryAddress::SIGNATURE_HASH) => {
                 let IdRegistryAbi::ChangeRecoveryAddress { id, recovery } =
                     event.log_decode()?.inner.data;
-                let fid = Uint::to::<u64>(&id);
+                let fid = id.try_into()?;
                 add_event(
                     fid,
                     OnChainEventType::EventTypeIdRegister,
@@ -334,7 +340,7 @@ impl Subscriber {
                     metadatatype,
                     metadata,
                 } = event.log_decode()?.inner.data;
-                let fid = Uint::to::<u64>(&fid);
+                let fid = fid.try_into()?;
                 add_event(
                     fid,
                     OnChainEventType::EventTypeSigner,
@@ -355,7 +361,7 @@ impl Subscriber {
                     key: _,
                     keyBytes,
                 } = event.log_decode()?.inner.data;
-                let fid = Uint::to::<u64>(&fid);
+                let fid = fid.try_into()?;
                 add_event(
                     fid,
                     OnChainEventType::EventTypeSigner,
@@ -376,7 +382,7 @@ impl Subscriber {
                     key: _,
                     keyBytes,
                 } = event.log_decode()?.inner.data;
-                let fid = Uint::to::<u64>(&fid);
+                let fid = fid.try_into()?;
                 add_event(
                     fid,
                     OnChainEventType::EventTypeSigner,
@@ -393,7 +399,7 @@ impl Subscriber {
             }
             Some(&KeyRegistryAbi::Migrated::SIGNATURE_HASH) => {
                 let KeyRegistryAbi::Migrated { keysMigratedAt } = event.log_decode()?.inner.data;
-                let migrated_at = Uint::to::<u32>(&keysMigratedAt);
+                let migrated_at = keysMigratedAt.try_into()?;
                 add_event(
                     0,
                     OnChainEventType::EventTypeSignerMigrated,
