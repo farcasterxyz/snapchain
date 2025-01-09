@@ -160,6 +160,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let mut onchain_events_subscriber = snapchain::connectors::onchain_events::Subscriber::new(
             app_config.onchain_events,
             mempool_tx.clone(),
+            statsd_client.clone(),
         )?;
         tokio::spawn(async move {
             let result = onchain_events_subscriber.run(false).await;
