@@ -20,6 +20,7 @@ use crate::{
         ValidatorMessage,
     },
     storage::store::engine::MempoolMessage,
+    utils::statsd_wrapper::StatsdClientWrapper,
 };
 
 sol!(
@@ -144,6 +145,7 @@ pub struct Subscriber {
     mempool_tx: mpsc::Sender<MempoolMessage>,
     start_block_number: u64,
     stop_block_number: u64,
+    statsd_client: StatsdClientWrapper,
 }
 
 // TODO(aditi): Wait for 1 confirmation before "committing" an onchain event.
@@ -151,6 +153,7 @@ impl Subscriber {
     pub fn new(
         config: Config,
         mempool_tx: mpsc::Sender<MempoolMessage>,
+        statsd_client: StatsdClientWrapper,
     ) -> Result<Subscriber, SubscribeError> {
         if config.rpc_url.is_empty() {
             return Err(SubscribeError::EmptyRpcUrl);
@@ -163,7 +166,13 @@ impl Subscriber {
             mempool_tx,
             start_block_number: config.start_block_number,
             stop_block_number: config.stop_block_number,
+            statsd_client,
         })
+    }
+
+    fn count(&self, key: &str, value: u64) {
+        self.statsd_client
+            .count(format!("onchain_events.{}", key).as_str(), value);
     }
 
     async fn add_onchain_event(
@@ -200,6 +209,21 @@ impl Subscriber {
             log_index = event.log_index,
             "Processed onchain event"
         );
+        match event_type {
+            OnChainEventType::EventTypeNone => {}
+            OnChainEventType::EventTypeSigner => {
+                self.count("num_signer_events", 1);
+            }
+            OnChainEventType::EventTypeSignerMigrated => {
+                self.count("num_signer_migrated_events", 1);
+            }
+            OnChainEventType::EventTypeIdRegister => {
+                self.count("num_id_register_events", 1);
+            }
+            OnChainEventType::EventTypeStorageRent => {
+                self.count("num_storage_events", 1);
+            }
+        };
         let events = self.onchain_events_by_block.get_mut(&block_number);
         match events {
             None => {
