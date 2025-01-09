@@ -30,19 +30,25 @@ pub struct MempoolKey {
     inserted_at: Instant,
 }
 
+pub struct MempoolMessagesRequest {
+    pub shard_id: u32,
+    pub message_tx: oneshot::Sender<Vec<MempoolMessage>>,
+    pub max_messages_per_block: u32,
+}
+
 pub struct Mempool {
     shard_stores: HashMap<u32, Stores>,
     message_router: Box<dyn MessageRouter>,
     num_shards: u32,
     mempool_rx: mpsc::Receiver<MempoolMessage>,
-    messages_request_rx: mpsc::Receiver<(u32, oneshot::Sender<Option<MempoolMessage>>)>,
+    messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
     messages: HashMap<u32, BTreeMap<MempoolKey, MempoolMessage>>,
 }
 
 impl Mempool {
     pub fn new(
         mempool_rx: mpsc::Receiver<MempoolMessage>,
-        messages_request_rx: mpsc::Receiver<(u32, oneshot::Sender<Option<MempoolMessage>>)>,
+        messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
         num_shards: u32,
         shard_stores: HashMap<u32, Stores>,
     ) -> Self {
@@ -82,18 +88,18 @@ impl Mempool {
         }
     }
 
-    async fn pull_message(&mut self, shard_id: u32, tx: oneshot::Sender<Option<MempoolMessage>>) {
-        let mut message = None;
-        loop {
-            let messages = self.messages.get_mut(&shard_id);
-            match messages {
+    async fn pull_messages(&mut self, request: MempoolMessagesRequest) {
+        let mut messages = vec![];
+        while messages.len() < request.max_messages_per_block as usize {
+            let shard_messages = self.messages.get_mut(&request.shard_id);
+            match shard_messages {
                 None => break,
-                Some(messages) => {
-                    match messages.pop_first() {
+                Some(shard_messages) => {
+                    match shard_messages.pop_first() {
                         None => break,
                         Some((_, next_message)) => {
                             if self.message_is_valid(&next_message) {
-                                message = Some(next_message);
+                                messages.push(next_message);
                                 break;
                             }
                         }
@@ -102,7 +108,7 @@ impl Mempool {
             }
         }
 
-        if let Err(_) = tx.send(message) {
+        if let Err(_) = request.message_tx.send(messages) {
             error!("Unable to send message from mempool");
         }
     }
@@ -147,6 +153,13 @@ impl Mempool {
     pub async fn run(&mut self) {
         loop {
             tokio::select! {
+                biased;
+
+                message_request = self.messages_request_rx.recv() => {
+                    if let Some(messages_request) = message_request {
+                        self.pull_messages(messages_request).await
+                    }
+                }
                 message = self.mempool_rx.recv() => {
                     if let Some(message) = message {
                         // TODO(aditi): Maybe we don't need to run validations here?
@@ -165,11 +178,6 @@ impl Mempool {
                                 }
                             }
                         }
-                    }
-                }
-                message_request = self.messages_request_rx.recv() => {
-                    if let Some((shard_id, tx)) = message_request {
-                        self.pull_message(shard_id, tx).await
                     }
                 }
             }

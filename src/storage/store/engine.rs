@@ -2,6 +2,7 @@ use super::account::{IntoU8, OnchainEventStorageError, UserDataStore};
 use crate::core::error::HubError;
 use crate::core::types::Height;
 use crate::core::validations;
+use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::FarcasterNetwork;
 use crate::proto::HubEvent;
 use crate::proto::Message;
@@ -141,7 +142,7 @@ pub struct ShardEngine {
     stores: Stores,
     statsd_client: StatsdClientWrapper,
     max_messages_per_block: u32,
-    messages_request_tx: Option<mpsc::Sender<(u32, oneshot::Sender<Option<MempoolMessage>>)>>,
+    messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
 }
 
 impl ShardEngine {
@@ -152,7 +153,7 @@ impl ShardEngine {
         store_limits: StoreLimits,
         statsd_client: StatsdClientWrapper,
         max_messages_per_block: u32,
-        messages_request_tx: Option<mpsc::Sender<(u32, oneshot::Sender<Option<MempoolMessage>>)>>,
+        messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
     ) -> ShardEngine {
         // TODO: adding the trie here introduces many calls that want to return errors. Rethink unwrap strategy.
         ShardEngine {
@@ -208,7 +209,14 @@ impl ShardEngine {
                 while messages.len() < self.max_messages_per_block as usize {
                     let (message_tx, message_rx) = oneshot::channel();
 
-                    if let Err(err) = messages_request_tx.send((self.shard_id, message_tx)).await {
+                    if let Err(err) = messages_request_tx
+                        .send(MempoolMessagesRequest {
+                            shard_id: self.shard_id,
+                            message_tx,
+                            max_messages_per_block: self.max_messages_per_block,
+                        })
+                        .await
+                    {
                         error!(
                             "Could not send request for messages to mempool {}",
                             err.to_string()
@@ -216,8 +224,7 @@ impl ShardEngine {
                     }
 
                     match message_rx.await {
-                        Ok(Some(msg)) => messages.push(msg),
-                        Ok(None) => break,
+                        Ok(mut new_messages) => messages.append(&mut new_messages),
                         Err(err) => return Err(EngineError::from(err)),
                     }
                 }

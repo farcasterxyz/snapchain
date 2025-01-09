@@ -5,10 +5,11 @@ use crate::core::types::{
     Address, Height, ShardId, SnapchainShard, SnapchainValidator, SnapchainValidatorContext,
     SnapchainValidatorSet,
 };
+use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::network::gossip::GossipEvent;
 use crate::proto::{Block, ShardChunk};
 use crate::storage::db::RocksDB;
-use crate::storage::store::engine::{BlockEngine, MempoolMessage, Senders, ShardEngine};
+use crate::storage::store::engine::{BlockEngine, Senders, ShardEngine};
 use crate::storage::store::stores::StoreLimits;
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
@@ -20,7 +21,7 @@ use informalsystems_malachitebft_metrics::Metrics;
 use libp2p::identity::ed25519::Keypair;
 use ractor::ActorRef;
 use std::collections::{BTreeMap, HashMap};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tracing::warn;
 
 const MAX_SHARDS: u32 = 64;
@@ -39,7 +40,7 @@ impl SnapchainNode {
         rpc_address: Option<String>,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         block_tx: Option<mpsc::Sender<Block>>,
-        messages_request_tx: mpsc::Sender<(u32, oneshot::Sender<Option<MempoolMessage>>)>,
+        messages_request_tx: mpsc::Sender<MempoolMessagesRequest>,
         block_store: BlockStore,
         rocksdb_dir: String,
         statsd_client: StatsdClientWrapper,
