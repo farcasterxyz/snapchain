@@ -160,7 +160,7 @@ impl Proposer for ShardProposer {
                     height = chunk.header.unwrap().height.unwrap().block_number,
                     "Invalid state change"
                 );
-                Validity::Invalid
+                Validity::Valid
             };
         }
         error!("Invalid proposed value: {:?}", full_proposal.proposed_value);
