@@ -26,7 +26,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::timeout;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Error, Debug)]
 pub enum EngineError {
@@ -669,7 +669,7 @@ impl ShardEngine {
             self.stores
                 .trie
                 .get_hash(&self.db, txn_batch, &TrieKey::for_fid(snapchain_txn.fid));
-        info!(
+        debug!(
             fid = snapchain_txn.fid,
             num_user_messages = total_user_messages,
             num_system_messages = total_system_messages,
