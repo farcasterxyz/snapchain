@@ -338,7 +338,11 @@ impl Consensus {
 
                     let height = state.consensus.driver.height();
                     send_after(Duration::from_secs(10), myself.get_cell(), move || {
-                        info!("Starting consensus");
+                        info!(
+                            shard_index = height.shard_index,
+                            height = height.block_number,
+                            "Starting consensus"
+                        );
                         ConsensusMsg::<SnapchainValidatorContext>::StartHeight(height)
                     });
                 }
