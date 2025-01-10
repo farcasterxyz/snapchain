@@ -174,10 +174,11 @@ impl Mempool {
                     self.messages.insert(shard_id, messages);
                 }
                 Some(messages) => {
-                    // For now, mempool messages are dropped here if the mempool is full.
-                    if messages.len() < self.capacity_per_shard {
-                        messages.insert(message.hex_hash(), message.clone());
+                    if messages.len() >= self.capacity_per_shard {
+                        // For now, mempool messages are dropped here if the mempool is full.
+                        return;
                     }
+                    messages.insert(message.hex_hash(), message.clone());
                 }
             }
 
