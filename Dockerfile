@@ -15,7 +15,7 @@ ENV RUST_BACKTRACE=full
 RUN cargo build --release --bins
 
 ## Pre-generate some configurations we can use
-# TOOD: consider doing something different here
+# TODO: consider doing something different here
 RUN target/release/setup_local_testnet
 
 #################################################################################
