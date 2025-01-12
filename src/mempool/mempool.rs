@@ -29,6 +29,21 @@ impl Default for Config {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MempoolKey {
+    timestamp: u64,
+    identity: String,
+}
+
+impl MempoolKey {
+    pub fn new(timestamp: u64, identity: String) -> Self {
+        MempoolKey {
+            timestamp,
+            identity,
+        }
+    }
+}
+
 pub struct MempoolMessagesRequest {
     pub shard_id: u32,
     pub message_tx: oneshot::Sender<Vec<MempoolMessage>>,
@@ -42,7 +57,7 @@ pub struct Mempool {
     num_shards: u32,
     mempool_rx: mpsc::Receiver<MempoolMessage>,
     messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
-    messages: HashMap<u32, BTreeMap<String, MempoolMessage>>,
+    messages: HashMap<u32, BTreeMap<MempoolKey, MempoolMessage>>,
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     shard_decision_rx: broadcast::Receiver<ShardChunk>,
 }
@@ -170,7 +185,7 @@ impl Mempool {
             match self.messages.get_mut(&shard_id) {
                 None => {
                     let mut messages = BTreeMap::new();
-                    messages.insert(message.hex_hash(), message.clone());
+                    messages.insert(message.mempool_key(), message.clone());
                     self.messages.insert(shard_id, messages);
                 }
                 Some(messages) => {
@@ -178,7 +193,7 @@ impl Mempool {
                         // For now, mempool messages are dropped here if the mempool is full.
                         return;
                     }
-                    messages.insert(message.hex_hash(), message.clone());
+                    messages.insert(message.mempool_key(), message.clone());
                 }
             }
 
@@ -215,10 +230,10 @@ impl Mempool {
                         if let Some(mempool) = self.messages.get_mut(&height.shard_index) {
                             for transaction in chunk.transactions {
                                 for user_message in transaction.user_messages {
-                                    mempool.remove(&user_message.hex_hash());
+                                    mempool.remove(&user_message.mempool_key());
                                 }
                                 for system_message in transaction.system_messages {
-                                    mempool.remove(&system_message.hex_hash());
+                                    mempool.remove(&system_message.mempool_key());
                                 }
                             }
                         }
