@@ -410,53 +410,8 @@ impl CastStore {
         store.get_removes_by_fid::<fn(&Message) -> bool>(fid, page_options, None)
     }
 
-    pub fn get_casts_by_parent(
-        store: &Store<CastStoreDef>,
-        parent: &Parent,
-        page_options: &PageOptions,
-    ) -> Result<MessagesPage, HubError> {
-        let prefix = CastStoreDef::make_cast_by_parent_key(parent, 0, None);
-
-        let mut message_keys = vec![];
-        let mut last_key = vec![];
-
-        store.db().for_each_iterator_by_prefix(
-            Some(prefix.to_vec()),
-            Some(increment_vec_u8(&prefix)),
-            page_options,
-            |key, _| {
-                let ts_hash_offset = prefix.len();
-                let fid_offset = ts_hash_offset + TS_HASH_LENGTH;
-
-                let fid = read_fid_key(key, fid_offset);
-                let ts_hash = read_ts_hash(key, ts_hash_offset);
-                let message_primary_key =
-                    make_message_primary_key(fid, store.postfix(), Some(&ts_hash));
-
-                message_keys.push(message_primary_key.to_vec());
-                if message_keys.len() >= page_options.page_size.unwrap_or(PAGE_SIZE_MAX) {
-                    last_key = key.to_vec();
-                    return Ok(true); // Stop iterating
-                }
-
-                Ok(false) // Continue iterating
-            },
-        )?;
-
-        let messages = get_many_messages(store.db().borrow(), message_keys)?;
-        let next_page_token = if last_key.len() > 0 {
-            Some(last_key[prefix.len()..].to_vec())
-        } else {
-            None
-        };
-
-        Ok(MessagesPage {
-            messages,
-            next_page_token,
-        })
-    }
-
-    pub fn get_casts_by_mention(
+ 
+   pub fn get_casts_by_mention(
         store: &Store<CastStoreDef>,
         mention: u64,
         page_options: &PageOptions,
@@ -501,4 +456,5 @@ impl CastStore {
             next_page_token,
         })
     }
+
 }
