@@ -236,7 +236,7 @@ pub fn validate_fname_transfer(transfer: &proto::FnameTransfer) -> Result<(), Va
     let fname_signer = alloy_primitives::address!("Bc5274eFc266311015793d89E9B591fa46294741");
     let signature = alloy_primitives::PrimitiveSignature::from_bytes_and_parity(
         &proof.signature[0..64],
-        proof.signature[64] != 0x1b,
+        proof.signature[64] != 0x1b && proof.signature[64] != 0x00,
     );
 
     let recovered_address = signature.recover_address_from_prehash(&hash);
@@ -335,7 +335,7 @@ fn validate_verification_eoa_signature(
     let hash = prehash.unwrap();
     let signature = alloy_primitives::PrimitiveSignature::from_bytes_and_parity(
         &body.claim_signature[0..64],
-        body.claim_signature[64] != 0x1b,
+        body.claim_signature[64] != 0x1b && body.claim_signature[64] != 0x00,
     );
 
     let recovered_address = signature.recover_address_from_prehash(&hash);
@@ -385,7 +385,7 @@ fn validate_verification_contract_signature(
     let hash = prehash.unwrap();
     let signature = alloy_primitives::PrimitiveSignature::from_bytes_and_parity(
         &body.claim_signature[0..64],
-        body.claim_signature[64] != 0x1b,
+        body.claim_signature[64] != 0x1b && body.claim_signature[64] != 0x00,
     );
 
     let recovered_address = signature.recover_address_from_prehash(&hash);
