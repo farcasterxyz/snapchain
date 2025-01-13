@@ -2,6 +2,7 @@ use super::account::{IntoU8, OnchainEventStorageError, UserDataStore};
 use crate::core::error::HubError;
 use crate::core::types::Height;
 use crate::core::validations;
+use crate::core::validations::verification;
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::FarcasterNetwork;
 use crate::proto::HubEvent;
@@ -70,7 +71,7 @@ pub enum MessageValidationError {
     MissingSigner,
 
     #[error(transparent)]
-    MessageValidationError(#[from] validations::ValidationError),
+    MessageValidationError(#[from] validations::error::ValidationError),
 
     #[error("invalid message type")]
     InvalidMessageType(i32),
@@ -531,7 +532,7 @@ impl ShardEngine {
                     );
                 }
 
-                match validations::validate_fname_transfer(fname_transfer) {
+                match verification::validate_fname_transfer(fname_transfer) {
                     Ok(_) => {}
                     Err(err) => {
                         warn!("Error validating fname transfer: {:?}", err);
@@ -917,11 +918,11 @@ impl ShardEngine {
         // TODO(aditi): Check network
         let network = FarcasterNetwork::try_from(message_data.network).or_else(|_| {
             Err(MessageValidationError::MessageValidationError(
-                validations::ValidationError::InvalidData,
+                validations::error::ValidationError::InvalidData,
             ))
         })?;
 
-        validations::validate_message(message)?;
+        validations::message::validate_message(message)?;
 
         // Check that the user has a custody address
         self.stores
@@ -947,7 +948,7 @@ impl ShardEngine {
                 // Validate ens
             }
             Some(proto::message_data::Body::VerificationAddAddressBody(add)) => {
-                let result = validations::validate_add_address(add, message_data.fid, network);
+                let result = verification::validate_add_address(add, message_data.fid, network);
                 if result.is_err() {
                     return Err(MessageValidationError::MessageValidationError(
                         result.unwrap_err(),
