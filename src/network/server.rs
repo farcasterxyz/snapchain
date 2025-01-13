@@ -558,6 +558,16 @@ impl HubService for MyHubService {
         CastStore::get_cast_adds_by_fid(&stores.cast_store, request.fid, &options).as_response()
     }
 
+    async fn get_casts_by_mention(
+        &self,
+        request: Request<FidRequest>,
+    ) -> Result<Response<proto::MessagesResponse>, Status> {
+        let request = request.into_inner();
+        let stores = self.get_stores_for(request.fid)?;
+        let options = request.page_options();
+        CastStore::get_casts_by_mention(&stores.cast_store, request.fid, &options).as_response()
+    }
+
     async fn get_all_cast_messages_by_fid(
         &self,
         request: Request<FidTimestampRequest>,
