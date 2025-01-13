@@ -17,7 +17,7 @@ use crate::proto::{FidRequest, FidTimestampRequest};
 use crate::proto::{GetInfoRequest, StorageLimitsResponse};
 use crate::proto::{
     LinkRequest, LinksByFidRequest, Message, MessagesResponse, ReactionRequest,
-    ReactionsByFidRequest, UserDataRequest, VerificationRequest,
+    ReactionsByFidRequest, ReactionsByTargetRequest, UserDataRequest, VerificationRequest,
 };
 use crate::storage::constants::OnChainEventPostfix;
 use crate::storage::constants::RootPrefix;
@@ -264,6 +264,41 @@ impl MyHubService {
                 "missing username proof for username",
             )),
         }
+    }
+
+    async fn get_reactions_by_target(
+        &self,
+        request: Request<ReactionsByTargetRequest>,
+    ) -> Result<Response<MessagesResponse>, Status> {
+        let request = request.into_inner();
+        let target = match request.target {
+            Some(proto::reactions_by_target_request::Target::TargetCastId(ref cast_id)) => {
+                proto::reaction_body::Target::TargetCastId(cast_id.clone())
+            }
+            Some(proto::reactions_by_target_request::Target::TargetUrl(ref url)) => {
+                proto::reaction_body::Target::TargetUrl(url.clone())
+            }
+            None => return Err(Status::invalid_argument("missing target")),
+        };
+
+        // Get the shard ID from the target cast ID if available
+        let shard_id = match &target {
+            proto::reaction_body::Target::TargetCastId(cast_id) => self
+                .message_router
+                .route_message(cast_id.fid, self.num_shards),
+            _ => 0, // Default to shard 0 for URL targets
+        };
+
+        let stores = self.get_stores_for_shard(shard_id)?;
+        let options = request.page_options();
+
+        ReactionStore::get_reactions_by_target(
+            &stores.reaction_store,
+            &target,
+            request.reaction_type.unwrap_or(0),
+            &options,
+        )
+        .as_response()
     }
 }
 
@@ -807,5 +842,12 @@ impl HubService for MyHubService {
             hash: trie_node.hash,
             children,
         }))
+    }
+
+    async fn get_reactions_by_target(
+        &self,
+        request: Request<ReactionsByTargetRequest>,
+    ) -> Result<Response<MessagesResponse>, Status> {
+        self.get_reactions_by_target(request).await
     }
 }

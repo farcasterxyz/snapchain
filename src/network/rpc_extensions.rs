@@ -1,7 +1,8 @@
 use crate::core::error::HubError;
 use crate::proto;
 use crate::proto::{
-    CastsByParentRequest, FidRequest, FidTimestampRequest, LinksByFidRequest, ReactionsByFidRequest,
+    CastsByParentRequest, FidRequest, FidTimestampRequest, LinksByFidRequest,
+    ReactionsByFidRequest, ReactionsByTargetRequest,
 };
 use crate::storage::db::PageOptions;
 use crate::storage::store::account::MessagesPage;
@@ -101,6 +102,12 @@ impl CastsByParentRequest {
 }
 
 impl ReactionsByFidRequest {
+    pub fn page_options(&self) -> PageOptions {
+        page_options(self.page_size, self.page_token.clone(), self.reverse)
+    }
+}
+
+impl ReactionsByTargetRequest {
     pub fn page_options(&self) -> PageOptions {
         page_options(self.page_size, self.page_token.clone(), self.reverse)
     }
