@@ -595,6 +595,17 @@ impl HubService for MyHubService {
         .as_response()
     }
 
+     async fn get_casts_by_mention(
+        &self,
+        request: Request<FidRequest>,
+    ) -> Result<Response<proto::MessagesResponse>, Status> {
+        let request = request.into_inner();
+        let stores = self.get_stores_for(request.fid)?;
+        let options = request.page_options();
+        CastStore::get_casts_by_mention(&stores.cast_store, request.fid, &options).as_response()
+    }
+
+
     async fn get_reactions_by_fid(
         &self,
         request: Request<ReactionsByFidRequest>,
