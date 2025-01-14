@@ -29,8 +29,8 @@ service HubService {
   // Casts
   rpc GetCast(CastId) returns (Message);
   rpc GetCastsByFid(FidRequest) returns (MessagesResponse);
-//  rpc GetCastsByParent(CastsByParentRequest) returns (MessagesResponse);
-//  rpc GetCastsByMention(FidRequest) returns (MessagesResponse);
+  rpc GetCastsByParent(CastsByParentRequest) returns (MessagesResponse);
+  rpc GetCastsByMention(FidRequest) returns (MessagesResponse);
 
 //  // Reactions
   rpc GetReaction(ReactionRequest) returns (Message);
