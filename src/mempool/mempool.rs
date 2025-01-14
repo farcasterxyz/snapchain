@@ -62,7 +62,8 @@ impl Mempool {
         }
     }
 
-    fn message_exists_in_trie(&mut self, fid: u64, trie_key: Vec<u8>) -> bool {
+    fn message_already_exists(&mut self, message: &MempoolMessage) -> bool {
+        let fid = message.fid();
         let shard = self.message_router.route_message(fid, self.num_shards);
         let stores = self.shard_stores.get_mut(&shard);
         match stores {
@@ -134,9 +135,8 @@ impl Mempool {
 
     fn is_message_already_merged(&mut self, message: &MempoolMessage) -> bool {
         let fid = message.fid();
-        let trie_key = Self::get_trie_key(&message);
         match trie_key {
-            Some(trie_key) => self.message_exists_in_trie(fid, trie_key),
+            Some(trie_key) => self.message_already_exists(message),
             None => false,
         }
     }
