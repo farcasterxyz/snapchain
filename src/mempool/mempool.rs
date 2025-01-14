@@ -7,8 +7,15 @@ use tokio::{
 };
 
 use crate::storage::{
-    store::{engine::MempoolMessage, stores::Stores},
-    trie::merkle_trie::{self, TrieKey},
+    db::RocksDbTransactionBatch,
+    store::{
+        account::{
+            get_message_by_key, make_message_primary_key, make_ts_hash, type_to_set_postfix,
+            UserDataStore,
+        },
+        engine::MempoolMessage,
+        stores::Stores,
+    },
 };
 
 use super::routing::{MessageRouter, ShardRouter};
@@ -71,21 +78,52 @@ impl Mempool {
                 error!("Error finding store for shard: {}", shard);
                 false
             }
-            Some(stores) => {
-                // TODO(aditi): The engine reloads its ref to the trie on commit but we maintain a separate ref to the trie here.
-                stores.trie.reload(&stores.db).unwrap();
-                match stores.trie.exists(
-                    &merkle_trie::Context::new(),
-                    &stores.db,
-                    trie_key.as_ref(),
-                ) {
-                    Err(err) => {
-                        error!("Error finding key in trie: {}", err);
-                        false
+            Some(stores) => match message {
+                MempoolMessage::UserMessage(message) => match &message.data {
+                    None => false,
+                    Some(message_data) => {
+                        let ts_hash = make_ts_hash(message_data.timestamp, &message.hash).unwrap();
+                        let set_postfix = type_to_set_postfix(message_data.r#type());
+                        let primary_key =
+                            make_message_primary_key(fid, set_postfix as u8, Some(&ts_hash));
+                        let existing_message = get_message_by_key(
+                            &stores.db,
+                            &mut RocksDbTransactionBatch::new(),
+                            &primary_key,
+                        );
+                        match existing_message {
+                            Ok(Some(_)) => true,
+                            Err(_) | Ok(None) => false,
+                        }
                     }
-                    Ok(exists) => exists,
+                },
+                MempoolMessage::ValidatorMessage(message) => {
+                    if let Some(onchain_event) = &message.on_chain_event {
+                        match stores.onchain_event_store.exists(&onchain_event) {
+                            Err(_) => return false,
+                            Ok(exists) => return exists,
+                        }
+                    }
+
+                    if let Some(fname_transfer) = &message.fname_transfer {
+                        match &fname_transfer.proof {
+                            None => return false,
+                            Some(proof) => {
+                                let username_proof = UserDataStore::get_username_proof(
+                                    &stores.user_data_store,
+                                    &mut RocksDbTransactionBatch::new(),
+                                    &proof.name,
+                                );
+                                match username_proof {
+                                    Err(_) | Ok(None) => return false,
+                                    Ok(Some(_)) => return true,
+                                }
+                            }
+                        }
+                    }
+                    return false;
                 }
-            }
+            },
         }
     }
 
@@ -113,36 +151,8 @@ impl Mempool {
         }
     }
 
-    fn get_trie_key(message: &MempoolMessage) -> Option<Vec<u8>> {
-        match message {
-            MempoolMessage::UserMessage(message) => return Some(TrieKey::for_message(message)),
-            MempoolMessage::ValidatorMessage(validator_message) => {
-                if let Some(onchain_event) = &validator_message.on_chain_event {
-                    return Some(TrieKey::for_onchain_event(&onchain_event));
-                }
-
-                if let Some(fname_transfer) = &validator_message.fname_transfer {
-                    if let Some(proof) = &fname_transfer.proof {
-                        let name = String::from_utf8(proof.name.clone()).unwrap();
-                        return Some(TrieKey::for_fname(fname_transfer.id, &name));
-                    }
-                }
-
-                return None;
-            }
-        }
-    }
-
-    fn is_message_already_merged(&mut self, message: &MempoolMessage) -> bool {
-        let fid = message.fid();
-        match trie_key {
-            Some(trie_key) => self.message_already_exists(message),
-            None => false,
-        }
-    }
-
     pub fn message_is_valid(&mut self, message: &MempoolMessage) -> bool {
-        if self.is_message_already_merged(message) {
+        if self.message_already_exists(message) {
             return false;
         }
 
