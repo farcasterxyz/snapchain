@@ -602,4 +602,165 @@ mod tests {
             .collect::<Vec<_>>()[0];
         assert_eq!(links_limit.used, 1);
     }
+  
+    #[tokio::test]
+    async fn test_get_casts_by_parent() {
+    // Set up a temporary database and stores
+    let (_, _, [mut engine1, mut engine2], service) = make_server().await;
+    let engine1 = &mut engine1;
+    let engine2 = &mut engine2;
+
+    // Register users for different shards
+    test_helper::register_user(
+        SHARD1_FID,
+        test_helper::default_signer(),
+        test_helper::default_custody_address(),
+        engine1,
+    )
+    .await;
+    test_helper::register_user(
+        SHARD2_FID,
+        test_helper::default_signer(),
+        test_helper::default_custody_address(),
+        engine2,
+    )
+    .await;
+
+    // Create a parent CastId and multiple CastAdd messages
+    let parent_cast_id = CastId {
+        fid: SHARD1_FID,
+        hash: "parent_hash".to_string(),
+    };
+    
+    let cast_add = messages_factory::casts::create_cast_add(SHARD1_FID, "test", Some(parent_cast_id.clone()), None);
+    let cast_add2 = messages_factory::casts::create_cast_add(SHARD1_FID, "test2", Some(parent_cast_id.clone()), None);
+
+    // Create another cast for a different shard
+    let another_shard_cast = messages_factory::casts::create_cast_add(SHARD2_FID, "another fid", None, None);
+
+    // Commit CastAdd messages to the engine
+    test_helper::commit_message(engine1, &cast_add).await;
+    test_helper::commit_message(engine1, &cast_add2).await;
+    test_helper::commit_message(engine2, &another_shard_cast).await;
+
+    // Define page options for fetching casts by parent
+    let page_options = PageOptions {
+        page_size: Some(1),
+        page_token: None,
+        reverse: false,
+    };
+
+    // Test fetching Casts by parent ID for SHARD1_FID
+    let result = service
+        .get_casts_by_parent(Request::new(proto::ParentRequest {
+            fid: SHARD1_FID,
+            parent_hash: cast_add.hash.clone(),
+            page_size: Some(1),
+            page_token: None,
+            reverse: Some(false),
+        }))
+        .await
+        .unwrap();
+
+    test_helper::assert_contains_all_messages(&result, &[&cast_add]);
+
+    // Test with reverse ordering
+    let reverse_result = service
+        .get_casts_by_parent(Request::new(proto::ParentRequest {
+            fid: SHARD1_FID,
+            parent_hash: cast_add.hash.clone(),
+            page_size: Some(1),
+            page_token: None,
+            reverse: Some(true),
+        }))
+        .await
+        .unwrap();
+
+    test_helper::assert_contains_all_messages(&reverse_result, &[&cast_add2]);
+
+    // Fetching an invalid parent cast should return an error
+    let invalid_result = service
+        .get_casts_by_parent(Request::new(proto::ParentRequest {
+            fid: SHARD1_FID,
+            parent_hash: "invalid_parent_hash".to_string(),
+            page_size: Some(1),
+            page_token: None,
+            reverse: Some(false),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(invalid_result.code(), tonic::Code::NotFound);
+
+    // Test fetching casts by parent from a different shard (should fail)
+    let cross_shard_result = service
+        .get_casts_by_parent(Request::new(proto::ParentRequest {
+            fid: SHARD2_FID,
+            parent_hash: cast_add.hash.clone(),
+            page_size: Some(1),
+            page_token: None,
+            reverse: Some(false),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(cross_shard_result.code(), tonic::Code::NotFound);
+
+    // Returns all casts for SHARD1_FID
+    let all_casts_request = proto::FidRequest {
+        fid: SHARD1_FID,
+        page_size: Some(2),
+        page_token: None,
+        reverse: None,
+    };
+    let all_casts_response = service
+        .get_casts_by_fid(Request::new(all_casts_request))
+        .await
+        .unwrap();
+
+    // Test that the correct messages are returned for the parent cast
+    test_helper::assert_contains_all_messages(&all_casts_response, &[&cast_add, &cast_add2]);
+
+    // Pagination works: Fetch second page
+    let second_page_request = proto::FidRequest {
+        fid: SHARD1_FID,
+        page_size: Some(1),
+        page_token: all_casts_response.get_ref().next_page_token.clone(),
+        reverse: None,
+    };
+    let second_page_response = service
+        .get_casts_by_fid(Request::new(second_page_request))
+        .await
+        .unwrap();
+
+    test_helper::assert_contains_all_messages(&second_page_response, &[&cast_add2]);
+
+   
+    let reverse_request = proto::FidRequest {
+        fid: SHARD1_FID,
+        page_size: Some(1),
+        page_token: None,
+        reverse: Some(true),
+    };
+    let reverse_response = service
+        .get_casts_by_fid(Request::new(reverse_request))
+        .await
+        .unwrap();
+
+    test_helper::assert_contains_all_messages(&reverse_response, &[&cast_add]);
+
+    // Returns all casts including removed ones (optional, based on business logic)
+    let bulk_casts_request = proto::FidTimestampRequest {
+        fid: SHARD1_FID,
+        page_size: None,
+        page_token: None,
+        reverse: None,
+        start_timestamp: None,
+        stop_timestamp: None,
+    };
+    let bulk_casts_response = service
+        .get_all_cast_messages_by_fid(Request::new(bulk_casts_request))
+        .await
+        .unwrap();
+
+    test_helper::assert_contains_all_messages(&bulk_casts_response, &[&cast_add, &cast_add2]);
+}
 }
