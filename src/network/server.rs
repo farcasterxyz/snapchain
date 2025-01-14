@@ -17,7 +17,7 @@ use crate::proto::{FidRequest, FidTimestampRequest};
 use crate::proto::{GetInfoRequest, StorageLimitsResponse};
 use crate::proto::{
     LinkRequest, LinksByFidRequest, Message, MessagesResponse, ReactionRequest,
-    ReactionsByFidRequest, UserDataRequest, VerificationRequest,
+    ReactionsByFidRequest, UserDataRequest, VerificationRequest, CastsByParentRequest
 };
 use crate::storage::constants::OnChainEventPostfix;
 use crate::storage::constants::RootPrefix;
