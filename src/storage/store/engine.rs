@@ -18,7 +18,6 @@ use crate::storage::trie::merkle_trie;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use itertools::Itertools;
 use merkle_trie::TrieKey;
-use prost::Message;
 use std::collections::HashSet;
 use std::str;
 use std::sync::Arc;
@@ -973,7 +972,7 @@ impl ShardEngine {
         if name.ends_with(".eth") {
             let proof_message = UsernameProofStore::get_username_proof(
                 &self.stores.username_proof_store,
-                &name.encode_to_vec(),
+                &name.as_bytes().to_vec(),
                 UserNameType::UsernameTypeEnsL1 as u8,
             )
             .map_err(|e| MessageValidationError::StoreError {
