@@ -1183,6 +1183,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_merge_ens_username() {
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let ens_name = &"farcaster.eth".to_string();
+        let owner = test_helper::default_custody_address();
+        let signature = "signature".to_string();
+        let signer = test_helper::default_signer();
+        let timestamp = messages_factory::farcaster_time();
+
+        test_helper::register_user(FID_FOR_TEST, signer.clone(), owner.clone(), &mut engine).await;
+
+        let username_proof_add = messages_factory::username_proof::create_username_proof(
+            FID_FOR_TEST as u64,
+            proto::UserNameType::UsernameTypeEnsL1,
+            ens_name.clone(),
+            owner,
+            signature.clone(),
+            timestamp as u64,
+            Some(&signer),
+        );
+
+        commit_message(&mut engine, &username_proof_add).await;
+        let committed_username_proof = engine.get_username_proofs_by_fid(FID_FOR_TEST).unwrap();
+        assert_eq!(committed_username_proof.messages.len(), 1);
+
+        let username_add = messages_factory::user_data::create_user_data_add(
+            FID_FOR_TEST as u64,
+            proto::UserDataType::Username,
+            ens_name,
+            Some(timestamp + 1),
+            Some(&signer),
+        );
+
+        // We had a bug where this commit would fail because we looked in the wrong store to find the username proof
+        commit_message(&mut engine, &username_add).await;
+    }
+
+    #[tokio::test]
     async fn test_username_revoked_when_proof_transferred() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
 

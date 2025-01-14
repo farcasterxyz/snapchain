@@ -1,13 +1,13 @@
+use super::account::UsernameProofStore;
 use super::account::{IntoU8, OnchainEventStorageError, UserDataStore};
 use crate::core::error::HubError;
 use crate::core::types::Height;
 use crate::core::validations;
 use crate::mempool::mempool::MempoolMessagesRequest;
-use crate::proto::FarcasterNetwork;
 use crate::proto::HubEvent;
-use crate::proto::Message;
 use crate::proto::UserNameProof;
 use crate::proto::{self, Block, MessageType, ShardChunk, Transaction};
+use crate::proto::{FarcasterNetwork, UserNameType};
 use crate::proto::{OnChainEvent, OnChainEventType};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{CastStore, MessagesPage};
@@ -18,6 +18,7 @@ use crate::storage::trie::merkle_trie;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use itertools::Itertools;
 use merkle_trie::TrieKey;
+use prost::Message;
 use std::collections::HashSet;
 use std::str;
 use std::sync::Arc;
@@ -963,32 +964,67 @@ impl ShardEngine {
         Ok(())
     }
 
-    fn validate_username(
+    fn get_username_proof(
         &self,
-        fid: u64,
-        fname: &str,
+        name: String,
         txn: &mut RocksDbTransactionBatch,
-    ) -> Result<(), MessageValidationError> {
-        if fname.is_empty() {
-            // Setting an empty username is allowed, no need to validate the proof
-            return Ok(());
-        }
-        let fname = fname.to_string();
-        // TODO: validate fname string
-
-        let proof =
-            UserDataStore::get_username_proof(&self.stores.user_data_store, txn, fname.as_bytes())
+    ) -> Result<Option<UserNameProof>, MessageValidationError> {
+        // TODO(aditi): The fnames proofs should live in the username proof store.
+        if name.ends_with(".eth") {
+            let proof_message = UsernameProofStore::get_username_proof(
+                &self.stores.username_proof_store,
+                &name.encode_to_vec(),
+                UserNameType::UsernameTypeEnsL1 as u8,
+            )
+            .map_err(|e| MessageValidationError::StoreError {
+                inner: e,
+                hash: vec![],
+            })?;
+            match proof_message {
+                Some(message) => match message.data {
+                    None => Ok(None),
+                    Some(message_data) => match message_data.body {
+                        Some(body) => match body {
+                            proto::message_data::Body::UsernameProofBody(user_name_proof) => {
+                                Ok(Some(user_name_proof))
+                            }
+                            _ => Ok(None),
+                        },
+                        None => Ok(None),
+                    },
+                },
+                None => Ok(None),
+            }
+        } else {
+            UserDataStore::get_username_proof(&self.stores.user_data_store, txn, name.as_bytes())
                 .map_err(|e| MessageValidationError::StoreError {
                     inner: e,
                     hash: vec![],
-                })?;
+                })
+        }
+    }
+
+    fn validate_username(
+        &self,
+        fid: u64,
+        name: &str,
+        txn: &mut RocksDbTransactionBatch,
+    ) -> Result<(), MessageValidationError> {
+        if name.is_empty() {
+            // Setting an empty username is allowed, no need to validate the proof
+            return Ok(());
+        }
+        let name = name.to_string();
+        // TODO: validate fname string
+
+        let proof = self.get_username_proof(name.clone(), txn)?;
         match proof {
             Some(proof) => {
                 if proof.fid != fid {
                     return Err(MessageValidationError::MissingFname);
                 }
 
-                if fname.ends_with(".eth") {
+                if name.ends_with(".eth") {
                     // TODO: Validate ens names
                 } else {
                 }
@@ -1134,7 +1170,10 @@ impl ShardEngine {
         }
     }
 
-    pub fn simulate_message(&mut self, message: &Message) -> Result<(), MessageValidationError> {
+    pub fn simulate_message(
+        &mut self,
+        message: &proto::Message,
+    ) -> Result<(), MessageValidationError> {
         let mut txn = RocksDbTransactionBatch::new();
         let snapchain_txn = Transaction {
             fid: message.fid() as u64,
@@ -1207,7 +1246,7 @@ impl ShardEngine {
     pub fn get_links_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
         self.stores
             .link_store
-            .get_adds_by_fid::<fn(&Message) -> bool>(fid, &PageOptions::default(), None)
+            .get_adds_by_fid::<fn(&proto::Message) -> bool>(fid, &PageOptions::default(), None)
     }
 
     pub fn get_link_compact_state_messages_by_fid(
@@ -1222,20 +1261,20 @@ impl ShardEngine {
     pub fn get_reactions_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
         self.stores
             .reaction_store
-            .get_adds_by_fid::<fn(&Message) -> bool>(fid, &PageOptions::default(), None)
+            .get_adds_by_fid::<fn(&proto::Message) -> bool>(fid, &PageOptions::default(), None)
     }
 
     pub fn get_user_data_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
         self.stores
             .user_data_store
-            .get_adds_by_fid::<fn(&Message) -> bool>(fid, &PageOptions::default(), None)
+            .get_adds_by_fid::<fn(&proto::Message) -> bool>(fid, &PageOptions::default(), None)
     }
 
     pub fn get_user_data_by_fid_and_type(
         &self,
         fid: u64,
         user_data_type: proto::UserDataType,
-    ) -> Result<Message, HubError> {
+    ) -> Result<proto::Message, HubError> {
         UserDataStore::get_user_data_by_fid_and_type(
             &self.stores.user_data_store,
             fid,
@@ -1246,13 +1285,13 @@ impl ShardEngine {
     pub fn get_verifications_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
         self.stores
             .verification_store
-            .get_adds_by_fid::<fn(&Message) -> bool>(fid, &PageOptions::default(), None)
+            .get_adds_by_fid::<fn(&proto::Message) -> bool>(fid, &PageOptions::default(), None)
     }
 
     pub fn get_username_proofs_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
         self.stores
             .username_proof_store
-            .get_adds_by_fid::<fn(&Message) -> bool>(fid, &PageOptions::default(), None)
+            .get_adds_by_fid::<fn(&proto::Message) -> bool>(fid, &PageOptions::default(), None)
     }
 
     pub fn get_fname_proof(&self, name: &String) -> Result<Option<UserNameProof>, HubError> {
