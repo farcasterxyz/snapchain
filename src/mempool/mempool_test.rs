@@ -6,7 +6,7 @@ mod tests {
 
     use crate::{
         mempool::mempool::Mempool,
-        proto::{FnameTransfer, UserNameProof, ValidatorMessage},
+        proto::{FnameTransfer, UserNameProof, UserNameType, ValidatorMessage},
         storage::store::{
             engine::{MempoolMessage, ShardEngine},
             test_helper,
@@ -66,19 +66,34 @@ mod tests {
     #[tokio::test]
     async fn test_duplicate_fname_transfer_is_invalid() {
         let (mut engine, mut mempool) = setup();
+        test_helper::register_user(
+            1234,
+            default_signer(),
+            default_custody_address(),
+            &mut engine,
+        )
+        .await;
+        let fname_transfer = FnameTransfer {
+            id: 1234,
+            from_fid: 0,
+            proof: Some(UserNameProof {
+                timestamp: messages_factory::farcaster_time() as u64,
+                name: "farcaster".as_bytes().to_vec(),
+                owner: default_custody_address(),
+                signature: "signature".as_bytes().to_vec(),
+                fid: 1234,
+                r#type: UserNameType::UsernameTypeEnsL1 as i32,
+            }),
+        };
         let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
             on_chain_event: None,
-            fname_transfer: Some(FnameTransfer {
-                id: 1234,
-                from_fid: 0,
-                proof,
-            }),
+            fname_transfer: Some(fname_transfer.clone()),
         }));
         assert!(valid);
-        test_helper::commit_event(&mut engine, &onchain_event).await;
+        test_helper::commit_fname_transfer(&mut engine, &fname_transfer).await;
         let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
-            on_chain_event: Some(onchain_event.clone()),
-            fname_transfer: None,
+            on_chain_event: None,
+            fname_transfer: Some(fname_transfer),
         }));
         assert!(!valid)
     }
