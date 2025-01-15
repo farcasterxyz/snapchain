@@ -150,6 +150,7 @@ pub async fn commit_event(engine: &mut ShardEngine, event: &OnChainEvent) -> Sha
     validate_and_commit_state_change(engine, &state_change)
 }
 
+#[cfg(test)]
 pub async fn commit_fname_transfer(
     engine: &mut ShardEngine,
     fname_transfer: &FnameTransfer,
