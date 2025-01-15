@@ -73,6 +73,7 @@ impl Mempool {
         let fid = message.fid();
         let shard = self.message_router.route_message(fid, self.num_shards);
         let stores = self.shard_stores.get_mut(&shard);
+        // Default to false in the orror paths
         match stores {
             None => {
                 error!("Error finding store for shard: {}", shard);
