@@ -11,6 +11,7 @@ use tempfile;
 use tokio::sync::mpsc;
 
 use crate::core::error::HubError;
+#[allow(unused_imports)] // Used by cfg(test)
 use crate::proto::{self, FnameTransfer};
 use crate::proto::{Height, ShardChunk, ShardHeader, Transaction};
 use crate::proto::{MessagesResponse, OnChainEvent};
