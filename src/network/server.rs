@@ -24,6 +24,7 @@ use crate::storage::constants::RootPrefix;
 use crate::storage::db::PageOptions;
 use crate::storage::db::RocksDbTransactionBatch;
 use crate::storage::store::account::message_bytes_decode;
+use crate::storage::store::account::UsernameProofStore;
 use crate::storage::store::account::{
     CastStore, LinkStore, ReactionStore, UserDataStore, VerificationStore,
 };
@@ -248,18 +249,29 @@ impl MyHubService {
         }
     }
 
-    async fn validate_ens_username(&self, fid: u64, fname: String) -> Result<(), Status> {
+    async fn validate_ens_username(&self, fid: u64, name: String) -> Result<(), Status> {
         let stores = self
             .get_stores_for(fid)
             .map_err(|err| Status::from_error(Box::new(err)))?;
-        let proof = UserDataStore::get_username_proof(
-            &stores.user_data_store,
-            &mut RocksDbTransactionBatch::new(),
-            fname.as_bytes(),
+        let proof_message = UsernameProofStore::get_username_proof(
+            &stores.username_proof_store,
+            &name.as_bytes().to_vec(),
+            UserNameType::UsernameTypeEnsL1 as u8,
         )
         .map_err(|err| Status::from_error(Box::new(err)))?;
-        match proof {
-            Some(proof) => self.validate_ens_username_proof(fid, &proof).await,
+        match proof_message {
+            Some(message) => match message.data {
+                None => Err(Status::invalid_argument("username proof missing data")),
+                Some(message_data) => match message_data.body {
+                    Some(body) => match body {
+                        proto::message_data::Body::UsernameProofBody(proof) => {
+                            self.validate_ens_username_proof(fid, &proof).await
+                        }
+                        _ => Err(Status::invalid_argument("username proof has wrong type")),
+                    },
+                    None => Err(Status::invalid_argument("username proof missing body")),
+                },
+            },
             None => Err(Status::invalid_argument(
                 "missing username proof for username",
             )),
