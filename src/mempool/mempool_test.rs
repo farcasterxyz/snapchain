@@ -2,11 +2,13 @@
 mod tests {
     use std::collections::HashMap;
 
-    use tokio::sync::{broadcast, mpsc};
+    use tokio::sync::{broadcast, mpsc, oneshot};
 
     use crate::{
-        mempool::mempool::Mempool,
-        proto::{FnameTransfer, UserNameProof, UserNameType, ValidatorMessage},
+        consensus::consensus::SystemMessage,
+        mempool::mempool::{Mempool, MempoolMessagesRequest},
+        network::gossip::{Config, SnapchainGossip},
+        proto::{self, FnameTransfer, UserNameProof, UserNameType, ValidatorMessage},
         storage::store::{
             engine::{MempoolMessage, ShardEngine},
             test_helper,
@@ -18,6 +20,10 @@ mod tests {
     };
 
     use self::test_helper::{default_custody_address, default_signer};
+
+    use std::time::Duration;
+
+    use libp2p::identity::ed25519::Keypair;
 
     fn setup() -> (ShardEngine, Mempool) {
         let statsd_client = StatsdClientWrapper::new(
@@ -115,5 +121,114 @@ mod tests {
             fname_transfer: Some(fname_transfer),
         }));
         assert!(!valid)
+    }
+
+    const HOST_FOR_TEST: &str = "127.0.0.1";
+    const PORT_FOR_TEST: u32 = 9388;
+
+    fn setup_gossip_mempool(
+        config: Config,
+    ) -> (
+        SnapchainGossip,
+        Mempool,
+        mpsc::Sender<MempoolMessage>,
+        mpsc::Sender<MempoolMessagesRequest>,
+    ) {
+        let keypair = Keypair::generate();
+        let statsd_client = StatsdClientWrapper::new(
+            cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
+            true,
+        );
+
+        let (system_tx, _) = mpsc::channel::<SystemMessage>(100);
+        let (mempool_tx, mempool_rx) = mpsc::channel(100);
+        let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
+        let (_shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
+        let (engine, _) = test_helper::new_engine();
+        let mut shard_senders = HashMap::new();
+        shard_senders.insert(1, engine.get_senders());
+        let mut shard_stores = HashMap::new();
+        shard_stores.insert(1, engine.get_stores());
+
+        let gossip =
+            SnapchainGossip::create(keypair.clone(), config, system_tx, mempool_tx.clone())
+                .unwrap();
+
+        let mempool = Mempool::new(
+            1024,
+            mempool_rx,
+            messages_request_rx,
+            1,
+            shard_stores,
+            gossip.tx.clone(),
+            shard_decision_rx,
+            statsd_client,
+        );
+
+        (gossip, mempool, mempool_tx.clone(), messages_request_tx)
+    }
+
+    #[tokio::test]
+    async fn test_mempool_gossip() {
+        // Create configs with different ports
+        let node1_addr = format!("/ip4/{HOST_FOR_TEST}/udp/{PORT_FOR_TEST}/quic-v1");
+        let node2_port = PORT_FOR_TEST + 1;
+        let node2_addr = format!("/ip4/{HOST_FOR_TEST}/udp/{node2_port}/quic-v1");
+        let config1 = Config::new(node1_addr.clone(), node2_addr.clone());
+        let config2 = Config::new(node2_addr.clone(), node1_addr.clone());
+
+        let (mut gossip1, mut mempool1, mempool_tx1, _mempool_requests_tx1) =
+            setup_gossip_mempool(config1);
+        let (mut gossip2, mut mempool2, _mempool_tx2, mempool_requests_tx2) =
+            setup_gossip_mempool(config2);
+
+        // Spawn gossip tasks
+        tokio::spawn(async move {
+            gossip1.start().await;
+        });
+        tokio::spawn(async move {
+            gossip2.start().await;
+        });
+
+        // Spawn mempool tasks
+        tokio::spawn(async move {
+            mempool1.run().await;
+        });
+        tokio::spawn(async move {
+            mempool2.run().await;
+        });
+
+        // Wait for connection to establish
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Create a test message
+        let cast: proto::Message =
+            messages_factory::casts::create_cast_add(1234, "hello", None, None);
+
+        // Add message to mempool 1
+        mempool_tx1
+            .send(MempoolMessage::UserMessage(cast))
+            .await
+            .unwrap();
+
+        // Wait for gossip
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        // Setup channel to retrieve message
+        let (mempool_retrieval_tx, mempool_retrieval_rx) = oneshot::channel();
+
+        // Query mempool 2 for the message
+        mempool_requests_tx2
+            .send(MempoolMessagesRequest {
+                shard_id: 1,
+                max_messages_per_block: 1,
+                message_tx: mempool_retrieval_tx,
+            })
+            .await
+            .unwrap();
+
+        let result = mempool_retrieval_rx.await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].fid(), 1234);
     }
 }

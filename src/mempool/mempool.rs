@@ -279,6 +279,11 @@ impl Mempool {
                         self.pull_messages(messages_request).await
                     }
                 }
+                message = self.mempool_rx.recv() => {
+                    if let Some(message) = message {
+                        self.insert(message).await;
+                    }
+                }
                 chunk = self.shard_decision_rx.recv() => {
                     if let Ok(chunk) = chunk {
                         let header = chunk.header.expect("Expects chunk to have a header");
@@ -295,11 +300,6 @@ impl Mempool {
                                 }
                             }
                         }
-                    }
-                }
-                message = self.mempool_rx.recv() => {
-                    if let Some(message) = message {
-                        self.insert(message).await;
                     }
                 }
             }
