@@ -3,17 +3,23 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use crate::{core::types::SnapchainValidatorContext, network::gossip::GossipEvent, proto::ShardChunk, storage::{
-    db::RocksDbTransactionBatch,
-    store::{
-        account::{
-            get_message_by_key, make_message_primary_key, make_ts_hash, type_to_set_postfix,
-            UserDataStore,
+use crate::{
+    core::types::SnapchainValidatorContext,
+    network::gossip::GossipEvent,
+    proto::{self, ShardChunk},
+    storage::{
+        db::RocksDbTransactionBatch,
+        store::{
+            account::{
+                get_message_by_key, make_message_primary_key, make_ts_hash, type_to_set_postfix,
+                UserDataStore,
+            },
+            engine::MempoolMessage,
+            stores::Stores,
         },
-        engine::MempoolMessage,
-        stores::Stores,
     },
-}};
+    utils::statsd_wrapper::StatsdClientWrapper,
+};
 
 use super::routing::{MessageRouter, ShardRouter};
 use tracing::{error, warn};
@@ -44,6 +50,41 @@ impl MempoolKey {
     }
 }
 
+impl proto::Message {
+    pub fn mempool_key(&self) -> MempoolKey {
+        if let Some(data) = &self.data {
+            return MempoolKey::new(data.timestamp as u64, self.hex_hash());
+        }
+        todo!();
+    }
+}
+
+impl proto::ValidatorMessage {
+    pub fn mempool_key(&self) -> MempoolKey {
+        if let Some(fname) = &self.fname_transfer {
+            if let Some(proof) = &fname.proof {
+                return MempoolKey::new(proof.timestamp, fname.id.to_string());
+            }
+        }
+        if let Some(event) = &self.on_chain_event {
+            return MempoolKey::new(
+                event.block_timestamp,
+                hex::encode(&event.transaction_hash) + &event.log_index.to_string(),
+            );
+        }
+        todo!();
+    }
+}
+
+impl MempoolMessage {
+    pub fn mempool_key(&self) -> MempoolKey {
+        match self {
+            MempoolMessage::UserMessage(msg) => msg.mempool_key(),
+            MempoolMessage::ValidatorMessage(msg) => msg.mempool_key(),
+        }
+    }
+}
+
 pub struct MempoolMessagesRequest {
     pub shard_id: u32,
     pub message_tx: oneshot::Sender<Vec<MempoolMessage>>,
@@ -60,6 +101,7 @@ pub struct Mempool {
     messages: HashMap<u32, BTreeMap<MempoolKey, MempoolMessage>>,
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     shard_decision_rx: broadcast::Receiver<ShardChunk>,
+    statsd_client: StatsdClientWrapper,
 }
 
 impl Mempool {
@@ -71,6 +113,7 @@ impl Mempool {
         shard_stores: HashMap<u32, Stores>,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         shard_decision_rx: broadcast::Receiver<ShardChunk>,
+        statsd_client: StatsdClientWrapper,
     ) -> Self {
         Mempool {
             capacity_per_shard,
@@ -82,6 +125,7 @@ impl Mempool {
             messages_request_rx,
             gossip_tx,
             shard_decision_rx,
+            statsd_client,
         }
     }
 
@@ -187,6 +231,8 @@ impl Mempool {
                     let mut messages = BTreeMap::new();
                     messages.insert(message.mempool_key(), message.clone());
                     self.messages.insert(shard_id, messages);
+                    self.statsd_client
+                        .gauge_with_shard(shard_id, "mempool.size", 1);
                 }
                 Some(messages) => {
                     if messages.len() >= self.capacity_per_shard {
@@ -194,8 +240,16 @@ impl Mempool {
                         return;
                     }
                     messages.insert(message.mempool_key(), message.clone());
+                    self.statsd_client.gauge_with_shard(
+                        shard_id,
+                        "mempool.size",
+                        messages.len() as u64,
+                    );
                 }
             }
+
+            self.statsd_client
+                .count_with_shard(shard_id, "mempool.insert.success", 1);
 
             match message {
                 MempoolMessage::UserMessage(_) => {
@@ -210,6 +264,8 @@ impl Mempool {
                 }
                 _ => {}
             }
+        } else {
+            self.statsd_client.count("mempool.insert.failure", 1);
         }
     }
 
@@ -231,9 +287,11 @@ impl Mempool {
                             for transaction in chunk.transactions {
                                 for user_message in transaction.user_messages {
                                     mempool.remove(&user_message.mempool_key());
+                                    self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
                                 }
                                 for system_message in transaction.system_messages {
                                     mempool.remove(&system_message.mempool_key());
+                                    self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
                                 }
                             }
                         }

@@ -3,7 +3,6 @@ use super::account::{IntoU8, OnchainEventStorageError, UserDataStore};
 use crate::core::error::HubError;
 use crate::core::types::Height;
 use crate::core::validations;
-use crate::mempool::mempool::MempoolKey;
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::HubEvent;
 use crate::proto::UserNameProof;
@@ -106,13 +105,6 @@ impl MempoolMessage {
         match self {
             MempoolMessage::UserMessage(msg) => msg.fid(),
             MempoolMessage::ValidatorMessage(msg) => msg.fid(),
-        }
-    }
-
-    pub fn mempool_key(&self) -> MempoolKey {
-        match self {
-            MempoolMessage::UserMessage(msg) => msg.mempool_key(),
-            MempoolMessage::ValidatorMessage(msg) => msg.mempool_key(),
         }
     }
 

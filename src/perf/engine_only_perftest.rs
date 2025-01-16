@@ -6,6 +6,7 @@ use crate::storage::store::engine::{MempoolMessage, ShardStateChange};
 use crate::storage::store::stores::StoreLimits;
 use crate::storage::store::test_helper;
 use crate::utils::cli::compose_message;
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::HashMap;
 use std::error::Error;
 use std::time::Duration;
@@ -46,6 +47,11 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         messages_request_tx: Some(messages_request_tx),
     });
 
+    let statsd_client = StatsdClientWrapper::new(
+        cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
+        true,
+    );
+
     let mut shard_stores = HashMap::new();
     shard_stores.insert(1, engine.get_stores());
     let mut mempool = Mempool::new(
@@ -56,6 +62,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         shard_stores,
         gossip_tx,
         shard_decision_rx,
+        statsd_client,
     );
 
     tokio::spawn(async move {

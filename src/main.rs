@@ -160,6 +160,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         node.shard_stores.clone(),
         gossip_tx.clone(),
         shard_decision_rx,
+        statsd_client.clone(),
     );
     tokio::spawn(async move { mempool.run().await });
 

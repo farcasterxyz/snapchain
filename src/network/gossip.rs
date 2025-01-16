@@ -252,7 +252,6 @@ impl SnapchainGossip {
 
                                         }
                                         Some(proto::gossip_message::GossipMessage::MempoolMessage(message)) => {
-                                            debug!("Received mempool message from peer: {}", peer_id);
                                             if let Some(mempool_message_proto) = message.mempool_message {
 
                                                 let mempool_message = match mempool_message_proto {
@@ -314,7 +313,6 @@ impl SnapchainGossip {
                             self.publish(encoded_message);
                         },
                         Some(GossipEvent::BroadcastMempoolMessage(message)) => {
-                            debug!("Broadcasting mempool message");
                             let proto_message = message.to_proto();
                             let gossip_message = proto::GossipMessage {
                                 gossip_message: Some(proto::gossip_message::GossipMessage::MempoolMessage(proto_message)),

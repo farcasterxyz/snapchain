@@ -11,12 +11,20 @@ mod tests {
             engine::{MempoolMessage, ShardEngine},
             test_helper,
         },
-        utils::factory::{events_factory, messages_factory},
+        utils::{
+            factory::{events_factory, messages_factory},
+            statsd_wrapper::StatsdClientWrapper,
+        },
     };
 
     use self::test_helper::{default_custody_address, default_signer};
 
     fn setup() -> (ShardEngine, Mempool) {
+        let statsd_client = StatsdClientWrapper::new(
+            cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
+            true,
+        );
+
         let (_mempool_tx, mempool_rx) = mpsc::channel(100);
         let (_mempool_tx, messages_request_rx) = mpsc::channel(100);
         let (gossip_tx, _gossip_rx) = mpsc::channel(100);
@@ -34,6 +42,7 @@ mod tests {
             shard_stores,
             gossip_tx,
             shard_decision_rx,
+            statsd_client,
         );
         (engine, mempool)
     }

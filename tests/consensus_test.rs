@@ -124,6 +124,7 @@ impl NodeForTest {
             node.shard_stores.clone(),
             gossip_tx,
             shard_decision_rx,
+            statsd_client.clone(),
         );
         tokio::spawn(async move { mempool.run().await });
 

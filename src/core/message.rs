@@ -1,4 +1,3 @@
-use crate::mempool::mempool::MempoolKey;
 use crate::proto;
 use crate::proto::MessageType;
 
@@ -26,13 +25,6 @@ impl proto::Message {
     pub fn hex_hash(&self) -> String {
         hex::encode(&self.hash)
     }
-
-    pub fn mempool_key(&self) -> MempoolKey {
-        if let Some(data) = &self.data {
-            return MempoolKey::new(data.timestamp as u64, self.hex_hash());
-        }
-        todo!();
-    }
 }
 
 impl proto::ValidatorMessage {
@@ -46,20 +38,5 @@ impl proto::ValidatorMessage {
             return event.fid;
         }
         0
-    }
-
-    pub fn mempool_key(&self) -> MempoolKey {
-        if let Some(fname) = &self.fname_transfer {
-            if let Some(proof) = &fname.proof {
-                return MempoolKey::new(proof.timestamp, fname.id.to_string());
-            }
-        }
-        if let Some(event) = &self.on_chain_event {
-            return MempoolKey::new(
-                event.block_timestamp,
-                hex::encode(&event.transaction_hash) + &event.log_index.to_string(),
-            );
-        }
-        todo!();
     }
 }
