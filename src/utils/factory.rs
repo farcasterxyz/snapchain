@@ -459,7 +459,7 @@ pub mod messages_factory {
             private_key: Option<&SigningKey>,
         ) -> message::Message {
             let body = VerificationRemoveBody {
-                address: address.encode_to_vec(),
+                address: address.as_bytes().to_vec(),
                 protocol: 0,
             };
             create_message_with_data(
@@ -489,7 +489,7 @@ pub mod messages_factory {
                 timestamp,
                 name: name.encode_to_vec(),
                 owner,
-                signature: signature.encode_to_vec(),
+                signature: signature.as_bytes().to_vec(),
                 fid,
                 r#type: username_type as i32,
             };
