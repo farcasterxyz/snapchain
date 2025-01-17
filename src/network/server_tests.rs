@@ -462,31 +462,47 @@ mod tests {
         test_helper::assert_contains_all_messages(&response, &[&cast_add2]);
 
         // Pagination works
-        let all_casts_request = proto::FidRequest {
+        let all_casts_request = proto::FidTimestampRequest {
             fid: SHARD1_FID,
             page_size: Some(1),
             page_token: None,
             reverse: None,
+            start_timestamp: None,
+            stop_timestamp: None,
         };
         let response = service
-            .get_casts_by_fid(Request::new(all_casts_request))
+            .get_all_cast_messages_by_fid(Request::new(all_casts_request))
             .await;
         test_helper::assert_contains_all_messages(&response, &[&cast_add2]);
 
         // TODO: Fix pagination
-        // let second_page_request = proto::FidRequest { fid: SHARD1_FID, page_size: Some(1), page_token: response.as_ref().unwrap().get_ref().next_page_token.clone(), reverse: None };
+        let second_page_request = proto::FidTimestampRequest {
+            fid: SHARD1_FID,
+            page_size: Some(1),
+            page_token: response.as_ref().unwrap().get_ref().next_page_token.clone(),
+            reverse: None,
+            start_timestamp: None,
+            stop_timestamp: None,
+        };
         // warn!("second_page_request: {:?}", second_page_request);
-        // let response = service
-        //     .get_casts_by_fid(Request::new(second_page_request))
-        //     .await;
+        let response = service
+            .get_all_cast_messages_by_fid(Request::new(second_page_request))
+            .await;
         // warn!("response: {:?}", response);
-        // test_helper::assert_contains_all_messages(&response, &[&cast_remove]);
+        test_helper::assert_contains_all_messages(&response, &[&cast_remove]);
 
-        // let reverse_request = proto::FidRequest { fid: SHARD1_FID, page_size: Some(1), page_token: None, reverse: Some(true) };
-        // let response = service
-        //     .get_casts_by_fid(Request::new(reverse_request))
-        //     .await;
-        // test_helper::assert_contains_all_messages(&response, &[&cast_remove]);
+        let reverse_request = proto::FidTimestampRequest {
+            fid: SHARD1_FID,
+            page_size: Some(1),
+            page_token: None,
+            reverse: Some(true),
+            start_timestamp: None,
+            stop_timestamp: None,
+        };
+        let response = service
+            .get_all_cast_messages_by_fid(Request::new(reverse_request))
+            .await;
+        test_helper::assert_contains_all_messages(&response, &[&cast_remove]);
 
         // Returns all casts
         let bulk_casts_request = proto::FidTimestampRequest {
