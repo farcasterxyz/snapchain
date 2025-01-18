@@ -475,7 +475,6 @@ mod tests {
             .await;
         test_helper::assert_contains_all_messages(&response, &[&cast_add2]);
 
-        // TODO: Fix pagination
         let second_page_request = proto::FidTimestampRequest {
             fid: SHARD1_FID,
             page_size: Some(1),
@@ -484,11 +483,9 @@ mod tests {
             start_timestamp: None,
             stop_timestamp: None,
         };
-        // warn!("second_page_request: {:?}", second_page_request);
         let response = service
             .get_all_cast_messages_by_fid(Request::new(second_page_request))
             .await;
-        // warn!("response: {:?}", response);
         test_helper::assert_contains_all_messages(&response, &[&cast_remove]);
 
         let reverse_request = proto::FidTimestampRequest {
