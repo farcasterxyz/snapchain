@@ -4218,6 +4218,7 @@ dependencies = [
 [[package]]
 name = "malachite-common"
 version = "0.1.0"
+source = "git+https://github.com/informalsystems/malachite.git?rev=8a9f3702eb41199bc8a7f45139adba233a04744a#8a9f3702eb41199bc8a7f45139adba233a04744a"
 dependencies = [
  "bytes",
  "derive-where",
@@ -4226,6 +4227,7 @@ dependencies = [
 [[package]]
 name = "malachite-config"
 version = "0.1.0"
+source = "git+https://github.com/informalsystems/malachite.git?rev=8a9f3702eb41199bc8a7f45139adba233a04744a#8a9f3702eb41199bc8a7f45139adba233a04744a"
 dependencies = [
  "bytesize",
  "humantime-serde",
@@ -4237,6 +4239,7 @@ dependencies = [
 [[package]]
 name = "malachite-consensus"
 version = "0.1.0"
+source = "git+https://github.com/informalsystems/malachite.git?rev=8a9f3702eb41199bc8a7f45139adba233a04744a#8a9f3702eb41199bc8a7f45139adba233a04744a"
 dependencies = [
  "async-recursion",
  "derive-where",
@@ -4253,6 +4256,7 @@ dependencies = [
 [[package]]
 name = "malachite-driver"
 version = "0.1.0"
+source = "git+https://github.com/informalsystems/malachite.git?rev=8a9f3702eb41199bc8a7f45139adba233a04744a#8a9f3702eb41199bc8a7f45139adba233a04744a"
 dependencies = [
  "derive-where",
  "malachite-common",
@@ -4263,6 +4267,7 @@ dependencies = [
 [[package]]
 name = "malachite-metrics"
 version = "0.1.0"
+source = "git+https://github.com/informalsystems/malachite.git?rev=8a9f3702eb41199bc8a7f45139adba233a04744a#8a9f3702eb41199bc8a7f45139adba233a04744a"
 dependencies = [
  "malachite-round",
  "prometheus-client",
@@ -4271,6 +4276,7 @@ dependencies = [
 [[package]]
 name = "malachite-node"
 version = "0.1.0"
+source = "git+https://github.com/informalsystems/malachite.git?rev=8a9f3702eb41199bc8a7f45139adba233a04744a#8a9f3702eb41199bc8a7f45139adba233a04744a"
 dependencies = [
  "malachite-common",
  "rand",
@@ -4280,6 +4286,7 @@ dependencies = [
 [[package]]
 name = "malachite-round"
 version = "0.1.0"
+source = "git+https://github.com/informalsystems/malachite.git?rev=8a9f3702eb41199bc8a7f45139adba233a04744a#8a9f3702eb41199bc8a7f45139adba233a04744a"
 dependencies = [
  "derive-where",
  "displaydoc",
@@ -4289,6 +4296,7 @@ dependencies = [
 [[package]]
 name = "malachite-vote"
 version = "0.1.0"
+source = "git+https://github.com/informalsystems/malachite.git?rev=8a9f3702eb41199bc8a7f45139adba233a04744a#8a9f3702eb41199bc8a7f45139adba233a04744a"
 dependencies = [
  "derive-where",
  "malachite-common",

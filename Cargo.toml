@@ -25,11 +25,11 @@ async-trait = "0.1.68"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt", "json"] }
 hex = "0.4.3"
 ractor = "0.11.2"
-malachite-consensus = { path = "../malachite/code/crates/consensus" }
-malachite-common = { path = "../malachite/code/crates/common" }
-malachite-config = { path = "../malachite/code/crates/config" }
-malachite-node = { path = "../malachite/code/crates/node" }
-malachite-metrics = { path = "../malachite/code/crates/metrics" }
+malachite-consensus = { git = "https://github.com/informalsystems/malachite.git", rev = "8a9f3702eb41199bc8a7f45139adba233a04744a", package = "malachite-consensus" }
+malachite-common = { git = "https://github.com/informalsystems/malachite.git", rev = "8a9f3702eb41199bc8a7f45139adba233a04744a", package = "malachite-common" }
+malachite-config = { git = "https://github.com/informalsystems/malachite.git", rev = "8a9f3702eb41199bc8a7f45139adba233a04744a", package = "malachite-config" }
+malachite-node = { git = "https://github.com/informalsystems/malachite.git", rev = "8a9f3702eb41199bc8a7f45139adba233a04744a", package = "malachite-node" }
+malachite-metrics = { git = "https://github.com/informalsystems/malachite.git", rev = "8a9f3702eb41199bc8a7f45139adba233a04744a", package = "malachite-metrics" }
 blake3 = "1.4.1"
 tracing = "0.1.40"
 thiserror = "1.0.66"
