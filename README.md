@@ -27,7 +27,7 @@ Snapchain is currently in early alpha. Please check the release section of the [
 
 We welcome contributions from developers of all skill levels. Please look for issues labeled with "help wanted" to find good tickets to work on. If you are working on something that is not explicitly a ticket, we may or may not accept it. We encourage checking with someone on the team before spending a lot of time on something. 
 
-We will ban and report accounts that appear to engage in reputating farming by using LLMs or automated tools to generate PRs. 
+We will ban and report accounts that appear to engage in reputation farming by using LLMs or automated tools to generate PRs. 
 
 ## Installation
 
@@ -40,14 +40,14 @@ Before you begin, ensure you have the following installed:
 
 ### Installation
 
-1. First clone the malachite repo and checkout the correct commit:
+1. First clone the malachite repo and check out the correct commit:
    ```
    git clone git@github.com:informalsystems/malachite.git
    cd malachite
-   git checkout 8a9f3702eb41199bc8a7f45139adba233a04744a # Remember to update GitHub workflow when changing
+   git check out 8a9f3702eb41199bc8a7f45139adba233a04744a # Remember to update the GitHub workflow when changing the commit
    cd code && cargo build
    ```
-2. Then clone the snapchain repo and build it:
+2. Next clone the snapchain repo and build it:
    ```
    cd ..
    git clone https://github.com/farcasterxyz/snapchain-v0.git
@@ -75,7 +75,7 @@ These will be configured to communicate with each other.
 To query a node, you can run `grpcurl` from within the container:
 
 ```
-docker compose exec node1 grpcurl -import-path proto -proto proto/rpc.proto list
+docker-compose exec node1 grpcurl -import-path proto -proto proto/rpc.proto list
 ```
 
 ### Clean up
