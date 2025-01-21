@@ -361,7 +361,76 @@ impl RocksDB {
         txn.commit().map_err(|e| RocksdbError::InternalError(e))
     }
 
-    fn get_iterator_options(
+    fn get_iterator_options(prefix: &[u8], page_options: &PageOptions) -> IteratorOptions {
+        // Handle the special case if the prefix is empty, then we want to iterate over the entire database
+        if prefix.is_empty() {
+            let mut opts = rocksdb::ReadOptions::default();
+
+            if page_options.reverse {
+                if page_options.page_token.is_none() {
+                    opts.set_iterate_upper_bound(vec![255u8; 32]);
+                } else {
+                    // The upper bound is exclusive, so no need to increment the page_token
+                    opts.set_iterate_upper_bound(page_options.page_token.clone().unwrap());
+                }
+
+                opts.set_iterate_lower_bound(vec![]);
+            } else {
+                if page_options.page_token.is_none() {
+                    opts.set_iterate_lower_bound(vec![]);
+                } else {
+                    // lower_bound is always inclusive, so we need to increment the page_token
+                    opts.set_iterate_lower_bound(increment_vec_u8(
+                        &page_options.page_token.clone().unwrap(),
+                    ));
+                }
+
+                opts.set_iterate_upper_bound(vec![255u8; 32]);
+            }
+
+            return IteratorOptions {
+                opts,
+                reverse: page_options.reverse,
+            };
+        }
+
+        let mut lower_prefix;
+        let mut upper_prefix;
+
+        if page_options.reverse {
+            lower_prefix = prefix.to_vec();
+            if let Some(token) = &page_options.page_token {
+                upper_prefix = prefix.to_vec();
+                upper_prefix.extend_from_slice(token);
+            } else {
+                upper_prefix = increment_vec_u8(&prefix.to_vec());
+            }
+        } else {
+            if let Some(token) = &page_options.page_token {
+                lower_prefix = prefix.to_vec();
+                lower_prefix.extend_from_slice(token);
+
+                // move to the next key, since the page_token is the key of the last seen item
+                lower_prefix = increment_vec_u8(&lower_prefix);
+            } else {
+                lower_prefix = prefix.to_vec();
+            }
+
+            let prefix_end = increment_vec_u8(&prefix.to_vec());
+            upper_prefix = prefix_end.to_vec();
+        }
+
+        let mut opts = rocksdb::ReadOptions::default();
+        opts.set_iterate_lower_bound(lower_prefix);
+        opts.set_iterate_upper_bound(upper_prefix);
+
+        IteratorOptions {
+            opts,
+            reverse: page_options.reverse,
+        }
+    }
+
+    fn get_iterator_options_with_range(
         start_prefix: Option<Vec<u8>>,
         stop_prefix: Option<Vec<u8>>,
         page_options: &PageOptions,
@@ -406,22 +475,15 @@ impl RocksDB {
         }
     }
 
-    /**
-     * Iterate over all keys with a given prefix.
-     * The callback function should return true to stop the iteration, or false to continue.
-     */
-    pub fn for_each_iterator_by_prefix_paged<F>(
+    fn iter_by_page<F>(
         &self,
-        start_prefix: Option<Vec<u8>>,
-        stop_prefix: Option<Vec<u8>>,
+        iter_opts: IteratorOptions,
         page_options: &PageOptions,
         mut f: F,
     ) -> Result<bool, HubError>
     where
         F: FnMut(&[u8], &[u8]) -> Result<bool, HubError>,
     {
-        let iter_opts = RocksDB::get_iterator_options(start_prefix, stop_prefix, page_options);
-
         let db = self.db();
         let mut iter = db.as_ref().unwrap().raw_iterator_opt(iter_opts.opts);
 
@@ -458,10 +520,68 @@ impl RocksDB {
 
         Ok(all_done)
     }
+    /**
+     * Iterate over all keys with a given prefix.
+     * The callback function should return true to stop the iteration, or false to continue.
+     */
+    pub fn for_each_iterator_by_prefix_paged<F>(
+        &self,
+        prefix: Vec<u8>,
+        page_options: &PageOptions,
+        f: F,
+    ) -> Result<bool, HubError>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<bool, HubError>,
+    {
+        let iter_opts = RocksDB::get_iterator_options(&prefix, page_options);
+        return self.iter_by_page(iter_opts, page_options, f);
+    }
+
+    /**
+     * Iterate over all keys with a given prefix range.
+     * The callback function should return true to stop the iteration, or false to continue.
+     */
+    pub fn for_each_iterator_by_prefix_range_paged<F>(
+        &self,
+        start_prefix: Option<Vec<u8>>,
+        stop_prefix: Option<Vec<u8>>,
+        page_options: &PageOptions,
+        f: F,
+    ) -> Result<bool, HubError>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<bool, HubError>,
+    {
+        let iter_opts =
+            RocksDB::get_iterator_options_with_range(start_prefix, stop_prefix, page_options);
+
+        return self.iter_by_page(iter_opts, page_options, f);
+    }
 
     // Same as for_each_iterator_by_prefix above, but does not limit by page size. To be used in
     // cases where higher level callers are doing custom filtering
     pub fn for_each_iterator_by_prefix<F>(
+        &self,
+        prefix: Vec<u8>,
+        page_options: &PageOptions,
+        f: F,
+    ) -> Result<bool, HubError>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<bool, HubError>,
+    {
+        let unbounded_page_options = PageOptions {
+            page_size: None,
+            page_token: page_options.page_token.clone(),
+            reverse: page_options.reverse,
+        };
+
+        let all_done =
+            self.for_each_iterator_by_prefix_paged(prefix, &unbounded_page_options, f)?;
+        Ok(all_done)
+    }
+
+    // Same as for_each_iterator_by_prefix above, but does not limit by page size. To be used in
+    // cases where higher level callers are doing custom filtering
+    pub fn for_each_iterator_by_prefix_range<F>(
         &self,
         start_prefix: Option<Vec<u8>>,
         stop_prefix: Option<Vec<u8>>,
@@ -477,7 +597,7 @@ impl RocksDB {
             reverse: page_options.reverse,
         };
 
-        let all_done = self.for_each_iterator_by_prefix_paged(
+        let all_done = self.for_each_iterator_by_prefix_range_paged(
             start_prefix,
             stop_prefix,
             &unbounded_page_options,
@@ -529,11 +649,7 @@ impl RocksDB {
      * Count the number of keys with a given prefix.
      */
     pub fn count_keys_at_prefix(&self, prefix: Vec<u8>) -> Result<u32, HubError> {
-        let iter_opts = RocksDB::get_iterator_options(
-            Some(prefix.clone()),
-            Some(increment_vec_u8(&prefix.to_vec())),
-            &PageOptions::default(),
-        );
+        let iter_opts = RocksDB::get_iterator_options(&prefix, &PageOptions::default());
 
         let db = self.db();
         let mut iter = db.as_ref().unwrap().raw_iterator_opt(iter_opts.opts);

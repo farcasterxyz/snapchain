@@ -7,7 +7,7 @@ use super::{
 use crate::core::error::HubError;
 use crate::storage::constants::{RootPrefix, UserPostfix};
 use crate::storage::db::PageOptions;
-use crate::storage::util::{bytes_compare, increment_vec_u8};
+use crate::storage::util::bytes_compare;
 use crate::{
     proto::{self as message, Message, MessageType},
     storage::db::{RocksDB, RocksDbTransactionBatch},
@@ -420,11 +420,9 @@ impl CastStore {
         let mut message_keys = vec![];
         let mut last_key = vec![];
 
-        store.db().for_each_iterator_by_prefix(
-            Some(prefix.to_vec()),
-            Some(increment_vec_u8(&prefix)),
-            page_options,
-            |key, _| {
+        store
+            .db()
+            .for_each_iterator_by_prefix(prefix.to_vec(), page_options, |key, _| {
                 let ts_hash_offset = prefix.len();
                 let fid_offset = ts_hash_offset + TS_HASH_LENGTH;
 
@@ -440,8 +438,7 @@ impl CastStore {
                 }
 
                 Ok(false) // Continue iterating
-            },
-        )?;
+            })?;
 
         let messages = get_many_messages(store.db().borrow(), message_keys)?;
         let next_page_token = if last_key.len() > 0 {
@@ -466,11 +463,9 @@ impl CastStore {
         let mut message_keys = vec![];
         let mut last_key = vec![];
 
-        store.db().for_each_iterator_by_prefix(
-            Some(prefix.to_vec()),
-            Some(increment_vec_u8(&prefix)),
-            page_options,
-            |key, _| {
+        store
+            .db()
+            .for_each_iterator_by_prefix(prefix.to_vec(), page_options, |key, _| {
                 let ts_hash_offset = prefix.len();
                 let fid_offset = ts_hash_offset + TS_HASH_LENGTH;
 
@@ -486,8 +481,7 @@ impl CastStore {
                 }
 
                 Ok(false) // Continue iterating
-            },
-        )?;
+            })?;
 
         let messages_bytes = get_many_messages(store.db().borrow(), message_keys)?;
         let next_page_token = if last_key.len() > 0 {

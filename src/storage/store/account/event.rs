@@ -150,7 +150,7 @@ impl HubEvent {
         let mut last_key = vec![];
         let page_options = page_options.unwrap_or_else(|| PageOptions::default());
 
-        db.for_each_iterator_by_prefix_paged(
+        db.for_each_iterator_by_prefix_range_paged(
             Some(start_prefix),
             Some(stop_prefix),
             &page_options,

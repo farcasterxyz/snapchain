@@ -3,7 +3,6 @@ use crate::core::error::HubError;
 use crate::core::types::FidOnDisk;
 use crate::storage::constants::{RootPrefix, UserPostfix};
 use crate::storage::db::{PageOptions, RocksdbError};
-use crate::storage::util::increment_vec_u8;
 use crate::{
     proto::{CastId, Message as MessageProto, MessageData, MessageType},
     storage::db::{RocksDB, RocksDbTransactionBatch},
@@ -231,31 +230,26 @@ where
     let mut messages = Vec::new();
     let mut last_key = vec![];
 
-    db.for_each_iterator_by_prefix(
-        Some(prefix.to_vec()),
-        Some(increment_vec_u8(&prefix.to_vec())),
-        page_options,
-        |key, value| {
-            match message_decode(value) {
-                Ok(message) => {
-                    if filter(&message) {
-                        messages.push(message);
+    db.for_each_iterator_by_prefix(prefix.to_vec(), page_options, |key, value| {
+        match message_decode(value) {
+            Ok(message) => {
+                if filter(&message) {
+                    messages.push(message);
 
-                        if messages.len() >= page_options.page_size.unwrap_or(PAGE_SIZE_MAX) {
-                            last_key = key.to_vec();
-                            return Ok(true); // Stop iterating
-                        }
+                    if messages.len() >= page_options.page_size.unwrap_or(PAGE_SIZE_MAX) {
+                        last_key = key.to_vec();
+                        return Ok(true); // Stop iterating
                     }
-
-                    Ok(false) // Continue iterating
                 }
-                Err(e) => Err(HubError::from(e)),
+
+                Ok(false) // Continue iterating
             }
-        },
-    )?;
+            Err(e) => Err(HubError::from(e)),
+        }
+    })?;
 
     let next_page_token = if last_key.len() > 0 {
-        Some(last_key.to_vec())
+        Some(last_key[prefix.len()..].to_vec())
     } else {
         None
     };

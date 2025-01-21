@@ -60,7 +60,7 @@ fn get_block_page_by_prefix(
         Some(key) => key,
     };
 
-    db.for_each_iterator_by_prefix_paged(
+    db.for_each_iterator_by_prefix_range_paged(
         Some(start_prefix),
         Some(stop_prefix),
         page_options,

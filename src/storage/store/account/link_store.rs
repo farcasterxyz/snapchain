@@ -4,12 +4,12 @@ use super::{
     store::{Store, StoreDef},
     MessagesPage, StoreEventHandler, PAGE_SIZE_MAX, TS_HASH_LENGTH,
 };
+use crate::proto::LinkBody;
 use crate::{
     core::error::HubError,
     proto::{link_body::Target, SignatureScheme},
 };
 use crate::{proto::message_data::Body, storage::db::PageOptions};
-use crate::{proto::LinkBody, storage::util::increment_vec_u8};
 use crate::{
     proto::MessageData,
     storage::constants::{RootPrefix, UserPostfix},
@@ -131,18 +131,16 @@ impl LinkStore {
         r#type: String,
         page_options: &PageOptions,
     ) -> Result<MessagesPage, HubError> {
-        let start_prefix: Vec<u8> = LinkStore::links_by_target_key(target, 0, None)?;
+        let prefix: Vec<u8> = LinkStore::links_by_target_key(target, 0, None)?;
 
         let mut message_keys = vec![];
         let mut last_key = vec![];
 
-        store.db().for_each_iterator_by_prefix(
-            Some(start_prefix.to_vec()),
-            Some(increment_vec_u8(&start_prefix)),
-            page_options,
-            |key, value| {
+        store
+            .db()
+            .for_each_iterator_by_prefix(prefix.clone(), page_options, |key, value| {
                 if r#type.is_empty() || value.eq(r#type.as_bytes()) {
-                    let ts_hash_offset = start_prefix.len();
+                    let ts_hash_offset = prefix.len();
                     let fid_offset: usize = ts_hash_offset + TS_HASH_LENGTH;
 
                     let fid = read_fid_key(key, fid_offset);
@@ -158,12 +156,11 @@ impl LinkStore {
                 }
 
                 Ok(false)
-            },
-        )?;
+            })?;
 
         let messages = get_many_messages(store.db().borrow(), message_keys)?;
         let next_page_token = if last_key.len() > 0 {
-            Some(last_key.to_vec())
+            Some(last_key[prefix.len()..].to_vec())
         } else {
             None
         };
