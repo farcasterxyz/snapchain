@@ -8,12 +8,15 @@ mod tests {
     use std::time::Duration;
 
     use crate::connectors::onchain_events::L1Client;
+    use crate::core::validations::{self, VerificationAddressClaim};
     use crate::mempool::mempool::Mempool;
     use crate::mempool::routing;
     use crate::mempool::routing::MessageRouter;
     use crate::network::server::MyHubService;
     use crate::proto::hub_service_server::HubService;
-    use crate::proto::{self, HubEvent, HubEventType, UserNameProof, UserNameType};
+    use crate::proto::{
+        self, HubEvent, HubEventType, UserNameProof, UserNameType, VerificationAddAddressBody,
+    };
     use crate::proto::{FidRequest, SubscribeRequest};
     use crate::storage::db::{self, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::engine::{Senders, ShardEngine};
@@ -54,6 +57,14 @@ mod tests {
                 &hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap(),
             );
             future::ready(Ok(addr)).await
+        }
+
+        async fn verify_contract_signature(
+            &self,
+            _claim: VerificationAddressClaim,
+            _body: &VerificationAddAddressBody,
+        ) -> Result<(), validations::ValidationError> {
+            future::ready(Ok(())).await
         }
     }
 

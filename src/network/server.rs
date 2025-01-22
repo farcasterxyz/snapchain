@@ -1,6 +1,8 @@
 use super::rpc_extensions::{AsMessagesResponse, AsSingleMessageResponse};
 use crate::connectors::onchain_events::L1Client;
 use crate::core::error::HubError;
+use crate::core::validations;
+use crate::core::validations::VerificationAddressClaim;
 use crate::mempool::routing;
 use crate::proto;
 use crate::proto::hub_service_server::HubService;
@@ -11,6 +13,7 @@ use crate::proto::TrieNodeMetadataRequest;
 use crate::proto::TrieNodeMetadataResponse;
 use crate::proto::UserNameProof;
 use crate::proto::UserNameType;
+use crate::proto::VerificationAddAddressBody;
 use crate::proto::{Block, CastId, DbStats};
 use crate::proto::{BlocksRequest, ShardChunksRequest, ShardChunksResponse, SubscribeRequest};
 use crate::proto::{FidRequest, FidTimestampRequest};
@@ -116,7 +119,7 @@ impl MyHubService {
                 )));
             }
 
-            // We're doing the ens validations here for now because we don't want ens resolution to be on the consensus critical path. Eventually this will move to the fname server.
+            // We're doing the ens and address validations here for now because we don't want L1 interactions to be on the consensus critical path. Eventually this will move to the fname server.
             if let Some(message_data) = &message.data {
                 match &message_data.body {
                     Some(proto::message_data::Body::UserDataBody(user_data)) => {
@@ -130,6 +133,29 @@ impl MyHubService {
                     Some(proto::message_data::Body::UsernameProofBody(proof)) => {
                         if proof.r#type() == UserNameType::UsernameTypeEnsL1 {
                             self.validate_ens_username_proof(fid, &proof).await?;
+                        }
+                    }
+                    Some(proto::message_data::Body::VerificationAddAddressBody(body)) => {
+                        if body.verification_type == 1 {
+                            // todo: thread through network
+                            let claim_result = validations::make_verification_address_claim(
+                                message_data.fid,
+                                &body.address,
+                                proto::FarcasterNetwork::Mainnet,
+                                &body.block_hash,
+                                proto::Protocol::Ethereum,
+                            );
+                            match claim_result {
+                                Ok(claim) => {
+                                    self.validate_contract_signature(claim, body).await?;
+                                }
+                                Err(err) => {
+                                    return Err(Status::invalid_argument(format!(
+                                        "Invalid message: {}",
+                                        err.to_string()
+                                    )))
+                                }
+                            }
                         }
                     }
                     _ => {}
@@ -172,6 +198,29 @@ impl MyHubService {
     fn get_stores_for(&self, fid: u64) -> Result<&Stores, Status> {
         let shard_id = self.message_router.route_message(fid, self.num_shards);
         self.get_stores_for_shard(shard_id)
+    }
+
+    pub async fn validate_contract_signature(
+        &self,
+        claim: VerificationAddressClaim,
+        body: &VerificationAddAddressBody,
+    ) -> Result<(), Status> {
+        match &self.l1_client {
+            None => {
+                // Fail validation, can be fixed with config change
+                Err(Status::invalid_argument(
+                    "unable to validate contract signature because there's no l1 client",
+                ))
+            }
+            Some(l1_client) => l1_client
+                .verify_contract_signature(claim, body)
+                .await
+                .or_else(|_| {
+                    Err(Status::invalid_argument(
+                        "could not verify contract signature",
+                    ))
+                }),
+        }
     }
 
     pub async fn validate_ens_username_proof(
