@@ -53,6 +53,7 @@ impl MempoolKey {
 impl proto::Message {
     pub fn mempool_key(&self) -> MempoolKey {
         if let Some(data) = &self.data {
+            // TODO: Consider revisiting choice of timestamp here as backdated messages currently are prioritized.
             return MempoolKey::new(data.timestamp as u64, self.hex_hash());
         }
         todo!();
@@ -237,6 +238,10 @@ impl Mempool {
                 Some(messages) => {
                     if messages.len() >= self.capacity_per_shard {
                         // For now, mempool messages are dropped here if the mempool is full.
+                        warn!(
+                            fid = message.fid(),
+                            "Message dropped due to mempool being over capacity"
+                        );
                         return;
                     }
                     messages.insert(message.mempool_key(), message.clone());
