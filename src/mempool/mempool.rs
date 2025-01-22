@@ -84,17 +84,27 @@ impl Mempool {
                     None => false,
                     Some(message_data) => {
                         let ts_hash = make_ts_hash(message_data.timestamp, &message.hash).unwrap();
-                        let set_postfix = type_to_set_postfix(message_data.r#type());
-                        let primary_key =
-                            make_message_primary_key(fid, set_postfix as u8, Some(&ts_hash));
-                        let existing_message = get_message_by_key(
-                            &stores.db,
-                            &mut RocksDbTransactionBatch::new(),
-                            &primary_key,
-                        );
-                        match existing_message {
-                            Ok(Some(_)) => true,
-                            Err(_) | Ok(None) => false,
+                        match type_to_set_postfix(message_data.r#type()) {
+                            Err(err) => {
+                                error!("Error retrieving set postfix: {}", err.to_string());
+                                false
+                            }
+                            Ok(set_postfix) => {
+                                let primary_key = make_message_primary_key(
+                                    fid,
+                                    set_postfix as u8,
+                                    Some(&ts_hash),
+                                );
+                                let existing_message = get_message_by_key(
+                                    &stores.db,
+                                    &mut RocksDbTransactionBatch::new(),
+                                    &primary_key,
+                                );
+                                match existing_message {
+                                    Ok(Some(_)) => true,
+                                    Err(_) | Ok(None) => false,
+                                }
+                            }
                         }
                     }
                 },
