@@ -45,6 +45,11 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
+          repository: CassOnMars/eth-signature-verifier
+          path: ./eth-signature-verifier
+
+      - uses: actions/checkout@v4
+        with:
           path: ./snapchain
 
       - working-directory: ./snapchain

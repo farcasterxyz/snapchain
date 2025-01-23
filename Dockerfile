@@ -6,11 +6,14 @@ WORKDIR /usr/src/app
 ARG MALACHITE_GIT_REPO_URL=https://github.com/informalsystems/malachite.git
 ENV MALACHITE_GIT_REPO_URL=$MALACHITE_GIT_REPO_URL
 ARG MALACHITE_GIT_REF=8a9f3702eb41199bc8a7f45139adba233a04744a
+ARG ETH_SIGNATURE_VERIFIER_GIT_REPO_URL=https://github.com/CassOnMars/eth-signature-verifier.git
+ENV ETH_SIGNATURE_VERIFIER_GIT_REPO_URL=$ETH_SIGNATURE_VERIFIER_GIT_REPO_URL
 ENV RUST_BACKTRACE=1
 RUN <<EOF
 set -eu
 apt-get update && apt-get install -y libclang-dev git libjemalloc-dev llvm-dev make protobuf-compiler libssl-dev openssh-client cmake
 cd ..
+git clone $ETH_SIGNATURE_VERIFIER_GIT_REPO_URL
 git clone $MALACHITE_GIT_REPO_URL
 cd malachite
 git checkout $MALACHITE_GIT_REF

@@ -1,7 +1,10 @@
 use crate::proto::{self, VerificationAddAddressBody};
 use crate::storage::util::{blake3_20, bytes_compare};
 use alloy_dyn_abi::TypedData;
+use alloy_provider::Provider;
+use alloy_transport::Transport;
 use ed25519_dalek::{Signature, VerifyingKey};
+use eth_signature_verifier::Verification;
 use prost::Message;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -351,10 +354,15 @@ fn validate_verification_eoa_signature(
     Ok(())
 }
 
-fn validate_verification_contract_signature(
+pub async fn validate_verification_contract_signature<P, T>(
+    provider: P,
     claim: VerificationAddressClaim,
     body: &VerificationAddAddressBody,
-) -> Result<(), ValidationError> {
+) -> Result<(), ValidationError>
+where
+    P: Provider<T>,
+    T: Transport + Clone,
+{
     let json = json!({
         "types": eip_712_farcaster_verification_claim(),
         "primaryType": "VerificationClaim",
@@ -383,22 +391,21 @@ fn validate_verification_contract_signature(
     }
 
     let hash = prehash.unwrap();
-    let signature = alloy_primitives::PrimitiveSignature::from_bytes_and_parity(
-        &body.claim_signature[0..64],
-        body.claim_signature[64] != 0x1b && body.claim_signature[64] != 0x00,
-    );
 
-    let recovered_address = signature.recover_address_from_prehash(&hash);
-    if recovered_address.is_err() {
-        return Err(ValidationError::InvalidSignature);
+    match eth_signature_verifier::verify_signature(
+        alloy_primitives::Bytes::from(body.claim_signature.clone()),
+        alloy_primitives::Address::from(&body.address.clone().try_into().unwrap()),
+        hash,
+        &provider,
+    )
+    .await
+    {
+        Ok(verification) => match verification {
+            Verification::Valid => Ok(()),
+            Verification::Invalid => Err(ValidationError::InvalidSignature),
+        },
+        Err(_) => Err(ValidationError::InvalidSignature),
     }
-
-    let recovered = recovered_address.unwrap().to_vec();
-    if recovered != body.address {
-        return Err(ValidationError::InvalidSignature);
-    }
-
-    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -410,7 +417,7 @@ pub struct VerificationAddressClaim {
     protocol: i32,
 }
 
-fn make_verification_address_claim(
+pub fn make_verification_address_claim(
     fid: u64,
     address: &Vec<u8>,
     network: proto::FarcasterNetwork,
@@ -487,7 +494,8 @@ fn validate_verification_add_eth_address_signature(
 
     match body.verification_type {
         0 => validate_verification_eoa_signature(reconstructed_claim.unwrap(), body),
-        1 => validate_verification_contract_signature(reconstructed_claim.unwrap(), body),
+        // Verification of contract signatures must happen out of consensus loop.
+        1 => Ok(()),
         _ => Err(ValidationError::InvalidData),
     }
 }
