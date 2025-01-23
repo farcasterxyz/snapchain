@@ -8,7 +8,10 @@ mod tests {
         consensus::consensus::SystemMessage,
         mempool::mempool::{Mempool, MempoolMessagesRequest},
         network::gossip::{Config, SnapchainGossip},
-        proto::{self, FnameTransfer, UserNameProof, UserNameType, ValidatorMessage},
+        proto::{
+            self, FnameTransfer, Height, ShardChunk, ShardHeader, Transaction, UserNameProof,
+            UserNameType, ValidatorMessage,
+        },
         storage::store::{
             engine::{MempoolMessage, ShardEngine},
             test_helper,
@@ -25,16 +28,22 @@ mod tests {
 
     use libp2p::identity::ed25519::Keypair;
 
-    fn setup() -> (ShardEngine, Mempool) {
+    fn setup() -> (
+        ShardEngine,
+        Mempool,
+        mpsc::Sender<MempoolMessage>,
+        mpsc::Sender<MempoolMessagesRequest>,
+        broadcast::Sender<ShardChunk>,
+    ) {
         let statsd_client = StatsdClientWrapper::new(
             cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
             true,
         );
 
-        let (_mempool_tx, mempool_rx) = mpsc::channel(100);
-        let (_mempool_tx, messages_request_rx) = mpsc::channel(100);
+        let (mempool_tx, mempool_rx) = mpsc::channel(100);
+        let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
         let (gossip_tx, _gossip_rx) = mpsc::channel(100);
-        let (_shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
+        let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
         let (engine, _) = test_helper::new_engine();
         let mut shard_senders = HashMap::new();
         shard_senders.insert(1, engine.get_senders());
@@ -50,12 +59,18 @@ mod tests {
             shard_decision_rx,
             statsd_client,
         );
-        (engine, mempool)
+        (
+            engine,
+            mempool,
+            mempool_tx,
+            messages_request_tx,
+            shard_decision_tx,
+        )
     }
 
     #[tokio::test]
     async fn test_duplicate_user_message_is_invalid() {
-        let (mut engine, mut mempool) = setup();
+        let (mut engine, mut mempool, _, _, _) = setup();
         test_helper::register_user(
             1234,
             default_signer(),
@@ -73,7 +88,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_onchain_event_is_invalid() {
-        let (mut engine, mut mempool) = setup();
+        let (mut engine, mut mempool, _, _, _) = setup();
         let onchain_event = events_factory::create_rent_event(1234, Some(10), None, false);
         let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
             on_chain_event: Some(onchain_event.clone()),
@@ -90,7 +105,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_fname_transfer_is_invalid() {
-        let (mut engine, mut mempool) = setup();
+        let (mut engine, mut mempool, _, _, _) = setup();
         test_helper::register_user(
             1234,
             default_signer(),
@@ -121,6 +136,84 @@ mod tests {
             fname_transfer: Some(fname_transfer),
         }));
         assert!(!valid)
+    }
+
+    #[tokio::test]
+    async fn test_mempool_eviction() {
+        let (mut engine, mut mempool, mempool_tx, messages_request_tx, shard_decision_tx) = setup();
+        test_helper::register_user(
+            1234,
+            default_signer(),
+            default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        // Spawn mempool task
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let fid = 1234;
+
+        let cast1 = messages_factory::casts::create_cast_add(fid, "hello", None, None);
+        let cast2 = messages_factory::casts::create_cast_add(fid, "world", None, None);
+
+        let _ = mempool_tx
+            .send(MempoolMessage::UserMessage(cast1.clone()))
+            .await;
+        let _ = mempool_tx.send(MempoolMessage::UserMessage(cast2)).await;
+
+        // Wait for cast processing
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let transaction = Transaction {
+            fid,
+            user_messages: vec![cast1],
+            system_messages: vec![],
+            account_root: vec![],
+        };
+
+        let header = ShardHeader {
+            height: Some(Height {
+                shard_index: 1,
+                block_number: 1,
+            }),
+            timestamp: 0,
+            parent_hash: vec![],
+            shard_root: vec![],
+        };
+
+        // Create fake chunk with cast1
+        let chunk = ShardChunk {
+            header: Some(header),
+            hash: vec![],
+            transactions: vec![transaction],
+            votes: None,
+        };
+
+        let _ = shard_decision_tx.send(chunk);
+
+        // Wait for chunk processing
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Setup channel to retrieve messages
+        let (mempool_retrieval_tx, mempool_retrieval_rx) = oneshot::channel();
+
+        // Query mempool for the messages
+        messages_request_tx
+            .send(MempoolMessagesRequest {
+                shard_id: 1,
+                max_messages_per_block: 2,
+                message_tx: mempool_retrieval_tx,
+            })
+            .await
+            .unwrap();
+
+        let result = mempool_retrieval_rx.await.unwrap();
+        // We expect one of the added casts to have been evicted
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].fid(), fid);
     }
 
     const HOST_FOR_TEST: &str = "127.0.0.1";
