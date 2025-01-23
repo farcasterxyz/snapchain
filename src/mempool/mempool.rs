@@ -48,6 +48,10 @@ impl MempoolKey {
             identity,
         }
     }
+
+    pub fn identity(self) -> String {
+        self.identity
+    }
 }
 
 impl proto::Message {
@@ -240,6 +244,7 @@ impl Mempool {
                         // For now, mempool messages are dropped here if the mempool is full.
                         warn!(
                             fid = message.fid(),
+                            identity = message.mempool_key().identity(),
                             "Message dropped due to mempool being over capacity"
                         );
                         return;
