@@ -1,4 +1,4 @@
-use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
+use malachite_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::onchain_events::{L1Client, RealL1Client};
 use snapchain::consensus::consensus::SystemMessage;
 use snapchain::core::types::proto;
@@ -53,9 +53,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     if app_config.clear_db {
         let db_dir = format!("{}", app_config.rocksdb_dir);
-        std::fs::remove_dir_all(db_dir.clone()).unwrap();
-        std::fs::create_dir_all(db_dir.clone()).unwrap();
-        warn!("Cleared db at {:?}", db_dir);
+        if std::path::Path::new(&db_dir).exists() {
+            let remove_result = std::fs::remove_dir_all(db_dir.clone());
+            if let Err(e) = remove_result {
+                error!("Failed to clear db at {:?}: {}", db_dir, e);
+            }
+            let create_result = std::fs::create_dir_all(db_dir.clone());
+            if let Err(e) = create_result {
+                error!("Failed to create db dir at {:?}: {}", db_dir, e);
+            }
+            warn!("Cleared db at {:?}", db_dir);
+        } else {
+            warn!("No db to clear at {:?}", db_dir);
+        }
     }
 
     if app_config.statsd.prefix == "" {
@@ -160,6 +170,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let mut onchain_events_subscriber = snapchain::connectors::onchain_events::Subscriber::new(
             app_config.onchain_events,
             mempool_tx.clone(),
+            statsd_client.clone(),
         )?;
         tokio::spawn(async move {
             let result = onchain_events_subscriber.run(false).await;

@@ -1,6 +1,6 @@
 use crate::core::validations::error::ValidationError;
 use crate::proto::reaction_body::Target;
-use crate::proto::{FarcasterNetwork, MessageType, ReactionBody, ReactionType};
+use crate::proto::{FarcasterNetwork, ReactionBody, ReactionType};
 
 use super::{validate_cast_id, validate_url};
 

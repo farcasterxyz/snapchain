@@ -1,5 +1,4 @@
 use crate::core::validations::error::ValidationError;
-use crate::core::validations::message;
 use crate::proto::cast_add_body::Parent;
 use crate::proto::{embed, CastAddBody, CastRemoveBody, CastType, Embed};
 use std::result::Result;
@@ -10,10 +9,6 @@ pub fn validate_cast_add_body(
     body: &CastAddBody,
     allow_embeds_deprecated: bool,
 ) -> Result<(), ValidationError> {
-    if body.text.is_empty() {
-        return Err(ValidationError::InvalidData);
-    }
-
     let text_bytes = body.text.as_bytes();
 
     match CastType::try_from(body.r#type) {
@@ -74,7 +69,7 @@ pub fn validate_cast_add_body(
         validate_fid(fid)?;
         let position = body.mentions_positions[idx];
 
-        if position < 0 || position > text_bytes.len() as u32 {
+        if position > text_bytes.len() as u32 {
             return Err(ValidationError::InvalidData);
         }
 

@@ -6,7 +6,6 @@ mod tests {
     use crate::storage::store::test_helper;
     use crate::utils::factory::{messages_factory, time};
     use prost::Message;
-    use proto::{FnameTransfer, UserNameProof};
 
     fn assert_validation_error(msg: &proto::Message, expected_error: ValidationError) {
         let result = validate_message(msg);

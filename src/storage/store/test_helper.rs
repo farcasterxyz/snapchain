@@ -11,7 +11,8 @@ use tempfile;
 use tokio::sync::mpsc;
 
 use crate::core::error::HubError;
-use crate::proto;
+#[allow(unused_imports)] // Used by cfg(test)
+use crate::proto::{self, FnameTransfer};
 use crate::proto::{Height, ShardChunk, ShardHeader, Transaction};
 use crate::proto::{MessagesResponse, OnChainEvent};
 use crate::storage::store::account::MessagesPage;
@@ -144,6 +145,22 @@ pub async fn commit_event(engine: &mut ShardEngine, event: &OnChainEvent) -> Sha
         vec![MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
             on_chain_event: Some(event.clone()),
             fname_transfer: None,
+        })],
+    );
+
+    validate_and_commit_state_change(engine, &state_change)
+}
+
+#[cfg(test)]
+pub async fn commit_fname_transfer(
+    engine: &mut ShardEngine,
+    fname_transfer: &FnameTransfer,
+) -> ShardChunk {
+    let state_change = engine.propose_state_change(
+        1,
+        vec![MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
+            on_chain_event: None,
+            fname_transfer: Some(fname_transfer.clone()),
         })],
     );
 

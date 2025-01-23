@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use alloy_primitives::{address, Address, FixedBytes, Uint};
+use alloy_primitives::{address, ruint::FromUintError, Address, FixedBytes};
 use alloy_provider::{Provider, ProviderBuilder, RootProvider};
 use alloy_rpc_types::{Filter, Log};
 use alloy_sol_types::{sol, SolEvent};
@@ -14,12 +14,17 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use crate::{
+    core::validations,
+    core::validations::verification::{
+        validate_verification_contract_signature, VerificationAddressClaim,
+    },
     proto::{
         on_chain_event, IdRegisterEventBody, IdRegisterEventType, OnChainEvent, OnChainEventType,
         SignerEventBody, SignerEventType, SignerMigratedEventBody, StorageRentEventBody,
-        ValidatorMessage,
+        ValidatorMessage, VerificationAddAddressBody,
     },
     storage::store::engine::MempoolMessage,
+    utils::statsd_wrapper::StatsdClientWrapper,
 };
 
 sol!(
@@ -81,6 +86,12 @@ pub enum SubscribeError {
     #[error(transparent)]
     UnableToParseLog(#[from] alloy_sol_types::Error),
 
+    #[error(transparent)]
+    UnableToConvertToU64(#[from] FromUintError<u64>),
+
+    #[error(transparent)]
+    UnableToConvertToU32(#[from] FromUintError<u32>),
+
     #[error("Empty rpc url")]
     EmptyRpcUrl,
 
@@ -106,6 +117,11 @@ pub enum SubscribeError {
 #[async_trait]
 pub trait L1Client: Send + Sync {
     async fn resolve_ens_name(&self, name: String) -> Result<Address, EnsError>;
+    async fn verify_contract_signature(
+        &self,
+        claim: VerificationAddressClaim,
+        body: &VerificationAddAddressBody,
+    ) -> Result<(), validations::error::ValidationError>;
 }
 
 pub struct RealL1Client {
@@ -130,6 +146,14 @@ impl L1Client for RealL1Client {
             .resolve(&self.provider)
             .await
     }
+
+    async fn verify_contract_signature(
+        &self,
+        claim: VerificationAddressClaim,
+        body: &VerificationAddAddressBody,
+    ) -> Result<(), validations::error::ValidationError> {
+        validate_verification_contract_signature(&self.provider, claim, body).await
+    }
 }
 
 pub struct Subscriber {
@@ -138,6 +162,7 @@ pub struct Subscriber {
     mempool_tx: mpsc::Sender<MempoolMessage>,
     start_block_number: u64,
     stop_block_number: u64,
+    statsd_client: StatsdClientWrapper,
 }
 
 // TODO(aditi): Wait for 1 confirmation before "committing" an onchain event.
@@ -145,6 +170,7 @@ impl Subscriber {
     pub fn new(
         config: Config,
         mempool_tx: mpsc::Sender<MempoolMessage>,
+        statsd_client: StatsdClientWrapper,
     ) -> Result<Subscriber, SubscribeError> {
         if config.rpc_url.is_empty() {
             return Err(SubscribeError::EmptyRpcUrl);
@@ -157,7 +183,13 @@ impl Subscriber {
             mempool_tx,
             start_block_number: config.start_block_number,
             stop_block_number: config.stop_block_number,
+            statsd_client,
         })
+    }
+
+    fn count(&self, key: &str, value: u64) {
+        self.statsd_client
+            .count(format!("onchain_events.{}", key).as_str(), value);
     }
 
     async fn add_onchain_event(
@@ -194,6 +226,21 @@ impl Subscriber {
             log_index = event.log_index,
             "Processed onchain event"
         );
+        match event_type {
+            OnChainEventType::EventTypeNone => {}
+            OnChainEventType::EventTypeSigner => {
+                self.count("num_signer_events", 1);
+            }
+            OnChainEventType::EventTypeSignerMigrated => {
+                self.count("num_signer_migrated_events", 1);
+            }
+            OnChainEventType::EventTypeIdRegister => {
+                self.count("num_id_register_events", 1);
+            }
+            OnChainEventType::EventTypeStorageRent => {
+                self.count("num_storage_events", 1);
+            }
+        };
         let events = self.onchain_events_by_block.get_mut(&block_number);
         match events {
             None => {
@@ -263,13 +310,13 @@ impl Subscriber {
         match event.topic0() {
             Some(&StorageRegistryAbi::Rent::SIGNATURE_HASH) => {
                 let StorageRegistryAbi::Rent { payer, fid, units } = event.log_decode()?.inner.data;
-                let fid = Uint::to::<u64>(&fid);
+                let fid = fid.try_into()?;
                 add_event(
                     fid,
                     OnChainEventType::EventTypeStorageRent,
                     on_chain_event::Body::StorageRentEventBody(StorageRentEventBody {
                         payer: payer.to_vec(),
-                        units: Uint::to::<u32>(&units),
+                        units: units.try_into()?,
                         expiry: (block_timestamp + RENT_EXPIRY_IN_SECONDS) as u32,
                     }),
                 )
@@ -278,7 +325,7 @@ impl Subscriber {
             }
             Some(&IdRegistryAbi::Register::SIGNATURE_HASH) => {
                 let IdRegistryAbi::Register { to, id, recovery } = event.log_decode()?.inner.data;
-                let fid = Uint::to::<u64>(&id);
+                let fid = id.try_into()?;
                 add_event(
                     fid,
                     OnChainEventType::EventTypeIdRegister,
@@ -294,7 +341,7 @@ impl Subscriber {
             }
             Some(&IdRegistryAbi::Transfer::SIGNATURE_HASH) => {
                 let IdRegistryAbi::Transfer { from, to, id } = event.log_decode()?.inner.data;
-                let fid = Uint::to::<u64>(&id);
+                let fid = id.try_into()?;
                 add_event(
                     fid,
                     OnChainEventType::EventTypeIdRegister,
@@ -311,7 +358,7 @@ impl Subscriber {
             Some(&IdRegistryAbi::ChangeRecoveryAddress::SIGNATURE_HASH) => {
                 let IdRegistryAbi::ChangeRecoveryAddress { id, recovery } =
                     event.log_decode()?.inner.data;
-                let fid = Uint::to::<u64>(&id);
+                let fid = id.try_into()?;
                 add_event(
                     fid,
                     OnChainEventType::EventTypeIdRegister,
@@ -334,7 +381,7 @@ impl Subscriber {
                     metadatatype,
                     metadata,
                 } = event.log_decode()?.inner.data;
-                let fid = Uint::to::<u64>(&fid);
+                let fid = fid.try_into()?;
                 add_event(
                     fid,
                     OnChainEventType::EventTypeSigner,
@@ -355,7 +402,7 @@ impl Subscriber {
                     key: _,
                     keyBytes,
                 } = event.log_decode()?.inner.data;
-                let fid = Uint::to::<u64>(&fid);
+                let fid = fid.try_into()?;
                 add_event(
                     fid,
                     OnChainEventType::EventTypeSigner,
@@ -376,7 +423,7 @@ impl Subscriber {
                     key: _,
                     keyBytes,
                 } = event.log_decode()?.inner.data;
-                let fid = Uint::to::<u64>(&fid);
+                let fid = fid.try_into()?;
                 add_event(
                     fid,
                     OnChainEventType::EventTypeSigner,
@@ -393,7 +440,7 @@ impl Subscriber {
             }
             Some(&KeyRegistryAbi::Migrated::SIGNATURE_HASH) => {
                 let KeyRegistryAbi::Migrated { keysMigratedAt } = event.log_decode()?.inner.data;
-                let migrated_at = Uint::to::<u32>(&keysMigratedAt);
+                let migrated_at = keysMigratedAt.try_into()?;
                 add_event(
                     0,
                     OnChainEventType::EventTypeSignerMigrated,

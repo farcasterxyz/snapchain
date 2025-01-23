@@ -1,6 +1,5 @@
 mod tests {
     use crate::core::validations::error::ValidationError;
-    use crate::core::validations::message::validate_message;
     use crate::core::validations::verification::{validate_add_address, validate_fname_transfer};
     use crate::proto;
     use proto::{FnameTransfer, UserNameProof};

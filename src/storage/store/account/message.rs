@@ -43,34 +43,41 @@ impl IntoI32 for MessageType {
 }
 
 /** Convert a specific message type (CastAdd / CastRemove) to a class of message (CastMessage) */
-pub fn type_to_set_postfix(message_type: MessageType) -> UserPostfix {
+pub fn type_to_set_postfix(message_type: MessageType) -> Result<UserPostfix, HubError> {
     if message_type == MessageType::CastAdd || message_type == MessageType::CastRemove {
-        return UserPostfix::CastMessage;
+        return Ok(UserPostfix::CastMessage);
     }
 
     if message_type == MessageType::ReactionAdd || message_type == MessageType::ReactionRemove {
-        return UserPostfix::ReactionMessage;
+        return Ok(UserPostfix::ReactionMessage);
     }
 
     if message_type == MessageType::VerificationAddEthAddress
         || message_type == MessageType::VerificationRemove
     {
-        return UserPostfix::VerificationMessage;
+        return Ok(UserPostfix::VerificationMessage);
     }
 
     if message_type == MessageType::UserDataAdd {
-        return UserPostfix::UserDataMessage;
+        return Ok(UserPostfix::UserDataMessage);
     }
 
     if message_type == MessageType::LinkAdd || message_type == MessageType::LinkRemove {
-        return UserPostfix::LinkMessage;
+        return Ok(UserPostfix::LinkMessage);
     }
 
     if message_type == MessageType::UsernameProof {
-        return UserPostfix::UsernameProofMessage;
+        return Ok(UserPostfix::UsernameProofMessage);
     }
 
-    panic!("invalid type");
+    return Err(HubError {
+        code: "internal_error".to_string(),
+        message: format!(
+            "unable to convert message type to set postfix: {}",
+            message_type.as_str_name()
+        )
+        .to_string(),
+    });
 }
 
 pub fn make_ts_hash(timestamp: u32, hash: &Vec<u8>) -> Result<[u8; TS_HASH_LENGTH], HubError> {
@@ -304,7 +311,7 @@ pub fn put_message_transaction(
 
     let primary_key = make_message_primary_key(
         message.data.as_ref().unwrap().fid,
-        type_to_set_postfix(MessageType::try_from(message.data.as_ref().unwrap().r#type).unwrap())
+        type_to_set_postfix(MessageType::try_from(message.data.as_ref().unwrap().r#type).unwrap())?
             as u8,
         Some(&ts_hash),
     );
@@ -321,7 +328,7 @@ pub fn delete_message_transaction(
 
     let primary_key = make_message_primary_key(
         message.data.as_ref().unwrap().fid,
-        type_to_set_postfix(MessageType::try_from(message.data.as_ref().unwrap().r#type).unwrap())
+        type_to_set_postfix(MessageType::try_from(message.data.as_ref().unwrap().r#type).unwrap())?
             as u8,
         Some(&ts_hash),
     );

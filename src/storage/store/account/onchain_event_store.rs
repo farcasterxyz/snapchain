@@ -465,4 +465,12 @@ impl OnchainEventStore {
         }
         Ok(storage_slot)
     }
+
+    pub fn exists(&self, onchain_event: &OnChainEvent) -> Result<bool, OnchainEventStorageError> {
+        let primary_key = make_onchain_event_primary_key(onchain_event);
+        match self.db.get(&primary_key)? {
+            None => Ok(false),
+            Some(_) => Ok(true),
+        }
+    }
 }

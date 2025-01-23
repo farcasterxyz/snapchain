@@ -9,9 +9,20 @@ pub mod message;
 pub mod reaction;
 pub mod verification;
 
+#[cfg(test)]
 mod message_test;
+
 #[cfg(test)]
 mod validations_test;
+
+#[cfg(test)]
+mod cast_test;
+
+#[cfg(test)]
+mod reaction_test;
+
+#[cfg(test)]
+mod link_test;
 
 pub fn validate_fid(fid: u64) -> Result<(), ValidationError> {
     match fid {
