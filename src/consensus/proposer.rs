@@ -2,7 +2,7 @@ use crate::core::types::{
     proto, Address, Height, ShardHash, ShardId, SnapchainShard, SnapchainValidator,
 };
 use crate::proto::hub_service_client::HubServiceClient;
-use crate::proto::{Block, BlockHeader, FullProposal, ShardChunk, ShardHeader};
+use crate::proto::{Block, BlockHeader, FullProposal, ShardChunk, ShardHeader, ValidatorSet};
 use crate::proto::{BlocksRequest, ShardChunksRequest};
 use crate::storage::store::engine::{BlockEngine, ShardEngine, ShardStateChange};
 use crate::storage::store::BlockStorageError;
@@ -36,6 +36,7 @@ pub trait Proposer {
         height: Height,
         round: Round,
         timeout: Duration,
+        validator_set: ValidatorSet,
     ) -> FullProposal;
     // Receive a block/shard chunk proposed by another validator and return whether it is valid
     fn add_proposed_value(&mut self, full_proposal: &FullProposal) -> Validity;
@@ -92,6 +93,7 @@ impl Proposer for ShardProposer {
         height: Height,
         round: Round,
         _timeout: Duration,
+        _validator_set: ValidatorSet,
     ) -> FullProposal {
         // TODO: perhaps not the best place to get our messages, but this is (currently) the
         // last place we're still in an async function
@@ -334,6 +336,7 @@ impl Proposer for BlockProposer {
         height: Height,
         round: Round,
         timeout: Duration,
+        validator_set: ValidatorSet,
     ) -> FullProposal {
         let shard_chunks = self.collect_confirmed_shard_chunks(height, timeout).await;
 
@@ -355,10 +358,11 @@ impl Proposer for BlockProposer {
             .as_bytes()
             .to_vec();
 
+        // We need to put the validator set into blocks
         let block = Block {
             header: Some(block_header),
             hash: hash.clone(),
-            validators: None,
+            validators: Some(validator_set),
             votes: None,
             shard_chunks,
         };

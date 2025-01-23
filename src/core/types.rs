@@ -271,6 +271,16 @@ impl SnapchainValidator {
             current_height,
         }
     }
+
+    pub fn to_proto(&self) -> proto::Validator {
+        proto::Validator {
+            signer: self.public_key.to_bytes().to_vec(),
+            rpc_address: self.rpc_address,
+            current_height: self.current_height,
+            shard_index: self.shard_index,
+            fid: 0, // TODO(aditi): Need to plub this through
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
