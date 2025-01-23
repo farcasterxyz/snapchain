@@ -2234,6 +2234,7 @@ dependencies = [
 [[package]]
 name = "eth-signature-verifier"
 version = "0.3.0"
+source = "git+https://github.com/CassOnMars/eth-signature-verifier#b2f5e23b57844c199a35a699f8c097bfb9350969"
 dependencies = [
  "alloy",
  "alloy-contract",
