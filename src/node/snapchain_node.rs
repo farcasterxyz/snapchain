@@ -15,7 +15,7 @@ use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::storage::trie::merkle_trie;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
-use libp2p::identity::ed25519::{Keypair, PublicKey};
+use libp2p::identity::ed25519::Keypair;
 use malachite_config::TimeoutConfig;
 use malachite_metrics::Metrics;
 use ractor::ActorRef;
@@ -55,7 +55,7 @@ impl SnapchainNode {
         let allowed_validators = config
             .validators
             .iter()
-            .map(|validator| PublicKey::try_from_bytes(validator.as_bytes()).unwrap())
+            .map(|validator| Address::from_vec(validator.as_bytes().to_vec()))
             .collect();
 
         // Create the shard validators

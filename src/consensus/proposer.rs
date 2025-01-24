@@ -8,7 +8,6 @@ use crate::proto::{BlocksRequest, ShardChunksRequest};
 use crate::storage::store::engine::{BlockEngine, ShardEngine, ShardStateChange};
 use crate::storage::store::BlockStorageError;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
-use libp2p::identity::ed25519::PublicKey;
 use malachite_common::{Round, Validity};
 use prost::Message;
 use std::collections::BTreeMap;
@@ -250,7 +249,7 @@ pub struct BlockProposer {
     block_tx: Option<mpsc::Sender<Block>>,
     engine: BlockEngine,
     statsd_client: StatsdClientWrapper,
-    allowed_validators: Vec<PublicKey>,
+    allowed_validators: Vec<Address>,
 }
 
 impl BlockProposer {
@@ -262,7 +261,7 @@ impl BlockProposer {
         block_tx: Option<mpsc::Sender<Block>>,
         engine: BlockEngine,
         statsd_client: StatsdClientWrapper,
-        allowed_validators: Vec<PublicKey>,
+        allowed_validators: Vec<Address>,
     ) -> BlockProposer {
         BlockProposer {
             shard_id,
@@ -401,7 +400,7 @@ impl Proposer for BlockProposer {
                 for validator in &validators.validators {
                     if !self
                         .allowed_validators
-                        .contains(&PublicKey::try_from_bytes(&validator.signer).unwrap())
+                        .contains(&Address::from_vec(validator.signer.clone()))
                     {
                         return Validity::Invalid;
                     }
