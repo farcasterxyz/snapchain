@@ -40,7 +40,7 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 pub struct MyHubService {
     block_store: BlockStore,
@@ -169,7 +169,7 @@ impl MyHubService {
         {
             Ok(_) => {
                 self.statsd_client.count("rpc.submit_message.success", 1);
-                info!("successfully submitted message");
+                debug!("successfully submitted message");
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.statsd_client
@@ -342,7 +342,7 @@ impl HubService for MyHubService {
             .as_ref()
             .map(|msg| msg.hash.encode_hex::<String>())
             .unwrap_or_default();
-        info!(%hash, "Received call to [submit_message_with_options] RPC");
+        debug!(%hash, "Received call to [submit_message_with_options] RPC");
 
         let proto::SubmitMessageRequest {
             message,
@@ -377,7 +377,7 @@ impl HubService for MyHubService {
         let start_time = std::time::Instant::now();
 
         let hash = request.get_ref().hash.encode_hex::<String>();
-        info!(hash, "Received call to [submit_message] RPC");
+        debug!(hash, "Received call to [submit_message] RPC");
 
         let mut message = request.into_inner();
         message_bytes_decode(&mut message);
