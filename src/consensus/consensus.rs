@@ -54,6 +54,7 @@ pub struct Config {
     pub propose_value_delay: Duration,
 
     pub max_messages_per_block: u32,
+    pub validators: Vec<String>,
 }
 
 impl Config {
@@ -70,6 +71,7 @@ impl Config {
             shard_ids,
             propose_value_delay: self.propose_value_delay,
             max_messages_per_block: self.max_messages_per_block,
+            validators: self.validators.clone(),
         }
     }
 }
@@ -82,6 +84,7 @@ impl Default for Config {
             num_shards: 1,
             propose_value_delay: Duration::from_millis(250),
             max_messages_per_block: 250, //TODO
+            validators: vec![],
         }
     }
 }

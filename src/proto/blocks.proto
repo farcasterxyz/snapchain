@@ -95,7 +95,7 @@ message Block {
   BlockHeader header = 1;
   bytes hash = 2;
   repeated ShardChunk shard_chunks = 3;
-  optional ValidatorSet validators = 4;
+  ValidatorSet validators = 4;
   ConfirmedVotes votes = 5;
 }
 

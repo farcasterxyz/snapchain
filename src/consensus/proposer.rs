@@ -7,6 +7,7 @@ use crate::proto::{BlocksRequest, ShardChunksRequest};
 use crate::storage::store::engine::{BlockEngine, ShardEngine, ShardStateChange};
 use crate::storage::store::BlockStorageError;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use libp2p::identity::ed25519::PublicKey;
 use malachite_common::{Round, Validity};
 use prost::Message;
 use std::collections::BTreeMap;
@@ -246,6 +247,7 @@ pub struct BlockProposer {
     block_tx: Option<mpsc::Sender<Block>>,
     engine: BlockEngine,
     statsd_client: StatsdClientWrapper,
+    allowed_validators: Vec<PublicKey>,
 }
 
 impl BlockProposer {
@@ -257,6 +259,7 @@ impl BlockProposer {
         block_tx: Option<mpsc::Sender<Block>>,
         engine: BlockEngine,
         statsd_client: StatsdClientWrapper,
+        allowed_validators: Vec<PublicKey>,
     ) -> BlockProposer {
         BlockProposer {
             shard_id,
@@ -268,6 +271,7 @@ impl BlockProposer {
             block_tx,
             engine,
             statsd_client,
+            allowed_validators,
         }
     }
 
@@ -358,7 +362,7 @@ impl Proposer for BlockProposer {
         let block = Block {
             header: Some(block_header),
             hash: hash.clone(),
-            validators: None,
+            validators: None, // TODO(aditi): Use validator set here
             votes: None,
             shard_chunks,
         };
@@ -380,9 +384,20 @@ impl Proposer for BlockProposer {
     }
 
     fn add_proposed_value(&mut self, full_proposal: &FullProposal) -> Validity {
-        if let Some(proto::full_proposal::ProposedValue::Block(_block)) =
+        if let Some(proto::full_proposal::ProposedValue::Block(block)) =
             &full_proposal.proposed_value
         {
+            if let Some(validators) = &block.validators {
+                for validator in &validators.validators {
+                    if !self
+                        .allowed_validators
+                        .contains(&PublicKey::try_from_bytes(&validator.signer).unwrap())
+                    {
+                        return Validity::Invalid;
+                    }
+                }
+            }
+
             self.proposed_blocks
                 .insert(full_proposal.shard_hash(), full_proposal.clone());
         }
