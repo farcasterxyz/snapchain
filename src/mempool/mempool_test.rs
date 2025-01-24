@@ -28,41 +28,62 @@ mod tests {
 
     use libp2p::identity::ed25519::Keypair;
 
-    fn setup() -> (
+    const HOST_FOR_TEST: &str = "127.0.0.1";
+    const PORT_FOR_TEST: u32 = 9388;
+
+    fn setup_config(port: u32) -> Config {
+        Config::new(
+            format!("/ip4/{HOST_FOR_TEST}/udp/{port}/quic-v1"),
+            "".to_string(),
+        )
+    }
+
+    fn setup(
+        config: Config,
+    ) -> (
         ShardEngine,
+        SnapchainGossip,
         Mempool,
         mpsc::Sender<MempoolMessage>,
         mpsc::Sender<MempoolMessagesRequest>,
         broadcast::Sender<ShardChunk>,
     ) {
+        let keypair = Keypair::generate();
         let statsd_client = StatsdClientWrapper::new(
             cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
             true,
         );
 
+        let (system_tx, _) = mpsc::channel::<SystemMessage>(100);
         let (mempool_tx, mempool_rx) = mpsc::channel(100);
         let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
-        let (gossip_tx, _gossip_rx) = mpsc::channel(100);
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
         let (engine, _) = test_helper::new_engine();
         let mut shard_senders = HashMap::new();
         shard_senders.insert(1, engine.get_senders());
         let mut shard_stores = HashMap::new();
         shard_stores.insert(1, engine.get_stores());
+
+        let gossip =
+            SnapchainGossip::create(keypair.clone(), config, system_tx, mempool_tx.clone())
+                .unwrap();
+
         let mempool = Mempool::new(
             1024,
             mempool_rx,
             messages_request_rx,
             1,
             shard_stores,
-            gossip_tx,
+            gossip.tx.clone(),
             shard_decision_rx,
             statsd_client,
         );
+
         (
             engine,
+            gossip,
             mempool,
-            mempool_tx,
+            mempool_tx.clone(),
             messages_request_tx,
             shard_decision_tx,
         )
@@ -70,7 +91,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_user_message_is_invalid() {
-        let (mut engine, mut mempool, _, _, _) = setup();
+        let (mut engine, _, mut mempool, _, _, _) = setup(setup_config(9300));
         test_helper::register_user(
             1234,
             default_signer(),
@@ -88,7 +109,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_onchain_event_is_invalid() {
-        let (mut engine, mut mempool, _, _, _) = setup();
+        let (mut engine, _, mut mempool, _, _, _) = setup(setup_config(9301));
         let onchain_event = events_factory::create_rent_event(1234, Some(10), None, false);
         let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
             on_chain_event: Some(onchain_event.clone()),
@@ -105,7 +126,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_fname_transfer_is_invalid() {
-        let (mut engine, mut mempool, _, _, _) = setup();
+        let (mut engine, _, mut mempool, _, _, _) = setup(setup_config(9302));
         test_helper::register_user(
             1234,
             default_signer(),
@@ -140,7 +161,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_mempool_eviction() {
-        let (mut engine, mut mempool, mempool_tx, messages_request_tx, shard_decision_tx) = setup();
+        let (mut engine, _, mut mempool, mempool_tx, messages_request_tx, shard_decision_tx) =
+            setup(setup_config(9304));
         test_helper::register_user(
             1234,
             default_signer(),
@@ -216,51 +238,6 @@ mod tests {
         assert_eq!(result[0].fid(), fid);
     }
 
-    const HOST_FOR_TEST: &str = "127.0.0.1";
-    const PORT_FOR_TEST: u32 = 9388;
-
-    fn setup_gossip_mempool(
-        config: Config,
-    ) -> (
-        SnapchainGossip,
-        Mempool,
-        mpsc::Sender<MempoolMessage>,
-        mpsc::Sender<MempoolMessagesRequest>,
-    ) {
-        let keypair = Keypair::generate();
-        let statsd_client = StatsdClientWrapper::new(
-            cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
-            true,
-        );
-
-        let (system_tx, _) = mpsc::channel::<SystemMessage>(100);
-        let (mempool_tx, mempool_rx) = mpsc::channel(100);
-        let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
-        let (_shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
-        let (engine, _) = test_helper::new_engine();
-        let mut shard_senders = HashMap::new();
-        shard_senders.insert(1, engine.get_senders());
-        let mut shard_stores = HashMap::new();
-        shard_stores.insert(1, engine.get_stores());
-
-        let gossip =
-            SnapchainGossip::create(keypair.clone(), config, system_tx, mempool_tx.clone())
-                .unwrap();
-
-        let mempool = Mempool::new(
-            1024,
-            mempool_rx,
-            messages_request_rx,
-            1,
-            shard_stores,
-            gossip.tx.clone(),
-            shard_decision_rx,
-            statsd_client,
-        );
-
-        (gossip, mempool, mempool_tx.clone(), messages_request_tx)
-    }
-
     #[tokio::test]
     async fn test_mempool_gossip() {
         // Create configs with different ports
@@ -270,10 +247,8 @@ mod tests {
         let config1 = Config::new(node1_addr.clone(), node2_addr.clone());
         let config2 = Config::new(node2_addr.clone(), node1_addr.clone());
 
-        let (mut gossip1, mut mempool1, mempool_tx1, _mempool_requests_tx1) =
-            setup_gossip_mempool(config1);
-        let (mut gossip2, mut mempool2, _mempool_tx2, mempool_requests_tx2) =
-            setup_gossip_mempool(config2);
+        let (_, mut gossip1, mut mempool1, mempool_tx1, _mempool_requests_tx1, _) = setup(config1);
+        let (_, mut gossip2, mut mempool2, _mempool_tx2, mempool_requests_tx2, _) = setup(config2);
 
         // Spawn gossip tasks
         tokio::spawn(async move {
