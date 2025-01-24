@@ -396,14 +396,17 @@ impl Proposer for BlockProposer {
         if let Some(proto::full_proposal::ProposedValue::Block(block)) =
             &full_proposal.proposed_value
         {
-            if let Some(validators) = &block.validators {
-                for validator in &validators.validators {
-                    if !self
-                        .allowed_validators
-                        .contains(&Address::from_vec(validator.signer.clone()))
-                    {
-                        return Validity::Invalid;
-                    }
+            for validator in &block
+                .validators
+                .as_ref()
+                .expect("validators must be populated for block")
+                .validators
+            {
+                if !self
+                    .allowed_validators
+                    .contains(&Address::from_vec(validator.signer.clone()))
+                {
+                    return Validity::Invalid;
                 }
             }
 
