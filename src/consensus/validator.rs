@@ -27,6 +27,7 @@ pub struct ShardValidator {
     shard_proposer: Option<ShardProposer>,
     pub started: bool,
     pub saw_proposal_from_validator: HashSet<Address>,
+    allowed_validators: Vec<Address>,
 }
 
 impl ShardValidator {
@@ -35,6 +36,7 @@ impl ShardValidator {
         shard: SnapchainShard,
         block_proposer: Option<BlockProposer>,
         shard_proposer: Option<ShardProposer>,
+        allowed_validators: Vec<Address>,
     ) -> ShardValidator {
         ShardValidator {
             shard_id: shard.clone(),
@@ -48,6 +50,7 @@ impl ShardValidator {
             shard_proposer,
             started: false,
             saw_proposal_from_validator: HashSet::new(),
+            allowed_validators,
         }
     }
 
@@ -69,7 +72,11 @@ impl ShardValidator {
     }
 
     pub fn add_validator(&mut self, validator: SnapchainValidator) -> bool {
-        self.validator_set.add(validator)
+        if self.allowed_validators.contains(&validator.address) {
+            self.validator_set.add(validator)
+        } else {
+            false // We haven't seen this validator before
+        }
     }
 
     pub fn start(&mut self) {

@@ -52,7 +52,7 @@ impl SnapchainNode {
 
         let mut shard_senders: HashMap<u32, Senders> = HashMap::new();
         let mut shard_stores: HashMap<u32, Stores> = HashMap::new();
-        let allowed_validators = config
+        let allowed_validators: Vec<Address> = config
             .validators
             .iter()
             .map(|validator| Address::from_vec(validator.as_bytes().to_vec()))
@@ -115,6 +115,7 @@ impl SnapchainNode {
                 shard.clone(),
                 None,
                 Some(shard_proposer),
+                allowed_validators.clone(),
             );
             let consensus_actor = Consensus::spawn(
                 ctx,
@@ -165,13 +166,14 @@ impl SnapchainNode {
             block_tx,
             engine,
             statsd_client.clone(),
-            allowed_validators,
+            allowed_validators.clone(),
         );
         let block_validator = ShardValidator::new(
             validator_address.clone(),
             block_shard.clone(),
             Some(block_proposer),
             None,
+            allowed_validators,
         );
         let ctx = SnapchainValidatorContext::new(keypair.clone());
         let block_consensus_actor = Consensus::spawn(
