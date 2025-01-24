@@ -55,7 +55,7 @@ impl SnapchainNode {
         let allowed_validators: Vec<Address> = config
             .validators
             .iter()
-            .map(|validator| Address::from_vec(validator.as_bytes().to_vec()))
+            .map(|validator| Address::from_vec(hex::decode(validator).unwrap()))
             .collect();
 
         // Create the shard validators

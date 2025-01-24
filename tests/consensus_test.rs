@@ -57,14 +57,21 @@ fn make_tmp_path() -> String {
 }
 
 impl NodeForTest {
-    pub async fn create(keypair: Keypair, num_shards: u32, grpc_port: u32) -> Self {
+    pub async fn create(
+        keypair: Keypair,
+        allowed_validators: Vec<String>,
+        num_shards: u32,
+        grpc_port: u32,
+    ) -> Self {
         let statsd_client = StatsdClientWrapper::new(
             cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
             true,
         );
 
         let mut config = snapchain::consensus::consensus::Config::default();
-        config = config.with_shard_ids((1..=num_shards).collect());
+        config = config
+            .with_shard_ids((1..=num_shards).collect())
+            .with_allowed_validators(allowed_validators);
 
         let (gossip_tx, gossip_rx) = mpsc::channel::<GossipEvent<SnapchainValidatorContext>>(100);
 
@@ -232,10 +239,22 @@ impl TestNetwork {
     pub async fn create(num_nodes: u32, num_shards: u32, base_grpc_port: u32) -> Self {
         let mut nodes = Vec::new();
         let mut keypairs = Vec::new();
-        for i in 0..num_nodes {
+        for _ in 0..num_nodes {
             let keypair = Keypair::generate();
             keypairs.push(keypair.clone());
-            let node = NodeForTest::create(keypair, num_shards, base_grpc_port + i).await;
+        }
+        let allowed_validators: Vec<String> = keypairs
+            .iter()
+            .map(|keypair| return hex::encode(keypair.public().to_bytes()))
+            .collect();
+        for i in 0..keypairs.len() {
+            let node = NodeForTest::create(
+                keypairs.get(i).unwrap().clone(),
+                allowed_validators.clone(),
+                num_shards,
+                base_grpc_port + (i as u32),
+            )
+            .await;
             nodes.push(node);
         }
 
@@ -436,7 +455,12 @@ async fn test_basic_sync() {
         );
     }
 
-    let node4 = NodeForTest::create(keypair4.clone(), num_shards, 3227).await;
+    let allowed_validators = network
+        .nodes
+        .iter()
+        .map(|node| hex::encode(node.keypair.public().to_bytes()))
+        .collect();
+    let node4 = NodeForTest::create(keypair4.clone(), allowed_validators, num_shards, 3227).await;
     node4.register_keypair(keypair4.clone(), format!("0.0.0.0:{}", 3227));
     node4.cast(ConsensusMsg::RegisterValidator(SnapchainValidator::new(
         SnapchainShard::new(0),

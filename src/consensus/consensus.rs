@@ -74,6 +74,17 @@ impl Config {
             validators: self.validators.clone(),
         }
     }
+
+    pub fn with_allowed_validators(&self, allowed_validators: Vec<String>) -> Self {
+        Self {
+            private_key: self.private_key.clone(),
+            num_shards: self.shard_ids.len() as u32,
+            shard_ids: self.shard_ids.clone(),
+            propose_value_delay: self.propose_value_delay,
+            max_messages_per_block: self.max_messages_per_block,
+            validators: allowed_validators,
+        }
+    }
 }
 
 impl Default for Config {
