@@ -298,8 +298,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         let register_validator = proto::RegisterValidator {
                             validator: Some(proto::Validator {
                                 signer: keypair.public().to_bytes().to_vec(),
-                                fid: 0,
-                                rpc_address: app_config.rpc_address.clone(),
+                                rpc_address: Some(app_config.rpc_address.clone()),
                                 shard_index: i,
                                 current_height
                             }),

@@ -55,8 +55,7 @@ async fn test_gossip_communication() {
     // Create a test message
     let test_validator = proto::Validator {
         signer: keypair1.public().to_bytes().to_vec(),
-        fid: 123,
-        rpc_address: data,
+        rpc_address: Some(data),
         shard_index: 0,
         current_height: 312,
     };

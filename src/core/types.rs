@@ -271,6 +271,15 @@ impl SnapchainValidator {
             current_height,
         }
     }
+
+    pub fn to_proto(&self) -> proto::Validator {
+        proto::Validator {
+            signer: self.address.to_vec(),
+            rpc_address: self.rpc_address.clone(),
+            shard_index: self.shard_index,
+            current_height: self.current_height,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

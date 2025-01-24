@@ -1,5 +1,6 @@
 use crate::core::types::{
     proto, Address, Height, ShardHash, ShardId, SnapchainShard, SnapchainValidator,
+    SnapchainValidatorSet,
 };
 use crate::proto::hub_service_client::HubServiceClient;
 use crate::proto::{Block, BlockHeader, FullProposal, ShardChunk, ShardHeader};
@@ -37,6 +38,7 @@ pub trait Proposer {
         height: Height,
         round: Round,
         timeout: Duration,
+        validator_set: &SnapchainValidatorSet,
     ) -> FullProposal;
     // Receive a block/shard chunk proposed by another validator and return whether it is valid
     fn add_proposed_value(&mut self, full_proposal: &FullProposal) -> Validity;
@@ -93,6 +95,7 @@ impl Proposer for ShardProposer {
         height: Height,
         round: Round,
         _timeout: Duration,
+        _validator_set: &SnapchainValidatorSet,
     ) -> FullProposal {
         // TODO: perhaps not the best place to get our messages, but this is (currently) the
         // last place we're still in an async function
@@ -338,6 +341,7 @@ impl Proposer for BlockProposer {
         height: Height,
         round: Round,
         timeout: Duration,
+        validator_set: &SnapchainValidatorSet,
     ) -> FullProposal {
         let shard_chunks = self.collect_confirmed_shard_chunks(height, timeout).await;
 
@@ -359,10 +363,16 @@ impl Proposer for BlockProposer {
             .as_bytes()
             .to_vec();
 
+        let validators = validator_set
+            .validators
+            .iter()
+            .map(|validator| return validator.to_proto())
+            .collect();
+
         let block = Block {
             header: Some(block_header),
             hash: hash.clone(),
-            validators: None, // TODO(aditi): Use validator set here
+            validators: Some(proto::ValidatorSet { validators }),
             votes: None,
             shard_chunks,
         };
