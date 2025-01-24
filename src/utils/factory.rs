@@ -454,12 +454,12 @@ pub mod messages_factory {
 
         pub fn create_verification_remove(
             fid: u64,
-            address: String,
+            address: Vec<u8>,
             timestamp: Option<u32>,
             private_key: Option<&SigningKey>,
         ) -> message::Message {
             let body = VerificationRemoveBody {
-                address: address.encode_to_vec(),
+                address: address,
                 protocol: 0,
             };
             create_message_with_data(

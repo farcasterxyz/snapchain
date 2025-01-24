@@ -15,7 +15,25 @@ mod tests {
     #[derive(Deserialize)]
     struct MessageData {
         #[serde(rename = "castAddBody")]
-        cast_add_body: CastAddBody,
+        cast_add_body: Option<CastAddBody>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum EmbedUrlOrCastId {
+        Url(EmbedUrl),
+        CastId(EmbedCastId),
+    }
+
+    #[derive(Deserialize)]
+    struct EmbedUrl {
+        url: String,
+    }
+
+    #[derive(Deserialize)]
+    struct EmbedCastId {
+        #[serde(rename = "castId")]
+        cast_id: CastId,
     }
 
     #[derive(Deserialize)]
@@ -24,17 +42,17 @@ mod tests {
         embeds_deprecated: Vec<String>,
         mentions: Vec<u64>,
         #[serde(rename = "parentCastId")]
-        parent_cast_id: Option<ParentCastId>,
+        parent_cast_id: Option<CastId>,
         text: String,
+        embeds: Vec<EmbedUrlOrCastId>,
         #[serde(rename = "mentionsPositions")]
         mentions_positions: Vec<u64>,
-        embeds: Vec<String>,
         #[serde(rename = "type")]
         cast_type: String,
     }
 
     #[derive(Deserialize)]
-    struct ParentCastId {
+    struct CastId {
         fid: u64,
         hash: String,
     }
@@ -55,44 +73,49 @@ mod tests {
         assert!(!resp.is_err());
 
         let response = resp.unwrap();
-        let resp_json = response.text().await;
+        let resp_json = response.text().await.unwrap();
 
-        let json = serde_json::from_str::<PagedResponse>(&resp_json.unwrap());
+        let json = serde_json::from_str::<PagedResponse>(&resp_json);
         let page = json.unwrap();
         for msg in page.messages {
-            let cast = crate::proto::CastAddBody {
-                embeds_deprecated: msg.data.cast_add_body.embeds_deprecated,
-                mentions: msg.data.cast_add_body.mentions,
-                embeds: msg
-                    .data
-                    .cast_add_body
-                    .embeds
-                    .into_iter()
-                    .map(|e| Embed {
-                        embed: Some(embed::Embed::Url(e)),
-                    })
-                    .collect(),
-                text: msg.data.cast_add_body.text,
-                mentions_positions: msg
-                    .data
-                    .cast_add_body
-                    .mentions_positions
-                    .iter()
-                    .map(|p| *p as u32)
-                    .collect(),
-                r#type: if msg.data.cast_add_body.cast_type == "CAST" {
-                    0
-                } else {
-                    1
-                },
-                parent: msg.data.cast_add_body.parent_cast_id.map(|p| {
-                    cast_add_body::Parent::ParentCastId(crate::proto::CastId {
-                        fid: p.fid,
-                        hash: hex::decode(p.hash.replace("0x", "")).unwrap(),
-                    })
-                }),
-            };
-            assert!(validations::cast::validate_cast_add_body(&cast, true).is_ok())
+            match msg.data.cast_add_body {
+                Some(body) => {
+                    let cast = crate::proto::CastAddBody {
+                        embeds_deprecated: body.embeds_deprecated,
+                        mentions: body.mentions,
+                        embeds: body
+                            .embeds
+                            .into_iter()
+                            .map(|e| match e {
+                                EmbedUrlOrCastId::Url(url) => Embed {
+                                    embed: Some(embed::Embed::Url(url.url)),
+                                },
+                                EmbedUrlOrCastId::CastId(cast_id) => Embed {
+                                    embed: Some(embed::Embed::CastId(crate::proto::CastId {
+                                        fid: cast_id.cast_id.fid,
+                                        hash: hex::decode(&cast_id.cast_id.hash[2..]).unwrap(),
+                                    })),
+                                },
+                            })
+                            .collect(),
+                        text: body.text,
+                        mentions_positions: body
+                            .mentions_positions
+                            .iter()
+                            .map(|p| *p as u32)
+                            .collect(),
+                        r#type: if body.cast_type == "CAST" { 0 } else { 1 },
+                        parent: body.parent_cast_id.map(|p| {
+                            cast_add_body::Parent::ParentCastId(crate::proto::CastId {
+                                fid: p.fid,
+                                hash: hex::decode(p.hash.replace("0x", "")).unwrap(),
+                            })
+                        }),
+                    };
+                    assert!(validations::cast::validate_cast_add_body(&cast, true).is_ok())
+                }
+                None => {}
+            }
         }
     }
 }

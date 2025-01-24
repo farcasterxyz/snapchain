@@ -510,3 +510,35 @@ pub fn validate_add_address(
         _ => Err(ValidationError::InvalidData),
     }
 }
+
+fn validate_remove_eth_address(
+    body: &proto::VerificationRemoveBody,
+) -> Result<(), ValidationError> {
+    let valid_address = validate_eth_address(&body.address);
+    if valid_address.is_err() {
+        return Err(valid_address.unwrap_err());
+    }
+
+    Ok(())
+}
+
+fn validate_remove_sol_address(
+    body: &proto::VerificationRemoveBody,
+) -> Result<(), ValidationError> {
+    let valid_address = validate_sol_address(&body.address);
+    if valid_address.is_err() {
+        return Err(valid_address.unwrap_err());
+    }
+
+    Ok(())
+}
+
+pub fn validate_remove_address(
+    body: &proto::VerificationRemoveBody,
+) -> Result<(), ValidationError> {
+    match body.protocol {
+        x if x == proto::Protocol::Ethereum as i32 => validate_remove_eth_address(body),
+        x if x == proto::Protocol::Solana as i32 => validate_remove_sol_address(body),
+        _ => Err(ValidationError::InvalidData),
+    }
+}

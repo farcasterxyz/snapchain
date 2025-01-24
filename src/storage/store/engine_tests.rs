@@ -496,8 +496,8 @@ mod tests {
 
         let verification_remove = messages_factory::verifications::create_verification_remove(
             FID3_FOR_TEST,
-            "91031dcfdea024b4d51e775486111d2b2a715871".to_string(),
-            Some(timestamp),
+            hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap(),
+            Some(timestamp + 1),
             None,
         );
 

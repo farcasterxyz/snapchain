@@ -7,8 +7,8 @@ use crate::core::validations::verification;
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::HubEvent;
 use crate::proto::UserNameProof;
+use crate::proto::UserNameType;
 use crate::proto::{self, Block, MessageType, ShardChunk, Transaction};
-use crate::proto::{FarcasterNetwork, UserNameType};
 use crate::proto::{OnChainEvent, OnChainEventType};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{CastStore, MessagesPage};
@@ -915,13 +915,6 @@ impl ShardEngine {
             .as_ref()
             .ok_or(MessageValidationError::NoMessageData)?;
 
-        // TODO(aditi): Check network
-        let network = FarcasterNetwork::try_from(message_data.network).or_else(|_| {
-            Err(MessageValidationError::MessageValidationError(
-                validations::error::ValidationError::InvalidData,
-            ))
-        })?;
-
         validations::message::validate_message(message)?;
 
         // Check that the user has a custody address
@@ -938,25 +931,12 @@ impl ShardEngine {
             .map_err(|_| MessageValidationError::MissingSigner)?
             .ok_or(MessageValidationError::MissingSigner)?;
 
+        // State-dependent verifications:
         match &message_data.body {
             Some(proto::message_data::Body::UserDataBody(user_data)) => {
                 if user_data.r#type == proto::UserDataType::Username as i32 {
                     self.validate_username(message_data.fid, &user_data.value, txn_batch)?;
                 }
-            }
-            Some(proto::message_data::Body::UsernameProofBody(_)) => {
-                // Validate ens
-            }
-            Some(proto::message_data::Body::VerificationAddAddressBody(add)) => {
-                let result = verification::validate_add_address(add, message_data.fid, network);
-                if result.is_err() {
-                    return Err(MessageValidationError::MessageValidationError(
-                        result.unwrap_err(),
-                    ));
-                }
-            }
-            Some(proto::message_data::Body::LinkCompactStateBody(_)) => {
-                // Validate link state length
             }
             _ => {}
         }
