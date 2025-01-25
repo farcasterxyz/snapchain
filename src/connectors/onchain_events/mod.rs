@@ -14,10 +14,11 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use crate::{
+    core::validations::{self, VerificationAddressClaim},
     proto::{
         on_chain_event, IdRegisterEventBody, IdRegisterEventType, OnChainEvent, OnChainEventType,
         SignerEventBody, SignerEventType, SignerMigratedEventBody, StorageRentEventBody,
-        ValidatorMessage,
+        ValidatorMessage, VerificationAddAddressBody,
     },
     storage::store::engine::MempoolMessage,
     utils::statsd_wrapper::StatsdClientWrapper,
@@ -113,6 +114,11 @@ pub enum SubscribeError {
 #[async_trait]
 pub trait L1Client: Send + Sync {
     async fn resolve_ens_name(&self, name: String) -> Result<Address, EnsError>;
+    async fn verify_contract_signature(
+        &self,
+        claim: VerificationAddressClaim,
+        body: &VerificationAddAddressBody,
+    ) -> Result<(), validations::ValidationError>;
 }
 
 pub struct RealL1Client {
@@ -136,6 +142,14 @@ impl L1Client for RealL1Client {
         foundry_common::ens::NameOrAddress::Name(name)
             .resolve(&self.provider)
             .await
+    }
+
+    async fn verify_contract_signature(
+        &self,
+        claim: VerificationAddressClaim,
+        body: &VerificationAddAddressBody,
+    ) -> Result<(), validations::ValidationError> {
+        validations::validate_verification_contract_signature(&self.provider, claim, body).await
     }
 }
 

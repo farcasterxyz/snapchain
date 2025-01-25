@@ -487,7 +487,7 @@ pub mod messages_factory {
         ) -> message::Message {
             let proof = UserNameProof {
                 timestamp,
-                name: name.encode_to_vec(),
+                name: name.as_bytes().to_vec(),
                 owner,
                 signature: signature.encode_to_vec(),
                 fid,

@@ -7,7 +7,7 @@ use crate::proto::{BlocksRequest, ShardChunksRequest};
 use crate::storage::store::engine::{BlockEngine, ShardEngine, ShardStateChange};
 use crate::storage::store::BlockStorageError;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
-use informalsystems_malachitebft_core_types::{Round, Validity};
+use malachite_common::{Round, Validity};
 use prost::Message;
 use std::collections::BTreeMap;
 use std::time::Duration;
