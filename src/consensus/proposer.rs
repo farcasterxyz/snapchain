@@ -45,6 +45,8 @@ pub trait Proposer {
 
     fn get_confirmed_height(&self) -> Height;
 
+    fn get_min_height(&self) -> Height;
+
     async fn sync_against_validator(
         &mut self,
         validator: &SnapchainValidator,
@@ -184,6 +186,11 @@ impl Proposer for ShardProposer {
 
     fn get_confirmed_height(&self) -> Height {
         self.engine.get_confirmed_height()
+    }
+
+    fn get_min_height(&self) -> Height {
+        // Always return the genesis block, until we implement pruning
+        Height::new(self.shard_id.shard_id(), 1)
     }
 
     async fn sync_against_validator(
@@ -425,6 +432,11 @@ impl Proposer for BlockProposer {
 
     fn get_confirmed_height(&self) -> Height {
         self.engine.get_confirmed_height()
+    }
+
+    fn get_min_height(&self) -> Height {
+        // Always return the genesis block, until we implement pruning
+        Height::new(self.shard_id.shard_id(), 1)
     }
 
     async fn sync_against_validator(

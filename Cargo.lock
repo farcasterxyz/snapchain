@@ -4310,7 +4310,7 @@ dependencies = [
  "informalsystems-malachitebft-sync",
  "informalsystems-malachitebft-wal",
  "libp2p",
- "ractor 0.13.5",
+ "ractor",
  "rand",
  "tokio",
  "tracing",
@@ -6371,21 +6371,6 @@ dependencies = [
 
 [[package]]
 name = "ractor"
-version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61e6aec2fe1f8a8f2fe79897826a0ea18b41f97735ee3704a6dd29c989a65c65"
-dependencies = [
- "async-trait",
- "dashmap",
- "futures",
- "once_cell",
- "strum",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ractor"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8cbebed288497a3e7567eba6e1496e89d6b9850f03fb27876e1451fd85b07cf4"
@@ -7388,6 +7373,7 @@ dependencies = [
  "hex",
  "humantime",
  "humantime-serde",
+ "informalsystems-malachitebft-codec",
  "informalsystems-malachitebft-config",
  "informalsystems-malachitebft-core-consensus",
  "informalsystems-malachitebft-core-types",
@@ -7401,7 +7387,7 @@ dependencies = [
  "parking_lot",
  "pre-commit",
  "prost 0.13.3",
- "ractor 0.11.2",
+ "ractor",
  "rand",
  "reqwest",
  "rocksdb",

@@ -1,27 +1,50 @@
 use crate::core::types::{SnapchainContext, SnapchainValidatorContext};
+use crate::network::gossip::GossipEvent;
 use async_trait::async_trait;
-use informalsystems_malachitebft_engine::network::NetworkMsg as Msg;
+use informalsystems_malachitebft_core_consensus::SignedConsensusMsg;
+use informalsystems_malachitebft_engine::consensus::ConsensusCodec;
+use informalsystems_malachitebft_engine::network::{NetworkEvent, NetworkMsg as Msg};
 use informalsystems_malachitebft_engine::sync;
 use informalsystems_malachitebft_network::{Channel, Event};
 use informalsystems_malachitebft_sync::RawMessage;
-use ractor::{Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort};
 use std::collections::{BTreeSet, HashMap};
+use tokio::sync::mpsc;
 use tracing::{error, trace};
 
-pub struct MalachiteNetworkConnector {}
+pub struct MalachiteNetworkConnector<Codec> {
+    codec: Codec,
+}
 
-pub struct NetworkConnectorState {}
+pub enum NetworkConnectorState {
+    Stopped,
+    Running {
+        // peers: BTreeSet<PeerId>,
+        output_port: OutputPort<NetworkEvent<SnapchainValidatorContext>>,
+        // ctrl_handle: malachitebft_network::CtrlHandle,
+        // recv_task: tokio::task::JoinHandle<()>,
+        // inbound_requests: HashMap<InboundRequestId, OutboundRequestId>,
+        gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+    },
+}
+
+pub struct NetworkConnectorArgs {
+    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+}
 
 #[async_trait]
-impl Actor for MalachiteNetworkConnector {
+impl<Codec> Actor for MalachiteNetworkConnector<Codec>
+where
+    Codec: ConsensusCodec<SnapchainValidatorContext>,
+{
     type Msg = Msg<SnapchainValidatorContext>;
     type State = NetworkConnectorState;
-    type Arguments = ();
+    type Arguments = NetworkConnectorArgs;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Msg<SnapchainValidatorContext>>,
-        args: (),
+        args: NetworkConnectorArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         // let handle = malachitebft_network::spawn(args.keypair, args.config, args.metrics).await?;
         //
@@ -36,15 +59,10 @@ impl Actor for MalachiteNetworkConnector {
         //     }
         // });
         //
-        // Ok(State::Running {
-        //     peers: BTreeSet::new(),
-        //     output_port: OutputPort::default(),
-        //     ctrl_handle,
-        //     recv_task,
-        //     inbound_requests: HashMap::new(),
-        // })
-
-        Ok(NetworkConnectorState {})
+        Ok(NetworkConnectorState::Running {
+            output_port: OutputPort::default(),
+            gossip_tx: args.gossip_tx.clone(),
+        })
     }
 
     async fn post_start(
@@ -61,23 +79,41 @@ impl Actor for MalachiteNetworkConnector {
         msg: Msg<SnapchainValidatorContext>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        // let State::Running {
-        //     peers,
-        //     output_port,
-        //     ctrl_handle,
-        //     inbound_requests,
-        //     ..
-        // } = state
-        // else {
-        //     return Ok(());
-        // };
+        let NetworkConnectorState::Running {
+            output_port,
+            gossip_tx,
+        } = state
+        else {
+            return Ok(());
+        };
 
         match msg {
-            Msg::Subscribe(subscriber) => {}
+            Msg::Subscribe(subscriber) => {
+                subscriber.subscribe_to_port(output_port);
+            }
 
-            Msg::Publish(msg) => {}
+            Msg::Publish(msg) => match msg {
+                SignedConsensusMsg::Vote(vote) => {
+                    gossip_tx
+                        .send(GossipEvent::BroadcastSignedVote(vote))
+                        .await?;
+                }
+                SignedConsensusMsg::Proposal(proposal) => {
+                    gossip_tx
+                        .send(GossipEvent::BroadcastSignedProposal(proposal))
+                        .await?;
+                }
+            },
 
-            Msg::PublishProposalPart(msg) => {}
+            Msg::PublishProposalPart(msg) => {
+                if let Some(full_proposal) = msg.content.as_data() {
+                    gossip_tx
+                        .send(GossipEvent::BroadcastFullProposal(full_proposal.clone()))
+                        .await?;
+                } else {
+                    error!("Could not map proposal part to full proposal for gossip");
+                }
+            }
 
             Msg::BroadcastStatus(status) => {
                 // let status = sync::Status {
@@ -124,36 +160,36 @@ impl Actor for MalachiteNetworkConnector {
             }
 
             Msg::NewEvent(Event::Listening(addr)) => {
-                // output_port.send(NetworkEvent::Listening(addr));
+                output_port.send(NetworkEvent::Listening(addr));
             }
 
             Msg::NewEvent(Event::PeerConnected(peer_id)) => {
                 // peers.insert(peer_id);
-                // output_port.send(NetworkEvent::PeerConnected(peer_id));
+                output_port.send(NetworkEvent::PeerConnected(peer_id));
             }
 
             Msg::NewEvent(Event::PeerDisconnected(peer_id)) => {
                 // peers.remove(&peer_id);
-                // output_port.send(NetworkEvent::PeerDisconnected(peer_id));
+                output_port.send(NetworkEvent::PeerDisconnected(peer_id));
             }
 
             Msg::NewEvent(Event::Message(Channel::Consensus, from, data)) => {
-                // let msg = match self.codec.decode(data) {
-                //     Ok(msg) => msg,
-                //     Err(e) => {
-                //         error!(%from, "Failed to decode gossip message: {e:?}");
-                //         return Ok(());
-                //     }
-                // };
-                //
-                // let event = match msg {
-                //     SignedConsensusMsg::Vote(vote) => NetworkEvent::Vote(from, vote),
-                //     SignedConsensusMsg::Proposal(proposal) => {
-                //         NetworkEvent::Proposal(from, proposal)
-                //     }
-                // };
-                //
-                // output_port.send(event);
+                let msg = match self.codec.decode(data) {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        error!(%from, "Failed to decode gossip message: {e:?}");
+                        return Ok(());
+                    }
+                };
+
+                let event = match msg {
+                    SignedConsensusMsg::Vote(vote) => NetworkEvent::Vote(from, vote),
+                    SignedConsensusMsg::Proposal(proposal) => {
+                        NetworkEvent::Proposal(from, proposal)
+                    }
+                };
+
+                output_port.send(event);
             }
 
             Msg::NewEvent(Event::Message(Channel::ProposalParts, from, data)) => {

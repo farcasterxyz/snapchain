@@ -577,18 +577,6 @@ impl Proposal {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SinglePartProposal {
-    pub height: Height,
-    pub proposal_round: Round,
-    pub proposer: Address,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProposalPart {
-    FullProposal(SinglePartProposal),
-}
-
 #[derive(Clone, Debug)]
 pub struct SnapchainValidatorContext {
     keypair: Arc<Keypair>,
@@ -616,7 +604,7 @@ impl ShardedContext for SnapchainValidatorContext {
 impl informalsystems_malachitebft_core_types::Context for SnapchainValidatorContext {
     type Address = Address;
     type Height = Height;
-    type ProposalPart = ProposalPart;
+    type ProposalPart = FullProposal;
     type Proposal = Proposal;
     type Validator = SnapchainValidator;
     type ValidatorSet = SnapchainValidatorSet;
@@ -689,7 +677,7 @@ impl informalsystems_malachitebft_core_types::Context for SnapchainValidatorCont
 impl SnapchainContext for SnapchainValidatorContext {}
 
 impl informalsystems_malachitebft_core_types::ProposalPart<SnapchainValidatorContext>
-    for ProposalPart
+    for FullProposal
 {
     fn is_first(&self) -> bool {
         // Only one part for now
@@ -700,6 +688,9 @@ impl informalsystems_malachitebft_core_types::ProposalPart<SnapchainValidatorCon
         true
     }
 }
+
+// Make malachite happy. Prost already implements PartialEq, should be safe to mark as Eq?
+impl Eq for FullProposal {}
 
 impl informalsystems_malachitebft_core_types::Proposal<SnapchainValidatorContext> for Proposal {
     fn height(&self) -> Height {

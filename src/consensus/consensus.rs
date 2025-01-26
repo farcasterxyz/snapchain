@@ -361,7 +361,7 @@ impl Consensus {
                     height, self.params.address
                 );
 
-                let current_height = state.shard_validator.get_current_height();
+                let current_height = state.shard_validator.get_current_height().block_number;
 
                 // TODO(aditi): Add a check for the node being too far behind to start up via rpc sync once we have a way to pick up missed blocks in bulk
                 if !state
@@ -389,7 +389,7 @@ impl Consensus {
                     }
                 }
 
-                let proposed_value = state.shard_validator.add_proposed_value(full_proposal);
+                let proposed_value = state.shard_validator.add_proposed_value(&full_proposal);
 
                 let result = self
                     .process_input(
@@ -715,7 +715,7 @@ impl Actor for Consensus {
             self.shard_id.clone(),
             self.ctx.public_key(),
             None,
-            state.shard_validator.get_current_height(),
+            state.shard_validator.get_current_height().block_number,
         ));
         Ok(())
     }
