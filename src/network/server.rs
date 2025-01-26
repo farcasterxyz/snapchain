@@ -9,6 +9,7 @@ use crate::proto::hub_service_server::HubService;
 use crate::proto::on_chain_event::Body;
 use crate::proto::GetInfoResponse;
 use crate::proto::HubEvent;
+use crate::proto::MessageType;
 use crate::proto::TrieNodeMetadataRequest;
 use crate::proto::TrieNodeMetadataResponse;
 use crate::proto::UserNameProof;
@@ -326,6 +327,41 @@ impl MyHubService {
             )),
         }
     }
+
+    fn rewrite_hub_event(hub_event: HubEvent) -> HubEvent {
+        match &hub_event.body {
+            Some(body) => {
+                match body {
+                    proto::hub_event::Body::MergeMessageBody(merge_message_body) => {
+                        match &merge_message_body.message {
+                            None => hub_event,
+                            Some(message) => {
+                                if message.msg_type() == MessageType::LinkCompactState {
+                                    // In the case of merging compact state, we omit the deleted messages as this would
+                                    // result in an unbounded message size:
+                                    let mut event = hub_event.clone();
+                                    let mut merge_message_body = merge_message_body.clone();
+                                    let deleted_messages = Vec::<Message>::new();
+                                    merge_message_body.deleted_messages = deleted_messages;
+                                    event.body = Some(proto::hub_event::Body::MergeMessageBody(
+                                        merge_message_body,
+                                    ));
+                                    event
+                                } else {
+                                    hub_event
+                                }
+                            }
+                        }
+                    }
+                    proto::hub_event::Body::PruneMessageBody(_)
+                    | proto::hub_event::Body::RevokeMessageBody(_)
+                    | proto::hub_event::Body::MergeUsernameProofBody(_)
+                    | proto::hub_event::Body::MergeOnChainEventBody(_) => hub_event,
+                }
+            }
+            None => hub_event,
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -580,6 +616,7 @@ impl HubService for MyHubService {
                     loop {
                         match event_rx.recv().await {
                             Ok(hub_event) => {
+                                let hub_event = Self::rewrite_hub_event(hub_event);
                                 match tx.send(Ok(hub_event)).await {
                                     Ok(_) => {}
                                     Err(_) => {
