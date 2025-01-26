@@ -411,6 +411,8 @@ mod tests {
 
         let link_result = engine.get_link_compact_state_messages_by_fid(FID_FOR_TEST);
         assert_eq!(1, link_result.unwrap().messages.len());
+        let link_result = engine.get_links_by_fid(FID_FOR_TEST);
+        assert_eq!(0, link_result.unwrap().messages.len());
         assert!(message_exists_in_trie(&mut engine, &link_compact_state));
         assert!(!message_exists_in_trie(&mut engine, &link_add2));
         assert!(!message_exists_in_trie(&mut engine, &link_remove))
