@@ -18,6 +18,7 @@ use informalsystems_malachitebft_core_types::{
 };
 use informalsystems_malachitebft_metrics::Metrics;
 
+use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::timers::{TimeoutElapsed, TimerScheduler};
 use crate::consensus::validator::ShardValidator;
 use crate::core::types::{
@@ -37,8 +38,14 @@ pub type Decision = FullProposal;
 pub type TxDecision = mpsc::Sender<Decision>;
 pub type RxDecision = mpsc::Receiver<Decision>;
 
+pub enum MalachiteEventShard {
+    None,
+    Shard(u32),
+}
+
 pub enum SystemMessage {
     Consensus(ConsensusMsg<SnapchainValidatorContext>),
+    MalachiteNetwork(MalachiteEventShard, MalachiteNetworkEvent), // Shard Id and the malachite network event
 }
 
 type Timers<Ctx> = TimerScheduler<Timeout, ConsensusMsg<Ctx>>;

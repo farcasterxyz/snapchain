@@ -1,9 +1,10 @@
 use crate::core::types::{Proposal, Signature, SnapchainValidatorContext, Vote};
-use crate::proto::{consensus_message, ConsensusMessage};
+use crate::proto::{consensus_message, ConsensusMessage, FullProposal};
 use bytes::Bytes;
 use informalsystems_malachitebft_codec::Codec;
 use informalsystems_malachitebft_core_consensus::SignedConsensusMsg;
 use informalsystems_malachitebft_core_types::{SignedProposal, SignedVote};
+use informalsystems_malachitebft_engine::util::streaming::{StreamContent, StreamMessage};
 use prost::{DecodeError, EncodeError, Message};
 use thiserror::Error;
 
@@ -15,6 +16,9 @@ pub enum SnapchainCodecError {
     Decode(#[from] DecodeError),
     #[error("Failed to encode message")]
     Encode(#[from] EncodeError),
+
+    #[error("Invalid field: {0}")]
+    InvalidField(String),
 }
 
 impl Codec<SignedConsensusMsg<SnapchainValidatorContext>> for SnapchainCodec {
@@ -70,5 +74,36 @@ impl Codec<SignedConsensusMsg<SnapchainValidatorContext>> for SnapchainCodec {
                 Ok(Bytes::from(message.encode_to_vec()))
             }
         }
+    }
+}
+
+impl Codec<FullProposal> for SnapchainCodec {
+    type Error = SnapchainCodecError;
+
+    fn decode(&self, bytes: Bytes) -> Result<FullProposal, Self::Error> {
+        FullProposal::decode(bytes).map_err(SnapchainCodecError::Decode)
+    }
+
+    fn encode(&self, msg: &FullProposal) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::from(msg.encode_to_vec()))
+    }
+}
+
+// Since we're always sending full proposals, just encode that directly instead of using StreamMessage
+impl Codec<StreamMessage<FullProposal>> for SnapchainCodec {
+    type Error = SnapchainCodecError;
+
+    fn decode(&self, bytes: Bytes) -> Result<StreamMessage<FullProposal>, Self::Error> {
+        let proposal = Self.decode(bytes)?;
+        Ok(StreamMessage::new(0, 0, StreamContent::Data(proposal)))
+    }
+
+    fn encode(&self, msg: &StreamMessage<FullProposal>) -> Result<Bytes, Self::Error> {
+        msg.content.as_data().map_or(
+            Err(SnapchainCodecError::InvalidField(
+                "StreamMessage content could not be encoded to FullProposal".to_string(),
+            )),
+            |proposal| self.encode(proposal),
+        )
     }
 }

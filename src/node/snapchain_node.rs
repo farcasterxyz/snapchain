@@ -1,4 +1,8 @@
-use crate::consensus::consensus::{Config, Consensus, ConsensusMsg, ConsensusParams};
+use crate::consensus::consensus::{
+    Config, Consensus, ConsensusMsg, ConsensusParams, MalachiteEventShard,
+};
+use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
+use crate::consensus::malachite::spawn::MalachiteConsensusActors;
 use crate::consensus::proposer::{BlockProposer, ShardProposer};
 use crate::consensus::validator::ShardValidator;
 use crate::core::types::{
@@ -17,7 +21,7 @@ use crate::storage::trie::merkle_trie;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_config::TimeoutConfig;
 use informalsystems_malachitebft_core_consensus::ValuePayload;
-use informalsystems_malachitebft_metrics::Metrics;
+use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use libp2p::identity::ed25519::Keypair;
 use ractor::ActorRef;
 use std::collections::{BTreeMap, HashMap};
@@ -27,7 +31,7 @@ use tracing::warn;
 const MAX_SHARDS: u32 = 64;
 
 pub struct SnapchainNode {
-    pub consensus_actors: BTreeMap<u32, ActorRef<ConsensusMsg<SnapchainValidatorContext>>>,
+    pub consensus_actors: BTreeMap<u32, MalachiteConsensusActors>,
     pub shard_stores: HashMap<u32, Stores>,
     pub shard_senders: HashMap<u32, Senders>,
     pub address: Address,
@@ -46,6 +50,7 @@ impl SnapchainNode {
         rocksdb_dir: String,
         statsd_client: StatsdClientWrapper,
         trie_branching_factor: u32,
+        registry: &SharedRegistry,
     ) -> Self {
         let validator_address = Address(keypair.public().to_bytes());
 
@@ -74,16 +79,9 @@ impl SnapchainNode {
                 current_height,
             );
             let shard_validator_set = SnapchainValidatorSet::new(vec![shard_validator]);
-            let shard_consensus_params = ConsensusParams {
-                initial_height: Height::new(shard.shard_id(), 1),
-                initial_validator_set: shard_validator_set,
-                address: validator_address.clone(),
-                threshold_params: Default::default(),
-                value_payload: ValuePayload::ProposalAndParts,
-            };
             let ctx = SnapchainValidatorContext::new(keypair.clone());
 
-            let db = RocksDB::open_shard_db(rocksdb_dir.as_str(), shard_id);
+            let db = RocksDB::open_shard_db(rocksdb_dir.clone().as_str(), shard_id);
             let trie = merkle_trie::MerkleTrie::new(trie_branching_factor).unwrap(); //TODO: don't unwrap()
             let engine = ShardEngine::new(
                 db,
@@ -110,22 +108,24 @@ impl SnapchainNode {
             let shard_validator = ShardValidator::new(
                 validator_address.clone(),
                 shard.clone(),
+                shard_validator_set,
                 None,
                 Some(shard_proposer),
             );
-            let consensus_actor = Consensus::spawn(
+            let consensus_actor = MalachiteConsensusActors::create_and_start(
                 ctx,
-                shard.clone(),
-                shard_consensus_params,
-                TimeoutConfig::default(),
-                Metrics::new(),
-                gossip_tx.clone(),
                 shard_validator,
+                rocksdb_dir.clone(),
+                gossip_tx.clone(),
+                registry,
             )
-            .await
-            .unwrap();
+            .await;
 
-            consensus_actors.insert(shard_id, consensus_actor);
+            if consensus_actor.is_err() {
+                panic!("Failed to create consensus actor for shard {}", shard_id);
+            }
+
+            consensus_actors.insert(shard_id, consensus_actor.unwrap());
         }
 
         // Now create the block validator
@@ -143,17 +143,7 @@ impl SnapchainNode {
             current_height,
         );
         let block_validator_set = SnapchainValidatorSet::new(vec![block_validator]);
-
-        let block_consensus_params = ConsensusParams {
-            initial_height: Height::new(block_shard.shard_id(), 1),
-            initial_validator_set: block_validator_set,
-            address: validator_address.clone(),
-            threshold_params: Default::default(),
-            value_payload: ValuePayload::ProposalAndParts,
-        };
-
         let engine = BlockEngine::new(block_store.clone());
-
         let shard_decision_rx = shard_decision_tx.subscribe();
         let block_proposer = BlockProposer::new(
             validator_address.clone(),
@@ -167,22 +157,23 @@ impl SnapchainNode {
         let block_validator = ShardValidator::new(
             validator_address.clone(),
             block_shard.clone(),
+            block_validator_set,
             Some(block_proposer),
             None,
         );
         let ctx = SnapchainValidatorContext::new(keypair.clone());
-        let block_consensus_actor = Consensus::spawn(
+        let block_consensus_actor = MalachiteConsensusActors::create_and_start(
             ctx,
-            block_shard,
-            block_consensus_params,
-            TimeoutConfig::default(),
-            Metrics::new(),
-            gossip_tx.clone(),
             block_validator,
+            rocksdb_dir.clone(),
+            gossip_tx.clone(),
+            registry,
         )
-        .await
-        .unwrap();
-        consensus_actors.insert(0, block_consensus_actor);
+        .await;
+        if block_consensus_actor.is_err() {
+            panic!("Failed to create consensus actor for block shard");
+        }
+        consensus_actors.insert(0, block_consensus_actor.unwrap());
 
         Self {
             consensus_actors,
@@ -199,28 +190,34 @@ impl SnapchainNode {
     pub fn stop(&self) {
         // Stop all actors
         for (_, actor) in self.consensus_actors.iter() {
-            actor.stop(None);
+            actor.stop();
         }
     }
 
-    pub fn start_height(&self, block_number: u64) {
-        for (shard, actor) in self.consensus_actors.iter() {
-            let result = actor.cast(ConsensusMsg::StartHeight(Height::new(*shard, block_number)));
-            if let Err(e) = result {
-                warn!("Failed to start height: {:?}", e);
+    // pub fn start_height(&self, block_number: u64) {
+    //     for (shard, actor) in self.consensus_actors.iter() {
+    //         let result = actor.cast(ConsensusMsg::StartHeight(Height::new(*shard, block_number)));
+    //         if let Err(e) = result {
+    //             warn!("Failed to start height: {:?}", e);
+    //         }
+    //     }
+    // }
+    //
+    pub fn dispatch(&self, shard: MalachiteEventShard, event: MalachiteNetworkEvent) {
+        match shard {
+            MalachiteEventShard::None => {
+                // Dispatch to all shards
             }
-        }
-    }
-
-    pub fn dispatch(&self, msg: ConsensusMsg<SnapchainValidatorContext>) {
-        let shard_id = msg.shard_id();
-        if let Some(actor) = self.consensus_actors.get(&shard_id) {
-            let result = actor.cast(msg);
-            if let Err(e) = result {
-                warn!("Failed to forward message to actor: {:?}", e);
+            MalachiteEventShard::Shard(shard_index) => {
+                if let Some(actor) = self.consensus_actors.get(&shard_index) {
+                    let result = actor.cast_network_event(event);
+                    if let Err(e) = result {
+                        warn!("Failed to forward message to actor: {:?}", e);
+                    }
+                } else {
+                    warn!("No actor found for shard, could not forward message");
+                }
             }
-        } else {
-            warn!("No actor found for shard, could not forward message");
         }
     }
 }

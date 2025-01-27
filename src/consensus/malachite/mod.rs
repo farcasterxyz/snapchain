@@ -1,4 +1,4 @@
 mod host;
-mod network_connector;
+pub mod network_connector;
 mod snapchain_codec;
-mod spawn;
+pub mod spawn;

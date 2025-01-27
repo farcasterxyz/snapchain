@@ -12,8 +12,11 @@ use std::collections::{BTreeSet, HashMap};
 use tokio::sync::mpsc;
 use tracing::{error, trace};
 
+pub type MalachiteNetworkActorMsg = Msg<SnapchainValidatorContext>;
+pub type MalachiteNetworkEvent = Event;
+
 pub struct MalachiteNetworkConnector<Codec> {
-    codec: Codec,
+    pub codec: Codec,
 }
 
 pub enum NetworkConnectorState {
@@ -29,7 +32,24 @@ pub enum NetworkConnectorState {
 }
 
 pub struct NetworkConnectorArgs {
-    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+    pub gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+}
+
+impl<Codec> MalachiteNetworkConnector<Codec>
+where
+    Codec: ConsensusCodec<SnapchainValidatorContext>,
+{
+    pub fn new(codec: Codec) -> Self {
+        Self { codec }
+    }
+
+    pub async fn spawn(
+        codec: Codec,
+        args: NetworkConnectorArgs,
+    ) -> Result<ActorRef<Msg<SnapchainValidatorContext>>, ractor::SpawnErr> {
+        let (actor_ref, _) = Actor::spawn(None, Self::new(codec), args).await?;
+        Ok(actor_ref)
+    }
 }
 
 #[async_trait]

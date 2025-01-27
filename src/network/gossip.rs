@@ -1,11 +1,15 @@
-use crate::consensus::consensus::{ConsensusMsg, SystemMessage};
+use crate::consensus::consensus::{ConsensusMsg, MalachiteEventShard, SystemMessage};
+use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::core::types::{
     proto, Proposal, ShardId, Signature, SnapchainContext, SnapchainShard, SnapchainValidator,
     SnapchainValidatorContext, Vote,
 };
 use crate::storage::store::engine::MempoolMessage;
+use bytes::Bytes;
 use futures::StreamExt;
 use informalsystems_malachitebft_core_types::{SignedProposal, SignedVote};
+use informalsystems_malachitebft_network::PeerId as MalachitePeerId;
+use informalsystems_malachitebft_network::{Channel, PeerIdExt};
 use libp2p::identity::ed25519::Keypair;
 use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::{gossipsub, noise, swarm::NetworkBehaviour, swarm::SwarmEvent, tcp, yamux, Swarm};
@@ -174,10 +178,20 @@ impl SnapchainGossip {
                     match gossip_event {
                         SwarmEvent::ConnectionEstablished {peer_id, ..} => {
                             info!("Connection established with peer: {peer_id}");
+                            let event = MalachiteNetworkEvent::PeerConnected(MalachitePeerId::from_libp2p(&peer_id));
+                            // TODO: Map the peer id to the right shard based on the register validator message
+                            let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await;
+                            if let Err(e) = res {
+                                warn!("Failed to send connection established message: {:?}", e);
+                            }
                         },
                         SwarmEvent::ConnectionClosed {peer_id, cause, ..} => {
                             info!("Connection closed with peer: {:?} due to: {:?}", peer_id, cause);
-                            // TODO: Remove validator
+                            let event = MalachiteNetworkEvent::PeerDisconnected(MalachitePeerId::from_libp2p(&peer_id));
+                            let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await;
+                            if let Err(e) = res {
+                                warn!("Failed to send connection closed message: {:?}", e);
+                            }
                         },
                         SwarmEvent::Behaviour(SnapchainBehaviorEvent::Gossipsub(gossipsub::Event::Subscribed { peer_id, topic })) =>
                             info!("Peer: {peer_id} subscribed to topic: {topic}"),
@@ -185,6 +199,10 @@ impl SnapchainGossip {
                             info!("Peer: {peer_id} unsubscribed to topic: {topic}"),
                         SwarmEvent::NewListenAddr { address, .. } => {
                             info!(address = address.to_string(), "Local node is listening");
+                            let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, MalachiteNetworkEvent::Listening(address))).await;
+                            if let Err(e) = res {
+                                warn!("Failed to send Listening message: {:?}", e);
+                            }
                         },
                         SwarmEvent::Behaviour(SnapchainBehaviorEvent::Gossipsub(gossipsub::Event::Message {
                             propagation_source: peer_id,
@@ -197,8 +215,16 @@ impl SnapchainGossip {
                                         Some(proto::gossip_message::GossipMessage::FullProposal(full_proposal)) => {
                                             let height = full_proposal.height();
                                             debug!("Received block with height {} from peer: {}", height, peer_id);
-                                            let consensus_message = ConsensusMsg::ReceivedFullProposal(full_proposal);
-                                            let res = self.system_tx.send(SystemMessage::Consensus(consensus_message)).await;
+                                            let malachite_peer_id = MalachitePeerId::from_libp2p(&peer_id);
+                                            let bytes = Bytes::from(full_proposal.encode_to_vec());
+                                            let event = MalachiteNetworkEvent::Message(Channel::Consensus, malachite_peer_id, bytes);
+                                            let shard_result = full_proposal.shard_id();
+                                            if shard_result.is_err() {
+                                                warn!("Failed to get shard id from consensus message");
+                                                continue;
+                                            }
+                                            let shard = MalachiteEventShard::Shard(shard_result.unwrap());
+                                            let res = self.system_tx.send(SystemMessage::MalachiteNetwork(shard, event)).await;
                                             if let Err(e) = res {
                                                 warn!("Failed to send system block message: {:?}", e);
                                             }
@@ -222,34 +248,19 @@ impl SnapchainGossip {
                                             }
                                         },
                                         Some(proto::gossip_message::GossipMessage::Consensus(signed_consensus_msg)) => {
-                                            match signed_consensus_msg.consensus_message{
-                                                Some(proto::consensus_message::ConsensusMessage::Vote(vote)) => {
-                                                    let vote = Vote::from_proto(vote);
-                                                    let signed_vote = SignedVote {
-                                                        message: vote,
-                                                        signature: Signature(signed_consensus_msg.signature),
-                                                    };
-                                                    let consensus_message = ConsensusMsg::ReceivedSignedVote(signed_vote);
-                                                    let res = self.system_tx.send(SystemMessage::Consensus(consensus_message)).await;
-                                                    if let Err(e) = res {
-                                                        warn!("Failed to send system vote message: {:?}", e);
-                                                    }
-                                                },
-                                                Some(proto::consensus_message::ConsensusMessage::Proposal(proposal)) => {
-                                                    let proposal = Proposal::from_proto(proposal);
-                                                    let signed_proposal = SignedProposal {
-                                                        message: proposal,
-                                                        signature: Signature(signed_consensus_msg.signature),
-                                                    };
-                                                    let consensus_message = ConsensusMsg::ReceivedSignedProposal(signed_proposal);
-                                                    let res = self.system_tx.send(SystemMessage::Consensus(consensus_message)).await;
-                                                    if let Err(e) = res {
-                                                        warn!("Failed to send system proposal message: {:?}", e);
-                                                    }
-                                                },
-                                                None => warn!("Received empty consensus message from peer: {}", peer_id),
+                                            let malachite_peer_id = MalachitePeerId::from_libp2p(&peer_id);
+                                            let bytes = Bytes::from(signed_consensus_msg.encode_to_vec());
+                                            let event = MalachiteNetworkEvent::Message(Channel::Consensus, malachite_peer_id, bytes);
+                                            let shard_result = signed_consensus_msg.shard_id();
+                                            if shard_result.is_err() {
+                                                warn!("Failed to get shard id from consensus message");
+                                                continue;
                                             }
-
+                                            let shard = MalachiteEventShard::Shard(shard_result.unwrap());
+                                            let res = self.system_tx.send(SystemMessage::MalachiteNetwork(shard, event)).await;
+                                            if let Err(e) = res {
+                                                warn!("Failed to send system vote message: {:?}", e);
+                                            }
                                         }
                                         Some(proto::gossip_message::GossipMessage::MempoolMessage(message)) => {
                                             if let Some(mempool_message_proto) = message.mempool_message {

@@ -18,8 +18,8 @@ use informalsystems_malachitebft_engine::host::{HostMsg, LocallyProposedValue};
 pub struct Host {}
 
 pub struct HostState {
-    shard_validator: ShardValidator,
-    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+    pub shard_validator: ShardValidator,
+    pub gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
 }
 
 impl Host {

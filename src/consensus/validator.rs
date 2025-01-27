@@ -33,13 +33,14 @@ impl ShardValidator {
     pub fn new(
         address: Address,
         shard: SnapchainShard,
+        initial_validator_set: SnapchainValidatorSet,
         block_proposer: Option<BlockProposer>,
         shard_proposer: Option<ShardProposer>,
     ) -> ShardValidator {
         ShardValidator {
             shard_id: shard.clone(),
             address: address.clone(),
-            validator_set: SnapchainValidatorSet::new(vec![]),
+            validator_set: initial_validator_set,
             confirmed_height: None,
             current_round: Round::new(0),
             current_height: None,
@@ -57,6 +58,10 @@ impl ShardValidator {
 
     pub fn validator_count(&self) -> usize {
         self.validator_set.count()
+    }
+
+    pub fn get_address(&self) -> Address {
+        self.address.clone()
     }
 
     pub fn get_current_height(&self) -> Height {

@@ -149,6 +149,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         app_config.rocksdb_dir.clone(),
         statsd_client.clone(),
         app_config.trie_branching_factor,
+        registry,
     )
     .await;
 
@@ -326,9 +327,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             Some(msg) = system_rx.recv() => {
                 match msg {
-                    SystemMessage::Consensus(consensus_msg) => {
+                    SystemMessage::MalachiteNetwork(shard, event) => {
                         // Forward to apropriate consesnsus actors
-                        node.dispatch(consensus_msg);
+                        node.dispatch(shard, event);
+                    },
+                    SystemMessage::Consensus(_) => {
+                        todo!(); // Deprecated
                     }
                 }
             }
