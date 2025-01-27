@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use libp2p::identity::ed25519::{Keypair, SecretKey};
 use malachite_common::ValidatorSet;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -16,7 +17,7 @@ use malachite_metrics::Metrics;
 use crate::consensus::timers::{TimeoutElapsed, TimerScheduler};
 use crate::consensus::validator::ShardValidator;
 use crate::core::types::{
-    Height, ShardId, SnapchainContext, SnapchainShard, SnapchainValidator,
+    Address, Height, ShardId, SnapchainContext, SnapchainShard, SnapchainValidator,
     SnapchainValidatorContext,
 };
 use crate::network::gossip::GossipEvent;
@@ -84,6 +85,19 @@ impl Config {
             max_messages_per_block: self.max_messages_per_block,
             validators: allowed_validators,
         }
+    }
+
+    pub fn allowed_validators_by_shard(&self) -> HashMap<u32, Vec<Address>> {
+        // For now, use the same allowed validators for all shards. It's easier to configure one set of validators.
+        let allowed_validators: Vec<Address> = self
+            .validators
+            .iter()
+            .map(|validator| Address::from_vec(hex::decode(validator).unwrap()))
+            .collect();
+        self.shard_ids
+            .iter()
+            .map(|&shard_id| return (shard_id, allowed_validators.clone()))
+            .collect()
     }
 }
 

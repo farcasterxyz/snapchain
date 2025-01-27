@@ -52,11 +52,7 @@ impl SnapchainNode {
 
         let mut shard_senders: HashMap<u32, Senders> = HashMap::new();
         let mut shard_stores: HashMap<u32, Stores> = HashMap::new();
-        let allowed_validators: Vec<Address> = config
-            .validators
-            .iter()
-            .map(|validator| Address::from_vec(hex::decode(validator).unwrap()))
-            .collect();
+        let allowed_validators_by_shard = config.allowed_validators_by_shard();
 
         // Create the shard validators
         for shard_id in config.shard_ids {
@@ -110,6 +106,9 @@ impl SnapchainNode {
                 config.propose_value_delay,
             );
 
+            let allowed_validators = allowed_validators_by_shard
+                .get(&shard_id)
+                .expect("allowed validators missing for shard");
             let shard_validator = ShardValidator::new(
                 validator_address.clone(),
                 shard.clone(),
@@ -158,6 +157,9 @@ impl SnapchainNode {
         let engine = BlockEngine::new(block_store.clone());
 
         let shard_decision_rx = shard_decision_tx.subscribe();
+        let allowed_validators = allowed_validators_by_shard
+            .get(&block_shard.shard_id())
+            .expect("allowed validators missing for block shard");
         let block_proposer = BlockProposer::new(
             validator_address.clone(),
             block_shard.clone(),
@@ -173,7 +175,7 @@ impl SnapchainNode {
             block_shard.clone(),
             Some(block_proposer),
             None,
-            allowed_validators,
+            allowed_validators.clone(),
         );
         let ctx = SnapchainValidatorContext::new(keypair.clone());
         let block_consensus_actor = Consensus::spawn(
