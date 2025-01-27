@@ -344,10 +344,7 @@ impl MyHubService {
                             }
                         }
                     }
-                    proto::hub_event::Body::PruneMessageBody(_)
-                    | proto::hub_event::Body::RevokeMessageBody(_)
-                    | proto::hub_event::Body::MergeUsernameProofBody(_)
-                    | proto::hub_event::Body::MergeOnChainEventBody(_) => {}
+                    _ => {}
                 }
             }
             None => {}
