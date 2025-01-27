@@ -10,7 +10,6 @@ use tracing::error;
 
 static PAGE_SIZE: usize = 100;
 
-// TODO(aditi): This code definitely needs unit tests
 #[derive(Error, Debug)]
 pub enum ShardStorageError {
     #[error(transparent)]

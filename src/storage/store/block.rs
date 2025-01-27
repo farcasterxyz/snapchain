@@ -7,7 +7,6 @@ use prost::Message;
 use std::sync::Arc;
 use thiserror::Error;
 
-// TODO(aditi): This code definitely needs unit tests
 #[derive(Error, Debug)]
 pub enum BlockStorageError {
     #[error(transparent)]

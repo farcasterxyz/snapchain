@@ -7,7 +7,13 @@ pub mod shard;
 pub mod stores;
 pub mod utils;
 
-pub(crate) mod test_helper;
+pub mod test_helper;
 
 #[cfg(test)]
-mod engine_tests;
+mod block_tests;
+
+#[cfg(test)]
+mod shard_tests;
+
+#[cfg(test)]
+mod integration_tests;
