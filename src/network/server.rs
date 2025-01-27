@@ -585,6 +585,7 @@ impl HubService for MyHubService {
                     .unwrap();
 
                     for event in old_events.events {
+                        let event = Self::rewrite_hub_event(event);
                         if let Err(_) = server_tx.send(Ok(event)).await {
                             return;
                         }
