@@ -94,7 +94,9 @@ impl Config {
             .iter()
             .map(|validator| Address::from_vec(hex::decode(validator).unwrap()))
             .collect();
-        self.shard_ids
+        let mut all_shards = self.shard_ids.clone();
+        all_shards.push(0);
+        all_shards
             .iter()
             .map(|&shard_id| return (shard_id, allowed_validators.clone()))
             .collect()
