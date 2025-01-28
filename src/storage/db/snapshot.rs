@@ -15,18 +15,19 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             endpoint_url: "".to_string(),
-            s3_bucket: "farcaster-snapshots".to_string(),
+            s3_bucket: "snapchain-snapshots".to_string(),
         }
     }
 }
-pub fn snapshot_directory(network: FarcasterNetwork) -> String {
-    return format!("snapchain-snapshots/{}", network.as_str_name());
+pub fn snapshot_directory(network: FarcasterNetwork, shard_id: u32) -> String {
+    return format!("snapchain-snapshots/{}/{}", network.as_str_name(), shard_id);
 }
 
 pub async fn upload_to_s3(
     network: FarcasterNetwork,
     chunked_dir_path: String,
     snapshot_config: &Config,
+    shard_id: u32,
 ) {
     let start_timetamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -43,7 +44,7 @@ pub async fn upload_to_s3(
     let s3 = aws_sdk_s3::Client::new(&config);
     let upload_dir = format!(
         "{}/snapshot-{}-{}.tar.gz",
-        snapshot_directory(network),
+        snapshot_directory(network, shard_id),
         start_date,
         start_timetamp / 1000
     );

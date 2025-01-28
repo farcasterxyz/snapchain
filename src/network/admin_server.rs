@@ -207,16 +207,16 @@ impl AdminService for MyAdminService {
             .unwrap()
             .as_millis();
         for (shard, stores) in self.shard_stores.iter() {
-            let backup_dir = Path::new(&stores.db.location())
+            let db_location = stores.db.location();
+            let backup_dir = Path::new(&db_location)
                 .join("..") // Create backup as sibling directory of normal path
-                .join("backup")
                 .join(format!(
-                    "{}.backup",
+                    "{}-{}.backup",
+                    db_location,
                     DateTime::from_timestamp_millis(now as i64)
                         .unwrap()
-                        .format("%Y-%m-%d-%s")
-                ))
-                .join("rocks.hub._default");
+                        .format("%Y-%m-%d-%s"),
+                ));
             let tar_gz_path = RocksDB::backup_db(
                 stores.db.clone(),
                 backup_dir.to_str().unwrap(),
@@ -228,6 +228,7 @@ impl AdminService for MyAdminService {
                 self.fc_network,
                 tar_gz_path,
                 &self.snapshot_config,
+                *shard,
             )
             .await;
         }
