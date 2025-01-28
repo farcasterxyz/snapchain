@@ -10,7 +10,9 @@ use crate::consensus::validator::ShardValidator;
 use crate::core::types::SnapchainValidatorContext;
 use crate::network::gossip::GossipEvent;
 use informalsystems_malachitebft_engine::host::{HostMsg, LocallyProposedValue};
-use tracing::info;
+use informalsystems_malachitebft_engine::network::{NetworkMsg, NetworkRef};
+use informalsystems_malachitebft_engine::util::streaming::{StreamContent, StreamMessage};
+use tracing::{debug, error, info, warn};
 
 /// Actor for bridging consensus and the application via a set of channels.
 ///
@@ -21,6 +23,7 @@ pub struct Host {}
 pub struct HostState {
     pub shard_validator: ShardValidator,
     pub gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+    pub network: NetworkRef<SnapchainValidatorContext>,
 }
 
 impl Host {
@@ -48,7 +51,7 @@ impl Host {
                 // Start height
                 state.shard_validator.start(); // Call each time?
                 let validator_set = state.shard_validator.get_validator_set();
-                let height = state.shard_validator.get_current_height();
+                let height = state.shard_validator.get_current_height().increment();
                 info!(
                     height = height.to_string(),
                     validators = validator_set.validators.len(),
@@ -77,20 +80,26 @@ impl Host {
                     .propose_value(height, round, timeout)
                     .await;
                 let shard_hash = value.shard_hash().clone();
-                // TODO: Publish value to network
                 let locally_proposed_value =
                     LocallyProposedValue::new(height, round, shard_hash, None);
                 reply_to.send(locally_proposed_value)?;
+
+                // Next, broadcast the value to the network
+                let stream_message = StreamMessage::new(0, 0, StreamContent::Data(value));
+                state
+                    .network
+                    .cast(NetworkMsg::PublishProposalPart(stream_message))?;
             }
 
             HostMsg::RestreamValue {
                 height,
                 round,
-                valid_round,
-                address,
-                value_id,
+                valid_round: _,
+                address: _,
+                value_id: _,
             } => {
-                // TODO: broadcast previous value to network
+                // This is only called for pol_rounds which we're not using?
+                warn!("Restream requested for value at height: {height}, round: {round}");
             }
 
             HostMsg::GetHistoryMinHeight { reply_to } => {
@@ -104,13 +113,13 @@ impl Host {
             } => {
                 // store proposal part
                 let data = part.content.as_data();
-
                 match data {
                     Some(proposal) => {
-                        state.shard_validator.add_proposed_value(proposal);
+                        let proposed_value = state.shard_validator.add_proposed_value(proposal);
+                        reply_to.send(proposed_value)?;
                     }
                     None => {
-                        tracing::error!("Received invalid proposal part");
+                        error!("Received invalid proposal part from {from}");
                     }
                 }
             }
@@ -128,6 +137,11 @@ impl Host {
                     .shard_validator
                     .decide(certificate.height, certificate.round, certificate.value_id)
                     .await;
+
+                // Start next height
+                let next_height = certificate.height.increment();
+                let validator_set = state.shard_validator.get_validator_set();
+                consensus_ref.cast(ConsensusMsg::StartHeight(next_height, validator_set))?;
             }
 
             HostMsg::GetDecidedValue { height, reply_to } => {
@@ -170,7 +184,7 @@ impl Actor for Host {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         if let Err(e) = self.handle_msg(myself, msg, state).await {
-            tracing::error!("Error processing message: {e}");
+            error!("Error processing message: {e}");
         }
         Ok(())
     }

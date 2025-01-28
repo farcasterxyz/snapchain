@@ -6,6 +6,7 @@ use libp2p::identity::ed25519::Keypair;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
+use tokio::{select, time};
 
 const HOST_FOR_TEST: &str = "127.0.0.1";
 const PORT_FOR_TEST: u32 = 9382;
@@ -72,13 +73,22 @@ async fn test_gossip_communication() {
         .unwrap();
 
     // Wait for message to be received with timeout
-    let received = timeout(Duration::from_secs(5), system_rx2.recv()).await;
-    assert!(received.is_ok(), "Timed out waiting for message");
-
-    if let Ok(Some(SystemMessage::Consensus(ConsensusMsg::RegisterValidator(validator)))) = received
-    {
-        assert_eq!(validator.current_height, 312);
-    } else {
-        panic!("Received unexpected or no message: {:?}", received);
+    let deadline = time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let timeout = time::sleep_until(deadline);
+        select! {
+            received = system_rx2.recv()  => {
+                match received {
+                    Some(SystemMessage::Consensus(ConsensusMsg::RegisterValidator(validator)))  => {
+                        assert_eq!(validator.current_height, 312);
+                        break;
+                    },
+                    _ => {},
+                }
+            }
+            _ = timeout => {
+                panic!("Timeout while waiting for message");
+            }
+        }
     }
 }

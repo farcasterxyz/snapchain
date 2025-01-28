@@ -191,7 +191,15 @@ impl SnapchainNode {
     pub fn dispatch(&self, shard: MalachiteEventShard, event: MalachiteNetworkEvent) {
         match shard {
             MalachiteEventShard::None => {
-                // Dispatch to all shards
+                for (shard_index, actor) in self.consensus_actors.iter() {
+                    let result = actor.cast_network_event(event.clone());
+                    if let Err(e) = result {
+                        warn!(
+                            "Failed to forward message to actor: {:?} at shard: {:?}",
+                            e, shard_index
+                        );
+                    }
+                }
             }
             MalachiteEventShard::Shard(shard_index) => {
                 if let Some(actor) = self.consensus_actors.get(&shard_index) {

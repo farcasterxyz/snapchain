@@ -5,12 +5,13 @@ use informalsystems_malachitebft_core_consensus::SignedConsensusMsg;
 use informalsystems_malachitebft_engine::consensus::ConsensusCodec;
 use informalsystems_malachitebft_engine::network::{NetworkEvent, NetworkMsg as Msg};
 use informalsystems_malachitebft_engine::sync;
+use informalsystems_malachitebft_engine::util::streaming::StreamMessage;
 use informalsystems_malachitebft_network::{Channel, Event};
 use informalsystems_malachitebft_sync::RawMessage;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort};
 use std::collections::{BTreeSet, HashMap};
 use tokio::sync::mpsc;
-use tracing::{error, trace};
+use tracing::{debug, error, trace};
 
 pub type MalachiteNetworkActorMsg = Msg<SnapchainValidatorContext>;
 pub type MalachiteNetworkEvent = Event;
@@ -205,6 +206,7 @@ where
                 let event = match msg {
                     SignedConsensusMsg::Vote(vote) => NetworkEvent::Vote(from, vote),
                     SignedConsensusMsg::Proposal(proposal) => {
+                        debug!("Received proposal from network");
                         NetworkEvent::Proposal(from, proposal)
                     }
                 };
@@ -213,22 +215,23 @@ where
             }
 
             Msg::NewEvent(Event::Message(Channel::ProposalParts, from, data)) => {
-                // let msg: StreamMessage<Ctx::ProposalPart> = match self.codec.decode(data) {
-                //     Ok(stream_msg) => stream_msg,
-                //     Err(e) => {
-                //         error!(%from, "Failed to decode stream message: {e:?}");
-                //         return Ok(());
-                //     }
-                // };
-                //
-                // trace!(
-                //     %from,
-                //     stream_id = %msg.stream_id,
-                //     sequence = %msg.sequence,
-                //     "Received proposal part"
-                // );
-                //
-                // output_port.send(NetworkEvent::ProposalPart(from, msg));
+                debug!("Received proposal parts from network");
+                let msg: StreamMessage<<SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::ProposalPart> = match self.codec.decode(data) {
+                    Ok(stream_msg) => stream_msg,
+                    Err(e) => {
+                        error!(%from, "Failed to decode stream message: {e:?}");
+                        return Ok(());
+                    }
+                };
+
+                trace!(
+                    %from,
+                    stream_id = %msg.stream_id,
+                    sequence = %msg.sequence,
+                    "Received proposal part"
+                );
+
+                output_port.send(NetworkEvent::ProposalPart(from, msg));
             }
 
             Msg::NewEvent(Event::Message(Channel::Sync, from, data)) => {

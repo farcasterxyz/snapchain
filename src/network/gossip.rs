@@ -268,7 +268,7 @@ impl SnapchainGossip {
                     let malachite_peer_id = MalachitePeerId::from_libp2p(&peer_id);
                     let bytes = Bytes::from(full_proposal.encode_to_vec());
                     let event = MalachiteNetworkEvent::Message(
-                        Channel::Consensus,
+                        Channel::ProposalParts,
                         malachite_peer_id,
                         bytes,
                     );
@@ -330,14 +330,14 @@ impl SnapchainGossip {
                         None
                     }
                 },
-                _ => {
-                    warn!("Unhandled message from peer: {}", peer_id);
+                None => {
+                    warn!("Empty message from peer: {}", peer_id);
                     None
                 }
             },
             Err(e) => {
                 warn!("Failed to decode gossip message: {}", e);
-                return None;
+                None
             }
         }
     }

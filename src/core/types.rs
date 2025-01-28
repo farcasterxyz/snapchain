@@ -556,7 +556,7 @@ impl Vote {
         Self {
             vote_type,
             height: proto.height.unwrap(),
-            round: Round::new(proto.round.try_into().unwrap()),
+            round: Round::from(proto.round),
             voter: Address::from_vec(proto.voter),
             shard_hash,
             extension: None,
@@ -591,9 +591,9 @@ impl Proposal {
     pub fn from_proto(proto: proto::Proposal) -> Self {
         Self {
             height: proto.height.unwrap(),
-            round: Round::new(proto.round.try_into().unwrap()),
+            round: Round::from(proto.round),
             shard_hash: proto.value.unwrap(),
-            pol_round: Round::try_from(proto.pol_round).unwrap(),
+            pol_round: Round::from(proto.pol_round),
             proposer: Address::from_vec(proto.proposer),
         }
     }
