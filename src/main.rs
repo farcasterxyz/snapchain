@@ -164,7 +164,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
     tokio::spawn(async move { mempool.run().await });
 
-    let admin_service = MyAdminService::new(db_manager, mempool_tx.clone());
+    let admin_service = MyAdminService::new(
+        db_manager,
+        mempool_tx.clone(),
+        node.shard_stores.clone(),
+        app_config.snapshot.clone(),
+        app_config.fc_network,
+    );
 
     if !app_config.fnames.disable {
         let mut fetcher = snapchain::connectors::fname::Fetcher::new(

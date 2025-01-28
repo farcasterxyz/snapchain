@@ -1,4 +1,4 @@
-use crate::{connectors, consensus, mempool, network};
+use crate::{connectors, consensus, mempool, network, proto::FarcasterNetwork, storage};
 use clap::Parser;
 use figment::{
     providers::{Env, Format, Serialized, Toml},
@@ -33,6 +33,7 @@ pub struct Config {
     pub consensus: consensus::consensus::Config,
     pub gossip: network::gossip::Config,
     pub mempool: mempool::mempool::Config,
+    pub snapshot: storage::db::snapshot::Config,
     pub rpc_address: String,
     pub rocksdb_dir: String,
     pub backup_dir: String,
@@ -40,6 +41,7 @@ pub struct Config {
     pub statsd: StatsdConfig,
     pub trie_branching_factor: u32,
     pub l1_rpc_url: String,
+    pub fc_network: FarcasterNetwork,
 }
 
 impl Default for Config {
@@ -58,6 +60,8 @@ impl Default for Config {
             statsd: StatsdConfig::default(),
             trie_branching_factor: 16,
             l1_rpc_url: "".to_string(),
+            fc_network: FarcasterNetwork::Testnet,
+            snapshot: storage::db::snapshot::Config::default(),
         }
     }
 }

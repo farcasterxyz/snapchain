@@ -1,8 +1,15 @@
 use crate::proto::admin_service_server::AdminService;
-use crate::proto::{self, FnameTransfer, OnChainEvent};
+use crate::proto::{self, Empty, FarcasterNetwork, FnameTransfer, OnChainEvent};
 use crate::proto::{UserNameProof, ValidatorMessage};
+use crate::storage;
+use crate::storage::db::RocksDB;
 use crate::storage::store::engine::MempoolMessage;
+use crate::storage::store::stores::Stores;
+use chrono::DateTime;
 use rocksdb;
+use std::collections::HashMap;
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{io, path, process};
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -62,6 +69,9 @@ impl DbManager {
 pub struct MyAdminService {
     db_manager: DbManager,
     pub mempool_tx: mpsc::Sender<MempoolMessage>,
+    snapshot_config: storage::db::snapshot::Config,
+    shard_stores: HashMap<u32, Stores>,
+    fc_network: FarcasterNetwork,
 }
 
 #[derive(Debug, Error)]
@@ -76,10 +86,19 @@ pub enum AdminServiceError {
 const DB_DESTROY_KEY: &[u8] = b"__destroy_all_databases_on_start__";
 
 impl MyAdminService {
-    pub fn new(db_manager: DbManager, mempool_tx: mpsc::Sender<MempoolMessage>) -> Self {
+    pub fn new(
+        db_manager: DbManager,
+        mempool_tx: mpsc::Sender<MempoolMessage>,
+        shard_stores: HashMap<u32, Stores>,
+        snapshot_config: storage::db::snapshot::Config,
+        fc_network: FarcasterNetwork,
+    ) -> Self {
         Self {
             db_manager,
             mempool_tx,
+            shard_stores,
+            snapshot_config,
+            fc_network,
         }
     }
 }
@@ -177,5 +196,41 @@ impl AdminService for MyAdminService {
             }
             Err(err) => Err(Status::from_error(Box::new(err))),
         }
+    }
+
+    async fn upload_snapshot(
+        &self,
+        _request: Request<Empty>,
+    ) -> std::result::Result<Response<Empty>, Status> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        for (shard, stores) in self.shard_stores.iter() {
+            let backup_dir = Path::new(&stores.db.location())
+                .join("..") // Create backup as sibling directory of normal path
+                .join("backup")
+                .join(format!(
+                    "{}.backup",
+                    DateTime::from_timestamp_millis(now as i64)
+                        .unwrap()
+                        .format("%Y-%m-%d-%s")
+                ))
+                .join("rocks.hub._default");
+            let tar_gz_path = RocksDB::backup_db(
+                stores.db.clone(),
+                backup_dir.to_str().unwrap(),
+                *shard,
+                now as i64,
+            )
+            .unwrap();
+            storage::db::snapshot::upload_to_s3(
+                self.fc_network,
+                tar_gz_path,
+                &self.snapshot_config,
+            )
+            .await;
+        }
+        Ok(Response::new(Empty {}))
     }
 }
