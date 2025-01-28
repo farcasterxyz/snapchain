@@ -3,7 +3,7 @@ use aws_config::Region;
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::put_object::PutObjectError;
-use aws_sdk_s3::primitives::{ByteStream, ByteStreamError, SdkBody};
+use aws_sdk_s3::primitives::{ByteStream, ByteStreamError};
 use serde::{Deserialize, Serialize};
 use std::fs::{self};
 use std::io;

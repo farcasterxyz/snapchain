@@ -232,7 +232,8 @@ impl AdminService for MyAdminService {
                 &self.snapshot_config,
                 *shard,
             )
-            .await;
+            .await
+            .map_err(|err| Status::from_error(Box::new(err)))?;
         }
         Ok(Response::new(Empty {}))
     }
