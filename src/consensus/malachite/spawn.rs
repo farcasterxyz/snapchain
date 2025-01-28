@@ -5,7 +5,7 @@ use informalsystems_malachitebft_engine::host::HostRef;
 use informalsystems_malachitebft_engine::network::NetworkRef;
 use informalsystems_malachitebft_sync::Metrics as SyncMetrics;
 use std::path::Path;
-use tracing::{error, Span};
+use tracing::{error, info, Span};
 
 use crate::consensus::malachite::host::{Host, HostState};
 use crate::consensus::malachite::network_connector::{

@@ -79,6 +79,6 @@ async fn test_gossip_communication() {
     {
         assert_eq!(validator.current_height, 312);
     } else {
-        panic!("Received unexpected or no message");
+        panic!("Received unexpected or no message: {:?}", received);
     }
 }

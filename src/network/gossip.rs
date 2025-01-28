@@ -5,6 +5,7 @@ use crate::core::types::{
     SnapchainValidatorContext, Vote,
 };
 use crate::storage::store::engine::MempoolMessage;
+use crate::proto::GossipMessage;
 use bytes::Bytes;
 use futures::StreamExt;
 use informalsystems_malachitebft_core_types::{SignedProposal, SignedVote};
@@ -12,7 +13,9 @@ use informalsystems_malachitebft_network::PeerId as MalachitePeerId;
 use informalsystems_malachitebft_network::{Channel, PeerIdExt};
 use libp2p::identity::ed25519::Keypair;
 use libp2p::swarm::dial_opts::DialOpts;
-use libp2p::{gossipsub, noise, swarm::NetworkBehaviour, swarm::SwarmEvent, tcp, yamux, Swarm};
+use libp2p::{
+    gossipsub, noise, swarm::NetworkBehaviour, swarm::SwarmEvent, tcp, yamux, PeerId, Swarm,
+};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
@@ -67,6 +70,11 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
     BroadcastFullProposal(proto::FullProposal),
     RegisterValidator(proto::RegisterValidator),
     BroadcastMempoolMessage(MempoolMessage),
+}
+
+pub enum GossipTopic {
+    Consensus,
+    Mempool,
 }
 
 #[derive(NetworkBehaviour)]
@@ -209,130 +217,21 @@ impl SnapchainGossip {
                             message_id: _id,
                             message,
                         })) => {
-                            match proto::GossipMessage::decode(&message.data[..]) {
-                                Ok(gossip_message) => {
-                                    match gossip_message.gossip_message{
-                                        Some(proto::gossip_message::GossipMessage::FullProposal(full_proposal)) => {
-                                            let height = full_proposal.height();
-                                            debug!("Received block with height {} from peer: {}", height, peer_id);
-                                            let malachite_peer_id = MalachitePeerId::from_libp2p(&peer_id);
-                                            let bytes = Bytes::from(full_proposal.encode_to_vec());
-                                            let event = MalachiteNetworkEvent::Message(Channel::Consensus, malachite_peer_id, bytes);
-                                            let shard_result = full_proposal.shard_id();
-                                            if shard_result.is_err() {
-                                                warn!("Failed to get shard id from consensus message");
-                                                continue;
-                                            }
-                                            let shard = MalachiteEventShard::Shard(shard_result.unwrap());
-                                            let res = self.system_tx.send(SystemMessage::MalachiteNetwork(shard, event)).await;
-                                            if let Err(e) = res {
-                                                warn!("Failed to send system block message: {:?}", e);
-                                            }
-                                        },
-                                        Some(proto::gossip_message::GossipMessage::Validator(validator)) => {
-                                            debug!("Received validator registration from peer: {}", peer_id);
-                                            if let Some(validator) = validator.validator {
-                                                let public_key = libp2p::identity::ed25519::PublicKey::try_from_bytes(&validator.signer);
-                                                if public_key.is_err() {
-                                                    warn!("Failed to decode public key from peer: {}", peer_id);
-                                                    continue;
-                                                }
-                                                let rpc_address = validator.rpc_address;
-                                                let shard_index = validator.shard_index;
-                                                let validator = SnapchainValidator::new(SnapchainShard::new(shard_index), public_key.unwrap(), Some(rpc_address), validator.current_height);
-                                                let consensus_message = ConsensusMsg::RegisterValidator(validator);
-                                                let res = self.system_tx.send(SystemMessage::Consensus(consensus_message)).await;
-                                                if let Err(e) = res {
-                                                    warn!("Failed to send system register validator message: {:?}", e);
-                                                }
-                                            }
-                                        },
-                                        Some(proto::gossip_message::GossipMessage::Consensus(signed_consensus_msg)) => {
-                                            let malachite_peer_id = MalachitePeerId::from_libp2p(&peer_id);
-                                            let bytes = Bytes::from(signed_consensus_msg.encode_to_vec());
-                                            let event = MalachiteNetworkEvent::Message(Channel::Consensus, malachite_peer_id, bytes);
-                                            let shard_result = signed_consensus_msg.shard_id();
-                                            if shard_result.is_err() {
-                                                warn!("Failed to get shard id from consensus message");
-                                                continue;
-                                            }
-                                            let shard = MalachiteEventShard::Shard(shard_result.unwrap());
-                                            let res = self.system_tx.send(SystemMessage::MalachiteNetwork(shard, event)).await;
-                                            if let Err(e) = res {
-                                                warn!("Failed to send system vote message: {:?}", e);
-                                            }
-                                        }
-                                        Some(proto::gossip_message::GossipMessage::MempoolMessage(message)) => {
-                                            if let Some(mempool_message_proto) = message.mempool_message {
-
-                                                let mempool_message = match mempool_message_proto {
-                                                    proto::mempool_message::MempoolMessage::UserMessage(message) => MempoolMessage::UserMessage(message),
-                                                };
-
-                                                let res = self.mempool_tx.send(mempool_message).await;
-                                                if let Err(e) = res {
-                                                    warn!("Failed to add to local mempool: {:?}", e);
-                                                }
-                                            }
-                                        },
-                                        _ => warn!("Unhandled message from peer: {}", peer_id),
-                                    }
-                                },
-                                Err(e) => warn!("Failed to decode gossip message: {}", e),
+                            if let Some(system_message) = Self::map_gossip_bytes_to_system_message(peer_id, message.data) {
+                                let res = self.system_tx.send(system_message).await;
+                                if let Err(e) = res {
+                                    warn!("Failed to send system block message: {:?}", e);
+                                }
                             }
                         },
                         _ => {}
                     }
                 }
                 event = self.rx.recv() => {
-                    match event {
-                        Some(GossipEvent::BroadcastSignedVote(vote)) => {
-                            let vote_proto = vote.to_proto();
-                            let gossip_message = proto::GossipMessage {
-                                gossip_message: Some(proto::gossip_message::GossipMessage::Consensus(proto::ConsensusMessage {
-                                    signature: vote.signature.0,
-                                    consensus_message: Some(proto::consensus_message::ConsensusMessage::Vote(vote_proto)),
-                                })),
-                            };
-                            let encoded_message = gossip_message.encode_to_vec();
-                            self.publish(encoded_message);
-                        }
-                        Some(GossipEvent::BroadcastSignedProposal(proposal)) => {
-                            let proposal_proto = proposal.to_proto();
-                            let gossip_message = proto::GossipMessage {
-                                gossip_message: Some(proto::gossip_message::GossipMessage::Consensus(proto::ConsensusMessage {
-                                    signature: proposal.signature.0,
-                                    consensus_message: Some(proto::consensus_message::ConsensusMessage::Proposal(proposal_proto)),
-                                })),
-                            };
-                            let encoded_message = gossip_message.encode_to_vec();
-                            self.publish(encoded_message);
-                        }
-                        Some(GossipEvent::BroadcastFullProposal(full_proposal)) => {
-                            let gossip_message = proto::GossipMessage {
-                                gossip_message: Some(proto::gossip_message::GossipMessage::FullProposal(full_proposal)),
-                            };
-                            let encoded_message = gossip_message.encode_to_vec();
-                            self.publish(encoded_message);
-                        },
-                        Some(GossipEvent::RegisterValidator(register_validator)) => {
-                            debug!("Broadcasting validator registration");
-                            let gossip_message = proto::GossipMessage {
-                                gossip_message: Some(proto::gossip_message::GossipMessage::Validator(register_validator)),
-                            };
-                            let encoded_message = gossip_message.encode_to_vec();
-                            self.publish(encoded_message);
-                        },
-                        Some(GossipEvent::BroadcastMempoolMessage(message)) => {
-                            let proto_message = message.to_proto();
-                            let gossip_message = proto::GossipMessage {
-                                gossip_message: Some(proto::gossip_message::GossipMessage::MempoolMessage(proto_message)),
-                            };
-                            let encoded_message = gossip_message.encode_to_vec();
-                            self.publish_mempool(encoded_message);
-                        },
-                        None => {
-                            // no-op
+                    if let Some((gossip_topic, encoded_message)) = Self::map_gossip_event_to_bytes(event) {
+                        match gossip_topic {
+                            GossipTopic::Consensus => self.publish(encoded_message),
+                            GossipTopic::Mempool => self.publish_mempool(encoded_message),
                         }
                     }
                 }
@@ -351,6 +250,157 @@ impl SnapchainGossip {
         let topic = gossipsub::IdentTopic::new("test-net-mempool");
         if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, message) {
             warn!("Failed to publish gossip message: {:?}", e);
+        }
+    }
+
+    pub fn map_gossip_bytes_to_system_message(
+        peer_id: PeerId,
+        gossip_message: Vec<u8>,
+    ) -> Option<SystemMessage> {
+        match proto::GossipMessage::decode(gossip_message.as_slice()) {
+            Ok(gossip_message) => match gossip_message.gossip_message {
+                Some(proto::gossip_message::GossipMessage::FullProposal(full_proposal)) => {
+                    let height = full_proposal.height();
+                    debug!(
+                        "Received block with height {} from peer: {}",
+                        height, peer_id
+                    );
+                    let malachite_peer_id = MalachitePeerId::from_libp2p(&peer_id);
+                    let bytes = Bytes::from(full_proposal.encode_to_vec());
+                    let event = MalachiteNetworkEvent::Message(
+                        Channel::Consensus,
+                        malachite_peer_id,
+                        bytes,
+                    );
+                    let shard_result = full_proposal.shard_id();
+                    if shard_result.is_err() {
+                        warn!("Failed to get shard id from consensus message");
+                        return None;
+                    }
+                    let shard = MalachiteEventShard::Shard(shard_result.unwrap());
+                    Some(SystemMessage::MalachiteNetwork(shard, event))
+                }
+                Some(proto::gossip_message::GossipMessage::Validator(validator)) => {
+                    debug!("Received validator registration from peer: {}", peer_id);
+                    if let Some(validator) = validator.validator {
+                        let public_key =
+                            libp2p::identity::ed25519::PublicKey::try_from_bytes(&validator.signer);
+                        if public_key.is_err() {
+                            warn!("Failed to decode public key from peer: {}", peer_id);
+                            return None;
+                        }
+                        let rpc_address = validator.rpc_address;
+                        let shard_index = validator.shard_index;
+                        let validator = SnapchainValidator::new(
+                            SnapchainShard::new(shard_index),
+                            public_key.unwrap(),
+                            Some(rpc_address),
+                            validator.current_height,
+                        );
+                        let consensus_message = ConsensusMsg::RegisterValidator(validator);
+                        return Some(SystemMessage::Consensus(consensus_message));
+                    }
+                    None
+                }
+                Some(proto::gossip_message::GossipMessage::Consensus(signed_consensus_msg)) => {
+                    let malachite_peer_id = MalachitePeerId::from_libp2p(&peer_id);
+                    let bytes = Bytes::from(signed_consensus_msg.encode_to_vec());
+                    let event = MalachiteNetworkEvent::Message(
+                        Channel::Consensus,
+                        malachite_peer_id,
+                        bytes,
+                    );
+                    let shard_result = signed_consensus_msg.shard_id();
+                    if shard_result.is_err() {
+                        warn!("Failed to get shard id from consensus message");
+                        return None;
+                    }
+                    let shard = MalachiteEventShard::Shard(shard_result.unwrap());
+                    Some(SystemMessage::MalachiteNetwork(shard, event))
+                }
+                Some(proto::gossip_message::GossipMessage::MempoolMessage(message)) => {
+                    if let Some(mempool_message_proto) = message.mempool_message {
+
+                        let mempool_message = match mempool_message_proto {
+                            proto::mempool_message::MempoolMessage::UserMessage(message) => MempoolMessage::UserMessage(message),
+                        };
+                        Some(SystemMessage::Mempool(mempool_message))
+                    } else {
+                        warn!("Unknown mempool message from peer: {}", peer_id);
+                        None
+                    }
+                },
+                _ => {
+                    warn!("Unhandled message from peer: {}", peer_id);
+                    None
+                }
+            },
+            Err(e) => {
+                warn!("Failed to decode gossip message: {}", e);
+                return None;
+            }
+        }
+    }
+
+    pub fn map_gossip_event_to_bytes(
+        event: Option<GossipEvent<SnapchainValidatorContext>>,
+    ) -> Option<(GossipTopic, Vec<u8>)> {
+        match event {
+            Some(GossipEvent::BroadcastSignedVote(vote)) => {
+                let vote_proto = vote.to_proto();
+                let gossip_message = proto::GossipMessage {
+                    gossip_message: Some(proto::gossip_message::GossipMessage::Consensus(
+                        proto::ConsensusMessage {
+                            signature: vote.signature.0,
+                            consensus_message: Some(
+                                proto::consensus_message::ConsensusMessage::Vote(vote_proto),
+                            ),
+                        },
+                    )),
+                };
+                Some((GossipTopic::Consensus, gossip_message.encode_to_vec()))
+            }
+            Some(GossipEvent::BroadcastSignedProposal(proposal)) => {
+                let proposal_proto = proposal.to_proto();
+                let gossip_message = proto::GossipMessage {
+                    gossip_message: Some(proto::gossip_message::GossipMessage::Consensus(
+                        proto::ConsensusMessage {
+                            signature: proposal.signature.0,
+                            consensus_message: Some(
+                                proto::consensus_message::ConsensusMessage::Proposal(
+                                    proposal_proto,
+                                ),
+                            ),
+                        },
+                    )),
+                };
+                Some((GossipTopic::Consensus, gossip_message.encode_to_vec()))
+            }
+            Some(GossipEvent::BroadcastFullProposal(full_proposal)) => {
+                let gossip_message = proto::GossipMessage {
+                    gossip_message: Some(proto::gossip_message::GossipMessage::FullProposal(
+                        full_proposal,
+                    )),
+                };
+                Some((GossipTopic::Consensus, gossip_message.encode_to_vec()))
+            }
+            Some(GossipEvent::RegisterValidator(register_validator)) => {
+                debug!("Broadcasting validator registration");
+                let gossip_message = proto::GossipMessage {
+                    gossip_message: Some(proto::gossip_message::GossipMessage::Validator(
+                        register_validator,
+                    )),
+                };
+                Some((GossipTopic::Consensus, gossip_message.encode_to_vec()))
+            }
+            Some(GossipEvent::BroadcastMempoolMessage(message)) => {
+                let proto_message = message.to_proto();
+                let gossip_message = proto::GossipMessage {
+                    gossip_message: Some(proto::gossip_message::GossipMessage::MempoolMessage(proto_message)),
+                };
+                Some((GossipTopic::Mempool, gossip_message.encode_to_vec()))
+            },
+            None => None,
         }
     }
 }

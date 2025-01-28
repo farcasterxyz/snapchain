@@ -1,7 +1,7 @@
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::onchain_events::{L1Client, RealL1Client};
 use snapchain::consensus::consensus::SystemMessage;
-use snapchain::core::types::proto;
+use snapchain::core::types::{proto, SnapchainValidatorConfig};
 use snapchain::mempool::mempool::Mempool;
 use snapchain::mempool::routing;
 use snapchain::network::admin_server::{DbManager, MyAdminService};
@@ -133,6 +133,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let registry = SharedRegistry::global();
     // Use the new non-global metrics registry when we upgrade to newer version of malachite
     let _ = Metrics::register(registry);
+    let validator_config = SnapchainValidatorConfig::new();
 
     let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
     let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
@@ -150,6 +151,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         statsd_client.clone(),
         app_config.trie_branching_factor,
         registry,
+        &validator_config,
     )
     .await;
 
@@ -206,6 +208,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let rpc_shard_senders = node.shard_senders.clone();
 
     let rpc_block_store = block_store.clone();
+    let mempool_tx_for_service = mempool_tx.clone();
     tokio::spawn(async move {
         let l1_client: Option<Box<dyn L1Client>> = match RealL1Client::new(app_config.l1_rpc_url) {
             Ok(client) => Some(Box::new(client)),
@@ -218,7 +221,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             statsd_client.clone(),
             app_config.consensus.num_shards,
             Box::new(routing::ShardRouter {}),
-            mempool_tx.clone(),
+            mempool_tx_for_service,
             l1_client,
         );
 
@@ -330,6 +333,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     SystemMessage::MalachiteNetwork(shard, event) => {
                         // Forward to apropriate consesnsus actors
                         node.dispatch(shard, event);
+                    },
+                    SystemMessage::Mempool(msg) => {
+                        let res = mempool_tx.send(msg).await;
+                        if let Err(e) = res {
+                            warn!("Failed to add to local mempool: {:?}", e);
+                        }
                     },
                     SystemMessage::Consensus(_) => {
                         todo!(); // Deprecated

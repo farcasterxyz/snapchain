@@ -6,8 +6,8 @@ use crate::consensus::malachite::spawn::MalachiteConsensusActors;
 use crate::consensus::proposer::{BlockProposer, ShardProposer};
 use crate::consensus::validator::ShardValidator;
 use crate::core::types::{
-    Address, Height, ShardId, SnapchainShard, SnapchainValidator, SnapchainValidatorContext,
-    SnapchainValidatorSet,
+    Address, Height, ShardId, SnapchainShard, SnapchainValidator, SnapchainValidatorConfig,
+    SnapchainValidatorContext, SnapchainValidatorSet,
 };
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::network::gossip::GossipEvent;
@@ -51,6 +51,7 @@ impl SnapchainNode {
         statsd_client: StatsdClientWrapper,
         trie_branching_factor: u32,
         registry: &SharedRegistry,
+        validator_config: &SnapchainValidatorConfig,
     ) -> Self {
         let validator_address = Address(keypair.public().to_bytes());
 
@@ -67,18 +68,8 @@ impl SnapchainNode {
                 panic!("Shard ID must be between 1 and {}", MAX_SHARDS);
             }
 
-            let current_height = match block_store.max_block_number() {
-                Err(_) => 0,
-                Ok(height) => height,
-            };
             let shard = SnapchainShard::new(shard_id);
-            let shard_validator = SnapchainValidator::new(
-                shard.clone(),
-                keypair.public().clone(),
-                rpc_address.clone(),
-                current_height,
-            );
-            let shard_validator_set = SnapchainValidatorSet::new(vec![shard_validator]);
+            let shard_validator_set = validator_config.get_validator_set(shard_id).unwrap();
             let ctx = SnapchainValidatorContext::new(keypair.clone());
 
             let db = RocksDB::open_shard_db(rocksdb_dir.clone().as_str(), shard_id);
@@ -108,7 +99,7 @@ impl SnapchainNode {
             let shard_validator = ShardValidator::new(
                 validator_address.clone(),
                 shard.clone(),
-                shard_validator_set,
+                shard_validator_set.clone(),
                 None,
                 Some(shard_proposer),
             );
@@ -136,13 +127,7 @@ impl SnapchainNode {
             Ok(height) => height,
         };
         // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
-        let block_validator = SnapchainValidator::new(
-            block_shard.clone(),
-            keypair.public().clone(),
-            rpc_address.clone(),
-            current_height,
-        );
-        let block_validator_set = SnapchainValidatorSet::new(vec![block_validator]);
+        let block_validator_set = validator_config.get_validator_set(0).unwrap();
         let engine = BlockEngine::new(block_store.clone());
         let shard_decision_rx = shard_decision_tx.subscribe();
         let block_proposer = BlockProposer::new(
@@ -157,7 +142,7 @@ impl SnapchainNode {
         let block_validator = ShardValidator::new(
             validator_address.clone(),
             block_shard.clone(),
-            block_validator_set,
+            block_validator_set.clone(),
             Some(block_proposer),
             None,
         );

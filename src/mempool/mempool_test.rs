@@ -47,6 +47,7 @@ mod tests {
         mpsc::Sender<MempoolMessage>,
         mpsc::Sender<MempoolMessagesRequest>,
         broadcast::Sender<ShardChunk>,
+        mpsc::Receiver<SystemMessage>,
     ) {
         let keypair = Keypair::generate();
         let statsd_client = StatsdClientWrapper::new(
@@ -54,7 +55,7 @@ mod tests {
             true,
         );
 
-        let (system_tx, _) = mpsc::channel::<SystemMessage>(100);
+        let (system_tx, system_rx) = mpsc::channel::<SystemMessage>(100);
         let (mempool_tx, mempool_rx) = mpsc::channel(100);
         let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
@@ -86,12 +87,13 @@ mod tests {
             mempool_tx.clone(),
             messages_request_tx,
             shard_decision_tx,
+            system_rx
         )
     }
 
     #[tokio::test]
     async fn test_duplicate_user_message_is_invalid() {
-        let (mut engine, _, mut mempool, _, _, _) = setup(setup_config(9300));
+        let (mut engine, _, mut mempool, _, _, _, _) = setup(setup_config(9300));
         test_helper::register_user(
             1234,
             default_signer(),
@@ -109,7 +111,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_onchain_event_is_invalid() {
-        let (mut engine, _, mut mempool, _, _, _) = setup(setup_config(9301));
+        let (mut engine, _, mut mempool, _, _, _, _) = setup(setup_config(9301));
         let onchain_event = events_factory::create_rent_event(1234, Some(10), None, false);
         let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
             on_chain_event: Some(onchain_event.clone()),
@@ -126,7 +128,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_fname_transfer_is_invalid() {
-        let (mut engine, _, mut mempool, _, _, _) = setup(setup_config(9302));
+        let (mut engine, _, mut mempool, _, _, _, _) = setup(setup_config(9302));
         test_helper::register_user(
             1234,
             default_signer(),
@@ -161,7 +163,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mempool_eviction() {
-        let (mut engine, _, mut mempool, mempool_tx, messages_request_tx, shard_decision_tx) =
+        let (mut engine, _, mut mempool, mempool_tx, messages_request_tx, shard_decision_tx, _) =
             setup(setup_config(9304));
         test_helper::register_user(
             1234,
@@ -247,8 +249,8 @@ mod tests {
         let config1 = Config::new(node1_addr.clone(), node2_addr.clone());
         let config2 = Config::new(node2_addr.clone(), node1_addr.clone());
 
-        let (_, mut gossip1, mut mempool1, mempool_tx1, _mempool_requests_tx1, _) = setup(config1);
-        let (_, mut gossip2, mut mempool2, _mempool_tx2, mempool_requests_tx2, _) = setup(config2);
+        let (_, mut gossip1, mut mempool1, mempool_tx1, _mempool_requests_tx1, _, _) = setup(config1);
+        let (_, mut gossip2, mut mempool2, mempool_tx2, mempool_requests_tx2, _, mut system_rx2) = setup(config2);
 
         // Spawn gossip tasks
         tokio::spawn(async move {
@@ -280,7 +282,20 @@ mod tests {
             .unwrap();
 
         // Wait for gossip
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let mut received = system_rx2.try_recv();
+        // Should be received through the system message of gossip 2
+        while let Ok(msg) = received {
+            if let SystemMessage::Mempool(mempool_message) = msg {
+                // Manually forward to the mempool
+                mempool_tx2.send(mempool_message).await.unwrap();
+            }
+            received = system_rx2.try_recv();
+        }
+
+        // Wait for the message to be processed
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
         // Setup channel to retrieve message
         let (mempool_retrieval_tx, mempool_retrieval_rx) = oneshot::channel();

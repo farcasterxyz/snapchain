@@ -10,6 +10,7 @@ use crate::consensus::validator::ShardValidator;
 use crate::core::types::SnapchainValidatorContext;
 use crate::network::gossip::GossipEvent;
 use informalsystems_malachitebft_engine::host::{HostMsg, LocallyProposedValue};
+use tracing::info;
 
 /// Actor for bridging consensus and the application via a set of channels.
 ///
@@ -48,6 +49,11 @@ impl Host {
                 state.shard_validator.start(); // Call each time?
                 let validator_set = state.shard_validator.get_validator_set();
                 let height = state.shard_validator.get_current_height();
+                info!(
+                    height = height.to_string(),
+                    validators = validator_set.validators.len(),
+                    "Consensus ready. Starting Height"
+                );
                 consensus_ref.cast(ConsensusMsg::StartHeight(height, validator_set))?;
             }
 

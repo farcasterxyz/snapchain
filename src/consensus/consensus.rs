@@ -32,20 +32,24 @@ pub use informalsystems_malachitebft_core_consensus::State as ConsensusState;
 use ractor::time::send_after;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
+use crate::storage::store::engine::MempoolMessage;
 
 pub type ConsensusRef<Ctx> = ActorRef<ConsensusMsg<Ctx>>;
 pub type Decision = FullProposal;
 pub type TxDecision = mpsc::Sender<Decision>;
 pub type RxDecision = mpsc::Receiver<Decision>;
 
+#[derive(Clone, Debug)]
 pub enum MalachiteEventShard {
     None,
     Shard(u32),
 }
 
+#[derive(Debug)]
 pub enum SystemMessage {
     Consensus(ConsensusMsg<SnapchainValidatorContext>),
     MalachiteNetwork(MalachiteEventShard, MalachiteNetworkEvent), // Shard Id and the malachite network event
+    Mempool(MempoolMessage),
 }
 
 type Timers<Ctx> = TimerScheduler<Timeout, ConsensusMsg<Ctx>>;
