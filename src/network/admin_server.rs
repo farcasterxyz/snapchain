@@ -204,7 +204,7 @@ impl AdminService for MyAdminService {
     ) -> std::result::Result<Response<Empty>, Status> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .map_err(|err| Status::from_error(Box::new(err)))?
             .as_millis();
         for (shard, stores) in self.shard_stores.iter() {
             let db_location = stores.db.location();
@@ -214,16 +214,18 @@ impl AdminService for MyAdminService {
                     "{}-{}.backup",
                     db_location,
                     DateTime::from_timestamp_millis(now as i64)
-                        .unwrap()
+                        .ok_or(Status::internal("unable to convert current time to string"))?
                         .format("%Y-%m-%d-%s"),
                 ));
             let tar_gz_path = RocksDB::backup_db(
                 stores.db.clone(),
-                backup_dir.to_str().unwrap(),
+                backup_dir
+                    .to_str()
+                    .ok_or(Status::internal("unable to convert backup dir to string"))?,
                 *shard,
                 now as i64,
             )
-            .unwrap();
+            .map_err(|err| Status::from_error(Box::new(err)))?;
             storage::db::snapshot::upload_to_s3(
                 self.fc_network,
                 tar_gz_path,
