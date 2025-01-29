@@ -2,6 +2,7 @@ use crate::proto::admin_service_server::AdminService;
 use crate::proto::{self, Empty, FarcasterNetwork, FnameTransfer, OnChainEvent};
 use crate::proto::{UserNameProof, ValidatorMessage};
 use crate::storage;
+use crate::storage::db::snapshot::clear_snapshots;
 use crate::storage::db::RocksDB;
 use crate::storage::store::engine::MempoolMessage;
 use crate::storage::store::stores::Stores;
@@ -107,6 +108,10 @@ impl MyAdminService {
     }
 
     async fn backup_shard(&self, shard_id: u32, db: Arc<RocksDB>, now: i64) -> Result<(), Status> {
+        // TODO(aditi): Eventually, we should upload a metadata file. For now, just clear all existing snapshots and only keep 1 snapshot per shard
+        clear_snapshots(self.fc_network, &self.snapshot_config, shard_id)
+            .await
+            .map_err(|err| Status::from_error(Box::new(err)))?;
         let db_location = db.location();
         let backup_dir = Path::new(&db_location)
             .parent()
