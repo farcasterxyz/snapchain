@@ -1,18 +1,13 @@
 //! Implementation of a host actor for bridiging consensus and the application via a set of channels.
 
-use informalsystems_malachitebft_core_consensus::{PeerId, ProposedValue};
-use informalsystems_malachitebft_core_types::{CommitCertificate, Round, ValueId};
-use informalsystems_malachitebft_engine::consensus::ConsensusMsg;
-use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SpawnErr};
-use tokio::sync::mpsc;
-
 use crate::consensus::validator::ShardValidator;
 use crate::core::types::SnapchainValidatorContext;
-use crate::network::gossip::GossipEvent;
+use informalsystems_malachitebft_engine::consensus::ConsensusMsg;
 use informalsystems_malachitebft_engine::host::{HostMsg, LocallyProposedValue};
 use informalsystems_malachitebft_engine::network::{NetworkMsg, NetworkRef};
 use informalsystems_malachitebft_engine::util::streaming::{StreamContent, StreamMessage};
-use tracing::{debug, error, info, warn};
+use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SpawnErr};
+use tracing::{error, info, warn};
 
 /// Actor for bridging consensus and the application via a set of channels.
 ///
@@ -22,7 +17,6 @@ pub struct Host {}
 
 pub struct HostState {
     pub shard_validator: ShardValidator,
-    pub gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     pub network: NetworkRef<SnapchainValidatorContext>,
 }
 
@@ -124,7 +118,10 @@ impl Host {
                 }
             }
 
-            HostMsg::GetValidatorSet { height, reply_to } => {
+            HostMsg::GetValidatorSet {
+                height: _,
+                reply_to,
+            } => {
                 reply_to.send(state.shard_validator.get_validator_set())?;
             }
 
@@ -144,16 +141,19 @@ impl Host {
                 consensus_ref.cast(ConsensusMsg::StartHeight(next_height, validator_set))?;
             }
 
-            HostMsg::GetDecidedValue { height, reply_to } => {
+            HostMsg::GetDecidedValue {
+                height: _,
+                reply_to: _,
+            } => {
                 // TODO: Get previously decided value for sync
             }
 
             HostMsg::ProcessSyncedValue {
-                height,
-                round,
-                validator_address,
-                value_bytes,
-                reply_to,
+                height: _,
+                round: _,
+                validator_address: _,
+                value_bytes: _,
+                reply_to: _,
             } => {
                 // TODO: Convert bytes to Proposal (sync)
             }

@@ -65,9 +65,7 @@ mod tests {
         let mut shard_stores = HashMap::new();
         shard_stores.insert(1, engine.get_stores());
 
-        let gossip =
-            SnapchainGossip::create(keypair.clone(), config, system_tx, mempool_tx.clone())
-                .unwrap();
+        let gossip = SnapchainGossip::create(keypair.clone(), config, system_tx).unwrap();
 
         let mempool = Mempool::new(
             1024,
@@ -84,10 +82,10 @@ mod tests {
             engine,
             gossip,
             mempool,
-            mempool_tx.clone(),
+            mempool_tx,
             messages_request_tx,
             shard_decision_tx,
-            system_rx
+            system_rx,
         )
     }
 
@@ -249,8 +247,10 @@ mod tests {
         let config1 = Config::new(node1_addr.clone(), node2_addr.clone());
         let config2 = Config::new(node2_addr.clone(), node1_addr.clone());
 
-        let (_, mut gossip1, mut mempool1, mempool_tx1, _mempool_requests_tx1, _, _) = setup(config1);
-        let (_, mut gossip2, mut mempool2, mempool_tx2, mempool_requests_tx2, _, mut system_rx2) = setup(config2);
+        let (_, mut gossip1, mut mempool1, mempool_tx1, _mempool_requests_tx1, _, _) =
+            setup(config1);
+        let (_, mut gossip2, mut mempool2, mempool_tx2, mempool_requests_tx2, _, mut system_rx2) =
+            setup(config2);
 
         // Spawn gossip tasks
         tokio::spawn(async move {

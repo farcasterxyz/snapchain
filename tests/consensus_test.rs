@@ -22,7 +22,6 @@ use snapchain::storage::store::BlockStore;
 use snapchain::utils::factory::messages_factory;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
 use snapchain::{
-    consensus::consensus::ConsensusMsg,
     core::types::{ShardId, SnapchainShard, SnapchainValidator, SnapchainValidatorContext},
     network::gossip::GossipEvent,
 };
@@ -33,15 +32,11 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 struct NodeForTest {
-    keypair: Keypair,
-    num_shards: u32,
     node: SnapchainNode,
     gossip_rx: mpsc::Receiver<GossipEvent<SnapchainValidatorContext>>,
-    grpc_addr: String,
     db: Arc<RocksDB>,
     block_store: BlockStore,
     mempool_tx: mpsc::Sender<MempoolMessage>,
-    data_dir: String,
 }
 
 impl Drop for NodeForTest {
@@ -51,7 +46,6 @@ impl Drop for NodeForTest {
             stores.shard_store.db.destroy().unwrap();
         }
         self.node.stop();
-        // std::fs::remove_dir_all(&self.data_dir).unwrap();
     }
 }
 
@@ -171,15 +165,11 @@ impl NodeForTest {
         });
 
         Self {
-            keypair,
-            num_shards,
             node,
             gossip_rx,
-            grpc_addr: grpc_addr.clone(),
             db: db.clone(),
             block_store,
             mempool_tx,
-            data_dir: data_dir.clone(),
         }
     }
 
@@ -256,7 +246,7 @@ impl TestNetwork {
         let mut nodes = Vec::new();
         let mut keypairs = Vec::new();
         let mut validator_config = SnapchainValidatorConfig::new();
-        for i in 0..num_nodes {
+        for _ in 0..num_nodes {
             let keypair = Keypair::generate();
             keypairs.push(keypair.clone());
             for j in 0..=num_shards {
@@ -332,7 +322,7 @@ impl TestNetwork {
                     match system_event {
                         SystemMessage::MalachiteNetwork(event_shard, event) => {
                             self.dispatch_to_other_nodes(i, event_shard, event);
-                        },
+                        }
                         SystemMessage::Mempool(_) => {
                             // noop
                         }
@@ -425,29 +415,29 @@ async fn test_basic_consensus() {
     }
 }
 
-async fn wait_for_blocks(new_node: &NodeForTest, old_node: &NodeForTest) {
-    let timeout = tokio::time::Duration::from_secs(5);
-    let start = tokio::time::Instant::now();
-    let mut timer = time::interval(tokio::time::Duration::from_millis(10));
-    loop {
-        let _ = timer.tick().await;
-        if new_node.num_blocks().await >= old_node.num_blocks().await {
-            break;
-        }
-        if start.elapsed() > timeout {
-            break;
-        }
-    }
-
-    assert!(
-        new_node.num_blocks().await >= old_node.num_blocks().await,
-        "Node 4 should have confirmed blocks"
-    );
-    assert!(
-        new_node.num_shard_chunks().await >= old_node.num_shard_chunks().await,
-        "Node 4 should have confirmed shard chunks"
-    );
-}
+// async fn wait_for_blocks(new_node: &NodeForTest, old_node: &NodeForTest) {
+//     let timeout = tokio::time::Duration::from_secs(5);
+//     let start = tokio::time::Instant::now();
+//     let mut timer = time::interval(tokio::time::Duration::from_millis(10));
+//     loop {
+//         let _ = timer.tick().await;
+//         if new_node.num_blocks().await >= old_node.num_blocks().await {
+//             break;
+//         }
+//         if start.elapsed() > timeout {
+//             break;
+//         }
+//     }
+//
+//     assert!(
+//         new_node.num_blocks().await >= old_node.num_blocks().await,
+//         "Node 4 should have confirmed blocks"
+//     );
+//     assert!(
+//         new_node.num_shard_chunks().await >= old_node.num_shard_chunks().await,
+//         "Node 4 should have confirmed shard chunks"
+//     );
+// }
 
 // #[tokio::test]
 // async fn test_basic_sync() {

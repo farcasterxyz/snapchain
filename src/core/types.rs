@@ -153,17 +153,21 @@ impl SigningProvider<SnapchainValidatorContext> for Ed25519Provider {
         &self,
         proposal_part: <SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::ProposalPart,
     ) -> SignedMessage<SnapchainValidatorContext, <SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::ProposalPart>{
-        SignedProposalPart::new(proposal_part, Signature(vec![]))
+        let signature = self.keypair.sign(&proposal_part.to_sign_bytes());
+        SignedProposalPart::new(proposal_part, Signature(signature))
     }
 
     fn verify_signed_proposal_part(
         &self,
-        _proposal_part: &<SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::ProposalPart,
-        _signature: &informalsystems_malachitebft_core_types::Signature<SnapchainValidatorContext>,
-        _public_key: &informalsystems_malachitebft_core_types::PublicKey<SnapchainValidatorContext>,
+        proposal_part: &<SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::ProposalPart,
+        signature: &informalsystems_malachitebft_core_types::Signature<SnapchainValidatorContext>,
+        public_key: &informalsystems_malachitebft_core_types::PublicKey<SnapchainValidatorContext>,
     ) -> bool {
-        // TODO(aditi): We don't handle proposal parts yet in consensus
-        todo!()
+        let valid = public_key.verify(&proposal_part.to_sign_bytes(), &signature.0);
+        if !valid {
+            panic!("Invalid signature");
+        }
+        valid
     }
 
     fn verify_commit_signature(
@@ -368,6 +372,10 @@ impl FullProposal {
 
     pub fn round(&self) -> Round {
         Round::new(self.round.try_into().unwrap())
+    }
+
+    pub fn to_sign_bytes(&self) -> Vec<u8> {
+        self.encode_to_vec()
     }
 }
 

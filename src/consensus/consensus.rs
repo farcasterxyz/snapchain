@@ -27,12 +27,12 @@ use crate::core::types::{
 };
 use crate::network::gossip::GossipEvent;
 use crate::proto::FullProposal;
+use crate::storage::store::engine::MempoolMessage;
 pub use informalsystems_malachitebft_core_consensus::Params as ConsensusParams;
 pub use informalsystems_malachitebft_core_consensus::State as ConsensusState;
 use ractor::time::send_after;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
-use crate::storage::store::engine::MempoolMessage;
 
 pub type ConsensusRef<Ctx> = ActorRef<ConsensusMsg<Ctx>>;
 pub type Decision = FullProposal;

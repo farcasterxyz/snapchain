@@ -5,7 +5,7 @@ use informalsystems_malachitebft_engine::host::HostRef;
 use informalsystems_malachitebft_engine::network::NetworkRef;
 use informalsystems_malachitebft_sync::Metrics as SyncMetrics;
 use std::path::Path;
-use tracing::{error, info, Span};
+use tracing::Span;
 
 use crate::consensus::malachite::host::{Host, HostState};
 use crate::consensus::malachite::network_connector::{
@@ -16,12 +16,10 @@ use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::consensus::validator::ShardValidator;
 use crate::core::types::{ShardId, SnapchainValidatorContext};
 use crate::network::gossip::GossipEvent;
-use informalsystems_malachitebft_engine::sync::{Params as SyncParams, Sync, SyncCodec, SyncRef};
+use informalsystems_malachitebft_engine::sync::{Params as SyncParams, Sync, SyncRef};
 use informalsystems_malachitebft_engine::util::events::TxEvent;
 use informalsystems_malachitebft_engine::wal::{Wal, WalRef};
-use informalsystems_malachitebft_metrics::prometheus::registry::Metric;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
-use ractor::Actor;
 use tokio::sync::mpsc;
 
 pub async fn spawn_network_actor(
@@ -53,12 +51,10 @@ pub async fn spawn_wal_actor(
 pub async fn spawn_host(
     network: NetworkRef<SnapchainValidatorContext>,
     shard_validator: ShardValidator,
-    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
 ) -> Result<HostRef<SnapchainValidatorContext>, ractor::SpawnErr> {
     let state = HostState {
         network,
         shard_validator,
-        gossip_tx,
     };
     let actor_ref = Host::spawn(state).await?;
     Ok(actor_ref)
@@ -132,6 +128,7 @@ impl MalachiteConsensusActors {
     pub async fn create_and_start(
         ctx: SnapchainValidatorContext,
         shard_validator: ShardValidator,
+        _rpc_address: Option<String>,
         db_dir: String,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         registry: &SharedRegistry,
@@ -148,8 +145,7 @@ impl MalachiteConsensusActors {
             registry,
         )
         .await?;
-        let host_actor =
-            spawn_host(network_actor.clone(), shard_validator, gossip_tx.clone()).await?;
+        let host_actor = spawn_host(network_actor.clone(), shard_validator).await?;
         let sync_actor = spawn_sync_actor(
             ctx.clone(),
             network_actor.clone(),

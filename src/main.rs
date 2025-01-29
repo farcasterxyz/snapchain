@@ -107,12 +107,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
     let (mempool_tx, mempool_rx) = mpsc::channel(app_config.mempool.queue_size as usize);
 
-    let gossip_result = SnapchainGossip::create(
-        keypair.clone(),
-        app_config.gossip,
-        system_tx.clone(),
-        mempool_tx.clone(),
-    );
+    let gossip_result =
+        SnapchainGossip::create(keypair.clone(), app_config.gossip, system_tx.clone());
 
     if let Err(e) = gossip_result {
         error!(error = ?e, "Failed to create SnapchainGossip");
@@ -325,13 +321,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         gossip_tx.send(GossipEvent::RegisterValidator(register_validator)).await?;
                     }
                     info!("Registering validator with nonce: {}", nonce);
-
                 }
             }
             Some(msg) = system_rx.recv() => {
                 match msg {
                     SystemMessage::MalachiteNetwork(shard, event) => {
-                        // Forward to apropriate consesnsus actors
+                        // Forward to appropriate consensus actors
                         node.dispatch(shard, event);
                     },
                     SystemMessage::Mempool(msg) => {
@@ -341,7 +336,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                     },
                     SystemMessage::Consensus(_) => {
-                        todo!(); // Deprecated
+                        // Deprecated
                     }
                 }
             }

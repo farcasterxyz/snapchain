@@ -1,11 +1,9 @@
 use crate::consensus::consensus::{ConsensusMsg, MalachiteEventShard, SystemMessage};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::core::types::{
-    proto, Proposal, ShardId, Signature, SnapchainContext, SnapchainShard, SnapchainValidator,
-    SnapchainValidatorContext, Vote,
+    proto, ShardId, SnapchainContext, SnapchainShard, SnapchainValidator, SnapchainValidatorContext,
 };
 use crate::storage::store::engine::MempoolMessage;
-use crate::proto::GossipMessage;
 use bytes::Bytes;
 use futures::StreamExt;
 use informalsystems_malachitebft_core_types::{SignedProposal, SignedVote};
@@ -87,7 +85,6 @@ pub struct SnapchainGossip {
     pub tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     rx: mpsc::Receiver<GossipEvent<SnapchainValidatorContext>>,
     system_tx: Sender<SystemMessage>,
-    mempool_tx: Sender<MempoolMessage>,
 }
 
 impl SnapchainGossip {
@@ -95,7 +92,6 @@ impl SnapchainGossip {
         keypair: Keypair,
         config: Config,
         system_tx: Sender<SystemMessage>,
-        mempool_tx: Sender<MempoolMessage>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair.clone().into())
             .with_tokio()
@@ -175,7 +171,6 @@ impl SnapchainGossip {
             tx,
             rx,
             system_tx,
-            mempool_tx,
         })
     }
 
@@ -187,7 +182,6 @@ impl SnapchainGossip {
                         SwarmEvent::ConnectionEstablished {peer_id, ..} => {
                             info!("Connection established with peer: {peer_id}");
                             let event = MalachiteNetworkEvent::PeerConnected(MalachitePeerId::from_libp2p(&peer_id));
-                            // TODO: Map the peer id to the right shard based on the register validator message
                             let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await;
                             if let Err(e) = res {
                                 warn!("Failed to send connection established message: {:?}", e);
@@ -320,16 +314,17 @@ impl SnapchainGossip {
                 }
                 Some(proto::gossip_message::GossipMessage::MempoolMessage(message)) => {
                     if let Some(mempool_message_proto) = message.mempool_message {
-
                         let mempool_message = match mempool_message_proto {
-                            proto::mempool_message::MempoolMessage::UserMessage(message) => MempoolMessage::UserMessage(message),
+                            proto::mempool_message::MempoolMessage::UserMessage(message) => {
+                                MempoolMessage::UserMessage(message)
+                            }
                         };
                         Some(SystemMessage::Mempool(mempool_message))
                     } else {
                         warn!("Unknown mempool message from peer: {}", peer_id);
                         None
                     }
-                },
+                }
                 None => {
                     warn!("Empty message from peer: {}", peer_id);
                     None
@@ -396,10 +391,12 @@ impl SnapchainGossip {
             Some(GossipEvent::BroadcastMempoolMessage(message)) => {
                 let proto_message = message.to_proto();
                 let gossip_message = proto::GossipMessage {
-                    gossip_message: Some(proto::gossip_message::GossipMessage::MempoolMessage(proto_message)),
+                    gossip_message: Some(proto::gossip_message::GossipMessage::MempoolMessage(
+                        proto_message,
+                    )),
                 };
                 Some((GossipTopic::Mempool, gossip_message.encode_to_vec()))
-            },
+            }
             None => None,
         }
     }

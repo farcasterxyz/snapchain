@@ -1,13 +1,10 @@
-use crate::consensus::consensus::{
-    Config, Consensus, ConsensusMsg, ConsensusParams, MalachiteEventShard,
-};
+use crate::consensus::consensus::{Config, MalachiteEventShard};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::spawn::MalachiteConsensusActors;
 use crate::consensus::proposer::{BlockProposer, ShardProposer};
 use crate::consensus::validator::ShardValidator;
 use crate::core::types::{
-    Address, Height, ShardId, SnapchainShard, SnapchainValidator, SnapchainValidatorConfig,
-    SnapchainValidatorContext, SnapchainValidatorSet,
+    Address, ShardId, SnapchainShard, SnapchainValidatorConfig, SnapchainValidatorContext,
 };
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::network::gossip::GossipEvent;
@@ -19,11 +16,8 @@ use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::storage::trie::merkle_trie;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
-use informalsystems_malachitebft_config::TimeoutConfig;
-use informalsystems_malachitebft_core_consensus::ValuePayload;
-use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
+use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
-use ractor::ActorRef;
 use std::collections::{BTreeMap, HashMap};
 use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
@@ -106,6 +100,7 @@ impl SnapchainNode {
             let consensus_actor = MalachiteConsensusActors::create_and_start(
                 ctx,
                 shard_validator,
+                rpc_address.clone(),
                 rocksdb_dir.clone(),
                 gossip_tx.clone(),
                 registry,
@@ -122,10 +117,6 @@ impl SnapchainNode {
         // Now create the block validator
         let block_shard = SnapchainShard::new(0);
 
-        let current_height = match block_store.max_block_number() {
-            Err(_) => 0,
-            Ok(height) => height,
-        };
         // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
         let block_validator_set = validator_config.get_validator_set(0).unwrap();
         let engine = BlockEngine::new(block_store.clone());
@@ -150,6 +141,7 @@ impl SnapchainNode {
         let block_consensus_actor = MalachiteConsensusActors::create_and_start(
             ctx,
             block_validator,
+            rpc_address.clone(),
             rocksdb_dir.clone(),
             gossip_tx.clone(),
             registry,

@@ -1,15 +1,13 @@
-use crate::core::types::{SnapchainContext, SnapchainValidatorContext};
+use crate::core::types::SnapchainValidatorContext;
 use crate::network::gossip::GossipEvent;
 use async_trait::async_trait;
 use informalsystems_malachitebft_core_consensus::SignedConsensusMsg;
 use informalsystems_malachitebft_engine::consensus::ConsensusCodec;
 use informalsystems_malachitebft_engine::network::{NetworkEvent, NetworkMsg as Msg};
-use informalsystems_malachitebft_engine::sync;
 use informalsystems_malachitebft_engine::util::streaming::StreamMessage;
 use informalsystems_malachitebft_network::{Channel, Event};
 use informalsystems_malachitebft_sync::RawMessage;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort};
-use std::collections::{BTreeSet, HashMap};
 use tokio::sync::mpsc;
 use tracing::{debug, error, trace};
 
@@ -25,8 +23,6 @@ pub enum NetworkConnectorState {
     Running {
         // peers: BTreeSet<PeerId>,
         output_port: OutputPort<NetworkEvent<SnapchainValidatorContext>>,
-        // ctrl_handle: malachitebft_network::CtrlHandle,
-        // recv_task: tokio::task::JoinHandle<()>,
         // inbound_requests: HashMap<InboundRequestId, OutboundRequestId>,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     },
@@ -64,7 +60,7 @@ where
 
     async fn pre_start(
         &self,
-        myself: ActorRef<Msg<SnapchainValidatorContext>>,
+        _myself: ActorRef<Msg<SnapchainValidatorContext>>,
         args: NetworkConnectorArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         // let handle = malachitebft_network::spawn(args.keypair, args.config, args.metrics).await?;
@@ -136,7 +132,7 @@ where
                 }
             }
 
-            Msg::BroadcastStatus(status) => {
+            Msg::BroadcastStatus(_status) => {
                 // let status = sync::Status {
                 //     peer_id: ctrl_handle.peer_id(),
                 //     height: status.height,
@@ -150,7 +146,7 @@ where
                 // }
             }
 
-            Msg::OutgoingRequest(peer_id, request, reply_to) => {
+            Msg::OutgoingRequest(_peer_id, _request, _reply_to) => {
                 // let request = self.codec.encode(&request);
                 //
                 // match request {
@@ -162,7 +158,7 @@ where
                 // }
             }
 
-            Msg::OutgoingResponse(request_id, response) => {
+            Msg::OutgoingResponse(_request_id, _response) => {
                 // let response = self.codec.encode(&response);
                 //
                 // match response {
@@ -234,7 +230,7 @@ where
                 output_port.send(NetworkEvent::ProposalPart(from, msg));
             }
 
-            Msg::NewEvent(Event::Message(Channel::Sync, from, data)) => {
+            Msg::NewEvent(Event::Message(Channel::Sync, _from, _data)) => {
                 // let status: sync::Status<Ctx> = match self.codec.decode(data) {
                 //     Ok(status) => status,
                 //     Err(e) => {
@@ -258,9 +254,9 @@ where
 
             Msg::NewEvent(Event::Sync(raw_msg)) => match raw_msg {
                 RawMessage::Request {
-                    request_id,
-                    peer,
-                    body,
+                    request_id: _,
+                    peer: _,
+                    body: _,
                 } => {
                     // let request: sync::Request<SnapchainValidatorContext> = match self.codec.decode(body) {
                     //     Ok(request) => request,
@@ -280,9 +276,9 @@ where
                 }
 
                 RawMessage::Response {
-                    request_id,
-                    peer,
-                    body,
+                    request_id: _,
+                    peer: _,
+                    body: _,
                 } => {
                     // let response: sync::Response<Ctx> = match self.codec.decode(body) {
                     //     Ok(response) => response,
@@ -300,7 +296,9 @@ where
                 }
             },
 
-            Msg::GetState { reply } => {
+            Msg::GetState { reply: _ } => {
+                // Unused
+
                 // let number_peers = match state {
                 //     State::Stopped => 0,
                 //     State::Running { peers, .. } => peers.len(),
@@ -315,7 +313,7 @@ where
     async fn post_stop(
         &self,
         _myself: ActorRef<Msg<SnapchainValidatorContext>>,
-        state: &mut Self::State,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         // let state = std::mem::replace(state, State::Stopped);
         //
