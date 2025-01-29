@@ -1,12 +1,13 @@
 use core::fmt;
-use libp2p::identity::ed25519::Keypair;
-use malachite_common;
-use malachite_common::{
+use informalsystems_malachitebft_core_types::{self, SignedMessage, SigningProvider};
+use informalsystems_malachitebft_core_types::{
     Extension, NilOrVal, Round, SignedProposal, SignedProposalPart, SignedVote, Validator,
     VoteType, VotingPower,
 };
+use libp2p::identity::ed25519::Keypair;
 use prost::Message;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::sync::Arc;
 use tracing::warn;
@@ -48,7 +49,10 @@ pub trait ShardedContext {
     type ShardId: ShardId;
 }
 
-pub trait SnapchainContext: malachite_common::Context + ShardedContext {}
+pub trait SnapchainContext:
+    informalsystems_malachitebft_core_types::Context + ShardedContext
+{
+}
 
 // TODO: Should validator keys be ECDSA?
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -86,10 +90,119 @@ impl fmt::Debug for Address {
     }
 }
 
-impl malachite_common::Address for Address {}
+impl informalsystems_malachitebft_core_types::Address for Address {}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Ed25519 {}
+
+#[derive(Clone, Debug)]
+pub struct Ed25519Provider {
+    keypair: Arc<Keypair>,
+}
+
+impl Ed25519Provider {
+    pub fn new(keypair: Arc<Keypair>) -> Self {
+        Self { keypair }
+    }
+}
+
+impl SigningProvider<SnapchainValidatorContext> for Ed25519Provider {
+    fn sign_vote(
+        &self,
+        vote: <SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::Vote,
+    ) -> SignedMessage<
+        SnapchainValidatorContext,
+        <SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::Vote,
+    > {
+        let signature = self.keypair.sign(&vote.to_sign_bytes());
+        SignedVote::new(vote, Signature(signature))
+    }
+
+    fn verify_signed_vote(
+        &self,
+        vote: &<SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::Vote,
+        signature: &informalsystems_malachitebft_core_types::Signature<SnapchainValidatorContext>,
+        public_key: &informalsystems_malachitebft_core_types::PublicKey<SnapchainValidatorContext>,
+    ) -> bool {
+        let valid = public_key.verify(&vote.to_sign_bytes(), &signature.0);
+        if !valid {
+            panic!("Invalid signature");
+        }
+        valid
+    }
+
+    fn sign_proposal(&self, proposal: Proposal) -> SignedProposal<SnapchainValidatorContext> {
+        let signature = self.keypair.sign(&proposal.to_sign_bytes());
+        SignedProposal::new(proposal, Signature(signature))
+    }
+
+    fn verify_signed_proposal(
+        &self,
+        proposal: &<SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::Proposal,
+        signature: &informalsystems_malachitebft_core_types::Signature<SnapchainValidatorContext>,
+        public_key: &informalsystems_malachitebft_core_types::PublicKey<SnapchainValidatorContext>,
+    ) -> bool {
+        let valid = public_key.verify(&proposal.to_sign_bytes(), &signature.0);
+        if !valid {
+            panic!("Invalid signature");
+        }
+        valid
+    }
+
+    fn sign_proposal_part(
+        &self,
+        proposal_part: <SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::ProposalPart,
+    ) -> SignedMessage<SnapchainValidatorContext, <SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::ProposalPart>{
+        let signature = self.keypair.sign(&proposal_part.to_sign_bytes());
+        SignedProposalPart::new(proposal_part, Signature(signature))
+    }
+
+    fn verify_signed_proposal_part(
+        &self,
+        proposal_part: &<SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::ProposalPart,
+        signature: &informalsystems_malachitebft_core_types::Signature<SnapchainValidatorContext>,
+        public_key: &informalsystems_malachitebft_core_types::PublicKey<SnapchainValidatorContext>,
+    ) -> bool {
+        let valid = public_key.verify(&proposal_part.to_sign_bytes(), &signature.0);
+        if !valid {
+            panic!("Invalid signature");
+        }
+        valid
+    }
+
+    fn verify_commit_signature(
+        &self,
+        certificate: &informalsystems_malachitebft_core_types::CommitCertificate<
+            SnapchainValidatorContext,
+        >,
+        commit_sig: &informalsystems_malachitebft_core_types::CommitSignature<
+            SnapchainValidatorContext,
+        >,
+        validator: &<SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::Validator,
+    ) -> Result<
+        VotingPower,
+        informalsystems_malachitebft_core_types::CertificateError<SnapchainValidatorContext>,
+    > {
+        // Reconstruct the vote that was signed
+        let vote = Vote::new_precommit(
+            certificate.height,
+            certificate.round,
+            NilOrVal::Val(certificate.value_id.clone()),
+            validator.address().clone(),
+        );
+
+        // Verify signature
+        if !self.verify_signed_vote(&vote, &commit_sig.signature, validator.public_key()) {
+            return Err(
+                informalsystems_malachitebft_core_types::CertificateError::InvalidSignature(
+                    commit_sig.clone(),
+                ),
+            );
+        }
+
+        Ok(validator.voting_power())
+    }
+}
 
 pub struct InvalidSignatureError();
 impl fmt::Display for InvalidSignatureError {
@@ -105,7 +218,7 @@ pub struct Signature(pub Vec<u8>);
 pub type PublicKey = libp2p::identity::ed25519::PublicKey;
 pub type PrivateKey = libp2p::identity::ed25519::SecretKey;
 
-impl malachite_common::SigningScheme for Ed25519 {
+impl informalsystems_malachitebft_core_types::SigningScheme for Ed25519 {
     type DecodingError = InvalidSignatureError;
     type Signature = Signature;
     type PublicKey = PublicKey;
@@ -159,6 +272,13 @@ impl Height {
             block_number,
         })
     }
+
+    pub fn decrement_by(&self, n: u64) -> Option<Self> {
+        self.block_number.checked_sub(n).map(|block_number| Self {
+            shard_index: self.shard_index,
+            block_number,
+        })
+    }
 }
 
 impl fmt::Display for Height {
@@ -167,13 +287,21 @@ impl fmt::Display for Height {
     }
 }
 
-impl malachite_common::Height for Height {
+impl informalsystems_malachitebft_core_types::Height for Height {
     fn increment(&self) -> Self {
         self.increment()
     }
 
     fn as_u64(&self) -> u64 {
         self.block_number
+    }
+
+    fn increment_by(&self, n: u64) -> Self {
+        self.increment_by(n)
+    }
+
+    fn decrement_by(&self, n: u64) -> Option<Self> {
+        self.decrement_by(n)
     }
 }
 
@@ -195,7 +323,7 @@ impl fmt::Display for ShardHash {
 //     }
 // }
 
-impl malachite_common::Value for ShardHash {
+impl informalsystems_malachitebft_core_types::Value for ShardHash {
     type Id = ShardHash;
 
     fn id(&self) -> Self::Id {
@@ -243,7 +371,11 @@ impl FullProposal {
     }
 
     pub fn round(&self) -> Round {
-        Round::new(self.round)
+        Round::new(self.round.try_into().unwrap())
+    }
+
+    pub fn to_sign_bytes(&self) -> Vec<u8> {
+        self.encode_to_vec()
     }
 }
 
@@ -313,6 +445,31 @@ impl SnapchainValidatorSet {
         } else {
             self.validators[0].shard_index
         }
+    }
+}
+
+pub struct SnapchainValidatorConfig {
+    validator_set_by_shard: HashMap<u32, SnapchainValidatorSet>,
+}
+
+impl SnapchainValidatorConfig {
+    pub fn new() -> Self {
+        Self {
+            validator_set_by_shard: HashMap::new(),
+        }
+    }
+
+    pub fn add_validator(&mut self, validator: SnapchainValidator) {
+        let shard_index = validator.shard_index;
+        let set = self
+            .validator_set_by_shard
+            .entry(shard_index)
+            .or_insert_with(|| SnapchainValidatorSet::new(vec![]));
+        set.add(validator);
+    }
+
+    pub fn get_validator_set(&self, shard_index: u32) -> Option<&SnapchainValidatorSet> {
+        self.validator_set_by_shard.get(&shard_index)
     }
 }
 
@@ -407,7 +564,7 @@ impl Vote {
         Self {
             vote_type,
             height: proto.height.unwrap(),
-            round: Round::new(proto.round),
+            round: Round::from(proto.round),
             voter: Address::from_vec(proto.voter),
             shard_hash,
             extension: None,
@@ -442,9 +599,9 @@ impl Proposal {
     pub fn from_proto(proto: proto::Proposal) -> Self {
         Self {
             height: proto.height.unwrap(),
-            round: Round::new(proto.round),
+            round: Round::from(proto.round),
             shard_hash: proto.value.unwrap(),
-            pol_round: Round::new(proto.pol_round),
+            pol_round: Round::from(proto.pol_round),
             proposer: Address::from_vec(proto.proposer),
         }
     }
@@ -454,27 +611,18 @@ impl Proposal {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SinglePartProposal {
-    pub height: Height,
-    pub proposal_round: Round,
-    pub proposer: Address,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProposalPart {
-    FullProposal(SinglePartProposal),
-}
-
 #[derive(Clone, Debug)]
 pub struct SnapchainValidatorContext {
     keypair: Arc<Keypair>,
+    signing_provider: Ed25519Provider,
 }
 
 impl SnapchainValidatorContext {
     pub fn new(keypair: Keypair) -> Self {
+        let keypair = Arc::new(keypair);
         Self {
-            keypair: Arc::new(keypair),
+            keypair: keypair.clone(),
+            signing_provider: Ed25519Provider::new(keypair),
         }
     }
 
@@ -487,16 +635,17 @@ impl ShardedContext for SnapchainValidatorContext {
     type ShardId = SnapchainShard;
 }
 
-impl malachite_common::Context for SnapchainValidatorContext {
+impl informalsystems_malachitebft_core_types::Context for SnapchainValidatorContext {
     type Address = Address;
     type Height = Height;
-    type ProposalPart = ProposalPart;
+    type ProposalPart = FullProposal;
     type Proposal = Proposal;
     type Validator = SnapchainValidator;
     type ValidatorSet = SnapchainValidatorSet;
     type Value = ShardHash;
     type Vote = Vote;
     type SigningScheme = Ed25519;
+    type SigningProvider = Ed25519Provider;
 
     fn select_proposer<'a>(
         &self,
@@ -518,55 +667,6 @@ impl malachite_common::Context for SnapchainValidatorContext {
             .validators
             .get(proposer_index)
             .expect("proposer_index is valid")
-    }
-
-    fn sign_vote(&self, vote: Self::Vote) -> SignedVote<Self> {
-        let signature = self.keypair.sign(&vote.to_sign_bytes());
-        SignedVote::new(vote, Signature(signature))
-    }
-
-    fn verify_signed_vote(
-        &self,
-        vote: &Vote,
-        signature: &Signature,
-        public_key: &PublicKey,
-    ) -> bool {
-        let valid = public_key.verify(&vote.to_sign_bytes(), &signature.0);
-        if !valid {
-            panic!("Invalid signature");
-        }
-        valid
-    }
-
-    fn sign_proposal(&self, proposal: Self::Proposal) -> SignedProposal<Self> {
-        let signature = self.keypair.sign(&proposal.to_sign_bytes());
-        SignedProposal::new(proposal, Signature(signature))
-    }
-
-    fn verify_signed_proposal(
-        &self,
-        proposal: &Proposal,
-        signature: &Signature,
-        public_key: &PublicKey,
-    ) -> bool {
-        let valid = public_key.verify(&proposal.to_sign_bytes(), &signature.0);
-        if !valid {
-            panic!("Invalid signature");
-        }
-        valid
-    }
-
-    fn sign_proposal_part(&self, proposal_part: Self::ProposalPart) -> SignedProposalPart<Self> {
-        SignedProposalPart::new(proposal_part, Signature(vec![]))
-    }
-
-    fn verify_signed_proposal_part(
-        &self,
-        _proposal_part: &ProposalPart,
-        _signature: &Signature,
-        _public_key: &PublicKey,
-    ) -> bool {
-        todo!()
     }
 
     fn new_proposal(
@@ -602,11 +702,17 @@ impl malachite_common::Context for SnapchainValidatorContext {
     ) -> Vote {
         Vote::new_precommit(height, round, value_id, address)
     }
+
+    fn signing_provider(&self) -> &Self::SigningProvider {
+        &self.signing_provider
+    }
 }
 
 impl SnapchainContext for SnapchainValidatorContext {}
 
-impl malachite_common::ProposalPart<SnapchainValidatorContext> for ProposalPart {
+impl informalsystems_malachitebft_core_types::ProposalPart<SnapchainValidatorContext>
+    for FullProposal
+{
     fn is_first(&self) -> bool {
         // Only one part for now
         true
@@ -617,7 +723,10 @@ impl malachite_common::ProposalPart<SnapchainValidatorContext> for ProposalPart 
     }
 }
 
-impl malachite_common::Proposal<SnapchainValidatorContext> for Proposal {
+// Make malachite happy. Prost already implements PartialEq, should be safe to mark as Eq?
+impl Eq for FullProposal {}
+
+impl informalsystems_malachitebft_core_types::Proposal<SnapchainValidatorContext> for Proposal {
     fn height(&self) -> Height {
         self.height
     }
@@ -643,7 +752,7 @@ impl malachite_common::Proposal<SnapchainValidatorContext> for Proposal {
     }
 }
 
-impl malachite_common::Vote<SnapchainValidatorContext> for Vote {
+impl informalsystems_malachitebft_core_types::Vote<SnapchainValidatorContext> for Vote {
     fn height(&self) -> Height {
         self.height
     }
@@ -668,19 +777,23 @@ impl malachite_common::Vote<SnapchainValidatorContext> for Vote {
         &self.voter
     }
 
-    fn extension(&self) -> Option<&Extension> {
+    fn extension(
+        &self,
+    ) -> std::option::Option<&SignedMessage<SnapchainValidatorContext, Extension>> {
         None
     }
 
-    fn extend(self, extension: Extension) -> Self {
+    fn extend(self, extension: SignedMessage<SnapchainValidatorContext, Extension>) -> Self {
         Self {
-            extension: Some(extension),
+            extension: Some(extension.message),
             ..self
         }
     }
 }
 
-impl malachite_common::ValidatorSet<SnapchainValidatorContext> for SnapchainValidatorSet {
+impl informalsystems_malachitebft_core_types::ValidatorSet<SnapchainValidatorContext>
+    for SnapchainValidatorSet
+{
     fn count(&self) -> usize {
         self.validators.len()
     }
@@ -702,7 +815,9 @@ impl malachite_common::ValidatorSet<SnapchainValidatorContext> for SnapchainVali
     }
 }
 
-impl malachite_common::Validator<SnapchainValidatorContext> for SnapchainValidator {
+impl informalsystems_malachitebft_core_types::Validator<SnapchainValidatorContext>
+    for SnapchainValidator
+{
     fn address(&self) -> &Address {
         &self.address
     }

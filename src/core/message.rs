@@ -1,5 +1,5 @@
 use crate::proto;
-use crate::proto::MessageType;
+use crate::proto::{consensus_message, ConsensusMessage, MessageType};
 
 impl proto::Message {
     pub fn is_type(&self, message_type: proto::MessageType) -> bool {
@@ -38,5 +38,35 @@ impl proto::ValidatorMessage {
             return event.fid;
         }
         0
+    }
+}
+
+impl proto::FullProposal {
+    pub fn shard_id(&self) -> Result<u32, String> {
+        if let Some(height) = &self.height {
+            Ok(height.shard_index)
+        } else {
+            Err("No height in FullProposal".to_string())
+        }
+    }
+}
+
+impl ConsensusMessage {
+    pub fn shard_id(&self) -> Result<u32, String> {
+        if let Some(msg) = &self.consensus_message {
+            match msg {
+                consensus_message::ConsensusMessage::Vote(vote) => {
+                    if let Some(height) = &vote.height {
+                        return Ok(height.shard_index);
+                    }
+                }
+                consensus_message::ConsensusMessage::Proposal(vote) => {
+                    if let Some(height) = &vote.height {
+                        return Ok(height.shard_index);
+                    }
+                }
+            }
+        }
+        Err("Could not determine shard id for ConsensusMessage".to_string())
     }
 }

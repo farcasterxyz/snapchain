@@ -4,8 +4,8 @@ use crate::core::types::{
     SnapchainValidatorSet,
 };
 use crate::proto::FullProposal;
-use malachite_common::{Round, ValidatorSet};
-use malachite_consensus::ProposedValue;
+use informalsystems_malachitebft_core_consensus::ProposedValue;
+use informalsystems_malachitebft_core_types::{Round, ValidatorSet};
 use std::collections::HashSet;
 use std::time::Duration;
 use tracing::error;
@@ -33,13 +33,14 @@ impl ShardValidator {
     pub fn new(
         address: Address,
         shard: SnapchainShard,
+        initial_validator_set: SnapchainValidatorSet,
         block_proposer: Option<BlockProposer>,
         shard_proposer: Option<ShardProposer>,
     ) -> ShardValidator {
         ShardValidator {
             shard_id: shard.clone(),
             address: address.clone(),
-            validator_set: SnapchainValidatorSet::new(vec![]),
+            validator_set: initial_validator_set,
             confirmed_height: None,
             current_round: Round::new(0),
             current_height: None,
@@ -59,11 +60,24 @@ impl ShardValidator {
         self.validator_set.count()
     }
 
-    pub fn get_current_height(&self) -> u64 {
+    pub fn get_address(&self) -> Address {
+        self.address.clone()
+    }
+
+    pub fn get_current_height(&self) -> Height {
         if let Some(p) = &self.block_proposer {
-            return p.get_confirmed_height().block_number;
+            return p.get_confirmed_height();
         } else if let Some(p) = &self.shard_proposer {
-            return p.get_confirmed_height().block_number;
+            return p.get_confirmed_height();
+        }
+        panic!("No proposer set on validator");
+    }
+
+    pub fn get_min_height(&self) -> Height {
+        if let Some(p) = &self.block_proposer {
+            return p.get_min_height();
+        } else if let Some(p) = &self.shard_proposer {
+            return p.get_min_height();
         }
         panic!("No proposer set on validator");
     }
@@ -118,13 +132,13 @@ impl ShardValidator {
 
     pub fn add_proposed_value(
         &mut self,
-        full_proposal: FullProposal,
+        full_proposal: &FullProposal,
     ) -> ProposedValue<SnapchainValidatorContext> {
         let value = full_proposal.shard_hash();
         let validity = if let Some(block_proposer) = &mut self.block_proposer {
-            block_proposer.add_proposed_value(&full_proposal)
+            block_proposer.add_proposed_value(full_proposal)
         } else if let Some(shard_proposer) = &mut self.shard_proposer {
-            shard_proposer.add_proposed_value(&full_proposal)
+            shard_proposer.add_proposed_value(full_proposal)
         } else {
             panic!("No proposer set");
         };
@@ -134,7 +148,8 @@ impl ShardValidator {
         ProposedValue {
             height: full_proposal.height(),
             round: full_proposal.round(),
-            validator_address: full_proposal.proposer_address(),
+            valid_round: Round::Nil,
+            proposer: full_proposal.proposer_address(),
             value,
             validity,
             extension: None,

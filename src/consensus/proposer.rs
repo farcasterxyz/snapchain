@@ -7,7 +7,7 @@ use crate::proto::{BlocksRequest, ShardChunksRequest};
 use crate::storage::store::engine::{BlockEngine, ShardEngine, ShardStateChange};
 use crate::storage::store::BlockStorageError;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
-use malachite_common::{Round, Validity};
+use informalsystems_malachitebft_core_types::{Round, Validity};
 use prost::Message;
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -44,6 +44,8 @@ pub trait Proposer {
     async fn decide(&mut self, height: Height, round: Round, value: ShardHash);
 
     fn get_confirmed_height(&self) -> Height;
+
+    fn get_min_height(&self) -> Height;
 
     async fn sync_against_validator(
         &mut self,
@@ -184,6 +186,11 @@ impl Proposer for ShardProposer {
 
     fn get_confirmed_height(&self) -> Height {
         self.engine.get_confirmed_height()
+    }
+
+    fn get_min_height(&self) -> Height {
+        // Always return the genesis block, until we implement pruning
+        Height::new(self.shard_id.shard_id(), 1)
     }
 
     async fn sync_against_validator(
@@ -425,6 +432,11 @@ impl Proposer for BlockProposer {
 
     fn get_confirmed_height(&self) -> Height {
         self.engine.get_confirmed_height()
+    }
+
+    fn get_min_height(&self) -> Height {
+        // Always return the genesis block, until we implement pruning
+        Height::new(self.shard_id.shard_id(), 1)
     }
 
     async fn sync_against_validator(
