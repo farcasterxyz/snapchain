@@ -9,7 +9,6 @@ use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use rocksdb;
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{io, path, process};
@@ -107,24 +106,19 @@ impl MyAdminService {
         }
     }
 
-    async fn backup_shard(&self, shard_id: u32, db: Arc<RocksDB>, now: i64) -> Result<(), Status> {
-        // TODO(aditi): Eventually, we should upload a metadata file. For now, just clear all existing snapshots and only keep 1 snapshot per shard
+    async fn backup_and_upload(
+        &self,
+        shard_id: u32,
+        db: Arc<RocksDB>,
+        now: i64,
+    ) -> Result<(), Status> {
+        // TODO(aditi): Eventually, we should upload a metadata file. For now, just clear all existing snapshots on s3 and only keep 1 snapshot per shard
         clear_snapshots(self.fc_network, &self.snapshot_config, shard_id)
             .await
             .map_err(|err| Status::from_error(Box::new(err)))?;
-        let db_location = db.location();
-        let backup_dir = Path::new(&db_location)
-            .parent()
-            .ok_or(Status::internal("unable to find parent directory for db"))?; // Create backup as sibling directory of normal path
-        let tar_gz_path = RocksDB::backup_db(
-            db,
-            backup_dir
-                .to_str()
-                .ok_or(Status::internal("unable to convert backup dir to string"))?,
-            shard_id,
-            now,
-        )
-        .map_err(|err| Status::from_error(Box::new(err)))?;
+        let backup_dir = self.snapshot_config.backup_dir.clone();
+        let tar_gz_path = RocksDB::backup_db(db, &backup_dir, shard_id, now)
+            .map_err(|err| Status::from_error(Box::new(err)))?;
         storage::db::snapshot::upload_to_s3(
             self.fc_network,
             tar_gz_path,
@@ -236,17 +230,34 @@ impl AdminService for MyAdminService {
         &self,
         _request: Request<Empty>,
     ) -> std::result::Result<Response<Empty>, Status> {
+        if std::fs::exists(self.snapshot_config.backup_dir.clone())? {
+            return Err(Status::aborted("snapshot already in progress"));
+        }
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|err| Status::from_error(Box::new(err)))?
             .as_millis();
 
-        self.backup_shard(0, self.block_store.db.clone(), now as i64)
-            .await?;
+        let on_error = |err| {
+            if let Err(err) = std::fs::remove_dir_all(self.snapshot_config.backup_dir.clone()) {
+                info!("Unable to remove snapshot directory: {}", err.to_string());
+            }
+            // Maintain the original error
+            err
+        };
+
+        self.backup_and_upload(0, self.block_store.db.clone(), now as i64)
+            .await
+            .map_err(|err| on_error(err))?;
         for (shard, stores) in self.shard_stores.iter() {
-            self.backup_shard(*shard, stores.db.clone(), now as i64)
-                .await?
+            self.backup_and_upload(*shard, stores.db.clone(), now as i64)
+                .await
+                .map_err(|err| on_error(err))?
         }
+
+        std::fs::remove_dir_all(self.snapshot_config.backup_dir.clone())?;
+
         Ok(Response::new(Empty {}))
     }
 }

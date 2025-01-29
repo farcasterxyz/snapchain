@@ -16,8 +16,10 @@ use tracing::info;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
-    endpoint_url: String,
-    s3_bucket: String,
+    pub endpoint_url: String,
+    pub s3_bucket: String,
+    pub backup_dir: String,
+    pub backup_on_startup: bool,
 }
 
 impl Default for Config {
@@ -25,6 +27,8 @@ impl Default for Config {
         Config {
             endpoint_url: "".to_string(),
             s3_bucket: "snapchain-snapshots".to_string(),
+            backup_dir: ".rocks.backup".to_string(),
+            backup_on_startup: false,
         }
     }
 }
@@ -60,6 +64,7 @@ pub enum SnapshotError {
 }
 
 async fn create_s3_client(snapshot_config: &Config) -> aws_sdk_s3::Client {
+    // AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION are loaded from envvars
     let config = aws_config::load_from_env().await;
     let s3_config = aws_sdk_s3::config::Builder::from(&config)
         .force_path_style(true)
