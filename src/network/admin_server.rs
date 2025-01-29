@@ -5,10 +5,11 @@ use crate::storage;
 use crate::storage::db::RocksDB;
 use crate::storage::store::engine::MempoolMessage;
 use crate::storage::store::stores::Stores;
-use chrono::DateTime;
+use crate::storage::store::BlockStore;
 use rocksdb;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{io, path, process};
 use thiserror::Error;
@@ -71,6 +72,7 @@ pub struct MyAdminService {
     pub mempool_tx: mpsc::Sender<MempoolMessage>,
     snapshot_config: storage::db::snapshot::Config,
     shard_stores: HashMap<u32, Stores>,
+    block_store: BlockStore,
     fc_network: FarcasterNetwork,
 }
 
@@ -90,6 +92,7 @@ impl MyAdminService {
         db_manager: DbManager,
         mempool_tx: mpsc::Sender<MempoolMessage>,
         shard_stores: HashMap<u32, Stores>,
+        block_store: BlockStore,
         snapshot_config: storage::db::snapshot::Config,
         fc_network: FarcasterNetwork,
     ) -> Self {
@@ -97,9 +100,35 @@ impl MyAdminService {
             db_manager,
             mempool_tx,
             shard_stores,
+            block_store,
             snapshot_config,
             fc_network,
         }
+    }
+
+    async fn backup_shard(&self, shard_id: u32, db: Arc<RocksDB>, now: i64) -> Result<(), Status> {
+        let db_location = db.location();
+        let backup_dir = Path::new(&db_location)
+            .parent()
+            .ok_or(Status::internal("unable to find parent directory for db"))?; // Create backup as sibling directory of normal path
+        let tar_gz_path = RocksDB::backup_db(
+            db,
+            backup_dir
+                .to_str()
+                .ok_or(Status::internal("unable to convert backup dir to string"))?,
+            shard_id,
+            now,
+        )
+        .map_err(|err| Status::from_error(Box::new(err)))?;
+        storage::db::snapshot::upload_to_s3(
+            self.fc_network,
+            tar_gz_path,
+            &self.snapshot_config,
+            shard_id,
+        )
+        .await
+        .map_err(|err| Status::from_error(Box::new(err)))?;
+        Ok(())
     }
 }
 
@@ -206,34 +235,12 @@ impl AdminService for MyAdminService {
             .duration_since(UNIX_EPOCH)
             .map_err(|err| Status::from_error(Box::new(err)))?
             .as_millis();
+
+        self.backup_shard(0, self.block_store.db.clone(), now as i64)
+            .await?;
         for (shard, stores) in self.shard_stores.iter() {
-            let db_location = stores.db.location();
-            let backup_dir = Path::new(&db_location)
-                .join("..") // Create backup as sibling directory of normal path
-                .join(format!(
-                    "{}-{}.backup",
-                    db_location,
-                    DateTime::from_timestamp_millis(now as i64)
-                        .ok_or(Status::internal("unable to convert current time to string"))?
-                        .format("%Y-%m-%d-%s"),
-                ));
-            let tar_gz_path = RocksDB::backup_db(
-                stores.db.clone(),
-                backup_dir
-                    .to_str()
-                    .ok_or(Status::internal("unable to convert backup dir to string"))?,
-                *shard,
-                now as i64,
-            )
-            .map_err(|err| Status::from_error(Box::new(err)))?;
-            storage::db::snapshot::upload_to_s3(
-                self.fc_network,
-                tar_gz_path,
-                &self.snapshot_config,
-                *shard,
-            )
-            .await
-            .map_err(|err| Status::from_error(Box::new(err)))?;
+            self.backup_shard(*shard, stores.db.clone(), now as i64)
+                .await?
         }
         Ok(Response::new(Empty {}))
     }

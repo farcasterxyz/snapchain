@@ -30,6 +30,9 @@ struct Args {
 
     #[arg(long, default_value = "false")]
     statsd_use_tags: bool,
+
+    #[arg(long, default_value = "")]
+    snapshot_endpoint_url: String,
 }
 
 fn parse_duration(arg: &str) -> Result<Duration, String> {
@@ -82,6 +85,7 @@ async fn main() {
         let l2_rpc_url = args.l2_rpc_url.clone();
         let start_block_number = args.start_block_number;
         let stop_block_number = args.stop_block_number;
+        let snapshot_endpoint_url = args.snapshot_endpoint_url.clone();
 
         let config_file_content = format!(
             r#"
@@ -106,6 +110,9 @@ propose_value_delay = "{propose_value_delay}"
 rpc_url= "{l2_rpc_url}"
 start_block_number = {start_block_number}
 stop_block_number = {stop_block_number}
+
+[snapshot]
+endpoint_url = "{snapshot_endpoint_url}"
             "#
         );
 

@@ -1,7 +1,7 @@
 use crate::proto::FarcasterNetwork;
 use aws_config::Region;
 use aws_sdk_s3::config::http::HttpResponse;
-use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::error::{DisplayErrorContext, SdkError};
 use aws_sdk_s3::operation::put_object::PutObjectError;
 use aws_sdk_s3::primitives::{ByteStream, ByteStreamError};
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,7 @@ use std::fs::{self};
 use std::io;
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 use thiserror::Error;
+use tracing::info;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
@@ -24,8 +25,8 @@ impl Default for Config {
         }
     }
 }
-pub fn snapshot_directory(network: FarcasterNetwork, shard_id: u32) -> String {
-    return format!("snapchain-snapshots/{}/{}", network.as_str_name(), shard_id);
+fn snapshot_directory(network: FarcasterNetwork, shard_id: u32) -> String {
+    return format!("{}/{}", network.as_str_name(), shard_id);
 }
 
 #[derive(Error, Debug)]
@@ -52,16 +53,18 @@ pub async fn upload_to_s3(
     snapshot_config: &Config,
     shard_id: u32,
 ) -> Result<(), SnapshotError> {
+    info!(shard_id, chunked_dir_path, "Starting upload to s3");
     let start_timetamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
     let start_date = chrono::DateTime::from_timestamp_millis(start_timetamp)
         .ok_or(SnapshotError::DateError)?
         .date_naive();
-    let region = "auto";
-    let config = aws_config::SdkConfig::builder()
-        .region(Region::new(region.to_string()))
+    let config = aws_config::load_from_env().await;
+    let s3_config = aws_sdk_s3::config::Builder::from(&config)
+        .force_path_style(true)
         .endpoint_url(snapshot_config.endpoint_url.clone())
+        .region(Region::new("auto".to_string()))
         .build();
-    let s3 = aws_sdk_s3::Client::new(&config);
+    let s3 = aws_sdk_s3::Client::from_conf(s3_config);
     let upload_dir = format!(
         "{}/snapshot-{}-{}.tar.gz",
         snapshot_directory(network, shard_id),
@@ -70,16 +73,30 @@ pub async fn upload_to_s3(
     );
     let files = fs::read_dir(chunked_dir_path)?;
     for entry in files {
-        let entry = entry.unwrap();
+        let entry = entry?;
         let key = format!("{}/{}", upload_dir, entry.file_name().to_string_lossy());
 
+        info!(key, "Uploading chunk to s3");
         let byte_stream = ByteStream::from_path(entry.path()).await?;
-        s3.put_object()
-            .key(key)
+        let upload_result = s3
+            .put_object()
+            .key(key.clone())
             .bucket(snapshot_config.s3_bucket.clone())
             .body(byte_stream)
             .send()
-            .await?;
+            .await;
+        match &upload_result {
+            Err(err) => {
+                info!(
+                    "Error uploading to s3: {}, key: {}, bucket: {}",
+                    DisplayErrorContext(err),
+                    key,
+                    snapshot_config.s3_bucket
+                );
+            }
+            Ok(_) => {}
+        };
+        upload_result?;
     }
     Ok(())
 }

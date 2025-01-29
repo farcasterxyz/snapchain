@@ -168,6 +168,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         db_manager,
         mempool_tx.clone(),
         node.shard_stores.clone(),
+        block_store.clone(),
         app_config.snapshot.clone(),
         app_config.fc_network,
     );

@@ -111,8 +111,11 @@ impl RocksDB {
         let now = chrono::DateTime::from_timestamp_millis(timestamp_ms)
             .unwrap()
             .naive_utc();
-        let backup_path =
-            Path::new(backup_dir).join(format!("backup-{}", now.format("%Y-%m-%d-%s")));
+        let backup_path = Path::new(backup_dir).join(format!(
+            "backup-shard-{}-{}",
+            shard_id,
+            now.format("%Y-%m-%d-%s")
+        ));
         let span = tracing::span!(
             tracing::Level::INFO,
             "backup_db",
@@ -128,6 +131,7 @@ impl RocksDB {
 
         let mut backup_db_options = Options::default();
         backup_db_options.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        backup_db_options.create_if_missing(true);
 
         let backup_db = DB::open(&backup_db_options, &backup_path)
             .map_err(|e| RocksdbError::InternalError(e))?;
