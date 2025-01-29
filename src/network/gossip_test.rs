@@ -1,11 +1,10 @@
 use crate::consensus::consensus::{ConsensusMsg, SystemMessage};
 use crate::core::types::proto;
 use crate::network::gossip::{Config, GossipEvent, SnapchainGossip};
-use crate::storage::store::engine::MempoolMessage;
 use libp2p::identity::ed25519::Keypair;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::time::timeout;
+use tokio::{select, time};
 
 const HOST_FOR_TEST: &str = "127.0.0.1";
 const PORT_FOR_TEST: u32 = 9382;
@@ -27,14 +26,9 @@ async fn test_gossip_communication() {
     let (system_tx1, _) = mpsc::channel::<SystemMessage>(100);
     let (system_tx2, mut system_rx2) = mpsc::channel::<SystemMessage>(100);
 
-    let (mempool_tx1, _) = mpsc::channel::<MempoolMessage>(100);
-    let (mempool_tx2, _) = mpsc::channel::<MempoolMessage>(100);
-
     // Create gossip instances
-    let mut gossip1 =
-        SnapchainGossip::create(keypair1.clone(), config1, system_tx1, mempool_tx1).unwrap();
-    let mut gossip2 =
-        SnapchainGossip::create(keypair2.clone(), config2, system_tx2, mempool_tx2).unwrap();
+    let mut gossip1 = SnapchainGossip::create(keypair1.clone(), config1, system_tx1).unwrap();
+    let mut gossip2 = SnapchainGossip::create(keypair2.clone(), config2, system_tx2).unwrap();
 
     let gossip_tx1 = gossip1.tx.clone();
 
@@ -72,13 +66,22 @@ async fn test_gossip_communication() {
         .unwrap();
 
     // Wait for message to be received with timeout
-    let received = timeout(Duration::from_secs(5), system_rx2.recv()).await;
-    assert!(received.is_ok(), "Timed out waiting for message");
-
-    if let Ok(Some(SystemMessage::Consensus(ConsensusMsg::RegisterValidator(validator)))) = received
-    {
-        assert_eq!(validator.current_height, 312);
-    } else {
-        panic!("Received unexpected or no message");
+    let deadline = time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let timeout = time::sleep_until(deadline);
+        select! {
+            received = system_rx2.recv()  => {
+                match received {
+                    Some(SystemMessage::Consensus(ConsensusMsg::RegisterValidator(validator)))  => {
+                        assert_eq!(validator.current_height, 312);
+                        break;
+                    },
+                    _ => {},
+                }
+            }
+            _ = timeout => {
+                panic!("Timeout while waiting for message");
+            }
+        }
     }
 }
