@@ -8,11 +8,17 @@ use aws_sdk_s3::operation::put_object::PutObjectError;
 use aws_sdk_s3::primitives::{ByteStream, ByteStreamError};
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_sdk_s3::Client;
+use flate2::read::GzDecoder;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::fs::{self};
-use std::io;
+use std::io::{self};
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
+use tar::{Archive, EntryType};
 use thiserror::Error;
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tracing::info;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -21,6 +27,7 @@ pub struct Config {
     pub s3_bucket: String,
     pub backup_dir: String,
     pub backup_on_startup: bool,
+    pub load_db_from_snapshot: bool,
 }
 
 impl Default for Config {
@@ -30,6 +37,7 @@ impl Default for Config {
             s3_bucket: "snapchain-snapshots".to_string(),
             backup_dir: ".rocks.backup".to_string(),
             backup_on_startup: false,
+            load_db_from_snapshot: true,
         }
     }
 }
@@ -143,6 +151,64 @@ fn metadata_path(network: FarcasterNetwork, shard_id: u32) -> String {
         snapshot_directory(network, shard_id),
         "latest.json"
     )
+}
+
+pub async fn download_snapshots(
+    network: FarcasterNetwork,
+    snapshot_config: &Config,
+    db_dir: String,
+    shard_id: u32,
+) {
+    let snapshot_dir = ".rocks.snapshot";
+    let metadata_url = format!(
+        "{}/{}",
+        snapshot_config.endpoint_url,
+        metadata_path(network, shard_id)
+    );
+    let metadata_bytes = reqwest::get(metadata_url)
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let metadata_json: SnapshotMetadata = serde_json::from_slice(&metadata_bytes.to_vec()).unwrap();
+    let base_path = metadata_json.key_base;
+    for chunk in metadata_json.chunks {
+        let download_path = format!("{}/{}/{}", snapshot_config.endpoint_url, base_path, chunk);
+        let download_response = reqwest::get(download_path).await.unwrap();
+        let mut byte_stream = download_response.bytes_stream();
+        let mut file = BufWriter::new(
+            tokio::fs::File::create(format!("{}/{}", snapshot_dir, chunk))
+                .await
+                .unwrap(),
+        );
+
+        while let Some(Ok(piece)) = byte_stream.next().await {
+            file.write_all(&piece).await.unwrap();
+        }
+    }
+
+    for entry in fs::read_dir(snapshot_dir).unwrap() {
+        let file = std::fs::File::open(entry.unwrap().path()).unwrap();
+        let gz_decoder = GzDecoder::new(file);
+        let mut archive = Archive::new(gz_decoder);
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let mut path = PathBuf::from_str(&db_dir).unwrap();
+            path.extend(entry.path().unwrap().into_iter().skip(1));
+            match entry.header().entry_type() {
+                EntryType::Regular => {
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    let mut new_file = std::fs::File::create(path.to_str().unwrap()).unwrap();
+                    // TODO(aditi): We should not using a big blocking operation here. Should use chunks.
+                    std::io::copy(&mut entry, &mut new_file).unwrap();
+                }
+                EntryType::Directory => std::fs::create_dir_all(path).unwrap(),
+                _ => {}
+            }
+        }
+    }
+    std::fs::remove_dir_all(snapshot_dir).unwrap();
 }
 
 pub async fn upload_to_s3(

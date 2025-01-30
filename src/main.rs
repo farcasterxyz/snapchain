@@ -11,6 +11,7 @@ use snapchain::network::server::MyHubService;
 use snapchain::node::snapchain_node::SnapchainNode;
 use snapchain::proto::admin_service_server::AdminServiceServer;
 use snapchain::proto::hub_service_server::HubServiceServer;
+use snapchain::storage::db::snapshot::download_snapshots;
 use snapchain::storage::db::RocksDB;
 use snapchain::storage::store::BlockStore;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
@@ -68,6 +69,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    if app_config.snapshot.load_db_from_snapshot {
+        let mut shard_ids = app_config.consensus.shard_ids.clone();
+        shard_ids.push(0);
+        for shard_id in shard_ids {
+            download_snapshots(
+                app_config.fc_network,
+                &app_config.snapshot,
+                app_config.rocksdb_dir.clone(),
+                shard_id,
+            )
+            .await
+        }
+    }
+
     if app_config.statsd.prefix == "" {
         // TODO: consider removing this check
         return Err("statsd prefix must be specified in config".into());
@@ -92,8 +107,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let addr = app_config.gossip.address.clone();
     let grpc_addr = app_config.rpc_address.clone();
     let grpc_socket_addr: SocketAddr = grpc_addr.parse()?;
-    let db = RocksDB::open_block_db(app_config.rocksdb_dir.as_str());
-    let block_store = BlockStore::new(db);
+    let block_db = RocksDB::open_shard_db(app_config.rocksdb_dir.as_str(), 0);
+    let block_store = BlockStore::new(block_db);
 
     info!(addr = addr, grpc_addr = grpc_addr, "HubService listening",);
 

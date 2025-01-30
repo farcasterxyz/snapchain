@@ -33,7 +33,7 @@ malachite-metrics = { path = "../malachite/code/crates/metrics" }
 blake3 = "1.4.1"
 tracing = "0.1.40"
 thiserror = "1.0.66"
-reqwest = { version = "0.12.9", features = ["json"] }
+reqwest = { version = "0.12.9", features = ["json", "stream"] }
 figment = { version = "0.10.19", features = ["env", "toml"] }
 futures-util = "0.3.31"
 url = "2.5.3"
