@@ -1,7 +1,7 @@
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::onchain_events::{L1Client, RealL1Client};
 use snapchain::consensus::consensus::SystemMessage;
-use snapchain::core::types::{proto, SnapchainValidatorConfig};
+use snapchain::core::types::proto;
 use snapchain::mempool::mempool::Mempool;
 use snapchain::mempool::routing;
 use snapchain::network::admin_server::{DbManager, MyAdminService};
@@ -129,8 +129,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let registry = SharedRegistry::global();
     // Use the new non-global metrics registry when we upgrade to newer version of malachite
     let _ = Metrics::register(registry);
-    let validator_config = SnapchainValidatorConfig::new();
-
     let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
     let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
 
@@ -147,7 +145,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         statsd_client.clone(),
         app_config.trie_branching_factor,
         registry,
-        &validator_config,
     )
     .await;
 

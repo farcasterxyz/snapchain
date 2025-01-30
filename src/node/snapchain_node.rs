@@ -3,9 +3,7 @@ use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::spawn::MalachiteConsensusActors;
 use crate::consensus::proposer::{BlockProposer, ShardProposer};
 use crate::consensus::validator::ShardValidator;
-use crate::core::types::{
-    Address, ShardId, SnapchainShard, SnapchainValidatorConfig, SnapchainValidatorContext,
-};
+use crate::core::types::{Address, ShardId, SnapchainShard, SnapchainValidatorContext};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::network::gossip::GossipEvent;
 use crate::proto::{Block, ShardChunk};
@@ -45,7 +43,6 @@ impl SnapchainNode {
         statsd_client: StatsdClientWrapper,
         trie_branching_factor: u32,
         registry: &SharedRegistry,
-        validator_config: &SnapchainValidatorConfig,
     ) -> Self {
         let validator_address = Address(keypair.public().to_bytes());
 
@@ -55,7 +52,7 @@ impl SnapchainNode {
         let mut shard_stores: HashMap<u32, Stores> = HashMap::new();
 
         // Create the shard validators
-        for shard_id in config.shard_ids {
+        for shard_id in config.shard_ids.clone() {
             if shard_id == 0 {
                 panic!("Shard ID 0 is reserved for the block shard, created automaticaly");
             } else if shard_id > MAX_SHARDS {
@@ -63,7 +60,7 @@ impl SnapchainNode {
             }
 
             let shard = SnapchainShard::new(shard_id);
-            let shard_validator_set = validator_config.get_validator_set(shard_id).unwrap();
+            let shard_validator_set = config.validator_set_for(shard_id);
             let ctx = SnapchainValidatorContext::new(keypair.clone());
 
             let db = RocksDB::open_shard_db(rocksdb_dir.clone().as_str(), shard_id);
@@ -118,7 +115,7 @@ impl SnapchainNode {
         let block_shard = SnapchainShard::new(0);
 
         // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
-        let block_validator_set = validator_config.get_validator_set(0).unwrap();
+        let block_validator_set = config.validator_set_for(0);
         let engine = BlockEngine::new(block_store.clone());
         let shard_decision_rx = shard_decision_tx.subscribe();
         let block_proposer = BlockProposer::new(

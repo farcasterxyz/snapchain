@@ -71,6 +71,7 @@ flate2 = "1.0.28"
 eth-signature-verifier = { version = "0.3.0", path = "../eth-signature-verifier" }
 aws-config = { version = "1.1.7", features = ["behavior-version-latest"] }
 aws-sdk-s3 = { version = "1.71.0", features = ["behavior-version-latest"] }
+toml = "0.8.19"
 
 [build-dependencies]
 tonic-build = "0.9.2"

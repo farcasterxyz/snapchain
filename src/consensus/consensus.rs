@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use informalsystems_malachitebft_core_types::{
-    CommitCertificate, SignedMessage, SigningProvider, SigningProviderExt, ValidatorSet,
+    CommitCertificate, SignedMessage, SigningProvider, SigningProviderExt, Validator, ValidatorSet,
     ValueOrigin,
 };
-use libp2p::identity::ed25519::{Keypair, SecretKey};
+use libp2p::identity::ed25519::{Keypair, PublicKey, SecretKey};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -23,7 +23,7 @@ use crate::consensus::timers::{TimeoutElapsed, TimerScheduler};
 use crate::consensus::validator::ShardValidator;
 use crate::core::types::{
     Height, ShardId, SnapchainContext, SnapchainShard, SnapchainValidator,
-    SnapchainValidatorContext,
+    SnapchainValidatorContext, SnapchainValidatorSet,
 };
 use crate::network::gossip::GossipEvent;
 use crate::proto::FullProposal;
@@ -70,6 +70,7 @@ pub struct Config {
     pub propose_value_delay: Duration,
 
     pub max_messages_per_block: u32,
+    pub validator_addresses: Vec<String>,
 }
 
 impl Config {
@@ -79,14 +80,29 @@ impl Config {
         Keypair::from(secret_key.unwrap())
     }
 
-    pub fn with_shard_ids(&self, shard_ids: Vec<u32>) -> Self {
+    pub fn with(&self, shard_ids: Vec<u32>, validator_addresses: Vec<String>) -> Self {
         Self {
             private_key: self.private_key.clone(),
             num_shards: shard_ids.len() as u32,
             shard_ids,
             propose_value_delay: self.propose_value_delay,
             max_messages_per_block: self.max_messages_per_block,
+            validator_addresses: validator_addresses.clone(),
         }
+    }
+
+    pub fn validator_set_for(&self, shard_id: u32) -> SnapchainValidatorSet {
+        let mut validators = SnapchainValidatorSet::new(vec![]);
+        for address in &self.validator_addresses {
+            let validator = SnapchainValidator::new(
+                SnapchainShard::new(shard_id),
+                PublicKey::try_from_bytes(&hex::decode(address).unwrap()).unwrap(),
+                None,
+                0,
+            );
+            validators.add(validator);
+        }
+        validators
     }
 }
 
@@ -98,6 +114,7 @@ impl Default for Config {
             num_shards: 1,
             propose_value_delay: Duration::from_millis(250),
             max_messages_per_block: 250, //TODO
+            validator_addresses: vec![],
         }
     }
 }

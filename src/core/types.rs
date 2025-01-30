@@ -7,7 +7,6 @@ use informalsystems_malachitebft_core_types::{
 use libp2p::identity::ed25519::Keypair;
 use prost::Message;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::sync::Arc;
 use tracing::warn;
@@ -445,31 +444,6 @@ impl SnapchainValidatorSet {
         } else {
             self.validators[0].shard_index
         }
-    }
-}
-
-pub struct SnapchainValidatorConfig {
-    validator_set_by_shard: HashMap<u32, SnapchainValidatorSet>,
-}
-
-impl SnapchainValidatorConfig {
-    pub fn new() -> Self {
-        Self {
-            validator_set_by_shard: HashMap::new(),
-        }
-    }
-
-    pub fn add_validator(&mut self, validator: SnapchainValidator) {
-        let shard_index = validator.shard_index;
-        let set = self
-            .validator_set_by_shard
-            .entry(shard_index)
-            .or_insert_with(|| SnapchainValidatorSet::new(vec![]));
-        set.add(validator);
-    }
-
-    pub fn get_validator_set(&self, shard_index: u32) -> Option<&SnapchainValidatorSet> {
-        self.validator_set_by_shard.get(&shard_index)
     }
 }
 

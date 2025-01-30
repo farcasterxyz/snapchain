@@ -8,7 +8,6 @@ use libp2p::identity::ed25519::Keypair;
 use libp2p::{Multiaddr, PeerId};
 use snapchain::consensus::consensus::{MalachiteEventShard, SystemMessage};
 use snapchain::consensus::malachite::network_connector::MalachiteNetworkEvent;
-use snapchain::core::types::SnapchainValidatorConfig;
 use snapchain::mempool::mempool::Mempool;
 use snapchain::mempool::routing;
 use snapchain::network::gossip::SnapchainGossip;
@@ -21,10 +20,7 @@ use snapchain::storage::store::engine::MempoolMessage;
 use snapchain::storage::store::BlockStore;
 use snapchain::utils::factory::messages_factory;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
-use snapchain::{
-    core::types::{ShardId, SnapchainShard, SnapchainValidator, SnapchainValidatorContext},
-    network::gossip::GossipEvent,
-};
+use snapchain::{core::types::SnapchainValidatorContext, network::gossip::GossipEvent};
 use tokio::sync::{broadcast, mpsc};
 use tokio::time;
 use tonic::transport::Server;
@@ -63,7 +59,7 @@ impl NodeForTest {
         keypair: Keypair,
         num_shards: u32,
         grpc_port: u32,
-        validator_config: &SnapchainValidatorConfig,
+        validator_addresses: &Vec<String>,
     ) -> Self {
         let statsd_client = StatsdClientWrapper::new(
             cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
@@ -71,7 +67,7 @@ impl NodeForTest {
         );
 
         let mut config = snapchain::consensus::consensus::Config::default();
-        config = config.with_shard_ids((1..=num_shards).collect());
+        config = config.with((1..=num_shards).collect(), validator_addresses.clone());
 
         let (gossip_tx, gossip_rx) = mpsc::channel::<GossipEvent<SnapchainValidatorContext>>(100);
 
@@ -96,7 +92,6 @@ impl NodeForTest {
             statsd_client.clone(),
             16,
             registry,
-            validator_config,
         )
         .await;
 
@@ -245,27 +240,23 @@ impl TestNetwork {
     pub async fn create(num_nodes: u32, num_shards: u32, base_grpc_port: u32) -> Self {
         let mut nodes = Vec::new();
         let mut keypairs = Vec::new();
-        let mut validator_config = SnapchainValidatorConfig::new();
+        let mut validator_addresses = vec![];
         for _ in 0..num_nodes {
             let keypair = Keypair::generate();
             keypairs.push(keypair.clone());
-            for j in 0..=num_shards {
-                let validator = SnapchainValidator::new(
-                    SnapchainShard::new(j),
-                    keypair.public().clone(),
-                    None,
-                    0,
-                );
-                validator_config.add_validator(validator);
-            }
+            validator_addresses.push(hex::encode(keypair.public().to_bytes()));
         }
 
         // Register validators
         for i in 0..num_nodes {
             let keypair = keypairs[i as usize].clone();
-            let node =
-                NodeForTest::create(keypair, num_shards, base_grpc_port + i, &validator_config)
-                    .await;
+            let node = NodeForTest::create(
+                keypair,
+                num_shards,
+                base_grpc_port + i,
+                &validator_addresses,
+            )
+            .await;
             nodes.push(node);
 
             // for keypair in keypairs.iter() {
