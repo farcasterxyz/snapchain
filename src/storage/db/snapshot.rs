@@ -7,6 +7,7 @@ use aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Error;
 use aws_sdk_s3::operation::put_object::PutObjectError;
 use aws_sdk_s3::primitives::{ByteStream, ByteStreamError};
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+use aws_sdk_s3::Client;
 use serde::{Deserialize, Serialize};
 use std::fs::{self};
 use std::io;
@@ -63,6 +64,13 @@ pub enum SnapshotError {
     DateError,
 }
 
+#[derive(Serialize, Deserialize)]
+struct SnapshotMetadata {
+    key_base: String,
+    chunks: Vec<String>,
+    timestamp: i64,
+}
+
 async fn create_s3_client(snapshot_config: &Config) -> aws_sdk_s3::Client {
     // AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION are loaded from envvars
     let config = aws_config::load_from_env().await;
@@ -74,6 +82,30 @@ async fn create_s3_client(snapshot_config: &Config) -> aws_sdk_s3::Client {
     aws_sdk_s3::Client::from_conf(s3_config)
 }
 
+async fn get_objects_under_key(
+    s3_client: &Client,
+    snapshot_config: &Config,
+    prefix: String,
+) -> Result<Vec<ObjectIdentifier>, SnapshotError> {
+    let objects = s3_client
+        .list_objects_v2()
+        .bucket(snapshot_config.s3_bucket.clone())
+        .prefix(prefix)
+        .send()
+        .await?;
+    if let Some(contents) = objects.contents {
+        Ok(contents
+            .into_iter()
+            .filter_map(|object| match object.key {
+                None => None,
+                Some(key) => Some(ObjectIdentifier::builder().key(key).build()),
+            })
+            .collect::<Result<Vec<ObjectIdentifier>, BuildError>>()?)
+    } else {
+        Ok(vec![])
+    }
+}
+
 pub async fn clear_snapshots(
     network: FarcasterNetwork,
     snapshot_config: &Config,
@@ -82,20 +114,10 @@ pub async fn clear_snapshots(
     let s3_client = create_s3_client(&snapshot_config).await;
     let snapshot_dir = snapshot_directory(network, shard_id);
     info!("Clearing snapshots under {}", snapshot_dir.clone());
-    let objects = s3_client
-        .list_objects_v2()
-        .bucket(snapshot_config.s3_bucket.clone())
-        .prefix(snapshot_dir.clone())
-        .send()
-        .await?;
-    if let Some(contents) = objects.contents {
-        let objects = contents
-            .into_iter()
-            .filter_map(|object| match object.key {
-                None => None,
-                Some(key) => Some(ObjectIdentifier::builder().key(key).build()),
-            })
-            .collect::<Result<Vec<ObjectIdentifier>, BuildError>>()?;
+    let objects = get_objects_under_key(&s3_client, &snapshot_config, snapshot_dir.clone()).await?;
+    if objects.is_empty() {
+        return Ok(());
+    } else {
         let delete_request = Delete::builder().set_objects(Some(objects)).build()?;
         let delete_result = s3_client
             .delete_objects()
@@ -111,8 +133,16 @@ pub async fn clear_snapshots(
             );
         };
         delete_result?;
+        Ok(())
     }
-    Ok(())
+}
+
+fn metadata_path(network: FarcasterNetwork, shard_id: u32) -> String {
+    format!(
+        "{}/{}",
+        snapshot_directory(network, shard_id),
+        "latest.json"
+    )
 }
 
 pub async fn upload_to_s3(
@@ -134,9 +164,11 @@ pub async fn upload_to_s3(
         start_timetamp / 1000
     );
     let files = fs::read_dir(chunked_dir_path)?;
+    let mut file_names: Vec<String> = vec![];
     for entry in files {
         let entry = entry?;
-        let key = format!("{}/{}", upload_dir, entry.file_name().to_string_lossy());
+        let file_name = entry.file_name().to_str().unwrap().to_string();
+        let key = format!("{}/{}", upload_dir, file_name);
 
         info!(key, "Uploading chunk to s3");
         let byte_stream = ByteStream::from_path(entry.path()).await?;
@@ -156,6 +188,33 @@ pub async fn upload_to_s3(
             );
         }
         upload_result?;
+        file_names.push(file_name);
     }
+
+    let metadata = SnapshotMetadata {
+        key_base: upload_dir,
+        chunks: file_names,
+        timestamp: start_timetamp,
+    };
+
+    let metadata_json = serde_json::to_string(&metadata).unwrap();
+    let metadata_key = metadata_path(network, shard_id);
+    let upload_result = s3_client
+        .put_object()
+        .bucket(snapshot_config.s3_bucket.clone())
+        .key(metadata_key.clone())
+        .body(ByteStream::from(metadata_json.as_bytes().to_vec()))
+        .content_type("application/json")
+        .send()
+        .await;
+    if let Err(err) = &upload_result {
+        info!(
+            "Error uploading to s3: {}, key: {}, bucket: {}",
+            DisplayErrorContext(err),
+            metadata_key,
+            snapshot_config.s3_bucket
+        );
+    }
+    upload_result?;
     Ok(())
 }
