@@ -56,6 +56,8 @@ async fn main() {
     for i in 1..=nodes {
         let id = i;
         let db_dir = format!("nodes/{id}/.rocks");
+        let backup_dir = format!("nodes/{id}/.rocks.backup");
+        let snapshot_download_dir = format!("nodes/{id}/.rocks.snapshot");
 
         if !std::path::Path::new(format!("nodes/{id}").as_str()).exists() {
             std::fs::create_dir(format!("nodes/{id}")).expect("Failed to create node directory");
@@ -113,6 +115,8 @@ stop_block_number = {stop_block_number}
 
 [snapshot]
 endpoint_url = "{snapshot_endpoint_url}"
+backup_dir = "{backup_dir}"
+snapshot_download_dir = "{snapshot_download_dir}"
             "#
         );
 

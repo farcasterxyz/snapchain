@@ -11,15 +11,12 @@ use aws_sdk_s3::Client;
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::fs::{self};
 use std::io::{self};
-use std::path::PathBuf;
-use std::str::FromStr;
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
-use tar::{Archive, EntryType};
+use tar::Archive;
 use thiserror::Error;
 use tokio::io::{AsyncWriteExt, BufWriter};
-use tracing::info;
+use tracing::{error, info};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
@@ -28,6 +25,8 @@ pub struct Config {
     pub backup_dir: String,
     pub backup_on_startup: bool,
     pub load_db_from_snapshot: bool,
+    pub snapshot_download_url: String,
+    pub snapshot_download_dir: String,
 }
 
 impl Default for Config {
@@ -36,8 +35,11 @@ impl Default for Config {
             endpoint_url: "".to_string(),
             s3_bucket: "snapchain-snapshots".to_string(),
             backup_dir: ".rocks.backup".to_string(),
+            snapshot_download_dir: ".rocks.snapshot".to_string(),
             backup_on_startup: false,
             load_db_from_snapshot: true,
+            snapshot_download_url: "https://pub-d352dd8819104a778e20d08888c5a661.r2.dev"
+                .to_string(),
         }
     }
 }
@@ -159,52 +161,60 @@ pub async fn download_snapshots(
     db_dir: String,
     shard_id: u32,
 ) {
-    let snapshot_dir = ".rocks.snapshot";
-    let metadata_url = format!(
-        "{}/{}",
-        snapshot_config.endpoint_url,
-        metadata_path(network, shard_id)
-    );
-    let metadata_bytes = reqwest::get(metadata_url)
-        .await
-        .unwrap()
-        .bytes()
+    let snapshot_dir = snapshot_config.snapshot_download_dir.clone();
+    tokio::fs::create_dir_all(snapshot_dir.clone())
         .await
         .unwrap();
-    let metadata_json: SnapshotMetadata = serde_json::from_slice(&metadata_bytes.to_vec()).unwrap();
+    let metadata_url = format!(
+        "{}/{}",
+        snapshot_config.snapshot_download_url,
+        metadata_path(network, shard_id)
+    );
+    info!("Retrieving metadata from {}", metadata_url);
+    let metadata_json = reqwest::get(metadata_url)
+        .await
+        .unwrap()
+        .json::<SnapshotMetadata>()
+        .await
+        .unwrap();
     let base_path = metadata_json.key_base;
     for chunk in metadata_json.chunks {
-        let download_path = format!("{}/{}/{}", snapshot_config.endpoint_url, base_path, chunk);
+        let download_path = format!(
+            "{}/{}/{}",
+            snapshot_config.snapshot_download_url, base_path, chunk
+        );
         let download_response = reqwest::get(download_path).await.unwrap();
         let mut byte_stream = download_response.bytes_stream();
-        let mut file = BufWriter::new(
-            tokio::fs::File::create(format!("{}/{}", snapshot_dir, chunk))
-                .await
-                .unwrap(),
-        );
+        let filename = format!("{}/{}", snapshot_dir.clone(), chunk);
+        info!("Downloading zipped chunk at to {}", filename);
 
-        while let Some(Ok(piece)) = byte_stream.next().await {
-            file.write_all(&piece).await.unwrap();
+        let mut file = BufWriter::new(tokio::fs::File::create(filename).await.unwrap());
+
+        while let Some(piece) = byte_stream.next().await {
+            file.write_all(&piece.unwrap()).await.unwrap();
         }
+        file.flush().await.unwrap();
     }
 
-    for entry in fs::read_dir(snapshot_dir).unwrap() {
+    for entry in std::fs::read_dir(snapshot_dir.clone()).unwrap() {
         let file = std::fs::File::open(entry.unwrap().path()).unwrap();
         let gz_decoder = GzDecoder::new(file);
         let mut archive = Archive::new(gz_decoder);
-        for entry in archive.entries().unwrap() {
-            let mut entry = entry.unwrap();
-            let mut path = PathBuf::from_str(&db_dir).unwrap();
-            path.extend(entry.path().unwrap().into_iter().skip(1));
-            match entry.header().entry_type() {
-                EntryType::Regular => {
-                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                    let mut new_file = std::fs::File::create(path.to_str().unwrap()).unwrap();
-                    // TODO(aditi): We should not using a big blocking operation here. Should use chunks.
-                    std::io::copy(&mut entry, &mut new_file).unwrap();
+        archive.unpack(&db_dir).unwrap();
+
+        // Move contents of subdirectory into parent. The unzipped files are put into a subdirectory
+        for entry in std::fs::read_dir(&db_dir).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_dir() {
+                for db_file in std::fs::read_dir(entry.path()).unwrap() {
+                    let db_file = db_file.unwrap();
+                    std::fs::rename(
+                        db_file.path(),
+                        db_file.path().parent().unwrap().join(db_file.file_name()),
+                    )
+                    .unwrap()
                 }
-                EntryType::Directory => std::fs::create_dir_all(path).unwrap(),
-                _ => {}
+                std::fs::remove_dir_all(entry.path()).unwrap();
             }
         }
     }
@@ -229,7 +239,7 @@ pub async fn upload_to_s3(
         start_date,
         start_timetamp / 1000
     );
-    let files = fs::read_dir(chunked_dir_path)?;
+    let files = std::fs::read_dir(chunked_dir_path)?;
     let mut file_names: Vec<String> = vec![];
     for entry in files {
         let entry = entry?;
