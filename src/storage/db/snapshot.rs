@@ -197,6 +197,10 @@ pub async fn download_snapshots(
     }
 
     for entry in std::fs::read_dir(snapshot_dir.clone()).unwrap() {
+        info!(
+            "Unzipping file {}",
+            entry.as_ref().unwrap().path().to_str().unwrap()
+        );
         let file = std::fs::File::open(entry.unwrap().path()).unwrap();
         let gz_decoder = GzDecoder::new(file);
         let mut archive = Archive::new(gz_decoder);
