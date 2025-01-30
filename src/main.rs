@@ -116,6 +116,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut gossip = gossip_result?;
+    let local_peer_id = gossip.swarm.local_peer_id().clone();
     let gossip_tx = gossip.tx.clone();
 
     tokio::spawn(async move {
@@ -135,7 +136,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let node = SnapchainNode::create(
         keypair.clone(),
         app_config.consensus.clone(),
-        Some(app_config.rpc_address.clone()),
+        local_peer_id,
         gossip_tx.clone(),
         shard_decision_tx,
         None,

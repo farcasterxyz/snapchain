@@ -28,7 +28,7 @@ fn state_change_to_shard_chunk(
         }),
         transactions: change.transactions.clone(),
         hash: vec![],
-        votes: None,
+        commits: None,
     }
 }
 

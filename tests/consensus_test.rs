@@ -72,6 +72,7 @@ impl NodeForTest {
         let (gossip_tx, gossip_rx) = mpsc::channel::<GossipEvent<SnapchainValidatorContext>>(100);
 
         let registry = SharedRegistry::global();
+        let peer_id = PeerId::random();
         let (block_tx, mut block_rx) = mpsc::channel::<Block>(100);
         let data_dir = &make_tmp_path();
         let db = Arc::new(RocksDB::new(data_dir));
@@ -82,7 +83,7 @@ impl NodeForTest {
         let node = SnapchainNode::create(
             keypair.clone(),
             config,
-            None,
+            peer_id,
             gossip_tx.clone(),
             shard_decision_tx,
             Some(block_tx),

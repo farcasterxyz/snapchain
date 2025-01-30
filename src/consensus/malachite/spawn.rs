@@ -3,6 +3,7 @@ use informalsystems_malachitebft_core_consensus::ValuePayload;
 use informalsystems_malachitebft_engine::consensus::{Consensus, ConsensusParams, ConsensusRef};
 use informalsystems_malachitebft_engine::host::HostRef;
 use informalsystems_malachitebft_engine::network::NetworkRef;
+use informalsystems_malachitebft_network::{PeerId as MalachitePeerId, PeerIdExt};
 use informalsystems_malachitebft_sync::Metrics as SyncMetrics;
 use std::path::Path;
 use tracing::Span;
@@ -20,13 +21,18 @@ use informalsystems_malachitebft_engine::sync::{Params as SyncParams, Sync, Sync
 use informalsystems_malachitebft_engine::util::events::TxEvent;
 use informalsystems_malachitebft_engine::wal::{Wal, WalRef};
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
+use libp2p::PeerId;
 use tokio::sync::mpsc;
 
 pub async fn spawn_network_actor(
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+    local_peer_id: PeerId,
 ) -> Result<NetworkRef<SnapchainValidatorContext>, ractor::SpawnErr> {
     let codec = SnapchainCodec;
-    let args = NetworkConnectorArgs { gossip_tx };
+    let args = NetworkConnectorArgs {
+        gossip_tx,
+        peer_id: MalachitePeerId::from_libp2p(&local_peer_id),
+    };
     MalachiteNetworkConnector::spawn(codec, args)
         .await
         .map_err(Into::into)
@@ -128,7 +134,7 @@ impl MalachiteConsensusActors {
     pub async fn create_and_start(
         ctx: SnapchainValidatorContext,
         shard_validator: ShardValidator,
-        _rpc_address: Option<String>,
+        local_peer_id: PeerId,
         db_dir: String,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         registry: &SharedRegistry,
@@ -138,7 +144,7 @@ impl MalachiteConsensusActors {
         let address = shard_validator.get_address();
         let shard_id = shard_validator.shard_id.shard_id();
 
-        let network_actor = spawn_network_actor(gossip_tx.clone()).await?;
+        let network_actor = spawn_network_actor(gossip_tx.clone(), local_peer_id).await?;
         let wal_actor = spawn_wal_actor(
             Path::new(format!("{}/shard-{}/wal", db_dir, shard_id).as_str()),
             ctx.clone(),
@@ -164,7 +170,7 @@ impl MalachiteConsensusActors {
             network_actor.clone(),
             host_actor.clone(),
             wal_actor.clone(),
-            None, // TODO: Use actual sync actor
+            Some(sync_actor.clone()),
             Metrics::new(),
             TxEvent::new(),
         )

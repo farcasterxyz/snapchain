@@ -3,12 +3,16 @@ use crate::network::gossip::GossipEvent;
 use async_trait::async_trait;
 use informalsystems_malachitebft_core_consensus::SignedConsensusMsg;
 use informalsystems_malachitebft_engine::consensus::ConsensusCodec;
-use informalsystems_malachitebft_engine::network::{NetworkEvent, NetworkMsg as Msg};
+use informalsystems_malachitebft_engine::network::{NetworkEvent, NetworkMsg as Msg, Status};
+use informalsystems_malachitebft_engine::sync::SyncCodec;
 use informalsystems_malachitebft_engine::util::streaming::StreamMessage;
+use informalsystems_malachitebft_network::PeerId as MalachitePeerId;
 use informalsystems_malachitebft_network::{Channel, Event};
-use informalsystems_malachitebft_sync::RawMessage;
+use informalsystems_malachitebft_sync::{self as sync, RawMessage};
+use libp2p::request_response;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort};
-use tokio::sync::mpsc;
+use std::collections::HashMap;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, trace};
 
 pub type MalachiteNetworkActorMsg = Msg<SnapchainValidatorContext>;
@@ -18,23 +22,21 @@ pub struct MalachiteNetworkConnector<Codec> {
     pub codec: Codec,
 }
 
-pub enum NetworkConnectorState {
-    Stopped,
-    Running {
-        // peers: BTreeSet<PeerId>,
-        output_port: OutputPort<NetworkEvent<SnapchainValidatorContext>>,
-        // inbound_requests: HashMap<InboundRequestId, OutboundRequestId>,
-        gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
-    },
+pub struct NetworkConnectorState {
+    peer_id: MalachitePeerId,
+    output_port: OutputPort<NetworkEvent<SnapchainValidatorContext>>,
+    inbound_requests: HashMap<sync::InboundRequestId, request_response::InboundRequestId>,
+    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
 }
 
 pub struct NetworkConnectorArgs {
     pub gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+    pub peer_id: MalachitePeerId,
 }
 
 impl<Codec> MalachiteNetworkConnector<Codec>
 where
-    Codec: ConsensusCodec<SnapchainValidatorContext>,
+    Codec: ConsensusCodec<SnapchainValidatorContext> + SyncCodec<SnapchainValidatorContext>,
 {
     pub fn new(codec: Codec) -> Self {
         Self { codec }
@@ -52,7 +54,7 @@ where
 #[async_trait]
 impl<Codec> Actor for MalachiteNetworkConnector<Codec>
 where
-    Codec: ConsensusCodec<SnapchainValidatorContext>,
+    Codec: ConsensusCodec<SnapchainValidatorContext> + SyncCodec<SnapchainValidatorContext>,
 {
     type Msg = Msg<SnapchainValidatorContext>;
     type State = NetworkConnectorState;
@@ -63,22 +65,11 @@ where
         _myself: ActorRef<Msg<SnapchainValidatorContext>>,
         args: NetworkConnectorArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
-        // let handle = malachitebft_network::spawn(args.keypair, args.config, args.metrics).await?;
-        //
-        // let (mut recv_handle, ctrl_handle) = handle.split();
-        //
-        // let recv_task = tokio::spawn(async move {
-        //     while let Some(event) = recv_handle.recv().await {
-        //         if let Err(e) = myself.cast(Msg::NewEvent(event)) {
-        //             error!("Actor has died, stopping network: {e:?}");
-        //             break;
-        //         }
-        //     }
-        // });
-        //
-        Ok(NetworkConnectorState::Running {
+        Ok(NetworkConnectorState {
             output_port: OutputPort::default(),
             gossip_tx: args.gossip_tx.clone(),
+            inbound_requests: HashMap::new(),
+            peer_id: args.peer_id,
         })
     }
 
@@ -96,13 +87,12 @@ where
         msg: Msg<SnapchainValidatorContext>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        let NetworkConnectorState::Running {
+        let NetworkConnectorState {
             output_port,
             gossip_tx,
-        } = state
-        else {
-            return Ok(());
-        };
+            inbound_requests,
+            peer_id: _,
+        } = state;
 
         match msg {
             Msg::Subscribe(subscriber) => {
@@ -132,48 +122,33 @@ where
                 }
             }
 
-            Msg::BroadcastStatus(_status) => {
-                // let status = sync::Status {
-                //     peer_id: ctrl_handle.peer_id(),
-                //     height: status.height,
-                //     history_min_height: status.history_min_height,
-                // };
-                //
-                // let data = self.codec.encode(&status);
-                // match data {
-                //     Ok(data) => ctrl_handle.broadcast(Channel::Sync, data).await?,
-                //     Err(e) => error!("Failed to encode status message: {e:?}"),
-                // }
+            Msg::BroadcastStatus(status) => {
+                let status = sync::Status {
+                    peer_id: state.peer_id,
+                    height: status.height,
+                    history_min_height: status.history_min_height,
+                };
+                gossip_tx.send(GossipEvent::BroadcastStatus(status)).await?
             }
 
-            Msg::OutgoingRequest(_peer_id, _request, _reply_to) => {
-                // let request = self.codec.encode(&request);
-                //
-                // match request {
-                //     Ok(data) => {
-                //         let p2p_request_id = ctrl_handle.sync_request(peer_id, data).await?;
-                //         reply_to.send(OutboundRequestId::new(p2p_request_id))?;
-                //     }
-                //     Err(e) => error!("Failed to encode request message: {e:?}"),
-                // }
+            Msg::OutgoingRequest(peer_id, request, reply_to) => {
+                let (tx, rx) = oneshot::channel();
+                gossip_tx
+                    .send(GossipEvent::SyncRequest(peer_id, request, tx))
+                    .await?;
+                let request_id = rx.await?;
+                reply_to.send(sync::OutboundRequestId::new(request_id))?;
             }
 
-            Msg::OutgoingResponse(_request_id, _response) => {
-                // let response = self.codec.encode(&response);
-                //
-                // match response {
-                //     Ok(data) => {
-                //         let request_id = inbound_requests
-                //             .remove(&request_id)
-                //             .ok_or_else(|| eyre!("Unknown inbound request ID: {request_id}"))?;
-                //
-                //         ctrl_handle.sync_reply(request_id, data).await?
-                //     }
-                //     Err(e) => {
-                //         error!(%request_id, "Failed to encode response message: {e:?}");
-                //         return Ok(());
-                //     }
-                // };
+            Msg::OutgoingResponse(request_id, response) => {
+                let request_id = inbound_requests.remove(&request_id);
+                if let Some(request_id) = request_id {
+                    gossip_tx
+                        .send(GossipEvent::SyncReply(request_id, response))
+                        .await?;
+                } else {
+                    error!("Unknown request ID in response: {:?}", request_id);
+                }
             }
 
             Msg::NewEvent(Event::Listening(addr)) => {
@@ -230,69 +205,72 @@ where
                 output_port.send(NetworkEvent::ProposalPart(from, msg));
             }
 
-            Msg::NewEvent(Event::Message(Channel::Sync, _from, _data)) => {
-                // let status: sync::Status<Ctx> = match self.codec.decode(data) {
-                //     Ok(status) => status,
-                //     Err(e) => {
-                //         error!(%from, "Failed to decode status message: {e:?}");
-                //         return Ok(());
-                //     }
-                // };
-                //
-                // if from != status.peer_id {
-                //     error!(%from, %status.peer_id, "Mismatched peer ID in status message");
-                //     return Ok(());
-                // }
-                //
-                // trace!(%from, height = %status.height, "Received status");
-                //
-                // output_port.send(NetworkEvent::Status(
-                //     status.peer_id,
-                //     Status::new(status.height, status.history_min_height),
-                // ));
+            Msg::NewEvent(Event::Message(Channel::Sync, from, data)) => {
+                let status: sync::Status<SnapchainValidatorContext> = match self.codec.decode(data)
+                {
+                    Ok(status) => status,
+                    Err(e) => {
+                        error!(%from, "Failed to decode status message: {e:?}");
+                        return Ok(());
+                    }
+                };
+
+                if from != status.peer_id {
+                    error!(%from, %status.peer_id, "Mismatched peer ID in status message");
+                    return Ok(());
+                }
+
+                trace!(%from, height = %status.height, "Received status");
+
+                output_port.send(NetworkEvent::Status(
+                    status.peer_id,
+                    Status::new(status.height, status.history_min_height),
+                ));
             }
 
             Msg::NewEvent(Event::Sync(raw_msg)) => match raw_msg {
                 RawMessage::Request {
-                    request_id: _,
-                    peer: _,
-                    body: _,
+                    request_id,
+                    peer,
+                    body,
                 } => {
-                    // let request: sync::Request<SnapchainValidatorContext> = match self.codec.decode(body) {
-                    //     Ok(request) => request,
-                    //     Err(e) => {
-                    //         error!(%peer, "Failed to decode sync request: {e:?}");
-                    //         return Ok(());
-                    //     }
-                    // };
-                    //
-                    // inbound_requests.insert(InboundRequestId::new(request_id), request_id);
-                    //
-                    // output_port.send(NetworkEvent::Request(
-                    //     InboundRequestId::new(request_id),
-                    //     peer,
-                    //     request,
-                    // ));
+                    let request: sync::Request<SnapchainValidatorContext> =
+                        match self.codec.decode(body) {
+                            Ok(request) => request,
+                            Err(e) => {
+                                error!(%peer, "Failed to decode sync request: {e:?}");
+                                return Ok(());
+                            }
+                        };
+
+                    inbound_requests.insert(sync::InboundRequestId::new(request_id), request_id);
+
+                    output_port.send(NetworkEvent::Request(
+                        sync::InboundRequestId::new(request_id),
+                        peer,
+                        request,
+                    ));
                 }
 
                 RawMessage::Response {
-                    request_id: _,
-                    peer: _,
-                    body: _,
+                    request_id,
+                    peer,
+                    body,
                 } => {
-                    // let response: sync::Response<Ctx> = match self.codec.decode(body) {
-                    //     Ok(response) => response,
-                    //     Err(e) => {
-                    //         error!(%peer, "Failed to decode sync response: {e:?}");
-                    //         return Ok(());
-                    //     }
-                    // };
-                    //
-                    // output_port.send(NetworkEvent::Response(
-                    //     OutboundRequestId::new(request_id),
-                    //     peer,
-                    //     response,
-                    // ));
+                    let response: sync::Response<SnapchainValidatorContext> =
+                        match self.codec.decode(body) {
+                            Ok(response) => response,
+                            Err(e) => {
+                                error!(%peer, "Failed to decode sync response: {e:?}");
+                                return Ok(());
+                            }
+                        };
+
+                    output_port.send(NetworkEvent::Response(
+                        sync::OutboundRequestId::new(request_id),
+                        peer,
+                        response,
+                    ));
                 }
             },
 
@@ -315,18 +293,6 @@ where
         _myself: ActorRef<Msg<SnapchainValidatorContext>>,
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        // let state = std::mem::replace(state, State::Stopped);
-        //
-        // if let State::Running {
-        //     ctrl_handle,
-        //     recv_task,
-        //     ..
-        // } = state
-        // {
-        //     ctrl_handle.wait_shutdown().await?;
-        //     recv_task.await?;
-        // }
-
         Ok(())
     }
 }

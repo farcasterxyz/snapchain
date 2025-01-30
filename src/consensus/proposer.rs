@@ -126,7 +126,7 @@ impl Proposer for ShardProposer {
             header: Some(shard_header),
             hash: hash.clone(),
             transactions: state_change.transactions.clone(),
-            votes: None,
+            commits: None,
         };
 
         let shard_hash = ShardHash {
@@ -366,7 +366,7 @@ impl Proposer for BlockProposer {
             header: Some(block_header),
             hash: hash.clone(),
             validators: None,
-            votes: None,
+            commits: None,
             shard_chunks,
         };
 

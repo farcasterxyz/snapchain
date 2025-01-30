@@ -211,7 +211,7 @@ mod tests {
             header: Some(header),
             hash: vec![],
             transactions: vec![transaction],
-            votes: None,
+            commits: None,
         };
 
         let _ = shard_decision_tx.send(chunk);

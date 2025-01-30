@@ -16,6 +16,7 @@ use crate::storage::trie::merkle_trie;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
+use libp2p::PeerId;
 use std::collections::{BTreeMap, HashMap};
 use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
@@ -33,7 +34,7 @@ impl SnapchainNode {
     pub async fn create(
         keypair: Keypair,
         config: Config,
-        rpc_address: Option<String>,
+        local_peer_id: PeerId,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         shard_decision_tx: broadcast::Sender<ShardChunk>,
         block_tx: Option<mpsc::Sender<Block>>,
@@ -97,7 +98,7 @@ impl SnapchainNode {
             let consensus_actor = MalachiteConsensusActors::create_and_start(
                 ctx,
                 shard_validator,
-                rpc_address.clone(),
+                local_peer_id,
                 rocksdb_dir.clone(),
                 gossip_tx.clone(),
                 registry,
@@ -138,7 +139,7 @@ impl SnapchainNode {
         let block_consensus_actor = MalachiteConsensusActors::create_and_start(
             ctx,
             block_validator,
-            rpc_address.clone(),
+            local_peer_id,
             rocksdb_dir.clone(),
             gossip_tx.clone(),
             registry,

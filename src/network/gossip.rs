@@ -1,15 +1,19 @@
 use crate::consensus::consensus::{ConsensusMsg, MalachiteEventShard, SystemMessage};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
+use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::core::types::{
     proto, ShardId, SnapchainContext, SnapchainShard, SnapchainValidator, SnapchainValidatorContext,
 };
 use crate::storage::store::engine::MempoolMessage;
 use bytes::Bytes;
 use futures::StreamExt;
+use informalsystems_malachitebft_codec::Codec;
 use informalsystems_malachitebft_core_types::{SignedProposal, SignedVote};
 use informalsystems_malachitebft_network::PeerId as MalachitePeerId;
 use informalsystems_malachitebft_network::{Channel, PeerIdExt};
+use informalsystems_malachitebft_sync as sync;
 use libp2p::identity::ed25519::Keypair;
+use libp2p::request_response::{InboundRequestId, OutboundRequestId};
 use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::{
     gossipsub, noise, swarm::NetworkBehaviour, swarm::SwarmEvent, tcp, yamux, PeerId, Swarm,
@@ -17,11 +21,12 @@ use libp2p::{
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 use tokio::io;
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 const DEFAULT_GOSSIP_PORT: u16 = 3382;
@@ -68,16 +73,26 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
     BroadcastFullProposal(proto::FullProposal),
     RegisterValidator(proto::RegisterValidator),
     BroadcastMempoolMessage(MempoolMessage),
+    BroadcastStatus(sync::Status<SnapchainValidatorContext>),
+    SyncRequest(
+        MalachitePeerId,
+        sync::Request<SnapchainValidatorContext>,
+        oneshot::Sender<OutboundRequestId>,
+    ),
+    SyncReply(InboundRequestId, sync::Response<SnapchainValidatorContext>),
 }
 
 pub enum GossipTopic {
     Consensus,
     Mempool,
+    SyncRequest(MalachitePeerId, oneshot::Sender<OutboundRequestId>),
+    SyncReply(InboundRequestId),
 }
 
 #[derive(NetworkBehaviour)]
 pub struct SnapchainBehavior {
     pub gossipsub: gossipsub::Behaviour,
+    pub rpc: sync::Behaviour,
 }
 
 pub struct SnapchainGossip {
@@ -85,6 +100,7 @@ pub struct SnapchainGossip {
     pub tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     rx: mpsc::Receiver<GossipEvent<SnapchainValidatorContext>>,
     system_tx: Sender<SystemMessage>,
+    sync_channels: HashMap<InboundRequestId, sync::ResponseChannel>,
 }
 
 impl SnapchainGossip {
@@ -124,7 +140,9 @@ impl SnapchainGossip {
                     gossipsub_config,
                 )?;
 
-                Ok(SnapchainBehavior { gossipsub })
+                let rpc = sync::Behaviour::new(sync::Config::default());
+
+                Ok(SnapchainBehavior { gossipsub, rpc })
             })?
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
             .build();
@@ -171,6 +189,7 @@ impl SnapchainGossip {
             tx,
             rx,
             system_tx,
+            sync_channels: HashMap::new(),
         })
     }
 
@@ -218,6 +237,45 @@ impl SnapchainGossip {
                                 }
                             }
                         },
+                        SwarmEvent::Behaviour(SnapchainBehaviorEvent::Rpc(sync_event)) => {
+                            match sync_event {
+                                sync::Event::Message {peer, message} => {
+                                    match message {
+                                        libp2p::request_response::Message::Request {
+                                            request_id,
+                                            request,
+                                            channel,
+                                        } => {
+                                            self.sync_channels.insert(request_id, channel);
+                                            let event = MalachiteNetworkEvent::Sync(sync::RawMessage::Request {
+                                                request_id,
+                                                peer: MalachitePeerId::from_libp2p(&peer),
+                                                body: request.0,
+                                            });
+                                            let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await;
+                                            if let Err(e) = res {
+                                                warn!("Failed to send RPC request message: {:?}", e);
+                                            }
+                                        },
+                                       libp2p::request_response::Message::Response {
+                                            request_id,
+                                            response,
+                                        } => {
+                                            let event = MalachiteNetworkEvent::Sync(sync::RawMessage::Response {
+                                                request_id,
+                                                peer: MalachitePeerId::from_libp2p(&peer),
+                                                body: response.0,
+                                            });
+                                            let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await;
+                                            if let Err(e) = res {
+                                                warn!("Failed to send RPC request message: {:?}", e);
+                                            }
+                                        },
+                                    }
+                                },
+                                _ => {}
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -226,6 +284,24 @@ impl SnapchainGossip {
                         match gossip_topic {
                             GossipTopic::Consensus => self.publish(encoded_message),
                             GossipTopic::Mempool => self.publish_mempool(encoded_message),
+                            GossipTopic::SyncRequest(peer_id, reply_tx) => {
+                                let peer = peer_id.to_libp2p();
+                                let request_id = self.swarm.behaviour_mut().rpc.send_request(peer, Bytes::from(encoded_message));
+                                if let Err(e) = reply_tx.send(request_id) {
+                                    warn!("Failed to send RPC request: {:?}", e);
+                                }
+                            },
+                            GossipTopic::SyncReply(request_id) => {
+                                let Some(channel) = self.sync_channels.remove(&request_id) else {
+                                    warn!(%request_id, "Received Sync reply for unknown request ID");
+                                    continue;
+                                };
+
+                                let result = self.swarm.behaviour_mut().rpc.send_response(channel, Bytes::from(encoded_message));
+                                if let Err(e) = result {
+                                    warn!("Failed to send RPC response: {:?}", e);
+                                }
+                            },
                         }
                     }
                 }
@@ -312,6 +388,24 @@ impl SnapchainGossip {
                     let shard = MalachiteEventShard::Shard(shard_result.unwrap());
                     Some(SystemMessage::MalachiteNetwork(shard, event))
                 }
+                Some(proto::gossip_message::GossipMessage::Status(status)) => {
+                    let encoded = status.encode_to_vec();
+                    let Some(height) = status.height else {
+                        warn!(
+                            "Received status message without height from peer: {}",
+                            peer_id
+                        );
+                        return None;
+                    };
+                    let shard = MalachiteEventShard::Shard(height.shard_index);
+                    let malachite_peer_id = MalachitePeerId::from_libp2p(&peer_id);
+                    let event = MalachiteNetworkEvent::Message(
+                        Channel::Sync,
+                        malachite_peer_id,
+                        Bytes::from(encoded),
+                    );
+                    Some(SystemMessage::MalachiteNetwork(shard, event))
+                }
                 Some(proto::gossip_message::GossipMessage::MempoolMessage(message)) => {
                     if let Some(mempool_message_proto) = message.mempool_message {
                         let mempool_message = match mempool_message_proto {
@@ -340,6 +434,7 @@ impl SnapchainGossip {
     pub fn map_gossip_event_to_bytes(
         event: Option<GossipEvent<SnapchainValidatorContext>>,
     ) -> Option<(GossipTopic, Vec<u8>)> {
+        let snapchain_codec = SnapchainCodec {};
         match event {
             Some(GossipEvent::BroadcastSignedVote(vote)) => {
                 let vote_proto = vote.to_proto();
@@ -396,6 +491,50 @@ impl SnapchainGossip {
                     )),
                 };
                 Some((GossipTopic::Mempool, gossip_message.encode_to_vec()))
+            }
+            Some(GossipEvent::SyncRequest(peer_id, request, reply_tx)) => {
+                let encoded = snapchain_codec.encode(&request);
+                match encoded {
+                    Ok(encoded) => {
+                        let topic = GossipTopic::SyncRequest(peer_id, reply_tx);
+                        Some((topic, encoded.to_vec()))
+                    }
+                    Err(e) => {
+                        warn!("Failed to encode sync request: {:?}", e);
+                        None
+                    }
+                }
+            }
+            Some(GossipEvent::SyncReply(request_id, response)) => {
+                let encoded = snapchain_codec.encode(&response);
+                match encoded {
+                    Ok(encoded) => {
+                        let topic = GossipTopic::SyncReply(request_id);
+                        Some((topic, encoded.to_vec()))
+                    }
+                    Err(e) => {
+                        warn!("Failed to encode sync reply: {:?}", e);
+                        None
+                    }
+                }
+            }
+            Some(GossipEvent::BroadcastStatus(status)) => {
+                let encoded = snapchain_codec.encode(&status);
+                match encoded {
+                    Ok(encoded) => {
+                        let gossip_message = proto::GossipMessage {
+                            gossip_message: Some(proto::gossip_message::GossipMessage::Status(
+                                proto::StatusMessage::decode(encoded).unwrap(),
+                            )),
+                        };
+                        // Should probably use a separate topic for status messages, but these are infrequent
+                        Some((GossipTopic::Consensus, gossip_message.encode_to_vec()))
+                    }
+                    Err(e) => {
+                        warn!("Failed to encode status message: {:?}", e);
+                        None
+                    }
+                }
             }
             None => None,
         }

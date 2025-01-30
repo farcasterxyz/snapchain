@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use informalsystems_malachitebft_core_types::{
-    CommitCertificate, SignedMessage, SigningProvider, SigningProviderExt, Validator, ValidatorSet,
+    CommitCertificate, SignedMessage, SigningProvider, SigningProviderExt, ValidatorSet,
     ValueOrigin,
 };
 use libp2p::identity::ed25519::{Keypair, PublicKey, SecretKey};

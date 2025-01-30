@@ -1,5 +1,7 @@
 use core::fmt;
-use informalsystems_malachitebft_core_types::{self, SignedMessage, SigningProvider};
+use informalsystems_malachitebft_core_types::{
+    self, AggregatedSignature, CommitSignature, SignedMessage, SigningProvider,
+};
 use informalsystems_malachitebft_core_types::{
     Extension, NilOrVal, Round, SignedProposal, SignedProposalPart, SignedVote, Validator,
     VoteType, VotingPower,
@@ -802,5 +804,58 @@ impl informalsystems_malachitebft_core_types::Validator<SnapchainValidatorContex
 
     fn voting_power(&self) -> VotingPower {
         1
+    }
+}
+
+impl proto::Commits {
+    pub fn to_commit_certificate(
+        &self,
+    ) -> informalsystems_malachitebft_core_types::CommitCertificate<SnapchainValidatorContext> {
+        let height = self.height.unwrap();
+        let round = Round::from(self.round);
+        let value_id = self.value.clone().unwrap();
+
+        let signatures = self
+            .signatures
+            .iter()
+            .map(|commit| CommitSignature {
+                address: Address::from_vec(commit.signer.clone()),
+                signature: Signature(commit.signature.clone()),
+                extension: None,
+            })
+            .collect();
+
+        informalsystems_malachitebft_core_types::CommitCertificate {
+            height,
+            round,
+            value_id,
+            aggregated_signature: AggregatedSignature::new(signatures),
+        }
+    }
+
+    pub fn from_commit_certificate(
+        certificate: &informalsystems_malachitebft_core_types::CommitCertificate<
+            SnapchainValidatorContext,
+        >,
+    ) -> Self {
+        let height = Some(certificate.height.clone());
+        let round = certificate.round.as_i64();
+        let value = Some(certificate.value_id.clone());
+        let signatures = certificate
+            .aggregated_signature
+            .signatures
+            .iter()
+            .map(|commit| proto::CommitSignature {
+                signer: commit.address.to_vec(),
+                signature: commit.signature.0.clone(),
+            })
+            .collect();
+
+        proto::Commits {
+            height,
+            round,
+            value,
+            signatures,
+        }
     }
 }
