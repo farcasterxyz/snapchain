@@ -2,7 +2,9 @@ use crate::core::types::{
     proto, Address, Height, ShardHash, ShardId, SnapchainShard, SnapchainValidator,
 };
 use crate::proto::hub_service_client::HubServiceClient;
-use crate::proto::{Block, BlockHeader, FullProposal, ShardChunk, ShardHeader};
+use crate::proto::{
+    full_proposal, Block, BlockHeader, Commits, FullProposal, ShardChunk, ShardHeader,
+};
 use crate::proto::{BlocksRequest, ShardChunksRequest};
 use crate::storage::store::engine::{BlockEngine, ShardEngine, ShardStateChange};
 use crate::storage::store::BlockStorageError;
@@ -41,7 +43,12 @@ pub trait Proposer {
     fn add_proposed_value(&mut self, full_proposal: &FullProposal) -> Validity;
 
     // Consensus has confirmed the block/shard_chunk, apply it to the local state
-    async fn decide(&mut self, height: Height, round: Round, value: ShardHash);
+    async fn decide(&mut self, commits: Commits);
+
+    async fn get_decided_value(
+        &self,
+        height: Height,
+    ) -> Option<(Commits, full_proposal::ProposedValue)>;
 
     fn get_confirmed_height(&self) -> Height;
 
@@ -169,12 +176,12 @@ impl Proposer for ShardProposer {
         Validity::Invalid // TODO: Validate proposer signature?
     }
 
-    async fn decide(&mut self, _height: Height, _round: Round, value: ShardHash) {
+    async fn decide(&mut self, commits: Commits) {
+        let value = commits.value.clone().unwrap();
         if let Some(proposal) = self.proposed_chunks.get(&value) {
-            self.publish_new_shard_chunk(proposal.shard_chunk().unwrap())
-                .await;
-            self.engine
-                .commit_shard_chunk(proposal.shard_chunk().unwrap());
+            let chunk = proposal.shard_chunk(commits).unwrap();
+            self.publish_new_shard_chunk(&chunk.clone()).await;
+            self.engine.commit_shard_chunk(&chunk);
             self.proposed_chunks.remove(&value);
         }
         self.statsd_client.gauge_with_shard(
@@ -182,6 +189,20 @@ impl Proposer for ShardProposer {
             "proposer.pending_blocks",
             self.proposed_chunks.len() as u64,
         );
+    }
+
+    async fn get_decided_value(
+        &self,
+        height: Height,
+    ) -> Option<(Commits, full_proposal::ProposedValue)> {
+        let shard_chunk = self.engine.get_shard_chunk_by_height(height);
+        match shard_chunk {
+            Some(chunk) => {
+                let commits = chunk.commits.clone().unwrap();
+                Some((commits, full_proposal::ProposedValue::Shard(chunk)))
+            }
+            _ => None,
+        }
     }
 
     fn get_confirmed_height(&self) -> Height {
@@ -396,10 +417,13 @@ impl Proposer for BlockProposer {
         Validity::Valid // TODO: Validate proposer signature?
     }
 
-    async fn decide(&mut self, height: Height, _round: Round, value: ShardHash) {
+    async fn decide(&mut self, commits: Commits) {
+        let value = commits.value.clone().unwrap();
+        let height = commits.height.clone().unwrap();
         if let Some(proposal) = self.proposed_blocks.get(&value) {
-            self.publish_new_block(proposal.block().unwrap()).await;
-            self.engine.commit_block(proposal.block().unwrap());
+            let block = proposal.block(commits).unwrap();
+            self.publish_new_block(block.clone()).await;
+            self.engine.commit_block(block);
             self.proposed_blocks.remove(&value);
             self.pending_chunks.remove(&height.block_number);
         }
@@ -428,6 +452,20 @@ impl Proposer for BlockProposer {
             "proposer.pending_blocks",
             self.proposed_blocks.len() as u64,
         );
+    }
+
+    async fn get_decided_value(
+        &self,
+        height: Height,
+    ) -> Option<(Commits, full_proposal::ProposedValue)> {
+        let maybe_block = self.engine.get_block_by_height(height);
+        match maybe_block {
+            Some(block) => {
+                let commits = block.commits.clone().unwrap();
+                Some((commits, full_proposal::ProposedValue::Block(block)))
+            }
+            _ => None,
+        }
     }
 
     fn get_confirmed_height(&self) -> Height {

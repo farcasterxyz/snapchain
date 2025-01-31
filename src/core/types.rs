@@ -16,7 +16,7 @@ use tracing::warn;
 pub use crate::proto; // TODO: reconsider how this is imported
 
 use crate::proto::full_proposal::ProposedValue;
-use crate::proto::{Block, FullProposal, ShardChunk};
+use crate::proto::{Block, Commits, FullProposal, ShardChunk};
 pub use proto::Height;
 pub use proto::ShardHash;
 
@@ -349,16 +349,24 @@ impl FullProposal {
         }
     }
 
-    pub fn block(&self) -> Option<Block> {
+    pub fn block(&self, commits: Commits) -> Option<Block> {
         match &self.proposed_value {
-            Some(ProposedValue::Block(block)) => Some(block.clone()),
+            Some(ProposedValue::Block(block)) => {
+                let mut block = block.clone();
+                block.commits = Some(commits);
+                Some(block)
+            }
             _ => None,
         }
     }
 
-    pub fn shard_chunk(&self) -> Option<&ShardChunk> {
+    pub fn shard_chunk(&self, commits: Commits) -> Option<ShardChunk> {
         match &self.proposed_value {
-            Some(ProposedValue::Shard(chunk)) => Some(&chunk),
+            Some(ProposedValue::Shard(chunk)) => {
+                let mut chunk = chunk.clone();
+                chunk.commits = Some(commits);
+                Some(chunk)
+            }
             _ => None,
         }
     }

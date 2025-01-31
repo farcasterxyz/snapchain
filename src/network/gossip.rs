@@ -247,28 +247,34 @@ impl SnapchainGossip {
                                             channel,
                                         } => {
                                             self.sync_channels.insert(request_id, channel);
-                                            let event = MalachiteNetworkEvent::Sync(sync::RawMessage::Request {
+                                            let request = sync::RawMessage::Request {
                                                 request_id,
                                                 peer: MalachitePeerId::from_libp2p(&peer),
                                                 body: request.0,
-                                            });
-                                            let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await;
-                                            if let Err(e) = res {
-                                                warn!("Failed to send RPC request message: {:?}", e);
+                                            };
+                                            let event = Self::map_sync_message_to_system_message(request);
+                                            if let Some(event) = event {
+                                                let res = self.system_tx.send(event).await;
+                                                if let Err(e) = res {
+                                                    warn!("Failed to send RPC request message: {:?}", e);
+                                                }
                                             }
                                         },
                                        libp2p::request_response::Message::Response {
                                             request_id,
                                             response,
                                         } => {
-                                            let event = MalachiteNetworkEvent::Sync(sync::RawMessage::Response {
+                                            let event = sync::RawMessage::Response {
                                                 request_id,
                                                 peer: MalachitePeerId::from_libp2p(&peer),
                                                 body: response.0,
-                                            });
-                                            let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await;
-                                            if let Err(e) = res {
-                                                warn!("Failed to send RPC request message: {:?}", e);
+                                            };
+                                            let event = Self::map_sync_message_to_system_message(event);
+                                            if let Some(event) = event {
+                                                let res = self.system_tx.send(event).await;
+                                                if let Err(e) = res {
+                                                    warn!("Failed to send RPC request message: {:?}", e);
+                                                }
                                             }
                                         },
                                     }
@@ -427,6 +433,54 @@ impl SnapchainGossip {
             Err(e) => {
                 warn!("Failed to decode gossip message: {}", e);
                 None
+            }
+        }
+    }
+
+    pub fn map_sync_message_to_system_message(message: sync::RawMessage) -> Option<SystemMessage> {
+        let snapchain_codec = SnapchainCodec {};
+        match &message {
+            sync::RawMessage::Request {
+                request_id: _,
+                peer: _,
+                body,
+            } => {
+                let event = MalachiteNetworkEvent::Sync(message.clone());
+                let request: sync::Request<SnapchainValidatorContext> =
+                    match snapchain_codec.decode(body.clone()) {
+                        Ok(request) => request,
+                        Err(e) => {
+                            warn!("Failed to decode sync request: {:?}", e);
+                            return None;
+                        }
+                    };
+                let shard_index = match request {
+                    sync::Request::ValueRequest(request) => request.height.shard_index,
+                    sync::Request::VoteSetRequest(request) => request.height.shard_index,
+                };
+                let shard = MalachiteEventShard::Shard(shard_index);
+                Some(SystemMessage::MalachiteNetwork(shard, event))
+            }
+            sync::RawMessage::Response {
+                request_id: _,
+                peer: _,
+                body,
+            } => {
+                let event = MalachiteNetworkEvent::Sync(message.clone());
+                let response: sync::Response<SnapchainValidatorContext> =
+                    match snapchain_codec.decode(body.clone()) {
+                        Ok(response) => response,
+                        Err(e) => {
+                            warn!("Failed to decode sync response: {:?}", e);
+                            return None;
+                        }
+                    };
+                let shard_index = match response {
+                    sync::Response::ValueResponse(response) => response.height.shard_index,
+                    sync::Response::VoteSetResponse(response) => response.height.shard_index,
+                };
+                let shard = MalachiteEventShard::Shard(shard_index);
+                Some(SystemMessage::MalachiteNetwork(shard, event))
             }
         }
     }

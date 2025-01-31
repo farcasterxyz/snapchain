@@ -42,6 +42,7 @@ pub async fn spawn_wal_actor(
     home_dir: &Path,
     ctx: SnapchainValidatorContext,
     registry: &SharedRegistry,
+    span: Span,
 ) -> Result<WalRef<SnapchainValidatorContext>, ractor::SpawnErr> {
     let wal_dir = home_dir.join("wal");
     std::fs::create_dir_all(&wal_dir).unwrap();
@@ -49,7 +50,7 @@ pub async fn spawn_wal_actor(
     let wal_file = wal_dir.join("consensus.wal");
     let codec = SnapchainCodec;
 
-    Wal::spawn(&ctx, codec, wal_file, registry.clone(), Span::current())
+    Wal::spawn(&ctx, codec, wal_file, registry.clone(), span)
         .await
         .map_err(Into::into)
 }
@@ -78,6 +79,7 @@ pub async fn spawn_consensus_actor(
     sync: Option<SyncRef<SnapchainValidatorContext>>,
     metrics: Metrics,
     tx_event: TxEvent<SnapchainValidatorContext>,
+    span: Span,
 ) -> Result<ConsensusRef<SnapchainValidatorContext>, ractor::SpawnErr> {
     let consensus_params = ConsensusParams {
         initial_height,
@@ -97,7 +99,7 @@ pub async fn spawn_consensus_actor(
         sync,
         metrics,
         tx_event,
-        Span::current(),
+        span,
     )
     .await
     .map_err(Into::into)
@@ -109,6 +111,7 @@ pub async fn spawn_sync_actor(
     host: HostRef<SnapchainValidatorContext>,
     config: SyncConfig,
     registry: &SharedRegistry,
+    span: Span,
 ) -> Result<SyncRef<SnapchainValidatorContext>, ractor::SpawnErr> {
     let params = SyncParams {
         status_update_interval: config.status_update_interval,
@@ -117,7 +120,7 @@ pub async fn spawn_sync_actor(
 
     let metrics = SyncMetrics::register(registry);
 
-    let actor_ref = Sync::spawn(ctx, network, host, params, metrics, Span::current()).await?;
+    let actor_ref = Sync::spawn(ctx, network, host, params, metrics, span).await?;
 
     Ok(actor_ref)
 }
@@ -144,12 +147,19 @@ impl MalachiteConsensusActors {
         let validator_set = shard_validator.get_validator_set();
         let address = shard_validator.get_address();
         let shard_id = shard_validator.shard_id.shard_id();
+        let name = if shard_id == 0 {
+            format!("{:} Block", address.prefix())
+        } else {
+            format!("{:} Shard {}", address.prefix(), shard_id)
+        };
+        let span = tracing::info_span!("node", name = %name);
 
         let network_actor = spawn_network_actor(gossip_tx.clone(), local_peer_id).await?;
         let wal_actor = spawn_wal_actor(
             Path::new(format!("{}/shard-{}/wal", db_dir, shard_id).as_str()),
             ctx.clone(),
             registry,
+            span.clone(),
         )
         .await?;
         let host_actor = spawn_host(network_actor.clone(), shard_validator).await?;
@@ -159,6 +169,7 @@ impl MalachiteConsensusActors {
             host_actor.clone(),
             SyncConfig::default(),
             registry,
+            span.clone(),
         )
         .await?;
 
@@ -174,6 +185,7 @@ impl MalachiteConsensusActors {
             Some(sync_actor.clone()),
             Metrics::new(),
             TxEvent::new(),
+            span,
         )
         .await?;
 

@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use informalsystems_malachitebft_core_types::{
-    CommitCertificate, SignedMessage, SigningProvider, SigningProviderExt, ValidatorSet,
-    ValueOrigin,
+    SignedMessage, SigningProvider, SigningProviderExt, ValidatorSet, ValueOrigin,
 };
 use libp2p::identity::ed25519::{Keypair, PublicKey, SecretKey};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
@@ -26,7 +25,7 @@ use crate::core::types::{
     SnapchainValidatorContext, SnapchainValidatorSet,
 };
 use crate::network::gossip::GossipEvent;
-use crate::proto::FullProposal;
+use crate::proto::{Commits, FullProposal};
 use crate::storage::store::engine::MempoolMessage;
 pub use informalsystems_malachitebft_core_consensus::Params as ConsensusParams;
 pub use informalsystems_malachitebft_core_consensus::State as ConsensusState;
@@ -676,21 +675,16 @@ impl Consensus {
                 Ok(r.resume_with(Some(shard_validator.get_validator_set())))
             }
 
-            Effect::Decide(
-                CommitCertificate {
-                    height,
-                    round,
-                    value_id: value,
-                    aggregated_signature: commits,
-                },
-                r,
-            ) => {
-                info!(
-                    "Deciding value: {value} for height: {height} at {:?} with {:?} commits",
-                    self.params.address,
-                    commits.signatures.len()
-                );
-                shard_validator.decide(height, round, value.clone()).await;
+            Effect::Decide(commit_certificate, r) => {
+                // info!(
+                //     "Deciding value: {value} for height: {height} at {:?} with {:?} commits",
+                //     self.params.address,
+                //     commit_certificate.aggregated_signature.len()
+                // );
+                shard_validator
+                    .decide(Commits::from_commit_certificate(&commit_certificate))
+                    .await;
+                let height = commit_certificate.height;
                 let result = myself.cast(ConsensusMsg::StartHeight(height.increment()));
                 if let Err(e) = result {
                     error!("Error when starting next height after decision on {height}: {e:?}");
