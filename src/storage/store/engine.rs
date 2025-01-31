@@ -1345,14 +1345,43 @@ impl ShardEngine {
 
 pub struct BlockEngine {
     block_store: BlockStore,
+    statsd_client: StatsdClientWrapper,
 }
 
 impl BlockEngine {
-    pub fn new(block_store: BlockStore) -> Self {
-        BlockEngine { block_store }
+    pub fn new(block_store: BlockStore, statsd_client: StatsdClientWrapper) -> Self {
+        BlockEngine {
+            block_store,
+            statsd_client,
+        }
+    }
+
+    // statsd
+    fn count(&self, key: &str, count: u64) {
+        let key = format!("engine.{}", key);
+        self.statsd_client.count_with_shard(0, key.as_str(), count);
+    }
+
+    // statsd
+    fn gauge(&self, key: &str, value: u64) {
+        let key = format!("engine.{}", key);
+        self.statsd_client.gauge_with_shard(0, key.as_str(), value);
     }
 
     pub fn commit_block(&mut self, block: Block) {
+        self.gauge(
+            "block_height",
+            block
+                .header
+                .as_ref()
+                .unwrap()
+                .height
+                .as_ref()
+                .unwrap()
+                .block_number,
+        );
+        self.count("block_shards", block.shard_chunks.len() as u64);
+
         let result = self.block_store.put_block(block);
         if result.is_err() {
             error!("Failed to store block: {:?}", result.err());

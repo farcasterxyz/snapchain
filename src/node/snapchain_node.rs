@@ -119,7 +119,7 @@ impl SnapchainNode {
 
         // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
         let block_validator_set = config.validator_set_for(0);
-        let engine = BlockEngine::new(block_store.clone());
+        let engine = BlockEngine::new(block_store.clone(), statsd_client.clone());
         let shard_decision_rx = shard_decision_tx.subscribe();
         let block_proposer = BlockProposer::new(
             validator_address.clone(),
