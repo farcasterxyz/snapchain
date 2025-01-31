@@ -6,7 +6,7 @@ mod tests {
 
     use crate::{
         consensus::consensus::SystemMessage,
-        mempool::mempool::{Mempool, MempoolMessagesRequest},
+        mempool::mempool::{self, Mempool, MempoolMessagesRequest},
         network::gossip::{Config, SnapchainGossip},
         proto::{
             self, FnameTransfer, Height, ShardChunk, ShardHeader, Transaction, UserNameProof,
@@ -69,6 +69,7 @@ mod tests {
                 .unwrap();
 
         let mempool = Mempool::new(
+            mempool::Config::default(),
             1024,
             mempool_rx,
             messages_request_rx,

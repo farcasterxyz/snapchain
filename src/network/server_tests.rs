@@ -9,7 +9,7 @@ mod tests {
 
     use crate::connectors::onchain_events::L1Client;
     use crate::core::validations::{self, verification::VerificationAddressClaim};
-    use crate::mempool::mempool::Mempool;
+    use crate::mempool::mempool::{self, Mempool};
     use crate::mempool::routing;
     use crate::mempool::routing::MessageRouter;
     use crate::network::server::MyHubService;
@@ -185,6 +185,7 @@ mod tests {
         let (gossip_tx, _gossip_rx) = mpsc::channel(1000);
         let (_shard_decision_tx, shard_decision_rx) = broadcast::channel(1000);
         let mut mempool = Mempool::new(
+            mempool::Config::default(),
             1024,
             mempool_rx,
             msgs_request_rx,

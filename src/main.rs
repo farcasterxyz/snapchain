@@ -170,6 +170,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .await;
 
     let mut mempool = Mempool::new(
+        app_config.mempool.clone(),
         1024,
         mempool_rx,
         messages_request_rx,

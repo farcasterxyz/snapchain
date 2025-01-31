@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use hex;
 use libp2p::identity::ed25519::Keypair;
-use snapchain::mempool::mempool::Mempool;
+use snapchain::mempool::mempool::{self, Mempool};
 use snapchain::mempool::routing;
 use snapchain::network::server::MyHubService;
 use snapchain::node::snapchain_node::SnapchainNode;
@@ -117,6 +117,7 @@ impl NodeForTest {
         let addr = grpc_addr.clone();
         let (mempool_tx, mempool_rx) = mpsc::channel(100);
         let mut mempool = Mempool::new(
+            mempool::Config::default(),
             1024,
             mempool_rx,
             messages_request_rx,
