@@ -73,6 +73,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let mut shard_ids = app_config.consensus.shard_ids.clone();
         shard_ids.push(0);
         for shard_id in shard_ids {
+            // Raise if the download fails. If there's a persistent issue, disable snapshot download.
             download_snapshots(
                 app_config.fc_network,
                 &app_config.snapshot,
@@ -80,6 +81,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 shard_id,
             )
             .await
+            .unwrap();
         }
     }
 
