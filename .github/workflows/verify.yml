@@ -35,7 +35,6 @@ jobs:
         uses: arduino/setup-protoc@v3
 
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
         with:
           repository: CassOnMars/eth-signature-verifier
           path: ./eth-signature-verifier
@@ -49,10 +48,12 @@ jobs:
           RUSTFLAGS: "-Dwarnings"
         run: cargo test
 
-      - env:
+      - working-directory: ./snapchain
+        env:
           RUSTFLAGS: "-Dwarnings"
         run: cargo build --bins
 
-      - env:
+      - working-directory: ./snapchain
+        env:
           RUSTFLAGS: "-Dwarnings"
         run: cargo fmt --all --check

@@ -148,6 +148,7 @@ stop_block_number = {stop_block_number}
 endpoint_url = "{snapshot_endpoint_url}"
 backup_dir = "{backup_dir}"
 snapshot_download_dir = "{snapshot_download_dir}"
+load_db_from_snapshot=false
             "#
         );
 

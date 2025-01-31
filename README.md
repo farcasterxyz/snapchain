@@ -42,8 +42,8 @@ Before you begin, ensure you have the following installed:
 
 Clone the snapchain repo and build it:
 ```
-git clone https://github.com/farcasterxyz/snapchain-v0.git
-cd snapchain-v0
+git clone https://github.com/farcasterxyz/snapchain.git
+cd snapchain
 cargo build
 ```
 
