@@ -1,7 +1,6 @@
 use crate::core::validations::error::ValidationError;
 use crate::proto::{self, FarcasterNetwork, MessageData, MessageType, UserDataBody, UserDataType};
 use crate::storage::util::{blake3_20, bytes_compare};
-use crate::utils::factory::messages_factory::user_data;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use fancy_regex::Regex;

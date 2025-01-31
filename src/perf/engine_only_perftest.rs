@@ -1,4 +1,4 @@
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::mempool::mempool::Mempool;
 use crate::proto::{Height, ShardChunk, ShardHeader};
@@ -6,6 +6,7 @@ use crate::storage::store::engine::{MempoolMessage, ShardStateChange};
 use crate::storage::store::stores::StoreLimits;
 use crate::storage::store::test_helper;
 use crate::utils::cli::compose_message;
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::HashMap;
 use std::error::Error;
 use std::time::Duration;
@@ -34,6 +35,8 @@ fn state_change_to_shard_chunk(
 pub async fn run() -> Result<(), Box<dyn Error>> {
     let (mempool_tx, mempool_rx) = mpsc::channel(1000);
     let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
+    let (gossip_tx, _gossip_rx) = mpsc::channel(100);
+    let (_shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
 
     let (mut engine, _tmpdir) = test_helper::new_engine_with_options(test_helper::EngineOptions {
         limits: Some(StoreLimits {
@@ -44,9 +47,23 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         messages_request_tx: Some(messages_request_tx),
     });
 
+    let statsd_client = StatsdClientWrapper::new(
+        cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
+        true,
+    );
+
     let mut shard_stores = HashMap::new();
     shard_stores.insert(1, engine.get_stores());
-    let mut mempool = Mempool::new(mempool_rx, messages_request_rx, 1, shard_stores);
+    let mut mempool = Mempool::new(
+        1024,
+        mempool_rx,
+        messages_request_rx,
+        1,
+        shard_stores,
+        gossip_tx,
+        shard_decision_rx,
+        statsd_client,
+    );
 
     tokio::spawn(async move {
         mempool.run().await;

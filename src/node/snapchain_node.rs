@@ -20,7 +20,7 @@ use malachite_config::TimeoutConfig;
 use malachite_metrics::Metrics;
 use ractor::ActorRef;
 use std::collections::{BTreeMap, HashMap};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
 
 const MAX_SHARDS: u32 = 64;
@@ -38,6 +38,7 @@ impl SnapchainNode {
         config: Config,
         rpc_address: Option<String>,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+        shard_decision_tx: broadcast::Sender<ShardChunk>,
         block_tx: Option<mpsc::Sender<Block>>,
         messages_request_tx: mpsc::Sender<MempoolMessagesRequest>,
         block_store: BlockStore,
@@ -48,8 +49,6 @@ impl SnapchainNode {
         let validator_address = Address(keypair.public().to_bytes());
 
         let mut consensus_actors = BTreeMap::new();
-
-        let (shard_decision_tx, shard_decision_rx) = mpsc::channel::<ShardChunk>(100);
 
         let mut shard_senders: HashMap<u32, Senders> = HashMap::new();
         let mut shard_stores: HashMap<u32, Stores> = HashMap::new();
@@ -152,6 +151,7 @@ impl SnapchainNode {
 
         let engine = BlockEngine::new(block_store.clone());
 
+        let shard_decision_rx = shard_decision_tx.subscribe();
         let block_proposer = BlockProposer::new(
             validator_address.clone(),
             block_shard.clone(),

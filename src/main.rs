@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use std::process;
 use std::time::Duration;
 use tokio::signal::ctrl_c;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::{select, time};
 use tonic::transport::Server;
 use tracing::{error, info, warn};
@@ -105,9 +105,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
+    let (mempool_tx, mempool_rx) = mpsc::channel(app_config.mempool.queue_size as usize);
 
-    let gossip_result =
-        SnapchainGossip::create(keypair.clone(), app_config.gossip, system_tx.clone());
+    let gossip_result = SnapchainGossip::create(
+        keypair.clone(),
+        app_config.gossip,
+        system_tx.clone(),
+        mempool_tx.clone(),
+    );
 
     if let Err(e) = gossip_result {
         error!(error = ?e, "Failed to create SnapchainGossip");
@@ -130,11 +135,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let _ = Metrics::register(registry);
 
     let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
+    let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
+
     let node = SnapchainNode::create(
         keypair.clone(),
         app_config.consensus.clone(),
         Some(app_config.rpc_address.clone()),
         gossip_tx.clone(),
+        shard_decision_tx,
         None,
         messages_request_tx,
         block_store.clone(),
@@ -144,16 +152,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
     )
     .await;
 
-    let (mempool_tx, mempool_rx) = mpsc::channel(app_config.mempool.queue_size as usize);
     let mut mempool = Mempool::new(
+        1024,
         mempool_rx,
         messages_request_rx,
         app_config.consensus.num_shards,
         node.shard_stores.clone(),
+        gossip_tx.clone(),
+        shard_decision_rx,
+        statsd_client.clone(),
     );
     tokio::spawn(async move { mempool.run().await });
 
-    let admin_service = MyAdminService::new(db_manager, mempool_tx.clone());
+    let admin_service = MyAdminService::new(
+        db_manager,
+        mempool_tx.clone(),
+        node.shard_stores.clone(),
+        block_store.clone(),
+        app_config.snapshot.clone(),
+        app_config.fc_network,
+    );
 
     if !app_config.fnames.disable {
         let mut fetcher = snapchain::connectors::fname::Fetcher::new(
@@ -218,8 +236,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         shutdown_tx.send(()).await.ok();
     });
 
-    if app_config.backup_dir != "" {
-        let backup_dir = app_config.backup_dir.clone();
+    // TODO(aditi): We may want to reconsider this code when we upload snapshots on a schedule.
+    if app_config.snapshot.backup_on_startup {
         let shard_ids = app_config.consensus.shard_ids.clone();
         let block_db = block_store.db.clone();
         let mut dbs = HashMap::new();
@@ -232,11 +250,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         tokio::spawn(async move {
             info!(
                 "Backing up {:?} shard databases to {:?}",
-                shard_ids, backup_dir
+                shard_ids, app_config.snapshot.backup_dir
             );
             let timestamp = chrono::Utc::now().timestamp_millis();
             dbs.iter().for_each(|(shard_id, db)| {
-                RocksDB::backup_db(db.clone(), &backup_dir, *shard_id, timestamp).unwrap();
+                RocksDB::backup_db(
+                    db.clone(),
+                    &app_config.snapshot.backup_dir,
+                    *shard_id,
+                    timestamp,
+                )
+                .unwrap();
             });
         });
     }

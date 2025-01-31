@@ -1,6 +1,7 @@
 use crate::consensus::consensus::{ConsensusMsg, SystemMessage};
 use crate::core::types::proto;
 use crate::network::gossip::{Config, GossipEvent, SnapchainGossip};
+use crate::storage::store::engine::MempoolMessage;
 use libp2p::identity::ed25519::Keypair;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -26,9 +27,14 @@ async fn test_gossip_communication() {
     let (system_tx1, _) = mpsc::channel::<SystemMessage>(100);
     let (system_tx2, mut system_rx2) = mpsc::channel::<SystemMessage>(100);
 
+    let (mempool_tx1, _) = mpsc::channel::<MempoolMessage>(100);
+    let (mempool_tx2, _) = mpsc::channel::<MempoolMessage>(100);
+
     // Create gossip instances
-    let mut gossip1 = SnapchainGossip::create(keypair1.clone(), config1, system_tx1).unwrap();
-    let mut gossip2 = SnapchainGossip::create(keypair2.clone(), config2, system_tx2).unwrap();
+    let mut gossip1 =
+        SnapchainGossip::create(keypair1.clone(), config1, system_tx1, mempool_tx1).unwrap();
+    let mut gossip2 =
+        SnapchainGossip::create(keypair2.clone(), config2, system_tx2, mempool_tx2).unwrap();
 
     let gossip_tx1 = gossip1.tx.clone();
 

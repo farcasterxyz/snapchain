@@ -12,7 +12,7 @@ use prost::Message;
 use std::collections::BTreeMap;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 use tokio::{select, time};
 use tonic::Request;
@@ -55,7 +55,7 @@ pub struct ShardProposer {
     shard_id: SnapchainShard,
     address: Address,
     proposed_chunks: BTreeMap<ShardHash, FullProposal>,
-    tx_decision: mpsc::Sender<ShardChunk>,
+    tx_decision: broadcast::Sender<ShardChunk>,
     engine: ShardEngine,
     propose_value_delay: Duration,
     statsd_client: StatsdClientWrapper,
@@ -67,7 +67,7 @@ impl ShardProposer {
         shard_id: SnapchainShard,
         engine: ShardEngine,
         statsd_client: StatsdClientWrapper,
-        tx_decision: mpsc::Sender<ShardChunk>,
+        tx_decision: broadcast::Sender<ShardChunk>,
         propose_value_delay: Duration,
     ) -> ShardProposer {
         ShardProposer {
@@ -82,7 +82,7 @@ impl ShardProposer {
     }
 
     async fn publish_new_shard_chunk(&self, shard_chunk: &ShardChunk) {
-        let _ = &self.tx_decision.send(shard_chunk.clone()).await;
+        let _ = &self.tx_decision.send(shard_chunk.clone());
     }
 }
 
@@ -241,7 +241,7 @@ pub struct BlockProposer {
     address: Address,
     proposed_blocks: BTreeMap<ShardHash, FullProposal>,
     pending_chunks: BTreeMap<u64, Vec<ShardChunk>>,
-    shard_decision_rx: mpsc::Receiver<ShardChunk>,
+    shard_decision_rx: broadcast::Receiver<ShardChunk>,
     num_shards: u32,
     block_tx: Option<mpsc::Sender<Block>>,
     engine: BlockEngine,
@@ -252,7 +252,7 @@ impl BlockProposer {
     pub fn new(
         address: Address,
         shard_id: SnapchainShard,
-        shard_decision_rx: mpsc::Receiver<ShardChunk>,
+        shard_decision_rx: broadcast::Receiver<ShardChunk>,
         num_shards: u32,
         block_tx: Option<mpsc::Sender<Block>>,
         engine: BlockEngine,

@@ -361,7 +361,7 @@ mod tests {
         )
         .await;
 
-        let link_add = messages_factory::links::create_link_add(
+        let link_add1 = messages_factory::links::create_link_add(
             FID_FOR_TEST,
             "follow",
             target_fid,
@@ -369,29 +369,41 @@ mod tests {
             None,
         );
 
-        commit_message(&mut engine, &link_add).await;
-
+        commit_message(&mut engine, &link_add1).await;
         let link_result = engine.get_links_by_fid(FID_FOR_TEST);
         assert_eq!(1, link_result.unwrap().messages.len());
+
+        let link_add2 = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            "follow",
+            target_fid + 1, // target fid is different from the target fid in the compact state
+            Some(timestamp + 1),
+            None,
+        );
+
+        commit_message(&mut engine, &link_add2).await;
+        let link_result = engine.get_links_by_fid(FID_FOR_TEST);
+        assert_eq!(2, link_result.unwrap().messages.len());
 
         let link_remove = messages_factory::links::create_link_remove(
             FID_FOR_TEST,
             "follow",
             target_fid,
-            Some(timestamp + 1),
+            Some(timestamp + 2),
             None,
         );
 
         commit_message(&mut engine, &link_remove).await;
 
         let link_result = engine.get_links_by_fid(FID_FOR_TEST);
-        assert_eq!(0, link_result.unwrap().messages.len());
+        assert_eq!(1, link_result.unwrap().messages.len());
+        assert!(!message_exists_in_trie(&mut engine, &link_add1));
 
         let link_compact_state = messages_factory::links::create_link_compact_state(
             FID_FOR_TEST,
             "follow",
             target_fid,
-            Some(timestamp + 1),
+            Some(timestamp + 2),
             None,
         );
 
@@ -399,6 +411,11 @@ mod tests {
 
         let link_result = engine.get_link_compact_state_messages_by_fid(FID_FOR_TEST);
         assert_eq!(1, link_result.unwrap().messages.len());
+        let link_result = engine.get_links_by_fid(FID_FOR_TEST);
+        assert_eq!(0, link_result.unwrap().messages.len());
+        assert!(message_exists_in_trie(&mut engine, &link_compact_state));
+        assert!(!message_exists_in_trie(&mut engine, &link_add2));
+        assert!(!message_exists_in_trie(&mut engine, &link_remove))
     }
 
     #[tokio::test]

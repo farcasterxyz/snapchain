@@ -1,25 +1,28 @@
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
-use tokio::{
-    sync::{mpsc, oneshot},
-    time::Instant,
-};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
-use crate::storage::{
-    db::RocksDbTransactionBatch,
-    store::{
-        account::{
-            get_message_by_key, make_message_primary_key, make_ts_hash, type_to_set_postfix,
-            UserDataStore,
+use crate::{
+    core::types::SnapchainValidatorContext,
+    network::gossip::GossipEvent,
+    proto::{self, ShardChunk},
+    storage::{
+        db::RocksDbTransactionBatch,
+        store::{
+            account::{
+                get_message_by_key, make_message_primary_key, make_ts_hash, type_to_set_postfix,
+                UserDataStore,
+            },
+            engine::MempoolMessage,
+            stores::Stores,
         },
-        engine::MempoolMessage,
-        stores::Stores,
     },
+    utils::statsd_wrapper::StatsdClientWrapper,
 };
 
 use super::routing::{MessageRouter, ShardRouter};
-use tracing::error;
+use tracing::{error, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -34,7 +37,57 @@ impl Default for Config {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MempoolKey {
-    inserted_at: Instant,
+    timestamp: u64,
+    identity: String,
+}
+
+impl MempoolKey {
+    pub fn new(timestamp: u64, identity: String) -> Self {
+        MempoolKey {
+            timestamp,
+            identity,
+        }
+    }
+
+    pub fn identity(self) -> String {
+        self.identity
+    }
+}
+
+impl proto::Message {
+    pub fn mempool_key(&self) -> MempoolKey {
+        if let Some(data) = &self.data {
+            // TODO: Consider revisiting choice of timestamp here as backdated messages currently are prioritized.
+            return MempoolKey::new(data.timestamp as u64, self.hex_hash());
+        }
+        todo!();
+    }
+}
+
+impl proto::ValidatorMessage {
+    pub fn mempool_key(&self) -> MempoolKey {
+        if let Some(fname) = &self.fname_transfer {
+            if let Some(proof) = &fname.proof {
+                return MempoolKey::new(proof.timestamp, fname.id.to_string());
+            }
+        }
+        if let Some(event) = &self.on_chain_event {
+            return MempoolKey::new(
+                event.block_timestamp,
+                hex::encode(&event.transaction_hash) + &event.log_index.to_string(),
+            );
+        }
+        todo!();
+    }
+}
+
+impl MempoolMessage {
+    pub fn mempool_key(&self) -> MempoolKey {
+        match self {
+            MempoolMessage::UserMessage(msg) => msg.mempool_key(),
+            MempoolMessage::ValidatorMessage(msg) => msg.mempool_key(),
+        }
+    }
 }
 
 pub struct MempoolMessagesRequest {
@@ -44,28 +97,40 @@ pub struct MempoolMessagesRequest {
 }
 
 pub struct Mempool {
+    capacity_per_shard: usize,
     shard_stores: HashMap<u32, Stores>,
     message_router: Box<dyn MessageRouter>,
     num_shards: u32,
     mempool_rx: mpsc::Receiver<MempoolMessage>,
     messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
     messages: HashMap<u32, BTreeMap<MempoolKey, MempoolMessage>>,
+    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+    shard_decision_rx: broadcast::Receiver<ShardChunk>,
+    statsd_client: StatsdClientWrapper,
 }
 
 impl Mempool {
     pub fn new(
+        capacity_per_shard: usize,
         mempool_rx: mpsc::Receiver<MempoolMessage>,
         messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
         num_shards: u32,
         shard_stores: HashMap<u32, Stores>,
+        gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+        shard_decision_rx: broadcast::Receiver<ShardChunk>,
+        statsd_client: StatsdClientWrapper,
     ) -> Self {
         Mempool {
+            capacity_per_shard,
             shard_stores,
             num_shards,
             mempool_rx,
             message_router: Box::new(ShardRouter {}),
             messages: HashMap::new(),
             messages_request_rx,
+            gossip_tx,
+            shard_decision_rx,
+            statsd_client,
         }
     }
 
@@ -170,6 +235,60 @@ impl Mempool {
         return true;
     }
 
+    async fn insert(&mut self, message: MempoolMessage) {
+        // TODO(aditi): Maybe we don't need to run validations here?
+        if self.message_is_valid(&message) {
+            let fid = message.fid();
+            let shard_id = self.message_router.route_message(fid, self.num_shards);
+            // TODO(aditi): We need a size limit on the mempool and we need to figure out what to do if it's exceeded
+            match self.messages.get_mut(&shard_id) {
+                None => {
+                    let mut messages = BTreeMap::new();
+                    messages.insert(message.mempool_key(), message.clone());
+                    self.messages.insert(shard_id, messages);
+                    self.statsd_client
+                        .gauge_with_shard(shard_id, "mempool.size", 1);
+                }
+                Some(messages) => {
+                    if messages.len() >= self.capacity_per_shard {
+                        // For now, mempool messages are dropped here if the mempool is full.
+                        warn!(
+                            fid = message.fid(),
+                            identity = message.mempool_key().identity(),
+                            "Message dropped due to mempool being over capacity"
+                        );
+                        return;
+                    }
+                    messages.insert(message.mempool_key(), message.clone());
+                    self.statsd_client.gauge_with_shard(
+                        shard_id,
+                        "mempool.size",
+                        messages.len() as u64,
+                    );
+                }
+            }
+
+            self.statsd_client
+                .count_with_shard(shard_id, "mempool.insert.success", 1);
+
+            match message {
+                MempoolMessage::UserMessage(_) => {
+                    let result = self
+                        .gossip_tx
+                        .send(GossipEvent::BroadcastMempoolMessage(message))
+                        .await;
+
+                    if let Err(e) = result {
+                        warn!("Failed to gossip message {:?}", e);
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            self.statsd_client.count("mempool.insert.failure", 1);
+        }
+    }
+
     pub async fn run(&mut self) {
         loop {
             tokio::select! {
@@ -182,19 +301,22 @@ impl Mempool {
                 }
                 message = self.mempool_rx.recv() => {
                     if let Some(message) = message {
-                        // TODO(aditi): Maybe we don't need to run validations here?
-                        if self.message_is_valid(&message) {
-                            let fid = message.fid();
-                            let shard_id = self.message_router.route_message(fid, self.num_shards);
-                            // TODO(aditi): We need a size limit on the mempool and we need to figure out what to do if it's exceeded
-                            match self.messages.get_mut(&shard_id) {
-                                None => {
-                                    let mut messages = BTreeMap::new();
-                                    messages.insert(MempoolKey { inserted_at: Instant::now()}, message.clone());
-                                    self.messages.insert(shard_id, messages);
+                        self.insert(message).await;
+                    }
+                }
+                chunk = self.shard_decision_rx.recv() => {
+                    if let Ok(chunk) = chunk {
+                        let header = chunk.header.expect("Expects chunk to have a header");
+                        let height = header.height.expect("Expects header to have a height");
+                        if let Some(mempool) = self.messages.get_mut(&height.shard_index) {
+                            for transaction in chunk.transactions {
+                                for user_message in transaction.user_messages {
+                                    mempool.remove(&user_message.mempool_key());
+                                    self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
                                 }
-                                Some(messages) => {
-                                    messages.insert(MempoolKey { inserted_at: Instant::now()}, message.clone());
+                                for system_message in transaction.system_messages {
+                                    mempool.remove(&system_message.mempool_key());
+                                    self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
                                 }
                             }
                         }

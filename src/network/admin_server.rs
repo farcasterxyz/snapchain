@@ -1,8 +1,16 @@
 use crate::proto::admin_service_server::AdminService;
-use crate::proto::{self, FnameTransfer, OnChainEvent};
+use crate::proto::{self, Empty, FarcasterNetwork, FnameTransfer, OnChainEvent};
 use crate::proto::{UserNameProof, ValidatorMessage};
+use crate::storage;
+use crate::storage::db::snapshot::clear_snapshots;
+use crate::storage::db::RocksDB;
 use crate::storage::store::engine::MempoolMessage;
+use crate::storage::store::stores::Stores;
+use crate::storage::store::BlockStore;
 use rocksdb;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{io, path, process};
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -62,6 +70,10 @@ impl DbManager {
 pub struct MyAdminService {
     db_manager: DbManager,
     pub mempool_tx: mpsc::Sender<MempoolMessage>,
+    snapshot_config: storage::db::snapshot::Config,
+    shard_stores: HashMap<u32, Stores>,
+    block_store: BlockStore,
+    fc_network: FarcasterNetwork,
 }
 
 #[derive(Debug, Error)]
@@ -76,11 +88,46 @@ pub enum AdminServiceError {
 const DB_DESTROY_KEY: &[u8] = b"__destroy_all_databases_on_start__";
 
 impl MyAdminService {
-    pub fn new(db_manager: DbManager, mempool_tx: mpsc::Sender<MempoolMessage>) -> Self {
+    pub fn new(
+        db_manager: DbManager,
+        mempool_tx: mpsc::Sender<MempoolMessage>,
+        shard_stores: HashMap<u32, Stores>,
+        block_store: BlockStore,
+        snapshot_config: storage::db::snapshot::Config,
+        fc_network: FarcasterNetwork,
+    ) -> Self {
         Self {
             db_manager,
             mempool_tx,
+            shard_stores,
+            block_store,
+            snapshot_config,
+            fc_network,
         }
+    }
+
+    async fn backup_and_upload(
+        &self,
+        shard_id: u32,
+        db: Arc<RocksDB>,
+        now: i64,
+    ) -> Result<(), Status> {
+        // TODO(aditi): Eventually, we should upload a metadata file. For now, just clear all existing snapshots on s3 and only keep 1 snapshot per shard
+        clear_snapshots(self.fc_network, &self.snapshot_config, shard_id)
+            .await
+            .map_err(|err| Status::from_error(Box::new(err)))?;
+        let backup_dir = self.snapshot_config.backup_dir.clone();
+        let tar_gz_path = RocksDB::backup_db(db, &backup_dir, shard_id, now)
+            .map_err(|err| Status::from_error(Box::new(err)))?;
+        storage::db::snapshot::upload_to_s3(
+            self.fc_network,
+            tar_gz_path,
+            &self.snapshot_config,
+            shard_id,
+        )
+        .await
+        .map_err(|err| Status::from_error(Box::new(err)))?;
+        Ok(())
     }
 }
 
@@ -177,5 +224,40 @@ impl AdminService for MyAdminService {
             }
             Err(err) => Err(Status::from_error(Box::new(err))),
         }
+    }
+
+    async fn upload_snapshot(
+        &self,
+        _request: Request<Empty>,
+    ) -> std::result::Result<Response<Empty>, Status> {
+        if std::fs::exists(self.snapshot_config.backup_dir.clone())? {
+            return Err(Status::aborted("snapshot already in progress"));
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|err| Status::from_error(Box::new(err)))?
+            .as_millis();
+
+        let on_error = |err| {
+            if let Err(err) = std::fs::remove_dir_all(self.snapshot_config.backup_dir.clone()) {
+                info!("Unable to remove snapshot directory: {}", err.to_string());
+            }
+            // Maintain the original error
+            err
+        };
+
+        self.backup_and_upload(0, self.block_store.db.clone(), now as i64)
+            .await
+            .map_err(|err| on_error(err))?;
+        for (shard, stores) in self.shard_stores.iter() {
+            self.backup_and_upload(*shard, stores.db.clone(), now as i64)
+                .await
+                .map_err(|err| on_error(err))?
+        }
+
+        std::fs::remove_dir_all(self.snapshot_config.backup_dir.clone())?;
+
+        Ok(Response::new(Empty {}))
     }
 }

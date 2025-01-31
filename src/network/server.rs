@@ -9,6 +9,7 @@ use crate::proto::hub_service_server::HubService;
 use crate::proto::on_chain_event::Body;
 use crate::proto::GetInfoResponse;
 use crate::proto::HubEvent;
+use crate::proto::MessageType;
 use crate::proto::TrieNodeMetadataRequest;
 use crate::proto::TrieNodeMetadataResponse;
 use crate::proto::UserNameProof;
@@ -40,7 +41,7 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 pub struct MyHubService {
     block_store: BlockStore,
@@ -170,7 +171,7 @@ impl MyHubService {
         {
             Ok(_) => {
                 self.statsd_client.count("rpc.submit_message.success", 1);
-                info!("successfully submitted message");
+                debug!("successfully submitted message");
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.statsd_client
@@ -327,6 +328,30 @@ impl MyHubService {
             )),
         }
     }
+
+    fn rewrite_hub_event(mut hub_event: HubEvent) -> HubEvent {
+        match &mut hub_event.body {
+            Some(body) => {
+                match body {
+                    proto::hub_event::Body::MergeMessageBody(merge_message_body) => {
+                        match &merge_message_body.message {
+                            None => {}
+                            Some(message) => {
+                                if message.msg_type() == MessageType::LinkCompactState {
+                                    // In the case of merging compact state, we omit the deleted messages as this would
+                                    // result in an unbounded message size:
+                                    merge_message_body.deleted_messages = vec![]
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None => {}
+        };
+        hub_event
+    }
 }
 
 #[tonic::async_trait]
@@ -343,7 +368,7 @@ impl HubService for MyHubService {
             .as_ref()
             .map(|msg| msg.hash.encode_hex::<String>())
             .unwrap_or_default();
-        info!(%hash, "Received call to [submit_message_with_options] RPC");
+        debug!(%hash, "Received call to [submit_message_with_options] RPC");
 
         let proto::SubmitMessageRequest {
             message,
@@ -378,7 +403,7 @@ impl HubService for MyHubService {
         let start_time = std::time::Instant::now();
 
         let hash = request.get_ref().hash.encode_hex::<String>();
-        info!(hash, "Received call to [submit_message] RPC");
+        debug!(hash, "Received call to [submit_message] RPC");
 
         let mut message = request.into_inner();
         message_bytes_decode(&mut message);
@@ -561,6 +586,7 @@ impl HubService for MyHubService {
                     .unwrap();
 
                     for event in old_events.events {
+                        let event = Self::rewrite_hub_event(event);
                         if let Err(_) = server_tx.send(Ok(event)).await {
                             return;
                         }
@@ -581,6 +607,7 @@ impl HubService for MyHubService {
                     loop {
                         match event_rx.recv().await {
                             Ok(hub_event) => {
+                                let hub_event = Self::rewrite_hub_event(hub_event);
                                 match tx.send(Ok(hub_event)).await {
                                     Ok(_) => {}
                                     Err(_) => {

@@ -20,7 +20,7 @@ use snapchain::{
     core::types::{ShardId, SnapchainShard, SnapchainValidator, SnapchainValidatorContext},
     network::gossip::GossipEvent,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::time;
 use tonic::transport::Server;
 use tracing::{error, info};
@@ -73,11 +73,13 @@ impl NodeForTest {
         db.open().unwrap();
         let block_store = BlockStore::new(db.clone());
         let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
+        let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
         let node = SnapchainNode::create(
             keypair.clone(),
             config,
             None,
-            gossip_tx,
+            gossip_tx.clone(),
+            shard_decision_tx,
             Some(block_tx),
             messages_request_tx,
             block_store.clone(),
@@ -115,10 +117,14 @@ impl NodeForTest {
         let addr = grpc_addr.clone();
         let (mempool_tx, mempool_rx) = mpsc::channel(100);
         let mut mempool = Mempool::new(
+            1024,
             mempool_rx,
             messages_request_rx,
             num_shards,
             node.shard_stores.clone(),
+            gossip_tx,
+            shard_decision_rx,
+            statsd_client.clone(),
         );
         tokio::spawn(async move { mempool.run().await });
 
