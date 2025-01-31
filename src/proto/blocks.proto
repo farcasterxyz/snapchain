@@ -45,9 +45,17 @@ message Vote {
 }
 
 // Votes of at least 2/3 of the validators, required to independently verify that consensus was reached
-message ConfirmedVotes {
-  repeated Vote votes = 1;
-  repeated bytes signatures = 3;
+
+message CommitSignature {
+  bytes signer = 1;
+  bytes signature = 2;
+}
+
+message Commits {
+  Height height = 1;
+  int64 round = 2;
+  ShardHash value = 3;
+  repeated CommitSignature signatures = 4;
 }
 
 message Proposal {
@@ -96,7 +104,7 @@ message Block {
   bytes hash = 2;
   repeated ShardChunk shard_chunks = 3;
   optional ValidatorSet validators = 4;
-  ConfirmedVotes votes = 5;
+  Commits commits = 5;
 }
 
 message ShardHeader {
@@ -110,7 +118,7 @@ message ShardChunk {
   ShardHeader header = 1;
   bytes hash = 2;
   repeated Transaction transactions = 3;
-  ConfirmedVotes votes = 4;
+  Commits commits = 4;
 }
 
 message Transaction {
@@ -146,12 +154,55 @@ message MempoolMessage {
   }
 }
 
+message StatusMessage {
+  bytes peer_id = 1;
+  Height height = 2;
+  Height min_height = 3;
+}
+
+message SyncValueRequest {
+  Height height = 1;
+}
+
+message SyncVoteSetRequest {
+  Height height = 1;
+  int64 round = 2;
+}
+
+message SyncRequest {
+  oneof sync_request {
+    SyncValueRequest value = 1;
+    SyncVoteSetRequest vote_set = 2;
+  }
+}
+
+message SyncValueResponse {
+  Height height = 1;
+  bytes full_value = 2;
+  Commits commits = 3;
+}
+
+message SyncVoteSetResponse {
+  Height height = 1;
+  int64 round = 2;
+  repeated Vote votes = 3;
+  repeated bytes signatures = 4;
+}
+
+message SyncResponse {
+  oneof sync_response {
+    SyncValueResponse value = 1;
+    SyncVoteSetResponse vote_set = 2;
+  }
+}
+
 message GossipMessage {
   oneof gossip_message {
     ConsensusMessage consensus = 1;
     RegisterValidator validator = 2;  // Remove before testnet, once in-protocol leader rotation is implemented
     FullProposal full_proposal = 3;
     MempoolMessage mempool_message = 4;
+    StatusMessage status = 5;
   }
 }
 

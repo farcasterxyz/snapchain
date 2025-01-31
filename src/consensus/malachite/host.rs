@@ -2,10 +2,14 @@
 
 use crate::consensus::validator::ShardValidator;
 use crate::core::types::SnapchainValidatorContext;
+use crate::proto::{full_proposal, Block, Commits, FullProposal, ShardChunk};
+use bytes::Bytes;
 use informalsystems_malachitebft_engine::consensus::ConsensusMsg;
 use informalsystems_malachitebft_engine::host::{HostMsg, LocallyProposedValue};
 use informalsystems_malachitebft_engine::network::{NetworkMsg, NetworkRef};
 use informalsystems_malachitebft_engine::util::streaming::{StreamContent, StreamMessage};
+use informalsystems_malachitebft_sync::DecidedValue;
+use prost::Message;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SpawnErr};
 use tracing::{error, info, warn};
 
@@ -18,6 +22,7 @@ pub struct Host {}
 pub struct HostState {
     pub shard_validator: ShardValidator,
     pub network: NetworkRef<SnapchainValidatorContext>,
+    pub consensus_start_delay: u32,
 }
 
 impl Host {
@@ -46,6 +51,11 @@ impl Host {
                 state.shard_validator.start(); // Call each time?
                 let validator_set = state.shard_validator.get_validator_set();
                 let height = state.shard_validator.get_current_height().increment();
+                // Wait a few seconds before starting
+                tokio::time::sleep(tokio::time::Duration::from_secs(
+                    state.consensus_start_delay as u64,
+                ))
+                .await;
                 info!(
                     height = height.to_string(),
                     validators = validator_set.validators.len(),
@@ -132,7 +142,7 @@ impl Host {
                 //commit
                 state
                     .shard_validator
-                    .decide(certificate.height, certificate.round, certificate.value_id)
+                    .decide(Commits::from_commit_certificate(&certificate))
                     .await;
 
                 // Start next height
@@ -141,21 +151,58 @@ impl Host {
                 consensus_ref.cast(ConsensusMsg::StartHeight(next_height, validator_set))?;
             }
 
-            HostMsg::GetDecidedValue {
-                height: _,
-                reply_to: _,
-            } => {
-                // TODO: Get previously decided value for sync
+            HostMsg::GetDecidedValue { height, reply_to } => {
+                let proposal = state.shard_validator.get_decided_value(height).await;
+                let decided_value = match proposal {
+                    Some((commits, proposal)) => match proposal {
+                        full_proposal::ProposedValue::Block(block) => Some(DecidedValue {
+                            certificate: commits.to_commit_certificate(),
+                            value_bytes: Bytes::from(block.encode_to_vec()),
+                        }),
+                        full_proposal::ProposedValue::Shard(shard_chunk) => Some(DecidedValue {
+                            certificate: commits.to_commit_certificate(),
+                            value_bytes: Bytes::from(shard_chunk.encode_to_vec()),
+                        }),
+                    },
+                    None => None,
+                };
+                reply_to.send(decided_value)?;
             }
 
             HostMsg::ProcessSyncedValue {
-                height: _,
-                round: _,
-                validator_address: _,
-                value_bytes: _,
-                reply_to: _,
+                height,
+                round,
+                validator_address,
+                value_bytes,
+                reply_to,
             } => {
-                // TODO: Convert bytes to Proposal (sync)
+                let commits;
+                let proposal = if height.shard_index == 0 {
+                    let decoded_block = Block::decode(value_bytes.as_ref()).unwrap();
+                    commits = decoded_block.commits.clone().unwrap();
+                    FullProposal {
+                        height: Some(height),
+                        round: round.as_i64(),
+                        proposer: validator_address.to_vec(),
+                        proposed_value: Some(full_proposal::ProposedValue::Block(decoded_block)),
+                    }
+                } else {
+                    let chunk = ShardChunk::decode(value_bytes.as_ref()).unwrap();
+                    commits = chunk.commits.clone().unwrap();
+                    FullProposal {
+                        height: Some(height),
+                        round: round.as_i64(),
+                        proposer: validator_address.to_vec(),
+                        proposed_value: Some(full_proposal::ProposedValue::Shard(chunk)),
+                    }
+                };
+                let proposed_value = state.shard_validator.add_proposed_value(&proposal);
+                state.shard_validator.decide(commits).await;
+                info!(
+                    height = height.to_string(),
+                    "Processed value via sync: {}", proposed_value.value
+                );
+                reply_to.send(proposed_value)?;
             }
         };
 

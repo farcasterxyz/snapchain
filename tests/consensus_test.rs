@@ -6,10 +6,8 @@ use hex;
 use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
 use snapchain::mempool::mempool::{self, Mempool};
-use libp2p::{Multiaddr, PeerId};
-use snapchain::consensus::consensus::{MalachiteEventShard, SystemMessage};
-use snapchain::consensus::malachite::network_connector::MalachiteNetworkEvent;
-use snapchain::core::types::SnapchainValidatorConfig;
+use serial_test::serial;
+use snapchain::consensus::consensus::SystemMessage;
 use snapchain::mempool::routing;
 use snapchain::network::gossip::SnapchainGossip;
 use snapchain::network::server::MyHubService;
@@ -21,31 +19,30 @@ use snapchain::storage::store::engine::MempoolMessage;
 use snapchain::storage::store::BlockStore;
 use snapchain::utils::factory::messages_factory;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
-use snapchain::{
-    core::types::{ShardId, SnapchainShard, SnapchainValidator, SnapchainValidatorContext},
-    network::gossip::GossipEvent,
-};
 use tokio::sync::{broadcast, mpsc};
 use tokio::time;
 use tonic::transport::Server;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
+const HOST_FOR_TEST: &str = "127.0.0.1";
+const BASE_PORT_FOR_TEST: u32 = 9482;
+
 struct NodeForTest {
     node: SnapchainNode,
-    gossip_rx: mpsc::Receiver<GossipEvent<SnapchainValidatorContext>>,
     db: Arc<RocksDB>,
     block_store: BlockStore,
     mempool_tx: mpsc::Sender<MempoolMessage>,
+    handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for NodeForTest {
     fn drop(&mut self) {
+        self.stop();
         self.db.destroy().unwrap();
         for (_, stores) in self.node.shard_stores.iter_mut() {
             stores.shard_store.db.destroy().unwrap();
         }
-        self.node.stop();
     }
 }
 
@@ -63,19 +60,29 @@ impl NodeForTest {
         keypair: Keypair,
         num_shards: u32,
         grpc_port: u32,
-        validator_config: &SnapchainValidatorConfig,
+        validator_addresses: &Vec<String>,
+        gossip_address: String,
+        bootstrap_address: String,
     ) -> Self {
         let statsd_client = StatsdClientWrapper::new(
             cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
             true,
         );
 
-        let mut config = snapchain::consensus::consensus::Config::default();
-        config = config.with_shard_ids((1..=num_shards).collect());
+        let config = snapchain::network::gossip::Config::new(gossip_address, bootstrap_address);
 
-        let (gossip_tx, gossip_rx) = mpsc::channel::<GossipEvent<SnapchainValidatorContext>>(100);
+        let mut consensus_config = snapchain::consensus::consensus::Config::default();
+        consensus_config =
+            consensus_config.with((1..=num_shards).collect(), validator_addresses.clone());
+
+        let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
+
+        let mut gossip =
+            SnapchainGossip::create(keypair.clone(), config, system_tx.clone()).unwrap();
+        let gossip_tx = gossip.tx.clone();
 
         let registry = SharedRegistry::global();
+        let peer_id = gossip.swarm.local_peer_id().clone();
         let (block_tx, mut block_rx) = mpsc::channel::<Block>(100);
         let data_dir = &make_tmp_path();
         let db = Arc::new(RocksDB::new(data_dir));
@@ -85,8 +92,8 @@ impl NodeForTest {
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
         let node = SnapchainNode::create(
             keypair.clone(),
-            config,
-            None,
+            consensus_config,
+            peer_id,
             gossip_tx.clone(),
             shard_decision_tx,
             Some(block_tx),
@@ -96,7 +103,6 @@ impl NodeForTest {
             statsd_client.clone(),
             16,
             registry,
-            validator_config,
         )
         .await;
 
@@ -118,11 +124,14 @@ impl NodeForTest {
             assert_eq!(block.shard_chunks.len(), num_shards as usize);
         };
 
-        tokio::spawn(async move {
+        let mut join_handles = Vec::new();
+
+        let handle = tokio::spawn(async move {
             while let Some(block) = block_rx.recv().await {
                 assert_valid_block(&block);
             }
         });
+        join_handles.push(handle);
 
         let grpc_addr = format!("0.0.0.0:{}", grpc_port);
         let addr = grpc_addr.clone();
@@ -138,7 +147,8 @@ impl NodeForTest {
             shard_decision_rx,
             statsd_client.clone(),
         );
-        tokio::spawn(async move { mempool.run().await });
+        let handle = tokio::spawn(async move { mempool.run().await });
+        join_handles.push(handle);
 
         let service = MyHubService::new(
             block_store.clone(),
@@ -151,7 +161,7 @@ impl NodeForTest {
             None,
         );
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let grpc_socket_addr: SocketAddr = addr.parse().unwrap();
             let resp = Server::builder()
                 .add_service(HubServiceServer::new(service))
@@ -164,44 +174,38 @@ impl NodeForTest {
                 Err(e) => error!(error = ?e, "{}", msg),
             }
         });
+        join_handles.push(handle);
+
+        let handle = tokio::spawn(async move {
+            gossip.start().await;
+        });
+        join_handles.push(handle);
+
+        let node_for_dispatch = node.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                if let Some(system_event) = system_rx.recv().await {
+                    match system_event {
+                        SystemMessage::MalachiteNetwork(event_shard, event) => {
+                            node_for_dispatch.dispatch(event_shard, event);
+                        }
+                        _ => {
+                            // noop
+                        }
+                    }
+                }
+            }
+        });
+        join_handles.push(handle);
 
         Self {
             node,
-            gossip_rx,
             db: db.clone(),
             block_store,
             mempool_tx,
+            handles: join_handles,
         }
     }
-
-    #[allow(dead_code)] // TODO
-    pub async fn recv_gossip_event(&mut self) -> Option<GossipEvent<SnapchainValidatorContext>> {
-        self.gossip_rx.recv().await
-    }
-
-    pub fn cast(&self, shard: MalachiteEventShard, event: MalachiteNetworkEvent) {
-        self.node.dispatch(shard, event);
-    }
-
-    pub fn start_height(&self) {
-        // create a multiaddr
-        let multiaddr = Multiaddr::empty();
-        self.node.dispatch(
-            MalachiteEventShard::None,
-            MalachiteNetworkEvent::Listening(multiaddr),
-        );
-    }
-
-    // pub fn register_keypair(&self, keypair: Keypair, rpc_address: String) {
-    //     for i in 0..=self.num_shards {
-    //         self.cast(ConsensusMsg::RegisterValidator(SnapchainValidator::new(
-    //             SnapchainShard::new(i),
-    //             keypair.public().clone(),
-    //             Some(rpc_address.clone()),
-    //             0,
-    //         )));
-    //     }
-    // }
 
     pub fn id(&self) -> String {
         self.node.id()
@@ -235,67 +239,76 @@ impl NodeForTest {
 
         messages.len()
     }
+
+    pub fn stop(&self) {
+        self.node.stop();
+        for handle in self.handles.iter() {
+            handle.abort();
+        }
+    }
 }
 
 pub struct TestNetwork {
+    num_nodes: u32,
+    num_shards: u32,
+    base_grpc_port: u32,
+    keypairs: Vec<Keypair>,
+    validator_addresses: Vec<String>,
+    gossip_addresses: Vec<String>,
     nodes: Vec<NodeForTest>,
 }
 
 impl TestNetwork {
     // These networks can be created in parallel, so make sure the base port is far enough part to avoid conflicts
     pub async fn create(num_nodes: u32, num_shards: u32, base_grpc_port: u32) -> Self {
-        let mut nodes = Vec::new();
         let mut keypairs = Vec::new();
-        let mut validator_config = SnapchainValidatorConfig::new();
-        for _ in 0..num_nodes {
+        let mut validator_addresses = vec![];
+        let mut node_addresses = vec![];
+        for i in 0..num_nodes {
             let keypair = Keypair::generate();
             keypairs.push(keypair.clone());
-            for j in 0..=num_shards {
-                let validator = SnapchainValidator::new(
-                    SnapchainShard::new(j),
-                    keypair.public().clone(),
-                    None,
-                    0,
-                );
-                validator_config.add_validator(validator);
-            }
+            validator_addresses.push(hex::encode(keypair.public().to_bytes()));
+            let port = BASE_PORT_FOR_TEST + i;
+            let gossip_address = format!("/ip4/{HOST_FOR_TEST}/udp/{port}/quic-v1");
+            node_addresses.push(gossip_address);
         }
-
-        // Register validators
-        for i in 0..num_nodes {
-            let keypair = keypairs[i as usize].clone();
-            let node =
-                NodeForTest::create(keypair, num_shards, base_grpc_port + i, &validator_config)
-                    .await;
-            nodes.push(node);
-
-            // for keypair in keypairs.iter() {
-            //     nodes[i as usize]
-            //         .register_keypair(keypair.clone(), format!("0.0.0.0:{}", base_grpc_port + i));
-            // }
+        Self {
+            num_nodes,
+            num_shards,
+            base_grpc_port,
+            keypairs,
+            validator_addresses,
+            gossip_addresses: node_addresses,
+            nodes: vec![],
         }
-        // Wait for the RegisterValidator message to be processed
-        tokio::time::sleep(time::Duration::from_millis(200)).await;
-
-        Self { nodes }
     }
 
-    // fn add_node(&mut self, new_node: NodeForTest) {
-    //     for node in self.nodes.iter() {
-    //         new_node.register_keypair(node.keypair.clone(), node.grpc_addr.clone());
-    //         node.register_keypair(new_node.keypair.clone(), new_node.grpc_addr.clone());
-    //     }
-    //     self.nodes.push(new_node)
-    // }
+    async fn start_node(&mut self, index: u32) {
+        let keypair = self.keypairs[index as usize].clone();
+        let gossip_address = self.gossip_addresses[index as usize].clone();
+        let grpc_port = self.base_grpc_port + index;
+        let node = NodeForTest::create(
+            keypair,
+            self.num_shards,
+            grpc_port,
+            &self.validator_addresses,
+            gossip_address,
+            self.gossip_addresses[0].clone(),
+        )
+        .await;
+        self.nodes.push(node);
+    }
+
+    async fn start_all(&mut self) {
+        for i in 0..self.num_nodes {
+            self.start_node(i).await;
+        }
+    }
 
     pub async fn produce_blocks(&mut self, num_blocks: u64) {
-        for node in self.nodes.iter_mut() {
-            node.start_height();
-        }
-
-        let timeout = tokio::time::Duration::from_secs(5);
+        let timeout = tokio::time::Duration::from_secs(10);
         let start = tokio::time::Instant::now();
-        let mut timer = time::interval(tokio::time::Duration::from_millis(10));
+        let mut timer = time::interval(tokio::time::Duration::from_millis(100));
 
         let num_nodes = self.nodes.len();
 
@@ -311,50 +324,15 @@ impl TestNetwork {
                 }
             }
 
-            // Loop through each node, and select all other nodes to send gossip messages
-            for i in 0..self.nodes.len() {
-                if let Ok(gossip_event) = self.nodes[i].gossip_rx.try_recv() {
-                    let (_, bytes) =
-                        SnapchainGossip::map_gossip_event_to_bytes(Some(gossip_event)).unwrap();
-                    let peer_id = PeerId::random();
-                    let system_event =
-                        SnapchainGossip::map_gossip_bytes_to_system_message(peer_id, bytes)
-                            .unwrap();
-                    match system_event {
-                        SystemMessage::MalachiteNetwork(event_shard, event) => {
-                            self.dispatch_to_other_nodes(i, event_shard, event);
-                        }
-                        SystemMessage::Mempool(_) => {
-                            // noop
-                        }
-                        _ => {
-                            panic!("Unexpected system event");
-                        }
-                    }
-                }
-            }
-
             if start.elapsed() > timeout {
                 break;
-            }
-        }
-    }
-
-    fn dispatch_to_other_nodes(
-        &self,
-        i: usize,
-        shard: MalachiteEventShard,
-        event: MalachiteNetworkEvent,
-    ) {
-        for j in 0..self.nodes.len() {
-            if i != j {
-                self.nodes[j].cast(shard.clone(), event.clone());
             }
         }
     }
 }
 
 #[tokio::test]
+#[serial]
 async fn test_basic_consensus() {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
     let _ = tracing_subscriber::fmt()
@@ -363,6 +341,7 @@ async fn test_basic_consensus() {
 
     let num_shards = 2;
     let mut network = TestNetwork::create(3, num_shards, 3380).await;
+    network.start_all().await;
 
     let messages_tx1 = network.nodes[0].mempool_tx.clone();
 
@@ -416,77 +395,104 @@ async fn test_basic_consensus() {
     }
 }
 
-// async fn wait_for_blocks(new_node: &NodeForTest, old_node: &NodeForTest) {
-//     let timeout = tokio::time::Duration::from_secs(5);
-//     let start = tokio::time::Instant::now();
-//     let mut timer = time::interval(tokio::time::Duration::from_millis(10));
-//     loop {
-//         let _ = timer.tick().await;
-//         if new_node.num_blocks().await >= old_node.num_blocks().await {
-//             break;
-//         }
-//         if start.elapsed() > timeout {
-//             break;
-//         }
-//     }
-//
-//     assert!(
-//         new_node.num_blocks().await >= old_node.num_blocks().await,
-//         "Node 4 should have confirmed blocks"
-//     );
-//     assert!(
-//         new_node.num_shard_chunks().await >= old_node.num_shard_chunks().await,
-//         "Node 4 should have confirmed shard chunks"
-//     );
-// }
+async fn wait_for_blocks(node: &NodeForTest, num_blocks: usize) {
+    let timeout = tokio::time::Duration::from_secs(5);
+    let start = tokio::time::Instant::now();
+    let mut timer = time::interval(tokio::time::Duration::from_millis(10));
+    let existing_blocks = node.num_blocks().await;
 
-// #[tokio::test]
-// async fn test_basic_sync() {
-//     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
-//     let _ = tracing_subscriber::fmt()
-//         .with_env_filter(env_filter)
-//         .try_init();
-//
-//     let keypair4 = Keypair::generate();
-//
-//     // Set up shard and validators
-//
-//     let num_shards = 1;
-//
-//     let mut network = TestNetwork::create(3, num_shards, 3220).await;
-//
-//     network.produce_blocks(3).await;
-//
-//     for i in 0..network.nodes.len() {
-//         assert!(
-//             network.nodes[i].num_blocks().await >= 3,
-//             "Node {} should have confirmed blocks",
-//             i
-//         );
-//     }
-//
-//     let node4 = NodeForTest::create(keypair4.clone(), num_shards, 3227).await;
-//     node4.register_keypair(keypair4.clone(), format!("0.0.0.0:{}", 3227));
-//     node4.cast(ConsensusMsg::RegisterValidator(SnapchainValidator::new(
-//         SnapchainShard::new(0),
-//         network.nodes[0].keypair.public().clone(),
-//         Some(network.nodes[0].grpc_addr.clone()),
-//         network.nodes[0].num_blocks().await as u64,
-//     )));
-//     node4.cast(ConsensusMsg::RegisterValidator(SnapchainValidator::new(
-//         SnapchainShard::new(1),
-//         network.nodes[0].keypair.public().clone(),
-//         Some(network.nodes[0].grpc_addr.clone()),
-//         network.nodes[0].num_shard_chunks().await as u64,
-//     )));
-//
-//     // Node 4 won't see these blocks directly.
-//     network.produce_blocks(3).await;
-//
-//     network.add_node(node4);
-//
-//     // Node 4 picks up the blocks it missed on the first proposals from each validator.
-//     network.produce_blocks(1).await;
-//
-//     wait_for_blocks(&network.nodes[3], &network.nodes[0]).await;
-// }
+    loop {
+        let _ = timer.tick().await;
+        if node.num_blocks().await >= existing_blocks + num_blocks {
+            break;
+        }
+        if start.elapsed() > timeout {
+            break;
+        }
+    }
+
+    assert!(
+        node.num_blocks().await >= existing_blocks + num_blocks,
+        "Node should have confirmed blocks"
+    );
+    assert!(
+        node.num_shard_chunks().await >= existing_blocks + num_blocks,
+        "Node should have confirmed shard chunks"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_basic_sync() {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .try_init();
+
+    // Set up shard and validators
+    let num_shards = 1;
+
+    let mut network = TestNetwork::create(4, num_shards, 3220).await;
+
+    // Start the first three nodes
+    for i in 0..3 {
+        network.start_node(i).await;
+    }
+
+    let messages_tx1 = network.nodes[0].mempool_tx.clone();
+
+    tokio::spawn(async move {
+        let mut i: i32 = 0;
+        let prefix = vec![0, 0, 0, 0, 0, 0];
+        loop {
+            info!(i, "sending message");
+
+            let mut hash = prefix.clone();
+            hash.extend_from_slice(&i.to_be_bytes()); // just for now
+
+            messages_tx1
+                .send(
+                    snapchain::storage::store::engine::MempoolMessage::UserMessage(
+                        messages_factory::casts::create_cast_add(
+                            321,
+                            format!("Cast {}", i).as_str(),
+                            None,
+                            None,
+                        ),
+                    ),
+                )
+                .await
+                .unwrap();
+            i += 1;
+            tokio::time::sleep(time::Duration::from_millis(200)).await;
+        }
+    });
+
+    network.produce_blocks(3).await;
+
+    for i in 0..3 {
+        assert!(
+            network.nodes[i].num_shard_chunks().await >= 3,
+            "Node {} should have confirmed chunks",
+            i
+        );
+        assert!(
+            network.nodes[i].num_blocks().await >= 3,
+            "Node {} should have confirmed blocks",
+            i
+        );
+    }
+
+    // Add the node to the network and start producing blocks again.
+    network.start_node(3).await;
+
+    // When we start it the new node should not have any blocks or chunks
+    assert_eq!(network.nodes[3].num_shard_chunks().await, 0);
+    assert_eq!(network.nodes[3].num_blocks().await, 0);
+
+    network.produce_blocks(10).await;
+
+    // After producing some blocks, the node should've sync'd and have blocks and chunks
+    // TODO: The actual number successfully sync'd varies. Figure out why and add a stricter check on exact number of blocks
+    wait_for_blocks(&network.nodes[3], 1).await;
+}

@@ -3,9 +3,7 @@ use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::spawn::MalachiteConsensusActors;
 use crate::consensus::proposer::{BlockProposer, ShardProposer};
 use crate::consensus::validator::ShardValidator;
-use crate::core::types::{
-    Address, ShardId, SnapchainShard, SnapchainValidatorConfig, SnapchainValidatorContext,
-};
+use crate::core::types::{Address, ShardId, SnapchainShard, SnapchainValidatorContext};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::network::gossip::GossipEvent;
 use crate::proto::{Block, ShardChunk};
@@ -18,12 +16,14 @@ use crate::storage::trie::merkle_trie;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
+use libp2p::PeerId;
 use std::collections::{BTreeMap, HashMap};
 use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
 
 const MAX_SHARDS: u32 = 64;
 
+#[derive(Clone)]
 pub struct SnapchainNode {
     pub consensus_actors: BTreeMap<u32, MalachiteConsensusActors>,
     pub shard_stores: HashMap<u32, Stores>,
@@ -35,7 +35,7 @@ impl SnapchainNode {
     pub async fn create(
         keypair: Keypair,
         config: Config,
-        rpc_address: Option<String>,
+        local_peer_id: PeerId,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         shard_decision_tx: broadcast::Sender<ShardChunk>,
         block_tx: Option<mpsc::Sender<Block>>,
@@ -45,7 +45,6 @@ impl SnapchainNode {
         statsd_client: StatsdClientWrapper,
         trie_branching_factor: u32,
         registry: &SharedRegistry,
-        validator_config: &SnapchainValidatorConfig,
     ) -> Self {
         let validator_address = Address(keypair.public().to_bytes());
 
@@ -55,7 +54,7 @@ impl SnapchainNode {
         let mut shard_stores: HashMap<u32, Stores> = HashMap::new();
 
         // Create the shard validators
-        for shard_id in config.shard_ids {
+        for shard_id in config.shard_ids.clone() {
             if shard_id == 0 {
                 panic!("Shard ID 0 is reserved for the block shard, created automaticaly");
             } else if shard_id > MAX_SHARDS {
@@ -63,7 +62,7 @@ impl SnapchainNode {
             }
 
             let shard = SnapchainShard::new(shard_id);
-            let shard_validator_set = validator_config.get_validator_set(shard_id).unwrap();
+            let shard_validator_set = config.validator_set_for(shard_id);
             let ctx = SnapchainValidatorContext::new(keypair.clone());
 
             let db = RocksDB::open_shard_db(rocksdb_dir.clone().as_str(), shard_id);
@@ -100,10 +99,11 @@ impl SnapchainNode {
             let consensus_actor = MalachiteConsensusActors::create_and_start(
                 ctx,
                 shard_validator,
-                rpc_address.clone(),
+                local_peer_id,
                 rocksdb_dir.clone(),
                 gossip_tx.clone(),
                 registry,
+                config.consensus_start_delay,
             )
             .await;
 
@@ -118,7 +118,7 @@ impl SnapchainNode {
         let block_shard = SnapchainShard::new(0);
 
         // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
-        let block_validator_set = validator_config.get_validator_set(0).unwrap();
+        let block_validator_set = config.validator_set_for(0);
         let engine = BlockEngine::new(block_store.clone());
         let shard_decision_rx = shard_decision_tx.subscribe();
         let block_proposer = BlockProposer::new(
@@ -141,10 +141,11 @@ impl SnapchainNode {
         let block_consensus_actor = MalachiteConsensusActors::create_and_start(
             ctx,
             block_validator,
-            rpc_address.clone(),
+            local_peer_id,
             rocksdb_dir.clone(),
             gossip_tx.clone(),
             registry,
+            config.consensus_start_delay,
         )
         .await;
         if block_consensus_actor.is_err() {
@@ -171,15 +172,6 @@ impl SnapchainNode {
         }
     }
 
-    // pub fn start_height(&self, block_number: u64) {
-    //     for (shard, actor) in self.consensus_actors.iter() {
-    //         let result = actor.cast(ConsensusMsg::StartHeight(Height::new(*shard, block_number)));
-    //         if let Err(e) = result {
-    //             warn!("Failed to start height: {:?}", e);
-    //         }
-    //     }
-    // }
-    //
     pub fn dispatch(&self, shard: MalachiteEventShard, event: MalachiteNetworkEvent) {
         match shard {
             MalachiteEventShard::None => {

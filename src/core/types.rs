@@ -1,5 +1,7 @@
 use core::fmt;
-use informalsystems_malachitebft_core_types::{self, SignedMessage, SigningProvider};
+use informalsystems_malachitebft_core_types::{
+    self, AggregatedSignature, CommitSignature, SignedMessage, SigningProvider,
+};
 use informalsystems_malachitebft_core_types::{
     Extension, NilOrVal, Round, SignedProposal, SignedProposalPart, SignedVote, Validator,
     VoteType, VotingPower,
@@ -7,7 +9,6 @@ use informalsystems_malachitebft_core_types::{
 use libp2p::identity::ed25519::Keypair;
 use prost::Message;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::sync::Arc;
 use tracing::warn;
@@ -15,7 +16,7 @@ use tracing::warn;
 pub use crate::proto; // TODO: reconsider how this is imported
 
 use crate::proto::full_proposal::ProposedValue;
-use crate::proto::{Block, FullProposal, ShardChunk};
+use crate::proto::{Block, Commits, FullProposal, ShardChunk};
 pub use proto::Height;
 pub use proto::ShardHash;
 
@@ -348,16 +349,24 @@ impl FullProposal {
         }
     }
 
-    pub fn block(&self) -> Option<Block> {
+    pub fn block(&self, commits: Commits) -> Option<Block> {
         match &self.proposed_value {
-            Some(ProposedValue::Block(block)) => Some(block.clone()),
+            Some(ProposedValue::Block(block)) => {
+                let mut block = block.clone();
+                block.commits = Some(commits);
+                Some(block)
+            }
             _ => None,
         }
     }
 
-    pub fn shard_chunk(&self) -> Option<&ShardChunk> {
+    pub fn shard_chunk(&self, commits: Commits) -> Option<ShardChunk> {
         match &self.proposed_value {
-            Some(ProposedValue::Shard(chunk)) => Some(&chunk),
+            Some(ProposedValue::Shard(chunk)) => {
+                let mut chunk = chunk.clone();
+                chunk.commits = Some(commits);
+                Some(chunk)
+            }
             _ => None,
         }
     }
@@ -445,31 +454,6 @@ impl SnapchainValidatorSet {
         } else {
             self.validators[0].shard_index
         }
-    }
-}
-
-pub struct SnapchainValidatorConfig {
-    validator_set_by_shard: HashMap<u32, SnapchainValidatorSet>,
-}
-
-impl SnapchainValidatorConfig {
-    pub fn new() -> Self {
-        Self {
-            validator_set_by_shard: HashMap::new(),
-        }
-    }
-
-    pub fn add_validator(&mut self, validator: SnapchainValidator) {
-        let shard_index = validator.shard_index;
-        let set = self
-            .validator_set_by_shard
-            .entry(shard_index)
-            .or_insert_with(|| SnapchainValidatorSet::new(vec![]));
-        set.add(validator);
-    }
-
-    pub fn get_validator_set(&self, shard_index: u32) -> Option<&SnapchainValidatorSet> {
-        self.validator_set_by_shard.get(&shard_index)
     }
 }
 
@@ -828,5 +812,58 @@ impl informalsystems_malachitebft_core_types::Validator<SnapchainValidatorContex
 
     fn voting_power(&self) -> VotingPower {
         1
+    }
+}
+
+impl proto::Commits {
+    pub fn to_commit_certificate(
+        &self,
+    ) -> informalsystems_malachitebft_core_types::CommitCertificate<SnapchainValidatorContext> {
+        let height = self.height.unwrap();
+        let round = Round::from(self.round);
+        let value_id = self.value.clone().unwrap();
+
+        let signatures = self
+            .signatures
+            .iter()
+            .map(|commit| CommitSignature {
+                address: Address::from_vec(commit.signer.clone()),
+                signature: Signature(commit.signature.clone()),
+                extension: None,
+            })
+            .collect();
+
+        informalsystems_malachitebft_core_types::CommitCertificate {
+            height,
+            round,
+            value_id,
+            aggregated_signature: AggregatedSignature::new(signatures),
+        }
+    }
+
+    pub fn from_commit_certificate(
+        certificate: &informalsystems_malachitebft_core_types::CommitCertificate<
+            SnapchainValidatorContext,
+        >,
+    ) -> Self {
+        let height = Some(certificate.height.clone());
+        let round = certificate.round.as_i64();
+        let value = Some(certificate.value_id.clone());
+        let signatures = certificate
+            .aggregated_signature
+            .signatures
+            .iter()
+            .map(|commit| proto::CommitSignature {
+                signer: commit.address.to_vec(),
+                signature: commit.signature.0.clone(),
+            })
+            .collect();
+
+        proto::Commits {
+            height,
+            round,
+            value,
+            signatures,
+        }
     }
 }

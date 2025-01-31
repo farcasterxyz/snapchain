@@ -7430,6 +7430,7 @@ dependencies = [
  "threadpool",
  "tokio",
  "tokio-stream",
+ "toml 0.8.19",
  "tonic",
  "tonic-build",
  "tracing",
