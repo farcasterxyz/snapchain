@@ -1,8 +1,10 @@
 use crate::core::validations::error::ValidationError;
-use crate::proto::{self, FarcasterNetwork, MessageData, MessageType};
+use crate::proto::{self, FarcasterNetwork, MessageData, MessageType, UserDataBody, UserDataType};
 use crate::storage::util::{blake3_20, bytes_compare};
+use crate::utils::factory::messages_factory::user_data;
 
 use ed25519_dalek::{Signature, VerifyingKey};
+use fancy_regex::Regex;
 use prost::Message;
 
 use super::{cast, link, reaction, verification};
@@ -51,56 +53,35 @@ pub fn validate_message(message: &proto::Message) -> Result<(), ValidationError>
         .or_else(|_| Err(ValidationError::InvalidData))?;
 
     match &message_data.body {
-        Some(proto::message_data::Body::UserDataBody(_)) => {
-            // Split user data validation from engine
+        Some(proto::message_data::Body::UserDataBody(user_data)) => {
+            validate_user_data_add_body(user_data)?;
         }
         Some(proto::message_data::Body::UsernameProofBody(_)) => {
             // Validate ens
         }
         Some(proto::message_data::Body::VerificationAddAddressBody(add)) => {
-            let result = verification::validate_add_address(&add, message_data.fid, network);
-            if result.is_err() {
-                return result;
-            }
+            verification::validate_add_address(&add, message_data.fid, network)?;
         }
         Some(proto::message_data::Body::LinkCompactStateBody(link_compact_state_body)) => {
-            let result = link::validate_link_compact_state_body(&link_compact_state_body);
-            if result.is_err() {
-                return result;
-            }
+            link::validate_link_compact_state_body(&link_compact_state_body)?;
         }
         Some(proto::message_data::Body::CastAddBody(cast_add_body)) => {
-            let result = cast::validate_cast_add_body(
+            cast::validate_cast_add_body(
                 &cast_add_body,
                 message_data.timestamp < EMBEDS_V1_CUTOFF,
-            );
-            if result.is_err() {
-                return result;
-            }
+            )?;
         }
         Some(proto::message_data::Body::CastRemoveBody(cast_remove_body)) => {
-            let result = cast::validate_cast_remove_body(&cast_remove_body);
-            if result.is_err() {
-                return result;
-            }
+            cast::validate_cast_remove_body(&cast_remove_body)?;
         }
         Some(proto::message_data::Body::ReactionBody(reaction_body)) => {
-            let result = reaction::validate_reaction_body(&reaction_body);
-            if result.is_err() {
-                return result;
-            }
+            reaction::validate_reaction_body(&reaction_body)?;
         }
         Some(proto::message_data::Body::LinkBody(link_body)) => {
-            let result = link::validate_link_body(&link_body);
-            if result.is_err() {
-                return result;
-            }
+            link::validate_link_body(&link_body)?;
         }
         Some(proto::message_data::Body::VerificationRemoveBody(remove_body)) => {
-            let result = verification::validate_remove_address(&remove_body);
-            if result.is_err() {
-                return result;
-            }
+            verification::validate_remove_address(&remove_body)?;
         }
         Some(proto::message_data::Body::FrameActionBody(_)) => {}
         None => {
@@ -153,5 +134,187 @@ fn validate_message_hash(
     if bytes_compare(&result, hash) != 0 {
         return Err(ValidationError::InvalidHash);
     }
+    Ok(())
+}
+
+pub fn validate_fname(input: &String) -> Result<(), ValidationError> {
+    if input.len() == 0 {
+        return Err(ValidationError::InvalidDataLength);
+    }
+
+    // FNAME_MAX_LENGTH - ".eth".length
+    if input.len() > 16 {
+        return Err(ValidationError::InvalidDataLength);
+    }
+
+    if !Regex::new(r"^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,38}$")
+        .unwrap()
+        .is_match(&input)
+        .map_err(|_| ValidationError::InvalidData)?
+    {
+        return Err(ValidationError::InvalidData);
+    }
+
+    Ok(())
+}
+
+pub fn validate_ens_name(input: &String) -> Result<(), ValidationError> {
+    if !input.ends_with(".eth") {
+        return Err(ValidationError::InvalidDataLength);
+    }
+
+    let name_parts: Vec<&str> = input.split('.').collect();
+    if name_parts.len() != 2 || name_parts[0].is_empty() {
+        return Err(ValidationError::InvalidData);
+    }
+
+    if input.len() > 20 {
+        return Err(ValidationError::InvalidDataLength);
+    }
+
+    if !Regex::new(r"^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,38}$")
+        .unwrap()
+        .is_match(name_parts[0])
+        .map_err(|_| ValidationError::InvalidData)?
+    {
+        return Err(ValidationError::InvalidData);
+    }
+
+    Ok(())
+}
+
+pub fn validate_twitter_username(input: &String) -> Result<(), ValidationError> {
+    if input.len() > 15 {
+        return Err(ValidationError::InvalidDataLength);
+    }
+
+    if !Regex::new(r"^[A-Za-z0-9_]{1,15}$")
+        .unwrap()
+        .is_match(&input)
+        .map_err(|_| ValidationError::InvalidData)?
+    {
+        return Err(ValidationError::InvalidData);
+    }
+
+    Ok(())
+}
+
+pub fn validate_github_username(input: &String) -> Result<(), ValidationError> {
+    if input.len() > 38 {
+        return Err(ValidationError::InvalidDataLength);
+    }
+
+    if !Regex::new(r"^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$")
+        .unwrap()
+        .is_match(&input)
+        .map_err(|_| ValidationError::InvalidData)?
+    {
+        return Err(ValidationError::InvalidData);
+    }
+
+    Ok(())
+}
+
+fn validate_number(value: &str) -> Result<f64, ValidationError> {
+    return value
+        .parse::<f64>()
+        .map_err(|_| ValidationError::InvalidData);
+}
+
+fn validate_latitude(value: &str) -> Result<(), ValidationError> {
+    let number = validate_number(value)?;
+
+    if number < -90.0 || number > 90.0 {
+        return Err(ValidationError::InvalidData);
+    }
+
+    Ok(())
+}
+
+fn validate_longitude(value: &str) -> Result<(), ValidationError> {
+    let number = validate_number(value)?;
+
+    if number < -180.0 || number > 180.0 {
+        return Err(ValidationError::InvalidData);
+    }
+
+    Ok(())
+}
+
+pub fn validate_user_location(location: &str) -> Result<(), ValidationError> {
+    if location.is_empty() {
+        return Ok(());
+    }
+
+    let captures = Regex::new(r"^geo:(-?\d{1,2}\.\d{2}),(-?\d{1,3}\.\d{2})$")
+        .unwrap()
+        .captures(location)
+        .map_err(|_| ValidationError::InvalidData)?;
+
+    if captures.is_none() {
+        return Err(ValidationError::InvalidData);
+    }
+
+    let captured = captures.unwrap();
+
+    let latitude = captured
+        .get(1)
+        .ok_or_else(|| ValidationError::InvalidData)?;
+    validate_latitude(latitude.as_str())?;
+
+    let longitude = captured
+        .get(2)
+        .ok_or_else(|| ValidationError::InvalidData)?;
+    validate_longitude(longitude.as_str())?;
+
+    Ok(())
+}
+
+pub fn validate_user_data_add_body(body: &UserDataBody) -> Result<(), ValidationError> {
+    let value_bytes = body.value.as_bytes();
+
+    match UserDataType::try_from(body.r#type).map_err(|_| ValidationError::InvalidData)? {
+        UserDataType::Pfp => {
+            if value_bytes.len() > 256 {
+                return Err(ValidationError::InvalidDataLength);
+            }
+        }
+        UserDataType::Display => {
+            if value_bytes.len() > 32 {
+                return Err(ValidationError::InvalidDataLength);
+            }
+        }
+        UserDataType::Bio => {
+            if value_bytes.len() > 256 {
+                return Err(ValidationError::InvalidDataLength);
+            }
+        }
+        UserDataType::Url => {
+            if value_bytes.len() > 256 {
+                return Err(ValidationError::InvalidDataLength);
+            }
+        }
+        UserDataType::Username => {
+            // Users are allowed to set fname = '' to remove their fname
+            if !body.value.is_empty() {
+                let fname_result = validate_fname(&body.value);
+                let ens_result = validate_ens_name(&body.value);
+                if fname_result.is_err() && ens_result.is_err() {
+                    return fname_result;
+                }
+            }
+        }
+        UserDataType::Location => {
+            validate_user_location(&body.value)?;
+        }
+        UserDataType::Twitter => {
+            validate_twitter_username(&body.value)?;
+        }
+        UserDataType::Github => {
+            validate_github_username(&body.value)?;
+        }
+        UserDataType::None => return Err(ValidationError::InvalidData),
+    }
+
     Ok(())
 }
