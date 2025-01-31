@@ -1,9 +1,7 @@
-use crate::consensus::consensus::{ConsensusMsg, MalachiteEventShard, SystemMessage};
+use crate::consensus::consensus::{MalachiteEventShard, SystemMessage};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
-use crate::core::types::{
-    proto, ShardId, SnapchainContext, SnapchainShard, SnapchainValidator, SnapchainValidatorContext,
-};
+use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
 use crate::storage::store::engine::MempoolMessage;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -71,7 +69,6 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
     BroadcastSignedVote(SignedVote<Ctx>),
     BroadcastSignedProposal(SignedProposal<Ctx>),
     BroadcastFullProposal(proto::FullProposal),
-    RegisterValidator(proto::RegisterValidator),
     BroadcastMempoolMessage(MempoolMessage),
     BroadcastStatus(sync::Status<SnapchainValidatorContext>),
     SyncRequest(
@@ -356,28 +353,6 @@ impl SnapchainGossip {
                     let shard = MalachiteEventShard::Shard(shard_result.unwrap());
                     Some(SystemMessage::MalachiteNetwork(shard, event))
                 }
-                Some(proto::gossip_message::GossipMessage::Validator(validator)) => {
-                    debug!("Received validator registration from peer: {}", peer_id);
-                    if let Some(validator) = validator.validator {
-                        let public_key =
-                            libp2p::identity::ed25519::PublicKey::try_from_bytes(&validator.signer);
-                        if public_key.is_err() {
-                            warn!("Failed to decode public key from peer: {}", peer_id);
-                            return None;
-                        }
-                        let rpc_address = validator.rpc_address;
-                        let shard_index = validator.shard_index;
-                        let validator = SnapchainValidator::new(
-                            SnapchainShard::new(shard_index),
-                            public_key.unwrap(),
-                            Some(rpc_address),
-                            validator.current_height,
-                        );
-                        let consensus_message = ConsensusMsg::RegisterValidator(validator);
-                        return Some(SystemMessage::Consensus(consensus_message));
-                    }
-                    None
-                }
                 Some(proto::gossip_message::GossipMessage::Consensus(signed_consensus_msg)) => {
                     let malachite_peer_id = MalachitePeerId::from_libp2p(&peer_id);
                     let bytes = Bytes::from(signed_consensus_msg.encode_to_vec());
@@ -524,15 +499,6 @@ impl SnapchainGossip {
                 let gossip_message = proto::GossipMessage {
                     gossip_message: Some(proto::gossip_message::GossipMessage::FullProposal(
                         full_proposal,
-                    )),
-                };
-                Some((GossipTopic::Consensus, gossip_message.encode_to_vec()))
-            }
-            Some(GossipEvent::RegisterValidator(register_validator)) => {
-                debug!("Broadcasting validator registration");
-                let gossip_message = proto::GossipMessage {
-                    gossip_message: Some(proto::gossip_message::GossipMessage::Validator(
-                        register_validator,
                     )),
                 };
                 Some((GossipTopic::Consensus, gossip_message.encode_to_vec()))

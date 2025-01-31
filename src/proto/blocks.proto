@@ -143,11 +143,6 @@ message ValidatorMessage {
 
 
 // Gossip related messages
-message RegisterValidator {
-  Validator validator = 1;
-  uint64 nonce = 2;
-}
-
 message MempoolMessage {
   oneof mempool_message {
     Message user_message = 1;
@@ -199,10 +194,9 @@ message SyncResponse {
 message GossipMessage {
   oneof gossip_message {
     ConsensusMessage consensus = 1;
-    RegisterValidator validator = 2;  // Remove before testnet, once in-protocol leader rotation is implemented
-    FullProposal full_proposal = 3;
-    MempoolMessage mempool_message = 4;
-    StatusMessage status = 5;
+    FullProposal full_proposal = 2;
+    MempoolMessage mempool_message = 3;
+    StatusMessage status = 4;
   }
 }
 

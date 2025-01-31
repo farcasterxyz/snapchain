@@ -1,11 +1,9 @@
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::onchain_events::{L1Client, RealL1Client};
 use snapchain::consensus::consensus::SystemMessage;
-use snapchain::core::types::proto;
 use snapchain::mempool::mempool::Mempool;
 use snapchain::mempool::routing;
 use snapchain::network::admin_server::{DbManager, MyAdminService};
-use snapchain::network::gossip::GossipEvent;
 use snapchain::network::gossip::SnapchainGossip;
 use snapchain::network::server::MyHubService;
 use snapchain::node::snapchain_node::SnapchainNode;
@@ -20,10 +18,9 @@ use std::error::Error;
 use std::net;
 use std::net::SocketAddr;
 use std::process;
-use std::time::Duration;
+use tokio::select;
 use tokio::signal::ctrl_c;
 use tokio::sync::{broadcast, mpsc};
-use tokio::{select, time};
 use tonic::transport::Server;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -281,11 +278,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
-    // Create a timer for block creation
-    let mut block_interval = time::interval(Duration::from_secs(2));
-
-    let mut tick_count = 0;
-
     // Kick it off
     loop {
         select! {
@@ -299,46 +291,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 node.stop();
                 return Ok(());
             }
-            _ = block_interval.tick() => {
-                tick_count += 1;
-                // Every 5 ticks, re-register the validators so that new nodes can discover each other
-                if tick_count % 5 == 0 {
-                    let nonce = tick_count as u64;
-
-                    let ids = {
-                        // prepend 0 to shard_ids for the following loop
-                        let mut ids = vec![0u32];
-                        ids.extend(&app_config.consensus.shard_ids);
-                        ids
-                    };
-
-                    for i in ids {
-                        let current_height =
-                        if i == 0 {
-                            block_store.max_block_number().unwrap_or_else(|_| 0)
-                        } else {
-                            let stores = node.shard_stores.get(&i);
-                            match stores {
-                                None => 0,
-                                Some(stores) => stores.shard_store.max_block_number().unwrap_or_else(|_| 0)
-                            }
-                        };
-
-                        let register_validator = proto::RegisterValidator {
-                            validator: Some(proto::Validator {
-                                signer: keypair.public().to_bytes().to_vec(),
-                                fid: 0,
-                                rpc_address: app_config.rpc_address.clone(),
-                                shard_index: i,
-                                current_height
-                            }),
-                            nonce,   // Need the nonce to avoid the gossip duplicate message check
-                        };
-                        gossip_tx.send(GossipEvent::RegisterValidator(register_validator)).await?;
-                    }
-                    info!("Registering validator with nonce: {}", nonce);
-                }
-            }
             Some(msg) = system_rx.recv() => {
                 match msg {
                     SystemMessage::MalachiteNetwork(shard, event) => {
@@ -351,9 +303,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             warn!("Failed to add to local mempool: {:?}", e);
                         }
                     },
-                    SystemMessage::Consensus(_) => {
-                        // Deprecated
-                    }
                 }
             }
         }

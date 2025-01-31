@@ -1,6 +1,7 @@
-use crate::consensus::consensus::{ConsensusMsg, SystemMessage};
-use crate::core::types::proto;
+use crate::consensus::consensus::SystemMessage;
 use crate::network::gossip::{Config, GossipEvent, SnapchainGossip};
+use crate::storage::store::engine::MempoolMessage;
+use crate::utils::factory::messages_factory;
 use libp2p::identity::ed25519::Keypair;
 use serial_test::serial;
 use std::time::Duration;
@@ -45,25 +46,12 @@ async fn test_gossip_communication() {
     // Wait for connection to establish
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    // Create a random 1.5mb string to ensure sending a large message works
-    let data = "a".repeat(1_500_000);
-
     // Create a test message
-    let test_validator = proto::Validator {
-        signer: keypair1.public().to_bytes().to_vec(),
-        fid: 123,
-        rpc_address: data,
-        shard_index: 0,
-        current_height: 312,
-    };
-    let register_msg = proto::RegisterValidator {
-        validator: Some(test_validator),
-        nonce: 1,
-    };
-
+    let cast_add = messages_factory::casts::create_cast_add(123, "test", None, None);
+    let mempool_msg = MempoolMessage::UserMessage(cast_add.clone());
     // Send message from node1 to node2
     gossip_tx1
-        .send(GossipEvent::RegisterValidator(register_msg))
+        .send(GossipEvent::BroadcastMempoolMessage(mempool_msg))
         .await
         .unwrap();
 
@@ -74,9 +62,16 @@ async fn test_gossip_communication() {
         select! {
             received = system_rx2.recv()  => {
                 match received {
-                    Some(SystemMessage::Consensus(ConsensusMsg::RegisterValidator(validator)))  => {
-                        assert_eq!(validator.current_height, 312);
-                        break;
+                    Some(SystemMessage::Mempool(msg))  => {
+                        match msg {
+                            MempoolMessage::UserMessage(data) => {
+                                assert_eq!(data, cast_add);
+                                break;
+                            },
+                            _ => {
+                                panic!("Received unexpected message");
+                            },
+                        }
                     },
                     _ => {},
                 }
