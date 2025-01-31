@@ -103,6 +103,7 @@ impl SnapchainNode {
                 rocksdb_dir.clone(),
                 gossip_tx.clone(),
                 registry,
+                config.consensus_start_delay,
             )
             .await;
 
@@ -144,6 +145,7 @@ impl SnapchainNode {
             rocksdb_dir.clone(),
             gossip_tx.clone(),
             registry,
+            config.consensus_start_delay,
         )
         .await;
         if block_consensus_actor.is_err() {

@@ -58,10 +58,12 @@ pub async fn spawn_wal_actor(
 pub async fn spawn_host(
     network: NetworkRef<SnapchainValidatorContext>,
     shard_validator: ShardValidator,
+    consensus_start_delay: u32,
 ) -> Result<HostRef<SnapchainValidatorContext>, ractor::SpawnErr> {
     let state = HostState {
         network,
         shard_validator,
+        consensus_start_delay,
     };
     let actor_ref = Host::spawn(state).await?;
     Ok(actor_ref)
@@ -142,6 +144,7 @@ impl MalachiteConsensusActors {
         db_dir: String,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         registry: &SharedRegistry,
+        consensus_start_delay: u32,
     ) -> Result<Self, ractor::SpawnErr> {
         let current_height = shard_validator.get_current_height();
         let validator_set = shard_validator.get_validator_set();
@@ -162,7 +165,12 @@ impl MalachiteConsensusActors {
             span.clone(),
         )
         .await?;
-        let host_actor = spawn_host(network_actor.clone(), shard_validator).await?;
+        let host_actor = spawn_host(
+            network_actor.clone(),
+            shard_validator,
+            consensus_start_delay,
+        )
+        .await?;
         let sync_actor = spawn_sync_actor(
             ctx.clone(),
             network_actor.clone(),

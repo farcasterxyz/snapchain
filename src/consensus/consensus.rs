@@ -70,6 +70,9 @@ pub struct Config {
 
     pub max_messages_per_block: u32,
     pub validator_addresses: Vec<String>,
+
+    // Number of seconds to wait before kicking off start height
+    pub consensus_start_delay: u32,
 }
 
 impl Config {
@@ -87,6 +90,7 @@ impl Config {
             propose_value_delay: self.propose_value_delay,
             max_messages_per_block: self.max_messages_per_block,
             validator_addresses: validator_addresses.clone(),
+            consensus_start_delay: self.consensus_start_delay,
         }
     }
 
@@ -114,6 +118,7 @@ impl Default for Config {
             propose_value_delay: Duration::from_millis(250),
             max_messages_per_block: 250, //TODO
             validator_addresses: vec![],
+            consensus_start_delay: 2,
         }
     }
 }

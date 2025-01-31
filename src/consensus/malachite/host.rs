@@ -22,6 +22,7 @@ pub struct Host {}
 pub struct HostState {
     pub shard_validator: ShardValidator,
     pub network: NetworkRef<SnapchainValidatorContext>,
+    pub consensus_start_delay: u32,
 }
 
 impl Host {
@@ -51,7 +52,10 @@ impl Host {
                 let validator_set = state.shard_validator.get_validator_set();
                 let height = state.shard_validator.get_current_height().increment();
                 // Wait a few seconds before starting
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(
+                    state.consensus_start_delay as u64,
+                ))
+                .await;
                 info!(
                     height = height.to_string(),
                     validators = validator_set.validators.len(),
