@@ -70,6 +70,12 @@ To query a node, you can run `grpcurl` from within the container:
 docker compose exec node1 grpcurl -import-path proto -proto proto/rpc.proto list
 ```
 
+If you need fresh keypairs for your node, you can generate them with:
+
+```
+cargo run --bin generate_keys
+```
+
 ### Clean up
 
 You can remove any cached items by running:
