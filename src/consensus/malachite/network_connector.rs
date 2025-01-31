@@ -215,10 +215,11 @@ where
                     }
                 };
 
-                if from != status.peer_id {
-                    error!(%from, %status.peer_id, "Mismatched peer ID in status message");
-                    return Ok(());
-                }
+                // We don't need this check because we're using gossip and not broadcast
+                // if from != status.peer_id {
+                //     error!(%from, %status.peer_id, "Mismatched peer ID in status message");
+                //     return Ok(());
+                // }
 
                 trace!(%from, height = %status.height, "Received status");
 

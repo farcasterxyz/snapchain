@@ -23,6 +23,7 @@ use tracing::warn;
 
 const MAX_SHARDS: u32 = 64;
 
+#[derive(Clone)]
 pub struct SnapchainNode {
     pub consensus_actors: BTreeMap<u32, MalachiteConsensusActors>,
     pub shard_stores: HashMap<u32, Stores>,
@@ -169,15 +170,6 @@ impl SnapchainNode {
         }
     }
 
-    // pub fn start_height(&self, block_number: u64) {
-    //     for (shard, actor) in self.consensus_actors.iter() {
-    //         let result = actor.cast(ConsensusMsg::StartHeight(Height::new(*shard, block_number)));
-    //         if let Err(e) = result {
-    //             warn!("Failed to start height: {:?}", e);
-    //         }
-    //     }
-    // }
-    //
     pub fn dispatch(&self, shard: MalachiteEventShard, event: MalachiteNetworkEvent) {
         match shard {
             MalachiteEventShard::None => {

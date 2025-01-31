@@ -122,6 +122,7 @@ pub async fn spawn_sync_actor(
     Ok(actor_ref)
 }
 
+#[derive(Clone)]
 pub struct MalachiteConsensusActors {
     pub network_actor: NetworkRef<SnapchainValidatorContext>,
     pub wal_actor: WalRef<SnapchainValidatorContext>,

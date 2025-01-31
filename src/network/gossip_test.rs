@@ -2,22 +2,24 @@ use crate::consensus::consensus::{ConsensusMsg, SystemMessage};
 use crate::core::types::proto;
 use crate::network::gossip::{Config, GossipEvent, SnapchainGossip};
 use libp2p::identity::ed25519::Keypair;
+use serial_test::serial;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::{select, time};
 
 const HOST_FOR_TEST: &str = "127.0.0.1";
-const PORT_FOR_TEST: u32 = 9382;
+const BASE_PORT_FOR_TEST: u32 = 9382;
 
 #[tokio::test]
+#[serial]
 async fn test_gossip_communication() {
     // Create two keypairs for our test nodes
     let keypair1 = Keypair::generate();
     let keypair2 = Keypair::generate();
 
     // Create configs with different ports
-    let node1_addr = format!("/ip4/{HOST_FOR_TEST}/udp/{PORT_FOR_TEST}/quic-v1");
-    let node2_port = PORT_FOR_TEST + 1;
+    let node1_addr = format!("/ip4/{HOST_FOR_TEST}/udp/{BASE_PORT_FOR_TEST}/quic-v1");
+    let node2_port = BASE_PORT_FOR_TEST + 1;
     let node2_addr = format!("/ip4/{HOST_FOR_TEST}/udp/{node2_port}/quic-v1");
     let config1 = Config::new(node1_addr.clone(), node2_addr.clone());
     let config2 = Config::new(node2_addr.clone(), node1_addr.clone());

@@ -51,6 +51,8 @@ impl Host {
                     validators = validator_set.validators.len(),
                     "Consensus ready. Starting Height"
                 );
+                // Wait a few seconds before starting
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 consensus_ref.cast(ConsensusMsg::StartHeight(height, validator_set))?;
             }
 
