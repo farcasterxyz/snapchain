@@ -18,8 +18,6 @@ use std::error::Error;
 use std::net;
 use std::net::SocketAddr;
 use std::process;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::select;
 use tokio::signal::ctrl_c;
 use tokio::sync::{broadcast, mpsc};
@@ -108,8 +106,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let addr = app_config.gossip.address.clone();
     let grpc_addr = app_config.rpc_address.clone();
     let grpc_socket_addr: SocketAddr = grpc_addr.parse()?;
-    let http_addr = app_config.http_addr.clone();
-    let http_addr: SocketAddr = http_addr.parse()?;
     let block_db = RocksDB::open_shard_db(app_config.rocksdb_dir.as_str(), 0);
     let block_store = BlockStore::new(block_db);
 
