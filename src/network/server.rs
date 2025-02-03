@@ -5,15 +5,34 @@ use crate::core::validations;
 use crate::core::validations::verification::VerificationAddressClaim;
 use crate::mempool::routing;
 use crate::proto;
+use crate::proto::cast_add_body;
+use crate::proto::casts_by_parent_request;
 use crate::proto::hub_service_server::HubService;
+use crate::proto::link_body;
+use crate::proto::links_by_target_request;
+use crate::proto::message_data;
 use crate::proto::on_chain_event::Body;
+use crate::proto::reaction_body;
+use crate::proto::reactions_by_target_request;
+use crate::proto::CastsByParentRequest;
+use crate::proto::FidsRequest;
+use crate::proto::FidsResponse;
 use crate::proto::GetInfoResponse;
 use crate::proto::HubEvent;
+use crate::proto::IdRegistryEventByAddressRequest;
+use crate::proto::LinksByTargetRequest;
 use crate::proto::MessageType;
+use crate::proto::OnChainEvent;
+use crate::proto::OnChainEventRequest;
+use crate::proto::OnChainEventResponse;
+use crate::proto::ReactionsByTargetRequest;
+use crate::proto::SignerRequest;
 use crate::proto::TrieNodeMetadataRequest;
 use crate::proto::TrieNodeMetadataResponse;
 use crate::proto::UserNameProof;
 use crate::proto::UserNameType;
+use crate::proto::UsernameProofRequest;
+use crate::proto::UsernameProofsResponse;
 use crate::proto::VerificationAddAddressBody;
 use crate::proto::{Block, CastId, DbStats};
 use crate::proto::{BlocksRequest, ShardChunksRequest, ShardChunksResponse, SubscribeRequest};
@@ -28,6 +47,7 @@ use crate::storage::constants::RootPrefix;
 use crate::storage::db::PageOptions;
 use crate::storage::db::RocksDbTransactionBatch;
 use crate::storage::store::account::message_bytes_decode;
+use crate::storage::store::account::MessagesPage;
 use crate::storage::store::account::UsernameProofStore;
 use crate::storage::store::account::{
     CastStore, LinkStore, ReactionStore, UserDataStore, VerificationStore,
@@ -864,6 +884,571 @@ impl HubService for MyHubService {
             .get_storage_limits(request.fid)
             .map_err(|err| Status::internal(err.to_string()))?;
         Ok(Response::new(limits))
+    }
+
+    async fn get_casts_by_parent(
+        &self,
+        request: Request<CastsByParentRequest>,
+    ) -> Result<Response<MessagesResponse>, Status> {
+        let req = request.into_inner();
+        let parent = match req.parent {
+            Some(casts_by_parent_request::Parent::ParentCastId(cast_id)) => {
+                cast_add_body::Parent::ParentCastId(cast_id)
+            }
+            Some(casts_by_parent_request::Parent::ParentUrl(url)) => {
+                cast_add_body::Parent::ParentUrl(url)
+            }
+            None => return Err(Status::not_found("Parent not specified".to_string())),
+        };
+        let num_shards = self.shard_stores.len();
+        let per_shard_tokens: Vec<Option<Vec<u8>>> = if let Some(token_bytes) = req.page_token {
+            serde_json::from_slice(&token_bytes)
+                .map_err(|e| Status::invalid_argument(format!("Invalid page token: {}", e)))?
+        } else {
+            vec![None; num_shards]
+        };
+        if per_shard_tokens.len() != num_shards {
+            return Err(Status::invalid_argument(
+                "Page token does not match number of shards".to_string(),
+            ));
+        }
+        let pages: Vec<MessagesPage> = self
+            .shard_stores
+            .iter()
+            .zip(per_shard_tokens.into_iter())
+            .map(|(shard_entry, shard_token)| {
+                let page_options = PageOptions {
+                    page_size: req.page_size.map(|s| s as usize),
+                    page_token: shard_token,
+                    reverse: req.reverse.unwrap_or(false),
+                };
+                let cast_store = &shard_entry.1.cast_store;
+                return CastStore::get_casts_by_parent(cast_store, &parent, &page_options)
+                    .unwrap_or(MessagesPage {
+                        messages: vec![],
+                        next_page_token: None,
+                    });
+            })
+            .collect();
+        let combined_messages: Vec<Message> = pages
+            .iter()
+            .flat_map(|page| page.messages.clone())
+            .collect();
+        let next_page_tokens: Vec<Option<Vec<u8>>> =
+            pages.into_iter().map(|page| page.next_page_token).collect();
+        let new_page_token = serde_json::to_vec(&next_page_tokens)
+            .map_err(|e| Status::internal(format!("Failed to serialize next_page_token: {}", e)))?;
+        let response = MessagesResponse {
+            messages: combined_messages,
+            next_page_token: Some(new_page_token),
+        };
+
+        Ok(Response::new(response))
+    }
+
+    async fn get_casts_by_mention(
+        &self,
+        request: Request<FidRequest>,
+    ) -> Result<Response<MessagesResponse>, Status> {
+        let req = request.into_inner();
+        let mention = req.fid;
+
+        let num_shards = self.shard_stores.len();
+
+        let per_shard_tokens: Vec<Option<Vec<u8>>> = if let Some(token_bytes) = req.page_token {
+            serde_json::from_slice(&token_bytes)
+                .map_err(|e| Status::invalid_argument(format!("Invalid page token: {}", e)))?
+        } else {
+            vec![None; num_shards]
+        };
+
+        if per_shard_tokens.len() != num_shards {
+            return Err(Status::invalid_argument(
+                "Page token does not match number of shards".to_string(),
+            ));
+        }
+
+        let pages: Vec<MessagesPage> =
+            self.shard_stores
+                .iter()
+                .zip(per_shard_tokens.into_iter())
+                .map(|(shard_entry, shard_token)| {
+                    let page_options = PageOptions {
+                        page_size: req.page_size.map(|s| s as usize),
+                        page_token: shard_token,
+                        reverse: req.reverse.unwrap_or(false),
+                    };
+
+                    let store = &shard_entry.1.cast_store;
+                    return CastStore::get_casts_by_mention(store, mention, &page_options)
+                        .unwrap_or(MessagesPage {
+                            messages: vec![],
+                            next_page_token: None,
+                        });
+                })
+                .collect();
+
+        let combined_messages: Vec<Message> = pages
+            .iter()
+            .flat_map(|page| page.messages.clone())
+            .collect();
+
+        let next_page_tokens: Vec<Option<Vec<u8>>> =
+            pages.into_iter().map(|page| page.next_page_token).collect();
+
+        let new_page_token = serde_json::to_vec(&next_page_tokens)
+            .map_err(|e| Status::internal(format!("Failed to serialize next_page_token: {}", e)))?;
+
+        let response = MessagesResponse {
+            messages: combined_messages,
+            next_page_token: Some(new_page_token),
+        };
+
+        Ok(Response::new(response))
+    }
+
+    async fn get_reactions_by_cast(
+        &self,
+        request: Request<ReactionsByTargetRequest>,
+    ) -> Result<Response<MessagesResponse>, Status> {
+        let req = request.into_inner();
+
+        let reaction_type = req
+            .reaction_type
+            .ok_or_else(|| Status::invalid_argument("reaction_type is required".to_string()))?;
+
+        let target = match req.target {
+            Some(reactions_by_target_request::Target::TargetCastId(cast_id)) => {
+                reaction_body::Target::TargetCastId(cast_id)
+            }
+            // Enforce compatibility, disallow url target
+            _ => return Err(Status::not_found("Target not specified".to_string())),
+        };
+
+        let num_shards = self.shard_stores.len();
+
+        let per_shard_tokens: Vec<Option<Vec<u8>>> = if let Some(token_bytes) = req.page_token {
+            serde_json::from_slice(&token_bytes)
+                .map_err(|e| Status::invalid_argument(format!("Invalid page token: {}", e)))?
+        } else {
+            vec![None; num_shards]
+        };
+
+        if per_shard_tokens.len() != num_shards {
+            return Err(Status::invalid_argument(
+                "Page token does not match number of shards".to_string(),
+            ));
+        }
+
+        let pages: Vec<MessagesPage> = self
+            .shard_stores
+            .iter()
+            .zip(per_shard_tokens.into_iter())
+            .map(|(shard_entry, shard_token)| {
+                let page_options = PageOptions {
+                    page_size: req.page_size.map(|s| s as usize),
+                    page_token: shard_token,
+                    reverse: req.reverse.unwrap_or(false),
+                };
+
+                let store = &shard_entry.1.reaction_store;
+
+                return ReactionStore::get_reactions_by_target(
+                    store,
+                    &target,
+                    reaction_type,
+                    &page_options,
+                )
+                .unwrap_or(MessagesPage {
+                    messages: vec![],
+                    next_page_token: None,
+                });
+            })
+            .collect();
+
+        let combined_messages: Vec<Message> = pages
+            .iter()
+            .flat_map(|page| page.messages.clone())
+            .collect();
+
+        let next_page_tokens: Vec<Option<Vec<u8>>> =
+            pages.into_iter().map(|page| page.next_page_token).collect();
+
+        let new_page_token = serde_json::to_vec(&next_page_tokens)
+            .map_err(|e| Status::internal(format!("Failed to serialize next_page_token: {}", e)))?;
+
+        let response = MessagesResponse {
+            messages: combined_messages,
+            next_page_token: Some(new_page_token),
+        };
+
+        Ok(Response::new(response))
+    }
+
+    async fn get_reactions_by_target(
+        &self,
+        request: Request<ReactionsByTargetRequest>,
+    ) -> Result<Response<MessagesResponse>, Status> {
+        let req = request.into_inner();
+
+        let reaction_type = req
+            .reaction_type
+            .ok_or_else(|| Status::invalid_argument("reaction_type is required".to_string()))?;
+
+        let target = match req.target {
+            Some(reactions_by_target_request::Target::TargetCastId(cast_id)) => {
+                reaction_body::Target::TargetCastId(cast_id)
+            }
+            Some(reactions_by_target_request::Target::TargetUrl(url)) => {
+                reaction_body::Target::TargetUrl(url)
+            }
+            None => return Err(Status::not_found("Target not specified".to_string())),
+        };
+
+        let num_shards = self.shard_stores.len();
+
+        let per_shard_tokens: Vec<Option<Vec<u8>>> = if let Some(token_bytes) = req.page_token {
+            serde_json::from_slice(&token_bytes)
+                .map_err(|e| Status::invalid_argument(format!("Invalid page token: {}", e)))?
+        } else {
+            vec![None; num_shards]
+        };
+
+        if per_shard_tokens.len() != num_shards {
+            return Err(Status::invalid_argument(
+                "Page token does not match number of shards".to_string(),
+            ));
+        }
+
+        let pages: Vec<MessagesPage> = self
+            .shard_stores
+            .iter()
+            .zip(per_shard_tokens.into_iter())
+            .map(|(shard_entry, shard_token)| {
+                let page_options = PageOptions {
+                    page_size: req.page_size.map(|s| s as usize),
+                    page_token: shard_token,
+                    reverse: req.reverse.unwrap_or(false),
+                };
+
+                let store = &shard_entry.1.reaction_store;
+
+                return ReactionStore::get_reactions_by_target(
+                    store,
+                    &target,
+                    reaction_type,
+                    &page_options,
+                )
+                .unwrap_or(MessagesPage {
+                    messages: vec![],
+                    next_page_token: None,
+                });
+            })
+            .collect();
+
+        let combined_messages: Vec<Message> = pages
+            .iter()
+            .flat_map(|page| page.messages.clone())
+            .collect();
+
+        let next_page_tokens: Vec<Option<Vec<u8>>> =
+            pages.into_iter().map(|page| page.next_page_token).collect();
+
+        let new_page_token = serde_json::to_vec(&next_page_tokens)
+            .map_err(|e| Status::internal(format!("Failed to serialize next_page_token: {}", e)))?;
+
+        let response = MessagesResponse {
+            messages: combined_messages,
+            next_page_token: Some(new_page_token),
+        };
+
+        Ok(Response::new(response))
+    }
+
+    async fn get_username_proof(
+        &self,
+        request: Request<UsernameProofRequest>,
+    ) -> Result<Response<UserNameProof>, Status> {
+        let req = request.into_inner();
+        let name = req.name;
+        let user_name_type = UserNameType::UsernameTypeEnsL1 as u8;
+
+        let proof_opt = self.shard_stores.iter().find_map(|(_shard_entry, stores)| {
+            match UsernameProofStore::get_username_proof(
+                &stores.username_proof_store,
+                &name,
+                user_name_type,
+            ) {
+                Ok(Some(message)) => message.data.and_then(|data| {
+                    if let Some(message_data::Body::UsernameProofBody(user_name_proof)) = data.body
+                    {
+                        Some(user_name_proof)
+                    } else {
+                        None
+                    }
+                }),
+                _ => None,
+            }
+        });
+
+        if let Some(proof_message) = proof_opt {
+            Ok(Response::new(proof_message))
+        } else {
+            Err(Status::not_found("Username proof not found".to_string()))
+        }
+    }
+
+    async fn get_user_name_proofs_by_fid(
+        &self,
+        request: Request<FidRequest>,
+    ) -> Result<Response<UsernameProofsResponse>, Status> {
+        let req = request.into_inner();
+        let fid = req.fid;
+
+        let shard_results: Vec<Result<Vec<UserNameProof>, Status>> = self
+            .shard_stores
+            .iter()
+            .map(|(_shard_id, stores)| {
+                let mut all_proofs = Vec::new();
+                let mut token: Option<Vec<u8>> = None;
+
+                loop {
+                    let page_options = PageOptions {
+                        page_size: None,
+                        page_token: token.clone(),
+                        reverse: false,
+                    };
+
+                    let page = UsernameProofStore::get_username_proofs_by_fid(
+                        &stores.username_proof_store,
+                        fid,
+                        &page_options,
+                    )
+                    .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
+
+                    all_proofs.extend(page.messages.into_iter().filter_map(|message| {
+                        message.data.and_then(|data| {
+                            if let Some(message_data::Body::UsernameProofBody(user_name_proof)) =
+                                data.body
+                            {
+                                Some(user_name_proof)
+                            } else {
+                                None
+                            }
+                        })
+                    }));
+
+                    if page.next_page_token.is_none() {
+                        break;
+                    }
+
+                    token = page.next_page_token;
+                }
+
+                Ok(all_proofs)
+            })
+            .collect();
+
+        let mut combined_proofs = Vec::new();
+        for shard_result in shard_results {
+            let proofs = shard_result?;
+            combined_proofs.extend(proofs);
+        }
+
+        let response = UsernameProofsResponse {
+            proofs: combined_proofs,
+        };
+
+        Ok(Response::new(response))
+    }
+
+    async fn get_on_chain_signer(
+        &self,
+        request: Request<SignerRequest>,
+    ) -> Result<Response<OnChainEvent>, Status> {
+        let req = request.into_inner();
+        let fid = req.fid;
+        let signer = req.signer;
+
+        let maybe_event = self.shard_stores.iter().find_map(|(_shard_id, stores)| {
+            match stores
+                .onchain_event_store
+                .get_active_signer(fid, signer.clone())
+            {
+                Ok(Some(event)) => Some(Ok(event)),
+                Ok(None) => None,
+                Err(e) => Some(Err(Status::internal(format!("Store error: {:?}", e)))),
+            }
+        });
+
+        let event = match maybe_event {
+            Some(Ok(event)) => event,
+            Some(Err(e)) => return Err(e),
+            None => return Err(Status::not_found("Active signer not found".to_string())),
+        };
+
+        Ok(Response::new(event))
+    }
+
+    async fn get_on_chain_signers_by_fid(
+        &self,
+        request: Request<FidRequest>,
+    ) -> Result<Response<OnChainEventResponse>, Status> {
+        let req = request.into_inner();
+        let fid = req.fid;
+        let event_type = proto::OnChainEventType::EventTypeSigner;
+
+        let mut combined_events = Vec::new();
+        for (_shard_id, stores) in &self.shard_stores {
+            let events = stores
+                .onchain_event_store
+                .get_onchain_events(event_type, fid)
+                .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
+            combined_events.extend(events);
+        }
+
+        let response = OnChainEventResponse {
+            events: combined_events,
+            next_page_token: None,
+        };
+        Ok(Response::new(response))
+    }
+
+    async fn get_on_chain_events(
+        &self,
+        request: Request<OnChainEventRequest>,
+    ) -> Result<Response<OnChainEventResponse>, Status> {
+        let req = request.into_inner();
+        let fid = req.fid;
+
+        let event_type = proto::OnChainEventType::try_from(req.event_type)
+            .map_err(|_| Status::invalid_argument("Invalid event type"))?;
+
+        let mut combined_events = Vec::new();
+        for (_shard_id, stores) in &self.shard_stores {
+            let events = stores
+                .onchain_event_store
+                .get_onchain_events(event_type, fid)
+                .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
+            combined_events.extend(events);
+        }
+
+        let response = OnChainEventResponse {
+            events: combined_events,
+            next_page_token: None,
+        };
+        Ok(Response::new(response))
+    }
+
+    async fn get_id_registry_on_chain_event(
+        &self,
+        request: Request<FidRequest>,
+    ) -> Result<Response<OnChainEvent>, Status> {
+        let req = request.into_inner();
+        let fid = req.fid;
+
+        let maybe_event = self.shard_stores.iter().find_map(|(_shard_id, stores)| {
+            match stores.onchain_event_store.get_id_register_event_by_fid(fid) {
+                Ok(Some(event)) => Some(Ok(event)),
+                Ok(None) => None,
+                Err(e) => Some(Err(Status::internal(format!("Store error: {:?}", e)))),
+            }
+        });
+
+        let event = match maybe_event {
+            Some(Ok(event)) => event,
+            Some(Err(e)) => return Err(e),
+            None => return Err(Status::not_found("ID registry event not found".to_string())),
+        };
+
+        Ok(Response::new(event))
+    }
+
+    async fn get_id_registry_on_chain_event_by_address(
+        &self,
+        _: Request<IdRegistryEventByAddressRequest>,
+    ) -> Result<Response<OnChainEvent>, Status> {
+        Err(Status::internal("method not supported".to_string()))
+    }
+
+    async fn get_fids(&self, _: Request<FidsRequest>) -> Result<Response<FidsResponse>, Status> {
+        Err(Status::internal("method not supported".to_string()))
+    }
+
+    async fn get_links_by_target(
+        &self,
+        request: Request<LinksByTargetRequest>,
+    ) -> Result<Response<MessagesResponse>, Status> {
+        let req = request.into_inner();
+
+        let link_type = req
+            .link_type
+            .clone()
+            .ok_or_else(|| Status::invalid_argument("link_type is required".to_string()))?;
+        let target = match req.target {
+            Some(links_by_target_request::Target::TargetFid(fid)) => {
+                link_body::Target::TargetFid(fid)
+            }
+            None => return Err(Status::not_found("Target not specified".to_string())),
+        };
+
+        let num_shards = self.shard_stores.len();
+
+        let per_shard_tokens: Vec<Option<Vec<u8>>> = if let Some(token_bytes) = req.page_token {
+            serde_json::from_slice(&token_bytes)
+                .map_err(|e| Status::invalid_argument(format!("Invalid page token: {}", e)))?
+        } else {
+            vec![None; num_shards]
+        };
+
+        if per_shard_tokens.len() != num_shards {
+            return Err(Status::invalid_argument(
+                "Page token does not match number of shards".to_string(),
+            ));
+        }
+
+        let pages: Vec<MessagesPage> = self
+            .shard_stores
+            .iter()
+            .zip(per_shard_tokens.into_iter())
+            .map(|(shard_entry, shard_token)| {
+                let page_options = PageOptions {
+                    page_size: req.page_size.map(|s| s as usize),
+                    page_token: shard_token,
+                    reverse: req.reverse.unwrap_or(false),
+                };
+
+                let store = &shard_entry.1.link_store;
+                LinkStore::get_links_by_target(
+                    store,
+                    &target,
+                    req.link_type.clone().unwrap(),
+                    &page_options,
+                )
+                .unwrap_or(MessagesPage {
+                    messages: vec![],
+                    next_page_token: None,
+                })
+            })
+            .collect();
+
+        let combined_messages: Vec<Message> = pages
+            .iter()
+            .flat_map(|page| page.messages.clone())
+            .collect();
+
+        let next_page_tokens: Vec<Option<Vec<u8>>> =
+            pages.into_iter().map(|page| page.next_page_token).collect();
+
+        let new_page_token = serde_json::to_vec(&next_page_tokens)
+            .map_err(|e| Status::internal(format!("Failed to serialize next_page_token: {}", e)))?;
+
+        let response = MessagesResponse {
+            messages: combined_messages,
+            next_page_token: Some(new_page_token),
+        };
+
+        Ok(Response::new(response))
     }
 
     async fn get_trie_metadata_by_prefix(

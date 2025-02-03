@@ -20,6 +20,7 @@ use std::error::Error;
 use std::net;
 use std::net::SocketAddr;
 use std::process;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::signal::ctrl_c;
 use tokio::sync::{broadcast, mpsc};
@@ -109,6 +110,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let addr = app_config.gossip.address.clone();
     let grpc_addr = app_config.rpc_address.clone();
     let grpc_socket_addr: SocketAddr = grpc_addr.parse()?;
+    let http_addr = app_config.http_addr.clone();
+    let http_addr: SocketAddr = http_addr.parse()?;
     let block_db = RocksDB::open_shard_db(app_config.rocksdb_dir.as_str(), 0);
     let block_store = BlockStore::new(block_db);
 
@@ -222,22 +225,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let rpc_shard_senders = node.shard_senders.clone();
 
     let rpc_block_store = block_store.clone();
-    tokio::spawn(async move {
-        let l1_client: Option<Box<dyn L1Client>> = match RealL1Client::new(app_config.l1_rpc_url) {
-            Ok(client) => Some(Box::new(client)),
-            Err(_) => None,
-        };
-        let service = MyHubService::new(
-            rpc_block_store,
-            rpc_shard_stores,
-            rpc_shard_senders,
-            statsd_client.clone(),
-            app_config.consensus.num_shards,
-            Box::new(routing::ShardRouter {}),
-            mempool_tx.clone(),
-            l1_client,
-        );
+    let l1_client: Option<Box<dyn L1Client>> = match RealL1Client::new(app_config.l1_rpc_url) {
+        Ok(client) => Some(Box::new(client)),
+        Err(_) => None,
+    };
+    let service = MyHubService::new(
+        rpc_block_store,
+        rpc_shard_stores,
+        rpc_shard_senders,
+        statsd_client.clone(),
+        app_config.consensus.num_shards,
+        Box::new(routing::ShardRouter {}),
+        mempool_tx.clone(),
+        l1_client,
+    );
 
+    tokio::spawn(async move {
         let resp = Server::builder()
             .add_service(HubServiceServer::new(service))
             .add_service(AdminServiceServer::new(admin_service))
