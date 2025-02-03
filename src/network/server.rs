@@ -1381,10 +1381,12 @@ impl HubService for MyHubService {
     ) -> Result<Response<MessagesResponse>, Status> {
         let req = request.into_inner();
 
-        let link_type = req
-            .link_type
-            .clone()
-            .ok_or_else(|| Status::invalid_argument("link_type is required".to_string()))?;
+        if req.link_type.clone().is_none() {
+            return Err(Status::invalid_argument(
+                "link_type is required".to_string(),
+            ));
+        }
+
         let target = match req.target {
             Some(links_by_target_request::Target::TargetFid(fid)) => {
                 link_body::Target::TargetFid(fid)
