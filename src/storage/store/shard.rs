@@ -27,6 +27,9 @@ pub enum ShardStorageError {
 
     #[error("Hub error")]
     HubError,
+
+    #[error("Error decoding shard chunk")]
+    DecodeError(#[from] prost::DecodeError),
 }
 
 /** A page of messages returned from various APIs */
@@ -175,6 +178,24 @@ impl ShardStore {
 
     pub fn get_last_shard_chunk(&self) -> Result<Option<ShardChunk>, ShardStorageError> {
         get_last_shard_chunk(&self.db)
+    }
+
+    pub fn get_chunk_by_height(
+        &self,
+        height: u64,
+    ) -> Result<Option<ShardChunk>, ShardStorageError> {
+        let shard_key = make_shard_key(height);
+        let shard_chunk = self.db.get(&shard_key)?;
+        match shard_chunk {
+            None => Ok(None),
+            Some(chunk) => {
+                let shard_chunk = ShardChunk::decode(chunk.as_slice()).map_err(|e| {
+                    error!("Error decoding shard chunk: {:?}", e);
+                    ShardStorageError::DecodeError(e)
+                })?;
+                Ok(Some(shard_chunk))
+            }
+        }
     }
 
     pub fn max_block_number(&self) -> Result<u64, ShardStorageError> {

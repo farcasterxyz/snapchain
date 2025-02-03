@@ -1231,6 +1231,24 @@ impl ShardEngine {
         }
     }
 
+    pub fn get_shard_chunk_by_height(&self, height: Height) -> Option<ShardChunk> {
+        if self.shard_id != height.shard_index {
+            error!(
+                shard_id = self.shard_id,
+                requested_shard_id = height.shard_index,
+                "Requested shard chunk from incorrect shard"
+            );
+            return None;
+        }
+        self.stores
+            .shard_store
+            .get_chunk_by_height(height.block_number)
+            .unwrap_or_else(|err| {
+                error!("No shard chunk at height {:#?}", err);
+                None
+            })
+    }
+
     pub fn get_casts_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
         CastStore::get_cast_adds_by_fid(&self.stores.cast_store, fid, &PageOptions::default())
     }
@@ -1327,14 +1345,43 @@ impl ShardEngine {
 
 pub struct BlockEngine {
     block_store: BlockStore,
+    statsd_client: StatsdClientWrapper,
 }
 
 impl BlockEngine {
-    pub fn new(block_store: BlockStore) -> Self {
-        BlockEngine { block_store }
+    pub fn new(block_store: BlockStore, statsd_client: StatsdClientWrapper) -> Self {
+        BlockEngine {
+            block_store,
+            statsd_client,
+        }
+    }
+
+    // statsd
+    fn count(&self, key: &str, count: u64) {
+        let key = format!("engine.{}", key);
+        self.statsd_client.count_with_shard(0, key.as_str(), count);
+    }
+
+    // statsd
+    fn gauge(&self, key: &str, value: u64) {
+        let key = format!("engine.{}", key);
+        self.statsd_client.gauge_with_shard(0, key.as_str(), value);
     }
 
     pub fn commit_block(&mut self, block: Block) {
+        self.gauge(
+            "block_height",
+            block
+                .header
+                .as_ref()
+                .unwrap()
+                .height
+                .as_ref()
+                .unwrap()
+                .block_number,
+        );
+        self.count("block_shards", block.shard_chunks.len() as u64);
+
         let result = self.block_store.put_block(block);
         if result.is_err() {
             error!("Failed to store block: {:?}", result.err());
@@ -1346,6 +1393,25 @@ impl BlockEngine {
             Ok(block) => block,
             Err(err) => {
                 error!("Unable to obtain last block {:#?}", err);
+                None
+            }
+        }
+    }
+
+    pub fn get_block_by_height(&self, height: Height) -> Option<Block> {
+        if height.shard_index != 0 {
+            error!(
+                shard_id = 0,
+                requested_shard_id = height.shard_index,
+                "Requested shard chunk from incorrect shard"
+            );
+
+            return None;
+        }
+        match self.block_store.get_block_by_height(height.block_number) {
+            Ok(block) => block,
+            Err(err) => {
+                error!("No block at height {:#?}", err);
                 None
             }
         }

@@ -146,7 +146,7 @@ pub fn validate_fname(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::InvalidDataLength);
     }
 
-    if !Regex::new(r"^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,38}$")
+    if !Regex::new("^[a-z0-9][a-z0-9-]{0,15}$")
         .unwrap()
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
@@ -171,7 +171,7 @@ pub fn validate_ens_name(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::InvalidDataLength);
     }
 
-    if !Regex::new(r"^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,38}$")
+    if !Regex::new("^[a-z0-9][a-z0-9-]{0,15}$")
         .unwrap()
         .is_match(name_parts[0])
         .map_err(|_| ValidationError::InvalidData)?
@@ -187,7 +187,7 @@ pub fn validate_twitter_username(input: &String) -> Result<(), ValidationError> 
         return Err(ValidationError::InvalidDataLength);
     }
 
-    if !Regex::new(r"^[A-Za-z0-9_]{1,15}$")
+    if !Regex::new("^[a-z0-9_]{0,15}$")
         .unwrap()
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
@@ -203,7 +203,7 @@ pub fn validate_github_username(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::InvalidDataLength);
     }
 
-    if !Regex::new(r"^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$")
+    if !Regex::new("^[a-zA-Z\\d](?:[a-zA-Z\\d]|-(?!-)){0,38}$")
         .unwrap()
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?

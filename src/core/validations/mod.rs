@@ -52,9 +52,5 @@ pub fn validate_url(url: &str) -> Result<(), ValidationError> {
         return Err(ValidationError::InvalidDataLength);
     }
 
-    if !url.is_ascii() {
-        return Err(ValidationError::InvalidData);
-    }
-
     Ok(())
 }

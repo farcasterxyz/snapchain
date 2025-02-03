@@ -211,7 +211,7 @@ pub fn default_shard_chunk() -> ShardChunk {
             account_root: vec![5, 5, 6, 6], //TODO,
         }],
         hash: vec![],
-        votes: None,
+        commits: None,
     }
 }
 

@@ -27,11 +27,15 @@ use tracing::{error, warn};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub queue_size: u32,
+    pub allow_unlimited_mempool_size: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { queue_size: 500 }
+        Self {
+            queue_size: 500,
+            allow_unlimited_mempool_size: false,
+        }
     }
 }
 
@@ -97,6 +101,7 @@ pub struct MempoolMessagesRequest {
 }
 
 pub struct Mempool {
+    config: Config,
     capacity_per_shard: usize,
     shard_stores: HashMap<u32, Stores>,
     message_router: Box<dyn MessageRouter>,
@@ -111,6 +116,7 @@ pub struct Mempool {
 
 impl Mempool {
     pub fn new(
+        config: Config,
         capacity_per_shard: usize,
         mempool_rx: mpsc::Receiver<MempoolMessage>,
         messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
@@ -121,6 +127,7 @@ impl Mempool {
         statsd_client: StatsdClientWrapper,
     ) -> Self {
         Mempool {
+            config,
             capacity_per_shard,
             shard_stores,
             num_shards,
@@ -250,7 +257,9 @@ impl Mempool {
                         .gauge_with_shard(shard_id, "mempool.size", 1);
                 }
                 Some(messages) => {
-                    if messages.len() >= self.capacity_per_shard {
+                    if !self.config.allow_unlimited_mempool_size
+                        && messages.len() >= self.capacity_per_shard
+                    {
                         // For now, mempool messages are dropped here if the mempool is full.
                         warn!(
                             fid = message.fid(),

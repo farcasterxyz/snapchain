@@ -290,10 +290,6 @@ where
         return Err(ValidationError::InvalidHash);
     }
 
-    if body.claim_signature.len() != 65 {
-        return Err(ValidationError::InvalidSignature);
-    }
-
     let hash = prehash.unwrap();
 
     match eth_signature_verifier::verify_signature(

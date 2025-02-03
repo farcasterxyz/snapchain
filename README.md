@@ -40,20 +40,12 @@ Before you begin, ensure you have the following installed:
 
 ### Installation
 
-1. First clone the malachite repo and checkout the correct commit:
-   ```
-   git clone git@github.com:informalsystems/malachite.git
-   cd malachite
-   git checkout 8a9f3702eb41199bc8a7f45139adba233a04744a # Remember to update GitHub workflow when changing
-   cd code && cargo build
-   ```
-2. Then clone the snapchain repo and build it:
-   ```
-   cd ..
-   git clone https://github.com/farcasterxyz/snapchain-v0.git
-   cd snapchain-v0
-   cargo build
-   ```
+Clone the snapchain repo and build it:
+```
+git clone https://github.com/farcasterxyz/snapchain.git
+cd snapchain
+cargo build
+```
 
 ### Testing
 
@@ -76,6 +68,12 @@ To query a node, you can run `grpcurl` from within the container:
 
 ```
 docker compose exec node1 grpcurl -import-path proto -proto proto/rpc.proto list
+```
+
+If you need fresh keypairs for your node, you can generate them with:
+
+```
+cargo run --bin generate_keys
 ```
 
 ### Clean up
