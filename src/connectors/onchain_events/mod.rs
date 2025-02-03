@@ -65,7 +65,7 @@ const FIRST_BLOCK: u64 = 108864739;
 pub struct Config {
     pub rpc_url: String,
     pub start_block_number: u64,
-    pub stop_block_number: u64,
+    pub stop_block_number: Option<u64>,
 }
 
 impl Default for Config {
@@ -73,7 +73,7 @@ impl Default for Config {
         return Config {
             rpc_url: String::new(),
             start_block_number: FIRST_BLOCK,
-            stop_block_number: FIRST_BLOCK,
+            stop_block_number: None,
         };
     }
 }
@@ -164,7 +164,7 @@ pub struct Subscriber {
     onchain_events_by_block: HashMap<u32, Vec<OnChainEvent>>,
     mempool_tx: mpsc::Sender<MempoolMessage>,
     start_block_number: u64,
-    stop_block_number: u64,
+    stop_block_number: Option<u64>,
     statsd_client: StatsdClientWrapper,
     db: Arc<RocksDB>,
 }
@@ -512,10 +512,10 @@ impl Subscriber {
                 }
             }
             start_block += batch_size;
-            if start_block > self.stop_block_number {
+            if start_block > final_stop_block {
                 info!(
                     start_block,
-                    stop_block = self.stop_block_number,
+                    stop_block = final_stop_block,
                     "Stopping onchain events sync"
                 );
                 return Ok(());
@@ -562,7 +562,8 @@ impl Subscriber {
         let latest_block_on_chain = self.latest_block_on_chain().await?;
         let latest_block_in_db = self.latest_block_in_db();
         let historical_sync_start_block = latest_block_in_db.max(self.start_block_number);
-        let historical_sync_stop_block = latest_block_on_chain.min(self.stop_block_number);
+        let historical_sync_stop_block =
+            latest_block_on_chain.min(self.stop_block_number.unwrap_or(latest_block_on_chain));
         self.sync_historical_events(
             STORAGE_REGISTRY,
             historical_sync_start_block,
@@ -582,11 +583,20 @@ impl Subscriber {
         )
         .await?;
 
-        if self.stop_block_number > historical_sync_stop_block {
+        let should_start_live_sync = match self.stop_block_number {
+            None => true,
+            Some(stop_block) => stop_block > historical_sync_stop_block,
+        };
+
+        if should_start_live_sync {
             // Subscribe to new events starting from now.
             let filter = Filter::new()
                 .address(vec![STORAGE_REGISTRY, KEY_REGISTRY, ID_REGISTRY])
                 .from_block(historical_sync_stop_block);
+            let filter = match self.stop_block_number {
+                None => filter,
+                Some(stop_block) => filter.to_block(stop_block),
+            };
             let subscription = self.provider.watch_logs(&filter).await?;
             let mut stream = subscription.into_stream();
             while let Some(events) = stream.next().await {
