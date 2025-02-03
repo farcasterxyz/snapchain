@@ -1,0 +1,5 @@
+syntax = "proto3";
+
+message OnChainEventState {
+  uint64 last_l2_block = 3;
+}

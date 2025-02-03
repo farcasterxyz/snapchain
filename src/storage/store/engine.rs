@@ -505,6 +505,7 @@ impl ShardEngine {
         let mut revoked_signers = HashSet::new();
 
         let mut validation_errors = vec![];
+        let mut max_block_number = None;
 
         // System messages first, then user messages and finally prunes
         for msg in &snapchain_txn.system_messages {
@@ -520,6 +521,13 @@ impl ShardEngine {
                         self.update_trie(trie_ctx, &hub_event, txn_batch)?;
                         events.push(hub_event.clone());
                         system_messages_count += 1;
+                        match max_block_number {
+                            None => max_block_number = Some(onchain_event.block_number),
+                            Some(block_number) => {
+                                max_block_number =
+                                    Some(onchain_event.block_number.max(block_number))
+                            }
+                        }
                         match &onchain_event.body {
                             Some(proto::on_chain_event::Body::SignerEventBody(signer_event)) => {
                                 if signer_event.event_type == proto::SignerEventType::Remove as i32
