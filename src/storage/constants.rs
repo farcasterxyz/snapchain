@@ -39,7 +39,8 @@ pub enum RootPrefix {
     /* Used to index user submitted username proofs */
     UserNameProofByName = 16,
 
-    OnChainEventState = 17,
+    /* Used to maintain information about latest onchain events, fnames ingested */
+    NodeLocalState = 17,
 }
 
 /** Copied from the JS code */

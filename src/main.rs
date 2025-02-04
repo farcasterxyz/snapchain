@@ -11,14 +11,14 @@ use snapchain::proto::admin_service_server::AdminServiceServer;
 use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::storage::db::snapshot::download_snapshots;
 use snapchain::storage::db::RocksDB;
+use snapchain::storage::store::node_local_state::LocalStateStore;
 use snapchain::storage::store::BlockStore;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::HashMap;
 use std::error::Error;
+use std::net;
 use std::net::SocketAddr;
 use std::process;
-use std::sync::Arc;
-use std::{net, path};
 use tokio::select;
 use tokio::signal::ctrl_c;
 use tokio::sync::{broadcast, mpsc};
@@ -197,18 +197,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
-    let global_db_dir = path::Path::new(&app_config.rocksdb_dir)
-        .join("global")
-        .to_string_lossy()
-        .into_owned();
-    let global_db = Arc::new(RocksDB::new(&global_db_dir));
-    global_db.open().unwrap();
+    let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
+    let local_state_store = LocalStateStore::new(global_db);
     if !app_config.onchain_events.rpc_url.is_empty() {
         let mut onchain_events_subscriber = snapchain::connectors::onchain_events::Subscriber::new(
             app_config.onchain_events,
             mempool_tx.clone(),
             statsd_client.clone(),
-            global_db,
+            local_state_store,
         )?;
         tokio::spawn(async move {
             let result = onchain_events_subscriber.run().await;

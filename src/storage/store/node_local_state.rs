@@ -1,5 +1,11 @@
+use std::sync::Arc;
+
+use crate::proto::OnChainEventState;
+use crate::storage::constants::RootPrefix;
+use crate::storage::db::RocksDB;
 use crate::storage::db::RocksdbError;
 use prost::DecodeError;
+use prost::Message;
 use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum IngestStateError {
@@ -10,26 +16,42 @@ pub enum IngestStateError {
     RocksdbError(#[from] RocksdbError),
 }
 
-pub mod onchain_events {
-    use crate::proto::OnChainEventState;
-    use crate::storage::constants::RootPrefix;
-    use crate::storage::db::RocksDB;
-    use prost::Message;
+pub struct LocalStateStore {
+    db: Arc<RocksDB>,
+}
 
-    fn make_primary_key() -> Vec<u8> {
-        vec![RootPrefix::OnChainEventState as u8]
+pub enum DataType {
+    OnchainEvent = 1,
+    FnameTransfer = 2,
+}
+
+impl LocalStateStore {
+    pub fn new(db: Arc<RocksDB>) -> Self {
+        LocalStateStore { db }
     }
 
-    pub fn put_state(
-        db: &RocksDB,
-        state: OnChainEventState,
-    ) -> Result<(), super::IngestStateError> {
-        Ok(db.put(&make_primary_key(), &state.encode_to_vec())?)
+    fn make_onchain_event_primary_key() -> Vec<u8> {
+        vec![
+            RootPrefix::NodeLocalState as u8,
+            DataType::OnchainEvent as u8,
+        ]
     }
 
-    pub fn get_state(db: &RocksDB) -> Result<Option<OnChainEventState>, super::IngestStateError> {
-        match db.get(&make_primary_key())? {
-            Some(hub_state) => Ok(Some(OnChainEventState::decode(hub_state.as_slice())?)),
+    pub fn set_latest_block_number(&self, block_number: u64) -> Result<(), IngestStateError> {
+        Ok(self.db.put(
+            &Self::make_onchain_event_primary_key(),
+            &OnChainEventState {
+                last_l2_block: block_number,
+            }
+            .encode_to_vec(),
+        )?)
+    }
+
+    pub fn get_latest_block_number(&self) -> Result<Option<u64>, IngestStateError> {
+        match self.db.get(&Self::make_onchain_event_primary_key())? {
+            Some(state) => Ok(Some(
+                OnChainEventState::decode(state.as_slice())?.last_l2_block,
+            )),
             None => Ok(None),
         }
     }

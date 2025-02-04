@@ -96,6 +96,12 @@ impl RocksDB {
         Arc::new(db)
     }
 
+    pub fn open_global_db(db_dir: &str) -> Arc<RocksDB> {
+        let db = RocksDB::new(format!("{}/global", db_dir).as_str());
+        db.open().unwrap();
+        Arc::new(db)
+    }
+
     pub fn backup_db(
         db: Arc<RocksDB>,
         backup_dir: &str,

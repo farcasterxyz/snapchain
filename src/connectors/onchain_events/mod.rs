@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use alloy_primitives::{address, ruint::FromUintError, Address, FixedBytes};
 use alloy_provider::{Provider, ProviderBuilder, RootProvider};
@@ -19,14 +19,11 @@ use crate::{
         verification::{validate_verification_contract_signature, VerificationAddressClaim},
     },
     proto::{
-        on_chain_event, IdRegisterEventBody, IdRegisterEventType, OnChainEvent, OnChainEventState,
-        OnChainEventType, SignerEventBody, SignerEventType, SignerMigratedEventBody,
-        StorageRentEventBody, ValidatorMessage, VerificationAddAddressBody,
+        on_chain_event, IdRegisterEventBody, IdRegisterEventType, OnChainEvent, OnChainEventType,
+        SignerEventBody, SignerEventType, SignerMigratedEventBody, StorageRentEventBody,
+        ValidatorMessage, VerificationAddAddressBody,
     },
-    storage::{
-        db::RocksDB,
-        store::{engine::MempoolMessage, node_local_state},
-    },
+    storage::store::{engine::MempoolMessage, node_local_state::LocalStateStore},
     utils::statsd_wrapper::StatsdClientWrapper,
 };
 
@@ -166,7 +163,7 @@ pub struct Subscriber {
     start_block_number: u64,
     stop_block_number: Option<u64>,
     statsd_client: StatsdClientWrapper,
-    db: Arc<RocksDB>,
+    local_state_store: LocalStateStore,
 }
 
 // TODO(aditi): Wait for 1 confirmation before "committing" an onchain event.
@@ -175,7 +172,7 @@ impl Subscriber {
         config: Config,
         mempool_tx: mpsc::Sender<MempoolMessage>,
         statsd_client: StatsdClientWrapper,
-        db: Arc<RocksDB>,
+        local_state_store: LocalStateStore,
     ) -> Result<Subscriber, SubscribeError> {
         if config.rpc_url.is_empty() {
             return Err(SubscribeError::EmptyRpcUrl);
@@ -183,7 +180,7 @@ impl Subscriber {
         let url = config.rpc_url.parse()?;
         let provider = ProviderBuilder::new().on_http(url);
         Ok(Subscriber {
-            db,
+            local_state_store,
             provider,
             onchain_events_by_block: HashMap::new(),
             mempool_tx,
@@ -277,12 +274,7 @@ impl Subscriber {
         match event.block_number {
             Some(block_number) => {
                 if block_number as u64 > self.latest_block_in_db() {
-                    match node_local_state::onchain_events::put_state(
-                        &self.db,
-                        OnChainEventState {
-                            last_l2_block: block_number as u64,
-                        },
-                    ) {
+                    match self.local_state_store.set_latest_block_number(block_number) {
                         Err(err) => {
                             error!(
                                 block_number,
@@ -533,11 +525,8 @@ impl Subscriber {
     }
 
     fn latest_block_in_db(&self) -> u64 {
-        match node_local_state::onchain_events::get_state(&self.db) {
-            Ok(state) => match state {
-                None => 0,
-                Some(state) => state.last_l2_block,
-            },
+        match self.local_state_store.get_latest_block_number() {
+            Ok(number) => number.unwrap_or(0),
             Err(err) => {
                 error!(
                     err = err.to_string(),
