@@ -166,7 +166,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut mempool = Mempool::new(
         app_config.mempool.clone(),
-        1024,
         mempool_rx,
         messages_request_rx,
         app_config.consensus.num_shards,
@@ -303,7 +302,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         node.dispatch(shard, event);
                     },
                     SystemMessage::Mempool(msg) => {
-                        let res = mempool_tx.send(msg).await;
+                        let res = mempool_tx.try_send(msg);
                         if let Err(e) = res {
                             warn!("Failed to add to local mempool: {:?}", e);
                         }

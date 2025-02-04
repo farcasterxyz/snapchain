@@ -28,6 +28,7 @@ use tracing::{error, warn};
 pub struct Config {
     pub queue_size: u32,
     pub allow_unlimited_mempool_size: bool,
+    pub capacity_per_shard: u64,
 }
 
 impl Default for Config {
@@ -35,6 +36,7 @@ impl Default for Config {
         Self {
             queue_size: 500,
             allow_unlimited_mempool_size: false,
+            capacity_per_shard: 1024,
         }
     }
 }
@@ -102,7 +104,6 @@ pub struct MempoolMessagesRequest {
 
 pub struct Mempool {
     config: Config,
-    capacity_per_shard: usize,
     shard_stores: HashMap<u32, Stores>,
     message_router: Box<dyn MessageRouter>,
     num_shards: u32,
@@ -117,7 +118,6 @@ pub struct Mempool {
 impl Mempool {
     pub fn new(
         config: Config,
-        capacity_per_shard: usize,
         mempool_rx: mpsc::Receiver<MempoolMessage>,
         messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
         num_shards: u32,
@@ -128,7 +128,6 @@ impl Mempool {
     ) -> Self {
         Mempool {
             config,
-            capacity_per_shard,
             shard_stores,
             num_shards,
             mempool_rx,
@@ -247,7 +246,6 @@ impl Mempool {
         if self.message_is_valid(&message) {
             let fid = message.fid();
             let shard_id = self.message_router.route_message(fid, self.num_shards);
-            // TODO(aditi): We need a size limit on the mempool and we need to figure out what to do if it's exceeded
             match self.messages.get_mut(&shard_id) {
                 None => {
                     let mut messages = BTreeMap::new();
@@ -257,17 +255,6 @@ impl Mempool {
                         .gauge_with_shard(shard_id, "mempool.size", 1);
                 }
                 Some(messages) => {
-                    if !self.config.allow_unlimited_mempool_size
-                        && messages.len() >= self.capacity_per_shard
-                    {
-                        // For now, mempool messages are dropped here if the mempool is full.
-                        warn!(
-                            fid = message.fid(),
-                            identity = message.mempool_key().identity(),
-                            "Message dropped due to mempool being over capacity"
-                        );
-                        return;
-                    }
                     messages.insert(message.mempool_key(), message.clone());
                     self.statsd_client.gauge_with_shard(
                         shard_id,
@@ -299,6 +286,8 @@ impl Mempool {
     }
 
     pub async fn run(&mut self) {
+        // TODO(aditi): We may want to adjust this poll interval
+        let mut poll_interval = tokio::time::interval(std::time::Duration::from_millis(1));
         loop {
             tokio::select! {
                 biased;
@@ -308,9 +297,11 @@ impl Mempool {
                         self.pull_messages(messages_request).await
                     }
                 }
-                message = self.mempool_rx.recv() => {
-                    if let Some(message) = message {
-                        self.insert(message).await;
+                _ = poll_interval.tick() => {
+                    if self.config.allow_unlimited_mempool_size || (self.messages.len() as u64) < self.config.capacity_per_shard {
+                        if let Ok(message) = self.mempool_rx.try_recv() {
+                            self.insert(message).await;
+                        }
                     }
                 }
                 chunk = self.shard_decision_rx.recv() => {

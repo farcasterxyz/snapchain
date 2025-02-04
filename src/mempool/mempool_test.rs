@@ -69,7 +69,6 @@ mod tests {
 
         let mempool = Mempool::new(
             mempool::Config::default(),
-            1024,
             mempool_rx,
             messages_request_rx,
             1,

@@ -175,11 +175,10 @@ impl AdminService for MyAdminService {
 
         let result = self
             .mempool_tx
-            .send(MempoolMessage::ValidatorMessage(ValidatorMessage {
+            .try_send(MempoolMessage::ValidatorMessage(ValidatorMessage {
                 on_chain_event: Some(onchain_event.clone()),
                 fname_transfer: None,
-            }))
-            .await;
+            }));
 
         match result {
             Ok(()) => {
@@ -207,15 +206,14 @@ impl AdminService for MyAdminService {
 
         let result = self
             .mempool_tx
-            .send(MempoolMessage::ValidatorMessage(ValidatorMessage {
+            .try_send(MempoolMessage::ValidatorMessage(ValidatorMessage {
                 on_chain_event: None,
                 fname_transfer: Some(FnameTransfer {
                     id: username_proof.fid,
                     from_fid: 0, // Assume the username is being transfer from the "root" fid to the one in the username proof
                     proof: Some(username_proof.clone()),
                 }),
-            }))
-            .await;
+            }));
 
         match result {
             Ok(()) => {

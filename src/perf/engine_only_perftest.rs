@@ -56,7 +56,6 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     shard_stores.insert(1, engine.get_stores());
     let mut mempool = Mempool::new(
         mempool::Config::default(),
-        1024,
         mempool_rx,
         messages_request_rx,
         1,
