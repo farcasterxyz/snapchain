@@ -1,6 +1,5 @@
 pub use self::cast_store::*;
 pub use self::event::*;
-pub use self::hub_state::*;
 pub use self::link_store::*;
 pub use self::message::*;
 pub use self::onchain_event_store::*;
@@ -17,7 +16,6 @@ mod message;
 mod onchain_event_store;
 mod store;
 
-mod hub_state;
 mod name_registry_events;
 mod reaction_store;
 mod user_data_store;

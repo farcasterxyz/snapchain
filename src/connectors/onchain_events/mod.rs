@@ -25,7 +25,7 @@ use crate::{
     },
     storage::{
         db::RocksDB,
-        store::{account::onchain_events, engine::MempoolMessage},
+        store::{engine::MempoolMessage, ingest_state},
     },
     utils::statsd_wrapper::StatsdClientWrapper,
 };
@@ -256,7 +256,7 @@ impl Subscriber {
             Some(events) => events.push(event.clone()),
         }
         if block_number as u64 > self.latest_block_in_db() {
-            match onchain_events::put_state(
+            match ingest_state::onchain_events::put_state(
                 &self.db,
                 OnChainEventState {
                     last_l2_block: block_number as u64,
@@ -524,7 +524,7 @@ impl Subscriber {
     }
 
     fn latest_block_in_db(&self) -> u64 {
-        match onchain_events::get_state(&self.db) {
+        match ingest_state::onchain_events::get_state(&self.db) {
             Ok(state) => match state {
                 None => 0,
                 Some(state) => state.last_l2_block,
