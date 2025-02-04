@@ -554,13 +554,15 @@ impl Subscriber {
     }
 
     pub async fn run(&mut self) -> Result<(), SubscribeError> {
+        let latest_block_on_chain = self.latest_block_on_chain().await?;
+        let latest_block_in_db = self.latest_block_in_db();
         info!(
             start_block_number = self.start_block_number,
             stop_block_numer = self.stop_block_number,
+            latest_block_on_chain,
+            latest_block_in_db,
             "Starting l2 events subscription"
         );
-        let latest_block_on_chain = self.latest_block_on_chain().await?;
-        let latest_block_in_db = self.latest_block_in_db();
         let historical_sync_start_block = latest_block_in_db.max(self.start_block_number);
         let historical_sync_stop_block =
             latest_block_on_chain.min(self.stop_block_number.unwrap_or(latest_block_on_chain));
