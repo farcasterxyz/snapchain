@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     proto::{FnameTransfer, UserNameProof, UserNameType, ValidatorMessage},
-    storage::store::engine::MempoolMessage,
+    storage::store::{engine::MempoolMessage, node_local_state::LocalStateStore},
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -78,15 +78,47 @@ pub struct Fetcher {
     transfers: Vec<Transfer>,
     cfg: Config,
     mempool_tx: mpsc::Sender<MempoolMessage>,
+    local_state_store: LocalStateStore,
 }
 
 impl Fetcher {
-    pub fn new(cfg: Config, mempool_tx: mpsc::Sender<MempoolMessage>) -> Self {
+    pub fn new(
+        cfg: Config,
+        mempool_tx: mpsc::Sender<MempoolMessage>,
+        local_state_store: LocalStateStore,
+    ) -> Self {
         Fetcher {
             position: cfg.start_from,
             transfers: vec![],
             cfg: cfg,
             mempool_tx,
+            local_state_store,
+        }
+    }
+
+    fn record_username_proof(&self, transfer_id: u64) {
+        match self.local_state_store.set_latest_block_number(transfer_id) {
+            Err(err) => {
+                error!(
+                    transfer_id,
+                    err = err.to_string(),
+                    "Unable to store last username proof",
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn latest_fname_transfer_in_db(&self) -> u64 {
+        match self.local_state_store.get_latest_block_number() {
+            Ok(id) => id.unwrap_or(0),
+            Err(err) => {
+                error!(
+                    err = err.to_string(),
+                    "Unable to retrieve last username proof",
+                );
+                0
+            }
         }
     }
 
@@ -145,11 +177,13 @@ impl Fetcher {
                         "Unable to send fname transfer to mempool"
                     )
                 }
+                self.record_username_proof(t.id);
             }
         }
     }
 
     pub async fn run(&mut self) -> () {
+        self.position = self.position.max(self.latest_fname_transfer_in_db());
         loop {
             let result = self.fetch().await;
 

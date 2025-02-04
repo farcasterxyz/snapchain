@@ -186,10 +186,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         app_config.fc_network,
     );
 
+    let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
+    let local_state_store = LocalStateStore::new(global_db);
+
     if !app_config.fnames.disable {
         let mut fetcher = snapchain::connectors::fname::Fetcher::new(
             app_config.fnames.clone(),
             mempool_tx.clone(),
+            local_state_store.clone(),
         );
 
         tokio::spawn(async move {
@@ -197,8 +201,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
-    let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
-    let local_state_store = LocalStateStore::new(global_db);
     if !app_config.onchain_events.rpc_url.is_empty() {
         let mut onchain_events_subscriber = snapchain::connectors::onchain_events::Subscriber::new(
             app_config.onchain_events,

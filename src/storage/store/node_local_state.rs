@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::proto::FnameState;
 use crate::proto::OnChainEventState;
 use crate::storage::constants::RootPrefix;
 use crate::storage::db::RocksDB;
@@ -7,6 +8,7 @@ use crate::storage::db::RocksdbError;
 use prost::DecodeError;
 use prost::Message;
 use thiserror::Error;
+
 #[derive(Error, Debug)]
 pub enum IngestStateError {
     #[error(transparent)]
@@ -16,6 +18,7 @@ pub enum IngestStateError {
     RocksdbError(#[from] RocksdbError),
 }
 
+#[derive(Clone)]
 pub struct LocalStateStore {
     db: Arc<RocksDB>,
 }
@@ -52,6 +55,35 @@ impl LocalStateStore {
             Some(state) => Ok(Some(
                 OnChainEventState::decode(state.as_slice())?.last_l2_block,
             )),
+            None => Ok(None),
+        }
+    }
+
+    fn make_fname_transfer_primary_key() -> Vec<u8> {
+        vec![
+            RootPrefix::NodeLocalState as u8,
+            DataType::FnameTransfer as u8,
+        ]
+    }
+
+    pub fn set_latest_fname_transfer_id(
+        db: &RocksDB,
+        transfer_id: u64,
+    ) -> Result<(), IngestStateError> {
+        Ok(db.put(
+            &Self::make_fname_transfer_primary_key(),
+            &FnameState {
+                last_fname_proof: transfer_id,
+            }
+            .encode_to_vec(),
+        )?)
+    }
+
+    pub fn get_latest_fname_transfer_id(
+        db: &RocksDB,
+    ) -> Result<Option<FnameState>, IngestStateError> {
+        match db.get(&Self::make_fname_transfer_primary_key())? {
+            Some(state) => Ok(Some(FnameState::decode(state.as_slice())?)),
             None => Ok(None),
         }
     }
