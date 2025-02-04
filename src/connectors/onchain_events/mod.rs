@@ -497,7 +497,7 @@ impl Subscriber {
                 stop_block, "Syncing historical events in range"
             );
             let events = self.provider.get_logs(&filter).await?;
-            for event in events {
+            for event in events.iter() {
                 let result = self.process_log(&event).await;
                 match result {
                     Err(err) => {
@@ -511,6 +511,10 @@ impl Subscriber {
                         self.record_block_number(&event);
                     }
                 }
+            }
+            match events.last() {
+                Some(event) => self.record_block_number(&event),
+                None => {}
             }
             start_block += batch_size;
             if start_block > final_stop_block {
