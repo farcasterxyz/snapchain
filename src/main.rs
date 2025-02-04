@@ -202,6 +202,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .to_string_lossy()
         .into_owned();
     let global_db = Arc::new(RocksDB::new(&global_db_dir));
+    global_db.open().unwrap();
     if !app_config.onchain_events.rpc_url.is_empty() {
         let mut onchain_events_subscriber = snapchain::connectors::onchain_events::Subscriber::new(
             app_config.onchain_events,

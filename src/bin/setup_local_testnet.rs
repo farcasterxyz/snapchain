@@ -19,8 +19,8 @@ struct Args {
     #[arg(long, default_value = "108864739")]
     start_block_number: u64,
 
-    #[arg(long, default_value = "0")]
-    stop_block_number: u64,
+    #[arg(long)]
+    stop_block_number: Option<u64>,
 
     /// Statsd prefix. note: node ID will be appended before config file written
     #[arg(long, default_value = "snapchain")]
@@ -114,8 +114,11 @@ async fn main() {
         let l1_rpc_url = args.l1_rpc_url.clone();
         let l2_rpc_url = args.l2_rpc_url.clone();
         let start_block_number = args.start_block_number;
-        let stop_block_number = args.stop_block_number;
         let snapshot_endpoint_url = args.snapshot_endpoint_url.clone();
+        let stop_block_number = match args.stop_block_number {
+            None => "".to_string(),
+            Some(number) => format!("stop_block_number = {number}").to_string(),
+        };
 
         let config_file_content = format!(
             r#"
@@ -142,7 +145,7 @@ num_shards = {num_shards}
 [onchain_events]
 rpc_url= "{l2_rpc_url}"
 start_block_number = {start_block_number}
-stop_block_number = {stop_block_number}
+{stop_block_number}
 
 [snapshot]
 endpoint_url = "{snapshot_endpoint_url}"

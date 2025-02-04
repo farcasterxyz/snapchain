@@ -544,7 +544,7 @@ impl Subscriber {
             .provider
             .get_block_by_number(
                 alloy_rpc_types::BlockNumberOrTag::Latest,
-                alloy_rpc_types::BlockTransactionsKind::Full,
+                alloy_rpc_types::BlockTransactionsKind::Hashes,
             )
             .await?;
         Ok(block
