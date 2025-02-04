@@ -25,7 +25,7 @@ use crate::{
     },
     storage::{
         db::RocksDB,
-        store::{engine::MempoolMessage, ingest_state},
+        store::{engine::MempoolMessage, node_local_state},
     },
     utils::statsd_wrapper::StatsdClientWrapper,
 };
@@ -255,25 +255,6 @@ impl Subscriber {
             }
             Some(events) => events.push(event.clone()),
         }
-        if block_number as u64 > self.latest_block_in_db() {
-            match ingest_state::onchain_events::put_state(
-                &self.db,
-                OnChainEventState {
-                    last_l2_block: block_number as u64,
-                },
-            ) {
-                Err(err) => {
-                    error!(
-                        block_number = event.block_number,
-                        tx_hash = hex::encode(&event.transaction_hash),
-                        log_index = event.log_index,
-                        err = err.to_string(),
-                        "Unable to store last block number",
-                    );
-                }
-                _ => {}
-            }
-        };
         if let Err(err) = self
             .mempool_tx
             .send(MempoolMessage::ValidatorMessage(ValidatorMessage {
@@ -289,6 +270,31 @@ impl Subscriber {
                 err = err.to_string(),
                 "Unable to send onchain event to mempool"
             )
+        }
+    }
+
+    fn record_block_number(&self, event: &Log) {
+        match event.block_number {
+            Some(block_number) => {
+                if block_number as u64 > self.latest_block_in_db() {
+                    match node_local_state::onchain_events::put_state(
+                        &self.db,
+                        OnChainEventState {
+                            last_l2_block: block_number as u64,
+                        },
+                    ) {
+                        Err(err) => {
+                            error!(
+                                block_number,
+                                err = err.to_string(),
+                                "Unable to store last block number",
+                            );
+                        }
+                        _ => {}
+                    }
+                };
+            }
+            None => {}
         }
     }
 
@@ -499,7 +505,7 @@ impl Subscriber {
                 stop_block, "Syncing historical events in range"
             );
             let events = self.provider.get_logs(&filter).await?;
-            for event in events {
+            for event in events.iter() {
                 let result = self.process_log(&event).await;
                 match result {
                     Err(err) => {
@@ -510,6 +516,10 @@ impl Subscriber {
                     }
                     Ok(_) => {}
                 }
+            }
+            match events.last() {
+                Some(event) => self.record_block_number(&event),
+                None => {}
             }
             start_block += batch_size;
             if start_block > final_stop_block {
@@ -524,7 +534,7 @@ impl Subscriber {
     }
 
     fn latest_block_in_db(&self) -> u64 {
-        match ingest_state::onchain_events::get_state(&self.db) {
+        match node_local_state::onchain_events::get_state(&self.db) {
             Ok(state) => match state {
                 None => 0,
                 Some(state) => state.last_l2_block,
@@ -611,7 +621,9 @@ impl Subscriber {
                                 err, event,
                             )
                         }
-                        Ok(_) => {}
+                        Ok(_) => {
+                            self.record_block_number(&event);
+                        }
                     }
                 }
             }

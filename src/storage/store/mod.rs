@@ -3,7 +3,7 @@ pub use self::block::*;
 pub mod account;
 pub mod block;
 pub mod engine;
-pub mod ingest_state;
+pub mod node_local_state;
 pub mod shard;
 pub mod stores;
 pub mod utils;
