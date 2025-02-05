@@ -454,7 +454,7 @@ pub mod messages_factory {
 
         pub fn create_verification_remove(
             fid: u64,
-            address: String,
+            address: Vec<u8>,
             timestamp: Option<u32>,
             private_key: Option<&SigningKey>,
         ) -> message::Message {
@@ -487,7 +487,7 @@ pub mod messages_factory {
         ) -> message::Message {
             let proof = UserNameProof {
                 timestamp,
-                name: name.encode_to_vec(),
+                name: name.as_bytes().to_vec(),
                 owner,
                 signature: signature.as_bytes().to_vec(),
                 fid,

@@ -2,7 +2,15 @@ FROM rust:1.83 AS builder
 
 WORKDIR /usr/src/app
 
-RUN apt-get update && apt-get install -y libclang-dev libjemalloc-dev llvm-dev make protobuf-compiler cmake
+ARG ETH_SIGNATURE_VERIFIER_GIT_REPO_URL=https://github.com/CassOnMars/eth-signature-verifier.git
+ENV ETH_SIGNATURE_VERIFIER_GIT_REPO_URL=$ETH_SIGNATURE_VERIFIER_GIT_REPO_URL
+ENV RUST_BACKTRACE=1
+RUN <<EOF
+set -eu
+apt-get update && apt-get install -y libclang-dev git libjemalloc-dev llvm-dev make protobuf-compiler libssl-dev openssh-client cmake
+cd ..
+git clone $ETH_SIGNATURE_VERIFIER_GIT_REPO_URL
+EOF
 
 # Unfortunately, we can't prefetch creates without including the source code,
 # since the Cargo configuration references files in src.

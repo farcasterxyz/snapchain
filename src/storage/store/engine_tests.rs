@@ -361,7 +361,7 @@ mod tests {
         )
         .await;
 
-        let link_add = messages_factory::links::create_link_add(
+        let link_add1 = messages_factory::links::create_link_add(
             FID_FOR_TEST,
             "follow",
             target_fid,
@@ -369,29 +369,41 @@ mod tests {
             None,
         );
 
-        commit_message(&mut engine, &link_add).await;
-
+        commit_message(&mut engine, &link_add1).await;
         let link_result = engine.get_links_by_fid(FID_FOR_TEST);
         assert_eq!(1, link_result.unwrap().messages.len());
+
+        let link_add2 = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            "follow",
+            target_fid + 1, // target fid is different from the target fid in the compact state
+            Some(timestamp + 1),
+            None,
+        );
+
+        commit_message(&mut engine, &link_add2).await;
+        let link_result = engine.get_links_by_fid(FID_FOR_TEST);
+        assert_eq!(2, link_result.unwrap().messages.len());
 
         let link_remove = messages_factory::links::create_link_remove(
             FID_FOR_TEST,
             "follow",
             target_fid,
-            Some(timestamp + 1),
+            Some(timestamp + 2),
             None,
         );
 
         commit_message(&mut engine, &link_remove).await;
 
         let link_result = engine.get_links_by_fid(FID_FOR_TEST);
-        assert_eq!(0, link_result.unwrap().messages.len());
+        assert_eq!(1, link_result.unwrap().messages.len());
+        assert!(!message_exists_in_trie(&mut engine, &link_add1));
 
         let link_compact_state = messages_factory::links::create_link_compact_state(
             FID_FOR_TEST,
             "follow",
             target_fid,
-            Some(timestamp + 1),
+            Some(timestamp + 2),
             None,
         );
 
@@ -399,6 +411,11 @@ mod tests {
 
         let link_result = engine.get_link_compact_state_messages_by_fid(FID_FOR_TEST);
         assert_eq!(1, link_result.unwrap().messages.len());
+        let link_result = engine.get_links_by_fid(FID_FOR_TEST);
+        assert_eq!(0, link_result.unwrap().messages.len());
+        assert!(message_exists_in_trie(&mut engine, &link_compact_state));
+        assert!(!message_exists_in_trie(&mut engine, &link_add2));
+        assert!(!message_exists_in_trie(&mut engine, &link_remove))
     }
 
     #[tokio::test]
@@ -496,8 +513,8 @@ mod tests {
 
         let verification_remove = messages_factory::verifications::create_verification_remove(
             FID3_FOR_TEST,
-            "91031dcfdea024b4d51e775486111d2b2a715871".to_string(),
-            Some(timestamp),
+            hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap(),
+            Some(timestamp + 1),
             None,
         );
 
@@ -1180,6 +1197,43 @@ mod tests {
             &mut engine,
             &TrieKey::for_fname(0, fname)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_merge_ens_username() {
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let ens_name = &"farcaster.eth".to_string();
+        let owner = test_helper::default_custody_address();
+        let signature = "signature".to_string();
+        let signer = test_helper::default_signer();
+        let timestamp = messages_factory::farcaster_time();
+
+        test_helper::register_user(FID_FOR_TEST, signer.clone(), owner.clone(), &mut engine).await;
+
+        let username_proof_add = messages_factory::username_proof::create_username_proof(
+            FID_FOR_TEST as u64,
+            proto::UserNameType::UsernameTypeEnsL1,
+            ens_name.clone(),
+            owner,
+            signature.clone(),
+            timestamp as u64,
+            Some(&signer),
+        );
+
+        commit_message(&mut engine, &username_proof_add).await;
+        let committed_username_proof = engine.get_username_proofs_by_fid(FID_FOR_TEST).unwrap();
+        assert_eq!(committed_username_proof.messages.len(), 1);
+
+        let username_add = messages_factory::user_data::create_user_data_add(
+            FID_FOR_TEST as u64,
+            proto::UserDataType::Username,
+            ens_name,
+            Some(timestamp + 1),
+            Some(&signer),
+        );
+
+        // We had a bug where this commit would fail because we looked in the wrong store to find the username proof
+        commit_message(&mut engine, &username_add).await;
     }
 
     #[tokio::test]

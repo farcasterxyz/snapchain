@@ -1,106 +1,13 @@
+use crate::core::validations::error::ValidationError;
 use crate::proto::{self, VerificationAddAddressBody};
-use crate::storage::util::{blake3_20, bytes_compare};
 use alloy_dyn_abi::TypedData;
-use ed25519_dalek::{Signature, VerifyingKey};
-use prost::Message;
+use alloy_provider::Provider;
+use alloy_transport::Transport;
+use eth_signature_verifier::Verification;
 use serde::Serialize;
 use serde_json::{json, Value};
-use thiserror::Error;
 
-const MAX_DATA_BYTES: usize = 2048;
 const EIP_712_FARCASTER_VERIFICATION_CLAIM_CHAIN_IDS: [u16; 5] = [0, 1, 5, 10, 420];
-
-#[derive(Error, Debug, Clone, PartialEq)]
-pub enum ValidationError {
-    #[error("Message data is missing")]
-    MissingData,
-    #[error("Invalid message hash")]
-    InvalidHash,
-    #[error("Unrecognized hash scheme")]
-    InvalidHashScheme,
-    #[error("Message data invalid")]
-    InvalidData,
-    #[error("Message data too large")]
-    InvalidDataLength,
-    #[error("Unrecognized signature scheme")]
-    InvalidSignatureScheme,
-    #[error("Signer is empty or invalid")]
-    MissingOrInvalidSigner,
-    #[error("Signature is empty")]
-    MissingSignature,
-    #[error("Invalid message signature")]
-    InvalidSignature,
-}
-
-pub fn validate_message(message: &proto::Message) -> Result<(), ValidationError> {
-    let data_bytes;
-    if message.data_bytes.is_some() {
-        data_bytes = message.data_bytes.as_ref().unwrap().clone();
-        if data_bytes.len() > MAX_DATA_BYTES {
-            return Err(ValidationError::InvalidDataLength);
-        }
-    } else {
-        if message.data.is_none() {
-            return Err(ValidationError::MissingData);
-        }
-        data_bytes = message.data.as_ref().unwrap().encode_to_vec();
-    }
-
-    validate_message_hash(message.hash_scheme, &data_bytes, &message.hash)?;
-    validate_signature(
-        message.signature_scheme,
-        &message.hash,
-        &message.signature,
-        &message.signer,
-    )?;
-
-    Ok(())
-}
-
-fn validate_signature(
-    signature_scheme: i32,
-    data_bytes: &Vec<u8>,
-    signature: &Vec<u8>,
-    signer: &Vec<u8>,
-) -> Result<(), ValidationError> {
-    if signature_scheme != proto::SignatureScheme::Ed25519 as i32 {
-        return Err(ValidationError::InvalidSignatureScheme);
-    }
-
-    if signature.len() == 0 {
-        return Err(ValidationError::MissingSignature);
-    }
-
-    let sig = Signature::from_slice(signature).map_err(|_| ValidationError::InvalidSignature)?;
-    let public_key = VerifyingKey::try_from(signer.as_slice())
-        .map_err(|_| ValidationError::MissingOrInvalidSigner)?;
-
-    public_key
-        .verify_strict(data_bytes.as_slice(), &sig)
-        .map_err(|_| ValidationError::InvalidSignature)?;
-
-    Ok(())
-}
-
-fn validate_message_hash(
-    hash_scheme: i32,
-    data_bytes: &Vec<u8>,
-    hash: &Vec<u8>,
-) -> Result<(), ValidationError> {
-    if hash_scheme != proto::HashScheme::Blake3 as i32 {
-        return Err(ValidationError::InvalidHashScheme);
-    }
-
-    if data_bytes.len() == 0 {
-        return Err(ValidationError::MissingData);
-    }
-
-    let result = blake3_20(data_bytes);
-    if bytes_compare(&result, hash) != 0 {
-        return Err(ValidationError::InvalidHash);
-    }
-    Ok(())
-}
 
 fn eip_712_farcaster_verification_claim() -> Value {
     json!({
@@ -236,7 +143,7 @@ pub fn validate_fname_transfer(transfer: &proto::FnameTransfer) -> Result<(), Va
     let fname_signer = alloy_primitives::address!("Bc5274eFc266311015793d89E9B591fa46294741");
     let signature = alloy_primitives::PrimitiveSignature::from_bytes_and_parity(
         &proof.signature[0..64],
-        proof.signature[64] != 0x1b,
+        proof.signature[64] != 0x1b && proof.signature[64] != 0x00,
     );
 
     let recovered_address = signature.recover_address_from_prehash(&hash);
@@ -335,7 +242,7 @@ fn validate_verification_eoa_signature(
     let hash = prehash.unwrap();
     let signature = alloy_primitives::PrimitiveSignature::from_bytes_and_parity(
         &body.claim_signature[0..64],
-        body.claim_signature[64] != 0x1b,
+        body.claim_signature[64] != 0x1b && body.claim_signature[64] != 0x00,
     );
 
     let recovered_address = signature.recover_address_from_prehash(&hash);
@@ -351,10 +258,15 @@ fn validate_verification_eoa_signature(
     Ok(())
 }
 
-fn validate_verification_contract_signature(
+pub async fn validate_verification_contract_signature<P, T>(
+    provider: P,
     claim: VerificationAddressClaim,
     body: &VerificationAddAddressBody,
-) -> Result<(), ValidationError> {
+) -> Result<(), ValidationError>
+where
+    P: Provider<T>,
+    T: Transport + Clone,
+{
     let json = json!({
         "types": eip_712_farcaster_verification_claim(),
         "primaryType": "VerificationClaim",
@@ -378,27 +290,22 @@ fn validate_verification_contract_signature(
         return Err(ValidationError::InvalidHash);
     }
 
-    if body.claim_signature.len() != 65 {
-        return Err(ValidationError::InvalidSignature);
-    }
-
     let hash = prehash.unwrap();
-    let signature = alloy_primitives::PrimitiveSignature::from_bytes_and_parity(
-        &body.claim_signature[0..64],
-        body.claim_signature[64] != 0x1b,
-    );
 
-    let recovered_address = signature.recover_address_from_prehash(&hash);
-    if recovered_address.is_err() {
-        return Err(ValidationError::InvalidSignature);
+    match eth_signature_verifier::verify_signature(
+        alloy_primitives::Bytes::from(body.claim_signature.clone()),
+        alloy_primitives::Address::from(&body.address.clone().try_into().unwrap()),
+        hash,
+        &provider,
+    )
+    .await
+    {
+        Ok(verification) => match verification {
+            Verification::Valid => Ok(()),
+            Verification::Invalid => Err(ValidationError::InvalidSignature),
+        },
+        Err(_) => Err(ValidationError::InvalidSignature),
     }
-
-    let recovered = recovered_address.unwrap().to_vec();
-    if recovered != body.address {
-        return Err(ValidationError::InvalidSignature);
-    }
-
-    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -410,7 +317,7 @@ pub struct VerificationAddressClaim {
     protocol: i32,
 }
 
-fn make_verification_address_claim(
+pub fn make_verification_address_claim(
     fid: u64,
     address: &Vec<u8>,
     network: proto::FarcasterNetwork,
@@ -487,7 +394,8 @@ fn validate_verification_add_eth_address_signature(
 
     match body.verification_type {
         0 => validate_verification_eoa_signature(reconstructed_claim.unwrap(), body),
-        1 => validate_verification_contract_signature(reconstructed_claim.unwrap(), body),
+        // Verification of contract signatures must happen out of consensus loop.
+        1 => Ok(()),
         _ => Err(ValidationError::InvalidData),
     }
 }
@@ -595,6 +503,38 @@ pub fn validate_add_address(
     match body.protocol {
         x if x == proto::Protocol::Ethereum as i32 => validate_add_eth_address(body, fid, network),
         x if x == proto::Protocol::Solana as i32 => validate_add_sol_address(body, fid, network),
+        _ => Err(ValidationError::InvalidData),
+    }
+}
+
+fn validate_remove_eth_address(
+    body: &proto::VerificationRemoveBody,
+) -> Result<(), ValidationError> {
+    let valid_address = validate_eth_address(&body.address);
+    if valid_address.is_err() {
+        return Err(valid_address.unwrap_err());
+    }
+
+    Ok(())
+}
+
+fn validate_remove_sol_address(
+    body: &proto::VerificationRemoveBody,
+) -> Result<(), ValidationError> {
+    let valid_address = validate_sol_address(&body.address);
+    if valid_address.is_err() {
+        return Err(valid_address.unwrap_err());
+    }
+
+    Ok(())
+}
+
+pub fn validate_remove_address(
+    body: &proto::VerificationRemoveBody,
+) -> Result<(), ValidationError> {
+    match body.protocol {
+        x if x == proto::Protocol::Ethereum as i32 => validate_remove_eth_address(body),
+        x if x == proto::Protocol::Solana as i32 => validate_remove_sol_address(body),
         _ => Err(ValidationError::InvalidData),
     }
 }

@@ -224,18 +224,7 @@ pub trait StoreDef: Send + Sync {
             r#type: HubEventType::MergeMessage as i32,
             body: Some(hub_event::Body::MergeMessageBody(MergeMessageBody {
                 message: Some(message.clone()),
-                deleted_messages: match &message.data {
-                    Some(data) => {
-                        if data.r#type == self.compact_state_message_type() as i32 {
-                            // In the case of merging compact state, we omit the deleted messages as this would
-                            // result in an unbounded message size:
-                            Vec::<Message>::new()
-                        } else {
-                            merge_conflicts
-                        }
-                    }
-                    None => Vec::<Message>::new(),
-                },
+                deleted_messages: merge_conflicts,
             })),
             id: 0,
         }

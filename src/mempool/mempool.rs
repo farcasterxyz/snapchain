@@ -1,33 +1,99 @@
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
-use tokio::{
-    sync::{mpsc, oneshot},
-    time::Instant,
-};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
-use crate::storage::{
-    store::{engine::MempoolMessage, stores::Stores},
-    trie::merkle_trie::{self, TrieKey},
+use crate::{
+    core::types::SnapchainValidatorContext,
+    network::gossip::GossipEvent,
+    proto::{self, ShardChunk},
+    storage::{
+        db::RocksDbTransactionBatch,
+        store::{
+            account::{
+                get_message_by_key, make_message_primary_key, make_ts_hash, type_to_set_postfix,
+                UserDataStore,
+            },
+            engine::MempoolMessage,
+            stores::Stores,
+        },
+    },
+    utils::statsd_wrapper::StatsdClientWrapper,
 };
 
 use super::routing::{MessageRouter, ShardRouter};
-use tracing::error;
+use tracing::{error, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub queue_size: u32,
+    pub allow_unlimited_mempool_size: bool,
+    pub capacity_per_shard: u64,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { queue_size: 500 }
+        Self {
+            queue_size: 500,
+            allow_unlimited_mempool_size: false,
+            capacity_per_shard: 1024,
+        }
     }
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MempoolKey {
-    inserted_at: Instant,
+    timestamp: u64,
+    identity: String,
+}
+
+impl MempoolKey {
+    pub fn new(timestamp: u64, identity: String) -> Self {
+        MempoolKey {
+            timestamp,
+            identity,
+        }
+    }
+
+    pub fn identity(self) -> String {
+        self.identity
+    }
+}
+
+impl proto::Message {
+    pub fn mempool_key(&self) -> MempoolKey {
+        if let Some(data) = &self.data {
+            // TODO: Consider revisiting choice of timestamp here as backdated messages currently are prioritized.
+            return MempoolKey::new(data.timestamp as u64, self.hex_hash());
+        }
+        todo!();
+    }
+}
+
+impl proto::ValidatorMessage {
+    pub fn mempool_key(&self) -> MempoolKey {
+        if let Some(fname) = &self.fname_transfer {
+            if let Some(proof) = &fname.proof {
+                return MempoolKey::new(proof.timestamp, fname.id.to_string());
+            }
+        }
+        if let Some(event) = &self.on_chain_event {
+            return MempoolKey::new(
+                event.block_timestamp,
+                hex::encode(&event.transaction_hash) + &event.log_index.to_string(),
+            );
+        }
+        todo!();
+    }
+}
+
+impl MempoolMessage {
+    pub fn mempool_key(&self) -> MempoolKey {
+        match self {
+            MempoolMessage::UserMessage(msg) => msg.mempool_key(),
+            MempoolMessage::ValidatorMessage(msg) => msg.mempool_key(),
+        }
+    }
 }
 
 pub struct MempoolMessagesRequest {
@@ -37,54 +103,109 @@ pub struct MempoolMessagesRequest {
 }
 
 pub struct Mempool {
+    config: Config,
     shard_stores: HashMap<u32, Stores>,
     message_router: Box<dyn MessageRouter>,
     num_shards: u32,
     mempool_rx: mpsc::Receiver<MempoolMessage>,
     messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
     messages: HashMap<u32, BTreeMap<MempoolKey, MempoolMessage>>,
+    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+    shard_decision_rx: broadcast::Receiver<ShardChunk>,
+    statsd_client: StatsdClientWrapper,
 }
 
 impl Mempool {
     pub fn new(
+        config: Config,
         mempool_rx: mpsc::Receiver<MempoolMessage>,
         messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
         num_shards: u32,
         shard_stores: HashMap<u32, Stores>,
+        gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+        shard_decision_rx: broadcast::Receiver<ShardChunk>,
+        statsd_client: StatsdClientWrapper,
     ) -> Self {
         Mempool {
+            config,
             shard_stores,
             num_shards,
             mempool_rx,
             message_router: Box::new(ShardRouter {}),
             messages: HashMap::new(),
             messages_request_rx,
+            gossip_tx,
+            shard_decision_rx,
+            statsd_client,
         }
     }
 
-    fn message_exists_in_trie(&mut self, fid: u64, trie_key: Vec<u8>) -> bool {
+    fn message_already_exists(&mut self, message: &MempoolMessage) -> bool {
+        let fid = message.fid();
         let shard = self.message_router.route_message(fid, self.num_shards);
         let stores = self.shard_stores.get_mut(&shard);
+        // Default to false in the orror paths
         match stores {
             None => {
                 error!("Error finding store for shard: {}", shard);
                 false
             }
-            Some(stores) => {
-                // TODO(aditi): The engine reloads its ref to the trie on commit but we maintain a separate ref to the trie here.
-                stores.trie.reload(&stores.db).unwrap();
-                match stores.trie.exists(
-                    &merkle_trie::Context::new(),
-                    &stores.db,
-                    trie_key.as_ref(),
-                ) {
-                    Err(err) => {
-                        error!("Error finding key in trie: {}", err);
-                        false
+            Some(stores) => match message {
+                MempoolMessage::UserMessage(message) => match &message.data {
+                    None => false,
+                    Some(message_data) => {
+                        let ts_hash = make_ts_hash(message_data.timestamp, &message.hash).unwrap();
+                        match type_to_set_postfix(message_data.r#type()) {
+                            Err(err) => {
+                                error!("Error retrieving set postfix: {}", err.to_string());
+                                false
+                            }
+                            Ok(set_postfix) => {
+                                let primary_key = make_message_primary_key(
+                                    fid,
+                                    set_postfix as u8,
+                                    Some(&ts_hash),
+                                );
+                                let existing_message = get_message_by_key(
+                                    &stores.db,
+                                    &mut RocksDbTransactionBatch::new(),
+                                    &primary_key,
+                                );
+                                match existing_message {
+                                    Ok(Some(_)) => true,
+                                    Err(_) | Ok(None) => false,
+                                }
+                            }
+                        }
                     }
-                    Ok(exists) => exists,
+                },
+                MempoolMessage::ValidatorMessage(message) => {
+                    if let Some(onchain_event) = &message.on_chain_event {
+                        match stores.onchain_event_store.exists(&onchain_event) {
+                            Err(_) => return false,
+                            Ok(exists) => return exists,
+                        }
+                    }
+
+                    if let Some(fname_transfer) = &message.fname_transfer {
+                        match &fname_transfer.proof {
+                            None => return false,
+                            Some(proof) => {
+                                let username_proof = UserDataStore::get_username_proof(
+                                    &stores.user_data_store,
+                                    &mut RocksDbTransactionBatch::new(),
+                                    &proof.name,
+                                );
+                                match username_proof {
+                                    Err(_) | Ok(None) => return false,
+                                    Ok(Some(_)) => return true,
+                                }
+                            }
+                        }
+                    }
+                    return false;
                 }
-            }
+            },
         }
     }
 
@@ -112,44 +233,61 @@ impl Mempool {
         }
     }
 
-    fn get_trie_key(message: &MempoolMessage) -> Option<Vec<u8>> {
-        match message {
-            MempoolMessage::UserMessage(message) => return Some(TrieKey::for_message(message)),
-            MempoolMessage::ValidatorMessage(validator_message) => {
-                if let Some(onchain_event) = &validator_message.on_chain_event {
-                    return Some(TrieKey::for_onchain_event(&onchain_event));
-                }
-
-                if let Some(fname_transfer) = &validator_message.fname_transfer {
-                    if let Some(proof) = &fname_transfer.proof {
-                        let name = String::from_utf8(proof.name.clone()).unwrap();
-                        return Some(TrieKey::for_fname(fname_transfer.id, &name));
-                    }
-                }
-
-                return None;
-            }
-        }
-    }
-
-    fn is_message_already_merged(&mut self, message: &MempoolMessage) -> bool {
-        let fid = message.fid();
-        let trie_key = Self::get_trie_key(&message);
-        match trie_key {
-            Some(trie_key) => self.message_exists_in_trie(fid, trie_key),
-            None => false,
-        }
-    }
-
     pub fn message_is_valid(&mut self, message: &MempoolMessage) -> bool {
-        if self.is_message_already_merged(message) {
+        if self.message_already_exists(message) {
             return false;
         }
 
         return true;
     }
 
+    async fn insert(&mut self, message: MempoolMessage) {
+        // TODO(aditi): Maybe we don't need to run validations here?
+        if self.message_is_valid(&message) {
+            let fid = message.fid();
+            let shard_id = self.message_router.route_message(fid, self.num_shards);
+            match self.messages.get_mut(&shard_id) {
+                None => {
+                    let mut messages = BTreeMap::new();
+                    messages.insert(message.mempool_key(), message.clone());
+                    self.messages.insert(shard_id, messages);
+                    self.statsd_client
+                        .gauge_with_shard(shard_id, "mempool.size", 1);
+                }
+                Some(messages) => {
+                    messages.insert(message.mempool_key(), message.clone());
+                    self.statsd_client.gauge_with_shard(
+                        shard_id,
+                        "mempool.size",
+                        messages.len() as u64,
+                    );
+                }
+            }
+
+            self.statsd_client
+                .count_with_shard(shard_id, "mempool.insert.success", 1);
+
+            match message {
+                MempoolMessage::UserMessage(_) => {
+                    let result = self
+                        .gossip_tx
+                        .send(GossipEvent::BroadcastMempoolMessage(message))
+                        .await;
+
+                    if let Err(e) = result {
+                        warn!("Failed to gossip message {:?}", e);
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            self.statsd_client.count("mempool.insert.failure", 1);
+        }
+    }
+
     pub async fn run(&mut self) {
+        // TODO(aditi): We may want to adjust this poll interval
+        let mut poll_interval = tokio::time::interval(std::time::Duration::from_millis(1));
         loop {
             tokio::select! {
                 biased;
@@ -159,21 +297,26 @@ impl Mempool {
                         self.pull_messages(messages_request).await
                     }
                 }
-                message = self.mempool_rx.recv() => {
-                    if let Some(message) = message {
-                        // TODO(aditi): Maybe we don't need to run validations here?
-                        if self.message_is_valid(&message) {
-                            let fid = message.fid();
-                            let shard_id = self.message_router.route_message(fid, self.num_shards);
-                            // TODO(aditi): We need a size limit on the mempool and we need to figure out what to do if it's exceeded
-                            match self.messages.get_mut(&shard_id) {
-                                None => {
-                                    let mut messages = BTreeMap::new();
-                                    messages.insert(MempoolKey { inserted_at: Instant::now()}, message.clone());
-                                    self.messages.insert(shard_id, messages);
+                _ = poll_interval.tick() => {
+                    if self.config.allow_unlimited_mempool_size || (self.messages.len() as u64) < self.config.capacity_per_shard {
+                        if let Ok(message) = self.mempool_rx.try_recv() {
+                            self.insert(message).await;
+                        }
+                    }
+                }
+                chunk = self.shard_decision_rx.recv() => {
+                    if let Ok(chunk) = chunk {
+                        let header = chunk.header.expect("Expects chunk to have a header");
+                        let height = header.height.expect("Expects header to have a height");
+                        if let Some(mempool) = self.messages.get_mut(&height.shard_index) {
+                            for transaction in chunk.transactions {
+                                for user_message in transaction.user_messages {
+                                    mempool.remove(&user_message.mempool_key());
+                                    self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
                                 }
-                                Some(messages) => {
-                                    messages.insert(MempoolKey { inserted_at: Instant::now()}, message.clone());
+                                for system_message in transaction.system_messages {
+                                    mempool.remove(&system_message.mempool_key());
+                                    self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
                                 }
                             }
                         }

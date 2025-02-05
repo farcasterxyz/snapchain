@@ -1,5 +1,7 @@
 use core::fmt;
-use informalsystems_malachitebft_core_types::{self, SignedMessage, SigningProvider};
+use informalsystems_malachitebft_core_types::{
+    self, AggregatedSignature, CommitSignature, SignedMessage, SigningProvider,
+};
 use informalsystems_malachitebft_core_types::{
     Extension, NilOrVal, Round, SignedProposal, SignedProposalPart, SignedVote, Validator,
     VoteType, VotingPower,
@@ -14,7 +16,7 @@ use tracing::warn;
 pub use crate::proto; // TODO: reconsider how this is imported
 
 use crate::proto::full_proposal::ProposedValue;
-use crate::proto::{Block, FullProposal, ShardChunk};
+use crate::proto::{Block, Commits, FullProposal, ShardChunk};
 pub use proto::Height;
 pub use proto::ShardHash;
 
@@ -152,17 +154,21 @@ impl SigningProvider<SnapchainValidatorContext> for Ed25519Provider {
         &self,
         proposal_part: <SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::ProposalPart,
     ) -> SignedMessage<SnapchainValidatorContext, <SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::ProposalPart>{
-        SignedProposalPart::new(proposal_part, Signature(vec![]))
+        let signature = self.keypair.sign(&proposal_part.to_sign_bytes());
+        SignedProposalPart::new(proposal_part, Signature(signature))
     }
 
     fn verify_signed_proposal_part(
         &self,
-        _proposal_part: &<SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::ProposalPart,
-        _signature: &informalsystems_malachitebft_core_types::Signature<SnapchainValidatorContext>,
-        _public_key: &informalsystems_malachitebft_core_types::PublicKey<SnapchainValidatorContext>,
+        proposal_part: &<SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::ProposalPart,
+        signature: &informalsystems_malachitebft_core_types::Signature<SnapchainValidatorContext>,
+        public_key: &informalsystems_malachitebft_core_types::PublicKey<SnapchainValidatorContext>,
     ) -> bool {
-        // TODO(aditi): We don't handle proposal parts yet in consensus
-        todo!()
+        let valid = public_key.verify(&proposal_part.to_sign_bytes(), &signature.0);
+        if !valid {
+            panic!("Invalid signature");
+        }
+        valid
     }
 
     fn verify_commit_signature(
@@ -343,16 +349,24 @@ impl FullProposal {
         }
     }
 
-    pub fn block(&self) -> Option<Block> {
+    pub fn block(&self, commits: Commits) -> Option<Block> {
         match &self.proposed_value {
-            Some(ProposedValue::Block(block)) => Some(block.clone()),
+            Some(ProposedValue::Block(block)) => {
+                let mut block = block.clone();
+                block.commits = Some(commits);
+                Some(block)
+            }
             _ => None,
         }
     }
 
-    pub fn shard_chunk(&self) -> Option<&ShardChunk> {
+    pub fn shard_chunk(&self, commits: Commits) -> Option<ShardChunk> {
         match &self.proposed_value {
-            Some(ProposedValue::Shard(chunk)) => Some(&chunk),
+            Some(ProposedValue::Shard(chunk)) => {
+                let mut chunk = chunk.clone();
+                chunk.commits = Some(commits);
+                Some(chunk)
+            }
             _ => None,
         }
     }
@@ -367,6 +381,10 @@ impl FullProposal {
 
     pub fn round(&self) -> Round {
         Round::new(self.round.try_into().unwrap())
+    }
+
+    pub fn to_sign_bytes(&self) -> Vec<u8> {
+        self.encode_to_vec()
     }
 }
 
@@ -530,7 +548,7 @@ impl Vote {
         Self {
             vote_type,
             height: proto.height.unwrap(),
-            round: Round::new(proto.round.try_into().unwrap()),
+            round: Round::from(proto.round),
             voter: Address::from_vec(proto.voter),
             shard_hash,
             extension: None,
@@ -565,9 +583,9 @@ impl Proposal {
     pub fn from_proto(proto: proto::Proposal) -> Self {
         Self {
             height: proto.height.unwrap(),
-            round: Round::new(proto.round.try_into().unwrap()),
+            round: Round::from(proto.round),
             shard_hash: proto.value.unwrap(),
-            pol_round: Round::try_from(proto.pol_round).unwrap(),
+            pol_round: Round::from(proto.pol_round),
             proposer: Address::from_vec(proto.proposer),
         }
     }
@@ -575,18 +593,6 @@ impl Proposal {
         // TODO: Should we be signing the hash?
         self.to_proto().encode_to_vec()
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SinglePartProposal {
-    pub height: Height,
-    pub proposal_round: Round,
-    pub proposer: Address,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProposalPart {
-    FullProposal(SinglePartProposal),
 }
 
 #[derive(Clone, Debug)]
@@ -616,7 +622,7 @@ impl ShardedContext for SnapchainValidatorContext {
 impl informalsystems_malachitebft_core_types::Context for SnapchainValidatorContext {
     type Address = Address;
     type Height = Height;
-    type ProposalPart = ProposalPart;
+    type ProposalPart = FullProposal;
     type Proposal = Proposal;
     type Validator = SnapchainValidator;
     type ValidatorSet = SnapchainValidatorSet;
@@ -689,7 +695,7 @@ impl informalsystems_malachitebft_core_types::Context for SnapchainValidatorCont
 impl SnapchainContext for SnapchainValidatorContext {}
 
 impl informalsystems_malachitebft_core_types::ProposalPart<SnapchainValidatorContext>
-    for ProposalPart
+    for FullProposal
 {
     fn is_first(&self) -> bool {
         // Only one part for now
@@ -700,6 +706,9 @@ impl informalsystems_malachitebft_core_types::ProposalPart<SnapchainValidatorCon
         true
     }
 }
+
+// Make malachite happy. Prost already implements PartialEq, should be safe to mark as Eq?
+impl Eq for FullProposal {}
 
 impl informalsystems_malachitebft_core_types::Proposal<SnapchainValidatorContext> for Proposal {
     fn height(&self) -> Height {
@@ -803,5 +812,58 @@ impl informalsystems_malachitebft_core_types::Validator<SnapchainValidatorContex
 
     fn voting_power(&self) -> VotingPower {
         1
+    }
+}
+
+impl proto::Commits {
+    pub fn to_commit_certificate(
+        &self,
+    ) -> informalsystems_malachitebft_core_types::CommitCertificate<SnapchainValidatorContext> {
+        let height = self.height.unwrap();
+        let round = Round::from(self.round);
+        let value_id = self.value.clone().unwrap();
+
+        let signatures = self
+            .signatures
+            .iter()
+            .map(|commit| CommitSignature {
+                address: Address::from_vec(commit.signer.clone()),
+                signature: Signature(commit.signature.clone()),
+                extension: None,
+            })
+            .collect();
+
+        informalsystems_malachitebft_core_types::CommitCertificate {
+            height,
+            round,
+            value_id,
+            aggregated_signature: AggregatedSignature::new(signatures),
+        }
+    }
+
+    pub fn from_commit_certificate(
+        certificate: &informalsystems_malachitebft_core_types::CommitCertificate<
+            SnapchainValidatorContext,
+        >,
+    ) -> Self {
+        let height = Some(certificate.height.clone());
+        let round = certificate.round.as_i64();
+        let value = Some(certificate.value_id.clone());
+        let signatures = certificate
+            .aggregated_signature
+            .signatures
+            .iter()
+            .map(|commit| proto::CommitSignature {
+                signer: commit.address.to_vec(),
+                signature: commit.signature.0.clone(),
+            })
+            .collect();
+
+        proto::Commits {
+            height,
+            round,
+            value,
+            signatures,
+        }
     }
 }

@@ -20,19 +20,24 @@ futures = "0.3.28"
 futures-core = "0.3.31"
 parking_lot = "0.12.1"
 clap = { version = "4.3.0", features = ["derive"] }
-libp2p = { version = "0.54.1", features = ["tokio", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux", "quic"] }
+libp2p = { version = "0.54.1", features = ["tokio", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux", "quic", "request-response"] }
 async-trait = "0.1.68"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt", "json"] }
 hex = "0.4.3"
-ractor = "0.11.2"
+ractor = "0.13.5"
+bytes = "1.9.0"
 informalsystems-malachitebft-core-consensus = { version = "0.0.1" }
+informalsystems-malachitebft-engine = { version = "0.0.1" }
+informalsystems-malachitebft-network = { version = "0.0.1" }
+informalsystems-malachitebft-sync = { version = "0.0.1" }
 informalsystems-malachitebft-core-types = { version = "0.0.1"}
 informalsystems-malachitebft-config = { version = "0.0.1"}
+informalsystems-malachitebft-codec = { version = "0.0.1"}
 informalsystems-malachitebft-metrics = { version = "0.0.1" }
 blake3 = "1.4.1"
 tracing = "0.1.40"
 thiserror = "1.0.66"
-reqwest = { version = "0.12.9", features = ["json"] }
+reqwest = { version = "0.12.9", features = ["json", "stream"] }
 figment = { version = "0.10.19", features = ["env", "toml"] }
 futures-util = "0.3.31"
 url = "2.5.3"
@@ -63,6 +68,14 @@ chrono = "0.4.39"
 tar = "0.4.40"
 gzp = "0.11.3"
 flate2 = "1.0.28"
+eth-signature-verifier = { version = "0.3.0", path = "../eth-signature-verifier" }
+fancy-regex = "0.14.0"
+aws-config = { version = "1.1.7", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1.71.0", features = ["behavior-version-latest"] }
+hyper = "1.5.1"
+serde_qs = "0.13.0"
+base64 = "0.22.1"
+toml = "0.8.19"
 
 [build-dependencies]
 tonic-build = "0.9.2"

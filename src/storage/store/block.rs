@@ -6,6 +6,7 @@ use crate::storage::db::{PageOptions, RocksDB, RocksdbError};
 use prost::Message;
 use std::sync::Arc;
 use thiserror::Error;
+use tracing::error;
 
 // TODO(aditi): This code definitely needs unit tests
 #[derive(Error, Debug)]
@@ -21,6 +22,9 @@ pub enum BlockStorageError {
 
     #[error("Too many blocks in result")]
     TooManyBlocksInResult,
+
+    #[error("Error decoding shard chunk")]
+    DecodeError(#[from] prost::DecodeError),
 }
 
 /** A page of messages returned from various APIs */
@@ -169,6 +173,21 @@ impl BlockStore {
 
     pub fn get_last_block(&self) -> Result<Option<Block>, BlockStorageError> {
         get_last_block(&self.db)
+    }
+
+    pub fn get_block_by_height(&self, height: u64) -> Result<Option<Block>, BlockStorageError> {
+        let block_key = make_block_key(height);
+        let block = self.db.get(&block_key)?;
+        match block {
+            None => Ok(None),
+            Some(block) => {
+                let block = Block::decode(block.as_slice()).map_err(|e| {
+                    error!("Error decoding shard chunk: {:?}", e);
+                    BlockStorageError::DecodeError(e)
+                })?;
+                Ok(Some(block))
+            }
+        }
     }
 
     pub fn max_block_number(&self) -> Result<u64, BlockStorageError> {

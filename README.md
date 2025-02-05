@@ -42,8 +42,8 @@ Before you begin, ensure you have the following installed:
 
 Clone the snapchain repo and build it:
 ```
-git clone https://github.com/farcasterxyz/snapchain-v0.git
-cd snapchain-v0
+git clone https://github.com/farcasterxyz/snapchain.git
+cd snapchain
 cargo build
 ```
 
@@ -68,6 +68,12 @@ To query a node, you can run `grpcurl` from within the container:
 
 ```
 docker compose exec node1 grpcurl -import-path proto -proto proto/rpc.proto list
+```
+
+If you need fresh keypairs for your node, you can generate them with:
+
+```
+cargo run --bin generate_keys
 ```
 
 ### Clean up

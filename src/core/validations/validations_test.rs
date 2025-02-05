@@ -1,127 +1,8 @@
 mod tests {
-    use crate::core::util::calculate_message_hash;
-    use crate::core::validations::{
-        validate_add_address, validate_fname_transfer, validate_message, ValidationError,
-    };
+    use crate::core::validations::error::ValidationError;
+    use crate::core::validations::verification::{validate_add_address, validate_fname_transfer};
     use crate::proto;
-    use crate::storage::store::test_helper;
-    use crate::utils::factory::{messages_factory, time};
-    use prost::Message;
     use proto::{FnameTransfer, UserNameProof};
-
-    fn assert_validation_error(msg: &proto::Message, expected_error: ValidationError) {
-        let result = validate_message(msg);
-        assert!(result.is_err());
-        assert_eq!(result.err().unwrap(), expected_error);
-    }
-
-    fn assert_valid(msg: &proto::Message) {
-        let result = validate_message(msg);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validates_data_bytes() {
-        let mut msg = messages_factory::casts::create_cast_add(1234, "test", None, None);
-        assert_valid(&msg);
-
-        // Set data and data_bytes to None
-        msg.data = None;
-        msg.data_bytes = None;
-
-        assert_validation_error(&msg, ValidationError::MissingData);
-
-        msg.data_bytes = Some(vec![]);
-        assert_validation_error(&msg, ValidationError::MissingData);
-
-        // when data bytes is too large
-        msg.data_bytes = Some(vec![0; 2049]);
-        assert_validation_error(&msg, ValidationError::InvalidDataLength);
-
-        // When valid
-        let mut msg = messages_factory::casts::create_cast_add(1234, "test", None, None);
-        // Valid data, but empty data_bytes
-        msg.data_bytes = None;
-        assert_valid(&msg);
-
-        // Valid data_bytes, but empty data
-        msg.data_bytes = Some(msg.data.as_ref().unwrap().encode_to_vec());
-        msg.data = None;
-        assert_valid(&msg);
-    }
-
-    fn valid_message() -> proto::Message {
-        messages_factory::casts::create_cast_add(1234, "test", None, None)
-    }
-
-    #[test]
-    fn test_validates_hash_scheme() {
-        let mut msg = valid_message();
-        assert_valid(&msg);
-
-        msg.hash_scheme = 0;
-        assert_validation_error(&msg, ValidationError::InvalidHashScheme);
-
-        msg.hash_scheme = 2;
-        assert_validation_error(&msg, ValidationError::InvalidHashScheme);
-    }
-
-    #[test]
-    fn test_validates_hash() {
-        let timestamp = time::farcaster_time();
-        let mut msg = valid_message();
-        assert_valid(&msg);
-
-        msg.data.as_mut().unwrap().timestamp = timestamp + 10;
-        assert_validation_error(&msg, ValidationError::InvalidHash);
-
-        msg.hash = vec![];
-        assert_validation_error(&msg, ValidationError::InvalidHash);
-
-        msg.hash = vec![0; 20];
-        assert_validation_error(&msg, ValidationError::InvalidHash);
-    }
-
-    #[test]
-    fn validates_signature_scheme() {
-        let mut msg = valid_message();
-        assert_valid(&msg);
-
-        msg.signature_scheme = 0;
-        assert_validation_error(&msg, ValidationError::InvalidSignatureScheme);
-
-        msg.signature_scheme = 2;
-        assert_validation_error(&msg, ValidationError::InvalidSignatureScheme);
-    }
-
-    #[test]
-    fn validates_signature() {
-        let timestamp = time::farcaster_time();
-        let mut msg = valid_message();
-        assert_valid(&msg);
-
-        // Change the data so the signature becomes invalid
-        msg.data.as_mut().unwrap().timestamp = timestamp + 10;
-        msg.hash = calculate_message_hash(&msg.data.as_ref().unwrap().encode_to_vec()); // Ensure hash is valid
-        assert_validation_error(&msg, ValidationError::InvalidSignature);
-
-        msg.signature = vec![];
-        assert_validation_error(&msg, ValidationError::MissingSignature);
-
-        msg.signature = vec![0; 64];
-        assert_validation_error(&msg, ValidationError::InvalidSignature);
-
-        msg = valid_message();
-        msg.signer = vec![];
-
-        assert_validation_error(&msg, ValidationError::MissingOrInvalidSigner);
-
-        msg.signer = test_helper::generate_signer()
-            .verifying_key()
-            .to_bytes()
-            .to_vec();
-        assert_validation_error(&msg, ValidationError::InvalidSignature);
-    }
 
     #[test]
     fn test_validate_add_address_valid_eoa() {
@@ -135,6 +16,22 @@ mod tests {
       };
 
         let result = validate_add_address(add_address_body, 2, proto::FarcasterNetwork::Mainnet);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_add_address_valid_eoa_2() {
+        let add_address_body = &proto::VerificationAddAddressBody{
+        address: hex::decode("5eed8e690f36824f963498024249028d66961c0a").unwrap(),
+        claim_signature: hex::decode("eaaa2438c2395a70415e520a5b3f94009ca691862e6c906b0b6d5170f1a148c8329aad093bd330e809089a3d4ca2678d817901be8031e3ba72ef19f9e809cf2700").unwrap(),
+        block_hash: hex::decode("49d78d07b9e1caaf000da24b55efa6d293a128679fe070d527e5c45a862da9f9").unwrap(),
+        verification_type: 0,
+        chain_id: 0,
+        protocol: 0,
+      };
+
+        let result =
+            validate_add_address(add_address_body, 200739, proto::FarcasterNetwork::Mainnet);
         assert!(result.is_ok());
     }
 
@@ -194,6 +91,24 @@ mod tests {
                 owner: hex::decode("8773442740c17c9d0f0b87022c722f9a136206ed").unwrap(),
                 signature: hex::decode("b7181760f14eda0028e0b647ff15f45235526ced3b4ae07fcce06141b73d32960d3253776e62f761363fb8137087192047763f4af838950a96f3885f3c2289c41b").unwrap(),
                 fid: 1,
+                r#type: 1,
+            })
+        };
+        let result = validate_fname_transfer(transfer);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_fname_transfer_verify_valid_signature_2() {
+        let transfer = &FnameTransfer{
+            id: 200739,
+            from_fid: 200739,
+            proof: Some(UserNameProof{
+                timestamp: 1702071745,
+                name: "pierre02100".into(),
+                owner: hex::decode("59fe4ccccb6deefc78e274fa41ee4e107fac59ae").unwrap(),
+                signature: hex::decode("69c07157eebc605777b20d18222c5a642b138d932adfd3a0ebdc771edeb1f50b7ad6191ee0b4479141f1284baafcc43551e018eccd9f66eb30f1c2643418918a1b").unwrap(),
+                fid: 200739,
                 r#type: 1,
             })
         };

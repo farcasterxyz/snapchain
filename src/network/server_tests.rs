@@ -8,12 +8,15 @@ mod tests {
     use std::time::Duration;
 
     use crate::connectors::onchain_events::L1Client;
-    use crate::mempool::mempool::Mempool;
+    use crate::core::validations::{self, verification::VerificationAddressClaim};
+    use crate::mempool::mempool::{self, Mempool};
     use crate::mempool::routing;
     use crate::mempool::routing::MessageRouter;
     use crate::network::server::MyHubService;
     use crate::proto::hub_service_server::HubService;
-    use crate::proto::{self, HubEvent, HubEventType, UserNameProof, UserNameType};
+    use crate::proto::{
+        self, HubEvent, HubEventType, UserNameProof, UserNameType, VerificationAddAddressBody,
+    };
     use crate::proto::{FidRequest, SubscribeRequest};
     use crate::storage::db::{self, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::engine::{Senders, ShardEngine};
@@ -54,6 +57,14 @@ mod tests {
                 &hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap(),
             );
             future::ready(Ok(addr)).await
+        }
+
+        async fn verify_contract_signature(
+            &self,
+            _claim: VerificationAddressClaim,
+            _body: &VerificationAddAddressBody,
+        ) -> Result<(), validations::error::ValidationError> {
+            future::ready(Ok(())).await
         }
     }
 
@@ -171,7 +182,18 @@ mod tests {
         assert_eq!(message_router.route_message(SHARD2_FID, 2), 2);
 
         let (mempool_tx, mempool_rx) = mpsc::channel(1000);
-        let mut mempool = Mempool::new(mempool_rx, msgs_request_rx, num_shards, stores.clone());
+        let (gossip_tx, _gossip_rx) = mpsc::channel(1000);
+        let (_shard_decision_tx, shard_decision_rx) = broadcast::channel(1000);
+        let mut mempool = Mempool::new(
+            mempool::Config::default(),
+            mempool_rx,
+            msgs_request_rx,
+            num_shards,
+            stores.clone(),
+            gossip_tx,
+            shard_decision_rx,
+            statsd_client.clone(),
+        );
         tokio::spawn(async move { mempool.run().await });
 
         (
@@ -462,31 +484,44 @@ mod tests {
         test_helper::assert_contains_all_messages(&response, &[&cast_add2]);
 
         // Pagination works
-        let all_casts_request = proto::FidRequest {
+        let all_casts_request = proto::FidTimestampRequest {
             fid: SHARD1_FID,
             page_size: Some(1),
             page_token: None,
             reverse: None,
+            start_timestamp: None,
+            stop_timestamp: None,
         };
         let response = service
-            .get_casts_by_fid(Request::new(all_casts_request))
+            .get_all_cast_messages_by_fid(Request::new(all_casts_request))
             .await;
         test_helper::assert_contains_all_messages(&response, &[&cast_add2]);
 
-        // TODO: Fix pagination
-        // let second_page_request = proto::FidRequest { fid: SHARD1_FID, page_size: Some(1), page_token: response.as_ref().unwrap().get_ref().next_page_token.clone(), reverse: None };
-        // warn!("second_page_request: {:?}", second_page_request);
-        // let response = service
-        //     .get_casts_by_fid(Request::new(second_page_request))
-        //     .await;
-        // warn!("response: {:?}", response);
-        // test_helper::assert_contains_all_messages(&response, &[&cast_remove]);
+        let second_page_request = proto::FidTimestampRequest {
+            fid: SHARD1_FID,
+            page_size: Some(1),
+            page_token: response.as_ref().unwrap().get_ref().next_page_token.clone(),
+            reverse: None,
+            start_timestamp: None,
+            stop_timestamp: None,
+        };
+        let response = service
+            .get_all_cast_messages_by_fid(Request::new(second_page_request))
+            .await;
+        test_helper::assert_contains_all_messages(&response, &[&cast_remove]);
 
-        // let reverse_request = proto::FidRequest { fid: SHARD1_FID, page_size: Some(1), page_token: None, reverse: Some(true) };
-        // let response = service
-        //     .get_casts_by_fid(Request::new(reverse_request))
-        //     .await;
-        // test_helper::assert_contains_all_messages(&response, &[&cast_remove]);
+        let reverse_request = proto::FidTimestampRequest {
+            fid: SHARD1_FID,
+            page_size: Some(1),
+            page_token: None,
+            reverse: Some(true),
+            start_timestamp: None,
+            stop_timestamp: None,
+        };
+        let response = service
+            .get_all_cast_messages_by_fid(Request::new(reverse_request))
+            .await;
+        test_helper::assert_contains_all_messages(&response, &[&cast_remove]);
 
         // Returns all casts
         let bulk_casts_request = proto::FidTimestampRequest {

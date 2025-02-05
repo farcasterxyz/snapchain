@@ -1,6 +1,7 @@
 use clap::Parser;
-use libp2p::identity::ed25519::SecretKey;
+use libp2p::identity::ed25519::{Keypair, SecretKey};
 use std::time::Duration;
+use toml::Value;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -18,8 +19,8 @@ struct Args {
     #[arg(long, default_value = "108864739")]
     start_block_number: u64,
 
-    #[arg(long, default_value = "0")]
-    stop_block_number: u64,
+    #[arg(long)]
+    stop_block_number: Option<u64>,
 
     /// Statsd prefix. note: node ID will be appended before config file written
     #[arg(long, default_value = "snapchain")]
@@ -30,6 +31,12 @@ struct Args {
 
     #[arg(long, default_value = "false")]
     statsd_use_tags: bool,
+
+    #[arg(long, default_value = "")]
+    snapshot_endpoint_url: String,
+
+    #[arg(long, default_value = "2")]
+    num_shards: u32,
 }
 
 fn parse_duration(arg: &str) -> Result<Duration, String> {
@@ -48,11 +55,28 @@ async fn main() {
         std::fs::create_dir("nodes").expect("Failed to create nodes directory");
     }
 
+    let keypairs = (1..=nodes)
+        .map(|_| SecretKey::generate())
+        .collect::<Vec<SecretKey>>();
+    let all_public_keys = keypairs
+        .iter()
+        .map(|x| hex::encode(Keypair::from(x.clone()).public().to_bytes()))
+        .collect::<Vec<String>>();
+    let validator_addresses = Value::Array(
+        all_public_keys
+            .iter()
+            .map(|x| Value::String(x.clone()))
+            .collect(),
+    )
+    .to_string();
+
     let base_rpc_port = 3382;
     let base_gossip_port = 50050;
     for i in 1..=nodes {
         let id = i;
         let db_dir = format!("nodes/{id}/.rocks");
+        let backup_dir = format!("nodes/{id}/.rocks.backup");
+        let snapshot_download_dir = format!("nodes/{id}/.rocks.snapshot");
 
         if !std::path::Path::new(format!("nodes/{id}").as_str()).exists() {
             std::fs::create_dir(format!("nodes/{id}")).expect("Failed to create node directory");
@@ -61,7 +85,7 @@ async fn main() {
                 std::fs::remove_dir_all(db_dir.clone()).expect("Failed to remove .rocks directory");
             }
         }
-        let secret_key = hex::encode(SecretKey::generate());
+        let secret_key = hex::encode(&keypairs[i - 1]);
         let rpc_port = base_rpc_port + i;
         let gossip_port = base_gossip_port + i;
         let host = format!("127.0.0.1");
@@ -74,6 +98,15 @@ async fn main() {
             .join(",");
 
         let propose_value_delay = humantime::format_duration(args.propose_value_delay);
+        let num_shards = args.num_shards;
+        let shard_ids = format!(
+            "[{}]",
+            (1..=num_shards)
+                .map(|x| x.to_string())
+                .collect::<Vec<String>>()
+                .as_slice()
+                .join(",")
+        );
 
         let statsd_prefix = format!("{}{}", args.statsd_prefix, id);
         let statsd_addr = args.statsd_addr.clone();
@@ -81,7 +114,11 @@ async fn main() {
         let l1_rpc_url = args.l1_rpc_url.clone();
         let l2_rpc_url = args.l2_rpc_url.clone();
         let start_block_number = args.start_block_number;
-        let stop_block_number = args.stop_block_number;
+        let snapshot_endpoint_url = args.snapshot_endpoint_url.clone();
+        let stop_block_number = match args.stop_block_number {
+            None => "".to_string(),
+            Some(number) => format!("stop_block_number = {number}").to_string(),
+        };
 
         let config_file_content = format!(
             r#"
@@ -101,11 +138,20 @@ bootstrap_peers = "{other_nodes_addresses}"
 [consensus]
 private_key = "{secret_key}"
 propose_value_delay = "{propose_value_delay}"
+validator_addresses = {validator_addresses}
+shard_ids = {shard_ids}
+num_shards = {num_shards}
 
 [onchain_events]
 rpc_url= "{l2_rpc_url}"
 start_block_number = {start_block_number}
-stop_block_number = {stop_block_number}
+{stop_block_number}
+
+[snapshot]
+endpoint_url = "{snapshot_endpoint_url}"
+backup_dir = "{backup_dir}"
+snapshot_download_dir = "{snapshot_download_dir}"
+load_db_from_snapshot=false
             "#
         );
 

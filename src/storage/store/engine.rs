@@ -1,12 +1,13 @@
+use super::account::UsernameProofStore;
 use super::account::{IntoU8, OnchainEventStorageError, UserDataStore};
 use crate::core::error::HubError;
 use crate::core::types::Height;
 use crate::core::validations;
+use crate::core::validations::verification;
 use crate::mempool::mempool::MempoolMessagesRequest;
-use crate::proto::FarcasterNetwork;
 use crate::proto::HubEvent;
-use crate::proto::Message;
 use crate::proto::UserNameProof;
+use crate::proto::UserNameType;
 use crate::proto::{self, Block, MessageType, ShardChunk, Transaction};
 use crate::proto::{OnChainEvent, OnChainEventType};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
@@ -70,7 +71,7 @@ pub enum MessageValidationError {
     MissingSigner,
 
     #[error(transparent)]
-    MessageValidationError(#[from] validations::ValidationError),
+    MessageValidationError(#[from] validations::error::ValidationError),
 
     #[error("invalid message type")]
     InvalidMessageType(i32),
@@ -105,6 +106,18 @@ impl MempoolMessage {
         match self {
             MempoolMessage::UserMessage(msg) => msg.fid(),
             MempoolMessage::ValidatorMessage(msg) => msg.fid(),
+        }
+    }
+
+    pub fn to_proto(&self) -> proto::MempoolMessage {
+        let msg = match self {
+            MempoolMessage::UserMessage(msg) => {
+                proto::mempool_message::MempoolMessage::UserMessage(msg.clone())
+            }
+            _ => todo!(),
+        };
+        proto::MempoolMessage {
+            mempool_message: Some(msg),
         }
     }
 }
@@ -531,7 +544,7 @@ impl ShardEngine {
                     );
                 }
 
-                match validations::validate_fname_transfer(fname_transfer) {
+                match verification::validate_fname_transfer(fname_transfer) {
                     Ok(_) => {}
                     Err(err) => {
                         warn!("Error validating fname transfer: {:?}", err);
@@ -914,14 +927,7 @@ impl ShardEngine {
             .as_ref()
             .ok_or(MessageValidationError::NoMessageData)?;
 
-        // TODO(aditi): Check network
-        let network = FarcasterNetwork::try_from(message_data.network).or_else(|_| {
-            Err(MessageValidationError::MessageValidationError(
-                validations::ValidationError::InvalidData,
-            ))
-        })?;
-
-        validations::validate_message(message)?;
+        validations::message::validate_message(message)?;
 
         // Check that the user has a custody address
         self.stores
@@ -937,25 +943,12 @@ impl ShardEngine {
             .map_err(|_| MessageValidationError::MissingSigner)?
             .ok_or(MessageValidationError::MissingSigner)?;
 
+        // State-dependent verifications:
         match &message_data.body {
             Some(proto::message_data::Body::UserDataBody(user_data)) => {
                 if user_data.r#type == proto::UserDataType::Username as i32 {
                     self.validate_username(message_data.fid, &user_data.value, txn_batch)?;
                 }
-            }
-            Some(proto::message_data::Body::UsernameProofBody(_)) => {
-                // Validate ens
-            }
-            Some(proto::message_data::Body::VerificationAddAddressBody(add)) => {
-                let result = validations::validate_add_address(add, message_data.fid, network);
-                if result.is_err() {
-                    return Err(MessageValidationError::MessageValidationError(
-                        result.unwrap_err(),
-                    ));
-                }
-            }
-            Some(proto::message_data::Body::LinkCompactStateBody(_)) => {
-                // Validate link state length
             }
             _ => {}
         }
@@ -963,32 +956,67 @@ impl ShardEngine {
         Ok(())
     }
 
-    fn validate_username(
+    fn get_username_proof(
         &self,
-        fid: u64,
-        fname: &str,
+        name: String,
         txn: &mut RocksDbTransactionBatch,
-    ) -> Result<(), MessageValidationError> {
-        if fname.is_empty() {
-            // Setting an empty username is allowed, no need to validate the proof
-            return Ok(());
-        }
-        let fname = fname.to_string();
-        // TODO: validate fname string
-
-        let proof =
-            UserDataStore::get_username_proof(&self.stores.user_data_store, txn, fname.as_bytes())
+    ) -> Result<Option<UserNameProof>, MessageValidationError> {
+        // TODO(aditi): The fnames proofs should live in the username proof store.
+        if name.ends_with(".eth") {
+            let proof_message = UsernameProofStore::get_username_proof(
+                &self.stores.username_proof_store,
+                &name.as_bytes().to_vec(),
+                UserNameType::UsernameTypeEnsL1 as u8,
+            )
+            .map_err(|e| MessageValidationError::StoreError {
+                inner: e,
+                hash: vec![],
+            })?;
+            match proof_message {
+                Some(message) => match message.data {
+                    None => Ok(None),
+                    Some(message_data) => match message_data.body {
+                        Some(body) => match body {
+                            proto::message_data::Body::UsernameProofBody(user_name_proof) => {
+                                Ok(Some(user_name_proof))
+                            }
+                            _ => Ok(None),
+                        },
+                        None => Ok(None),
+                    },
+                },
+                None => Ok(None),
+            }
+        } else {
+            UserDataStore::get_username_proof(&self.stores.user_data_store, txn, name.as_bytes())
                 .map_err(|e| MessageValidationError::StoreError {
                     inner: e,
                     hash: vec![],
-                })?;
+                })
+        }
+    }
+
+    fn validate_username(
+        &self,
+        fid: u64,
+        name: &str,
+        txn: &mut RocksDbTransactionBatch,
+    ) -> Result<(), MessageValidationError> {
+        if name.is_empty() {
+            // Setting an empty username is allowed, no need to validate the proof
+            return Ok(());
+        }
+        let name = name.to_string();
+        // TODO: validate fname string
+
+        let proof = self.get_username_proof(name.clone(), txn)?;
         match proof {
             Some(proof) => {
                 if proof.fid != fid {
                     return Err(MessageValidationError::MissingFname);
                 }
 
-                if fname.ends_with(".eth") {
+                if name.ends_with(".eth") {
                     // TODO: Validate ens names
                 } else {
                 }
@@ -1134,7 +1162,10 @@ impl ShardEngine {
         }
     }
 
-    pub fn simulate_message(&mut self, message: &Message) -> Result<(), MessageValidationError> {
+    pub fn simulate_message(
+        &mut self,
+        message: &proto::Message,
+    ) -> Result<(), MessageValidationError> {
         let mut txn = RocksDbTransactionBatch::new();
         let snapchain_txn = Transaction {
             fid: message.fid() as u64,
@@ -1200,6 +1231,24 @@ impl ShardEngine {
         }
     }
 
+    pub fn get_shard_chunk_by_height(&self, height: Height) -> Option<ShardChunk> {
+        if self.shard_id != height.shard_index {
+            error!(
+                shard_id = self.shard_id,
+                requested_shard_id = height.shard_index,
+                "Requested shard chunk from incorrect shard"
+            );
+            return None;
+        }
+        self.stores
+            .shard_store
+            .get_chunk_by_height(height.block_number)
+            .unwrap_or_else(|err| {
+                error!("No shard chunk at height {:#?}", err);
+                None
+            })
+    }
+
     pub fn get_casts_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
         CastStore::get_cast_adds_by_fid(&self.stores.cast_store, fid, &PageOptions::default())
     }
@@ -1207,7 +1256,7 @@ impl ShardEngine {
     pub fn get_links_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
         self.stores
             .link_store
-            .get_adds_by_fid::<fn(&Message) -> bool>(fid, &PageOptions::default(), None)
+            .get_adds_by_fid::<fn(&proto::Message) -> bool>(fid, &PageOptions::default(), None)
     }
 
     pub fn get_link_compact_state_messages_by_fid(
@@ -1222,20 +1271,20 @@ impl ShardEngine {
     pub fn get_reactions_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
         self.stores
             .reaction_store
-            .get_adds_by_fid::<fn(&Message) -> bool>(fid, &PageOptions::default(), None)
+            .get_adds_by_fid::<fn(&proto::Message) -> bool>(fid, &PageOptions::default(), None)
     }
 
     pub fn get_user_data_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
         self.stores
             .user_data_store
-            .get_adds_by_fid::<fn(&Message) -> bool>(fid, &PageOptions::default(), None)
+            .get_adds_by_fid::<fn(&proto::Message) -> bool>(fid, &PageOptions::default(), None)
     }
 
     pub fn get_user_data_by_fid_and_type(
         &self,
         fid: u64,
         user_data_type: proto::UserDataType,
-    ) -> Result<Message, HubError> {
+    ) -> Result<proto::Message, HubError> {
         UserDataStore::get_user_data_by_fid_and_type(
             &self.stores.user_data_store,
             fid,
@@ -1246,13 +1295,13 @@ impl ShardEngine {
     pub fn get_verifications_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
         self.stores
             .verification_store
-            .get_adds_by_fid::<fn(&Message) -> bool>(fid, &PageOptions::default(), None)
+            .get_adds_by_fid::<fn(&proto::Message) -> bool>(fid, &PageOptions::default(), None)
     }
 
     pub fn get_username_proofs_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
         self.stores
             .username_proof_store
-            .get_adds_by_fid::<fn(&Message) -> bool>(fid, &PageOptions::default(), None)
+            .get_adds_by_fid::<fn(&proto::Message) -> bool>(fid, &PageOptions::default(), None)
     }
 
     pub fn get_fname_proof(&self, name: &String) -> Result<Option<UserNameProof>, HubError> {
@@ -1296,14 +1345,43 @@ impl ShardEngine {
 
 pub struct BlockEngine {
     block_store: BlockStore,
+    statsd_client: StatsdClientWrapper,
 }
 
 impl BlockEngine {
-    pub fn new(block_store: BlockStore) -> Self {
-        BlockEngine { block_store }
+    pub fn new(block_store: BlockStore, statsd_client: StatsdClientWrapper) -> Self {
+        BlockEngine {
+            block_store,
+            statsd_client,
+        }
+    }
+
+    // statsd
+    fn count(&self, key: &str, count: u64) {
+        let key = format!("engine.{}", key);
+        self.statsd_client.count_with_shard(0, key.as_str(), count);
+    }
+
+    // statsd
+    fn gauge(&self, key: &str, value: u64) {
+        let key = format!("engine.{}", key);
+        self.statsd_client.gauge_with_shard(0, key.as_str(), value);
     }
 
     pub fn commit_block(&mut self, block: Block) {
+        self.gauge(
+            "block_height",
+            block
+                .header
+                .as_ref()
+                .unwrap()
+                .height
+                .as_ref()
+                .unwrap()
+                .block_number,
+        );
+        self.count("block_shards", block.shard_chunks.len() as u64);
+
         let result = self.block_store.put_block(block);
         if result.is_err() {
             error!("Failed to store block: {:?}", result.err());
@@ -1315,6 +1393,25 @@ impl BlockEngine {
             Ok(block) => block,
             Err(err) => {
                 error!("Unable to obtain last block {:#?}", err);
+                None
+            }
+        }
+    }
+
+    pub fn get_block_by_height(&self, height: Height) -> Option<Block> {
+        if height.shard_index != 0 {
+            error!(
+                shard_id = 0,
+                requested_shard_id = height.shard_index,
+                "Requested shard chunk from incorrect shard"
+            );
+
+            return None;
+        }
+        match self.block_store.get_block_by_height(height.block_number) {
+            Ok(block) => block,
+            Err(err) => {
+                error!("No block at height {:#?}", err);
                 None
             }
         }
