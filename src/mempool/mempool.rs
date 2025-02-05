@@ -302,7 +302,8 @@ impl Mempool {
                     }
                 }
                 chunk = self.shard_decision_rx.recv() => {
-                    if let Ok(chunk) = chunk {
+                    match chunk {
+                        Ok(chunk) => {
                         let header = chunk.header.expect("Expects chunk to have a header");
                         let height = header.height.expect("Expects header to have a height");
                         if let Some(mempool) = self.messages.get_mut(&height.shard_index) {
@@ -317,12 +318,27 @@ impl Mempool {
                                 }
                             }
                         }
+                    },
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("Shard decision tx is closed.");
+                    },
+                    Err(broadcast::error::RecvError::Lagged(count)) => {
+                        error!(lag = count, "Shard decision rx is lagged");
                     }
+                }
+
                 }
                 _ = poll_interval.tick() => {
                     if self.config.allow_unlimited_mempool_size || (self.messages.len() as u64) < self.config.capacity_per_shard {
-                        if let Ok(message) = self.mempool_rx.try_recv() {
-                            self.insert(message).await;
+                        match self.mempool_rx.try_recv() {
+                            Ok(message) => {
+                                self.insert(message).await;
+                            }, Err(mpsc::error::TryRecvError::Disconnected) => {
+                                panic!("Mempool tx is disconnected")
+                            },
+                             Err(mpsc::error::TryRecvError::Empty) => {
+                            },
+
                         }
                     }
                 }

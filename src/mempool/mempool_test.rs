@@ -247,10 +247,24 @@ mod tests {
         let config1 = Config::new(node1_addr.clone(), node2_addr.clone());
         let config2 = Config::new(node2_addr.clone(), node1_addr.clone());
 
-        let (_, mut gossip1, mut mempool1, mempool_tx1, _mempool_requests_tx1, _, _) =
-            setup(config1);
-        let (_, mut gossip2, mut mempool2, mempool_tx2, mempool_requests_tx2, _, mut system_rx2) =
-            setup(config2);
+        let (
+            _,
+            mut gossip1,
+            mut mempool1,
+            mempool_tx1,
+            _mempool_requests_tx1,
+            _shard_decision_tx1,
+            _,
+        ) = setup(config1);
+        let (
+            _,
+            mut gossip2,
+            mut mempool2,
+            mempool_tx2,
+            mempool_requests_tx2,
+            _shard_decision_tx1,
+            mut system_rx2,
+        ) = setup(config2);
 
         // Spawn gossip tasks
         tokio::spawn(async move {
@@ -284,14 +298,12 @@ mod tests {
         // Wait for gossip
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        let mut received = system_rx2.try_recv();
         // Should be received through the system message of gossip 2
-        while let Ok(msg) = received {
+        while let Ok(msg) = system_rx2.try_recv() {
             if let SystemMessage::Mempool(mempool_message) = msg {
                 // Manually forward to the mempool
                 mempool_tx2.send(mempool_message).await.unwrap();
             }
-            received = system_rx2.try_recv();
         }
 
         // Wait for the message to be processed
