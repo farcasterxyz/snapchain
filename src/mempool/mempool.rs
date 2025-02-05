@@ -41,7 +41,7 @@ impl Default for Config {
             queue_size: 500,
             allow_unlimited_mempool_size: false,
             capacity_per_shard: 1024,
-            rx_poll_interval: Duration::from_micros(1),
+            rx_poll_interval: Duration::from_millis(1),
         }
     }
 }
@@ -329,16 +329,19 @@ impl Mempool {
 
                 }
                 _ = poll_interval.tick() => {
-                    if self.config.allow_unlimited_mempool_size || (self.messages.len() as u64) < self.config.capacity_per_shard {
-                        match self.mempool_rx.try_recv() {
-                            Ok(message) => {
-                                self.insert(message).await;
-                            }, Err(mpsc::error::TryRecvError::Disconnected) => {
-                                panic!("Mempool tx is disconnected")
-                            },
-                             Err(mpsc::error::TryRecvError::Empty) => {
-                            },
+                    // We want to pull in multiple messages per poll so that throughput is not blocked on the polling frequency. The number of messages we pull should be fixed and relatively small so that the mempool isn't always stuck here.
+                    for _ in 0..256 {
+                        if self.config.allow_unlimited_mempool_size || (self.messages.len() as u64) < self.config.capacity_per_shard {
+                            match self.mempool_rx.try_recv() {
+                                Ok(message) => {
+                                    self.insert(message).await;
+                                }, Err(mpsc::error::TryRecvError::Disconnected) => {
+                                    panic!("Mempool tx is disconnected")
+                                },
+                                Err(mpsc::error::TryRecvError::Empty) => {
+                                },
 
+                            }
                         }
                     }
                 }
