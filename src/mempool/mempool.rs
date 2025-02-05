@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -29,6 +32,7 @@ pub struct Config {
     pub queue_size: u32,
     pub allow_unlimited_mempool_size: bool,
     pub capacity_per_shard: u64,
+    pub rx_poll_interval: Duration,
 }
 
 impl Default for Config {
@@ -37,6 +41,7 @@ impl Default for Config {
             queue_size: 500,
             allow_unlimited_mempool_size: false,
             capacity_per_shard: 1024,
+            rx_poll_interval: Duration::from_micros(1),
         }
     }
 }
@@ -286,8 +291,7 @@ impl Mempool {
     }
 
     pub async fn run(&mut self) {
-        // TODO(aditi): We may want to adjust this poll interval
-        let mut poll_interval = tokio::time::interval(std::time::Duration::from_millis(1));
+        let mut poll_interval = tokio::time::interval(self.config.rx_poll_interval);
         loop {
             tokio::select! {
                 biased;
