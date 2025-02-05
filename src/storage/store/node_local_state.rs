@@ -28,21 +28,33 @@ pub enum DataType {
     FnameTransfer = 2,
 }
 
+#[derive(Clone, Copy)]
+pub enum Registry {
+    StorageRegistry = 1,
+    IdRegistry = 2,
+    KeyRegistry = 3,
+}
+
 impl LocalStateStore {
     pub fn new(db: Arc<RocksDB>) -> Self {
         LocalStateStore { db }
     }
 
-    fn make_onchain_event_primary_key() -> Vec<u8> {
+    fn make_onchain_event_primary_key(registry: Registry) -> Vec<u8> {
         vec![
             RootPrefix::NodeLocalState as u8,
             DataType::OnchainEvent as u8,
+            registry as u8,
         ]
     }
 
-    pub fn set_latest_block_number(&self, block_number: u64) -> Result<(), IngestStateError> {
+    pub fn set_latest_block_number(
+        &self,
+        block_number: u64,
+        registry: Registry,
+    ) -> Result<(), IngestStateError> {
         Ok(self.db.put(
-            &Self::make_onchain_event_primary_key(),
+            &Self::make_onchain_event_primary_key(registry),
             &OnChainEventState {
                 last_l2_block: block_number,
             }
@@ -50,8 +62,14 @@ impl LocalStateStore {
         )?)
     }
 
-    pub fn get_latest_block_number(&self) -> Result<Option<u64>, IngestStateError> {
-        match self.db.get(&Self::make_onchain_event_primary_key())? {
+    pub fn get_latest_block_number(
+        &self,
+        registry: Registry,
+    ) -> Result<Option<u64>, IngestStateError> {
+        match self
+            .db
+            .get(&Self::make_onchain_event_primary_key(registry))?
+        {
             Some(state) => Ok(Some(
                 OnChainEventState::decode(state.as_slice())?.last_l2_block,
             )),
@@ -66,11 +84,8 @@ impl LocalStateStore {
         ]
     }
 
-    pub fn set_latest_fname_transfer_id(
-        db: &RocksDB,
-        transfer_id: u64,
-    ) -> Result<(), IngestStateError> {
-        Ok(db.put(
+    pub fn set_latest_fname_transfer_id(&self, transfer_id: u64) -> Result<(), IngestStateError> {
+        Ok(self.db.put(
             &Self::make_fname_transfer_primary_key(),
             &FnameState {
                 last_fname_proof: transfer_id,
@@ -79,11 +94,9 @@ impl LocalStateStore {
         )?)
     }
 
-    pub fn get_latest_fname_transfer_id(
-        db: &RocksDB,
-    ) -> Result<Option<FnameState>, IngestStateError> {
-        match db.get(&Self::make_fname_transfer_primary_key())? {
-            Some(state) => Ok(Some(FnameState::decode(state.as_slice())?)),
+    pub fn get_latest_fname_transfer_id(&self) -> Result<Option<u64>, IngestStateError> {
+        match self.db.get(&Self::make_fname_transfer_primary_key())? {
+            Some(state) => Ok(Some(FnameState::decode(state.as_slice())?.last_fname_proof)),
             None => Ok(None),
         }
     }

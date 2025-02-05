@@ -23,7 +23,10 @@ use crate::{
         SignerEventBody, SignerEventType, SignerMigratedEventBody, StorageRentEventBody,
         ValidatorMessage, VerificationAddAddressBody,
     },
-    storage::store::{engine::MempoolMessage, node_local_state::LocalStateStore},
+    storage::store::{
+        engine::MempoolMessage,
+        node_local_state::{LocalStateStore, Registry},
+    },
     utils::statsd_wrapper::StatsdClientWrapper,
 };
 
@@ -273,17 +276,25 @@ impl Subscriber {
     fn record_block_number(&self, event: &Log) {
         match event.block_number {
             Some(block_number) => {
-                if block_number as u64 > self.latest_block_in_db() {
-                    match self.local_state_store.set_latest_block_number(block_number) {
-                        Err(err) => {
-                            error!(
-                                block_number,
-                                err = err.to_string(),
-                                "Unable to store last block number",
-                            );
+                match Self::get_registry(event) {
+                    Some(registry) => {
+                        if block_number as u64 > self.latest_block_in_db(registry) {
+                            match self
+                                .local_state_store
+                                .set_latest_block_number(block_number, registry)
+                            {
+                                Err(err) => {
+                                    error!(
+                                        block_number,
+                                        err = err.to_string(),
+                                        "Unable to store last block number",
+                                    );
+                                }
+                                _ => {}
+                            }
                         }
-                        _ => {}
                     }
+                    None => {}
                 };
             }
             None => {}
@@ -297,6 +308,20 @@ impl Subscriber {
             .await?
             .ok_or(SubscribeError::UnableToFindBlockByHash)?;
         Ok(block.header.timestamp)
+    }
+
+    fn get_registry(event: &Log) -> Option<Registry> {
+        match event.topic0()? {
+            &StorageRegistryAbi::Rent::SIGNATURE_HASH => Some(Registry::StorageRegistry),
+            &IdRegistryAbi::Register::SIGNATURE_HASH => Some(Registry::IdRegistry),
+            &IdRegistryAbi::Transfer::SIGNATURE_HASH => Some(Registry::IdRegistry),
+            &IdRegistryAbi::ChangeRecoveryAddress::SIGNATURE_HASH => Some(Registry::IdRegistry),
+            &KeyRegistryAbi::Add::SIGNATURE_HASH => Some(Registry::KeyRegistry),
+            &KeyRegistryAbi::Remove::SIGNATURE_HASH => Some(Registry::KeyRegistry),
+            &KeyRegistryAbi::AdminReset::SIGNATURE_HASH => Some(Registry::KeyRegistry),
+            &KeyRegistryAbi::Migrated::SIGNATURE_HASH => Some(Registry::KeyRegistry),
+            _ => None,
+        }
     }
 
     async fn process_log(&mut self, event: &Log) -> Result<(), SubscribeError> {
@@ -481,11 +506,21 @@ impl Subscriber {
     pub async fn sync_historical_events(
         &mut self,
         address: Address,
-        initial_start_block: u64,
         final_stop_block: u64,
     ) -> Result<(), SubscribeError> {
+        let registry = if address == STORAGE_REGISTRY {
+            Registry::StorageRegistry
+        } else if address == ID_REGISTRY {
+            Registry::IdRegistry
+        } else if address == KEY_REGISTRY {
+            Registry::KeyRegistry
+        } else {
+            panic!("Invalid address for contract")
+        };
         let batch_size = 1000;
-        let mut start_block = initial_start_block;
+        let mut start_block = self
+            .start_block_number
+            .max(self.latest_block_in_db(registry));
         loop {
             let stop_block = final_stop_block.min(start_block + batch_size);
             let filter = Filter::new()
@@ -524,8 +559,8 @@ impl Subscriber {
         }
     }
 
-    fn latest_block_in_db(&self) -> u64 {
-        match self.local_state_store.get_latest_block_number() {
+    fn latest_block_in_db(&self, registry: Registry) -> u64 {
+        match self.local_state_store.get_latest_block_number(registry) {
             Ok(number) => number.unwrap_or(0),
             Err(err) => {
                 error!(
@@ -553,35 +588,20 @@ impl Subscriber {
 
     pub async fn run(&mut self) -> Result<(), SubscribeError> {
         let latest_block_on_chain = self.latest_block_on_chain().await?;
-        let latest_block_in_db = self.latest_block_in_db();
         info!(
             start_block_number = self.start_block_number,
             stop_block_numer = self.stop_block_number,
             latest_block_on_chain,
-            latest_block_in_db,
             "Starting l2 events subscription"
         );
-        let historical_sync_start_block = latest_block_in_db.max(self.start_block_number);
         let historical_sync_stop_block =
             latest_block_on_chain.min(self.stop_block_number.unwrap_or(latest_block_on_chain));
-        self.sync_historical_events(
-            STORAGE_REGISTRY,
-            historical_sync_start_block,
-            historical_sync_stop_block,
-        )
-        .await?;
-        self.sync_historical_events(
-            ID_REGISTRY,
-            historical_sync_start_block,
-            historical_sync_stop_block,
-        )
-        .await?;
-        self.sync_historical_events(
-            KEY_REGISTRY,
-            historical_sync_start_block,
-            historical_sync_stop_block,
-        )
-        .await?;
+        self.sync_historical_events(STORAGE_REGISTRY, historical_sync_stop_block)
+            .await?;
+        self.sync_historical_events(ID_REGISTRY, historical_sync_stop_block)
+            .await?;
+        self.sync_historical_events(KEY_REGISTRY, historical_sync_stop_block)
+            .await?;
 
         let should_start_live_sync = match self.stop_block_number {
             None => true,

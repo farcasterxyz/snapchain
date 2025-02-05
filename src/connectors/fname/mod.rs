@@ -97,7 +97,10 @@ impl Fetcher {
     }
 
     fn record_username_proof(&self, transfer_id: u64) {
-        match self.local_state_store.set_latest_block_number(transfer_id) {
+        match self
+            .local_state_store
+            .set_latest_fname_transfer_id(transfer_id)
+        {
             Err(err) => {
                 error!(
                     transfer_id,
@@ -110,7 +113,7 @@ impl Fetcher {
     }
 
     fn latest_fname_transfer_in_db(&self) -> u64 {
-        match self.local_state_store.get_latest_block_number() {
+        match self.local_state_store.get_latest_fname_transfer_id() {
             Ok(id) => id.unwrap_or(0),
             Err(err) => {
                 error!(

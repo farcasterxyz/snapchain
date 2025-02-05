@@ -1,9 +1,11 @@
 syntax = "proto3";
 
+import "onchain_event.proto";
+
 message OnChainEventState {
-  uint64 last_l2_block = 3;
+  uint64 last_l2_block = 1;
 }
 
 message FnameState {
-  uint64 last_fname_proof = 3;
+  uint64 last_fname_proof = 1;
 }
