@@ -1,7 +1,5 @@
 syntax = "proto3";
 
-import "onchain_event.proto";
-
 message OnChainEventState {
   uint64 last_l2_block = 1;
 }
