@@ -301,13 +301,6 @@ impl Mempool {
                         self.pull_messages(messages_request).await
                     }
                 }
-                _ = poll_interval.tick() => {
-                    if self.config.allow_unlimited_mempool_size || (self.messages.len() as u64) < self.config.capacity_per_shard {
-                        if let Ok(message) = self.mempool_rx.try_recv() {
-                            self.insert(message).await;
-                        }
-                    }
-                }
                 chunk = self.shard_decision_rx.recv() => {
                     if let Ok(chunk) = chunk {
                         let header = chunk.header.expect("Expects chunk to have a header");
@@ -323,6 +316,13 @@ impl Mempool {
                                     self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
                                 }
                             }
+                        }
+                    }
+                }
+                _ = poll_interval.tick() => {
+                    if self.config.allow_unlimited_mempool_size || (self.messages.len() as u64) < self.config.capacity_per_shard {
+                        if let Ok(message) = self.mempool_rx.try_recv() {
+                            self.insert(message).await;
                         }
                     }
                 }
