@@ -524,17 +524,28 @@ impl HubService for MyHubService {
         &self,
         _request: Request<GetInfoRequest>,
     ) -> Result<Response<GetInfoResponse>, Status> {
-        let mut num_fid_registrations = 0;
-        let mut approx_size = 0;
-        let mut num_messages = 0;
-        for (_, shard_store) in self.shard_stores.iter() {
-            approx_size += shard_store.db.approximate_size();
-            num_messages += shard_store.trie.get_count(
+        let mut total_fid_registrations = 0;
+        let mut total_approx_size = 0;
+        let mut total_num_messages = 0;
+        let mut shard_infos = Vec::new();
+
+        let block_info = proto::ShardInfo {
+            shard_id: 0,
+            max_height: self.block_store.max_block_number().unwrap_or(0),
+            num_messages: 0,
+            num_fid_registrations: 0,
+            approx_size: self.block_store.db.approximate_size(),
+        };
+        shard_infos.push(block_info);
+
+        for (shard_index, shard_store) in self.shard_stores.iter() {
+            let shard_approx_size = shard_store.db.approximate_size();
+            let shard_num_messages = shard_store.trie.get_count(
                 &shard_store.db,
                 &mut RocksDbTransactionBatch::new(),
                 &[],
             );
-            num_fid_registrations += shard_store
+            let shard_fid_registrations = shard_store
                 .db
                 .count_keys_at_prefix(vec![
                     RootPrefix::OnChainEvent as u8,
@@ -542,14 +553,28 @@ impl HubService for MyHubService {
                 ])
                 .map_err(|err| Status::from_error(Box::new(err)))?
                 as u64;
+
+            let info = proto::ShardInfo {
+                shard_id: *shard_index,
+                max_height: shard_store.shard_store.max_block_number().unwrap_or(0),
+                num_messages: shard_num_messages,
+                num_fid_registrations: shard_fid_registrations,
+                approx_size: shard_approx_size,
+            };
+            shard_infos.push(info);
+            total_num_messages += shard_num_messages;
+            total_fid_registrations += shard_fid_registrations;
+            total_approx_size += shard_approx_size;
         }
 
         Ok(Response::new(GetInfoResponse {
             db_stats: Some(DbStats {
-                num_fid_registrations,
-                num_messages,
-                approx_size,
+                num_fid_registrations: total_fid_registrations,
+                num_messages: total_num_messages,
+                approx_size: total_approx_size,
             }),
+            shard_infos,
+            num_shards: self.num_shards,
         }))
     }
 

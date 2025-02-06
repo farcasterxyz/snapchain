@@ -46,12 +46,22 @@ message DbStats {
   uint64 approx_size = 4;
 }
 
+message ShardInfo {
+  uint32 shard_id = 1;
+  uint64 max_height = 2;
+  uint64 num_messages = 3;
+  uint64 num_fid_registrations = 4;
+  uint64 approx_size = 5;
+}
+
 message GetInfoRequest {
 }
 
 // Response Types for the Sync RPC Methods
 message GetInfoResponse {
   DbStats db_stats = 5;
+  uint32 num_shards = 6;
+  repeated ShardInfo shard_infos = 7;
 }
 
 message EventRequest {

@@ -637,4 +637,60 @@ mod tests {
             .collect::<Vec<_>>()[0];
         assert_eq!(links_limit.used, 1);
     }
+
+    #[tokio::test]
+    async fn test_get_info() {
+        let (_, _, [mut engine1, _], service) = make_server().await;
+
+        test_helper::register_user(
+            SHARD1_FID,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine1,
+        )
+        .await;
+        test_helper::commit_message(
+            &mut engine1,
+            &messages_factory::casts::create_cast_add(SHARD1_FID, "test", None, None),
+        )
+        .await;
+
+        let response = service
+            .get_info(Request::new(proto::GetInfoRequest {}))
+            .await
+            .unwrap();
+        let info = response.get_ref();
+        assert_eq!(info.num_shards, 2);
+        assert_eq!(info.shard_infos.len(), 3); // +1 for the block shard
+
+        let block_info = info
+            .shard_infos
+            .iter()
+            .find(|info| info.shard_id == 0)
+            .unwrap();
+        assert_eq!(block_info.shard_id, 0);
+        assert_eq!(block_info.num_fid_registrations, 0);
+        assert_eq!(block_info.num_messages, 0);
+        assert_eq!(block_info.max_height, 0);
+
+        let shard1_info = info
+            .shard_infos
+            .iter()
+            .find(|info| info.shard_id == 1)
+            .unwrap();
+        assert_eq!(shard1_info.shard_id, 1);
+        assert_eq!(shard1_info.num_fid_registrations, 1);
+        assert_eq!(shard1_info.num_messages, 4); // 3 onchain events for registration + 1 cast add
+        assert_eq!(shard1_info.max_height, 4); // Each message above was commited in a separate block
+
+        let shard2_info = info
+            .shard_infos
+            .iter()
+            .find(|info| info.shard_id == 2)
+            .unwrap();
+        assert_eq!(shard2_info.shard_id, 2);
+        assert_eq!(shard2_info.num_fid_registrations, 0);
+        assert_eq!(shard2_info.num_messages, 0);
+        assert_eq!(shard2_info.max_height, 0);
+    }
 }
