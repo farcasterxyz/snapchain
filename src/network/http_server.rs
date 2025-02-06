@@ -1,37 +1,40 @@
 use base64::prelude::*;
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full};
 use hyper::{body::Bytes, Method};
 use hyper::{Request, Response, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::convert::Infallible;
 use std::future::Future;
 use std::sync::Arc;
 use tonic::async_trait;
 
-use crate::proto::{FidRequest, Protocol};
-use crate::{
-    proto::{
-        self, embed, hub_service_server::HubService, link_body::Target, message_data::Body,
-        CastType, FarcasterNetwork, FidTimestampRequest, HashScheme, MessageType, ReactionType,
-        SignatureScheme, UserDataType, UserNameType,
-    },
-    storage::store::engine::MessageValidationError,
+use crate::proto::{
+    self, embed, hub_service_server::HubService, link_body::Target, message_data::Body, CastType,
+    FarcasterNetwork, FidTimestampRequest, HashScheme, MessageType, ReactionType, SignatureScheme,
+    UserDataType, UserNameType,
+};
+use crate::proto::{
+    link_request, links_by_target_request, on_chain_event, reaction_request,
+    reactions_by_target_request, LinksByFidRequest, Protocol,
 };
 
 use super::server::MyHubService;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct Message {
-    data: MessageData,
-    hash: String,
+pub struct Message {
+    pub data: MessageData,
+    pub hash: String,
     #[serde(rename = "hashScheme")]
-    hash_scheme: String,
-    signature: Vec<u8>,
+    pub hash_scheme: String,
+    pub signature: Vec<u8>,
     #[serde(rename = "signatureScheme")]
-    signature_scheme: String,
-    signer: String,
+    pub signature_scheme: String,
+    pub signer: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct MessageData {
+pub struct MessageData {
     #[serde(rename = "type")]
     pub message_type: String,
     pub fid: u64,
@@ -70,43 +73,43 @@ struct MessageData {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
-enum EmbedUrlOrCastId {
+pub enum EmbedUrlOrCastId {
     Url(EmbedUrl),
     CastId(EmbedCastId),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct EmbedUrl {
-    url: String,
+pub struct EmbedUrl {
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct EmbedCastId {
+pub struct EmbedCastId {
     #[serde(rename = "castId")]
-    cast_id: CastId,
+    pub cast_id: CastId,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct CastAddBody {
+pub struct CastAddBody {
     #[serde(rename = "embedsDeprecated")]
-    embeds_deprecated: Vec<String>,
-    mentions: Vec<u64>,
+    pub embeds_deprecated: Vec<String>,
+    pub mentions: Vec<u64>,
     #[serde(rename = "parentCastId")]
-    parent_cast_id: Option<CastId>,
+    pub parent_cast_id: Option<CastId>,
     #[serde(rename = "parentUrl")]
-    parent_url: Option<String>,
-    text: String,
-    embeds: Vec<EmbedUrlOrCastId>,
+    pub parent_url: Option<String>,
+    pub text: String,
+    pub embeds: Vec<EmbedUrlOrCastId>,
     #[serde(rename = "mentionsPositions")]
-    mentions_positions: Vec<u32>,
+    pub mentions_positions: Vec<u32>,
     #[serde(rename = "type")]
-    cast_type: String,
+    pub cast_type: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct CastRemoveBody {
+pub struct CastRemoveBody {
     #[serde(rename = "targetHash")]
-    target_hash: String,
+    pub target_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,16 +182,16 @@ pub struct LinkCompactStateBody {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct CastId {
-    fid: u64,
-    hash: String,
+pub struct CastId {
+    pub fid: u64,
+    pub hash: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct PagedResponse {
-    messages: Vec<Message>,
+pub struct PagedResponse {
+    pub messages: Vec<Message>,
     #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
-    next_page_token: Option<Vec<u8>>,
+    pub next_page_token: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -200,23 +203,276 @@ pub struct IdRequest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FidRequest {
     pub fid: u64,
+    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
+    #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
     pub page_token: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
+    #[serde(rename = "startTimestamp", skip_serializing_if = "Option::is_none")]
     pub start_timestamp: Option<u64>,
+    #[serde(rename = "stopTimestamp", skip_serializing_if = "Option::is_none")]
     pub stop_timestamp: Option<u64>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReactionRequest {
+    fid: u64,
+    #[serde(rename = "reactionType")]
+    reaction_type: ReactionType,
+    #[serde(rename = "targetCastId", skip_serializing_if = "Option::is_none")]
+    target_cast_id: Option<CastId>,
+    #[serde(rename = "targetUrl", skip_serializing_if = "Option::is_none")]
+    target_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReactionsByFidRequest {
+    fid: u64,
+    #[serde(rename = "reactionType")]
+    reaction_type: ReactionType,
+    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    page_size: Option<u32>,
+    #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
+    page_token: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reverse: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReactionsByTargetRequest {
+    #[serde(rename = "targetCastId", skip_serializing_if = "Option::is_none")]
+    pub target_cast_id: Option<CastId>,
+    #[serde(rename = "targetUrl", skip_serializing_if = "Option::is_none")]
+    pub target_url: Option<String>,
+    #[serde(rename = "reactionType", skip_serializing_if = "Option::is_none")]
+    pub reaction_type: Option<ReactionType>,
+    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+    #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
+    pub page_token: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reverse: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LinkRequest {
+    fid: u64,
+    #[serde(rename = "linkType")]
+    link_type: String,
+    #[serde(rename = "targetFid", skip_serializing_if = "Option::is_none")]
+    target_fid: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LinksByTargetRequest {
+    #[serde(rename = "targetFid", skip_serializing_if = "Option::is_none")]
+    target_fid: Option<u64>,
+    #[serde(rename = "linkType", skip_serializing_if = "Option::is_none")]
+    link_type: Option<String>,
+    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    page_size: Option<u32>,
+    #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
+    page_token: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reverse: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum StorageUnitType {
+    UnitTypeLegacy = 0,
+    UnitType2024 = 1,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StorageUnitDetails {
+    #[serde(rename = "unitType")]
+    unit_type: StorageUnitType,
+    #[serde(rename = "unitSize")]
+    unit_size: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum StoreType {
+    None = 0,
+    Casts = 1,
+    Links = 2,
+    Reactions = 3,
+    UserData = 4,
+    Verifications = 5,
+    UsernameProofs = 6,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StorageLimit {
+    #[serde(rename = "storeType")]
+    pub store_type: StoreType,
+    pub name: String,
+    pub limit: u64,
+    pub used: u64,
+    #[serde(rename = "earliestTimestamp")]
+    pub earliest_timestamp: u64,
+    #[serde(rename = "earliestHash")]
+    pub earliest_hash: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StorageLimitsResponse {
+    pub limits: Vec<StorageLimit>,
+    pub units: u32,
+    #[serde(rename = "unitDetails")]
+    pub unit_details: Vec<StorageUnitDetails>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UsernameProofRequest {
+    name: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UserNameProof {
+    pub timestamp: u64,
+    pub name: Vec<u8>,
+    pub owner: Vec<u8>,
+    pub signature: Vec<u8>,
+    pub fid: u64,
+    pub r#type: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UsernameProofsResponse {
+    pub proofs: Vec<UserNameProof>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum OnChainEventType {
+    EventTypeNone = 0,
+    EventTypeSigner = 1,
+    EventTypeSignerMigrated = 2,
+    EventTypeIdRegister = 3,
+    EventTypeStorageRent = 4,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum SignerEventType {
+    None = 0,
+    Add = 1,
+    Remove = 2,
+    AdminReset = 3,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum IdRegisterEventType {
+    None = 0,
+    Register = 1,
+    Transfer = 2,
+    ChangeRecovery = 3,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SignerEventBody {
+    pub key: Vec<u8>,
+    #[serde(rename = "keyType")]
+    pub key_type: u32,
+    #[serde(rename = "eventType")]
+    pub event_type: SignerEventType,
+    pub metadata: Vec<u8>,
+    #[serde(rename = "metadataType")]
+    pub metadata_type: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SignerMigratedEventBody {
+    #[serde(rename = "migratedAt")]
+    pub migrated_at: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IdRegisterEventBody {
+    pub to: Vec<u8>,
+    #[serde(rename = "eventType")]
+    pub event_type: IdRegisterEventType,
+    pub from: Vec<u8>,
+    #[serde(rename = "recoveryAddress")]
+    pub recovery_address: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StorageRentEventBody {
+    pub payer: Vec<u8>,
+    pub units: u32,
+    pub expiry: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OnChainEvent {
+    pub r#type: OnChainEventType,
+    #[serde(rename = "chainId")]
+    pub chain_id: u32,
+    #[serde(rename = "blockNumber")]
+    pub block_number: u32,
+    #[serde(rename = "blockHash")]
+    pub block_hash: Vec<u8>,
+    #[serde(rename = "blockTimestamp")]
+    pub block_timestamp: u64,
+    #[serde(rename = "transactionHash")]
+    pub transaction_hash: Vec<u8>,
+    #[serde(rename = "logIndex")]
+    pub log_index: u32,
+    pub fid: u64,
+    #[serde(rename = "signerEventBody", skip_serializing_if = "Option::is_none")]
+    pub signer_event_body: Option<SignerEventBody>,
+    #[serde(
+        rename = "signerMigratedEventBody",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub signer_migrated_event_body: Option<SignerMigratedEventBody>,
+    #[serde(
+        rename = "idRegisterEventBody",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub id_register_event_body: Option<IdRegisterEventBody>,
+    #[serde(
+        rename = "storageRentEventBody",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub storage_rent_event_body: Option<StorageRentEventBody>,
+    #[serde(rename = "txIndex")]
+    pub tx_index: u32,
+    pub version: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OnChainEventResponse {
+    pub events: Vec<OnChainEvent>,
+    #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OnChainEventRequest {
+    fid: u64,
+    #[serde(rename = "eventType")]
+    event_type: OnChainEventType,
+    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    page_size: Option<u32>,
+    #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
+    page_token: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reverse: Option<bool>,
+}
+
 // Common error response
-#[derive(Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ErrorResponse {
     pub error: String,
     pub error_detail: Option<String>,
 }
 
 // Implementation struct
+#[derive(Clone)]
 pub struct HubHttpServiceImpl {
-    service: MyHubService,
+    pub service: Arc<MyHubService>,
 }
 
 fn map_proto_cast_add_body_to_json_cast_add_body(
@@ -572,7 +828,7 @@ fn map_proto_message_data_to_json_message_data(
                 timestamp: message_data.timestamp,
                 cast_add_body: None,
                 cast_remove_body: None,
-                reaction_body: None,
+                reaction_body: Some(result),
                 verification_add_address_body: None,
                 verification_remove_body: None,
                 user_data_body: None,
@@ -757,7 +1013,7 @@ fn map_proto_messages_response_to_json_paged_response(
         messages: messages_response
             .messages
             .iter()
-            .map(|m| map_proto_message_to_json_message(m)?)
+            .map(|m| map_proto_message_to_json_message(m.clone()).unwrap())
             .collect(),
         next_page_token: messages_response.next_page_token,
     })
@@ -769,8 +1025,11 @@ pub trait HubHttpService {
     async fn get_cast_by_id(&self, req: IdRequest) -> Result<Message, ErrorResponse>;
     async fn get_casts_by_fid(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse>;
     async fn get_casts_by_mention(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse>;
-    async fn get_reaction_by_id(&self, req: IdRequest) -> Result<Message, ErrorResponse>;
-    async fn get_reactions_by_fid(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse>;
+    async fn get_reaction_by_id(&self, req: ReactionRequest) -> Result<Message, ErrorResponse>;
+    async fn get_reactions_by_fid(
+        &self,
+        req: ReactionsByFidRequest,
+    ) -> Result<PagedResponse, ErrorResponse>;
     async fn get_reactions_by_cast(
         &self,
         req: ReactionsByTargetRequest,
@@ -779,11 +1038,14 @@ pub trait HubHttpService {
         &self,
         req: ReactionsByTargetRequest,
     ) -> Result<PagedResponse, ErrorResponse>;
-    async fn get_link_by_id(&self, req: IdRequest) -> Result<Message, ErrorResponse>;
-    async fn get_links_by_fid(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse>;
+    async fn get_link_by_id(&self, req: LinkRequest) -> Result<Message, ErrorResponse>;
+    async fn get_links_by_fid(
+        &self,
+        req: LinksByFidRequest,
+    ) -> Result<PagedResponse, ErrorResponse>;
     async fn get_links_by_target_fid(
         &self,
-        req: FidTimestampRequest,
+        req: LinksByTargetRequest,
     ) -> Result<PagedResponse, ErrorResponse>;
     async fn get_user_data_by_fid(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse>;
     async fn get_storage_limits_by_fid(
@@ -820,7 +1082,7 @@ impl HubHttpService for HubHttpServiceImpl {
             error_detail: Some(e.to_string()),
         })?;
 
-        let hash = hex::decode(&req.hash).map_err(|e| ErrorResponse {
+        let hash = hex::decode(&req.hash.replace("0x", "")).map_err(|e| ErrorResponse {
             error: "Invalid hash".to_string(),
             error_detail: Some(e.to_string()),
         })?;
@@ -884,9 +1146,34 @@ impl HubHttpService for HubHttpServiceImpl {
         map_proto_messages_response_to_json_paged_response(proto_resp)
     }
 
-    async fn get_reaction_by_id(&self, req: IdRequest) -> Result<Message, ErrorResponse> {
+    async fn get_reaction_by_id(&self, req: ReactionRequest) -> Result<Message, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(req);
+        let target = if req.target_cast_id.is_some() {
+            let cast_id = req.target_cast_id.unwrap();
+            let hash = hex::decode(cast_id.hash.replace("0x", ""));
+            if hash.is_err() {
+                return Err(ErrorResponse {
+                    error: hash.unwrap_err().to_string(),
+                    error_detail: None,
+                });
+            }
+            reaction_request::Target::TargetCastId(proto::CastId {
+                fid: cast_id.fid,
+                hash: hash.unwrap(),
+            })
+        } else if req.target_url.is_some() {
+            reaction_request::Target::TargetUrl(req.target_url.unwrap())
+        } else {
+            return Err(ErrorResponse {
+                error: "target not specified".to_string(),
+                error_detail: None,
+            });
+        };
+        let grpc_req = tonic::Request::new(proto::ReactionRequest {
+            fid: req.fid,
+            reaction_type: req.reaction_type as i32,
+            target: Some(target),
+        });
         let response = service
             .get_reaction(grpc_req)
             .await
@@ -899,9 +1186,18 @@ impl HubHttpService for HubHttpServiceImpl {
     }
 
     /// GET /v1/reactionsByFid
-    async fn get_reactions_by_fid(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse> {
+    async fn get_reactions_by_fid(
+        &self,
+        req: ReactionsByFidRequest,
+    ) -> Result<PagedResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(req);
+        let grpc_req = tonic::Request::new(proto::ReactionsByFidRequest {
+            fid: req.fid,
+            reaction_type: Some(req.reaction_type as i32),
+            page_size: req.page_size,
+            page_token: req.page_token,
+            reverse: req.reverse,
+        });
         let response = service
             .get_reactions_by_fid(grpc_req)
             .await
@@ -919,7 +1215,34 @@ impl HubHttpService for HubHttpServiceImpl {
         req: ReactionsByTargetRequest,
     ) -> Result<PagedResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(req);
+        let target = if req.target_cast_id.is_some() {
+            let cast_id = req.target_cast_id.unwrap();
+            let hash = hex::decode(cast_id.hash.replace("0x", ""));
+            if hash.is_err() {
+                return Err(ErrorResponse {
+                    error: hash.unwrap_err().to_string(),
+                    error_detail: None,
+                });
+            }
+            reactions_by_target_request::Target::TargetCastId(proto::CastId {
+                fid: cast_id.fid,
+                hash: hash.unwrap(),
+            })
+        } else if req.target_url.is_some() {
+            reactions_by_target_request::Target::TargetUrl(req.target_url.unwrap())
+        } else {
+            return Err(ErrorResponse {
+                error: "target not specified".to_string(),
+                error_detail: None,
+            });
+        };
+        let grpc_req = tonic::Request::new(proto::ReactionsByTargetRequest {
+            reaction_type: req.reaction_type.map(|r| r as i32),
+            page_size: req.page_size,
+            page_token: req.page_token,
+            reverse: req.reverse,
+            target: Some(target),
+        });
         let response =
             service
                 .get_reactions_by_cast(grpc_req)
@@ -938,7 +1261,34 @@ impl HubHttpService for HubHttpServiceImpl {
         req: ReactionsByTargetRequest,
     ) -> Result<PagedResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(req);
+        let target = if req.target_cast_id.is_some() {
+            let cast_id = req.target_cast_id.unwrap();
+            let hash = hex::decode(cast_id.hash.replace("0x", ""));
+            if hash.is_err() {
+                return Err(ErrorResponse {
+                    error: hash.unwrap_err().to_string(),
+                    error_detail: None,
+                });
+            }
+            reactions_by_target_request::Target::TargetCastId(proto::CastId {
+                fid: cast_id.fid,
+                hash: hash.unwrap(),
+            })
+        } else if req.target_url.is_some() {
+            reactions_by_target_request::Target::TargetUrl(req.target_url.unwrap())
+        } else {
+            return Err(ErrorResponse {
+                error: "target not specified".to_string(),
+                error_detail: None,
+            });
+        };
+        let grpc_req = tonic::Request::new(proto::ReactionsByTargetRequest {
+            reaction_type: req.reaction_type.map(|r| r as i32),
+            page_size: req.page_size,
+            page_token: req.page_token,
+            reverse: req.reverse,
+            target: Some(target),
+        });
         let response = service
             .get_reactions_by_target(grpc_req)
             .await
@@ -951,9 +1301,21 @@ impl HubHttpService for HubHttpServiceImpl {
     }
 
     /// GET /v1/linkById
-    async fn get_link_by_id(&self, req: IdRequest) -> Result<Message, ErrorResponse> {
+    async fn get_link_by_id(&self, req: LinkRequest) -> Result<Message, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(req);
+        let target = if req.target_fid.is_some() {
+            link_request::Target::TargetFid(req.target_fid.unwrap())
+        } else {
+            return Err(ErrorResponse {
+                error: "target not specified".to_string(),
+                error_detail: None,
+            });
+        };
+        let grpc_req = tonic::Request::new(proto::LinkRequest {
+            fid: req.fid,
+            link_type: req.link_type,
+            target: Some(target),
+        });
         let response = service
             .get_link(grpc_req)
             .await
@@ -966,9 +1328,18 @@ impl HubHttpService for HubHttpServiceImpl {
     }
 
     /// GET /v1/linksByFid
-    async fn get_links_by_fid(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse> {
+    async fn get_links_by_fid(
+        &self,
+        req: LinksByFidRequest,
+    ) -> Result<PagedResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(req);
+        let grpc_req = tonic::Request::new(proto::LinksByFidRequest {
+            fid: req.fid,
+            link_type: req.link_type,
+            page_size: req.page_size,
+            page_token: req.page_token,
+            reverse: req.reverse,
+        });
         let response = service
             .get_links_by_fid(grpc_req)
             .await
@@ -984,12 +1355,26 @@ impl HubHttpService for HubHttpServiceImpl {
     /// (Assumes that this endpoint uses FidTimestampRequest to retrieve all link messages for a given target fid.)
     async fn get_links_by_target_fid(
         &self,
-        req: FidTimestampRequest,
+        req: LinksByTargetRequest,
     ) -> Result<PagedResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(req);
+        let target = if req.link_type.is_some() {
+            links_by_target_request::Target::TargetFid(req.target_fid.unwrap())
+        } else {
+            return Err(ErrorResponse {
+                error: "target not specified".to_string(),
+                error_detail: None,
+            });
+        };
+        let grpc_req = tonic::Request::new(proto::LinksByTargetRequest {
+            link_type: req.link_type,
+            page_size: req.page_size,
+            page_token: req.page_token,
+            reverse: req.reverse,
+            target: Some(target),
+        });
         let response = service
-            .get_all_link_messages_by_fid(grpc_req)
+            .get_links_by_target(grpc_req)
             .await
             .map_err(|e| ErrorResponse {
                 error: "Failed to get links by target fid".to_string(),
@@ -1002,7 +1387,12 @@ impl HubHttpService for HubHttpServiceImpl {
     /// GET /v1/userDataByFid
     async fn get_user_data_by_fid(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(req);
+        let grpc_req = tonic::Request::new(proto::FidRequest {
+            fid: req.fid,
+            page_size: req.page_size,
+            page_token: req.page_token,
+            reverse: req.reverse,
+        });
         let response = service
             .get_user_data_by_fid(grpc_req)
             .await
@@ -1020,7 +1410,12 @@ impl HubHttpService for HubHttpServiceImpl {
         req: FidRequest,
     ) -> Result<StorageLimitsResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(req);
+        let grpc_req = tonic::Request::new(proto::FidRequest {
+            fid: req.fid,
+            page_size: req.page_size,
+            page_token: req.page_token,
+            reverse: req.reverse,
+        });
         let response = service
             .get_current_storage_limits_by_fid(grpc_req)
             .await
@@ -1028,7 +1423,41 @@ impl HubHttpService for HubHttpServiceImpl {
                 error: "Failed to get storage limits".to_string(),
                 error_detail: Some(e.to_string()),
             })?;
-        Ok(response.into_inner())
+        let limits = response.into_inner();
+        Ok(StorageLimitsResponse {
+            limits: limits
+                .limits
+                .iter()
+                .map(|l: &proto::StorageLimit| StorageLimit {
+                    store_type: match l.store_type {
+                        1 => StoreType::Casts,
+                        2 => StoreType::Links,
+                        3 => StoreType::Reactions,
+                        4 => StoreType::UserData,
+                        5 => StoreType::Verifications,
+                        6 => StoreType::UsernameProofs,
+                        _ => StoreType::None,
+                    },
+                    name: l.name.clone(),
+                    limit: l.limit,
+                    used: l.used,
+                    earliest_timestamp: l.earliest_timestamp,
+                    earliest_hash: l.earliest_hash.clone(),
+                })
+                .collect(),
+            units: limits.units,
+            unit_details: limits
+                .unit_details
+                .iter()
+                .map(|u: &proto::StorageUnitDetails| StorageUnitDetails {
+                    unit_size: u.unit_size,
+                    unit_type: match u.unit_type {
+                        1 => StorageUnitType::UnitType2024,
+                        _ => StorageUnitType::UnitTypeLegacy,
+                    },
+                })
+                .collect(),
+        })
     }
 
     /// GET /v1/userNameProofByName
@@ -1037,7 +1466,7 @@ impl HubHttpService for HubHttpServiceImpl {
         req: UsernameProofRequest,
     ) -> Result<UserNameProof, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(req);
+        let grpc_req = tonic::Request::new(proto::UsernameProofRequest { name: req.name });
         let response = service
             .get_username_proof(grpc_req)
             .await
@@ -1045,7 +1474,15 @@ impl HubHttpService for HubHttpServiceImpl {
                 error: "Failed to get username proof".to_string(),
                 error_detail: Some(e.to_string()),
             })?;
-        Ok(response.into_inner())
+        let proof = response.into_inner();
+        Ok(UserNameProof {
+            timestamp: proof.timestamp,
+            name: proof.name,
+            owner: proof.owner,
+            signature: proof.signature,
+            fid: proof.fid,
+            r#type: proof.r#type,
+        })
     }
 
     /// GET /v1/userNameProofsByFid
@@ -1054,7 +1491,12 @@ impl HubHttpService for HubHttpServiceImpl {
         req: FidRequest,
     ) -> Result<UsernameProofsResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(req);
+        let grpc_req = tonic::Request::new(proto::FidRequest {
+            fid: req.fid,
+            page_size: req.page_size,
+            page_token: req.page_token,
+            reverse: req.reverse,
+        });
         let response = service
             .get_user_name_proofs_by_fid(grpc_req)
             .await
@@ -1062,7 +1504,21 @@ impl HubHttpService for HubHttpServiceImpl {
                 error: "Failed to get username proofs".to_string(),
                 error_detail: Some(e.to_string()),
             })?;
-        Ok(response.into_inner())
+        let proof = response.into_inner();
+        Ok(UsernameProofsResponse {
+            proofs: proof
+                .proofs
+                .iter()
+                .map(|p| UserNameProof {
+                    timestamp: p.timestamp,
+                    name: p.name.clone(),
+                    owner: p.owner.clone(),
+                    signature: p.signature.clone(),
+                    fid: p.fid,
+                    r#type: p.r#type,
+                })
+                .collect(),
+        })
     }
 
     /// GET /v1/verificationsByFid
@@ -1071,7 +1527,12 @@ impl HubHttpService for HubHttpServiceImpl {
         req: FidRequest,
     ) -> Result<PagedResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(req);
+        let grpc_req = tonic::Request::new(proto::FidRequest {
+            fid: req.fid,
+            page_size: req.page_size,
+            page_token: req.page_token,
+            reverse: req.reverse,
+        });
         let response = service
             .get_verifications_by_fid(grpc_req)
             .await
@@ -1089,7 +1550,12 @@ impl HubHttpService for HubHttpServiceImpl {
         req: FidRequest,
     ) -> Result<OnChainEventResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(req);
+        let grpc_req = tonic::Request::new(proto::FidRequest {
+            fid: req.fid,
+            page_size: req.page_size,
+            page_token: req.page_token,
+            reverse: req.reverse,
+        });
         let response = service
             .get_on_chain_signers_by_fid(grpc_req)
             .await
@@ -1097,7 +1563,84 @@ impl HubHttpService for HubHttpServiceImpl {
                 error: "Failed to get on chain signers".to_string(),
                 error_detail: Some(e.to_string()),
             })?;
-        Ok(response.into_inner())
+        let onchain_event_response = response.into_inner();
+        Ok(OnChainEventResponse {
+            events: onchain_event_response
+                .events
+                .iter()
+                .map(|e| {
+                    let mut signer_event_body: Option<SignerEventBody> = None;
+                    let mut signer_migrated_event_body: Option<SignerMigratedEventBody> = None;
+                    let mut id_register_event_body: Option<IdRegisterEventBody> = None;
+                    let mut storage_rent_event_body: Option<StorageRentEventBody> = None;
+                    match &e.body {
+                        None => {}
+                        Some(on_chain_event::Body::SignerEventBody(body)) => {
+                            signer_event_body = Some(SignerEventBody {
+                                key: body.key.clone(),
+                                key_type: body.key_type,
+                                event_type: match body.event_type {
+                                    1 => SignerEventType::Add,
+                                    2 => SignerEventType::Remove,
+                                    3 => SignerEventType::AdminReset,
+                                    _ => SignerEventType::None,
+                                },
+                                metadata: body.metadata.clone(),
+                                metadata_type: body.metadata_type,
+                            });
+                        }
+                        Some(on_chain_event::Body::SignerMigratedEventBody(body)) => {
+                            signer_migrated_event_body = Some(SignerMigratedEventBody {
+                                migrated_at: body.migrated_at,
+                            });
+                        }
+                        Some(on_chain_event::Body::IdRegisterEventBody(body)) => {
+                            id_register_event_body = Some(IdRegisterEventBody {
+                                to: body.to.clone(),
+                                event_type: match body.event_type {
+                                    1 => IdRegisterEventType::Register,
+                                    2 => IdRegisterEventType::Transfer,
+                                    3 => IdRegisterEventType::ChangeRecovery,
+                                    _ => IdRegisterEventType::None,
+                                },
+                                from: body.from.clone(),
+                                recovery_address: body.recovery_address.clone(),
+                            });
+                        }
+                        Some(on_chain_event::Body::StorageRentEventBody(body)) => {
+                            storage_rent_event_body = Some(StorageRentEventBody {
+                                payer: body.payer.clone(),
+                                units: body.units,
+                                expiry: body.expiry,
+                            });
+                        }
+                    }
+                    return OnChainEvent {
+                        r#type: match e.r#type {
+                            1 => OnChainEventType::EventTypeSigner,
+                            2 => OnChainEventType::EventTypeSignerMigrated,
+                            3 => OnChainEventType::EventTypeIdRegister,
+                            4 => OnChainEventType::EventTypeStorageRent,
+                            _ => OnChainEventType::EventTypeNone,
+                        },
+                        chain_id: e.chain_id,
+                        block_number: e.block_number,
+                        block_hash: e.block_hash.clone(),
+                        block_timestamp: e.block_timestamp,
+                        transaction_hash: e.transaction_hash.clone(),
+                        log_index: e.log_index,
+                        fid: e.fid,
+                        tx_index: e.tx_index,
+                        version: e.version,
+                        signer_event_body: signer_event_body,
+                        signer_migrated_event_body: signer_migrated_event_body,
+                        id_register_event_body: id_register_event_body,
+                        storage_rent_event_body: storage_rent_event_body,
+                    };
+                })
+                .collect(),
+            next_page_token: onchain_event_response.next_page_token,
+        })
     }
 
     /// GET /v1/onChainEventsByFid
@@ -1106,7 +1649,13 @@ impl HubHttpService for HubHttpServiceImpl {
         req: OnChainEventRequest,
     ) -> Result<OnChainEventResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(req);
+        let grpc_req = tonic::Request::new(proto::OnChainEventRequest {
+            fid: req.fid,
+            event_type: req.event_type as i32,
+            page_size: req.page_size,
+            page_token: req.page_token,
+            reverse: req.reverse,
+        });
         let response = service
             .get_on_chain_events(grpc_req)
             .await
@@ -1114,7 +1663,84 @@ impl HubHttpService for HubHttpServiceImpl {
                 error: "Failed to get on chain events".to_string(),
                 error_detail: Some(e.to_string()),
             })?;
-        Ok(response.into_inner())
+        let onchain_event_response = response.into_inner();
+        Ok(OnChainEventResponse {
+            events: onchain_event_response
+                .events
+                .iter()
+                .map(|e| {
+                    let mut signer_event_body: Option<SignerEventBody> = None;
+                    let mut signer_migrated_event_body: Option<SignerMigratedEventBody> = None;
+                    let mut id_register_event_body: Option<IdRegisterEventBody> = None;
+                    let mut storage_rent_event_body: Option<StorageRentEventBody> = None;
+                    match &e.body {
+                        None => {}
+                        Some(on_chain_event::Body::SignerEventBody(body)) => {
+                            signer_event_body = Some(SignerEventBody {
+                                key: body.key.clone(),
+                                key_type: body.key_type,
+                                event_type: match body.event_type {
+                                    1 => SignerEventType::Add,
+                                    2 => SignerEventType::Remove,
+                                    3 => SignerEventType::AdminReset,
+                                    _ => SignerEventType::None,
+                                },
+                                metadata: body.metadata.clone(),
+                                metadata_type: body.metadata_type,
+                            });
+                        }
+                        Some(on_chain_event::Body::SignerMigratedEventBody(body)) => {
+                            signer_migrated_event_body = Some(SignerMigratedEventBody {
+                                migrated_at: body.migrated_at,
+                            });
+                        }
+                        Some(on_chain_event::Body::IdRegisterEventBody(body)) => {
+                            id_register_event_body = Some(IdRegisterEventBody {
+                                to: body.to.clone(),
+                                event_type: match body.event_type {
+                                    1 => IdRegisterEventType::Register,
+                                    2 => IdRegisterEventType::Transfer,
+                                    3 => IdRegisterEventType::ChangeRecovery,
+                                    _ => IdRegisterEventType::None,
+                                },
+                                from: body.from.clone(),
+                                recovery_address: body.recovery_address.clone(),
+                            });
+                        }
+                        Some(on_chain_event::Body::StorageRentEventBody(body)) => {
+                            storage_rent_event_body = Some(StorageRentEventBody {
+                                payer: body.payer.clone(),
+                                units: body.units,
+                                expiry: body.expiry,
+                            });
+                        }
+                    }
+                    return OnChainEvent {
+                        r#type: match e.r#type {
+                            1 => OnChainEventType::EventTypeSigner,
+                            2 => OnChainEventType::EventTypeSignerMigrated,
+                            3 => OnChainEventType::EventTypeIdRegister,
+                            4 => OnChainEventType::EventTypeStorageRent,
+                            _ => OnChainEventType::EventTypeNone,
+                        },
+                        chain_id: e.chain_id,
+                        block_number: e.block_number,
+                        block_hash: e.block_hash.clone(),
+                        block_timestamp: e.block_timestamp,
+                        transaction_hash: e.transaction_hash.clone(),
+                        log_index: e.log_index,
+                        fid: e.fid,
+                        tx_index: e.tx_index,
+                        version: e.version,
+                        signer_event_body: signer_event_body,
+                        signer_migrated_event_body: signer_migrated_event_body,
+                        id_register_event_body: id_register_event_body,
+                        storage_rent_event_body: storage_rent_event_body,
+                    };
+                })
+                .collect(),
+            next_page_token: onchain_event_response.next_page_token,
+        })
     }
 }
 
@@ -1130,7 +1756,10 @@ impl Router {
         }
     }
 
-    pub async fn handle(&self, req: Request<Bytes>) -> Response<Bytes> {
+    pub async fn handle(
+        &self,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
         match (req.method(), req.uri().path()) {
             (&Method::GET, "/v1/castById") => {
                 self.handle_request::<IdRequest, Message, _>(req, |service, req| {
@@ -1151,15 +1780,16 @@ impl Router {
                 .await
             }
             (&Method::GET, "/v1/reactionById") => {
-                self.handle_request::<IdRequest, Message, _>(req, |service, req| {
-                    Box::pin(async move { service.get_reaction(req).await })
+                self.handle_request::<ReactionRequest, Message, _>(req, |service, req| {
+                    Box::pin(async move { service.get_reaction_by_id(req).await })
                 })
                 .await
             }
             (&Method::GET, "/v1/reactionsByFid") => {
-                self.handle_request::<FidRequest, PagedResponse, _>(req, |service, req| {
-                    Box::pin(async move { service.get_reactions_by_fid(req).await })
-                })
+                self.handle_request::<ReactionsByFidRequest, PagedResponse, _>(
+                    req,
+                    |service, req| Box::pin(async move { service.get_reactions_by_fid(req).await }),
+                )
                 .await
             }
             (&Method::GET, "/v1/reactionsByCast") => {
@@ -1181,13 +1811,13 @@ impl Router {
                 .await
             }
             (&Method::GET, "/v1/linkById") => {
-                self.handle_request::<IdRequest, Message, _>(req, |service, req| {
-                    Box::pin(async move { service.get_link(req).await })
+                self.handle_request::<LinkRequest, Message, _>(req, |service, req| {
+                    Box::pin(async move { service.get_link_by_id(req).await })
                 })
                 .await
             }
             (&Method::GET, "/v1/linksByFid") => {
-                self.handle_request::<FidRequest, PagedResponse, _>(req, |service, req| {
+                self.handle_request::<LinksByFidRequest, PagedResponse, _>(req, |service, req| {
                     Box::pin(async move { service.get_links_by_fid(req).await })
                 })
                 .await
@@ -1195,9 +1825,12 @@ impl Router {
             (&Method::GET, "/v1/linksByTargetFid") => {
                 // For linksByTargetFid we assume that the service uses a FidTimestampRequest
                 // (similar to castsByFid) to return all link messages for a target fid.
-                self.handle_request::<FidTimestampRequest, PagedResponse, _>(req, |service, req| {
-                    Box::pin(async move { service.get_all_link_messages_by_fid(req).await })
-                })
+                self.handle_request::<LinksByTargetRequest, PagedResponse, _>(
+                    req,
+                    |service, req| {
+                        Box::pin(async move { service.get_links_by_target_fid(req).await })
+                    },
+                )
                 .await
             }
             (&Method::GET, "/v1/userDataByFid") => {
@@ -1208,14 +1841,16 @@ impl Router {
             }
             (&Method::GET, "/v1/storageLimitsByFid") => {
                 self.handle_request::<FidRequest, StorageLimitsResponse, _>(req, |service, req| {
-                    Box::pin(async move { service.get_current_storage_limits_by_fid(req).await })
+                    Box::pin(async move { service.get_storage_limits_by_fid(req).await })
                 })
                 .await
             }
             (&Method::GET, "/v1/userNameProofByName") => {
                 self.handle_request::<UsernameProofRequest, UserNameProof, _>(
                     req,
-                    |service, req| Box::pin(async move { service.get_username_proof(req).await }),
+                    |service, req| {
+                        Box::pin(async move { service.get_user_name_proof_by_name(req).await })
+                    },
                 )
                 .await
             }
@@ -1240,22 +1875,24 @@ impl Router {
             (&Method::GET, "/v1/onChainEventsByFid") => {
                 self.handle_request::<OnChainEventRequest, OnChainEventResponse, _>(
                     req,
-                    |service, req| Box::pin(async move { service.get_on_chain_events(req).await }),
+                    |service, req| {
+                        Box::pin(async move { service.get_on_chain_events_by_fid(req).await })
+                    },
                 )
                 .await
             }
-            _ => Response::builder()
+            _ => Ok(Response::builder()
                 .status(StatusCode::NOT_FOUND)
-                .body(Bytes::from("Not Found"))
-                .unwrap(),
+                .body(Full::new(Bytes::from("Not Found")).boxed())
+                .unwrap()),
         }
     }
 
     async fn handle_request<Req, Resp, F>(
         &self,
-        req: Request<Bytes>,
+        req: Request<hyper::body::Incoming>,
         handler: impl FnOnce(Arc<HubHttpServiceImpl>, Req) -> F,
-    ) -> Response<Bytes>
+    ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible>
     where
         Req: DeserializeOwned,
         Resp: Serialize,
@@ -1264,27 +1901,32 @@ impl Router {
         // Parse request
         let req_obj = match self.parse_request::<Req>(req).await {
             Ok(req) => req,
-            Err(resp) => return resp,
+            Err(resp) => {
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Full::new(resp.into_body()).boxed())
+                    .unwrap())
+            }
         };
 
         // Handle request
         match handler(self.service.clone(), req_obj).await {
-            Ok(resp) => Response::builder()
+            Ok(resp) => Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "application/json")
-                .body(Bytes::from(serde_json::to_vec(&resp).unwrap()))
-                .unwrap(),
-            Err(err) => Response::builder()
+                .body(Full::new(Bytes::from(serde_json::to_vec(&resp).unwrap())).boxed())
+                .unwrap()),
+            Err(err) => Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .header("content-type", "application/json")
-                .body(Bytes::from(serde_json::to_vec(&err).unwrap()))
-                .unwrap(),
+                .body(Full::new(Bytes::from(serde_json::to_vec(&err).unwrap())).boxed())
+                .unwrap()),
         }
     }
 
     async fn parse_request<T: DeserializeOwned>(
         &self,
-        req: Request<Bytes>,
+        req: Request<hyper::body::Incoming>,
     ) -> Result<T, Response<Bytes>> {
         // For GET requests, parse from query string
         if req.method() == Method::GET {
@@ -1298,9 +1940,18 @@ impl Router {
         }
 
         // For POST/PUT requests, parse body
-        let body_bytes = req.into_body();
+        let body_bytes = req.collect().await;
+        if body_bytes.is_err() {
+            return Err(Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Bytes::from(format!(
+                    "Internal server error: {}",
+                    body_bytes.unwrap_err().to_string()
+                )))
+                .unwrap());
+        }
 
-        match serde_json::from_slice(&body_bytes.slice(..)) {
+        match serde_json::from_slice(&body_bytes.unwrap().to_bytes().slice(..)) {
             Ok(parsed) => Ok(parsed),
             Err(e) => Err(Response::builder()
                 .status(StatusCode::BAD_REQUEST)

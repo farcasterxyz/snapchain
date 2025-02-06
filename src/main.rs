@@ -1,3 +1,6 @@
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::onchain_events::{L1Client, RealL1Client};
 use snapchain::consensus::consensus::SystemMessage;
@@ -5,6 +8,7 @@ use snapchain::mempool::mempool::Mempool;
 use snapchain::mempool::routing;
 use snapchain::network::admin_server::{DbManager, MyAdminService};
 use snapchain::network::gossip::SnapchainGossip;
+use snapchain::network::http_server::HubHttpServiceImpl;
 use snapchain::network::server::MyHubService;
 use snapchain::node::snapchain_node::SnapchainNode;
 use snapchain::proto::admin_service_server::AdminServiceServer;
@@ -19,6 +23,8 @@ use std::error::Error;
 use std::net;
 use std::net::SocketAddr;
 use std::process;
+use std::sync::Arc;
+use tokio::net::TcpListener;
 use tokio::select;
 use tokio::signal::ctrl_c;
 use tokio::sync::{broadcast, mpsc};
@@ -107,6 +113,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let addr = app_config.gossip.address.clone();
     let grpc_addr = app_config.rpc_address.clone();
     let grpc_socket_addr: SocketAddr = grpc_addr.parse()?;
+    let http_addr = app_config.http_address.clone();
+    let http_socket_addr: SocketAddr = http_addr.parse()?;
     let block_db = RocksDB::open_shard_db(app_config.rocksdb_dir.as_str(), 0);
     let block_store = BlockStore::new(block_db);
 
@@ -141,6 +149,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+    let (http_shutdown_tx, mut http_shutdown_rx) = mpsc::channel::<()>(1);
 
     let registry = SharedRegistry::global();
     // Use the new non-global metrics registry when we upgrade to newer version of malachite
@@ -227,7 +236,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Err(_) => None,
     };
     let mempool_tx_for_service = mempool_tx.clone();
-    let service = MyHubService::new(
+    let service = Arc::new(MyHubService::new(
         rpc_block_store,
         rpc_shard_stores,
         rpc_shard_senders,
@@ -236,10 +245,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Box::new(routing::ShardRouter {}),
         mempool_tx_for_service,
         l1_client,
-    );
+    ));
+    let grpc_service = service.clone();
     tokio::spawn(async move {
         let resp = Server::builder()
-            .add_service(HubServiceServer::new(service))
+            .add_service(HubServiceServer::from_arc(grpc_service))
             .add_service(AdminServiceServer::new(admin_service))
             .serve(grpc_socket_addr)
             .await;
@@ -251,6 +261,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
 
         shutdown_tx.send(()).await.ok();
+    });
+    tokio::spawn(async move {
+        let listener = TcpListener::bind(http_socket_addr).await.unwrap();
+
+        let http_service = HubHttpServiceImpl {
+            service: service.clone(),
+        };
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let io = TokioIo::new(stream);
+                    let service_clone = http_service.clone();
+                    tokio::spawn(async move {
+                        let router = snapchain::network::http_server::Router::new(service_clone);
+                        if let Err(err) = http1::Builder::new()
+                            .serve_connection(io, service_fn(|r| router.handle(r)))
+                            .await
+                        {
+                            error!("Error serving connection: {}", err);
+                        }
+                    });
+                }
+                Err(e) => {
+                    error!("Error accepting connection: {}", e);
+                    break;
+                }
+            }
+        }
+
+        http_shutdown_tx.send(()).await.ok();
     });
 
     // TODO(aditi): We may want to reconsider this code when we upload snapshots on a schedule.
@@ -291,6 +331,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 return Ok(());
             }
             _ = shutdown_rx.recv() => {
+                error!("Received shutdown signal, shutting down");
+                node.stop();
+                return Ok(());
+            }
+            _ = http_shutdown_rx.recv() => {
                 error!("Received shutdown signal, shutting down");
                 node.stop();
                 return Ok(());

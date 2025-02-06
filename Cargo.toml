@@ -73,6 +73,8 @@ fancy-regex = "0.14.0"
 aws-config = { version = "1.1.7", features = ["behavior-version-latest"] }
 aws-sdk-s3 = { version = "1.71.0", features = ["behavior-version-latest"] }
 hyper = "1.5.1"
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
 serde_qs = "0.13.0"
 base64 = "0.22.1"
 toml = "0.8.19"

@@ -12,6 +12,7 @@ services:
     command: ["./snapchain", "--config-path", "./nodes/1/snapchain.toml"]
     ports:
       - "50051:50051/udp"
+      - "3381:3381/tcp"
       - "3383:3383/tcp"
     networks:
       snapchain-subnet:
