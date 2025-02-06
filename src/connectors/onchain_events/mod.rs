@@ -483,9 +483,18 @@ impl Subscriber {
             .address(address)
             .from_block(start_block)
             .to_block(stop_block);
+        let event_kind = if address == STORAGE_REGISTRY {
+            "storage"
+        } else if address == ID_REGISTRY {
+            "id"
+        } else if address == KEY_REGISTRY {
+            "key"
+        } else {
+            panic!("Invalid registry")
+        };
         info!(
-            start_block,
-            stop_block, "Syncing historical events in range"
+            event_kind,
+            start_block, stop_block, "Syncing historical events in range"
         );
         let events = self.provider.get_logs(&filter).await?;
         for event in events {
