@@ -132,6 +132,11 @@ impl Fetcher {
             .count(format!("fnames.{}", key).as_str(), value);
     }
 
+    fn gauge(&self, key: &str, value: u64) {
+        self.statsd_client
+            .gauge(format!("fnames.{}", key).as_str(), value);
+    }
+
     async fn fetch(&mut self) -> Result<(), FetchError> {
         loop {
             let url = format!("{}?from_id={}", self.cfg.url, self.position);
@@ -167,7 +172,8 @@ impl Fetcher {
                     fid: t.to,
                     r#type: UserNameType::UsernameTypeFname as i32,
                 };
-                self.count("num_fname_transfers_ingested", 1);
+                self.count("num_transfers", 1);
+                self.gauge("latest_transfer_id", t.id);
                 if let Err(err) = self
                     .mempool_tx
                     .send(MempoolMessage::ValidatorMessage(ValidatorMessage {
