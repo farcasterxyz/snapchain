@@ -339,9 +339,12 @@ impl Mempool {
                                     panic!("Mempool tx is disconnected")
                                 },
                                 Err(mpsc::error::TryRecvError::Empty) => {
+                                    break;
                                 },
 
                             }
+                        } else {
+                            break;
                         }
                     }
                 }

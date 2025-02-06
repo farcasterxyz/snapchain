@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use alloy_primitives::{address, ruint::FromUintError, Address, FixedBytes};
 use alloy_provider::{Provider, ProviderBuilder, RootProvider};
 use alloy_rpc_types::{Filter, Log};
@@ -158,7 +156,6 @@ impl L1Client for RealL1Client {
 
 pub struct Subscriber {
     provider: RootProvider<Http<Client>>,
-    onchain_events_by_block: HashMap<u32, Vec<OnChainEvent>>,
     mempool_tx: mpsc::Sender<MempoolMessage>,
     start_block_number: u64,
     stop_block_number: Option<u64>,
@@ -182,7 +179,6 @@ impl Subscriber {
         Ok(Subscriber {
             local_state_store,
             provider,
-            onchain_events_by_block: HashMap::new(),
             mempool_tx,
             start_block_number: config.start_block_number,
             stop_block_number: config.stop_block_number,
@@ -193,6 +189,11 @@ impl Subscriber {
     fn count(&self, key: &str, value: u64) {
         self.statsd_client
             .count(format!("onchain_events.{}", key).as_str(), value);
+    }
+
+    fn gauge(&self, key: &str, value: u64) {
+        self.statsd_client
+            .gauge(format!("onchain_events.{}", key).as_str(), value);
     }
 
     async fn add_onchain_event(
@@ -244,14 +245,15 @@ impl Subscriber {
                 self.count("num_storage_events", 1);
             }
         };
-        let events = self.onchain_events_by_block.get_mut(&block_number);
-        match events {
-            None => {
-                self.onchain_events_by_block
-                    .insert(block_number, vec![event.clone()]);
+        match &event.body {
+            Some(on_chain_event::Body::IdRegisterEventBody(id_register_event_body)) => {
+                if id_register_event_body.event_type() == IdRegisterEventType::Register {
+                    self.gauge("latest_fid_registered", fid);
+                }
             }
-            Some(events) => events.push(event.clone()),
+            _ => {}
         }
+        self.gauge("latest_block_number", block_number as u64);
         if let Err(err) = self
             .mempool_tx
             .send(MempoolMessage::ValidatorMessage(ValidatorMessage {

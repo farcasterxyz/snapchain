@@ -9,6 +9,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     proto::{FnameTransfer, UserNameProof, UserNameType, ValidatorMessage},
     storage::store::{engine::MempoolMessage, node_local_state::LocalStateStore},
+    utils::statsd_wrapper::StatsdClientWrapper,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -75,9 +76,9 @@ enum FetchError {
 
 pub struct Fetcher {
     position: u64,
-    transfers: Vec<Transfer>,
     cfg: Config,
     mempool_tx: mpsc::Sender<MempoolMessage>,
+    statsd_client: StatsdClientWrapper,
     local_state_store: LocalStateStore,
 }
 
@@ -85,13 +86,14 @@ impl Fetcher {
     pub fn new(
         cfg: Config,
         mempool_tx: mpsc::Sender<MempoolMessage>,
+        statsd_client: StatsdClientWrapper,
         local_state_store: LocalStateStore,
     ) -> Self {
         Fetcher {
             position: cfg.start_from,
-            transfers: vec![],
             cfg: cfg,
             mempool_tx,
+            statsd_client,
             local_state_store,
         }
     }
@@ -125,6 +127,11 @@ impl Fetcher {
         }
     }
 
+    fn count(&self, key: &str, value: u64) {
+        self.statsd_client
+            .count(format!("fnames.{}", key).as_str(), value);
+    }
+
     async fn fetch(&mut self) -> Result<(), FetchError> {
         loop {
             let url = format!("{}?from_id={}", self.cfg.url, self.position);
@@ -151,7 +158,6 @@ impl Fetcher {
                     return Err(FetchError::Stop);
                 }
                 self.position = t.id;
-                self.transfers.push(t.clone()); // Just store these for now, we'll use them later
 
                 let username_proof = UserNameProof {
                     timestamp: t.timestamp,
@@ -161,6 +167,7 @@ impl Fetcher {
                     fid: t.to,
                     r#type: UserNameType::UsernameTypeFname as i32,
                 };
+                self.count("num_fnames_transfers_ingested", 1);
                 if let Err(err) = self
                     .mempool_tx
                     .send(MempoolMessage::ValidatorMessage(ValidatorMessage {

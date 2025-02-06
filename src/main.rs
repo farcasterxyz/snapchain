@@ -192,6 +192,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let mut fetcher = snapchain::connectors::fname::Fetcher::new(
             app_config.fnames.clone(),
             mempool_tx.clone(),
+            statsd_client.clone(),
             local_state_store.clone(),
         );
 
