@@ -167,7 +167,7 @@ impl Fetcher {
                     fid: t.to,
                     r#type: UserNameType::UsernameTypeFname as i32,
                 };
-                self.count("num_fnames_transfers_ingested", 1);
+                self.count("num_fname_transfers_ingested", 1);
                 if let Err(err) = self
                     .mempool_tx
                     .send(MempoolMessage::ValidatorMessage(ValidatorMessage {
