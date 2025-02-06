@@ -40,7 +40,7 @@ use crate::proto::{FidRequest, FidTimestampRequest};
 use crate::proto::{GetInfoRequest, StorageLimitsResponse};
 use crate::proto::{
     LinkRequest, LinksByFidRequest, Message, MessagesResponse, ReactionRequest,
-    ReactionsByFidRequest, UserDataRequest, VerificationRequest,
+    ReactionsByFidRequest, UserDataRequest, VerificationRequest, CastsByParentRequest
 };
 use crate::storage::constants::OnChainEventPostfix;
 use crate::storage::constants::RootPrefix;
@@ -678,6 +678,55 @@ impl HubService for MyHubService {
             .cast_store
             .get_all_messages_by_fid(request.fid, start_ts, stop_ts, &request.page_options())
             .as_response()
+    }
+
+       async fn get_casts_by_parent(
+        &self,
+        request: Request<CastsByParentRequest>,
+    ) -> Result<Response<MessagesResponse>, Status> {
+        let request = request.into_inner();
+    
+       
+        let parent = match request.parent {
+            Some(parent) => match parent {
+                proto::casts_by_parent_request::Parent::ParentCastId(cast_id) => {
+                    proto::cast_add_body::Parent::ParentCastId(cast_id)
+                }
+                proto::casts_by_parent_request::Parent::ParentUrl(url) => {
+                    proto::cast_add_body::Parent::ParentUrl(url)
+                }
+            },
+            None => {
+                return Err(Status::invalid_argument(
+                    "Parent cast identifier must be provided",
+                ));
+            }
+        };
+    
+        let stores = match &parent {
+            proto::cast_add_body::Parent::ParentCastId(cast_id) => {
+                self.get_stores_for(cast_id.fid)?
+            }
+            proto::cast_add_body::Parent::ParentUrl(_) => {
+                return Err(Status::invalid_argument(
+                    "Stores cannot be fetched for parent URL",
+                ));
+            }
+        };
+    
+     
+        let page_options = PageOptions {
+            page_size: request.page_size.map(|s| s as usize),
+            page_token: request.page_token.clone(),
+            reverse: request.reverse.unwrap_or(false),
+        };
+    
+        CastStore::get_casts_by_parent(
+            &stores.cast_store, 
+            &parent, 
+            &page_options
+        ).
+        as_response()
     }
 
     async fn get_reaction(
