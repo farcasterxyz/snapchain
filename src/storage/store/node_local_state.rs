@@ -66,11 +66,8 @@ impl LocalStateStore {
         ]
     }
 
-    pub fn set_latest_fname_transfer_id(
-        db: &RocksDB,
-        transfer_id: u64,
-    ) -> Result<(), IngestStateError> {
-        Ok(db.put(
+    pub fn set_latest_fname_transfer_id(&self, transfer_id: u64) -> Result<(), IngestStateError> {
+        Ok(self.db.put(
             &Self::make_fname_transfer_primary_key(),
             &FnameState {
                 last_fname_proof: transfer_id,
@@ -79,11 +76,9 @@ impl LocalStateStore {
         )?)
     }
 
-    pub fn get_latest_fname_transfer_id(
-        db: &RocksDB,
-    ) -> Result<Option<FnameState>, IngestStateError> {
-        match db.get(&Self::make_fname_transfer_primary_key())? {
-            Some(state) => Ok(Some(FnameState::decode(state.as_slice())?)),
+    pub fn get_latest_fname_transfer_id(&self) -> Result<Option<u64>, IngestStateError> {
+        match self.db.get(&Self::make_fname_transfer_primary_key())? {
+            Some(state) => Ok(Some(FnameState::decode(state.as_slice())?.last_fname_proof)),
             None => Ok(None),
         }
     }

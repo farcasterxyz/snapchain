@@ -270,24 +270,19 @@ impl Subscriber {
         }
     }
 
-    fn record_block_number(&self, event: &Log) {
-        match event.block_number {
-            Some(block_number) => {
-                if block_number as u64 > self.latest_block_in_db() {
-                    match self.local_state_store.set_latest_block_number(block_number) {
-                        Err(err) => {
-                            error!(
-                                block_number,
-                                err = err.to_string(),
-                                "Unable to store last block number",
-                            );
-                        }
-                        _ => {}
-                    }
-                };
+    fn record_block_number(&self, block_number: u64) {
+        if block_number as u64 > self.latest_block_in_db() {
+            match self.local_state_store.set_latest_block_number(block_number) {
+                Err(err) => {
+                    error!(
+                        block_number,
+                        err = err.to_string(),
+                        "Unable to store last block number",
+                    );
+                }
+                _ => {}
             }
-            None => {}
-        }
+        };
     }
 
     async fn get_block_timestamp(&self, block_hash: FixedBytes<32>) -> Result<u64, SubscribeError> {
@@ -478,9 +473,38 @@ impl Subscriber {
         }
     }
 
-    pub async fn sync_historical_events(
+    async fn get_logs(
         &mut self,
         address: Address,
+        start_block: u64,
+        stop_block: u64,
+    ) -> Result<(), SubscribeError> {
+        let filter = Filter::new()
+            .address(address)
+            .from_block(start_block)
+            .to_block(stop_block);
+        info!(
+            start_block,
+            stop_block, "Syncing historical events in range"
+        );
+        let events = self.provider.get_logs(&filter).await?;
+        for event in events {
+            let result = self.process_log(&event).await;
+            match result {
+                Err(err) => {
+                    error!(
+                        "Error processing onchain event. Error: {:#?}. Event: {:#?}",
+                        err, event,
+                    )
+                }
+                Ok(()) => {}
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn sync_historical_events(
+        &mut self,
         initial_start_block: u64,
         final_stop_block: u64,
     ) -> Result<(), SubscribeError> {
@@ -488,30 +512,11 @@ impl Subscriber {
         let mut start_block = initial_start_block;
         loop {
             let stop_block = final_stop_block.min(start_block + batch_size);
-            let filter = Filter::new()
-                .address(address)
-                .from_block(start_block)
-                .to_block(stop_block);
-            info!(
-                start_block,
-                stop_block, "Syncing historical events in range"
-            );
-            let events = self.provider.get_logs(&filter).await?;
-            for event in events {
-                let result = self.process_log(&event).await;
-                match result {
-                    Err(err) => {
-                        error!(
-                            "Error processing onchain event. Error: {:#?}. Event: {:#?}",
-                            err, event,
-                        )
-                    }
-                    Ok(()) => {
-                        // TODO(aditi): Consider recording the block number only after the last event in the batch. Right now, batches are pretty large so we wouldn't be recording frequently enough
-                        self.record_block_number(&event);
-                    }
-                }
-            }
+            self.get_logs(STORAGE_REGISTRY, start_block, stop_block)
+                .await?;
+            self.get_logs(ID_REGISTRY, start_block, stop_block).await?;
+            self.get_logs(KEY_REGISTRY, start_block, stop_block).await?;
+            self.record_block_number(stop_block);
             start_block += batch_size;
             if start_block > final_stop_block {
                 info!(
@@ -564,24 +569,9 @@ impl Subscriber {
         let historical_sync_start_block = latest_block_in_db.max(self.start_block_number);
         let historical_sync_stop_block =
             latest_block_on_chain.min(self.stop_block_number.unwrap_or(latest_block_on_chain));
-        self.sync_historical_events(
-            STORAGE_REGISTRY,
-            historical_sync_start_block,
-            historical_sync_stop_block,
-        )
-        .await?;
-        self.sync_historical_events(
-            ID_REGISTRY,
-            historical_sync_start_block,
-            historical_sync_stop_block,
-        )
-        .await?;
-        self.sync_historical_events(
-            KEY_REGISTRY,
-            historical_sync_start_block,
-            historical_sync_stop_block,
-        )
-        .await?;
+
+        self.sync_historical_events(historical_sync_start_block, historical_sync_stop_block)
+            .await?;
 
         let should_start_live_sync = match self.stop_block_number {
             None => true,
@@ -609,9 +599,12 @@ impl Subscriber {
                                 err, event,
                             )
                         }
-                        Ok(()) => {
-                            self.record_block_number(&event);
-                        }
+                        Ok(()) => match event.block_number {
+                            None => {}
+                            Some(block_number) => {
+                                self.record_block_number(block_number);
+                            }
+                        },
                     }
                 }
             }
