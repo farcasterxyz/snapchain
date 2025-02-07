@@ -107,6 +107,7 @@ impl SnapchainNode {
                 gossip_tx.clone(),
                 registry,
                 config.consensus_start_delay,
+                statsd_client.clone(),
             )
             .await;
 
@@ -150,6 +151,7 @@ impl SnapchainNode {
             gossip_tx.clone(),
             registry,
             config.consensus_start_delay,
+            statsd_client.clone(),
         )
         .await;
         if block_consensus_actor.is_err() {
