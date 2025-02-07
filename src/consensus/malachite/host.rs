@@ -176,10 +176,8 @@ impl Host {
                 value_bytes,
                 reply_to,
             } => {
-                let commits;
                 let proposal = if height.shard_index == 0 {
                     let decoded_block = Block::decode(value_bytes.as_ref()).unwrap();
-                    commits = decoded_block.commits.clone().unwrap();
                     FullProposal {
                         height: Some(height),
                         round: round.as_i64(),
@@ -188,7 +186,6 @@ impl Host {
                     }
                 } else {
                     let chunk = ShardChunk::decode(value_bytes.as_ref()).unwrap();
-                    commits = chunk.commits.clone().unwrap();
                     FullProposal {
                         height: Some(height),
                         round: round.as_i64(),
@@ -197,7 +194,6 @@ impl Host {
                     }
                 };
                 let proposed_value = state.shard_validator.add_proposed_value(&proposal);
-                state.shard_validator.decide(commits).await;
                 info!(
                     height = height.to_string(),
                     "Processed value via sync: {}", proposed_value.value
