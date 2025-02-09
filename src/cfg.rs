@@ -1,4 +1,7 @@
-use crate::{connectors, consensus, mempool, network, proto::FarcasterNetwork, storage};
+use crate::{
+    connectors, consensus, mempool, network, proto::FarcasterNetwork, storage,
+    utils::malachite_metrics,
+};
 use clap::Parser;
 use figment::{
     providers::{Env, Format, Serialized, Toml},
@@ -39,6 +42,7 @@ pub struct Config {
     pub rocksdb_dir: String,
     pub clear_db: bool,
     pub statsd: StatsdConfig,
+    pub malachite_metrics: malachite_metrics::Config,
     pub trie_branching_factor: u32,
     pub l1_rpc_url: String,
     pub fc_network: FarcasterNetwork,
@@ -62,6 +66,7 @@ impl Default for Config {
             l1_rpc_url: "".to_string(),
             fc_network: FarcasterNetwork::Testnet,
             snapshot: storage::db::snapshot::Config::default(),
+            malachite_metrics: malachite_metrics::Config::default(),
         }
     }
 }
