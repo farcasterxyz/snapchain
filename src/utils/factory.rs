@@ -459,7 +459,7 @@ pub mod messages_factory {
             private_key: Option<&SigningKey>,
         ) -> message::Message {
             let body = VerificationRemoveBody {
-                address: address.as_bytes().to_vec(),
+                address: address,
                 protocol: 0,
             };
             create_message_with_data(
