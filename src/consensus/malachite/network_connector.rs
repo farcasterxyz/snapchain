@@ -32,11 +32,33 @@ pub struct NetworkConnectorState {
     shard_id: u32,
 }
 
-fn count(statsd_client: &StatsdClientWrapper, shard_id: u32, key: &str, value: u64) {
+fn count(
+    statsd_client: &StatsdClientWrapper,
+    shard_id: u32,
+    key: &str,
+    value: u64,
+    tags: Vec<(String, String)>,
+) {
     statsd_client.count_with_shard(
         shard_id,
         format!("network_connector.{}", key).as_str(),
         value,
+        tags,
+    );
+}
+
+fn gauge(
+    statsd_client: &StatsdClientWrapper,
+    shard_id: u32,
+    key: &str,
+    value: u64,
+    tags: Vec<(String, String)>,
+) {
+    statsd_client.gauge_with_shard(
+        shard_id,
+        format!("network_connector.{}", key).as_str(),
+        value,
+        tags,
     );
 }
 
@@ -118,13 +140,27 @@ where
 
             Msg::Publish(msg) => match msg {
                 SignedConsensusMsg::Vote(vote) => {
-                    count(statsd_client, *shard_id, "send_vote", 1);
+                    count(statsd_client, *shard_id, "send_vote", 1, vec![]);
+                    gauge(
+                        statsd_client,
+                        *shard_id,
+                        "send_vote_height",
+                        vote.height.block_number,
+                        vec![],
+                    );
                     gossip_tx
                         .send(GossipEvent::BroadcastSignedVote(vote))
                         .await?;
                 }
                 SignedConsensusMsg::Proposal(proposal) => {
-                    count(statsd_client, *shard_id, "send_proposal", 1);
+                    count(statsd_client, *shard_id, "send_proposal", 1, vec![]);
+                    gauge(
+                        statsd_client,
+                        *shard_id,
+                        "send_proposal_height",
+                        proposal.height.block_number,
+                        vec![],
+                    );
                     gossip_tx
                         .send(GossipEvent::BroadcastSignedProposal(proposal))
                         .await?;
@@ -133,7 +169,14 @@ where
 
             Msg::PublishProposalPart(msg) => {
                 if let Some(full_proposal) = msg.content.as_data() {
-                    count(statsd_client, *shard_id, "send_proposal_part", 1);
+                    count(statsd_client, *shard_id, "send_proposal_part", 1, vec![]);
+                    gauge(
+                        statsd_client,
+                        *shard_id,
+                        "send_proposal_part_height",
+                        full_proposal.height().block_number,
+                        vec![],
+                    );
                     gossip_tx
                         .send(GossipEvent::BroadcastFullProposal(full_proposal.clone()))
                         .await?;
@@ -143,18 +186,32 @@ where
             }
 
             Msg::BroadcastStatus(status) => {
+                let height = status.height;
                 let status = sync::Status {
                     peer_id: state.peer_id,
-                    height: status.height,
+                    height,
                     history_min_height: status.history_min_height,
                 };
-                count(statsd_client, *shard_id, "send_status", 1);
+                count(statsd_client, *shard_id, "send_status", 1, vec![]);
+                gauge(
+                    statsd_client,
+                    *shard_id,
+                    "broadcast_status_height",
+                    height.block_number,
+                    vec![],
+                );
                 gossip_tx.send(GossipEvent::BroadcastStatus(status)).await?
             }
 
             Msg::OutgoingRequest(peer_id, request, reply_to) => {
                 let (tx, rx) = oneshot::channel();
-                count(statsd_client, *shard_id, "send_sync_request", 1);
+                count(
+                    statsd_client,
+                    *shard_id,
+                    "send_sync_request",
+                    1,
+                    vec![("peer_id".to_string(), peer_id.to_string())],
+                );
                 gossip_tx
                     .send(GossipEvent::SyncRequest(peer_id, request, tx))
                     .await?;
@@ -165,7 +222,7 @@ where
             Msg::OutgoingResponse(request_id, response) => {
                 let request_id = inbound_requests.remove(&request_id);
                 if let Some(request_id) = request_id {
-                    count(statsd_client, *shard_id, "send_sync_reply", 1);
+                    count(statsd_client, *shard_id, "send_sync_reply", 1, vec![]);
                     gossip_tx
                         .send(GossipEvent::SyncReply(request_id, response))
                         .await?;
@@ -180,14 +237,26 @@ where
 
             Msg::NewEvent(Event::PeerConnected(peer_id)) => {
                 // peers.insert(peer_id);
-                count(statsd_client, *shard_id, "recv_peer_connected", 1);
+                count(
+                    statsd_client,
+                    *shard_id,
+                    "recv_peer_connected",
+                    1,
+                    vec![("peer_id".to_string(), peer_id.to_string())],
+                );
                 info!(peer_id = peer_id.to_string(), shard_id, "Peer connected");
                 output_port.send(NetworkEvent::PeerConnected(peer_id));
             }
 
             Msg::NewEvent(Event::PeerDisconnected(peer_id)) => {
                 // peers.remove(&peer_id);
-                count(statsd_client, *shard_id, "recv_peer_disconnected", 1);
+                count(
+                    statsd_client,
+                    *shard_id,
+                    "recv_peer_disconnected",
+                    1,
+                    vec![("peer_id".to_string(), peer_id.to_string())],
+                );
                 info!(peer_id = peer_id.to_string(), shard_id, "Peer disconnected");
                 output_port.send(NetworkEvent::PeerDisconnected(peer_id));
             }
@@ -203,12 +272,38 @@ where
 
                 let event = match msg {
                     SignedConsensusMsg::Vote(vote) => {
-                        count(statsd_client, *shard_id, "recv_vote", 1);
+                        count(
+                            statsd_client,
+                            *shard_id,
+                            "recv_vote",
+                            1,
+                            vec![("peer_id".to_string(), from.to_string())],
+                        );
+                        gauge(
+                            statsd_client,
+                            *shard_id,
+                            "recv_vote_height",
+                            vote.height.block_number,
+                            vec![("peer_id".to_string(), from.to_string())],
+                        );
                         NetworkEvent::Vote(from, vote)
                     }
 
                     SignedConsensusMsg::Proposal(proposal) => {
-                        count(statsd_client, *shard_id, "recv_proposal", 1);
+                        count(
+                            statsd_client,
+                            *shard_id,
+                            "recv_proposal",
+                            1,
+                            vec![("peer_id".to_string(), from.to_string())],
+                        );
+                        gauge(
+                            statsd_client,
+                            *shard_id,
+                            "recv_proposal_height",
+                            proposal.height.block_number,
+                            vec![("peer_id".to_string(), from.to_string())],
+                        );
                         debug!("Received proposal from network");
                         NetworkEvent::Proposal(from, proposal)
                     }
@@ -219,7 +314,7 @@ where
 
             Msg::NewEvent(Event::Message(Channel::ProposalParts, from, data)) => {
                 debug!("Received proposal parts from network");
-                count(statsd_client, *shard_id, "recv_proposal_parts", 1);
+                count(statsd_client, *shard_id, "recv_proposal_parts", 1, vec![]);
                 let msg: StreamMessage<<SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::ProposalPart> = match self.codec.decode(data) {
                     Ok(stream_msg) => stream_msg,
                     Err(e) => {
@@ -247,7 +342,20 @@ where
                         return Ok(());
                     }
                 };
-                count(statsd_client, *shard_id, "recv_peer_status", 1);
+                count(
+                    statsd_client,
+                    *shard_id,
+                    "recv_peer_status",
+                    1,
+                    vec![("peer_id".to_string(), from.to_string())],
+                );
+                gauge(
+                    statsd_client,
+                    *shard_id,
+                    "peer_height",
+                    status.height.block_number,
+                    vec![("peer_id".to_string(), status.peer_id.to_string())],
+                );
 
                 // We don't need this check because we're using gossip and not broadcast
                 // if from != status.peer_id {
@@ -277,7 +385,13 @@ where
                                 return Ok(());
                             }
                         };
-                    count(statsd_client, *shard_id, "recv_sync_request", 1);
+                    count(
+                        statsd_client,
+                        *shard_id,
+                        "recv_sync_request",
+                        1,
+                        vec![("peer_id".to_string(), peer.to_string())],
+                    );
 
                     inbound_requests.insert(sync::InboundRequestId::new(request_id), request_id);
 
@@ -301,7 +415,13 @@ where
                                 return Ok(());
                             }
                         };
-                    count(statsd_client, *shard_id, "recv_sync_response", 1);
+                    count(
+                        statsd_client,
+                        *shard_id,
+                        "recv_sync_response",
+                        1,
+                        vec![("peer_id".to_string(), peer.to_string())],
+                    );
 
                     output_port.send(NetworkEvent::Response(
                         sync::OutboundRequestId::new(request_id),
