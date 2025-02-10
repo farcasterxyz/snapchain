@@ -184,14 +184,14 @@ impl ShardEngine {
     fn count(&self, key: &str, count: u64) {
         let key = format!("engine.{}", key);
         self.statsd_client
-            .count_with_shard(self.shard_id, key.as_str(), count);
+            .count_with_shard(self.shard_id, key.as_str(), count, vec![]);
     }
 
     // statsd
     fn gauge(&self, key: &str, value: u64) {
         let key = format!("engine.{}", key);
         self.statsd_client
-            .gauge_with_shard(self.shard_id, key.as_str(), value);
+            .gauge_with_shard(self.shard_id, key.as_str(), value, vec![]);
     }
 
     pub fn get_stores(&self) -> Stores {
@@ -1126,7 +1126,7 @@ impl ShardEngine {
     pub fn make_count_fn(statsd_client: StatsdClientWrapper, shard_id: u32) -> impl Fn(&str, u64) {
         move |key: &str, count: u64| {
             let key = format!("engine.{}", key);
-            statsd_client.count_with_shard(shard_id, &key, count);
+            statsd_client.count_with_shard(shard_id, &key, count, vec![]);
         }
     }
 
@@ -1359,13 +1359,15 @@ impl BlockEngine {
     // statsd
     fn count(&self, key: &str, count: u64) {
         let key = format!("engine.{}", key);
-        self.statsd_client.count_with_shard(0, key.as_str(), count);
+        self.statsd_client
+            .count_with_shard(0, key.as_str(), count, vec![]);
     }
 
     // statsd
     fn gauge(&self, key: &str, value: u64) {
         let key = format!("engine.{}", key);
-        self.statsd_client.gauge_with_shard(0, key.as_str(), value);
+        self.statsd_client
+            .gauge_with_shard(0, key.as_str(), value, vec![]);
     }
 
     pub fn commit_block(&mut self, block: Block) {

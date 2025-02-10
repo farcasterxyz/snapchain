@@ -201,6 +201,7 @@ impl Proposer for ShardProposer {
             self.shard_id.shard_id(),
             "proposer.pending_blocks",
             self.proposed_chunks.len() as u64,
+            vec![],
         );
     }
 
@@ -470,11 +471,13 @@ impl Proposer for BlockProposer {
             self.shard_id.shard_id(),
             "proposer.pending_shards",
             self.pending_chunks.len() as u64,
+            vec![],
         );
         self.statsd_client.gauge_with_shard(
             self.shard_id.shard_id(),
             "proposer.pending_blocks",
             self.proposed_blocks.len() as u64,
+            vec![],
         );
     }
 
