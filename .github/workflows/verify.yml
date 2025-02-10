@@ -41,6 +41,11 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
+          repository: aditiharini/malachite
+          path: ./malachite
+
+      - uses: actions/checkout@v4
+        with:
           path: ./snapchain
 
       - working-directory: ./snapchain
