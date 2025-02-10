@@ -39,7 +39,7 @@ jobs:
           repository: CassOnMars/eth-signature-verifier
           path: ./eth-signature-verifier
 
-      - uses: actions/checkout@debugging-consensus
+      - uses: actions/checkout@v4
         with:
           repository: aditiharini/malachite
           path: ./malachite
