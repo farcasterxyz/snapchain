@@ -2,6 +2,25 @@ FROM rust:1.83 AS builder
 
 WORKDIR /usr/src/app
 
+# Build Malachite first
+ARG MALACHITE_GIT_REPO_URL=https://github.com/aditiharini/malachite.git
+ENV MALACHITE_GIT_REPO_URL=$MALACHITE_GIT_REPO_URL
+ARG MALACHITE_GIT_BRANCH=debugging-consensus
+ENV RUST_BACKTRACE=1
+RUN --mount=type=ssh <<EOF
+set -eu
+apt-get update && apt-get install -y libclang-dev git libjemalloc-dev llvm-dev make protobuf-compiler libssl-dev openssh-client
+echo "StrictHostKeyChecking no" >> /etc/ssh/ssh_config
+cd ..
+git clone $MALACHITE_GIT_REPO_URL
+cd malachite
+git fetch
+git checkout $MALACHITE_GIT_BRANCH
+cd code
+cargo build
+EOF
+
+
 ARG ETH_SIGNATURE_VERIFIER_GIT_REPO_URL=https://github.com/CassOnMars/eth-signature-verifier.git
 ENV ETH_SIGNATURE_VERIFIER_GIT_REPO_URL=$ETH_SIGNATURE_VERIFIER_GIT_REPO_URL
 ENV RUST_BACKTRACE=1

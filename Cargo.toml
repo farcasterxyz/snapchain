@@ -26,15 +26,15 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt", "jso
 hex = "0.4.3"
 ractor = "0.13.5"
 bytes = "1.9.0"
-informalsystems-malachitebft-core-consensus = { version = "0.0.1" }
-informalsystems-malachitebft-engine = { version = "0.0.1" }
-informalsystems-malachitebft-network = { version = "0.0.1" }
-informalsystems-malachitebft-sync = { version = "0.0.1" }
-informalsystems-malachitebft-core-types = { version = "0.0.1"}
-informalsystems-malachitebft-config = { version = "0.0.1"}
-informalsystems-malachitebft-codec = { version = "0.0.1"}
-informalsystems-malachitebft-metrics = { version = "0.0.1" }
-informalsystems-malachitebft-app = { version = "0.0.1" }
+informalsystems-malachitebft-core-consensus = { version = "0.0.1", path = "../malachite/code/crates/core-consensus" }
+informalsystems-malachitebft-engine = { version = "0.0.1", path = "../malachite/code/crates/engine" }
+informalsystems-malachitebft-network = { version = "0.0.1", path = "../malachite/code/crates/network" }
+informalsystems-malachitebft-sync = { version = "0.0.1", path = "../malachite/code/crates/sync" }
+informalsystems-malachitebft-core-types = { version = "0.0.1", path = "../malachite/code/crates/core-types" }
+informalsystems-malachitebft-config = { version = "0.0.1", path = "../malachite/code/crates/config" }
+informalsystems-malachitebft-codec = { version = "0.0.1", path = "../malachite/code/crates/codec" }
+informalsystems-malachitebft-metrics = { version = "0.0.1", path = "../malachite/code/crates/metrics" }
+informalsystems-malachitebft-app = { version = "0.0.1", path = "../malachite/code/crates/app"}
 blake3 = "1.4.1"
 tracing = "0.1.40"
 thiserror = "1.0.66"
