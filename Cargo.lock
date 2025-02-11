@@ -4444,6 +4444,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "bytes",
+ "cadence",
  "dashmap",
  "derive-where",
  "displaydoc",

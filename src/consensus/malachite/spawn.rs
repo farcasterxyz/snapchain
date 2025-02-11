@@ -119,13 +119,15 @@ pub async fn spawn_sync_actor(
     config: SyncConfig,
     registry: &SharedRegistry,
     span: Span,
+    statsd_client: StatsdClientWrapper,
+    shard_id: u32,
 ) -> Result<SyncRef<SnapchainValidatorContext>, ractor::SpawnErr> {
     let params = SyncParams {
         status_update_interval: config.status_update_interval,
         request_timeout: config.request_timeout,
     };
 
-    let metrics = SyncMetrics::register(registry);
+    let metrics = SyncMetrics::register(registry, Some(statsd_client.client), Some(shard_id));
 
     let actor_ref = Sync::spawn(ctx, network, host, params, metrics, span).await?;
 
@@ -163,8 +165,13 @@ impl MalachiteConsensusActors {
         };
         let span = tracing::info_span!("node", name = %name);
 
-        let network_actor =
-            spawn_network_actor(gossip_tx.clone(), local_peer_id, statsd_client, shard_id).await?;
+        let network_actor = spawn_network_actor(
+            gossip_tx.clone(),
+            local_peer_id,
+            statsd_client.clone(),
+            shard_id,
+        )
+        .await?;
         let wal_actor = spawn_wal_actor(
             Path::new(format!("{}/shard-{}/wal", db_dir, shard_id).as_str()),
             ctx.clone(),
@@ -185,6 +192,8 @@ impl MalachiteConsensusActors {
             SyncConfig::default(),
             registry,
             span.clone(),
+            statsd_client.clone(),
+            shard_id,
         )
         .await?;
 
@@ -198,7 +207,7 @@ impl MalachiteConsensusActors {
             host_actor.clone(),
             wal_actor.clone(),
             Some(sync_actor.clone()),
-            Metrics::new(),
+            Metrics::new(Some(shard_id), Some(statsd_client.client.clone())),
             TxEvent::new(),
             span,
         )

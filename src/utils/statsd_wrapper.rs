@@ -2,7 +2,7 @@ use cadence::{Counted, Gauged, StatsdClient, Timed};
 use std::sync::Arc;
 
 pub struct StatsdClientWrapper {
-    client: Arc<StatsdClient>,
+    pub client: Arc<StatsdClient>,
     use_tags: bool,
 }
 
