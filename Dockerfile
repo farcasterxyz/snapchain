@@ -5,7 +5,7 @@ WORKDIR /usr/src/app
 # Build Malachite first
 ARG MALACHITE_GIT_REPO_URL=https://github.com/aditiharini/malachite.git
 ENV MALACHITE_GIT_REPO_URL=$MALACHITE_GIT_REPO_URL
-ARG MALACHITE_GIT_BRANCH=debugging-consensus
+ARG MALACHITE_GIT_COMMIT=f5daa5eb01dc0274dcea8d55bd80e5dbdc36d9f0
 ENV RUST_BACKTRACE=1
 RUN --mount=type=ssh <<EOF
 set -eu
@@ -15,7 +15,7 @@ cd ..
 git clone $MALACHITE_GIT_REPO_URL
 cd malachite
 git fetch
-git checkout $MALACHITE_GIT_BRANCH
+git checkout $MALACHITE_GIT_COMMIT
 cd code
 cargo build
 EOF
