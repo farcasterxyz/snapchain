@@ -9,6 +9,8 @@ use snapchain::utils::cli::send_message;
 struct Cli {
     #[arg(long)]
     addr: String,
+    #[arg(long, default_value = "100")]
+    count: usize,
 }
 
 #[tokio::main]
@@ -22,13 +24,25 @@ async fn main() {
     );
 
     let mut client = HubServiceClient::connect(args.addr).await.unwrap();
+    let count = args.count;
 
-    let resp = send_message(
-        &mut client,
-        &compose_message(6833, "Welcome from Rust!", None, Some(&private_key)),
-    )
-    .await
-    .unwrap();
+    let mut success = 0;
+    for i in 1..count {
+        let resp = send_message(
+            &mut client,
+            &compose_message(
+                i as u64,
+                format!("Test message: {}", i).as_str(),
+                None,
+                Some(&private_key),
+            ),
+        )
+        .await;
 
-    println!("response: {:?}", resp);
+        if resp.is_ok() {
+            success += 1;
+        }
+    }
+
+    println!("Submitted {} messages, {} succeeded", count, success);
 }

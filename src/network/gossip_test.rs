@@ -51,12 +51,19 @@ async fn test_gossip_communication() {
     let mempool_msg = MempoolMessage::UserMessage(cast_add.clone());
     // Send message from node1 to node2
     gossip_tx1
+        .send(GossipEvent::BroadcastMempoolMessage(mempool_msg.clone()))
+        .await
+        .unwrap();
+
+    // Sending the same message twice will cause the second message to be dropped
+    gossip_tx1
         .send(GossipEvent::BroadcastMempoolMessage(mempool_msg))
         .await
         .unwrap();
 
     // Wait for message to be received with timeout
-    let deadline = time::Instant::now() + Duration::from_secs(5);
+    let deadline = time::Instant::now() + Duration::from_secs(2);
+    let mut receive_counts = 0;
     loop {
         let timeout = time::sleep_until(deadline);
         select! {
@@ -65,8 +72,8 @@ async fn test_gossip_communication() {
                     Some(SystemMessage::Mempool(msg))  => {
                         match msg {
                             MempoolMessage::UserMessage(data) => {
+                                receive_counts += 1;
                                 assert_eq!(data, cast_add);
-                                break;
                             },
                             _ => {
                                 panic!("Received unexpected message");
@@ -77,8 +84,9 @@ async fn test_gossip_communication() {
                 }
             }
             _ = timeout => {
-                panic!("Timeout while waiting for message");
+                break;
             }
         }
     }
+    assert_eq!(receive_counts, 1);
 }

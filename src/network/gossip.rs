@@ -7,8 +7,8 @@ use bytes::Bytes;
 use futures::StreamExt;
 use informalsystems_malachitebft_codec::Codec;
 use informalsystems_malachitebft_core_types::{SignedProposal, SignedVote};
-use informalsystems_malachitebft_network::PeerId as MalachitePeerId;
 use informalsystems_malachitebft_network::{Channel, PeerIdExt};
+use informalsystems_malachitebft_network::{MessageId, PeerId as MalachitePeerId};
 use informalsystems_malachitebft_sync as sync;
 use libp2p::identity::ed25519::Keypair;
 use libp2p::request_response::{InboundRequestId, OutboundRequestId};
@@ -19,6 +19,7 @@ use libp2p::{
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Duration;
 use tokio::io;
 use tokio::sync::mpsc::Sender;
@@ -28,6 +29,9 @@ use tracing::{debug, info, warn};
 const DEFAULT_GOSSIP_PORT: u16 = 3382;
 const DEFAULT_GOSSIP_HOST: &str = "127.0.0.1";
 const MAX_GOSSIP_MESSAGE_SIZE: usize = 1024 * 1024 * 10; // 10 mb
+
+const CONSENSUS_TOPIC: &str = "consensus";
+const MEMPOOL_TOPIC: &str = "mempool";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -113,20 +117,36 @@ impl SnapchainGossip {
             )?
             .with_quic()
             .with_behaviour(|key| {
-                // Disable message id since it's interfering with consensus/sync.
-                // TODO: Reenable, but only for the mempool topic.
-                // // To content-address message, we can take the hash of message and use it as an ID.
-                // let message_id_fn = |message: &gossipsub::Message| {
-                //     let mut s = DefaultHasher::new();
-                //     message.data.hash(&mut s);
-                //     gossipsub::MessageId::from(s.finish().to_string())
-                // };
+                let message_id_fn = |message: &gossipsub::Message| {
+                    // This is the default implementation inside libp2p
+                    let default_message_id_fn = |message: &gossipsub::Message| {
+                        let mut source_string = if let Some(peer_id) = message.source.as_ref() {
+                            peer_id.to_base58()
+                        } else {
+                            PeerId::from_bytes(&[0, 1, 0])
+                                .expect("Valid peer id")
+                                .to_base58()
+                        };
+                        source_string
+                            .push_str(&message.sequence_number.unwrap_or_default().to_string());
+                        MessageId::from(source_string)
+                    };
+
+                    match message.topic.as_str() {
+                        MEMPOOL_TOPIC => {
+                            let mut s = DefaultHasher::new();
+                            message.data.hash(&mut s);
+                            gossipsub::MessageId::from(s.finish().to_string())
+                        }
+                        _ => default_message_id_fn(message),
+                    }
+                };
 
                 // Set a custom gossipsub configuration
                 let gossipsub_config = gossipsub::ConfigBuilder::default()
                     .heartbeat_interval(Duration::from_secs(10)) // This is set to aid debugging by not cluttering the log space
                     .validation_mode(gossipsub::ValidationMode::Strict) // This sets the kind of message validation. The default is Strict (enforce message signing)
-                    // .message_id_fn(message_id_fn) // content-address messages. No two messages of the same content will be propagated.
+                    .message_id_fn(message_id_fn) // content-address mempool messages
                     .max_transmit_size(MAX_GOSSIP_MESSAGE_SIZE) // maximum message size that can be transmitted
                     .build()
                     .map_err(|msg| io::Error::new(io::ErrorKind::Other, msg))?; // Temporary hack because `build` does not return a proper `std::error::Error`.
@@ -162,7 +182,7 @@ impl SnapchainGossip {
         }
 
         // Create a Gossipsub topic
-        let topic = gossipsub::IdentTopic::new("test-net");
+        let topic = gossipsub::IdentTopic::new(CONSENSUS_TOPIC);
         // subscribes to our topic
         let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
         if let Err(e) = result {
@@ -170,7 +190,7 @@ impl SnapchainGossip {
             return Err(Box::new(e));
         }
 
-        let topic = gossipsub::IdentTopic::new("test-net-mempool");
+        let topic = gossipsub::IdentTopic::new(MEMPOOL_TOPIC);
         let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
         if let Err(e) = result {
             warn!("Failed to subscribe to topic: {:?}", e);
@@ -313,14 +333,14 @@ impl SnapchainGossip {
     }
 
     fn publish(&mut self, message: Vec<u8>) {
-        let topic = gossipsub::IdentTopic::new("test-net");
+        let topic = gossipsub::IdentTopic::new(CONSENSUS_TOPIC);
         if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, message) {
             warn!("Failed to publish gossip message: {:?}", e);
         }
     }
 
     fn publish_mempool(&mut self, message: Vec<u8>) {
-        let topic = gossipsub::IdentTopic::new("test-net-mempool");
+        let topic = gossipsub::IdentTopic::new(MEMPOOL_TOPIC);
         if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, message) {
             warn!("Failed to publish gossip message: {:?}", e);
         }
