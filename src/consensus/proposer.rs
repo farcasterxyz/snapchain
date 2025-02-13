@@ -54,6 +54,8 @@ pub trait Proposer {
 
     fn get_min_height(&self) -> Height;
 
+    fn get_proposed_value(&self, shard_hash: &ShardHash) -> Option<FullProposal>;
+
     async fn sync_against_validator(
         &mut self,
         validator: &SnapchainValidator,
@@ -174,6 +176,10 @@ impl Proposer for ShardProposer {
         }
         error!("Invalid proposed value: {:?}", full_proposal.proposed_value);
         Validity::Invalid // TODO: Validate proposer signature?
+    }
+
+    fn get_proposed_value(&self, shard_hash: &ShardHash) -> Option<FullProposal> {
+        self.proposed_chunks.get(&shard_hash).cloned()
     }
 
     async fn decide(&mut self, commits: Commits) {
@@ -422,6 +428,10 @@ impl Proposer for BlockProposer {
                 .insert(full_proposal.shard_hash(), full_proposal.clone());
         }
         Validity::Valid // TODO: Validate proposer signature?
+    }
+
+    fn get_proposed_value(&self, shard_hash: &ShardHash) -> Option<FullProposal> {
+        self.proposed_blocks.get(&shard_hash).cloned()
     }
 
     async fn decide(&mut self, commits: Commits) {

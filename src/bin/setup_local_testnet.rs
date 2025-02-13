@@ -48,7 +48,7 @@ async fn main() {
     let args = Args::parse();
 
     // Create 4 nodes by default
-    let nodes = 4;
+    let nodes = 3;
 
     // create directory at the root of the project if it doesn't exist
     if !std::path::Path::new("nodes").exists() {

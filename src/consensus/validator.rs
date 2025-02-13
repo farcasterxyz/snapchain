@@ -3,7 +3,7 @@ use crate::core::types::{
     Address, Height, ShardId, SnapchainShard, SnapchainValidator, SnapchainValidatorContext,
     SnapchainValidatorSet,
 };
-use crate::proto::{full_proposal, Commits, FullProposal};
+use crate::proto::{full_proposal, Commits, FullProposal, ShardHash};
 use crate::storage::store::node_local_state::LocalStateStore;
 use informalsystems_malachitebft_core_consensus::ProposedValue;
 use informalsystems_malachitebft_core_types::{Round, ValidatorSet};
@@ -222,5 +222,15 @@ impl ShardValidator {
         };
 
         proposal
+    }
+
+    pub fn get_proposed_value(&mut self, shard_hash: &ShardHash) -> Option<FullProposal> {
+        if let Some(block_proposer) = &mut self.block_proposer {
+            block_proposer.get_proposed_value(shard_hash)
+        } else if let Some(shard_proposer) = &mut self.shard_proposer {
+            shard_proposer.get_proposed_value(shard_hash)
+        } else {
+            panic!("No proposer set");
+        }
     }
 }
