@@ -1,3 +1,4 @@
+use crate::mempool::mempool::{MempoolMessageWithSource, MempoolSource};
 use crate::proto::admin_service_server::AdminService;
 use crate::proto::{self, Empty, FarcasterNetwork, FnameTransfer, OnChainEvent};
 use crate::proto::{UserNameProof, ValidatorMessage};
@@ -69,7 +70,7 @@ impl DbManager {
 
 pub struct MyAdminService {
     db_manager: DbManager,
-    pub mempool_tx: mpsc::Sender<MempoolMessage>,
+    pub mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
     snapshot_config: storage::db::snapshot::Config,
     shard_stores: HashMap<u32, Stores>,
     block_store: BlockStore,
@@ -90,7 +91,7 @@ const DB_DESTROY_KEY: &[u8] = b"__destroy_all_databases_on_start__";
 impl MyAdminService {
     pub fn new(
         db_manager: DbManager,
-        mempool_tx: mpsc::Sender<MempoolMessage>,
+        mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
         shard_stores: HashMap<u32, Stores>,
         block_store: BlockStore,
         snapshot_config: storage::db::snapshot::Config,
@@ -173,12 +174,13 @@ impl AdminService for MyAdminService {
             ));
         }
 
-        let result = self
-            .mempool_tx
-            .try_send(MempoolMessage::ValidatorMessage(ValidatorMessage {
+        let result = self.mempool_tx.try_send((
+            MempoolMessage::ValidatorMessage(ValidatorMessage {
                 on_chain_event: Some(onchain_event.clone()),
                 fname_transfer: None,
-            }));
+            }),
+            MempoolSource::RPC,
+        ));
 
         match result {
             Ok(()) => {
@@ -204,16 +206,17 @@ impl AdminService for MyAdminService {
             ));
         }
 
-        let result = self
-            .mempool_tx
-            .try_send(MempoolMessage::ValidatorMessage(ValidatorMessage {
+        let result = self.mempool_tx.try_send((
+            MempoolMessage::ValidatorMessage(ValidatorMessage {
                 on_chain_event: None,
                 fname_transfer: Some(FnameTransfer {
                     id: username_proof.fid,
                     from_fid: 0, // Assume the username is being transfer from the "root" fid to the one in the username proof
                     proof: Some(username_proof.clone()),
                 }),
-            }));
+            }),
+            MempoolSource::RPC,
+        ));
 
         match result {
             Ok(()) => {

@@ -1,4 +1,5 @@
 use crate::consensus::consensus::SystemMessage;
+use crate::mempool::mempool::MempoolSource;
 use crate::network::gossip::{Config, GossipEvent, SnapchainGossip};
 use crate::storage::store::engine::MempoolMessage;
 use crate::utils::factory::messages_factory;
@@ -71,9 +72,10 @@ async fn test_gossip_communication() {
                 match received {
                     Some(SystemMessage::Mempool(msg))  => {
                         match msg {
-                            MempoolMessage::UserMessage(data) => {
+                            (MempoolMessage::UserMessage(data), source) => {
                                 receive_counts += 1;
                                 assert_eq!(data, cast_add);
+                                assert_eq!(source, MempoolSource::Gossip);
                             },
                             _ => {
                                 panic!("Received unexpected message");

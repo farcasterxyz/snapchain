@@ -1,6 +1,6 @@
 use tokio::sync::{broadcast, mpsc};
 
-use crate::mempool::mempool::{self, Mempool};
+use crate::mempool::mempool::{self, Mempool, MempoolSource};
 use crate::proto::{Height, ShardChunk, ShardHeader};
 use crate::storage::store::engine::{MempoolMessage, ShardStateChange};
 use crate::storage::store::stores::StoreLimits;
@@ -86,8 +86,12 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
             let text = format!("For benchmarking {}", i);
             let msg = compose_message(fid, text.as_str(), None, None);
 
+            // Set source to gossip so we don't re-broadcast the message
             mempool_tx
-                .send(MempoolMessage::UserMessage(msg.clone()))
+                .send((
+                    MempoolMessage::UserMessage(msg.clone()),
+                    MempoolSource::Gossip,
+                ))
                 .await
                 .unwrap();
             i += 1;

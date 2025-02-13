@@ -26,6 +26,7 @@ mod tests {
 
     use std::time::Duration;
 
+    use crate::mempool::mempool::{MempoolMessageWithSource, MempoolSource};
     use libp2p::identity::ed25519::Keypair;
 
     const HOST_FOR_TEST: &str = "127.0.0.1";
@@ -44,7 +45,7 @@ mod tests {
         ShardEngine,
         SnapchainGossip,
         Mempool,
-        mpsc::Sender<MempoolMessage>,
+        mpsc::Sender<MempoolMessageWithSource>,
         mpsc::Sender<MempoolMessagesRequest>,
         broadcast::Sender<ShardChunk>,
         mpsc::Receiver<SystemMessage>,
@@ -182,9 +183,14 @@ mod tests {
         let cast2 = messages_factory::casts::create_cast_add(fid, "world", None, None);
 
         let _ = mempool_tx
-            .send(MempoolMessage::UserMessage(cast1.clone()))
+            .send((
+                MempoolMessage::UserMessage(cast1.clone()),
+                MempoolSource::Local,
+            ))
             .await;
-        let _ = mempool_tx.send(MempoolMessage::UserMessage(cast2)).await;
+        let _ = mempool_tx
+            .send((MempoolMessage::UserMessage(cast2), MempoolSource::Local))
+            .await;
 
         // Wait for cast processing
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -288,23 +294,43 @@ mod tests {
         // Create a test message
         let cast: proto::Message =
             messages_factory::casts::create_cast_add(1234, "hello", None, None);
+        let cast2: proto::Message =
+            messages_factory::casts::create_cast_add(3214, "hello 2", None, None);
 
         // Add message to mempool 1
         mempool_tx1
-            .send(MempoolMessage::UserMessage(cast))
+            .send((
+                MempoolMessage::UserMessage(cast.clone()),
+                MempoolSource::Local,
+            ))
+            .await
+            .unwrap();
+
+        // Inserting the same message twice should not be re-broadcasted
+        mempool_tx1
+            .send((MempoolMessage::UserMessage(cast), MempoolSource::Local))
+            .await
+            .unwrap();
+
+        // Another message received via gossip should not be re-broadcasted
+        mempool_tx1
+            .send((MempoolMessage::UserMessage(cast2), MempoolSource::Gossip))
             .await
             .unwrap();
 
         // Wait for gossip
         tokio::time::sleep(Duration::from_secs(1)).await;
 
+        let mut received_messages = 0;
         // Should be received through the system message of gossip 2
         while let Ok(msg) = system_rx2.try_recv() {
             if let SystemMessage::Mempool(mempool_message) = msg {
                 // Manually forward to the mempool
                 mempool_tx2.send(mempool_message).await.unwrap();
+                received_messages += 1;
             }
         }
+        assert_eq!(received_messages, 1);
 
         // Wait for the message to be processed
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -323,7 +349,7 @@ mod tests {
             .unwrap();
 
         let result = mempool_retrieval_rx.await.unwrap();
-        assert_eq!(result.len(), 1);
+        assert_eq!(result.len(), 1); // Only the first cast should be received
         assert_eq!(result[0].fid(), 1234);
     }
 }

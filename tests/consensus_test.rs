@@ -7,7 +7,7 @@ use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
 use serial_test::serial;
 use snapchain::consensus::consensus::SystemMessage;
-use snapchain::mempool::mempool::{self, Mempool};
+use snapchain::mempool::mempool::{self, Mempool, MempoolMessageWithSource, MempoolSource};
 use snapchain::mempool::routing;
 use snapchain::network::gossip::SnapchainGossip;
 use snapchain::network::server::MyHubService;
@@ -15,7 +15,6 @@ use snapchain::node::snapchain_node::SnapchainNode;
 use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::proto::Block;
 use snapchain::storage::db::{PageOptions, RocksDB};
-use snapchain::storage::store::engine::MempoolMessage;
 use snapchain::storage::store::BlockStore;
 use snapchain::utils::factory::messages_factory;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
@@ -32,7 +31,7 @@ struct NodeForTest {
     node: SnapchainNode,
     db: Arc<RocksDB>,
     block_store: BlockStore,
-    mempool_tx: mpsc::Sender<MempoolMessage>,
+    mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
     handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -353,17 +352,16 @@ async fn test_basic_consensus() {
             let mut hash = prefix.clone();
             hash.extend_from_slice(&i.to_be_bytes()); // just for now
 
+            let message = snapchain::storage::store::engine::MempoolMessage::UserMessage(
+                messages_factory::casts::create_cast_add(
+                    321,
+                    format!("Cast {}", i).as_str(),
+                    None,
+                    None,
+                ),
+            );
             messages_tx1
-                .send(
-                    snapchain::storage::store::engine::MempoolMessage::UserMessage(
-                        messages_factory::casts::create_cast_add(
-                            321,
-                            format!("Cast {}", i).as_str(),
-                            None,
-                            None,
-                        ),
-                    ),
-                )
+                .send((message, MempoolSource::Local))
                 .await
                 .unwrap();
             i += 1;
@@ -449,17 +447,16 @@ async fn test_basic_sync() {
             let mut hash = prefix.clone();
             hash.extend_from_slice(&i.to_be_bytes()); // just for now
 
+            let message = snapchain::storage::store::engine::MempoolMessage::UserMessage(
+                messages_factory::casts::create_cast_add(
+                    321,
+                    format!("Cast {}", i).as_str(),
+                    None,
+                    None,
+                ),
+            );
             messages_tx1
-                .send(
-                    snapchain::storage::store::engine::MempoolMessage::UserMessage(
-                        messages_factory::casts::create_cast_add(
-                            321,
-                            format!("Cast {}", i).as_str(),
-                            None,
-                            None,
-                        ),
-                    ),
-                )
+                .send((message, MempoolSource::Local))
                 .await
                 .unwrap();
             i += 1;

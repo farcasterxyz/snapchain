@@ -6,6 +6,7 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
+use crate::mempool::mempool::{MempoolMessageWithSource, MempoolSource};
 use crate::{
     proto::{FnameTransfer, UserNameProof, UserNameType, ValidatorMessage},
     storage::store::{engine::MempoolMessage, node_local_state::LocalStateStore},
@@ -77,7 +78,7 @@ enum FetchError {
 pub struct Fetcher {
     position: u64,
     cfg: Config,
-    mempool_tx: mpsc::Sender<MempoolMessage>,
+    mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
     statsd_client: StatsdClientWrapper,
     local_state_store: LocalStateStore,
 }
@@ -85,7 +86,7 @@ pub struct Fetcher {
 impl Fetcher {
     pub fn new(
         cfg: Config,
-        mempool_tx: mpsc::Sender<MempoolMessage>,
+        mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
         statsd_client: StatsdClientWrapper,
         local_state_store: LocalStateStore,
     ) -> Self {
@@ -176,14 +177,17 @@ impl Fetcher {
                 self.gauge("latest_transfer_id", t.id);
                 if let Err(err) = self
                     .mempool_tx
-                    .send(MempoolMessage::ValidatorMessage(ValidatorMessage {
-                        on_chain_event: None,
-                        fname_transfer: Some(FnameTransfer {
-                            id: t.to,
-                            from_fid: t.from,
-                            proof: Some(username_proof),
+                    .send((
+                        MempoolMessage::ValidatorMessage(ValidatorMessage {
+                            on_chain_event: None,
+                            fname_transfer: Some(FnameTransfer {
+                                id: t.to,
+                                from_fid: t.from,
+                                proof: Some(username_proof),
+                            }),
                         }),
-                    }))
+                        MempoolSource::Local,
+                    ))
                     .await
                 {
                     error!(

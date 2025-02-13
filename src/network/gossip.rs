@@ -2,6 +2,7 @@ use crate::consensus::consensus::{MalachiteEventShard, SystemMessage};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
+use crate::mempool::mempool::MempoolSource;
 use crate::storage::store::engine::MempoolMessage;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -414,7 +415,10 @@ impl SnapchainGossip {
                                 MempoolMessage::UserMessage(message)
                             }
                         };
-                        Some(SystemMessage::Mempool(mempool_message))
+                        Some(SystemMessage::Mempool((
+                            mempool_message,
+                            MempoolSource::Gossip,
+                        )))
                     } else {
                         warn!("Unknown mempool message from peer: {}", peer_id);
                         None

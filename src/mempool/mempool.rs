@@ -1,9 +1,9 @@
+use serde::{Deserialize, Serialize};
+use std::cmp::PartialEq;
 use std::{
     collections::{BTreeMap, HashMap},
     time::Duration,
 };
-
-use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::{
@@ -92,6 +92,15 @@ impl proto::ValidatorMessage {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MempoolSource {
+    Gossip,
+    RPC,
+    Local,
+}
+
+pub type MempoolMessageWithSource = (MempoolMessage, MempoolSource);
+
 impl MempoolMessage {
     pub fn mempool_key(&self) -> MempoolKey {
         match self {
@@ -112,7 +121,7 @@ pub struct Mempool {
     shard_stores: HashMap<u32, Stores>,
     message_router: Box<dyn MessageRouter>,
     num_shards: u32,
-    mempool_rx: mpsc::Receiver<MempoolMessage>,
+    mempool_rx: mpsc::Receiver<MempoolMessageWithSource>,
     messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
     messages: HashMap<u32, BTreeMap<MempoolKey, MempoolMessage>>,
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
@@ -123,7 +132,7 @@ pub struct Mempool {
 impl Mempool {
     pub fn new(
         config: Config,
-        mempool_rx: mpsc::Receiver<MempoolMessage>,
+        mempool_rx: mpsc::Receiver<MempoolMessageWithSource>,
         messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
         num_shards: u32,
         shard_stores: HashMap<u32, Stores>,
@@ -148,6 +157,17 @@ impl Mempool {
     fn message_already_exists(&mut self, message: &MempoolMessage) -> bool {
         let fid = message.fid();
         let shard = self.message_router.route_message(fid, self.num_shards);
+
+        // First check if it already exists in the mempool
+        match self.messages.get_mut(&shard) {
+            Some(shard_messages) => {
+                if shard_messages.contains_key(&message.mempool_key()) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+
         let stores = self.shard_stores.get_mut(&shard);
         // Default to false in the orror paths
         match stores {
@@ -242,11 +262,10 @@ impl Mempool {
         if self.message_already_exists(message) {
             return false;
         }
-
-        return true;
+        true
     }
 
-    async fn insert(&mut self, message: MempoolMessage) {
+    async fn insert(&mut self, message: MempoolMessage, source: MempoolSource) {
         // TODO(aditi): Maybe we don't need to run validations here?
         if self.message_is_valid(&message) {
             let fid = message.fid();
@@ -274,13 +293,16 @@ impl Mempool {
 
             match message {
                 MempoolMessage::UserMessage(_) => {
-                    let result = self
-                        .gossip_tx
-                        .send(GossipEvent::BroadcastMempoolMessage(message))
-                        .await;
+                    // Don't re-broadcast messages that were received from gossip, other nodes will already have them.
+                    if source != MempoolSource::Gossip {
+                        let result = self
+                            .gossip_tx
+                            .send(GossipEvent::BroadcastMempoolMessage(message))
+                            .await;
 
-                    if let Err(e) = result {
-                        warn!("Failed to gossip message {:?}", e);
+                        if let Err(e) = result {
+                            warn!("Failed to gossip message {:?}", e);
+                        }
                     }
                 }
                 _ => {}
@@ -333,8 +355,8 @@ impl Mempool {
                     for _ in 0..256 {
                         if self.config.allow_unlimited_mempool_size || (self.messages.len() as u64) < self.config.capacity_per_shard {
                             match self.mempool_rx.try_recv() {
-                                Ok(message) => {
-                                    self.insert(message).await;
+                                Ok((message, source)) => {
+                                    self.insert(message, source).await;
                                 }, Err(mpsc::error::TryRecvError::Disconnected) => {
                                     panic!("Mempool tx is disconnected")
                                 },

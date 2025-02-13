@@ -1,6 +1,6 @@
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::core::types::{ShardId, SnapchainShard, SnapchainValidator, SnapchainValidatorSet};
-use crate::storage::store::engine::MempoolMessage;
+use crate::mempool::mempool::MempoolMessageWithSource;
 pub use informalsystems_malachitebft_core_consensus::Params as ConsensusParams;
 pub use informalsystems_malachitebft_core_consensus::State as ConsensusState;
 use libp2p::identity::ed25519::{Keypair, PublicKey, SecretKey};
@@ -16,7 +16,7 @@ pub enum MalachiteEventShard {
 #[derive(Debug)]
 pub enum SystemMessage {
     MalachiteNetwork(MalachiteEventShard, MalachiteNetworkEvent), // Shard Id and the malachite network event
-    Mempool(MempoolMessage),
+    Mempool(MempoolMessageWithSource),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

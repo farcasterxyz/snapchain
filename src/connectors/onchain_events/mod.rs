@@ -11,6 +11,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
+use crate::mempool::mempool::{MempoolMessageWithSource, MempoolSource};
 use crate::{
     core::validations::{
         self,
@@ -156,7 +157,7 @@ impl L1Client for RealL1Client {
 
 pub struct Subscriber {
     provider: RootProvider<Http<Client>>,
-    mempool_tx: mpsc::Sender<MempoolMessage>,
+    mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
     start_block_number: u64,
     stop_block_number: Option<u64>,
     statsd_client: StatsdClientWrapper,
@@ -167,7 +168,7 @@ pub struct Subscriber {
 impl Subscriber {
     pub fn new(
         config: Config,
-        mempool_tx: mpsc::Sender<MempoolMessage>,
+        mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
         statsd_client: StatsdClientWrapper,
         local_state_store: LocalStateStore,
     ) -> Result<Subscriber, SubscribeError> {
@@ -256,10 +257,13 @@ impl Subscriber {
         self.gauge("latest_block_number", block_number as u64);
         if let Err(err) = self
             .mempool_tx
-            .send(MempoolMessage::ValidatorMessage(ValidatorMessage {
-                on_chain_event: Some(event.clone()),
-                fname_transfer: None,
-            }))
+            .send((
+                MempoolMessage::ValidatorMessage(ValidatorMessage {
+                    on_chain_event: Some(event.clone()),
+                    fname_transfer: None,
+                }),
+                MempoolSource::Local,
+            ))
             .await
         {
             error!(

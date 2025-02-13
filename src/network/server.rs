@@ -3,6 +3,7 @@ use crate::connectors::onchain_events::L1Client;
 use crate::core::error::HubError;
 use crate::core::validations;
 use crate::core::validations::verification::VerificationAddressClaim;
+use crate::mempool::mempool::{MempoolMessageWithSource, MempoolSource};
 use crate::mempool::routing;
 use crate::proto;
 use crate::proto::cast_add_body;
@@ -71,7 +72,7 @@ pub struct MyHubService {
     message_router: Box<dyn routing::MessageRouter>,
     statsd_client: StatsdClientWrapper,
     l1_client: Option<Box<dyn L1Client>>,
-    mempool_tx: mpsc::Sender<MempoolMessage>,
+    mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
 }
 
 impl MyHubService {
@@ -82,7 +83,7 @@ impl MyHubService {
         statsd_client: StatsdClientWrapper,
         num_shards: u32,
         message_router: Box<dyn routing::MessageRouter>,
-        mempool_tx: mpsc::Sender<MempoolMessage>,
+        mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
         l1_client: Option<Box<dyn L1Client>>,
     ) -> Self {
         Self {
@@ -185,10 +186,10 @@ impl MyHubService {
             }
         }
 
-        match self
-            .mempool_tx
-            .try_send(MempoolMessage::UserMessage(message.clone()))
-        {
+        match self.mempool_tx.try_send((
+            MempoolMessage::UserMessage(message.clone()),
+            MempoolSource::RPC,
+        )) {
             Ok(_) => {
                 self.statsd_client.count("rpc.submit_message.success", 1);
                 debug!("successfully submitted message");
