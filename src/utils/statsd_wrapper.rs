@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 pub struct StatsdClientWrapper {
     pub client: Arc<StatsdClient>,
-    use_tags: bool,
+    pub use_tags: bool,
 }
 
 impl Clone for StatsdClientWrapper {

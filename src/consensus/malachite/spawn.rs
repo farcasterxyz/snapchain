@@ -127,7 +127,12 @@ pub async fn spawn_sync_actor(
         request_timeout: config.request_timeout,
     };
 
-    let metrics = SyncMetrics::register(registry, Some(statsd_client.client), Some(shard_id));
+    let metrics = SyncMetrics::register(
+        registry,
+        Some(statsd_client.client),
+        Some(shard_id),
+        statsd_client.use_tags,
+    );
 
     let actor_ref = Sync::spawn(ctx, network, host, params, metrics, span).await?;
 
@@ -207,7 +212,11 @@ impl MalachiteConsensusActors {
             host_actor.clone(),
             wal_actor.clone(),
             Some(sync_actor.clone()),
-            Metrics::new(Some(shard_id), Some(statsd_client.client.clone())),
+            Metrics::new(
+                Some(shard_id),
+                Some(statsd_client.client.clone()),
+                statsd_client.use_tags,
+            ),
             TxEvent::new(),
             span,
         )

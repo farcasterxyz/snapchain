@@ -4334,6 +4334,7 @@ dependencies = [
  "informalsystems-malachitebft-core-types",
  "informalsystems-malachitebft-core-votekeeper",
  "thiserror 2.0.3",
+ "tracing",
 ]
 
 [[package]]
@@ -4343,6 +4344,7 @@ dependencies = [
  "derive-where",
  "displaydoc",
  "informalsystems-malachitebft-core-types",
+ "tracing",
 ]
 
 [[package]]
