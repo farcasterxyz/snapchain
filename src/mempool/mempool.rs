@@ -45,6 +45,7 @@ pub struct Mempool {
     messages: HashMap<u32, BTreeMap<MempoolKey, MempoolMessage>>,
 }
 
+const MAX_MEMPOOL_SIZE: usize = 10000;
 impl Mempool {
     pub fn new(
         mempool_rx: mpsc::Receiver<MempoolMessage>,
@@ -106,8 +107,8 @@ impl Mempool {
                 }
             }
         }
-
-        if let Err(_) = request.message_tx.send(messages) {
+        
+        if request.message_tx.send(messages).is_err() {
             error!("Unable to send message from mempool");
         }
     }
@@ -161,21 +162,21 @@ impl Mempool {
                 }
                 message = self.mempool_rx.recv() => {
                     if let Some(message) = message {
-                        // TODO(aditi): Maybe we don't need to run validations here?
                         if self.message_is_valid(&message) {
                             let fid = message.fid();
                             let shard_id = self.message_router.route_message(fid, self.num_shards);
-                            // TODO(aditi): We need a size limit on the mempool and we need to figure out what to do if it's exceeded
-                            match self.messages.get_mut(&shard_id) {
-                                None => {
-                                    let mut messages = BTreeMap::new();
-                                    messages.insert(MempoolKey { inserted_at: Instant::now()}, message.clone());
-                                    self.messages.insert(shard_id, messages);
-                                }
-                                Some(messages) => {
-                                    messages.insert(MempoolKey { inserted_at: Instant::now()}, message.clone());
-                                }
+
+                            let shard_messages = self.messages.entry(shard_id).or_insert_with(BTreeMap::new);
+
+                            // Enforce mempool size limit
+                            if shard_messages.len() >= MAX_MEMPOOL_SIZE {
+                                shard_messages.pop_first(); // Remove the oldest message
                             }
+
+                            shard_messages.insert(
+                                MempoolKey { inserted_at: Instant::now() }, 
+                                message.clone()
+                            );
                         }
                     }
                 }
