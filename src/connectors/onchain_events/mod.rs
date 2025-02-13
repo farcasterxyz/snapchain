@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{error, info};
+use tokio::sync::Mutex;
 
 use crate::{
     proto::{
@@ -146,6 +147,7 @@ pub struct Subscriber {
     start_block_number: u64,
     stop_block_number: u64,
     statsd_client: StatsdClientWrapper,
+    timestamp_cache: Mutex<HashMap<FixedBytes<32>, u64>>,
 }
 
 // TODO(aditi): Wait for 1 confirmation before "committing" an onchain event.
@@ -167,6 +169,7 @@ impl Subscriber {
             start_block_number: config.start_block_number,
             stop_block_number: config.stop_block_number,
             statsd_client,
+            timestamp_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -251,13 +254,19 @@ impl Subscriber {
     }
 
     async fn get_block_timestamp(&self, block_hash: FixedBytes<32>) -> Result<u64, SubscribeError> {
+        let mut cache = self.timestamp_cache.lock().await;
+        if let Some(&timestamp) = cache.get(&block_hash) {
+            return Ok(timestamp);
+        }
         let block = self
             .provider
             .get_block_by_hash(block_hash, alloy_rpc_types::BlockTransactionsKind::Hashes)
             .await?
             .ok_or(SubscribeError::UnableToFindBlockByHash)?;
-        Ok(block.header.timestamp)
-    }
+        let timestamp = block.header.timestamp;
+        cache.insert(block_hash, timestamp);
+        Ok(timestamp)
+    } 
 
     async fn process_log(&mut self, event: &Log) -> Result<(), SubscribeError> {
         let block_hash = event
