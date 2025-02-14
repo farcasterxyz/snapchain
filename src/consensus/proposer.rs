@@ -183,6 +183,13 @@ impl Proposer for ShardProposer {
             self.publish_new_shard_chunk(&chunk.clone()).await;
             self.engine.commit_shard_chunk(&chunk);
             self.proposed_chunks.remove(&value);
+        } else {
+            error!(
+                height = commits.height.unwrap().to_string(),
+                round = commits.round,
+                shard_hash = hex::encode(value.hash),
+                "Unable to find proposal for decided value"
+            )
         }
         self.statsd_client.gauge_with_shard(
             self.shard_id.shard_id(),
@@ -426,6 +433,13 @@ impl Proposer for BlockProposer {
             self.engine.commit_block(block);
             self.proposed_blocks.remove(&value);
             self.pending_chunks.remove(&height.block_number);
+        } else {
+            error!(
+                height = height.to_string(),
+                round = commits.round,
+                shard_hash = hex::encode(&commits.value.unwrap().hash),
+                "Unable to find proposal for decided value"
+            )
         }
 
         // Remove any expired heights
