@@ -135,11 +135,11 @@ impl ShardValidator {
         } else {
             panic!("No proposer set");
         }
-        if let Err(err) = self.local_state_store.delete_proposal(
-            self.shard_id.shard_id(),
-            commits.height.unwrap(),
-            Round::from(commits.round),
-        ) {
+        // Delete all proposals for this height, this node might have proposed for earlier rounds
+        if let Err(err) = self
+            .local_state_store
+            .delete_proposals(self.shard_id.shard_id(), commits.height.unwrap())
+        {
             error!("Error deleting proposal {}", err.to_string())
         }
         self.confirmed_height = commits.height;
@@ -198,6 +198,7 @@ impl ShardValidator {
         round: Round,
         timeout: Duration,
     ) -> FullProposal {
+        // TODO(aditi): As an optimization, we should only look inside the db on the first height after a restart. We do not need to look here in the steady state.
         match self
             .local_state_store
             .get_proposal(self.shard_id.shard_id(), height, round)

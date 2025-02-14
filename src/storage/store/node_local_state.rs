@@ -6,8 +6,10 @@ use crate::proto::FullProposal;
 use crate::proto::Height;
 use crate::proto::OnChainEventState;
 use crate::storage::constants::RootPrefix;
+use crate::storage::db::PageOptions;
 use crate::storage::db::RocksDB;
 use crate::storage::db::RocksdbError;
+use crate::storage::util::increment_vec_u8;
 use informalsystems_malachitebft_core_types::Round;
 use prost::DecodeError;
 use prost::Message;
@@ -70,14 +72,22 @@ impl LocalStateStore {
         Ok(())
     }
 
-    pub fn delete_proposal(
+    pub fn delete_proposals(
         &self,
         shard_index: u32,
         height: Height,
-        round: Round,
     ) -> Result<(), LocalStateError> {
-        let primary_key = Self::make_proposal_key(shard_index, height.as_u64(), round.as_i64());
-        self.db.del(&primary_key)?;
+        let start_prefix = Self::make_height_prefix(shard_index, height.as_u64());
+        let stop_prefix = increment_vec_u8(&start_prefix);
+        self.db.for_each_iterator_by_prefix(
+            Some(start_prefix),
+            Some(stop_prefix),
+            &PageOptions::default(),
+            |key, _| {
+                self.db.del(&key)?;
+                Ok(false)
+            },
+        )?;
         Ok(())
     }
 
