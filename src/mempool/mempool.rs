@@ -169,7 +169,7 @@ impl Mempool {
         }
 
         let stores = self.shard_stores.get_mut(&shard);
-        // Default to false in the orror paths
+        // Default to false in the error paths
         match stores {
             None => {
                 error!("Error finding store for shard: {}", shard);

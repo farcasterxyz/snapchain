@@ -129,21 +129,21 @@ mod tests {
     async fn test_duplicate_fname_transfer_is_invalid() {
         let (mut engine, _, mut mempool, _, _, _, _) = setup(setup_config(9302));
         test_helper::register_user(
-            1234,
+            1,
             default_signer(),
-            default_custody_address(),
+            hex::decode("8773442740c17c9d0f0b87022c722f9a136206ed").unwrap(),
             &mut engine,
         )
         .await;
         let fname_transfer = FnameTransfer {
-            id: 1234,
+            id: 1,
             from_fid: 0,
             proof: Some(UserNameProof {
-                timestamp: messages_factory::farcaster_time() as u64,
+                timestamp: 1628882891,
                 name: "farcaster".as_bytes().to_vec(),
-                owner: default_custody_address(),
-                signature: "signature".as_bytes().to_vec(),
-                fid: 1234,
+                owner: hex::decode("8773442740c17c9d0f0b87022c722f9a136206ed").unwrap(),
+                signature: hex::decode("b7181760f14eda0028e0b647ff15f45235526ced3b4ae07fcce06141b73d32960d3253776e62f761363fb8137087192047763f4af838950a96f3885f3c2289c41b").unwrap(),
+                fid: 1,
                 r#type: UserNameType::UsernameTypeEnsL1 as i32,
             }),
         };
