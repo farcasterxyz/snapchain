@@ -15,6 +15,7 @@ use snapchain::node::snapchain_node::SnapchainNode;
 use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::proto::Block;
 use snapchain::storage::db::{PageOptions, RocksDB};
+use snapchain::storage::store::node_local_state::LocalStateStore;
 use snapchain::storage::store::BlockStore;
 use snapchain::utils::factory::messages_factory;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
@@ -87,6 +88,8 @@ impl NodeForTest {
         let db = Arc::new(RocksDB::new(data_dir));
         db.open().unwrap();
         let block_store = BlockStore::new(db.clone());
+        let global_db = RocksDB::open_global_db(&data_dir);
+        let node_local_store = LocalStateStore::new(global_db);
         let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
         let node = SnapchainNode::create(
@@ -98,6 +101,7 @@ impl NodeForTest {
             Some(block_tx),
             messages_request_tx,
             block_store.clone(),
+            node_local_store,
             make_tmp_path(),
             statsd_client.clone(),
             16,

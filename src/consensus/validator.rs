@@ -4,7 +4,7 @@ use crate::core::types::{
     SnapchainValidatorSet,
 };
 use crate::proto::{full_proposal, Commits, FullProposal};
-use crate::storage::store::proposal::ProposalStore;
+use crate::storage::store::node_local_state::LocalStateStore;
 use informalsystems_malachitebft_core_consensus::ProposedValue;
 use informalsystems_malachitebft_core_types::{Round, ValidatorSet};
 use std::collections::HashSet;
@@ -28,7 +28,7 @@ pub struct ShardValidator {
     shard_proposer: Option<ShardProposer>,
     pub started: bool,
     pub saw_proposal_from_validator: HashSet<Address>,
-    proposal_store: ProposalStore,
+    local_state_store: LocalStateStore,
 }
 
 impl ShardValidator {
@@ -38,7 +38,7 @@ impl ShardValidator {
         initial_validator_set: SnapchainValidatorSet,
         block_proposer: Option<BlockProposer>,
         shard_proposer: Option<ShardProposer>,
-        proposal_store: ProposalStore,
+        local_state_store: LocalStateStore,
     ) -> ShardValidator {
         ShardValidator {
             shard_id: shard.clone(),
@@ -52,7 +52,7 @@ impl ShardValidator {
             shard_proposer,
             started: false,
             saw_proposal_from_validator: HashSet::new(),
-            proposal_store,
+            local_state_store,
         }
     }
 
@@ -135,10 +135,11 @@ impl ShardValidator {
         } else {
             panic!("No proposer set");
         }
-        if let Err(err) = self
-            .proposal_store
-            .delete_proposal(commits.height.unwrap(), Round::from(commits.round))
-        {
+        if let Err(err) = self.local_state_store.delete_proposal(
+            self.shard_id.shard_id(),
+            commits.height.unwrap(),
+            Round::from(commits.round),
+        ) {
             error!("Error deleting proposal {}", err.to_string())
         }
         self.confirmed_height = commits.height;
@@ -178,10 +179,6 @@ impl ShardValidator {
             panic!("No proposer set");
         };
 
-        if let Err(err) = self.proposal_store.put_proposal(full_proposal.clone()) {
-            error!("Unable to store proposal {}", err.to_string());
-        };
-
         self.saw_proposal_from_validator
             .insert(full_proposal.proposer_address());
         ProposedValue {
@@ -201,7 +198,10 @@ impl ShardValidator {
         round: Round,
         timeout: Duration,
     ) -> FullProposal {
-        match self.proposal_store.get_proposal(height, round) {
+        match self
+            .local_state_store
+            .get_proposal(self.shard_id.shard_id(), height, round)
+        {
             Ok(Some(proposal)) => return proposal,
             Ok(None) => {}
             Err(err) => {
@@ -216,7 +216,7 @@ impl ShardValidator {
             panic!("No proposer set");
         };
 
-        if let Err(err) = self.proposal_store.put_proposal(proposal.clone()) {
+        if let Err(err) = self.local_state_store.put_proposal(proposal.clone()) {
             error!("Unable to store proposal {}", err.to_string());
         };
 

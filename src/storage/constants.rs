@@ -41,8 +41,6 @@ pub enum RootPrefix {
 
     /* Used to maintain information about latest onchain events, fnames ingested */
     NodeLocalState = 17,
-
-    Proposal = 18,
 }
 
 /** Copied from the JS code */

@@ -148,6 +148,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
     let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
 
+    let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
+    let local_state_store = LocalStateStore::new(global_db);
+
     let node = SnapchainNode::create(
         keypair.clone(),
         app_config.consensus.clone(),
@@ -157,6 +160,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         None,
         messages_request_tx,
         block_store.clone(),
+        local_state_store.clone(),
         app_config.rocksdb_dir.clone(),
         statsd_client.clone(),
         app_config.trie_branching_factor,
@@ -184,9 +188,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         app_config.snapshot.clone(),
         app_config.fc_network,
     );
-
-    let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
-    let local_state_store = LocalStateStore::new(global_db);
 
     if !app_config.fnames.disable {
         let mut fetcher = snapchain::connectors::fname::Fetcher::new(
