@@ -149,7 +149,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
-    let (http_shutdown_tx, mut http_shutdown_rx) = mpsc::channel::<()>(1);
 
     let registry = SharedRegistry::global();
     // Use the new non-global metrics registry when we upgrade to newer version of malachite
@@ -247,6 +246,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         l1_client,
     ));
     let grpc_service = service.clone();
+    let grpc_shutdown_tx = shutdown_tx.clone();
     tokio::spawn(async move {
         let resp = Server::builder()
             .add_service(HubServiceServer::from_arc(grpc_service))
@@ -260,8 +260,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Err(e) => error!(error = ?e, "{}", msg),
         }
 
-        shutdown_tx.send(()).await.ok();
+        grpc_shutdown_tx.send(()).await.ok();
     });
+
+    let http_shutdown_tx = shutdown_tx.clone();
     tokio::spawn(async move {
         let listener = TcpListener::bind(http_socket_addr).await.unwrap();
 
@@ -331,11 +333,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 return Ok(());
             }
             _ = shutdown_rx.recv() => {
-                error!("Received shutdown signal, shutting down");
-                node.stop();
-                return Ok(());
-            }
-            _ = http_shutdown_rx.recv() => {
                 error!("Received shutdown signal, shutting down");
                 node.stop();
                 return Ok(());
