@@ -184,11 +184,11 @@ impl Proposer for ShardProposer {
             self.engine.commit_shard_chunk(&chunk);
             self.proposed_chunks.remove(&value);
         } else {
-            error!(
-                height = commits.height.unwrap().to_string(),
-                round = commits.round,
-                shard_hash = hex::encode(value.hash),
-                "Unable to find proposal for decided value"
+            panic!(
+                "Unable to find proposal for decided value. height {}, round {}, shard_hash {}",
+                commits.height.unwrap().to_string(),
+                commits.round,
+                hex::encode(value.hash),
             )
         }
         self.statsd_client.gauge_with_shard(
@@ -434,11 +434,11 @@ impl Proposer for BlockProposer {
             self.proposed_blocks.remove(&value);
             self.pending_chunks.remove(&height.block_number);
         } else {
-            error!(
-                height = height.to_string(),
-                round = commits.round,
-                shard_hash = hex::encode(&commits.value.unwrap().hash),
-                "Unable to find proposal for decided value"
+            panic!(
+                "Unable to find proposal for decided value. height {}, round {}, shard_hash {}",
+                commits.height.unwrap().to_string(),
+                commits.round,
+                hex::encode(value.hash),
             )
         }
 
