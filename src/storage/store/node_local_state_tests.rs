@@ -27,61 +27,56 @@ mod tests {
         }
     }
 
+    fn assert_proposal_exists(store: &LocalStateStore, proposal: &FullProposal) {
+        let proposal = store
+            .get_proposal(
+                proposal.shard_id().unwrap(),
+                proposal.height(),
+                proposal.round(),
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(proposal, proposal);
+    }
+
+    fn assert_proposal_not_exists(store: &LocalStateStore, proposal: &FullProposal) {
+        let proposal = store
+            .get_proposal(
+                proposal.shard_id().unwrap(),
+                proposal.height(),
+                proposal.round(),
+            )
+            .unwrap();
+
+        assert!(proposal.is_none());
+    }
+
     #[test]
     fn test_proposals() {
         let store = store();
         let proposal1 = make_proposal(1, 2, 0);
         let proposal2 = make_proposal(1, 2, 1);
         let proposal3 = make_proposal(1, 3, 1);
+        let proposal4 = make_proposal(2, 3, 1);
 
         store.put_proposal(proposal1.clone()).unwrap();
         store.put_proposal(proposal2.clone()).unwrap();
         store.put_proposal(proposal3.clone()).unwrap();
+        store.put_proposal(proposal4.clone()).unwrap();
 
-        let proposal = store
-            .get_proposal(
-                proposal1.shard_id().unwrap(),
-                proposal1.height(),
-                proposal1.round(),
-            )
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(proposal1, proposal);
+        assert_proposal_exists(&store, &proposal1);
+        assert_proposal_exists(&store, &proposal2);
+        assert_proposal_exists(&store, &proposal3);
+        assert_proposal_exists(&store, &proposal4);
 
         store
             .delete_proposals(proposal1.shard_id().unwrap(), proposal1.height())
             .unwrap();
 
-        let proposal = store
-            .get_proposal(
-                proposal1.shard_id().unwrap(),
-                proposal1.height(),
-                proposal1.round(),
-            )
-            .unwrap();
-
-        assert!(proposal.is_none());
-
-        let proposal = store
-            .get_proposal(
-                proposal2.shard_id().unwrap(),
-                proposal2.height(),
-                proposal2.round(),
-            )
-            .unwrap();
-
-        assert!(proposal.is_none());
-
-        let proposal = store
-            .get_proposal(
-                proposal3.shard_id().unwrap(),
-                proposal3.height(),
-                proposal3.round(),
-            )
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(proposal3, proposal);
+        assert_proposal_not_exists(&store, &proposal1);
+        assert_proposal_not_exists(&store, &proposal2);
+        assert_proposal_exists(&store, &proposal3);
+        assert_proposal_exists(&store, &proposal4);
     }
 }
