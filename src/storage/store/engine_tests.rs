@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use crate::core::types::FARCASTER_EPOCH;
     use crate::core::util::{calculate_message_hash, from_farcaster_time};
     use crate::proto::{self, ReactionType};
     use crate::proto::{FnameTransfer, ShardChunk, UserNameProof};
