@@ -84,7 +84,7 @@ mod tests {
     fn test_fname_transfer_verify_valid_signature() {
         let transfer = &FnameTransfer{
             id: 1,
-            from_fid: 1,
+            from_fid: 0,
             proof: Some(UserNameProof{
                 timestamp: 1628882891,
                 name: "farcaster".into(),

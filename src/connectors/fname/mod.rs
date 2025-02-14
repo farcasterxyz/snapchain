@@ -73,6 +73,9 @@ enum FetchError {
 
     #[error(transparent)]
     Reqwest(#[from] reqwest::Error),
+
+    #[error("invalid format")]
+    InvalidFormat,
 }
 
 pub struct Fetcher {
@@ -165,11 +168,18 @@ impl Fetcher {
                 }
                 self.position = t.id;
 
+                let owner = hex::decode(t.owner[2..].to_string());
+                let signature = hex::decode(t.server_signature[2..].to_string());
+
+                if owner.is_err() || signature.is_err() {
+                    return Err(FetchError::InvalidFormat);
+                }
+
                 let username_proof = UserNameProof {
                     timestamp: t.timestamp,
                     name: t.username.into_bytes(),
-                    owner: t.owner.into_bytes(),
-                    signature: t.server_signature.into_bytes(),
+                    owner: owner.unwrap(),
+                    signature: signature.unwrap(),
                     fid: t.to,
                     r#type: UserNameType::UsernameTypeFname as i32,
                 };
@@ -181,7 +191,7 @@ impl Fetcher {
                         MempoolMessage::ValidatorMessage(ValidatorMessage {
                             on_chain_event: None,
                             fname_transfer: Some(FnameTransfer {
-                                id: t.to,
+                                id: t.id,
                                 from_fid: t.from,
                                 proof: Some(username_proof),
                             }),
@@ -218,6 +228,9 @@ impl Fetcher {
                     FetchError::Stop => {
                         info!(position = self.position, "stopped fetching transfers");
                         return;
+                    }
+                    FetchError::InvalidFormat => {
+                        error!("fname server returning different format than expected");
                     }
                 }
             }

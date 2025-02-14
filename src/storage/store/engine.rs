@@ -536,61 +536,76 @@ impl ShardEngine {
                 }
             }
             if let Some(fname_transfer) = &msg.fname_transfer {
-                if fname_transfer.proof.is_none() {
-                    warn!(
-                        fid = snapchain_txn.fid,
-                        id = fname_transfer.id,
-                        "Fname transfer has no proof"
-                    );
-                }
-
-                match verification::validate_fname_transfer(fname_transfer) {
-                    Ok(_) => {}
-                    Err(err) => {
-                        warn!("Error validating fname transfer: {:?}", err);
+                match &fname_transfer.proof {
+                    None => {
+                        warn!(
+                            fid = snapchain_txn.fid,
+                            id = fname_transfer.id,
+                            "Fname transfer has no proof"
+                        );
+                        return Err(EngineError::EngineMessageValidationError(
+                            MessageValidationError::MessageValidationError(
+                                validations::error::ValidationError::MissingData,
+                            ),
+                        ));
                     }
-                }
-
-                let event = UserDataStore::merge_username_proof(
-                    &self.stores.user_data_store,
-                    fname_transfer.proof.as_ref().unwrap(),
-                    txn_batch,
-                );
-                match event {
-                    Ok(hub_event) => {
-                        merged_fnames_count += 1;
-                        self.update_trie(&merkle_trie::Context::new(), &hub_event, txn_batch)?;
-                        events.push(hub_event.clone());
-                        system_messages_count += 1;
-                    }
-                    Err(err) => {
-                        warn!("Error merging fname transfer: {:?}", err);
-                    }
-                }
-                // If the name was transfered from an existing fid, we need to make sure to revoke any existing username UserDataAdd
-                if fname_transfer.from_fid > 0 {
-                    let existing_username = self.get_user_data_by_fid_and_type(
-                        fname_transfer.from_fid,
-                        proto::UserDataType::Username,
-                    );
-                    if existing_username.is_ok() {
-                        let existing_username = existing_username.unwrap();
-                        let event = self
-                            .stores
-                            .user_data_store
-                            .revoke(&existing_username, txn_batch);
-                        match event {
-                            Ok(hub_event) => {
-                                revoked_messages_count += 1;
-                                self.update_trie(
-                                    &merkle_trie::Context::new(),
-                                    &hub_event,
+                    Some(proof) => {
+                        match verification::validate_fname_transfer(fname_transfer) {
+                            Ok(_) => {
+                                let event = UserDataStore::merge_username_proof(
+                                    &self.stores.user_data_store,
+                                    proof,
                                     txn_batch,
-                                )?;
-                                events.push(hub_event.clone());
+                                );
+                                match event {
+                                    Ok(hub_event) => {
+                                        merged_fnames_count += 1;
+                                        self.update_trie(
+                                            &merkle_trie::Context::new(),
+                                            &hub_event,
+                                            txn_batch,
+                                        )?;
+                                        events.push(hub_event.clone());
+                                        system_messages_count += 1;
+                                    }
+                                    Err(err) => {
+                                        warn!("Error merging fname transfer: {:?}", err);
+                                    }
+                                }
+                                // If the name was transfered from an existing fid, we need to make sure to revoke any existing username UserDataAdd
+                                if fname_transfer.from_fid > 0 {
+                                    let existing_username = self.get_user_data_by_fid_and_type(
+                                        fname_transfer.from_fid,
+                                        proto::UserDataType::Username,
+                                    );
+                                    if existing_username.is_ok() {
+                                        let existing_username = existing_username.unwrap();
+                                        let event = self
+                                            .stores
+                                            .user_data_store
+                                            .revoke(&existing_username, txn_batch);
+                                        match event {
+                                            Ok(hub_event) => {
+                                                revoked_messages_count += 1;
+                                                self.update_trie(
+                                                    &merkle_trie::Context::new(),
+                                                    &hub_event,
+                                                    txn_batch,
+                                                )?;
+                                                events.push(hub_event.clone());
+                                            }
+                                            Err(err) => {
+                                                warn!(
+                                                    "Error revoking existing username: {:?}",
+                                                    err
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             Err(err) => {
-                                warn!("Error revoking existing username: {:?}", err);
+                                warn!("Error validating fname transfer: {:?}", err);
                             }
                         }
                     }
