@@ -543,11 +543,6 @@ impl ShardEngine {
                             id = fname_transfer.id,
                             "Fname transfer has no proof"
                         );
-                        return Err(EngineError::EngineMessageValidationError(
-                            MessageValidationError::MessageValidationError(
-                                validations::error::ValidationError::MissingData,
-                            ),
-                        ));
                     }
                     Some(proof) => {
                         match verification::validate_fname_transfer(fname_transfer) {
