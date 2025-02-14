@@ -23,6 +23,7 @@ use informalsystems_malachitebft_engine::wal::{Wal, WalRef};
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use libp2p::PeerId;
 use tokio::sync::mpsc;
+use crate::consensus::consensus::Config;
 
 pub async fn spawn_network_actor(
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
@@ -144,7 +145,7 @@ impl MalachiteConsensusActors {
         db_dir: String,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         registry: &SharedRegistry,
-        consensus_start_delay: u32,
+        config: Config,
     ) -> Result<Self, ractor::SpawnErr> {
         let current_height = shard_validator.get_current_height();
         let validator_set = shard_validator.get_validator_set();
@@ -168,7 +169,7 @@ impl MalachiteConsensusActors {
         let host_actor = spawn_host(
             network_actor.clone(),
             shard_validator,
-            consensus_start_delay,
+            config.consensus_start_delay,
         )
         .await?;
         let sync_actor = spawn_sync_actor(
@@ -181,9 +182,12 @@ impl MalachiteConsensusActors {
         )
         .await?;
 
+        let mut timeout_config = TimeoutConfig::default();
+        // setting the commit timeout sets up a fixed block production rate.
+        timeout_config.timeout_commit = config.propose_value_delay;
         let consensus_actor = spawn_consensus_actor(
             ctx.clone(),
-            TimeoutConfig::default(),
+            timeout_config,
             current_height,
             validator_set,
             address,
