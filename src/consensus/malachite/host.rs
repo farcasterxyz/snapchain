@@ -112,10 +112,13 @@ impl Host {
                             hex::encode(&value_id.hash)
                         );
                     }
-                    Some(mut full_proposal) => {
-                        full_proposal.height = Some(height);
-                        full_proposal.round = round.as_i64();
-                        full_proposal.proposer = address.to_vec();
+                    Some(full_proposal) => {
+                        if full_proposal.height() != height
+                            || full_proposal.round() != round
+                            || full_proposal.proposer != address.to_vec()
+                        {
+                            info!(request_height = height.as_u64(), proposal_height = full_proposal.height().as_u64(), request_round = round.as_i64(), proposal_round = full_proposal.round().as_i64(), request_address= hex::encode(address.to_vec()), proposal_address = hex::encode(&full_proposal.proposer), "Proposal published in RestreamValue does not match height/round/proposer in the request")
+                        }
                         let stream_message =
                             StreamMessage::new(0, 0, StreamContent::Data(full_proposal));
                         state
