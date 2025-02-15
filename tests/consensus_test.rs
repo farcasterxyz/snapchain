@@ -1,7 +1,4 @@
-use std::collections::BTreeSet;
-use std::net::SocketAddr;
-use std::sync::Arc;
-
+use ed25519_dalek::SigningKey;
 use hex;
 use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
@@ -12,13 +9,19 @@ use snapchain::mempool::routing;
 use snapchain::network::gossip::SnapchainGossip;
 use snapchain::network::server::MyHubService;
 use snapchain::node::snapchain_node::SnapchainNode;
+use snapchain::proto;
 use snapchain::proto::hub_service_server::HubServiceServer;
-use snapchain::proto::Block;
+use snapchain::proto::{Block, FarcasterNetwork, IdRegisterEventType, SignerEventType};
 use snapchain::storage::db::{PageOptions, RocksDB};
 use snapchain::storage::store::node_local_state::LocalStateStore;
+use snapchain::storage::store::engine::MempoolMessage;
 use snapchain::storage::store::BlockStore;
-use snapchain::utils::factory::messages_factory;
+use snapchain::utils::factory::{self, messages_factory};
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
+use std::collections::BTreeSet;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time;
 use tonic::transport::Server;
@@ -105,6 +108,7 @@ impl NodeForTest {
             make_tmp_path(),
             statsd_client.clone(),
             16,
+            FarcasterNetwork::Testnet,
             registry,
         )
         .await;
@@ -112,19 +116,20 @@ impl NodeForTest {
         let node_id = node.id();
         let assert_valid_block = move |block: &Block| {
             let header = block.header.as_ref().unwrap();
-            let transactions_count: usize = block
-                .shard_chunks
-                .iter()
-                .map(|c| c.transactions.len())
-                .sum();
+            let chunks_count = block
+                .shard_witness
+                .as_ref()
+                .unwrap()
+                .shard_chunk_witnesses
+                .len();
             info!(
                 hash = hex::encode(&block.hash),
                 height = header.height.as_ref().map(|h| h.block_number),
                 id = node_id,
-                transactions = transactions_count,
+                chunks = chunks_count,
                 "decided block",
             );
-            assert_eq!(block.shard_chunks.len(), num_shards as usize);
+            assert_eq!(chunks_count, num_shards as usize);
         };
 
         let mut join_handles = Vec::new();
@@ -231,15 +236,15 @@ impl NodeForTest {
     }
 
     pub async fn total_messages(&self) -> usize {
-        let messages = self
-            .block_store
-            .get_blocks(0, None, &PageOptions::default())
-            .unwrap()
-            .blocks
-            .into_iter()
-            .map(|b| b.shard_chunks[0].transactions[0].user_messages.len());
-
-        messages.len()
+        let mut messages_count = 0;
+        for (_shard_id, stores) in self.node.shard_stores.iter() {
+            for chunk in stores.shard_store.get_shard_chunks(0, None).unwrap() {
+                for tx in chunk.transactions.iter() {
+                    messages_count += tx.user_messages.len();
+                }
+            }
+        }
+        messages_count
     }
 
     pub fn stop(&self) {
@@ -333,6 +338,55 @@ impl TestNetwork {
     }
 }
 
+async fn register_fid(fid: u64, messages_tx: Sender<MempoolMessageWithSource>) -> SigningKey {
+    let signer = factory::signers::generate_signer();
+    let address = factory::address::generate_random_address();
+    messages_tx
+        .send((
+            MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
+                on_chain_event: Some(factory::events_factory::create_rent_event(
+                    fid, None, None, false,
+                )),
+                fname_transfer: None,
+            }),
+            MempoolSource::Local,
+        ))
+        .await
+        .unwrap();
+    messages_tx
+        .send((
+            MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
+                on_chain_event: Some(factory::events_factory::create_signer_event(
+                    fid,
+                    signer.clone(),
+                    SignerEventType::Add,
+                    None,
+                )),
+                fname_transfer: None,
+            }),
+            MempoolSource::Local,
+        ))
+        .await
+        .unwrap();
+    messages_tx
+        .send((
+            MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
+                on_chain_event: Some(factory::events_factory::create_id_register_event(
+                    fid,
+                    IdRegisterEventType::Register,
+                    address,
+                    None,
+                )),
+                fname_transfer: None,
+            }),
+            MempoolSource::Local,
+        ))
+        .await
+        .unwrap();
+
+    signer
+}
+
 #[tokio::test]
 #[serial]
 async fn test_basic_consensus() {
@@ -350,20 +404,20 @@ async fn test_basic_consensus() {
     tokio::spawn(async move {
         let mut i: i32 = 0;
         let prefix = vec![0, 0, 0, 0, 0, 0];
+        let fid = 321;
+        let signer = register_fid(fid, messages_tx1.clone()).await;
         loop {
             info!(i, "sending message");
 
             let mut hash = prefix.clone();
             hash.extend_from_slice(&i.to_be_bytes()); // just for now
 
-            let message = snapchain::storage::store::engine::MempoolMessage::UserMessage(
-                messages_factory::casts::create_cast_add(
-                    321,
-                    format!("Cast {}", i).as_str(),
-                    None,
-                    None,
-                ),
-            );
+            let message = MempoolMessage::UserMessage(messages_factory::casts::create_cast_add(
+                321,
+                format!("Cast {}", i).as_str(),
+                None,
+                Some(&signer),
+            ));
             messages_tx1
                 .send((message, MempoolSource::Local))
                 .await
@@ -445,20 +499,21 @@ async fn test_basic_sync() {
     tokio::spawn(async move {
         let mut i: i32 = 0;
         let prefix = vec![0, 0, 0, 0, 0, 0];
+        let fid = 123;
+        let signer = register_fid(fid, messages_tx1.clone()).await;
+
         loop {
             info!(i, "sending message");
 
             let mut hash = prefix.clone();
             hash.extend_from_slice(&i.to_be_bytes()); // just for now
 
-            let message = snapchain::storage::store::engine::MempoolMessage::UserMessage(
-                messages_factory::casts::create_cast_add(
-                    321,
-                    format!("Cast {}", i).as_str(),
-                    None,
-                    None,
-                ),
-            );
+            let message = MempoolMessage::UserMessage(messages_factory::casts::create_cast_add(
+                fid,
+                format!("Cast {}", i).as_str(),
+                None,
+                Some(&signer),
+            ));
             messages_tx1
                 .send((message, MempoolSource::Local))
                 .await

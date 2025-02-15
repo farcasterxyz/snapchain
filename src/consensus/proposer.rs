@@ -1,17 +1,19 @@
 use crate::core::types::{
-    proto, Address, Height, ShardHash, ShardId, SnapchainShard, SnapchainValidator,
+    proto, Address, Height, ShardHash, ShardId, SnapchainShard, SnapchainValidator, FARCASTER_EPOCH,
 };
 use crate::proto::hub_service_client::HubServiceClient;
 use crate::proto::{
-    full_proposal, Block, BlockHeader, Commits, FullProposal, ShardChunk, ShardHeader,
+    full_proposal, Block, BlockHeader, Commits, FullProposal, ShardChunk, ShardChunkWitness,
+    ShardHeader, ShardWitness,
 };
 use crate::proto::{BlocksRequest, ShardChunksRequest};
 use crate::storage::store::engine::{BlockEngine, ShardEngine, ShardStateChange};
+use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStorageError;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_core_types::{Round, Validity};
 use prost::Message;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
@@ -20,14 +22,14 @@ use tokio::{select, time};
 use tonic::Request;
 use tracing::{error, info, warn};
 
-const FARCASTER_EPOCH: u64 = 1609459200; // January 1, 2021 UTC
+const PROTOCOL_VERSION: u32 = 1;
 
 pub fn current_time() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs()
-        - FARCASTER_EPOCH
+        - (FARCASTER_EPOCH / 1000)
 }
 
 #[allow(async_fn_in_trait)] // TODO
@@ -278,12 +280,11 @@ pub enum BlockProposerError {
 pub struct BlockProposer {
     #[allow(dead_code)] // TODO
     shard_id: SnapchainShard,
-
     address: Address,
     proposed_blocks: BTreeMap<ShardHash, FullProposal>,
-    pending_chunks: BTreeMap<u64, Vec<ShardChunk>>,
-    shard_decision_rx: broadcast::Receiver<ShardChunk>,
+    shard_stores: HashMap<u32, Stores>,
     num_shards: u32,
+    chain_id: u32,
     block_tx: Option<mpsc::Sender<Block>>,
     engine: BlockEngine,
     statsd_client: StatsdClientWrapper,
@@ -293,8 +294,9 @@ impl BlockProposer {
     pub fn new(
         address: Address,
         shard_id: SnapchainShard,
-        shard_decision_rx: broadcast::Receiver<ShardChunk>,
+        shard_stores: HashMap<u32, Stores>,
         num_shards: u32,
+        chain_id: u32,
         block_tx: Option<mpsc::Sender<Block>>,
         engine: BlockEngine,
         statsd_client: StatsdClientWrapper,
@@ -303,23 +305,24 @@ impl BlockProposer {
             shard_id,
             address,
             proposed_blocks: BTreeMap::new(),
-            pending_chunks: BTreeMap::new(),
-            shard_decision_rx,
+            shard_stores,
             num_shards,
+            chain_id,
             block_tx,
             engine,
             statsd_client,
         }
     }
 
-    async fn collect_confirmed_shard_chunks(
+    async fn collect_confirmed_shard_witnesses(
         &mut self,
         height: Height,
         timeout: Duration,
-    ) -> Vec<ShardChunk> {
+    ) -> Vec<ShardChunkWitness> {
         let requested_height = height.block_number;
 
-        let mut poll_interval = time::interval(Duration::from_millis(10));
+        let mut poll_interval = time::interval(Duration::from_millis(100));
+        let mut chunks = BTreeMap::new();
 
         // convert to deadline
         let deadline = Instant::now() + timeout;
@@ -327,32 +330,44 @@ impl BlockProposer {
             let timeout = time::sleep_until(deadline);
             select! {
                 _ = poll_interval.tick() => {
-                    // TODO(aditi): This breaks if syncd shard chunks show up in shard_decision_rx.
-                    if let Ok(chunk) = self.shard_decision_rx.try_recv() {
-                        let chunk_height = chunk.header.clone().unwrap().height.unwrap();
-                        let chunk_block_number = chunk_height.block_number;
-                        if self.pending_chunks.contains_key(&chunk_block_number) {
-                            self.pending_chunks.get_mut(&chunk_block_number).unwrap().push(chunk);
-                        } else {
-                            self.pending_chunks.insert(chunk_block_number, vec![chunk]);
+                    for (shard_id, store) in self.shard_stores.iter() {
+                        if chunks.contains_key(shard_id) {
+                            continue;
+                        }
+                        let result = store.shard_store.get_chunk_by_height(requested_height);
+                        match result {
+                            Ok(Some(chunk)) => {
+                                let header = chunk.header.as_ref().unwrap();
+                                let shard_witness = ShardChunkWitness {
+                                    height: header.height,
+                                    shard_hash: chunk.hash.clone(),
+                                    shard_root: chunk.header.unwrap().shard_root,
+                                };
+                                chunks.insert(*shard_id, shard_witness);
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                error!(height=height.block_number, shard_id=shard_id, "Error getting confirmed shard chunk: {:?}", err);
+                            }
                         }
                     }
-                    if let Some(chunks) = self.pending_chunks.get(&requested_height) {
-                        if chunks.len() == self.num_shards as usize {
-                            break;
-                        }
+                    if chunks.len() == self.num_shards as usize {
+                        break;
                     }
                 }
                 _ = timeout => {
-                    warn!("Block validator did not receive all shard chunks in time for height: {:?}", requested_height);
                     break;
                 }
             }
         }
 
-        if let Some(chunks) = self.pending_chunks.get(&requested_height) {
-            chunks.clone()
+        if chunks.values().len() == self.num_shards as usize {
+            chunks.values().cloned().collect()
         } else {
+            warn!(
+                "Block validator did not receive all shard chunks for height: {:?}",
+                requested_height
+            );
             vec![]
         }
     }
@@ -376,21 +391,27 @@ impl Proposer for BlockProposer {
         round: Round,
         timeout: Duration,
     ) -> FullProposal {
-        let shard_chunks = self.collect_confirmed_shard_chunks(height, timeout).await;
-
+        let shard_witnesses = self
+            .collect_confirmed_shard_witnesses(height, timeout)
+            .await;
+        let shard_witness = ShardWitness {
+            shard_chunk_witnesses: shard_witnesses,
+        };
         let previous_block = self.engine.get_last_block();
         let parent_hash = match previous_block {
             Some(block) => block.hash.clone(),
             None => vec![0, 32],
         };
+        let witness_hash = blake3::hash(&shard_witness.encode_to_vec())
+            .as_bytes()
+            .to_vec();
         let block_header = BlockHeader {
             parent_hash,
-            chain_id: 0,
-            version: 0,
-            shard_headers_hash: vec![],
-            validators_hash: vec![],
+            chain_id: self.chain_id as i32,
+            version: PROTOCOL_VERSION,
             timestamp: current_time(),
             height: Some(height.clone()),
+            shard_witnesses_hash: witness_hash,
         };
         let hash = blake3::hash(&block_header.encode_to_vec())
             .as_bytes()
@@ -399,14 +420,13 @@ impl Proposer for BlockProposer {
         let block = Block {
             header: Some(block_header),
             hash: hash.clone(),
-            validators: None,
+            shard_witness: Some(shard_witness),
             commits: None,
-            shard_chunks,
         };
 
         let shard_hash = ShardHash {
             hash: hash.clone(),
-            shard_index: height.shard_index as u32,
+            shard_index: height.shard_index,
         };
 
         let proposal = FullProposal {
@@ -421,9 +441,46 @@ impl Proposer for BlockProposer {
     }
 
     fn add_proposed_value(&mut self, full_proposal: &FullProposal) -> Validity {
-        if let Some(proto::full_proposal::ProposedValue::Block(_block)) =
+        if let Some(proto::full_proposal::ProposedValue::Block(block)) =
             &full_proposal.proposed_value
         {
+            let header = block.header.as_ref().unwrap();
+            if header.chain_id != (self.chain_id as i32) {
+                error!("Received block with wrong chain_id: {}", header.chain_id);
+                return Validity::Invalid;
+            }
+            if header.version != PROTOCOL_VERSION {
+                error!(
+                    "Received block with wrong protocol version: {}",
+                    header.version
+                );
+                return Validity::Invalid;
+            }
+            if header.height.is_none() {
+                error!("Received block with missing height");
+                return Validity::Invalid;
+            }
+            if header.shard_witnesses_hash.is_empty() {
+                error!("Received block with missing shard witnesses hash");
+                return Validity::Invalid;
+            }
+            if block.shard_witness.is_none() {
+                error!("Received block with missing shard witnesses");
+                return Validity::Invalid;
+            }
+            let witness = block.shard_witness.as_ref().unwrap();
+            if witness.shard_chunk_witnesses.len() != self.num_shards as usize {
+                error!(
+                    "Received block with wrong number of shard witnesses: {}",
+                    witness.shard_chunk_witnesses.len()
+                );
+                return Validity::Invalid;
+            }
+            let witness_hash = blake3::hash(&witness.encode_to_vec()).as_bytes().to_vec();
+            if witness_hash != header.shard_witnesses_hash {
+                error!("Received block with invalid shard witnesses hash");
+                return Validity::Invalid;
+            }
             self.proposed_blocks
                 .insert(full_proposal.shard_hash(), full_proposal.clone());
         }
@@ -436,13 +493,11 @@ impl Proposer for BlockProposer {
 
     async fn decide(&mut self, commits: Commits) {
         let value = commits.value.clone().unwrap();
-        let height = commits.height.clone().unwrap();
         if let Some(proposal) = self.proposed_blocks.get(&value) {
             let block = proposal.block(commits).unwrap();
             self.publish_new_block(block.clone()).await;
             self.engine.commit_block(block);
             self.proposed_blocks.remove(&value);
-            self.pending_chunks.remove(&height.block_number);
         } else {
             panic!(
                 "Unable to find proposal for decided value. height {}, round {}, shard_hash {}",
@@ -452,25 +507,7 @@ impl Proposer for BlockProposer {
             )
         }
 
-        // Remove any expired heights
-        // TODO: We should also do the same for hashes (in case validation failed) and in ShardProposer
-        // TODO: Understand why this happens in the first place.
-        let mut expired_heights = vec![];
-        for (block_number, _) in self.pending_chunks.iter() {
-            // Add a buffer of 100 blocks to avoid removing heights that are still being processed
-            if block_number + 100 < height.block_number {
-                expired_heights.push(*block_number);
-            }
-        }
-        for expired_height in expired_heights {
-            self.pending_chunks.remove(&expired_height);
-        }
-
-        self.statsd_client.gauge_with_shard(
-            self.shard_id.shard_id(),
-            "proposer.pending_shards",
-            self.pending_chunks.len() as u64,
-        );
+        // TODO: We might need to prune proposed blocks (and similarly in shard proposer)
         self.statsd_client.gauge_with_shard(
             self.shard_id.shard_id(),
             "proposer.pending_blocks",

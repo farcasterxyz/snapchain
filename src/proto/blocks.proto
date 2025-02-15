@@ -92,19 +92,26 @@ message BlockHeader {
   Height height = 1;
   uint64 timestamp = 2;
   uint32 version = 3;
-  uint32 chain_id = 4;
-  bytes validators_hash = 5;
-  bytes shard_headers_hash = 6;
-  bytes parent_hash = 7;
+  FarcasterNetwork chain_id = 4;
+  bytes shard_witnesses_hash = 5;
+  bytes parent_hash = 6;
 }
 
+message ShardWitness {
+  repeated ShardChunkWitness shard_chunk_witnesses = 1;
+}
+
+message ShardChunkWitness {
+  Height height = 1;
+  bytes shard_root = 2;
+  bytes shard_hash = 3;
+}
 
 message Block {
   BlockHeader header = 1;
   bytes hash = 2;
-  repeated ShardChunk shard_chunks = 3;
-  optional ValidatorSet validators = 4;
-  Commits commits = 5;
+  ShardWitness shard_witness = 3;
+  Commits commits = 4;
 }
 
 message ShardHeader {

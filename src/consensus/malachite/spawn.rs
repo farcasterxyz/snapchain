@@ -8,6 +8,7 @@ use informalsystems_malachitebft_sync::Metrics as SyncMetrics;
 use std::path::Path;
 use tracing::Span;
 
+use crate::consensus::consensus::Config;
 use crate::consensus::malachite::host::{Host, HostState};
 use crate::consensus::malachite::network_connector::{
     MalachiteNetworkActorMsg, MalachiteNetworkConnector, MalachiteNetworkEvent,
@@ -23,7 +24,6 @@ use informalsystems_malachitebft_engine::wal::{Wal, WalRef};
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use libp2p::PeerId;
 use tokio::sync::mpsc;
-use crate::consensus::consensus::Config;
 
 pub async fn spawn_network_actor(
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,

@@ -172,6 +172,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         app_config.rocksdb_dir.clone(),
         statsd_client.clone(),
         app_config.trie_branching_factor,
+        app_config.fc_network,
         registry,
     )
     .await;

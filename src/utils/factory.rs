@@ -8,6 +8,20 @@ use message::MessageType;
 use message::{CastAddBody, FarcasterNetwork, MessageData};
 use prost::Message;
 
+pub mod signers {
+    use ed25519_dalek::SigningKey;
+
+    pub fn generate_signer() -> SigningKey {
+        SigningKey::generate(&mut rand::thread_rng())
+    }
+}
+
+pub mod address {
+    pub fn generate_random_address() -> Vec<u8> {
+        (0..32).map(|_| rand::random::<u8>()).collect()
+    }
+}
+
 pub mod time {
     use super::*;
 

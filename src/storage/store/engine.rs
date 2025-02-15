@@ -1390,7 +1390,15 @@ impl BlockEngine {
                 .unwrap()
                 .block_number,
         );
-        self.count("block_shards", block.shard_chunks.len() as u64);
+        self.count(
+            "block_shards",
+            block
+                .shard_witness
+                .as_ref()
+                .unwrap()
+                .shard_chunk_witnesses
+                .len() as u64,
+        );
 
         let result = self.block_store.put_block(block);
         if result.is_err() {

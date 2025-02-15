@@ -26,17 +26,18 @@ async fn main() {
 
         println!("Block {}", block_number);
 
-        for chunk in &block.shard_chunks {
-            let height = chunk.header.as_ref().unwrap().height.unwrap();
-            let shard_id = height.shard_index;
-            let shard_height = height.block_number;
-
-            for tx in &chunk.transactions {
-                for msg in &tx.user_messages {
-                    show_msg(shard_id, shard_height, msg);
-                }
-            }
-        }
+        // TODO: Change API to return chunks along with the blocks
+        // for chunk in &block.shard_chunks {
+        //     let height = chunk.header.as_ref().unwrap().height.unwrap();
+        //     let shard_id = height.shard_index;
+        //     let shard_height = height.block_number;
+        //
+        //     for tx in &chunk.transactions {
+        //         for msg in &tx.user_messages {
+        //             show_msg(shard_id, shard_height, msg);
+        //         }
+        //     }
+        // }
     }
 }
 

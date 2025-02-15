@@ -207,16 +207,18 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                     block_count += 1;
                     block_times.push(block_timestamp - last_block_time);
                     last_block_time = block_timestamp;
-                    for chunk in &block.shard_chunks {
-                        for tx in &chunk.transactions {
-                            for msg in &tx.user_messages {
-                                let msg_timestamp = msg.data.as_ref().unwrap().timestamp;
-                                time_to_confirmation.push(block_timestamp  - msg_timestamp as u64);
-                                num_messages_confirmed += 1;
-                                pending_messages.remove(&hex::encode(msg.hash.clone()));
-                            }
-                        }
-                    }
+                    // TODO: Blocks don't include full chunks anymore, this should follow chunks or we should
+                    // modify the blocks api to return chunks as well
+                    // for chunk in &block.shard_chunks {
+                    //     for tx in &chunk.transactions {
+                    //         for msg in &tx.user_messages {
+                    //             let msg_timestamp = msg.data.as_ref().unwrap().timestamp;
+                    //             time_to_confirmation.push(block_timestamp  - msg_timestamp as u64);
+                    //             num_messages_confirmed += 1;
+                    //             pending_messages.remove(&hex::encode(msg.hash.clone()));
+                    //         }
+                    //     }
+                    // }
                 }
             }
             time = stats_calculation_timer.tick() => {
