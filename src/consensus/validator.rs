@@ -225,6 +225,7 @@ impl ShardValidator {
     }
 
     pub fn get_proposed_value(&mut self, shard_hash: &ShardHash) -> Option<FullProposal> {
+        // TODO(aditi): In the future, we may want to look the value up in the db
         if let Some(block_proposer) = &mut self.block_proposer {
             block_proposer.get_proposed_value(shard_hash)
         } else if let Some(shard_proposer) = &mut self.shard_proposer {
