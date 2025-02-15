@@ -5,7 +5,7 @@ WORKDIR /usr/src/app
 # Build Malachite first
 ARG MALACHITE_GIT_REPO_URL=https://github.com/aditiharini/malachite.git
 ENV MALACHITE_GIT_REPO_URL=$MALACHITE_GIT_REPO_URL
-ARG MALACHITE_GIT_COMMIT=f5daa5eb01dc0274dcea8d55bd80e5dbdc36d9f0
+ARG MALACHITE_GIT_COMMIT=7847089c2a638571ac39594a5c3e4234c5fa0866
 ENV RUST_BACKTRACE=1
 RUN --mount=type=ssh <<EOF
 set -eu
