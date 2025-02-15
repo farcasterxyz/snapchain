@@ -41,6 +41,7 @@ async fn main() {
     }
 }
 
+#[allow(dead_code)]
 fn show_msg(shard_id: u32, _shard_height: u64, msg: &Message) {
     let hash = hex::encode(&msg.hash);
 

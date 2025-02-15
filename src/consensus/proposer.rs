@@ -163,7 +163,7 @@ impl Proposer for ShardProposer {
             let height = chunk.header.clone().unwrap().height.unwrap();
 
             if height != self.get_confirmed_height().increment() {
-                error!(
+                warn!(
                     shard = height.shard_index,
                     our_height = height.block_number,
                     proposal_height = height.block_number,
@@ -460,7 +460,7 @@ impl Proposer for BlockProposer {
             let height = header.height.unwrap();
 
             if height != self.get_confirmed_height().increment() {
-                error!(
+                warn!(
                     shard = height.shard_index,
                     our_height = height.block_number,
                     proposal_height = height.block_number,
