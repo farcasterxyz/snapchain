@@ -160,8 +160,20 @@ impl Proposer for ShardProposer {
         {
             self.proposed_chunks
                 .insert(full_proposal.shard_hash(), full_proposal.clone());
+            let height = chunk.header.clone().unwrap().height.unwrap();
+
+            if height != self.get_confirmed_height().increment() {
+                error!(
+                    shard = height.shard_index,
+                    our_height = height.block_number,
+                    proposal_height = height.block_number,
+                    "Cannot validate height, not the next height"
+                );
+                return Validity::Invalid;
+            }
+
             let state = ShardStateChange {
-                shard_id: chunk.header.clone().unwrap().height.unwrap().shard_index,
+                shard_id: height.shard_index,
                 new_state_root: chunk.header.clone().unwrap().shard_root.clone(),
                 transactions: chunk.transactions.clone(),
             };
@@ -170,7 +182,7 @@ impl Proposer for ShardProposer {
             } else {
                 error!(
                     shard = state.shard_id,
-                    height = chunk.header.unwrap().height.unwrap().block_number,
+                    height = height.block_number,
                     "Invalid state change"
                 );
                 Validity::Invalid
@@ -445,6 +457,18 @@ impl Proposer for BlockProposer {
             &full_proposal.proposed_value
         {
             let header = block.header.as_ref().unwrap();
+            let height = header.height.unwrap();
+
+            if height != self.get_confirmed_height().increment() {
+                error!(
+                    shard = height.shard_index,
+                    our_height = height.block_number,
+                    proposal_height = height.block_number,
+                    "Cannot validate height, not the next height"
+                );
+                return Validity::Invalid;
+            }
+
             if header.chain_id != (self.chain_id as i32) {
                 error!("Received block with wrong chain_id: {}", header.chain_id);
                 return Validity::Invalid;
