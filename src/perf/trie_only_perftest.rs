@@ -116,8 +116,18 @@ fn run_shard(
 
     let sdc = statsd_client.clone();
     let count_callback = move |read_count: (u64, u64)| {
-        sdc.count_with_shard(shard_id, "engine.trie.db_get_count.total", read_count.0);
-        sdc.count_with_shard(shard_id, "engine.trie.mem_get_count.total", read_count.1);
+        sdc.count_with_shard(
+            shard_id,
+            "engine.trie.db_get_count.total",
+            read_count.0,
+            vec![],
+        );
+        sdc.count_with_shard(
+            shard_id,
+            "engine.trie.mem_get_count.total",
+            read_count.1,
+            vec![],
+        );
     };
 
     let mut ctx = Context::with_callback(count_callback.clone());
@@ -132,7 +142,7 @@ fn run_shard(
                 "Shard {}: Seconds since start: {}, items={}",
                 shard_id, elapsed_secs, items
             );
-            statsd_client.gauge_with_shard(shard_id, "engine.trie.num_items", items as u64);
+            statsd_client.gauge_with_shard(shard_id, "engine.trie.num_items", items as u64, vec![]);
             ctx = Context::with_callback(count_callback.clone());
         }
 

@@ -17,6 +17,7 @@ use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::consensus::validator::ShardValidator;
 use crate::core::types::{ShardId, SnapchainValidatorContext};
 use crate::network::gossip::GossipEvent;
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_engine::sync::{Params as SyncParams, Sync, SyncRef};
 use informalsystems_malachitebft_engine::util::events::TxEvent;
 use informalsystems_malachitebft_engine::wal::{Wal, WalRef};
@@ -27,11 +28,15 @@ use tokio::sync::mpsc;
 pub async fn spawn_network_actor(
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     local_peer_id: PeerId,
+    statsd_client: StatsdClientWrapper,
+    shard_id: u32,
 ) -> Result<NetworkRef<SnapchainValidatorContext>, ractor::SpawnErr> {
     let codec = SnapchainCodec;
     let args = NetworkConnectorArgs {
         gossip_tx,
         peer_id: MalachitePeerId::from_libp2p(&local_peer_id),
+        statsd_client,
+        shard_id,
     };
     MalachiteNetworkConnector::spawn(codec, args)
         .await
@@ -145,6 +150,7 @@ impl MalachiteConsensusActors {
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         registry: &SharedRegistry,
         consensus_start_delay: u32,
+        statsd_client: StatsdClientWrapper,
     ) -> Result<Self, ractor::SpawnErr> {
         let current_height = shard_validator.get_current_height();
         let validator_set = shard_validator.get_validator_set();
@@ -157,7 +163,8 @@ impl MalachiteConsensusActors {
         };
         let span = tracing::info_span!("node", name = %name);
 
-        let network_actor = spawn_network_actor(gossip_tx.clone(), local_peer_id).await?;
+        let network_actor =
+            spawn_network_actor(gossip_tx.clone(), local_peer_id, statsd_client, shard_id).await?;
         let wal_actor = spawn_wal_actor(
             Path::new(format!("{}/shard-{}/wal", db_dir, shard_id).as_str()),
             ctx.clone(),

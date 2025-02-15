@@ -23,12 +23,23 @@ impl StatsdClientWrapper {
         }
     }
 
-    pub fn count_with_shard(&self, shard_id: u32, key: &str, value: u64) {
+    pub fn count_with_shard(
+        &self,
+        shard_id: u32,
+        key: &str,
+        value: u64,
+        mut tags: Vec<(String, String)>,
+    ) {
         if self.use_tags {
-            self.client
-                .count_with_tags(key, value)
-                .with_tag("shard", format!("{}", shard_id).as_str())
-                .send()
+            tags.push(("shard".to_string(), format!("{}", shard_id).to_string()));
+            let mut count = self.client.count_with_tags(key, value);
+            let tags = tags
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()));
+            for (key, value) in tags {
+                count = count.with_tag(key, value);
+            }
+            count.send()
         } else {
             let key = format!("shard{}.{}", shard_id, key);
             _ = self.client.count(key.as_str(), value)
@@ -39,12 +50,23 @@ impl StatsdClientWrapper {
         _ = self.client.count(key, value)
     }
 
-    pub fn gauge_with_shard(&self, shard_id: u32, key: &str, value: u64) {
+    pub fn gauge_with_shard(
+        &self,
+        shard_id: u32,
+        key: &str,
+        value: u64,
+        mut tags: Vec<(String, String)>,
+    ) {
         if self.use_tags {
-            self.client
-                .gauge_with_tags(key, value)
-                .with_tag("shard", format!("{}", shard_id).as_str())
-                .send()
+            tags.push(("shard".to_string(), format!("{}", shard_id).to_string()));
+            let mut gauge = self.client.gauge_with_tags(key, value);
+            let tags = tags
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()));
+            for (key, value) in tags {
+                gauge = gauge.with_tag(key, value);
+            }
+            gauge.send();
         } else {
             let key = format!("shard{}.{}", shard_id, key);
             _ = self.client.gauge(key.as_str(), value)
