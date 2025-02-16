@@ -276,7 +276,7 @@ impl Mempool {
                     messages.insert(message.mempool_key(), message.clone());
                     self.messages.insert(shard_id, messages);
                     self.statsd_client
-                        .gauge_with_shard(shard_id, "mempool.size", 1);
+                        .gauge_with_shard(shard_id, "mempool.size", 1, vec![]);
                 }
                 Some(messages) => {
                     messages.insert(message.mempool_key(), message.clone());
@@ -284,12 +284,13 @@ impl Mempool {
                         shard_id,
                         "mempool.size",
                         messages.len() as u64,
+                        vec![],
                     );
                 }
             }
 
             self.statsd_client
-                .count_with_shard(shard_id, "mempool.insert.success", 1);
+                .count_with_shard(shard_id, "mempool.insert.success", 1, vec![]);
 
             match message {
                 MempoolMessage::UserMessage(_) => {
@@ -332,11 +333,11 @@ impl Mempool {
                             for transaction in chunk.transactions {
                                 for user_message in transaction.user_messages {
                                     mempool.remove(&user_message.mempool_key());
-                                    self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
+                                    self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1, vec![]);
                                 }
                                 for system_message in transaction.system_messages {
                                     mempool.remove(&system_message.mempool_key());
-                                    self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
+                                    self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1, vec![]);
                                 }
                             }
                         }

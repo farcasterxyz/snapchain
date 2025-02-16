@@ -152,7 +152,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let registry = SharedRegistry::global();
     // Use the new non-global metrics registry when we upgrade to newer version of malachite
-    let _ = Metrics::register(registry);
+    let _ = Metrics::register(registry, None, None, false);
+    // let malachite_metrics_addr = app_config
+    //     .malachite_metrics
+    //     .addr
+    //     .parse::<SocketAddr>()
+    //     .unwrap();
+    // tokio::spawn(async move {
+    //     malachite_metrics::serve(malachite_metrics_addr).await;
+    // });
+
     let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
     let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
 
