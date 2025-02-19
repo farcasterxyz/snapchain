@@ -76,7 +76,7 @@ impl Default for Config {
             shard_ids: vec![1],
             num_shards: 1,
             block_time: Duration::from_millis(250),
-            max_messages_per_block: 250, //TODO
+            max_messages_per_block: 500,
             validator_addresses: vec![],
             consensus_start_delay: 2,
         }
