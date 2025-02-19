@@ -26,7 +26,7 @@ pub struct Config {
     pub shard_ids: Vec<u32>,
 
     #[serde(with = "humantime_serde")]
-    pub propose_value_delay: Duration,
+    pub block_time: Duration,
 
     pub max_messages_per_block: u32,
     pub validator_addresses: Vec<String>,
@@ -47,7 +47,7 @@ impl Config {
             private_key: self.private_key.clone(),
             num_shards: shard_ids.len() as u32,
             shard_ids,
-            propose_value_delay: self.propose_value_delay,
+            block_time: self.block_time,
             max_messages_per_block: self.max_messages_per_block,
             validator_addresses: validator_addresses.clone(),
             consensus_start_delay: self.consensus_start_delay,
@@ -75,7 +75,7 @@ impl Default for Config {
             private_key: hex::encode(SecretKey::generate()),
             shard_ids: vec![1],
             num_shards: 1,
-            propose_value_delay: Duration::from_millis(250),
+            block_time: Duration::from_millis(250),
             max_messages_per_block: 250, //TODO
             validator_addresses: vec![],
             consensus_start_delay: 2,

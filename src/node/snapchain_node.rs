@@ -89,7 +89,6 @@ impl SnapchainNode {
                 engine,
                 statsd_client.clone(),
                 shard_decision_tx.clone(),
-                config.propose_value_delay,
             );
 
             let shard_validator = ShardValidator::new(

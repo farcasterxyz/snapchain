@@ -184,7 +184,7 @@ impl MalachiteConsensusActors {
 
         let mut timeout_config = TimeoutConfig::default();
         // setting the commit timeout sets up a fixed block production rate.
-        timeout_config.timeout_commit = config.propose_value_delay;
+        timeout_config.timeout_commit = config.block_time;
         let consensus_actor = spawn_consensus_actor(
             ctx.clone(),
             timeout_config,

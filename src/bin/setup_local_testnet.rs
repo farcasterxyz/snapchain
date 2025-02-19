@@ -6,9 +6,9 @@ use toml::Value;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Delay for proposing a value (e.g. "250ms")
+    /// Delay between blocks (e.g. "250ms")
     #[arg(long, value_parser = parse_duration, default_value = "250ms")]
-    propose_value_delay: Duration,
+    block_time: Duration,
 
     #[arg(long, default_value = "")]
     l1_rpc_url: String,
@@ -97,7 +97,7 @@ async fn main() {
             .collect::<Vec<String>>()
             .join(",");
 
-        let propose_value_delay = humantime::format_duration(args.propose_value_delay);
+        let block_time = humantime::format_duration(args.block_time);
         let num_shards = args.num_shards;
         let shard_ids = format!(
             "[{}]",
@@ -137,7 +137,7 @@ bootstrap_peers = "{other_nodes_addresses}"
 
 [consensus]
 private_key = "{secret_key}"
-propose_value_delay = "{propose_value_delay}"
+block_time = "{block_time}"
 validator_addresses = {validator_addresses}
 shard_ids = {shard_ids}
 num_shards = {num_shards}

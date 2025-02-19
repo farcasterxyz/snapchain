@@ -70,7 +70,6 @@ pub struct ShardProposer {
     proposed_chunks: BTreeMap<ShardHash, FullProposal>,
     tx_decision: broadcast::Sender<ShardChunk>,
     engine: ShardEngine,
-    propose_value_delay: Duration,
     statsd_client: StatsdClientWrapper,
 }
 
@@ -81,7 +80,6 @@ impl ShardProposer {
         engine: ShardEngine,
         statsd_client: StatsdClientWrapper,
         tx_decision: broadcast::Sender<ShardChunk>,
-        propose_value_delay: Duration,
     ) -> ShardProposer {
         ShardProposer {
             shard_id,
@@ -90,7 +88,6 @@ impl ShardProposer {
             tx_decision,
             engine,
             statsd_client,
-            propose_value_delay,
         }
     }
 
@@ -108,11 +105,8 @@ impl Proposer for ShardProposer {
     ) -> FullProposal {
         // TODO: perhaps not the best place to get our messages, but this is (currently) the
         // last place we're still in an async function
-        let messages = self
-            .engine
-            .pull_messages(self.propose_value_delay)
-            .await
-            .unwrap(); // TODO: don't unwrap
+        let mempool_timeout = Duration::from_millis(200);
+        let messages = self.engine.pull_messages(mempool_timeout).await.unwrap(); // TODO: don't unwrap
 
         let previous_chunk = self.engine.get_last_shard_chunk();
         let parent_hash = match previous_chunk {
