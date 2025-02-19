@@ -7,7 +7,6 @@ use crate::proto::{full_proposal, Commits, FullProposal, ShardHash};
 use crate::storage::store::node_local_state::LocalStateStore;
 use informalsystems_malachitebft_core_consensus::ProposedValue;
 use informalsystems_malachitebft_core_types::{Round, ValidatorSet};
-use std::collections::HashSet;
 use std::time::Duration;
 use tracing::{error, warn};
 
@@ -27,7 +26,6 @@ pub struct ShardValidator {
     block_proposer: Option<BlockProposer>,
     shard_proposer: Option<ShardProposer>,
     pub started: bool,
-    pub saw_proposal_from_validator: HashSet<Address>,
     local_state_store: LocalStateStore,
 }
 
@@ -51,7 +49,6 @@ impl ShardValidator {
             block_proposer,
             shard_proposer,
             started: false,
-            saw_proposal_from_validator: HashSet::new(),
             local_state_store,
         }
     }
@@ -92,24 +89,6 @@ impl ShardValidator {
 
     pub fn start(&mut self) {
         self.started = true;
-    }
-
-    pub fn saw_proposal_from_validator(&self, address: Address) -> bool {
-        self.saw_proposal_from_validator.contains(&address)
-    }
-
-    pub async fn sync_against_validator(&mut self, validator: &SnapchainValidator) {
-        if let Some(p) = &mut self.block_proposer {
-            match p.sync_against_validator(&validator).await {
-                Ok(()) => {}
-                Err(err) => error!("Error registering validator {:#?}", err),
-            };
-        } else if let Some(p) = &mut self.shard_proposer {
-            match p.sync_against_validator(&validator).await {
-                Ok(()) => {}
-                Err(err) => error!("Error registering validator {:#?}", err),
-            }
-        }
     }
 
     pub fn start_round(&mut self, height: Height, round: Round, proposer: Address) {
@@ -179,8 +158,6 @@ impl ShardValidator {
             panic!("No proposer set");
         };
 
-        self.saw_proposal_from_validator
-            .insert(full_proposal.proposer_address());
         ProposedValue {
             height: full_proposal.height(),
             round: full_proposal.round(),

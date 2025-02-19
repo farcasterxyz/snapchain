@@ -1,12 +1,10 @@
 use crate::core::types::{
-    proto, Address, Height, ShardHash, ShardId, SnapchainShard, SnapchainValidator, FARCASTER_EPOCH,
+    proto, Address, Height, ShardHash, ShardId, SnapchainShard, FARCASTER_EPOCH,
 };
-use crate::proto::hub_service_client::HubServiceClient;
 use crate::proto::{
     full_proposal, Block, BlockHeader, Commits, FullProposal, ShardChunk, ShardChunkWitness,
     ShardHeader, ShardWitness,
 };
-use crate::proto::{BlocksRequest, ShardChunksRequest};
 use crate::storage::store::engine::{BlockEngine, ShardEngine, ShardStateChange};
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStorageError;
@@ -19,8 +17,7 @@ use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 use tokio::{select, time};
-use tonic::Request;
-use tracing::{error, info, warn};
+use tracing::{error, warn};
 
 const PROTOCOL_VERSION: u32 = 1;
 
@@ -57,11 +54,6 @@ pub trait Proposer {
     fn get_min_height(&self) -> Height;
 
     fn get_proposed_value(&self, shard_hash: &ShardHash) -> Option<FullProposal>;
-
-    async fn sync_against_validator(
-        &mut self,
-        validator: &SnapchainValidator,
-    ) -> Result<(), Box<dyn std::error::Error>>;
 }
 
 pub struct ShardProposer {
@@ -233,32 +225,6 @@ impl Proposer for ShardProposer {
     fn get_min_height(&self) -> Height {
         // Always return the genesis block, until we implement pruning
         Height::new(self.shard_id.shard_id(), 1)
-    }
-
-    async fn sync_against_validator(
-        &mut self,
-        validator: &SnapchainValidator,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let prev_block_number = self.engine.get_confirmed_height().block_number;
-
-        match &validator.rpc_address {
-            None => return Ok(()),
-            Some(rpc_address) => {
-                let destination_addr = format!("http://{}", rpc_address.clone());
-                let mut rpc_client = HubServiceClient::connect(destination_addr).await?;
-                let request = Request::new(ShardChunksRequest {
-                    shard_id: self.shard_id.shard_id(),
-                    start_block_number: prev_block_number + 1,
-                    stop_block_number: None,
-                });
-                let missing_shard_chunks = rpc_client.get_shard_chunks(request).await?;
-                for shard_chunk in missing_shard_chunks.get_ref().shard_chunks.clone() {
-                    self.engine.commit_shard_chunk(&shard_chunk);
-                }
-            }
-        }
-
-        Ok(())
     }
 }
 
@@ -554,35 +520,5 @@ impl Proposer for BlockProposer {
     fn get_min_height(&self) -> Height {
         // Always return the genesis block, until we implement pruning
         Height::new(self.shard_id.shard_id(), 1)
-    }
-
-    async fn sync_against_validator(
-        &mut self,
-        validator: &SnapchainValidator,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let prev_block_number = self.engine.get_confirmed_height().block_number;
-
-        match &validator.rpc_address {
-            None => return Ok(()),
-            Some(rpc_address) => {
-                info!({ rpc_address }, "Starting block sync against a validator");
-                let destination_addr = format!("http://{}", rpc_address.clone());
-                let mut rpc_client = HubServiceClient::connect(destination_addr).await?;
-                let request = Request::new(BlocksRequest {
-                    shard_id: self.shard_id.shard_id(),
-                    start_block_number: prev_block_number + 1,
-                    stop_block_number: None,
-                });
-                let mut missing_blocks_rx = rpc_client.get_blocks(request).await?;
-                let mut num_blocks_synced = 0;
-                while let Ok(Some(block)) = missing_blocks_rx.get_mut().message().await {
-                    self.engine.commit_block(block.clone());
-                    num_blocks_synced += 1;
-                }
-                info!({ rpc_address, num_blocks_synced }, "Finished block sync against a validator");
-            }
-        }
-
-        Ok(())
     }
 }
