@@ -6,10 +6,12 @@ use bytes::Bytes;
 use informalsystems_malachitebft_codec::Codec;
 use informalsystems_malachitebft_core_consensus::SignedConsensusMsg;
 use informalsystems_malachitebft_core_types::{Round, SignedProposal, SignedVote, VoteSet};
-use informalsystems_malachitebft_engine::util::streaming::{StreamContent, StreamMessage};
+use informalsystems_malachitebft_engine::util::streaming::{
+    StreamContent, StreamId, StreamMessage,
+};
 use informalsystems_malachitebft_network::PeerId as MalachitePeerId;
 use informalsystems_malachitebft_sync as sync;
-use informalsystems_malachitebft_sync::{DecidedValue, Request, Status};
+use informalsystems_malachitebft_sync::{RawDecidedValue, Request, Status};
 use prost::{DecodeError, EncodeError, Message};
 use thiserror::Error;
 
@@ -99,8 +101,17 @@ impl Codec<StreamMessage<FullProposal>> for SnapchainCodec {
     type Error = SnapchainCodecError;
 
     fn decode(&self, bytes: Bytes) -> Result<StreamMessage<FullProposal>, Self::Error> {
-        let proposal = Self.decode(bytes)?;
-        Ok(StreamMessage::new(0, 0, StreamContent::Data(proposal)))
+        let proposal: FullProposal = Self.decode(bytes)?;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&proposal.height.unwrap().as_u64().to_be_bytes());
+        bytes.extend_from_slice(&proposal.round.to_be_bytes());
+        let stream_id = StreamId::new(bytes.into());
+
+        Ok(StreamMessage::new(
+            stream_id,
+            0,
+            StreamContent::Data(proposal),
+        ))
     }
 
     fn encode(&self, msg: &StreamMessage<FullProposal>) -> Result<Bytes, Self::Error> {
@@ -225,7 +236,7 @@ impl Codec<sync::Response<SnapchainValidatorContext>> for SnapchainCodec {
                             "Missing height in ValueResponse".to_string(),
                         )
                     })?,
-                    value: Some(DecidedValue {
+                    value: Some(RawDecidedValue {
                         value_bytes: Bytes::from(value.full_value),
                         certificate: commit_certificate,
                     }),

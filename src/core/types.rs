@@ -1,17 +1,17 @@
 use core::fmt;
 use informalsystems_malachitebft_core_types::{
-    self, AggregatedSignature, CommitSignature, SignedMessage, SigningProvider,
+    self, AggregatedSignature, CommitSignature, SignedExtension, SignedMessage, SigningProvider,
 };
 use informalsystems_malachitebft_core_types::{
-    Extension, NilOrVal, Round, SignedProposal, SignedProposalPart, SignedVote, Validator,
-    VoteType, VotingPower,
+    NilOrVal, Round, SignedProposal, SignedProposalPart, SignedVote, Validator, VoteType,
+    VotingPower,
 };
 use libp2p::identity::ed25519::Keypair;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Display};
 use std::sync::Arc;
-use tracing::warn;
+use tracing::{error, warn};
 
 pub use crate::proto; // TODO: reconsider how this is imported
 
@@ -127,7 +127,10 @@ impl SigningProvider<SnapchainValidatorContext> for Ed25519Provider {
     ) -> bool {
         let valid = public_key.verify(&vote.to_sign_bytes(), &signature.0);
         if !valid {
-            panic!("Invalid signature");
+            error!(
+                "Invalid signature on vote for {:?} at height {:?} by {:?}",
+                vote.shard_hash, vote.height, vote.voter
+            );
         }
         valid
     }
@@ -145,7 +148,10 @@ impl SigningProvider<SnapchainValidatorContext> for Ed25519Provider {
     ) -> bool {
         let valid = public_key.verify(&proposal.to_sign_bytes(), &signature.0);
         if !valid {
-            panic!("Invalid signature");
+            error!(
+                "Invalid signature on proposal for {:?} at height {:?} by {:?}",
+                proposal.shard_hash, proposal.height, proposal.proposer
+            );
         }
         valid
     }
@@ -166,9 +172,31 @@ impl SigningProvider<SnapchainValidatorContext> for Ed25519Provider {
     ) -> bool {
         let valid = public_key.verify(&proposal_part.to_sign_bytes(), &signature.0);
         if !valid {
-            panic!("Invalid signature");
+            error!(
+                "Invalid signature on proposal part at height {:?} by {:?}",
+                proposal_part.height, proposal_part.proposer
+            );
         }
         valid
+    }
+
+    fn sign_vote_extension(
+        &self,
+        _: <SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::Extension,
+    ) -> SignedMessage<
+        SnapchainValidatorContext,
+        <SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::Extension,
+    > {
+        panic!("Cannot sign. Vote extensions are not supported")
+    }
+
+    fn verify_signed_vote_extension(
+        &self,
+        _: &<SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::Extension,
+        _: &informalsystems_malachitebft_core_types::Signature<SnapchainValidatorContext>,
+        _: &informalsystems_malachitebft_core_types::PublicKey<SnapchainValidatorContext>,
+    ) -> bool {
+        panic!("Cannot verify. Vote extensions are not supported")
     }
 
     fn verify_commit_signature(
@@ -289,6 +317,9 @@ impl fmt::Display for Height {
 }
 
 impl informalsystems_malachitebft_core_types::Height for Height {
+    const ZERO: Self = Self::new(0, 0);
+    const INITIAL: Self = Self::new(0, 1);
+
     fn increment(&self) -> Self {
         self.increment()
     }
@@ -464,7 +495,6 @@ pub struct Vote {
     pub round: Round,
     pub shard_hash: NilOrVal<ShardHash>,
     pub voter: Address,
-    pub extension: Option<Extension>,
 }
 
 impl Vote {
@@ -480,7 +510,6 @@ impl Vote {
             round,
             shard_hash: block_hash,
             voter,
-            extension: None,
         }
     }
 
@@ -496,24 +525,6 @@ impl Vote {
             round,
             shard_hash: value,
             voter: address,
-            extension: None,
-        }
-    }
-
-    pub fn new_precommit_with_extension(
-        height: Height,
-        round: Round,
-        value: NilOrVal<ShardHash>,
-        address: Address,
-        extension: Extension,
-    ) -> Self {
-        Self {
-            vote_type: VoteType::Precommit,
-            height,
-            round,
-            shard_hash: value,
-            voter: address,
-            extension: Some(extension),
         }
     }
 
@@ -551,7 +562,6 @@ impl Vote {
             round: Round::from(proto.round),
             voter: Address::from_vec(proto.voter),
             shard_hash,
-            extension: None,
         }
     }
 
@@ -613,6 +623,10 @@ impl SnapchainValidatorContext {
     pub fn public_key(&self) -> PublicKey {
         self.keypair.public()
     }
+
+    pub fn signing_provider(&self) -> Ed25519Provider {
+        self.signing_provider.clone()
+    }
 }
 
 impl ShardedContext for SnapchainValidatorContext {
@@ -629,7 +643,7 @@ impl informalsystems_malachitebft_core_types::Context for SnapchainValidatorCont
     type Value = ShardHash;
     type Vote = Vote;
     type SigningScheme = Ed25519;
-    type SigningProvider = Ed25519Provider;
+    type Extension = ();
 
     fn select_proposer<'a>(
         &self,
@@ -685,10 +699,6 @@ impl informalsystems_malachitebft_core_types::Context for SnapchainValidatorCont
         address: Address,
     ) -> Vote {
         Vote::new_precommit(height, round, value_id, address)
-    }
-
-    fn signing_provider(&self) -> &Self::SigningProvider {
-        &self.signing_provider
     }
 }
 
@@ -761,17 +771,16 @@ impl informalsystems_malachitebft_core_types::Vote<SnapchainValidatorContext> fo
         &self.voter
     }
 
-    fn extension(
-        &self,
-    ) -> std::option::Option<&SignedMessage<SnapchainValidatorContext, Extension>> {
+    fn extension(&self) -> Option<&SignedMessage<SnapchainValidatorContext, ()>> {
         None
     }
 
-    fn extend(self, extension: SignedMessage<SnapchainValidatorContext, Extension>) -> Self {
-        Self {
-            extension: Some(extension.message),
-            ..self
-        }
+    fn take_extension(&mut self) -> Option<SignedExtension<SnapchainValidatorContext>> {
+        None
+    }
+
+    fn extend(self, _extension: SignedMessage<SnapchainValidatorContext, ()>) -> Self {
+        Self { ..self }
     }
 }
 
@@ -829,7 +838,6 @@ impl proto::Commits {
             .map(|commit| CommitSignature {
                 address: Address::from_vec(commit.signer.clone()),
                 signature: Signature(commit.signature.clone()),
-                extension: None,
             })
             .collect();
 

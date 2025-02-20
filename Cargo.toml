@@ -20,20 +20,20 @@ futures = "0.3.28"
 futures-core = "0.3.31"
 parking_lot = "0.12.1"
 clap = { version = "4.3.0", features = ["derive"] }
-libp2p = { version = "0.54.1", features = ["tokio", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux", "quic", "request-response"] }
+libp2p = { version = "0.55.0", features = ["tokio", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux", "quic", "request-response"] }
 async-trait = "0.1.68"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt", "json"] }
 hex = "0.4.3"
-ractor = "0.13.5"
+ractor = { version = "0.14.6", default-features = false, features = ["async-trait", "tokio_runtime"] }
 bytes = "1.9.0"
-informalsystems-malachitebft-core-consensus = { version = "0.0.1" }
-informalsystems-malachitebft-engine = { version = "0.0.1" }
-informalsystems-malachitebft-network = { version = "0.0.1" }
-informalsystems-malachitebft-sync = { version = "0.0.1" }
-informalsystems-malachitebft-core-types = { version = "0.0.1"}
-informalsystems-malachitebft-config = { version = "0.0.1"}
-informalsystems-malachitebft-codec = { version = "0.0.1"}
-informalsystems-malachitebft-metrics = { version = "0.0.1" }
+informalsystems-malachitebft-core-consensus = { path = "../malachite/code/crates/core-consensus" }
+informalsystems-malachitebft-engine = { path = "../malachite/code/crates/engine" }
+informalsystems-malachitebft-network = { path = "../malachite/code/crates/network" }
+informalsystems-malachitebft-sync = { path = "../malachite/code/crates/sync" }
+informalsystems-malachitebft-core-types = { path = "../malachite/code/crates/core-types" }
+informalsystems-malachitebft-config = { path = "../malachite/code/crates/config" }
+informalsystems-malachitebft-codec = { path = "../malachite/code/crates/codec" }
+informalsystems-malachitebft-metrics = { path = "../malachite/code/crates/metrics" }
 blake3 = "1.4.1"
 tracing = "0.1.40"
 thiserror = "1.0.66"

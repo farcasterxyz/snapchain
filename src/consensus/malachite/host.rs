@@ -7,8 +7,10 @@ use bytes::Bytes;
 use informalsystems_malachitebft_engine::consensus::ConsensusMsg;
 use informalsystems_malachitebft_engine::host::{HostMsg, LocallyProposedValue};
 use informalsystems_malachitebft_engine::network::{NetworkMsg, NetworkRef};
-use informalsystems_malachitebft_engine::util::streaming::{StreamContent, StreamMessage};
-use informalsystems_malachitebft_sync::DecidedValue;
+use informalsystems_malachitebft_engine::util::streaming::{
+    StreamContent, StreamId, StreamMessage,
+};
+use informalsystems_malachitebft_sync::RawDecidedValue;
 use prost::Message;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SpawnErr};
 use tracing::{error, info, warn};
@@ -84,12 +86,15 @@ impl Host {
                     .propose_value(height, round, timeout)
                     .await;
                 let shard_hash = value.shard_hash().clone();
-                let locally_proposed_value =
-                    LocallyProposedValue::new(height, round, shard_hash, None);
+                let locally_proposed_value = LocallyProposedValue::new(height, round, shard_hash);
                 reply_to.send(locally_proposed_value)?;
 
                 // Next, broadcast the value to the network
-                let stream_message = StreamMessage::new(0, 0, StreamContent::Data(value));
+                let mut bytes = Vec::new();
+                bytes.extend_from_slice(&height.as_u64().to_be_bytes());
+                bytes.extend_from_slice(&round.as_i64().to_be_bytes());
+                let stream_id = StreamId::new(bytes.into());
+                let stream_message = StreamMessage::new(stream_id, 0, StreamContent::Data(value));
                 state
                     .network
                     .cast(NetworkMsg::PublishProposalPart(stream_message))?;
@@ -119,8 +124,12 @@ impl Host {
                         {
                             info!(request_height = height.as_u64(), proposal_height = full_proposal.height().as_u64(), request_round = round.as_i64(), proposal_round = full_proposal.round().as_i64(), request_address= hex::encode(address.to_vec()), proposal_address = hex::encode(&full_proposal.proposer), "Proposal published in RestreamValue does not match height/round/proposer in the request")
                         }
+                        let mut bytes = Vec::new();
+                        bytes.extend_from_slice(&height.as_u64().to_be_bytes());
+                        bytes.extend_from_slice(&round.as_i64().to_be_bytes());
+                        let stream_id = StreamId::new(bytes.into());
                         let stream_message =
-                            StreamMessage::new(0, 0, StreamContent::Data(full_proposal));
+                            StreamMessage::new(stream_id, 0, StreamContent::Data(full_proposal));
                         state
                             .network
                             .cast(NetworkMsg::PublishProposalPart(stream_message))?;
@@ -160,6 +169,7 @@ impl Host {
             HostMsg::Decided {
                 certificate,
                 consensus: consensus_ref,
+                extensions: _,
             } => {
                 //commit
                 state
@@ -177,11 +187,11 @@ impl Host {
                 let proposal = state.shard_validator.get_decided_value(height).await;
                 let decided_value = match proposal {
                     Some((commits, proposal)) => match proposal {
-                        full_proposal::ProposedValue::Block(block) => Some(DecidedValue {
+                        full_proposal::ProposedValue::Block(block) => Some(RawDecidedValue {
                             certificate: commits.to_commit_certificate(),
                             value_bytes: Bytes::from(block.encode_to_vec()),
                         }),
-                        full_proposal::ProposedValue::Shard(shard_chunk) => Some(DecidedValue {
+                        full_proposal::ProposedValue::Shard(shard_chunk) => Some(RawDecidedValue {
                             certificate: commits.to_commit_certificate(),
                             value_bytes: Bytes::from(shard_chunk.encode_to_vec()),
                         }),
@@ -222,6 +232,25 @@ impl Host {
                 );
                 reply_to.send(proposed_value)?;
             }
+
+            // We don't use vote extensions, and don't care about peers joining or leaving here
+            HostMsg::ExtendVote {
+                height: _,
+                round: _,
+                value_id: _,
+                reply_to,
+            } => {
+                reply_to.send(None)?;
+            }
+            HostMsg::VerifyVoteExtension {
+                height: _,
+                round: _,
+                value_id: _,
+                extension: _,
+                reply_to,
+            } => reply_to.send(Ok(()))?,
+            HostMsg::PeerJoined { .. } => {}
+            HostMsg::PeerLeft { .. } => {}
         };
 
         Ok(())

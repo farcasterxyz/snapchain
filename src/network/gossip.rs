@@ -257,7 +257,7 @@ impl SnapchainGossip {
                         },
                         SwarmEvent::Behaviour(SnapchainBehaviorEvent::Rpc(sync_event)) => {
                             match sync_event {
-                                sync::Event::Message {peer, message} => {
+                                sync::Event::Message {peer, message, connection_id: _} => {
                                     match message {
                                         libp2p::request_response::Message::Request {
                                             request_id,

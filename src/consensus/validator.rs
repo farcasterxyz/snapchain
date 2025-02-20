@@ -165,7 +165,6 @@ impl ShardValidator {
             proposer: full_proposal.proposer_address(),
             value,
             validity,
-            extension: None,
         }
     }
 

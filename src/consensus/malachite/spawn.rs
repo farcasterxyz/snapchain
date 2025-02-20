@@ -91,11 +91,13 @@ pub async fn spawn_consensus_actor(
         threshold_params: Default::default(),
         value_payload: ValuePayload::ProposalAndParts,
     };
+    let signing_provider = ctx.signing_provider();
 
     Consensus::spawn(
         ctx,
         consensus_params,
         timeout_cfg,
+        Box::new(signing_provider),
         network,
         host,
         wal,
