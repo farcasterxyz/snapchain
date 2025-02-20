@@ -87,7 +87,7 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
 
 pub enum GossipTopic {
     Consensus,
-    DecidedValue,
+    ReadNode,
     Mempool,
     SyncRequest(MalachitePeerId, oneshot::Sender<OutboundRequestId>),
     SyncReply(InboundRequestId),
@@ -105,6 +105,7 @@ pub struct SnapchainGossip {
     rx: mpsc::Receiver<GossipEvent<SnapchainValidatorContext>>,
     system_tx: Sender<SystemMessage>,
     sync_channels: HashMap<InboundRequestId, sync::ResponseChannel>,
+    read_node: bool,
 }
 
 impl SnapchainGossip {
@@ -187,24 +188,24 @@ impl SnapchainGossip {
             }
         }
 
-        // Create a Gossipsub topic
-        let topic = gossipsub::IdentTopic::new(CONSENSUS_TOPIC);
-        // subscribes to our topic
-        let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
-        if let Err(e) = result {
-            warn!("Failed to subscribe to topic: {:?}", e);
-            return Err(Box::new(e));
-        }
-
-        let topic = gossipsub::IdentTopic::new(MEMPOOL_TOPIC);
-        let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
-        if let Err(e) = result {
-            warn!("Failed to subscribe to topic: {:?}", e);
-            return Err(Box::new(e));
-        }
-
         if read_node {
             let topic = gossipsub::IdentTopic::new(READ_NODE_TOPIC);
+            let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
+            if let Err(e) = result {
+                warn!("Failed to subscribe to topic: {:?}", e);
+                return Err(Box::new(e));
+            }
+        } else {
+            // Create a Gossipsub topic
+            let topic = gossipsub::IdentTopic::new(CONSENSUS_TOPIC);
+            // subscribes to our topic
+            let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
+            if let Err(e) = result {
+                warn!("Failed to subscribe to topic: {:?}", e);
+                return Err(Box::new(e));
+            }
+
+            let topic = gossipsub::IdentTopic::new(MEMPOOL_TOPIC);
             let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
             if let Err(e) = result {
                 warn!("Failed to subscribe to topic: {:?}", e);
@@ -222,6 +223,7 @@ impl SnapchainGossip {
             rx,
             system_tx,
             sync_channels: HashMap::new(),
+            read_node,
         })
     }
 
@@ -318,10 +320,10 @@ impl SnapchainGossip {
                     }
                 }
                 event = self.rx.recv() => {
-                    if let Some((gossip_topic, encoded_message)) = Self::map_gossip_event_to_bytes(event) {
+                    if let Some((gossip_topic, encoded_message)) = self.map_gossip_event_to_bytes(event) {
                         match gossip_topic {
                             GossipTopic::Consensus => self.publish(encoded_message, CONSENSUS_TOPIC),
-                            GossipTopic::DecidedValue => self.publish(encoded_message, READ_NODE_TOPIC),
+                            GossipTopic::ReadNode=> self.publish(encoded_message, READ_NODE_TOPIC),
                             GossipTopic::Mempool => self.publish(encoded_message, MEMPOOL_TOPIC),
                             GossipTopic::SyncRequest(peer_id, reply_tx) => {
                                 let peer = peer_id.to_libp2p();
@@ -505,6 +507,7 @@ impl SnapchainGossip {
     }
 
     pub fn map_gossip_event_to_bytes(
+        &self,
         event: Option<GossipEvent<SnapchainValidatorContext>>,
     ) -> Option<(GossipTopic, Vec<u8>)> {
         let snapchain_codec = SnapchainCodec {};
@@ -521,7 +524,7 @@ impl SnapchainGossip {
                         },
                     )),
                 };
-                Some((GossipTopic::DecidedValue, gossip_message.encode_to_vec()))
+                Some((GossipTopic::ReadNode, gossip_message.encode_to_vec()))
             }
             Some(GossipEvent::BroadcastSignedVote(vote)) => {
                 let vote_proto = vote.to_proto();
@@ -605,8 +608,15 @@ impl SnapchainGossip {
                                 proto::StatusMessage::decode(encoded).unwrap(),
                             )),
                         };
+
+                        let topic = if self.read_node {
+                            GossipTopic::ReadNode
+                        } else {
+                            GossipTopic::Consensus
+                        };
+
                         // Should probably use a separate topic for status messages, but these are infrequent
-                        Some((GossipTopic::Consensus, gossip_message.encode_to_vec()))
+                        Some((topic, gossip_message.encode_to_vec()))
                     }
                     Err(e) => {
                         warn!("Failed to encode status message: {:?}", e);
