@@ -81,7 +81,7 @@ impl NodeForTest {
         let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
 
         let mut gossip =
-            SnapchainGossip::create(keypair.clone(), config, system_tx.clone()).unwrap();
+            SnapchainGossip::create(keypair.clone(), config, system_tx.clone(), false).unwrap();
         let gossip_tx = gossip.tx.clone();
 
         let registry = SharedRegistry::global();

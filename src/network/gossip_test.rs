@@ -31,8 +31,10 @@ async fn test_gossip_communication() {
     let (system_tx2, mut system_rx2) = mpsc::channel::<SystemMessage>(100);
 
     // Create gossip instances
-    let mut gossip1 = SnapchainGossip::create(keypair1.clone(), config1, system_tx1).unwrap();
-    let mut gossip2 = SnapchainGossip::create(keypair2.clone(), config2, system_tx2).unwrap();
+    let mut gossip1 =
+        SnapchainGossip::create(keypair1.clone(), config1, system_tx1, false).unwrap();
+    let mut gossip2 =
+        SnapchainGossip::create(keypair2.clone(), config2, system_tx2, false).unwrap();
 
     let gossip_tx1 = gossip1.tx.clone();
 

@@ -3,6 +3,7 @@ use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
 use crate::mempool::mempool::MempoolSource;
+use crate::proto::read_node_message;
 use crate::storage::store::engine::MempoolMessage;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -10,7 +11,7 @@ use informalsystems_malachitebft_codec::Codec;
 use informalsystems_malachitebft_core_types::{SignedProposal, SignedVote};
 use informalsystems_malachitebft_network::{Channel, PeerIdExt};
 use informalsystems_malachitebft_network::{MessageId, PeerId as MalachitePeerId};
-use informalsystems_malachitebft_sync as sync;
+use informalsystems_malachitebft_sync::{self as sync};
 use libp2p::identity::ed25519::Keypair;
 use libp2p::request_response::{InboundRequestId, OutboundRequestId};
 use libp2p::swarm::dial_opts::DialOpts;
@@ -33,6 +34,7 @@ const MAX_GOSSIP_MESSAGE_SIZE: usize = 1024 * 1024 * 10; // 10 mb
 
 const CONSENSUS_TOPIC: &str = "consensus";
 const MEMPOOL_TOPIC: &str = "mempool";
+const READ_NODE_TOPIC: &str = "read-node";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -80,10 +82,12 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
         oneshot::Sender<OutboundRequestId>,
     ),
     SyncReply(InboundRequestId, sync::Response<SnapchainValidatorContext>),
+    BroadcastDecidedValue(proto::DecidedValue),
 }
 
 pub enum GossipTopic {
     Consensus,
+    DecidedValue,
     Mempool,
     SyncRequest(MalachitePeerId, oneshot::Sender<OutboundRequestId>),
     SyncReply(InboundRequestId),
@@ -108,6 +112,7 @@ impl SnapchainGossip {
         keypair: Keypair,
         config: Config,
         system_tx: Sender<SystemMessage>,
+        read_node: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair.clone().into())
             .with_tokio()
@@ -196,6 +201,15 @@ impl SnapchainGossip {
         if let Err(e) = result {
             warn!("Failed to subscribe to topic: {:?}", e);
             return Err(Box::new(e));
+        }
+
+        if read_node {
+            let topic = gossipsub::IdentTopic::new(READ_NODE_TOPIC);
+            let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
+            if let Err(e) = result {
+                warn!("Failed to subscribe to topic: {:?}", e);
+                return Err(Box::new(e));
+            }
         }
 
         // Listen on all assigned port for this id
@@ -306,8 +320,9 @@ impl SnapchainGossip {
                 event = self.rx.recv() => {
                     if let Some((gossip_topic, encoded_message)) = Self::map_gossip_event_to_bytes(event) {
                         match gossip_topic {
-                            GossipTopic::Consensus => self.publish(encoded_message),
-                            GossipTopic::Mempool => self.publish_mempool(encoded_message),
+                            GossipTopic::Consensus => self.publish(encoded_message, CONSENSUS_TOPIC),
+                            GossipTopic::DecidedValue => self.publish(encoded_message, READ_NODE_TOPIC),
+                            GossipTopic::Mempool => self.publish(encoded_message, MEMPOOL_TOPIC),
                             GossipTopic::SyncRequest(peer_id, reply_tx) => {
                                 let peer = peer_id.to_libp2p();
                                 let request_id = self.swarm.behaviour_mut().rpc.send_request(peer, Bytes::from(encoded_message));
@@ -333,15 +348,8 @@ impl SnapchainGossip {
         }
     }
 
-    fn publish(&mut self, message: Vec<u8>) {
-        let topic = gossipsub::IdentTopic::new(CONSENSUS_TOPIC);
-        if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, message) {
-            warn!("Failed to publish gossip message: {:?}", e);
-        }
-    }
-
-    fn publish_mempool(&mut self, message: Vec<u8>) {
-        let topic = gossipsub::IdentTopic::new(MEMPOOL_TOPIC);
+    fn publish(&mut self, message: Vec<u8>, topic: &str) {
+        let topic = gossipsub::IdentTopic::new(topic);
         if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, message) {
             warn!("Failed to publish gossip message: {:?}", e);
         }
@@ -353,6 +361,18 @@ impl SnapchainGossip {
     ) -> Option<SystemMessage> {
         match proto::GossipMessage::decode(gossip_message.as_slice()) {
             Ok(gossip_message) => match gossip_message.gossip_message {
+                Some(proto::gossip_message::GossipMessage::ReadNodeMessage(read_node_message)) => {
+                    let read_node_message = read_node_message.read_node_message;
+                    match read_node_message {
+                        None => None,
+                        Some(read_node_message) => match read_node_message {
+                            read_node_message::ReadNodeMessage::DecidedValue(decided_value) => {
+                                Some(SystemMessage::DecidedValue(decided_value))
+                            }
+                        },
+                    }
+                }
+
                 Some(proto::gossip_message::GossipMessage::FullProposal(full_proposal)) => {
                     let height = full_proposal.height();
                     debug!(
@@ -489,6 +509,20 @@ impl SnapchainGossip {
     ) -> Option<(GossipTopic, Vec<u8>)> {
         let snapchain_codec = SnapchainCodec {};
         match event {
+            Some(GossipEvent::BroadcastDecidedValue(decided_value)) => {
+                let gossip_message = proto::GossipMessage {
+                    gossip_message: Some(proto::gossip_message::GossipMessage::ReadNodeMessage(
+                        proto::ReadNodeMessage {
+                            read_node_message: Some(
+                                proto::read_node_message::ReadNodeMessage::DecidedValue(
+                                    decided_value,
+                                ),
+                            ),
+                        },
+                    )),
+                };
+                Some((GossipTopic::DecidedValue, gossip_message.encode_to_vec()))
+            }
             Some(GossipEvent::BroadcastSignedVote(vote)) => {
                 let vote_proto = vote.to_proto();
                 let gossip_message = proto::GossipMessage {

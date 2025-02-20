@@ -18,12 +18,17 @@ use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::consensus::validator::ShardValidator;
 use crate::core::types::{ShardId, SnapchainValidatorContext};
 use crate::network::gossip::GossipEvent;
+use crate::proto;
 use informalsystems_malachitebft_engine::sync::{Params as SyncParams, Sync, SyncRef};
 use informalsystems_malachitebft_engine::util::events::TxEvent;
 use informalsystems_malachitebft_engine::wal::{Wal, WalRef};
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use libp2p::PeerId;
 use tokio::sync::mpsc;
+
+use super::read_host::{Engine, ReadHost, ReadHostMsg, ReadHostRef, ReadHostState};
+use super::read_network_connector::{MalachiteReadNetworkConnector, ReadNetworkConnectorArgs};
+use super::read_sync::{self, ReadParams, ReadSync, ReadSyncRef};
 
 pub async fn spawn_network_actor(
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
@@ -35,6 +40,20 @@ pub async fn spawn_network_actor(
         peer_id: MalachitePeerId::from_libp2p(&local_peer_id),
     };
     MalachiteNetworkConnector::spawn(codec, args)
+        .await
+        .map_err(Into::into)
+}
+
+pub async fn spawn_read_network_actor(
+    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+    local_peer_id: PeerId,
+) -> Result<NetworkRef<SnapchainValidatorContext>, ractor::SpawnErr> {
+    let codec = SnapchainCodec;
+    let args = ReadNetworkConnectorArgs {
+        gossip_tx,
+        peer_id: MalachitePeerId::from_libp2p(&local_peer_id),
+    };
+    MalachiteReadNetworkConnector::spawn(codec, args)
         .await
         .map_err(Into::into)
 }
@@ -67,6 +86,15 @@ pub async fn spawn_host(
         consensus_start_delay,
     };
     let actor_ref = Host::spawn(state).await?;
+    Ok(actor_ref)
+}
+
+pub async fn spawn_read_host(
+    shard_id: u32,
+    engine: Engine,
+) -> Result<ReadHostRef, ractor::SpawnErr> {
+    let state = ReadHostState { shard_id, engine };
+    let actor_ref = ReadHost::spawn(state).await?;
     Ok(actor_ref)
 }
 
@@ -128,6 +156,96 @@ pub async fn spawn_sync_actor(
     let actor_ref = Sync::spawn(ctx, network, host, params, metrics, span).await?;
 
     Ok(actor_ref)
+}
+
+pub async fn spawn_read_sync_actor(
+    ctx: SnapchainValidatorContext,
+    network: NetworkRef<SnapchainValidatorContext>,
+    host: ReadHostRef,
+    config: SyncConfig,
+    registry: &SharedRegistry,
+    span: Span,
+) -> Result<ReadSyncRef, ractor::SpawnErr> {
+    let params = ReadParams {
+        status_update_interval: config.status_update_interval,
+        request_timeout: config.request_timeout,
+    };
+
+    let metrics = SyncMetrics::register(registry);
+
+    let actor_ref = ReadSync::spawn(ctx, network, host, params, metrics, span).await?;
+
+    Ok(actor_ref)
+}
+
+#[derive(Clone)]
+pub struct MalachiteReadNodeActors {
+    pub network_actor: NetworkRef<SnapchainValidatorContext>,
+    pub host_actor: ReadHostRef,
+    pub sync_actor: ReadSyncRef,
+}
+
+impl MalachiteReadNodeActors {
+    pub async fn create_and_start(
+        ctx: SnapchainValidatorContext,
+        engine: Engine,
+        local_peer_id: PeerId,
+        gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+        registry: &SharedRegistry,
+        shard_id: u32,
+    ) -> Result<Self, ractor::SpawnErr> {
+        let name = if shard_id == 0 {
+            format!("Block")
+        } else {
+            format!("Shard {}", shard_id)
+        };
+        let span = tracing::info_span!("node", name = %name);
+
+        let network_actor = spawn_read_network_actor(gossip_tx.clone(), local_peer_id).await?;
+        let host_actor = spawn_read_host(shard_id, engine).await?;
+        let sync_actor = spawn_read_sync_actor(
+            ctx.clone(),
+            network_actor.clone(),
+            host_actor.clone(),
+            SyncConfig::default(),
+            registry,
+            span.clone(),
+        )
+        .await?;
+
+        Ok(Self {
+            network_actor,
+            host_actor,
+            sync_actor,
+        })
+    }
+
+    pub fn cast_decided_value(
+        &self,
+        value: proto::DecidedValue,
+    ) -> Result<(), ractor::MessagingErr<ReadHostMsg>> {
+        self.sync_actor
+            .cast(read_sync::Msg::Decided(
+                value.commits.as_ref().unwrap().height.unwrap(),
+            ))
+            .unwrap();
+        self.host_actor
+            .cast(ReadHostMsg::ProcessDecidedValue { value })
+    }
+
+    pub fn cast_network_event(
+        &self,
+        event: MalachiteNetworkEvent,
+    ) -> Result<(), ractor::MessagingErr<MalachiteNetworkActorMsg>> {
+        self.network_actor
+            .cast(MalachiteNetworkActorMsg::NewEvent(event))
+    }
+
+    pub fn stop(&self) {
+        self.host_actor.stop(None);
+        self.network_actor.stop(None);
+        self.sync_actor.stop(None);
+    }
 }
 
 #[derive(Clone)]
