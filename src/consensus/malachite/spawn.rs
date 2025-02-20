@@ -27,7 +27,6 @@ use libp2p::PeerId;
 use tokio::sync::mpsc;
 
 use super::read_host::{Engine, ReadHost, ReadHostMsg, ReadHostRef, ReadHostState};
-use super::read_network_connector::{MalachiteReadNetworkConnector, ReadNetworkConnectorArgs};
 use super::read_sync::{self, ReadParams, ReadSync, ReadSyncRef};
 
 pub async fn spawn_network_actor(
@@ -40,20 +39,6 @@ pub async fn spawn_network_actor(
         peer_id: MalachitePeerId::from_libp2p(&local_peer_id),
     };
     MalachiteNetworkConnector::spawn(codec, args)
-        .await
-        .map_err(Into::into)
-}
-
-pub async fn spawn_read_network_actor(
-    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
-    local_peer_id: PeerId,
-) -> Result<NetworkRef<SnapchainValidatorContext>, ractor::SpawnErr> {
-    let codec = SnapchainCodec;
-    let args = ReadNetworkConnectorArgs {
-        gossip_tx,
-        peer_id: MalachitePeerId::from_libp2p(&local_peer_id),
-    };
-    MalachiteReadNetworkConnector::spawn(codec, args)
         .await
         .map_err(Into::into)
 }
@@ -201,7 +186,7 @@ impl MalachiteReadNodeActors {
         };
         let span = tracing::info_span!("node", name = %name);
 
-        let network_actor = spawn_read_network_actor(gossip_tx.clone(), local_peer_id).await?;
+        let network_actor = spawn_network_actor(gossip_tx.clone(), local_peer_id).await?;
         let host_actor = spawn_read_host(shard_id, engine).await?;
         let sync_actor = spawn_read_sync_actor(
             ctx.clone(),
