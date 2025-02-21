@@ -13,7 +13,7 @@ use informalsystems_malachitebft_core_consensus::PeerId;
 use informalsystems_malachitebft_sync::{
     self as sync, InboundRequestId, OutboundRequestId, Response,
 };
-use informalsystems_malachitebft_sync::{DecidedValue, Request};
+use informalsystems_malachitebft_sync::{RawDecidedValue, Request};
 
 use informalsystems_malachitebft_engine::network::{NetworkEvent, NetworkMsg, NetworkRef, Status};
 use informalsystems_malachitebft_engine::util::ticker::ticker;
@@ -57,7 +57,7 @@ pub enum Msg {
     GotDecidedBlock(
         InboundRequestId,
         Height,
-        Option<DecidedValue<SnapchainValidatorContext>>,
+        Option<RawDecidedValue<SnapchainValidatorContext>>,
     ),
 
     /// A timeout has elapsed
@@ -237,7 +237,7 @@ impl ReadSync {
                     .cast(NetworkMsg::OutgoingResponse(request_id, response))?;
             }
 
-            Effect::GetValue(request_id, height) => {
+            Effect::GetDecidedValue(request_id, height) => {
                 self.host.call_and_forward(
                     |reply_to| ReadHostMsg::GetDecidedValue { height, reply_to },
                     myself,

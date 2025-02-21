@@ -4,7 +4,7 @@ use crate::core::types::SnapchainValidatorContext;
 use crate::proto::{self, Height};
 use crate::storage::store::engine::{BlockEngine, ShardEngine};
 use bytes::Bytes;
-use informalsystems_malachitebft_sync::DecidedValue;
+use informalsystems_malachitebft_sync::RawDecidedValue;
 use prost::Message;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SpawnErr};
 use tracing::error;
@@ -25,7 +25,7 @@ pub enum ReadHostMsg {
     // Retrieve decided block from the block store
     GetDecidedValue {
         height: Height,
-        reply_to: RpcReplyPort<Option<DecidedValue<SnapchainValidatorContext>>>,
+        reply_to: RpcReplyPort<Option<RawDecidedValue<SnapchainValidatorContext>>>,
     },
 }
 
@@ -88,7 +88,7 @@ impl ReadHost {
                         match shard_chunk {
                             Some(chunk) => {
                                 let commits = chunk.commits.clone().unwrap();
-                                Some(DecidedValue {
+                                Some(RawDecidedValue {
                                     certificate: commits.to_commit_certificate(),
                                     value_bytes: Bytes::from(chunk.encode_to_vec()),
                                 })
@@ -101,7 +101,7 @@ impl ReadHost {
                         match block {
                             Some(block) => {
                                 let commits = block.commits.clone().unwrap();
-                                Some(DecidedValue {
+                                Some(RawDecidedValue {
                                     certificate: commits.to_commit_certificate(),
                                     value_bytes: Bytes::from(block.encode_to_vec()),
                                 })
