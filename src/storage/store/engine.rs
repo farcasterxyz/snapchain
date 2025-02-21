@@ -156,6 +156,7 @@ pub struct ShardEngine {
     statsd_client: StatsdClientWrapper,
     max_messages_per_block: u32,
     messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
+    fname_signer_address: Option<alloy_primitives::Address>,
 }
 
 impl ShardEngine {
@@ -167,8 +168,24 @@ impl ShardEngine {
         statsd_client: StatsdClientWrapper,
         max_messages_per_block: u32,
         messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
+        fname_signer_address: Option<String>,
     ) -> ShardEngine {
         // TODO: adding the trie here introduces many calls that want to return errors. Rethink unwrap strategy.
+        let signer_address = match fname_signer_address {
+            Some(a) => match hex::decode(a.replace("0x", "")) {
+                Ok(address_hex) => {
+                    if address_hex.len() == 20 {
+                        Some(alloy_primitives::Address::new(
+                            address_hex.try_into().unwrap(),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None,
+            },
+            None => None,
+        };
         ShardEngine {
             shard_id,
             stores: Stores::new(db.clone(), trie, store_limits),
@@ -177,6 +194,7 @@ impl ShardEngine {
             statsd_client,
             max_messages_per_block,
             messages_request_tx,
+            fname_signer_address: signer_address,
         }
     }
 
@@ -545,7 +563,10 @@ impl ShardEngine {
                         );
                     }
                     Some(proof) => {
-                        match verification::validate_fname_transfer(fname_transfer) {
+                        match verification::validate_fname_transfer(
+                            fname_transfer,
+                            self.fname_signer_address,
+                        ) {
                             Ok(_) => {
                                 let event = UserDataStore::merge_username_proof(
                                     &self.stores.user_data_store,
