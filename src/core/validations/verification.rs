@@ -8,6 +8,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 const EIP_712_FARCASTER_VERIFICATION_CLAIM_CHAIN_IDS: [u16; 5] = [0, 1, 5, 10, 420];
+const FNAME_SIGNER_ADDRESS: alloy_primitives::Address =
+    alloy_primitives::address!("Bc5274eFc266311015793d89E9B591fa46294741");
 
 fn eip_712_farcaster_verification_claim() -> Value {
     json!({
@@ -50,7 +52,7 @@ fn eip_712_farcaster_verification_claim() -> Value {
     })
 }
 
-fn eip_712_domain() -> Value {
+pub fn eip_712_domain() -> Value {
     json!({
         "EIP712Domain": [
             {
@@ -97,7 +99,7 @@ fn address_verification_domain() -> Value {
     })
 }
 
-fn name_registry_domain() -> Value {
+pub fn name_registry_domain() -> Value {
     json!({
         "name": "Farcaster name verification",
         "version": "1",
@@ -109,6 +111,7 @@ fn name_registry_domain() -> Value {
 pub fn validate_fname_transfer(
     transfer: &proto::FnameTransfer,
     network: FarcasterNetwork,
+    signer_address: Option<alloy_primitives::Address>,
 ) -> Result<(), ValidationError> {
     let proof = transfer.proof.as_ref().unwrap();
     let username = std::str::from_utf8(&proof.name);
@@ -148,7 +151,7 @@ pub fn validate_fname_transfer(
     }
 
     let hash = prehash.unwrap();
-    let fname_signer = alloy_primitives::address!("Bc5274eFc266311015793d89E9B591fa46294741");
+    let fname_signer = signer_address.unwrap_or(FNAME_SIGNER_ADDRESS);
     let signature = alloy_primitives::PrimitiveSignature::from_bytes_and_parity(
         &proof.signature[0..64],
         proof.signature[64] != 0x1b && proof.signature[64] != 0x00,

@@ -100,7 +100,7 @@ mod tests {
                 r#type: 1,
             })
         };
-        let result = validate_fname_transfer(transfer, FarcasterNetwork::Mainnet);
+        let result = validate_fname_transfer(transfer, FarcasterNetwork::Mainnet, None);
         assert!(result.is_ok());
     }
 
@@ -118,7 +118,7 @@ mod tests {
                 r#type: 1,
             })
         };
-        let result = validate_fname_transfer(transfer, FarcasterNetwork::Testnet);
+        let result = validate_fname_transfer(transfer, FarcasterNetwork::Testnet, None);
         assert!(result.is_ok());
     }
 
@@ -136,7 +136,7 @@ mod tests {
                 r#type: 1,
             })
         };
-        let result = validate_fname_transfer(transfer, FarcasterNetwork::Mainnet);
+        let result = validate_fname_transfer(transfer, FarcasterNetwork::Mainnet, None);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), ValidationError::InvalidSignature);
     }
@@ -144,18 +144,18 @@ mod tests {
     #[test]
     fn test_fname_transfer_verify_invalid_signature_fails() {
         let transfer = &FnameTransfer{
-      id: 1,
-      from_fid: 1,
-      proof: Some(UserNameProof{
-        timestamp: 1628882891,
-        name: "farcaster".into(),
-        owner: hex::decode("8773442740c17c9d0f0b87022c722f9a136206ed").unwrap(),
-        signature: hex::decode("181760f14eda0028e0b647ff15f45235526ced3b4ae07fcce06141b73d32960d3253776e62f761363fb8137087192047763f4af838950a96f3885f3c2289c41b").unwrap(),
-        fid: 1,
-        r#type: 1,
-      })
-    };
-        let result = validate_fname_transfer(transfer, FarcasterNetwork::Mainnet);
+          id: 1,
+          from_fid: 1,
+          proof: Some(UserNameProof{
+            timestamp: 1628882891,
+            name: "farcaster".into(),
+            owner: hex::decode("8773442740c17c9d0f0b87022c722f9a136206ed").unwrap(),
+            signature: hex::decode("181760f14eda0028e0b647ff15f45235526ced3b4ae07fcce06141b73d32960d3253776e62f761363fb8137087192047763f4af838950a96f3885f3c2289c41b").unwrap(),
+            fid: 1,
+            r#type: 1,
+          })
+        };
+        let result = validate_fname_transfer(transfer, FarcasterNetwork::Mainnet, None);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), ValidationError::InvalidSignature);
     }

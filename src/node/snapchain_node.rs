@@ -78,6 +78,7 @@ impl SnapchainNode {
                 statsd_client.clone(),
                 config.max_messages_per_block,
                 Some(messages_request_tx.clone()),
+                None,
             );
 
             shard_senders.insert(shard_id, engine.get_senders());

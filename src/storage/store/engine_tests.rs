@@ -1732,18 +1732,109 @@ mod tests {
         let proof = engine.get_fname_proof(fname).unwrap();
         assert!(proof.is_some());
         assert_eq!(proof.unwrap().fid, FID_FOR_TEST);
+    }
 
-        // todo: alternate signer for fname server testing so we can verify transferring to 0 nukes the fname
+    #[tokio::test]
+    async fn test_merge_fname_with_signing() {
+        let signer = alloy_signer_local::PrivateKeySigner::random();
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            fname_signer_address: Some(signer.address()),
+            ..EngineOptions::default()
+        });
+
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let fname = &"acp".to_string();
+
+        let timestamp = factory::time::farcaster_time();
+
+        let mut event_rx = engine.get_senders().events_tx.subscribe();
+        let fname_transfer = username_factory::create_transfer(
+            FID_FOR_TEST,
+            fname,
+            Some(timestamp),
+            None,
+            Some(test_helper::default_custody_address()),
+            signer.clone(),
+        );
+
+        let state_change = engine.propose_state_change(
+            1,
+            vec![MempoolMessage::ValidatorMessage(ValidatorMessage {
+                on_chain_event: None,
+                fname_transfer: Some(fname_transfer.clone()),
+            })],
+            None,
+        );
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+
+        // Emits a hub event for the user name proof
+        let transfer_event = &event_rx.try_recv().unwrap();
+        assert_eq!(
+            transfer_event.r#type,
+            proto::HubEventType::MergeUsernameProof as i32
+        );
+        assert_eq!(event_rx.try_recv().is_err(), true); // No more events
+
+        // fname exists in the trie and in the db
+        assert!(test_helper::key_exists_in_trie(
+            &mut engine,
+            &TrieKey::for_fname(FID_FOR_TEST, fname)
+        ));
+        let proof = engine.get_fname_proof(fname).unwrap();
+        assert!(proof.is_some());
+        assert_eq!(proof.unwrap().fid, FID_FOR_TEST);
+
+        let fname_transfer = username_factory::create_transfer(
+            0,
+            fname,
+            Some(timestamp + 1),
+            Some(FID_FOR_TEST),
+            Some(test_helper::default_custody_address()),
+            signer,
+        );
+
+        let state_change = engine.propose_state_change(
+            1,
+            vec![MempoolMessage::ValidatorMessage(ValidatorMessage {
+                on_chain_event: None,
+                fname_transfer: Some(fname_transfer.clone()),
+            })],
+            None,
+        );
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+
+        let transfer_event = &event_rx.try_recv().unwrap();
+        assert_eq!(
+            transfer_event.r#type,
+            proto::HubEventType::MergeUsernameProof as i32
+        );
+
+        // don't insert an fname for fid 0 into the trie
+        assert!(!test_helper::key_exists_in_trie(
+            &mut engine,
+            &TrieKey::for_fname(0, fname)
+        ));
     }
 
     #[tokio::test]
     async fn test_fname_transfer() {
+        let fname_signer = alloy_signer_local::PrivateKeySigner::random();
+        let fname_signer_address = fname_signer.address();
         let (mut engine1, _) = test_helper::new_engine_with_options(EngineOptions {
             shard_id: 1,
+            fname_signer_address: Some(fname_signer_address.clone()),
             ..Default::default()
         });
         let (mut engine2, _) = test_helper::new_engine_with_options(EngineOptions {
             shard_id: 2,
+            fname_signer_address: Some(fname_signer_address.clone()),
             ..Default::default()
         });
 
@@ -1772,7 +1863,8 @@ mod tests {
             &fname,
             Some(timestamp),
             Some(0),
-            default_custody_address(),
+            Some(default_custody_address()),
+            fname_signer.clone(),
         );
         test_helper::commit_fname_transfer(&mut engine1, &fname_register).await;
         assert!(key_exists_in_trie(
@@ -1809,7 +1901,8 @@ mod tests {
             &fname,
             Some(timestamp + 2),
             Some(fid1),
-            default_custody_address(),
+            Some(default_custody_address()),
+            fname_signer.clone(),
         );
         // Send transfer to both shards
         test_helper::commit_fname_transfer(&mut engine1, &fname_transfer).await;
@@ -1856,7 +1949,8 @@ mod tests {
             &fname,
             Some(timestamp + 3),
             Some(fid2),
-            default_custody_address(),
+            Some(default_custody_address()),
+            fname_signer.clone(),
         );
         // Mirror existing behavior in the mempool where fname transfers are sent to all shards
         test_helper::commit_fname_transfer(&mut engine1, &fname_transfer).await;
@@ -1912,7 +2006,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_username_revoked_when_proof_transferred() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let signer = alloy_signer_local::PrivateKeySigner::random();
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            fname_signer_address: Some(signer.address()),
+            ..EngineOptions::default()
+        });
 
         test_helper::register_user(
             FID_FOR_TEST,
@@ -1923,14 +2021,16 @@ mod tests {
         .await;
 
         let fname = &"farcaster".to_string();
-        let transfer = username_factory::create_transfer(
+        test_helper::register_fname(
             FID_FOR_TEST,
             fname,
             None,
-            None,
-            default_custody_address(),
-        );
-        test_helper::commit_fname_transfer(&mut engine, &transfer).await;
+            Some(test_helper::default_custody_address()),
+            &mut engine,
+            FarcasterNetwork::Mainnet,
+            signer.clone(),
+        )
+        .await;
 
         let fid_username_msg = messages_factory::user_data::create_user_data_add(
             FID_FOR_TEST,
@@ -1956,7 +2056,8 @@ mod tests {
             fname,
             Some(time::current_timestamp() + 10),
             Some(FID_FOR_TEST),
-            test_helper::default_custody_address(),
+            Some(test_helper::default_custody_address()),
+            signer,
         );
         test_helper::commit_fname_transfer(&mut engine, &transfer).await;
 

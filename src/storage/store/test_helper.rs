@@ -117,6 +117,7 @@ pub struct EngineOptions {
     pub db: Option<Arc<RocksDB>>,
     pub messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
     pub network: Option<proto::FarcasterNetwork>,
+    pub fname_signer_address: Option<alloy_primitives::Address>,
     pub shard_id: u32,
 }
 
@@ -127,6 +128,7 @@ impl Default for EngineOptions {
             db: None,
             messages_request_tx: None,
             network: None,
+            fname_signer_address: None,
             shard_id: 1,
         }
     }
@@ -169,6 +171,7 @@ pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile
             statsd_client,
             256,
             options.messages_request_tx,
+            options.fname_signer_address,
         ),
         dir,
     )
@@ -409,9 +412,50 @@ pub async fn commit_fname_transfer(engine: &mut ShardEngine, transfer: &FnameTra
     );
 
     validate_and_commit_state_change(engine, &state_change);
+
     // let proof = transfer.proof.as_ref().unwrap();
     // let name = String::from_utf8(proof.name.clone()).unwrap();
     // assert!(engine.trie_key_exists(trie_ctx(), &TrieKey::for_fname(proof.fid, &name)));
+}
+
+#[cfg(test)]
+pub async fn register_fname(
+    fid: u64,
+    username: &String,
+    timestamp: Option<u32>,
+    owner: Option<Vec<u8>>,
+    engine: &mut ShardEngine,
+    network: proto::FarcasterNetwork,
+    signer: alloy_signer_local::PrivateKeySigner,
+) {
+    use crate::core::validations::verification;
+
+    let fname_transfer =
+        username_factory::create_transfer(fid, username, timestamp, None, owner, signer.clone());
+
+    assert!(verification::validate_fname_transfer(
+        &fname_transfer,
+        network,
+        Some(signer.address())
+    )
+    .is_ok());
+
+    let state_change = engine.propose_state_change(
+        engine.shard_id(),
+        vec![MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
+            on_chain_event: None,
+            fname_transfer: Some(fname_transfer.clone()),
+        })],
+        None,
+    );
+
+    validate_and_commit_state_change(engine, &state_change);
+
+    // Ensure the key exists in the trie as this can fail silently otherwise
+    assert!(key_exists_in_trie(
+        engine,
+        &TrieKey::for_fname(fid, username)
+    ));
 }
 
 pub fn default_signer() -> SigningKey {

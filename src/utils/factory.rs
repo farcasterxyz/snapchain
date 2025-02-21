@@ -1,6 +1,7 @@
 use crate::core::types::FARCASTER_EPOCH;
 use crate::proto as message;
 use crate::proto::{OnChainEvent, OnChainEventType};
+use alloy_signer::SignerSync;
 use ed25519_dalek::{SecretKey, Signer, SigningKey};
 use hex::FromHex;
 use message::MessageType;
@@ -585,7 +586,12 @@ pub mod messages_factory {
 }
 
 pub mod username_factory {
+    use alloy_dyn_abi::TypedData;
+    use serde_json::json;
+
     use super::*;
+    use crate::core::validations::verification::eip_712_domain;
+    use crate::core::validations::verification::name_registry_domain;
     use crate::proto::FnameTransfer;
     use crate::proto::UserNameProof;
 
@@ -593,7 +599,7 @@ pub mod username_factory {
         fid: u64,
         username_type: crate::proto::UserNameType,
         name: &String,
-        timestamp: Option<u32>,
+        timestamp: Option<u64>,
         owner: Vec<u8>,
     ) -> UserNameProof {
         let timestamp = timestamp
@@ -614,18 +620,48 @@ pub mod username_factory {
         name: &String,
         timestamp: Option<u32>,
         from_fid: Option<u64>,
-        owner: Vec<u8>,
+        owner: Option<Vec<u8>>,
+        fname_signer: alloy_signer_local::PrivateKeySigner,
     ) -> FnameTransfer {
+        let usable_timestamp = timestamp.unwrap_or_else(|| time::current_timestamp() as u32);
+        let usable_owner = owner.unwrap_or_else(|| rand::random::<[u8; 32]>().to_vec());
+        let username = name;
+
+        let json = json!({
+            "types": eip_712_domain(),
+            "primaryType": "UserNameProof",
+            "domain": name_registry_domain(),
+            "message": {
+                "name": username,
+                "timestamp": usable_timestamp,
+                "owner": hex::encode(usable_owner.clone())
+            }
+        });
+
+        let typed_data = serde_json::from_value::<TypedData>(json);
+        if typed_data.is_err() {
+            panic!("invalid typed data");
+        }
+
+        let data = typed_data.unwrap();
+        let prehash = data.eip712_signing_hash();
+        if prehash.is_err() {
+            panic!("invalid hash");
+        }
+        let sig = fname_signer.sign_hash_sync(&prehash.unwrap());
+        let proof = UserNameProof {
+            timestamp: usable_timestamp.into(),
+            name: name.as_bytes().to_vec(),
+            owner: usable_owner,
+            signature: sig.unwrap().into(),
+            fid,
+            r#type: crate::proto::UserNameType::UsernameTypeFname as i32,
+        };
+
         FnameTransfer {
             id: rand::random::<u64>(),
             from_fid: from_fid.unwrap_or_else(|| 0),
-            proof: Some(create_username_proof(
-                fid,
-                crate::proto::UserNameType::UsernameTypeFname,
-                name,
-                timestamp,
-                owner,
-            )),
+            proof: Some(proof),
         }
     }
 }

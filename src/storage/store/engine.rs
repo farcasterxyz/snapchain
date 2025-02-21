@@ -179,6 +179,7 @@ pub struct ShardEngine {
     max_messages_per_block: u32,
     messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
     pending_txn: Option<CachedTransaction>,
+    fname_signer_address: Option<alloy_primitives::Address>,
 }
 
 impl ShardEngine {
@@ -191,6 +192,7 @@ impl ShardEngine {
         statsd_client: StatsdClientWrapper,
         max_messages_per_block: u32,
         messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
+        fname_signer_address: Option<alloy_primitives::Address>,
     ) -> ShardEngine {
         // TODO: adding the trie here introduces many calls that want to return errors. Rethink unwrap strategy.
         ShardEngine {
@@ -209,6 +211,7 @@ impl ShardEngine {
             max_messages_per_block,
             messages_request_tx,
             pending_txn: None,
+            fname_signer_address,
         }
     }
 
@@ -650,7 +653,11 @@ impl ShardEngine {
                         }
                     }
                     Some(proof) => {
-                        match verification::validate_fname_transfer(fname_transfer, self.network) {
+                        match verification::validate_fname_transfer(
+                            fname_transfer,
+                            self.network,
+                            self.fname_signer_address,
+                        ) {
                             Ok(_) => {
                                 let event = UserDataStore::merge_username_proof(
                                     &self.stores.user_data_store,

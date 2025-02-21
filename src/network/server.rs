@@ -179,6 +179,7 @@ impl MyHubService {
                 self.statsd_client.clone(),
                 100,
                 None,
+                None,
             );
             let result = readonly_engine.simulate_message(&message);
 
