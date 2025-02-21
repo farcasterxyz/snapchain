@@ -140,7 +140,7 @@ pub fn get_blocks_in_range(
     get_block_page_by_prefix(db, page_options, Some(start_primary_key), stop_prefix)
 }
 
-pub fn put_block(db: &RocksDB, block: Block) -> Result<(), BlockStorageError> {
+pub fn put_block(db: &RocksDB, block: &Block) -> Result<(), BlockStorageError> {
     // TODO: We need to introduce a transaction model
     let mut txn = db.txn();
     let header = block
@@ -167,7 +167,7 @@ impl BlockStore {
         BlockStore { db }
     }
 
-    pub fn put_block(&self, block: Block) -> Result<(), BlockStorageError> {
+    pub fn put_block(&self, block: &Block) -> Result<(), BlockStorageError> {
         put_block(&self.db, block)
     }
 

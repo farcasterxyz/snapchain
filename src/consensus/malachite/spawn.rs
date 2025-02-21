@@ -18,7 +18,7 @@ use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::consensus::validator::ShardValidator;
 use crate::core::types::{ShardId, SnapchainValidatorContext};
 use crate::network::gossip::GossipEvent;
-use crate::proto;
+use crate::proto::{self, Height};
 use informalsystems_malachitebft_engine::sync::{Params as SyncParams, Sync, SyncRef};
 use informalsystems_malachitebft_engine::util::events::TxEvent;
 use informalsystems_malachitebft_engine::wal::{Wal, WalRef};
@@ -80,7 +80,14 @@ pub async fn spawn_read_host(
     shard_id: u32,
     engine: Engine,
 ) -> Result<ReadHostRef, ractor::SpawnErr> {
-    let state = ReadHostState { shard_id, engine };
+    let state = ReadHostState {
+        shard_id,
+        engine,
+        last_height: Height {
+            shard_index: shard_id,
+            block_number: 0,
+        },
+    };
     let actor_ref = ReadHost::spawn(state).await?;
     Ok(actor_ref)
 }

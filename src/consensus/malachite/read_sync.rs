@@ -36,7 +36,6 @@ pub type SyncRef = ActorRef<Msg>;
 #[derive(Clone, Debug)]
 pub struct InflightRequest {
     pub peer_id: PeerId,
-    pub request_id: OutboundRequestId,
     pub request: Request<SnapchainValidatorContext>,
 }
 
@@ -192,7 +191,7 @@ impl ReadSync {
             }
 
             Effect::SendValueRequest(peer_id, value_request) => {
-                warn!(
+                info!(
                     height = %value_request.height, peer = %peer_id,
                     "Send the value request to peer"
                 );
@@ -211,14 +210,7 @@ impl ReadSync {
                             self.params.request_timeout,
                         );
 
-                        inflight.insert(
-                            request_id.clone(),
-                            InflightRequest {
-                                peer_id,
-                                request_id,
-                                request,
-                            },
-                        );
+                        inflight.insert(request_id.clone(), InflightRequest { peer_id, request });
                     }
                     Err(e) => {
                         error!("Failed to send request to gossip layer: {e}");
@@ -263,14 +255,7 @@ impl ReadSync {
                             self.params.request_timeout,
                         );
 
-                        inflight.insert(
-                            request_id.clone(),
-                            InflightRequest {
-                                peer_id,
-                                request_id,
-                                request,
-                            },
-                        );
+                        inflight.insert(request_id.clone(), InflightRequest { peer_id, request });
                     }
                     Err(e) => {
                         error!("Failed to send request to gossip layer: {e}");

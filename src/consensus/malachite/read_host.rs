@@ -7,7 +7,7 @@ use bytes::Bytes;
 use informalsystems_malachitebft_sync::RawDecidedValue;
 use prost::Message;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SpawnErr};
-use tracing::error;
+use tracing::{error, info};
 
 /// Messages that need to be handled by the host actor.
 #[derive(Debug)]
@@ -41,6 +41,7 @@ pub enum Engine {
 pub struct ReadHostState {
     pub engine: Engine,
     pub shard_id: u32,
+    pub last_height: Height,
 }
 
 impl ReadHost {
@@ -69,13 +70,31 @@ impl ReadHost {
             ReadHostMsg::ProcessDecidedValue { value } => match &mut state.engine {
                 Engine::ShardEngine(shard_engine) => match value.value {
                     Some(proto::decided_value::Value::Shard(shard_chunk)) => {
+                        let height = shard_chunk.header.as_ref().unwrap().height.unwrap();
+                        let out_of_order = height != state.last_height.increment();
                         shard_engine.commit_shard_chunk(&shard_chunk);
+                        info!(
+                            %height,
+                            hash = hex::encode(&shard_chunk.hash),
+                            out_of_order,
+                            "Processed decided shard chunk"
+                        );
+                        state.last_height = height;
                     }
                     _ => {}
                 },
                 Engine::BlockEngine(block_engine) => match value.value {
                     Some(proto::decided_value::Value::Block(block)) => {
-                        block_engine.commit_block(block);
+                        let height = block.header.as_ref().unwrap().height.unwrap();
+                        let out_of_order = height != state.last_height.increment();
+                        block_engine.commit_block(&block);
+                        info!(
+                            out_of_order,
+                            %height,
+                            hash = hex::encode(&block.hash),
+                            "Processed decided block"
+                        );
+                        state.last_height = height;
                     }
                     _ => {}
                 },

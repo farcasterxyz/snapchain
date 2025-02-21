@@ -480,7 +480,7 @@ impl Proposer for BlockProposer {
         if let Some(proposal) = self.proposed_blocks.get(&value) {
             let block = proposal.block(commits).unwrap();
             self.publish_new_block(block.clone()).await;
-            self.engine.commit_block(block);
+            self.engine.commit_block(&block);
             self.proposed_blocks.remove(&value);
         } else {
             panic!(
