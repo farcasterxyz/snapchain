@@ -196,7 +196,7 @@ mod tests {
                 let config = load_and_merge_config(args).expect("Failed to load config");
                 assert_eq!(config.fnames.disable, true);
                 assert_eq!(config.fnames.start_from, 100);
-                assert_eq!(config.fnames.stop_at, 150);
+                assert_eq!(config.fnames.stop_at, Some(150));
                 assert_eq!(
                     config.fnames.url,
                     "http://example.com/hello/universe".to_string()
