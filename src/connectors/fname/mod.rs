@@ -95,7 +95,7 @@ impl Fetcher {
     ) -> Self {
         Fetcher {
             position: cfg.start_from,
-            cfg: cfg,
+            cfg,
             mempool_tx,
             statsd_client,
             local_state_store,
@@ -156,6 +156,7 @@ impl Fetcher {
 
             info!(count, position = self.position, "found new transfers");
 
+            let mut last_transfer_id = 0;
             for t in response.transfers {
                 if t.id <= self.position {
                     return Err(FetchError::NonSequentialIds {
@@ -207,7 +208,10 @@ impl Fetcher {
                         "Unable to send fname transfer to mempool"
                     )
                 }
-                self.record_username_proof(t.id);
+                last_transfer_id = t.id;
+            }
+            if last_transfer_id > 0 {
+                self.record_username_proof(last_transfer_id);
             }
         }
     }
