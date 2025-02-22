@@ -15,8 +15,8 @@ use crate::{
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
-    pub start_from: u64, // for testing
-    pub stop_at: u64,    // for testing
+    pub start_from: u64,
+    pub stop_at: Option<u64>,
     pub url: String,
     pub disable: bool,
 }
@@ -25,7 +25,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             start_from: 0,
-            stop_at: 200, // set this default to a small value for now, revisit later
+            stop_at: None,
             url: "https://fnames.farcaster.xyz/transfers".to_string(),
             disable: false,
         }
@@ -163,7 +163,7 @@ impl Fetcher {
                         position: self.position,
                     });
                 }
-                if t.id > self.cfg.stop_at {
+                if self.cfg.stop_at.is_some() && t.id >= self.cfg.stop_at.unwrap() {
                     return Err(FetchError::Stop);
                 }
                 self.position = t.id;
