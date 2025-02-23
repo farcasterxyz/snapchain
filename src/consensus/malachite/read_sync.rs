@@ -345,6 +345,7 @@ impl ReadSync {
                                     )),
                                     value: Some(value),
                                 },
+                                sync: myself.clone(),
                             })
                             .unwrap();
                         self.process_input(

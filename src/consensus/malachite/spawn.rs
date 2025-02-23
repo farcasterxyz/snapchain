@@ -5,6 +5,7 @@ use informalsystems_malachitebft_engine::host::HostRef;
 use informalsystems_malachitebft_engine::network::NetworkRef;
 use informalsystems_malachitebft_network::{PeerId as MalachitePeerId, PeerIdExt};
 use informalsystems_malachitebft_sync::Metrics as SyncMetrics;
+use std::collections::BTreeMap;
 use std::path::Path;
 use tracing::Span;
 
@@ -27,7 +28,7 @@ use libp2p::PeerId;
 use tokio::sync::mpsc;
 
 use super::read_host::{Engine, ReadHost, ReadHostMsg, ReadHostRef, ReadHostState};
-use super::read_sync::{self, ReadParams, ReadSync, ReadSyncRef};
+use super::read_sync::{ReadParams, ReadSync, ReadSyncRef};
 
 pub async fn spawn_network_actor(
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
@@ -87,6 +88,8 @@ pub async fn spawn_read_host(
             shard_index: shard_id,
             block_number: 0,
         },
+        max_num_buffered_blocks: 100,
+        buffered_blocks: BTreeMap::new(),
     };
     let actor_ref = ReadHost::spawn(state).await?;
     Ok(actor_ref)
@@ -218,13 +221,10 @@ impl MalachiteReadNodeActors {
         &self,
         value: proto::DecidedValue,
     ) -> Result<(), ractor::MessagingErr<ReadHostMsg>> {
-        self.sync_actor
-            .cast(read_sync::Msg::Decided(
-                value.commits.as_ref().unwrap().height.unwrap(),
-            ))
-            .unwrap();
-        self.host_actor
-            .cast(ReadHostMsg::ProcessDecidedValue { value })
+        self.host_actor.cast(ReadHostMsg::ProcessDecidedValue {
+            value,
+            sync: self.sync_actor.clone(),
+        })
     }
 
     pub fn cast_network_event(
