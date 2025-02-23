@@ -338,6 +338,7 @@ impl ReadSync {
                                 proto::ShardChunk::decode(value_bytes).unwrap(),
                             )
                         };
+                        info!(peer_id = %peer, height = %decided_value.certificate.height, "Received sync value response");
                         self.host
                             .cast(ReadHostMsg::ProcessDecidedValue {
                                 value: proto::DecidedValue {
