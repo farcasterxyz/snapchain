@@ -288,6 +288,7 @@ impl ReadSync {
             }
 
             Msg::NetworkEvent(NetworkEvent::Status(peer_id, status)) => {
+                info!(%peer_id, height = %status.height, "Received peer status");
                 let status = sync::Status {
                     peer_id,
                     height: status.height,
