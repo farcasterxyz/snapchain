@@ -210,6 +210,12 @@ impl MalachiteReadNodeActors {
         )
         .await?;
 
+        host_actor
+            .cast(ReadHostMsg::Started {
+                sync: sync_actor.clone(),
+            })
+            .unwrap();
+
         Ok(Self {
             network_actor,
             host_actor,

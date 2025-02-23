@@ -17,8 +17,13 @@ use super::read_sync::ReadSyncRef;
 /// Messages that need to be handled by the host actor.
 #[derive(Debug)]
 pub enum ReadHostMsg {
+    Started {
+        sync: ReadSyncRef,
+    },
     /// Request the earliest block height in the block store
-    GetHistoryMinHeight { reply_to: RpcReplyPort<Height> },
+    GetHistoryMinHeight {
+        reply_to: RpcReplyPort<Height>,
+    },
 
     // Consensus has decided on a value
     ProcessDecidedValue {
@@ -130,6 +135,26 @@ impl ReadHost {
         state: &mut ReadHostState,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
+            ReadHostMsg::Started { sync } => {
+                let height = match &state.engine {
+                    Engine::BlockEngine(engine) => match engine.get_last_block() {
+                        None => Height {
+                            shard_index: state.shard_id,
+                            block_number: 0,
+                        },
+                        Some(block) => block.header.unwrap().height.unwrap(),
+                    },
+                    Engine::ShardEngine(engine) => match engine.get_last_shard_chunk() {
+                        None => Height {
+                            shard_index: state.shard_id,
+                            block_number: 0,
+                        },
+                        Some(shard_chunk) => shard_chunk.header.unwrap().height.unwrap(),
+                    },
+                };
+                sync.cast(read_sync::Msg::Decided(height)).unwrap();
+            }
+
             ReadHostMsg::GetHistoryMinHeight { reply_to } => {
                 reply_to.send(crate::proto::Height::new(state.shard_id, 1))?;
             }

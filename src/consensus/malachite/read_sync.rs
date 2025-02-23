@@ -374,7 +374,7 @@ impl ReadSync {
             Msg::Decided(height) => {
                 self.process_input(&myself, state, sync::Input::UpdateHeight(height))
                     .await?;
-                self.process_input(&myself, state, sync::Input::StartHeight(height))
+                self.process_input(&myself, state, sync::Input::StartHeight(height.increment()))
                     .await?;
             }
 
