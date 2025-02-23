@@ -152,6 +152,7 @@ impl ReadHost {
                         Some(shard_chunk) => shard_chunk.header.unwrap().height.unwrap(),
                     },
                 };
+                state.last_height = height;
                 sync.cast(read_sync::Msg::Decided(height)).unwrap();
             }
 
