@@ -238,29 +238,10 @@ impl ReadSync {
                 )?;
             }
             Effect::SendVoteSetRequest(peer_id, vote_set_request) => {
-                warn!(
+                error!(
                     height = %vote_set_request.height, round = %vote_set_request.round, peer = %peer_id,
-                    "Send the vote set request to peer"
+                    "Read node requesting vote set"
                 );
-
-                let request = Request::VoteSetRequest(vote_set_request);
-
-                let result = ractor::call!(self.gossip, |reply_to| {
-                    NetworkMsg::OutgoingRequest(peer_id, request.clone(), reply_to)
-                });
-                match result {
-                    Ok(request_id) => {
-                        timers.start_timer(
-                            Timeout::Request(request_id.clone()),
-                            self.params.request_timeout,
-                        );
-
-                        inflight.insert(request_id.clone(), InflightRequest { peer_id, request });
-                    }
-                    Err(e) => {
-                        error!("Failed to send request to gossip layer: {e}");
-                    }
-                }
             }
         }
 
@@ -314,12 +295,8 @@ impl ReadSync {
                         .await?;
                     }
                     Request::VoteSetRequest(vote_set_request) => {
-                        self.process_input(
-                            &myself,
-                            state,
-                            sync::Input::VoteSetRequest(request_id, from, vote_set_request),
-                        )
-                        .await?;
+                        error!(height = %vote_set_request.height, round = %vote_set_request.round, peer = %from,
+                            "Read node received vote set request");
                     }
                 };
             }
@@ -358,12 +335,8 @@ impl ReadSync {
                         .await?;
                     }
                     Response::VoteSetResponse(vote_set_response) => {
-                        self.process_input(
-                            &myself,
-                            state,
-                            sync::Input::VoteSetResponse(request_id, peer, vote_set_response),
-                        )
-                        .await?;
+                        error!(height = %vote_set_response.height, round = %vote_set_response.round, %peer ,
+                            "Read node sending vote set response");
                     }
                 }
             }
