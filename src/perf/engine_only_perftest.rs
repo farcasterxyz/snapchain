@@ -45,6 +45,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         }),
         db_name: None,
         messages_request_tx: Some(messages_request_tx),
+        fname_signer_address: None,
     });
 
     let statsd_client = StatsdClientWrapper::new(

@@ -96,6 +96,7 @@ pub struct EngineOptions {
     pub limits: Option<StoreLimits>,
     pub db_name: Option<String>,
     pub messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
+    pub fname_signer_address: Option<String>,
 }
 
 pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile::TempDir) {
@@ -125,6 +126,7 @@ pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile
             statsd_client,
             256,
             options.messages_request_tx,
+            options.fname_signer_address,
         ),
         dir,
     )
@@ -136,6 +138,19 @@ pub fn new_engine() -> (ShardEngine, tempfile::TempDir) {
         limits: None,
         db_name: None,
         messages_request_tx: None,
+        fname_signer_address: None,
+    })
+}
+
+#[cfg(test)]
+pub fn new_engine_with_fname_signer(
+    signer_address: Option<String>,
+) -> (ShardEngine, tempfile::TempDir) {
+    new_engine_with_options(EngineOptions {
+        limits: None,
+        db_name: None,
+        messages_request_tx: None,
+        fname_signer_address: signer_address,
     })
 }
 
@@ -273,9 +288,15 @@ pub async fn register_fname(
     fid: u64,
     username: &String,
     timestamp: Option<u64>,
+    owner: Option<Vec<u8>>,
     engine: &mut ShardEngine,
+    signer: alloy_signer_local::PrivateKeySigner,
 ) {
-    let fname_transfer = username_factory::create_transfer(fid, username, timestamp, None);
+    use crate::core::validations::verification;
+
+    let fname_transfer =
+        username_factory::create_transfer(fid, username, timestamp, None, owner, signer.clone());
+    assert!(verification::validate_fname_transfer(&fname_transfer, Some(signer.address())).is_ok());
     let state_change = engine.propose_state_change(
         1,
         vec![MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
