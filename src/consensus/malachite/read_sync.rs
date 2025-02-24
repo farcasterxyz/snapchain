@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use prost::Message;
-use ractor::{Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use rand::SeedableRng;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -20,7 +20,7 @@ use informalsystems_malachitebft_engine::util::ticker::ticker;
 use informalsystems_malachitebft_engine::util::timers::{TimeoutElapsed, TimerScheduler};
 
 use crate::core::types::SnapchainValidatorContext;
-use crate::proto::{self, Commits, Height};
+use crate::proto::{self, Height};
 
 use super::read_host::{ReadHostMsg, ReadHostRef};
 
@@ -44,7 +44,7 @@ pub type InflightRequests = HashMap<OutboundRequestId, InflightRequest>;
 #[derive(Debug)]
 pub enum Msg {
     /// Internal tick
-    Tick,
+    Tick { reply_to: Option<RpcReplyPort<()>> },
 
     /// Receive an even from gossip layer
     NetworkEvent(NetworkEvent<SnapchainValidatorContext>),
@@ -274,9 +274,13 @@ impl ReadSync {
         state: &mut State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
-            Msg::Tick => {
+            Msg::Tick { reply_to } => {
                 self.process_input(&myself, state, sync::Input::Tick)
                     .await?;
+
+                if let Some(reply_to) = reply_to {
+                    reply_to.send(()).unwrap();
+                }
             }
 
             Msg::NetworkEvent(NetworkEvent::PeerDisconnected(peer_id)) => {
@@ -341,13 +345,9 @@ impl ReadSync {
                         info!(peer_id = %peer, height = %decided_value.certificate.height, "Received sync value response");
                         self.host
                             .cast(ReadHostMsg::ProcessDecidedValue {
-                                value: proto::DecidedValue {
-                                    commits: Some(Commits::from_commit_certificate(
-                                        &decided_value.certificate,
-                                    )),
-                                    value: Some(value),
-                                },
+                                value: proto::DecidedValue { value: Some(value) },
                                 sync: myself.clone(),
+                                reply_to: None,
                             })
                             .unwrap();
                         self.process_input(
@@ -437,7 +437,7 @@ impl Actor for ReadSync {
         let ticker = tokio::spawn(ticker(
             self.params.status_update_interval,
             myself.clone(),
-            || Msg::Tick,
+            || Msg::Tick { reply_to: None },
         ));
 
         let rng = Box::new(rand::rngs::StdRng::from_entropy());

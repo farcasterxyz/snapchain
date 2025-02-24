@@ -29,6 +29,7 @@ pub enum ReadHostMsg {
     ProcessDecidedValue {
         value: proto::DecidedValue,
         sync: ReadSyncRef,
+        reply_to: Option<RpcReplyPort<()>>,
     },
 
     // Retrieve decided block from the block store
@@ -137,30 +138,23 @@ impl ReadHost {
         match msg {
             ReadHostMsg::Started { sync } => {
                 let height = match &state.engine {
-                    Engine::BlockEngine(engine) => match engine.get_last_block() {
-                        None => Height {
-                            shard_index: state.shard_id,
-                            block_number: 0,
-                        },
-                        Some(block) => block.header.unwrap().height.unwrap(),
-                    },
-                    Engine::ShardEngine(engine) => match engine.get_last_shard_chunk() {
-                        None => Height {
-                            shard_index: state.shard_id,
-                            block_number: 0,
-                        },
-                        Some(shard_chunk) => shard_chunk.header.unwrap().height.unwrap(),
-                    },
+                    Engine::BlockEngine(engine) => engine.get_confirmed_height(),
+                    Engine::ShardEngine(engine) => engine.get_confirmed_height(),
                 };
                 state.last_height = height;
                 sync.cast(read_sync::Msg::Decided(height)).unwrap();
             }
 
             ReadHostMsg::GetHistoryMinHeight { reply_to } => {
+                // For now until we implement pruning
                 reply_to.send(crate::proto::Height::new(state.shard_id, 1))?;
             }
 
-            ReadHostMsg::ProcessDecidedValue { value, sync } => {
+            ReadHostMsg::ProcessDecidedValue {
+                value,
+                sync,
+                reply_to,
+            } => {
                 let height = Self::get_decided_value_height(&value);
                 if height > state.last_height.increment() {
                     if (state.buffered_blocks.len() as u32) < state.max_num_buffered_blocks {
@@ -173,6 +167,9 @@ impl ReadHost {
                     Self::process_buffered_blocks(state, &sync);
                 } else {
                     info!(%height, last_height = %state.last_height, "Dropping decided block because height is too low")
+                }
+                if let Some(reply_to) = reply_to {
+                    reply_to.send(()).unwrap()
                 }
             }
 

@@ -230,6 +230,7 @@ impl MalachiteReadNodeActors {
         self.host_actor.cast(ReadHostMsg::ProcessDecidedValue {
             value,
             sync: self.sync_actor.clone(),
+            reply_to: None,
         })
     }
 

@@ -194,7 +194,6 @@ impl Host {
                 state
                     .gossip_tx
                     .send(GossipEvent::BroadcastDecidedValue(proto::DecidedValue {
-                        commits: Some(commits),
                         value: decided_value,
                     }))
                     .await

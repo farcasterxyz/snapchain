@@ -80,7 +80,6 @@ message FullProposal {
 }
 
 message DecidedValue {
-  Commits commits = 1;
   oneof value {
     Block block = 2;
     ShardChunk shard = 3;

@@ -148,6 +148,7 @@ struct TransactionCounts {
     system_messages: u64,
 }
 
+#[derive(Clone)]
 pub struct ShardEngine {
     shard_id: u32,
     pub db: Arc<RocksDB>,
@@ -178,6 +179,10 @@ impl ShardEngine {
             max_messages_per_block,
             messages_request_tx,
         }
+    }
+
+    pub fn shard_id(&self) -> u32 {
+        self.shard_id
     }
 
     // statsd
