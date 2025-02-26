@@ -197,10 +197,6 @@ impl ReadNodeForTest {
     pub async fn num_shard_chunks(&self) -> usize {
         num_shard_chunks(&self.node.shard_stores).await
     }
-
-    pub async fn total_messages(&self) -> usize {
-        total_messages(&self.node.shard_stores).await
-    }
 }
 
 impl NodeForTest {
