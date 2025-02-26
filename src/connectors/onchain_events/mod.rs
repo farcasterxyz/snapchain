@@ -295,12 +295,36 @@ impl Subscriber {
     }
 
     async fn get_block_timestamp(&self, block_hash: FixedBytes<32>) -> Result<u64, SubscribeError> {
-        let block = self
-            .provider
-            .get_block_by_hash(block_hash, alloy_rpc_types::BlockTransactionsKind::Hashes)
-            .await?
-            .ok_or(SubscribeError::UnableToFindBlockByHash)?;
-        Ok(block.header.timestamp)
+        let mut retry_count = 0;
+        loop {
+            match self
+                .provider
+                .get_block_by_hash(block_hash, alloy_rpc_types::BlockTransactionsKind::Hashes)
+                .await
+            {
+                Ok(Some(block)) => {
+                    return Ok(block.header.timestamp);
+                }
+                Ok(None) => {
+                    return Err(SubscribeError::UnableToFindBlockByHash);
+                }
+                Err(err) => {
+                    retry_count += 1;
+                    // Calculate exponential backoff with max of 60 seconds
+                    let backoff_secs = (2_u64.pow(retry_count.min(5) as u32)).min(60);
+
+                    error!(
+                        "Error getting block timestamp for hash {}: {}. Retry {} in {} seconds",
+                        hex::encode(block_hash),
+                        err,
+                        retry_count,
+                        backoff_secs
+                    );
+
+                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                }
+            }
+        }
     }
 
     async fn process_log(&mut self, event: &Log) -> Result<(), SubscribeError> {
@@ -521,6 +545,42 @@ impl Subscriber {
         Ok(())
     }
 
+    async fn get_logs_with_retry(
+        &mut self,
+        address: Address,
+        start_block: u64,
+        stop_block: u64,
+    ) -> Result<(), SubscribeError> {
+        let mut retry_count = 0;
+        loop {
+            match self.get_logs(address, start_block, stop_block).await {
+                Ok(_) => return Ok(()),
+                Err(err) => {
+                    retry_count += 1;
+                    let registry_name = if address == STORAGE_REGISTRY {
+                        "Storage Registry"
+                    } else if address == ID_REGISTRY {
+                        "ID Registry"
+                    } else if address == KEY_REGISTRY {
+                        "Key Registry"
+                    } else {
+                        "Unknown Registry"
+                    };
+
+                    // Calculate exponential backoff with max of 60 seconds
+                    let backoff_secs = (2_u64.pow(retry_count.min(5) as u32)).min(60);
+
+                    error!(
+                        "Error getting logs for {}, blocks {}-{}: {}. Retry {} in {} seconds",
+                        registry_name, start_block, stop_block, err, retry_count, backoff_secs
+                    );
+
+                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                }
+            }
+        }
+    }
+
     pub async fn sync_historical_events(
         &mut self,
         initial_start_block: u64,
@@ -530,12 +590,17 @@ impl Subscriber {
         let mut start_block = initial_start_block;
         loop {
             let stop_block = final_stop_block.min(start_block + batch_size);
-            self.get_logs(STORAGE_REGISTRY, start_block, stop_block)
+
+            self.get_logs_with_retry(STORAGE_REGISTRY, start_block, stop_block)
                 .await?;
-            self.get_logs(ID_REGISTRY, start_block, stop_block).await?;
-            self.get_logs(KEY_REGISTRY, start_block, stop_block).await?;
+            self.get_logs_with_retry(ID_REGISTRY, start_block, stop_block)
+                .await?;
+            self.get_logs_with_retry(KEY_REGISTRY, start_block, stop_block)
+                .await?;
+
             self.record_block_number(stop_block);
             start_block += batch_size;
+
             if start_block > final_stop_block {
                 info!(
                     start_block,
@@ -561,17 +626,36 @@ impl Subscriber {
     }
 
     async fn latest_block_on_chain(&mut self) -> Result<u64, SubscribeError> {
-        let block = self
-            .provider
-            .get_block_by_number(
-                alloy_rpc_types::BlockNumberOrTag::Latest,
-                alloy_rpc_types::BlockTransactionsKind::Hashes,
-            )
-            .await?;
-        Ok(block
-            .ok_or(SubscribeError::LogMissingBlockNumber)?
-            .header
-            .number)
+        let mut retry_count = 0;
+        loop {
+            match self
+                .provider
+                .get_block_by_number(
+                    alloy_rpc_types::BlockNumberOrTag::Latest,
+                    alloy_rpc_types::BlockTransactionsKind::Hashes,
+                )
+                .await
+            {
+                Ok(block) => {
+                    return Ok(block
+                        .ok_or(SubscribeError::LogMissingBlockNumber)?
+                        .header
+                        .number);
+                }
+                Err(err) => {
+                    retry_count += 1;
+                    // Calculate exponential backoff with max of 60 seconds
+                    let backoff_secs = (2_u64.pow(retry_count.min(5) as u32)).min(60);
+
+                    error!(
+                        "Error getting latest block on chain: {}. Retry {} in {} seconds",
+                        err, retry_count, backoff_secs
+                    );
+
+                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                }
+            }
+        }
     }
 
     async fn sync_live_events(&mut self, start_block_number: u64) -> Result<(), SubscribeError> {
@@ -620,31 +704,52 @@ impl Subscriber {
             latest_block_in_db,
             "Starting l2 events subscription"
         );
+        let live_sync_block;
         match self.start_block_number {
             None => {
-                self.sync_live_events(latest_block_on_chain).await?;
+                // By default, start from the first block or the latest block in the db. Whichever is higher
+                live_sync_block = Some(FIRST_BLOCK.max(latest_block_in_db));
             }
             Some(start_block_number) => {
                 let historical_sync_start_block = latest_block_in_db.max(start_block_number);
                 let historical_sync_stop_block = latest_block_on_chain
                     .min(self.stop_block_number.unwrap_or(latest_block_on_chain));
 
+                // If we have a specific start block, sync historical events first
                 self.sync_historical_events(
                     historical_sync_start_block,
                     historical_sync_stop_block,
                 )
                 .await?;
 
-                let should_start_live_sync = match self.stop_block_number {
-                    None => true,
-                    Some(stop_block) => stop_block > historical_sync_stop_block,
+                live_sync_block = match self.stop_block_number {
+                    // No specificed stop block, so live sync should resume from where historical sync ended
+                    None => Some(historical_sync_stop_block),
+                    Some(stop_block) => {
+                        // stop block is in the future, so start live sync
+                        if stop_block > historical_sync_stop_block {
+                            Some(historical_sync_stop_block)
+                        } else {
+                            // stop block is in the past, so no need to live sync
+                            None
+                        }
+                    }
                 };
+            }
+        }
 
-                if should_start_live_sync {
-                    self.sync_live_events(historical_sync_stop_block).await?;
+        if live_sync_block.is_none() {
+            info!("Historical sync complete. Not subscribing to live events");
+            return Ok(());
+        }
+
+        loop {
+            match self.sync_live_events(live_sync_block.unwrap()).await {
+                _ => {
+                    error!("Live sync ended unexpectedly. Retrying in 10 seconds",);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
                 }
             }
         }
-        Ok(())
     }
 }
