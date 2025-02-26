@@ -4,7 +4,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
-    use crate::consensus::malachite::spawn::MalachiteReadNodeActors;
+    use crate::consensus::malachite::spawn_read_node::MalachiteReadNodeActors;
     use crate::consensus::read_validator::Engine;
     use crate::core::types::SnapchainValidatorContext;
     use crate::network::gossip::GossipEvent;
