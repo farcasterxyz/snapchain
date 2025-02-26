@@ -3,19 +3,22 @@ mod tests {
 
     use std::time::Duration;
 
-    use crate::consensus::malachite::read_host::{Engine, ReadHostMsg};
-    use crate::consensus::malachite::read_sync::{self};
+    use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
     use crate::consensus::malachite::spawn::MalachiteReadNodeActors;
+    use crate::consensus::read_validator::Engine;
     use crate::core::types::SnapchainValidatorContext;
     use crate::network::gossip::GossipEvent;
-    use crate::proto::{self, Height, ShardChunk};
+    use crate::proto::{self, Height, ShardChunk, StatusMessage};
     use crate::storage::store::engine::ShardEngine;
     use crate::storage::store::test_helper::{
         self, commit_event, default_storage_event, FID_FOR_TEST,
     };
+    use bytes::Bytes;
     use informalsystems_malachitebft_metrics::SharedRegistry;
+    use informalsystems_malachitebft_network::{Channel, PeerIdExt};
+    use informalsystems_malachitebft_sync::PeerId;
     use libp2p::identity::ed25519::Keypair;
-    use libp2p::PeerId;
+    use prost::Message;
     use tokio::sync::mpsc;
 
     async fn setup(
@@ -39,7 +42,7 @@ mod tests {
         let read_node_actors = MalachiteReadNodeActors::create_and_start(
             SnapchainValidatorContext::new(keypair),
             Engine::ShardEngine(read_node_engine.clone()),
-            PeerId::random(),
+            libp2p::PeerId::random(),
             gossip_tx,
             SharedRegistry::global(),
             shard_id,
@@ -54,22 +57,11 @@ mod tests {
         )
     }
 
-    async fn broadcast_status_and_assert_height(
-        actors: &MalachiteReadNodeActors,
+    async fn assert_height_on_status(
         gossip_rx: &mut mpsc::Receiver<GossipEvent<SnapchainValidatorContext>>,
         expected_height: Height,
     ) {
-        actors
-            .sync_actor
-            .call(
-                |reply_to| read_sync::Msg::Tick {
-                    reply_to: Some(reply_to),
-                },
-                None,
-            )
-            .await
-            .unwrap();
-
+        wait_for_status().await;
         let gossip_msg = gossip_rx.recv().await.unwrap();
         match gossip_msg {
             GossipEvent::BroadcastStatus(status) => {
@@ -84,22 +76,20 @@ mod tests {
             value: Some(proto::decided_value::Value::Shard(shard_chunk.clone())),
         };
 
-        actors
-            .host_actor
-            .call(
-                |reply_to| ReadHostMsg::ProcessDecidedValue {
-                    value: decided_value,
-                    sync: actors.sync_actor.clone(),
-                    reply_to: Some(reply_to),
-                },
-                None,
-            )
-            .await
-            .unwrap();
+        actors.cast_decided_value(decided_value).unwrap();
+        wait_for_block().await;
     }
 
     async fn commit_shard_chunk(engine: &mut ShardEngine) -> ShardChunk {
         commit_event(engine, &default_storage_event(FID_FOR_TEST)).await
+    }
+
+    async fn wait_for_block() {
+        tokio::time::sleep(Duration::from_millis(10)).await
+    }
+
+    async fn wait_for_status() {
+        tokio::time::sleep(Duration::from_secs(6)).await
     }
 
     #[tokio::test]
@@ -108,14 +98,12 @@ mod tests {
 
         let shard_chunk = commit_shard_chunk(&mut proposer_engine).await;
         process_shard_chunk(&actors, &shard_chunk).await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
         assert_eq!(
             read_node_engine.get_confirmed_height(),
             shard_chunk.header.as_ref().unwrap().height.unwrap()
         );
 
-        broadcast_status_and_assert_height(
-            &actors,
+        assert_height_on_status(
             &mut gossip_rx,
             shard_chunk.header.as_ref().unwrap().height.unwrap(),
         )
@@ -158,7 +146,7 @@ mod tests {
     #[tokio::test]
     async fn test_startup_with_already_decided_blocks() {
         let num_initial_blocks = 3;
-        let (mut proposer_engine, read_node_engine, _gossip_rx, actors) =
+        let (mut proposer_engine, read_node_engine, mut gossip_rx, actors) =
             setup(num_initial_blocks).await;
 
         let start_height = Height {
@@ -167,6 +155,7 @@ mod tests {
         };
 
         assert_eq!(read_node_engine.get_confirmed_height(), start_height);
+        assert_height_on_status(&mut gossip_rx, start_height).await;
 
         let shard_chunk4 = commit_shard_chunk(&mut proposer_engine).await;
         process_shard_chunk(&actors, &shard_chunk4).await;
@@ -194,6 +183,7 @@ mod tests {
             shard_chunk2.header.as_ref().unwrap().height.unwrap()
         );
 
+        // This shard chunk is just dropped
         process_shard_chunk(&actors, &shard_chunk1).await;
         assert_eq!(
             read_node_engine.get_confirmed_height(),
@@ -206,5 +196,53 @@ mod tests {
             read_node_engine.get_confirmed_height(),
             shard_chunk3.header.as_ref().unwrap().height.unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn test_send_sync_request() {
+        let (_proposer_engine, read_node_engine, mut gossip_rx, actors) = setup(0).await;
+
+        let peer = PeerId::from_libp2p(&libp2p::PeerId::random());
+        actors
+            .cast_network_event(MalachiteNetworkEvent::Message(
+                Channel::Sync,
+                peer,
+                Bytes::from(
+                    (StatusMessage {
+                        peer_id: peer.to_libp2p().to_bytes(),
+                        height: Some(Height {
+                            shard_index: read_node_engine.shard_id(),
+                            block_number: 10,
+                        }),
+                        min_height: Some(Height {
+                            shard_index: read_node_engine.shard_id(),
+                            block_number: 1,
+                        }),
+                    })
+                    .encode_to_vec(),
+                ),
+            ))
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Show that we send a sync request when we're behind a peer
+        match gossip_rx.recv().await.unwrap() {
+            GossipEvent::SyncRequest(peer_id, request, _sender) => {
+                assert_eq!(peer_id, peer);
+                match request {
+                    informalsystems_malachitebft_sync::Request::ValueRequest(value_request) => {
+                        assert_eq!(
+                            value_request.height,
+                            read_node_engine.get_confirmed_height().increment()
+                        );
+                    }
+                    _ => panic!("Expected value request"),
+                }
+            }
+            _ => {
+                panic!("Expected sync request")
+            }
+        };
     }
 }

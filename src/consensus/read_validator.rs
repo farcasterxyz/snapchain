@@ -1,0 +1,145 @@
+use std::collections::BTreeMap;
+
+use crate::core::types::SnapchainValidatorContext;
+use crate::proto::{self, DecidedValue, Height};
+use crate::storage::store::engine::{BlockEngine, ShardEngine};
+use bytes::Bytes;
+use informalsystems_malachitebft_sync::RawDecidedValue;
+use prost::Message;
+use tracing::info;
+
+use super::malachite::read_sync::{self, ReadSyncRef};
+
+pub enum Engine {
+    ShardEngine(ShardEngine),
+    BlockEngine(BlockEngine),
+}
+pub struct ReadValidator {
+    pub engine: Engine,
+    pub shard_id: u32,
+    pub last_height: Height,
+    pub max_num_buffered_blocks: u32,
+    pub buffered_blocks: BTreeMap<Height, proto::DecidedValue>,
+}
+
+impl ReadValidator {
+    pub fn initialize_height(&mut self, sync: &ReadSyncRef) {
+        let height = match &self.engine {
+            Engine::BlockEngine(engine) => engine.get_confirmed_height(),
+            Engine::ShardEngine(engine) => engine.get_confirmed_height(),
+        };
+        self.last_height = height;
+        sync.cast(read_sync::Msg::Decided(height)).unwrap();
+    }
+
+    pub fn get_min_height(&self) -> Height {
+        // Always return the genesis block, until we implement pruning
+        Height::new(self.shard_id, 1)
+    }
+
+    fn commit_decided_value(&mut self, value: &DecidedValue, height: Height, sync: &ReadSyncRef) {
+        match &mut self.engine {
+            Engine::ShardEngine(shard_engine) => match &value.value {
+                Some(proto::decided_value::Value::Shard(shard_chunk)) => {
+                    shard_engine.commit_shard_chunk(&shard_chunk);
+                    info!(
+                        %height,
+                        hash = hex::encode(&shard_chunk.hash),
+                        "Processed decided shard chunk"
+                    );
+                }
+                _ => {
+                    panic!("Invalid decided value")
+                }
+            },
+            Engine::BlockEngine(block_engine) => match &value.value {
+                Some(proto::decided_value::Value::Block(block)) => {
+                    block_engine.commit_block(&block);
+                    info!(
+                        %height,
+                        hash = hex::encode(&block.hash),
+                        "Processed decided block"
+                    );
+                }
+                _ => {
+                    panic!("Invalid decided value")
+                }
+            },
+        };
+        self.last_height = height;
+        sync.cast(read_sync::Msg::Decided(height)).unwrap();
+    }
+
+    fn process_buffered_blocks(&mut self, sync: &read_sync::ReadSyncRef) {
+        while let Some((height, value)) = self.buffered_blocks.pop_first() {
+            if height == self.last_height.increment() {
+                self.commit_decided_value(&value, height, sync);
+            } else if height > self.last_height.increment() {
+                self.buffered_blocks.insert(height, value);
+                break;
+            }
+        }
+    }
+
+    fn get_decided_value_height(value: &proto::DecidedValue) -> Height {
+        match value.value.as_ref().unwrap() {
+            proto::decided_value::Value::Shard(shard_chunk) => {
+                shard_chunk.header.as_ref().unwrap().height.unwrap()
+            }
+
+            proto::decided_value::Value::Block(block) => {
+                block.header.as_ref().unwrap().height.unwrap()
+            }
+        }
+    }
+
+    pub fn process_decided_value(&mut self, value: DecidedValue, sync: &ReadSyncRef) {
+        let height = Self::get_decided_value_height(&value);
+        if height > self.last_height.increment() {
+            if (self.buffered_blocks.len() as u32) < self.max_num_buffered_blocks {
+                self.buffered_blocks.insert(height, value);
+            } else {
+                info!(%height, last_height = %self.last_height, "Dropping decided block because buffered block space is full")
+            }
+        } else if height == self.last_height.increment() {
+            self.commit_decided_value(&value, height, &sync);
+            self.process_buffered_blocks(&sync);
+        } else {
+            info!(%height, last_height = %self.last_height, "Dropping decided block because height is too low")
+        }
+    }
+
+    pub fn get_decided_value(
+        &mut self,
+        height: Height,
+    ) -> Option<RawDecidedValue<SnapchainValidatorContext>> {
+        match &self.engine {
+            Engine::ShardEngine(shard_engine) => {
+                let shard_chunk = shard_engine.get_shard_chunk_by_height(height);
+                match shard_chunk {
+                    Some(chunk) => {
+                        let commits = chunk.commits.clone().unwrap();
+                        Some(RawDecidedValue {
+                            certificate: commits.to_commit_certificate(),
+                            value_bytes: Bytes::from(chunk.encode_to_vec()),
+                        })
+                    }
+                    None => None,
+                }
+            }
+            Engine::BlockEngine(block_engine) => {
+                let block = block_engine.get_block_by_height(height);
+                match block {
+                    Some(block) => {
+                        let commits = block.commits.clone().unwrap();
+                        Some(RawDecidedValue {
+                            certificate: commits.to_commit_certificate(),
+                            value_bytes: Bytes::from(block.encode_to_vec()),
+                        })
+                    }
+                    None => None,
+                }
+            }
+        }
+    }
+}

@@ -324,7 +324,6 @@ impl ReadSync {
                             .cast(ReadHostMsg::ProcessDecidedValue {
                                 value: proto::DecidedValue { value: Some(value) },
                                 sync: myself.clone(),
-                                reply_to: None,
                             })
                             .unwrap();
                         self.process_input(

@@ -16,6 +16,7 @@ use crate::consensus::malachite::network_connector::{
     NetworkConnectorArgs,
 };
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
+use crate::consensus::read_validator::{self, Engine};
 use crate::consensus::validator::ShardValidator;
 use crate::core::types::{ShardId, SnapchainValidatorContext};
 use crate::network::gossip::GossipEvent;
@@ -27,7 +28,7 @@ use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use libp2p::PeerId;
 use tokio::sync::mpsc;
 
-use super::read_host::{Engine, ReadHost, ReadHostMsg, ReadHostRef, ReadHostState};
+use super::read_host::{ReadHost, ReadHostMsg, ReadHostRef, ReadHostState};
 use super::read_sync::{ReadParams, ReadSync, ReadSyncRef};
 
 pub async fn spawn_network_actor(
@@ -82,14 +83,16 @@ pub async fn spawn_read_host(
     engine: Engine,
 ) -> Result<ReadHostRef, ractor::SpawnErr> {
     let state = ReadHostState {
-        shard_id,
-        engine,
-        last_height: Height {
-            shard_index: shard_id,
-            block_number: 0,
+        validator: read_validator::ReadValidator {
+            shard_id,
+            engine,
+            last_height: Height {
+                shard_index: shard_id,
+                block_number: 0,
+            },
+            max_num_buffered_blocks: 100,
+            buffered_blocks: BTreeMap::new(),
         },
-        max_num_buffered_blocks: 100,
-        buffered_blocks: BTreeMap::new(),
     };
     let actor_ref = ReadHost::spawn(state).await?;
     Ok(actor_ref)
@@ -230,7 +233,6 @@ impl MalachiteReadNodeActors {
         self.host_actor.cast(ReadHostMsg::ProcessDecidedValue {
             value,
             sync: self.sync_actor.clone(),
-            reply_to: None,
         })
     }
 
