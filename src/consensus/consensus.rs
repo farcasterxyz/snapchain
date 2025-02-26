@@ -19,7 +19,7 @@ pub enum SystemMessage {
     MalachiteNetwork(MalachiteEventShard, MalachiteNetworkEvent), // Shard Id and the malachite network event
     Mempool(MempoolMessageWithSource),
 
-    DecidedValue(proto::DecidedValue),
+    DecidedValueForReadNode(proto::DecidedValue),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

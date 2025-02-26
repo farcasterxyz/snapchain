@@ -371,7 +371,7 @@ impl SnapchainGossip {
                         None => None,
                         Some(read_node_message) => match read_node_message {
                             read_node_message::ReadNodeMessage::DecidedValue(decided_value) => {
-                                Some(SystemMessage::DecidedValue(decided_value))
+                                Some(SystemMessage::DecidedValueForReadNode(decided_value))
                             }
                         },
                     }

@@ -194,7 +194,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             node.dispatch_network_event(shard, event);
                         },
                         SystemMessage::Mempool(_) => {},// No need to store mempool messages from other nodes in read nodes
-                        SystemMessage::DecidedValue(decided_value) => {
+                        SystemMessage::DecidedValueForReadNode(decided_value) => {
                             node.dispatch_decided_value(decided_value);
 
                         }
@@ -403,7 +403,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 warn!("Failed to add to local mempool: {:?}", e);
                             }
                         },
-                        SystemMessage::DecidedValue(_) => {
+                        SystemMessage::DecidedValueForReadNode(_) => {
                             // Ignore these for validator nodes
                         }
                     }
