@@ -4,7 +4,7 @@ use hyper_util::rt::TokioIo;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::onchain_events::{L1Client, RealL1Client};
 use snapchain::consensus::consensus::SystemMessage;
-use snapchain::mempool::mempool::Mempool;
+use snapchain::mempool::mempool::{Mempool, MempoolSource, ReadNodeMempool};
 use snapchain::mempool::routing;
 use snapchain::network::admin_server::{DbManager, MyAdminService};
 use snapchain::network::gossip::SnapchainGossip;
@@ -16,7 +16,9 @@ use snapchain::proto::admin_service_server::AdminServiceServer;
 use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::storage::db::snapshot::download_snapshots;
 use snapchain::storage::db::RocksDB;
+use snapchain::storage::store::engine::{MempoolMessage, Senders};
 use snapchain::storage::store::node_local_state::LocalStateStore;
+use snapchain::storage::store::stores::Stores;
 use snapchain::storage::store::BlockStore;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::HashMap;
@@ -32,6 +34,97 @@ use tokio::sync::{broadcast, mpsc};
 use tonic::transport::Server;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+
+async fn start_servers(
+    app_config: &snapchain::cfg::Config,
+    mempool_tx: mpsc::Sender<(MempoolMessage, MempoolSource)>,
+    shutdown_tx: mpsc::Sender<()>,
+    statsd_client: StatsdClientWrapper,
+    shard_stores: HashMap<u32, Stores>,
+    shard_senders: HashMap<u32, Senders>,
+    block_store: BlockStore,
+    l1_client: Option<Box<dyn L1Client>>,
+) {
+    let grpc_addr = app_config.rpc_address.clone();
+    let grpc_socket_addr: SocketAddr = grpc_addr.parse().unwrap();
+
+    let mut db_manager = DbManager::new(app_config.rocksdb_dir.clone().as_str());
+    db_manager.maybe_destroy_databases().unwrap();
+
+    let admin_service = MyAdminService::new(
+        db_manager,
+        mempool_tx.clone(),
+        shard_stores.clone(),
+        block_store.clone(),
+        app_config.snapshot.clone(),
+        app_config.fc_network,
+    );
+
+    let service = Arc::new(MyHubService::new(
+        block_store.clone(),
+        shard_stores.clone(),
+        shard_senders,
+        statsd_client.clone(),
+        app_config.consensus.num_shards,
+        Box::new(routing::ShardRouter {}),
+        mempool_tx.clone(),
+        l1_client,
+    ));
+    let grpc_service = service.clone();
+    let grpc_shutdown_tx = shutdown_tx.clone();
+    tokio::spawn(async move {
+        let resp = Server::builder()
+            .add_service(HubServiceServer::from_arc(grpc_service))
+            .add_service(AdminServiceServer::new(admin_service))
+            .serve(grpc_socket_addr)
+            .await;
+
+        let msg = "grpc server stopped";
+        match resp {
+            Ok(()) => error!(msg),
+            Err(e) => error!(error = ?e, "{}", msg),
+        }
+
+        grpc_shutdown_tx.send(()).await.ok();
+    });
+
+    info!(grpc_addr = grpc_addr, "HubService listening",);
+
+    let http_addr = app_config.http_address.clone();
+    let http_socket_addr: SocketAddr = http_addr.parse().unwrap();
+
+    let http_shutdown_tx = shutdown_tx.clone();
+    tokio::spawn(async move {
+        let listener = TcpListener::bind(http_socket_addr).await.unwrap();
+
+        let http_service = HubHttpServiceImpl {
+            service: service.clone(),
+        };
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let io = TokioIo::new(stream);
+                    let service_clone = http_service.clone();
+                    tokio::spawn(async move {
+                        let router = snapchain::network::http_server::Router::new(service_clone);
+                        if let Err(err) = http1::Builder::new()
+                            .serve_connection(io, service_fn(|r| router.handle(r)))
+                            .await
+                        {
+                            error!("Error serving connection: {}", err);
+                        }
+                    });
+                }
+                Err(e) => {
+                    error!("Error accepting connection: {}", e);
+                    break;
+                }
+            }
+        }
+
+        http_shutdown_tx.send(()).await.ok();
+    });
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -101,9 +194,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Err(e) => Err(format!("invalid statsd address: {}", e)),
     }?;
 
-    let mut db_manager = DbManager::new(app_config.rocksdb_dir.clone().as_str());
-    db_manager.maybe_destroy_databases().unwrap();
-
     let host = (statsd_host, statsd_port);
     let socket = net::UdpSocket::bind("0.0.0.0:0").unwrap();
     let sink = cadence::UdpMetricSink::from(host, socket)?;
@@ -111,15 +201,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         cadence::StatsdClient::builder(app_config.statsd.prefix.as_str(), sink).build();
     let statsd_client = StatsdClientWrapper::new(statsd_client, app_config.statsd.use_tags);
 
-    let addr = app_config.gossip.address.clone();
-    let grpc_addr = app_config.rpc_address.clone();
-    let grpc_socket_addr: SocketAddr = grpc_addr.parse()?;
-    let http_addr = app_config.http_address.clone();
-    let http_socket_addr: SocketAddr = http_addr.parse()?;
     let block_db = RocksDB::open_shard_db(app_config.rocksdb_dir.as_str(), 0);
     let block_store = BlockStore::new(block_db);
-
-    info!(addr = addr, grpc_addr = grpc_addr, "HubService listening",);
 
     let keypair = app_config.consensus.keypair().clone();
 
@@ -133,7 +216,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let gossip_result = SnapchainGossip::create(
         keypair.clone(),
-        app_config.gossip,
+        &app_config.gossip,
         system_tx.clone(),
         app_config.read_node,
     );
@@ -160,18 +243,44 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let _ = Metrics::register(registry);
     let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
 
+    let l1_client: Option<Box<dyn L1Client>> =
+        match RealL1Client::new(app_config.l1_rpc_url.clone()) {
+            Ok(client) => Some(Box::new(client)),
+            Err(_) => None,
+        };
+
     if app_config.read_node {
         let node = SnapchainReadNode::create(
             keypair.clone(),
             app_config.consensus.clone(),
             local_peer_id,
-            gossip_tx,
+            gossip_tx.clone(),
             messages_request_tx,
-            block_store,
+            block_store.clone(),
             app_config.rocksdb_dir.clone(),
             statsd_client.clone(),
             app_config.trie_branching_factor,
             registry,
+        )
+        .await;
+
+        let mut mempool = ReadNodeMempool::new(
+            mempool_rx,
+            app_config.consensus.num_shards,
+            node.shard_stores.clone(),
+            gossip_tx.clone(),
+        );
+        tokio::spawn(async move { mempool.run().await });
+
+        start_servers(
+            &app_config,
+            mempool_tx,
+            shutdown_tx,
+            statsd_client,
+            node.shard_stores.clone(),
+            node.shard_senders.clone(),
+            block_store.clone(),
+            l1_client,
         )
         .await;
 
@@ -203,10 +312,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     } else {
-        let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
-
         let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
         let local_state_store = LocalStateStore::new(global_db);
+        let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
 
         let node = SnapchainNode::create(
             keypair.clone(),
@@ -238,15 +346,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         );
         tokio::spawn(async move { mempool.run().await });
 
-        let admin_service = MyAdminService::new(
-            db_manager,
-            mempool_tx.clone(),
-            node.shard_stores.clone(),
-            block_store.clone(),
-            app_config.snapshot.clone(),
-            app_config.fc_network,
-        );
-
         if !app_config.fnames.disable {
             let mut fetcher = snapchain::connectors::fname::Fetcher::new(
                 app_config.fnames.clone(),
@@ -263,7 +362,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if !app_config.onchain_events.rpc_url.is_empty() {
             let mut onchain_events_subscriber =
                 snapchain::connectors::onchain_events::Subscriber::new(
-                    app_config.onchain_events,
+                    &app_config.onchain_events,
                     mempool_tx.clone(),
                     statsd_client.clone(),
                     local_state_store,
@@ -279,75 +378,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             });
         }
 
-        let rpc_shard_stores = node.shard_stores.clone();
-        let rpc_shard_senders = node.shard_senders.clone();
-
-        let rpc_block_store = block_store.clone();
-        let l1_client: Option<Box<dyn L1Client>> = match RealL1Client::new(app_config.l1_rpc_url) {
-            Ok(client) => Some(Box::new(client)),
-            Err(_) => None,
-        };
-        let mempool_tx_for_service = mempool_tx.clone();
-        let service = Arc::new(MyHubService::new(
-            rpc_block_store,
-            rpc_shard_stores,
-            rpc_shard_senders,
-            statsd_client.clone(),
-            app_config.consensus.num_shards,
-            Box::new(routing::ShardRouter {}),
-            mempool_tx_for_service,
+        start_servers(
+            &app_config,
+            mempool_tx.clone(),
+            shutdown_tx.clone(),
+            statsd_client,
+            node.shard_stores.clone(),
+            node.shard_senders.clone(),
+            block_store.clone(),
             l1_client,
-        ));
-        let grpc_service = service.clone();
-        let grpc_shutdown_tx = shutdown_tx.clone();
-        tokio::spawn(async move {
-            let resp = Server::builder()
-                .add_service(HubServiceServer::from_arc(grpc_service))
-                .add_service(AdminServiceServer::new(admin_service))
-                .serve(grpc_socket_addr)
-                .await;
-
-            let msg = "grpc server stopped";
-            match resp {
-                Ok(()) => error!(msg),
-                Err(e) => error!(error = ?e, "{}", msg),
-            }
-
-            grpc_shutdown_tx.send(()).await.ok();
-        });
-
-        let http_shutdown_tx = shutdown_tx.clone();
-        tokio::spawn(async move {
-            let listener = TcpListener::bind(http_socket_addr).await.unwrap();
-
-            let http_service = HubHttpServiceImpl {
-                service: service.clone(),
-            };
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let io = TokioIo::new(stream);
-                        let service_clone = http_service.clone();
-                        tokio::spawn(async move {
-                            let router =
-                                snapchain::network::http_server::Router::new(service_clone);
-                            if let Err(err) = http1::Builder::new()
-                                .serve_connection(io, service_fn(|r| router.handle(r)))
-                                .await
-                            {
-                                error!("Error serving connection: {}", err);
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        error!("Error accepting connection: {}", e);
-                        break;
-                    }
-                }
-            }
-
-            http_shutdown_tx.send(()).await.ok();
-        });
+        )
+        .await;
 
         // TODO(aditi): We may want to reconsider this code when we upload snapshots on a schedule.
         if app_config.snapshot.backup_on_startup {

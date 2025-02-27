@@ -111,7 +111,7 @@ pub struct SnapchainGossip {
 impl SnapchainGossip {
     pub fn create(
         keypair: Keypair,
-        config: Config,
+        config: &Config,
         system_tx: Sender<SystemMessage>,
         read_node: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
