@@ -32,9 +32,9 @@ async fn test_gossip_communication() {
 
     // Create gossip instances
     let mut gossip1 =
-        SnapchainGossip::create(keypair1.clone(), config1, system_tx1, false).unwrap();
+        SnapchainGossip::create(keypair1.clone(), &config1, system_tx1, false).unwrap();
     let mut gossip2 =
-        SnapchainGossip::create(keypair2.clone(), config2, system_tx2, false).unwrap();
+        SnapchainGossip::create(keypair2.clone(), &config2, system_tx2, false).unwrap();
 
     let gossip_tx1 = gossip1.tx.clone();
 

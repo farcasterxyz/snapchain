@@ -66,7 +66,7 @@ mod tests {
         let mut shard_stores = HashMap::new();
         shard_stores.insert(1, engine.get_stores());
 
-        let gossip = SnapchainGossip::create(keypair.clone(), config, system_tx, false).unwrap();
+        let gossip = SnapchainGossip::create(keypair.clone(), &config, system_tx, false).unwrap();
 
         let mempool = Mempool::new(
             mempool::Config::default(),
