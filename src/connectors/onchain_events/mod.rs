@@ -167,7 +167,7 @@ pub struct Subscriber {
 // TODO(aditi): Wait for 1 confirmation before "committing" an onchain event.
 impl Subscriber {
     pub fn new(
-        config: Config,
+        config: &Config,
         mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
         statsd_client: StatsdClientWrapper,
         local_state_store: LocalStateStore,
