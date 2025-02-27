@@ -43,6 +43,13 @@ jobs:
           ref: ${{ env.MALACHITE_GIT_REF }}
           path: ./malachite
 
+      - name: Install Rust 1.85.0
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.85.0
+          profile: default 
+          override: true
+
       - uses: actions/checkout@v4
         with:
           repository: CassOnMars/eth-signature-verifier

@@ -1,6 +1,6 @@
 use crate::core::types::{Proposal, Signature, SnapchainValidatorContext, Vote};
-use crate::proto;
 use crate::proto::sync_request::SyncRequest;
+use crate::proto::{self};
 use crate::proto::{consensus_message, ConsensusMessage, FullProposal, StatusMessage};
 use bytes::Bytes;
 use informalsystems_malachitebft_codec::Codec;

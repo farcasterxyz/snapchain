@@ -180,6 +180,10 @@ impl ShardEngine {
         }
     }
 
+    pub fn shard_id(&self) -> u32 {
+        self.shard_id
+    }
+
     // statsd
     fn count(&self, key: &str, count: u64) {
         let key = format!("engine.{}", key);
@@ -1378,7 +1382,7 @@ impl BlockEngine {
         self.statsd_client.gauge_with_shard(0, key.as_str(), value);
     }
 
-    pub fn commit_block(&mut self, block: Block) {
+    pub fn commit_block(&mut self, block: &Block) {
         self.gauge(
             "block_height",
             block

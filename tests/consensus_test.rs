@@ -4,21 +4,25 @@ use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
 use serial_test::serial;
 use snapchain::consensus::consensus::SystemMessage;
-use snapchain::mempool::mempool::{self, Mempool, MempoolMessageWithSource, MempoolSource};
+use snapchain::mempool::mempool::{
+    self, Mempool, MempoolMessageWithSource, MempoolMessagesRequest, MempoolSource,
+};
 use snapchain::mempool::routing;
 use snapchain::network::gossip::SnapchainGossip;
 use snapchain::network::server::MyHubService;
 use snapchain::node::snapchain_node::SnapchainNode;
-use snapchain::proto;
+use snapchain::node::snapchain_read_node::SnapchainReadNode;
 use snapchain::proto::hub_service_server::HubServiceServer;
+use snapchain::proto::{self};
 use snapchain::proto::{Block, FarcasterNetwork, IdRegisterEventType, SignerEventType};
 use snapchain::storage::db::{PageOptions, RocksDB};
 use snapchain::storage::store::engine::MempoolMessage;
 use snapchain::storage::store::node_local_state::LocalStateStore;
+use snapchain::storage::store::stores::Stores;
 use snapchain::storage::store::BlockStore;
 use snapchain::utils::factory::{self, messages_factory};
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
@@ -58,6 +62,143 @@ fn make_tmp_path() -> String {
         .to_string()
 }
 
+pub async fn num_blocks(block_store: &BlockStore) -> usize {
+    let blocks_page = block_store
+        .get_blocks(0, None, &PageOptions::default())
+        .unwrap();
+    blocks_page.blocks.len()
+}
+
+pub async fn num_shard_chunks(shard_stores: &HashMap<u32, Stores>) -> usize {
+    let mut count = 0;
+    for (_shard_id, stores) in shard_stores.iter() {
+        count += stores.shard_store.get_shard_chunks(0, None).unwrap().len();
+    }
+
+    count
+}
+
+pub async fn total_messages(shard_stores: &HashMap<u32, Stores>) -> usize {
+    let mut messages_count = 0;
+    for (_shard_id, stores) in shard_stores.iter() {
+        for chunk in stores.shard_store.get_shard_chunks(0, None).unwrap() {
+            for tx in chunk.transactions.iter() {
+                messages_count += tx.user_messages.len();
+            }
+        }
+    }
+    messages_count
+}
+struct ReadNodeForTest {
+    handles: Vec<tokio::task::JoinHandle<()>>,
+    node: SnapchainReadNode,
+    db: Arc<RocksDB>,
+    block_store: BlockStore,
+    _messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
+}
+
+impl Drop for ReadNodeForTest {
+    fn drop(&mut self) {
+        self.node.stop();
+        for handle in self.handles.iter() {
+            handle.abort();
+        }
+        self.db.destroy().unwrap();
+        for (_, stores) in self.node.shard_stores.iter_mut() {
+            stores.shard_store.db.destroy().unwrap();
+        }
+    }
+}
+
+impl ReadNodeForTest {
+    pub async fn create(
+        keypair: Keypair,
+        num_shards: u32,
+        validator_addresses: &Vec<String>,
+        gossip_address: String,
+        bootstrap_address: String,
+    ) -> Self {
+        let statsd_client = StatsdClientWrapper::new(
+            cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
+            true,
+        );
+
+        let config = snapchain::network::gossip::Config::new(gossip_address, bootstrap_address);
+
+        let mut consensus_config = snapchain::consensus::consensus::Config::default();
+        consensus_config =
+            consensus_config.with((1..=num_shards).collect(), validator_addresses.clone());
+
+        let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
+
+        let mut gossip =
+            SnapchainGossip::create(keypair.clone(), config, system_tx.clone(), false).unwrap();
+        let gossip_tx = gossip.tx.clone();
+
+        let registry = SharedRegistry::global();
+        let peer_id = gossip.swarm.local_peer_id().clone();
+        println!("StartNode read node peer id: {}", peer_id.to_string());
+        let data_dir = &make_tmp_path();
+        let db = Arc::new(RocksDB::new(data_dir));
+        db.open().unwrap();
+        let block_store = BlockStore::new(db.clone());
+        let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
+        let node = SnapchainReadNode::create(
+            keypair.clone(),
+            consensus_config,
+            peer_id,
+            gossip_tx.clone(),
+            messages_request_tx,
+            block_store.clone(),
+            make_tmp_path(),
+            statsd_client.clone(),
+            16,
+            registry,
+        )
+        .await;
+
+        let mut join_handles = Vec::new();
+
+        let handle = tokio::spawn(async move {
+            gossip.start().await;
+        });
+        join_handles.push(handle);
+
+        let node_for_dispatch = node.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                if let Some(system_event) = system_rx.recv().await {
+                    match system_event {
+                        SystemMessage::MalachiteNetwork(event_shard, event) => {
+                            node_for_dispatch.dispatch_network_event(event_shard, event);
+                        }
+                        _ => {
+                            // noop
+                        }
+                    }
+                }
+            }
+        });
+        join_handles.push(handle);
+
+        Self {
+            handles: join_handles,
+            node,
+            db: db.clone(),
+            block_store,
+            _messages_request_rx: messages_request_rx,
+        }
+    }
+
+    pub async fn num_blocks(&self) -> usize {
+        num_blocks(&self.block_store).await
+    }
+
+    pub async fn num_shard_chunks(&self) -> usize {
+        num_shard_chunks(&self.node.shard_stores).await
+    }
+}
+
 impl NodeForTest {
     pub async fn create(
         keypair: Keypair,
@@ -81,11 +222,12 @@ impl NodeForTest {
         let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
 
         let mut gossip =
-            SnapchainGossip::create(keypair.clone(), config, system_tx.clone()).unwrap();
+            SnapchainGossip::create(keypair.clone(), config, system_tx.clone(), false).unwrap();
         let gossip_tx = gossip.tx.clone();
 
         let registry = SharedRegistry::global();
         let peer_id = gossip.swarm.local_peer_id().clone();
+        println!("StartNode validator peer id: {}", peer_id.to_string());
         let (block_tx, mut block_rx) = mpsc::channel::<Block>(100);
         let data_dir = &make_tmp_path();
         let db = Arc::new(RocksDB::new(data_dir));
@@ -219,32 +361,15 @@ impl NodeForTest {
     }
 
     pub async fn num_blocks(&self) -> usize {
-        let blocks_page = self
-            .block_store
-            .get_blocks(0, None, &PageOptions::default())
-            .unwrap();
-        blocks_page.blocks.len()
+        num_blocks(&self.block_store).await
     }
 
     pub async fn num_shard_chunks(&self) -> usize {
-        let mut count = 0;
-        for (_shard_id, stores) in self.node.shard_stores.iter() {
-            count += stores.shard_store.get_shard_chunks(0, None).unwrap().len();
-        }
-
-        count
+        num_shard_chunks(&self.node.shard_stores).await
     }
 
     pub async fn total_messages(&self) -> usize {
-        let mut messages_count = 0;
-        for (_shard_id, stores) in self.node.shard_stores.iter() {
-            for chunk in stores.shard_store.get_shard_chunks(0, None).unwrap() {
-                for tx in chunk.transactions.iter() {
-                    messages_count += tx.user_messages.len();
-                }
-            }
-        }
-        messages_count
+        total_messages(&self.node.shard_stores).await
     }
 
     pub fn stop(&self) {
@@ -256,22 +381,23 @@ impl NodeForTest {
 }
 
 pub struct TestNetwork {
-    num_nodes: u32,
+    num_validator_nodes: u32,
     num_shards: u32,
     base_grpc_port: u32,
     keypairs: Vec<Keypair>,
     validator_addresses: Vec<String>,
     gossip_addresses: Vec<String>,
     nodes: Vec<NodeForTest>,
+    read_nodes: Vec<ReadNodeForTest>,
 }
 
 impl TestNetwork {
     // These networks can be created in parallel, so make sure the base port is far enough part to avoid conflicts
-    pub async fn create(num_nodes: u32, num_shards: u32, base_grpc_port: u32) -> Self {
+    pub async fn create(num_validator_nodes: u32, num_shards: u32, base_grpc_port: u32) -> Self {
         let mut keypairs = Vec::new();
         let mut validator_addresses = vec![];
         let mut node_addresses = vec![];
-        for i in 0..num_nodes {
+        for i in 0..num_validator_nodes {
             let keypair = Keypair::generate();
             keypairs.push(keypair.clone());
             validator_addresses.push(hex::encode(keypair.public().to_bytes()));
@@ -280,17 +406,18 @@ impl TestNetwork {
             node_addresses.push(gossip_address);
         }
         Self {
-            num_nodes,
+            num_validator_nodes,
             num_shards,
             base_grpc_port,
             keypairs,
             validator_addresses,
             gossip_addresses: node_addresses,
             nodes: vec![],
+            read_nodes: vec![],
         }
     }
 
-    async fn start_node(&mut self, index: u32) {
+    async fn start_validator_node(&mut self, index: u32) {
         let keypair = self.keypairs[index as usize].clone();
         let gossip_address = self.gossip_addresses[index as usize].clone();
         let grpc_port = self.base_grpc_port + index;
@@ -306,9 +433,24 @@ impl TestNetwork {
         self.nodes.push(node);
     }
 
-    async fn start_all(&mut self) {
-        for i in 0..self.num_nodes {
-            self.start_node(i).await;
+    async fn start_read_node(&mut self, index: u32) {
+        let keypair = Keypair::generate();
+        let port = BASE_PORT_FOR_TEST + self.num_validator_nodes + index;
+        let gossip_address = format!("/ip4/{HOST_FOR_TEST}/udp/{port}/quic-v1");
+        let node = ReadNodeForTest::create(
+            keypair,
+            self.num_shards,
+            &self.validator_addresses,
+            gossip_address,
+            self.gossip_addresses[0].clone(),
+        )
+        .await;
+        self.read_nodes.push(node);
+    }
+
+    async fn start_validators(&mut self) {
+        for i in 0..self.num_validator_nodes {
+            self.start_validator_node(i).await;
         }
     }
 
@@ -387,6 +529,33 @@ async fn register_fid(fid: u64, messages_tx: Sender<MempoolMessageWithSource>) -
     signer
 }
 
+async fn send_messages(messages_tx: mpsc::Sender<(MempoolMessage, MempoolSource)>) {
+    let mut i: i32 = 0;
+    let prefix = vec![0, 0, 0, 0, 0, 0];
+    let fid = 123;
+    let signer = register_fid(fid, messages_tx.clone()).await;
+
+    loop {
+        info!(i, "sending message");
+
+        let mut hash = prefix.clone();
+        hash.extend_from_slice(&i.to_be_bytes()); // just for now
+
+        let message = MempoolMessage::UserMessage(messages_factory::casts::create_cast_add(
+            fid,
+            format!("Cast {}", i).as_str(),
+            None,
+            Some(&signer),
+        ));
+        messages_tx
+            .send((message, MempoolSource::Local))
+            .await
+            .unwrap();
+        i += 1;
+        tokio::time::sleep(time::Duration::from_millis(200)).await;
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn test_basic_consensus() {
@@ -397,35 +566,11 @@ async fn test_basic_consensus() {
 
     let num_shards = 2;
     let mut network = TestNetwork::create(3, num_shards, 3380).await;
-    network.start_all().await;
+    network.start_validators().await;
 
     let messages_tx1 = network.nodes[0].mempool_tx.clone();
 
-    tokio::spawn(async move {
-        let mut i: i32 = 0;
-        let prefix = vec![0, 0, 0, 0, 0, 0];
-        let fid = 321;
-        let signer = register_fid(fid, messages_tx1.clone()).await;
-        loop {
-            info!(i, "sending message");
-
-            let mut hash = prefix.clone();
-            hash.extend_from_slice(&i.to_be_bytes()); // just for now
-
-            let message = MempoolMessage::UserMessage(messages_factory::casts::create_cast_add(
-                321,
-                format!("Cast {}", i).as_str(),
-                None,
-                Some(&signer),
-            ));
-            messages_tx1
-                .send((message, MempoolSource::Local))
-                .await
-                .unwrap();
-            i += 1;
-            tokio::time::sleep(time::Duration::from_millis(200)).await;
-        }
-    });
+    tokio::spawn(async move { send_messages(messages_tx1).await });
 
     network.produce_blocks(3).await;
 
@@ -491,37 +636,12 @@ async fn test_basic_sync() {
 
     // Start the first three nodes
     for i in 0..3 {
-        network.start_node(i).await;
+        network.start_validator_node(i).await;
     }
 
     let messages_tx1 = network.nodes[0].mempool_tx.clone();
 
-    tokio::spawn(async move {
-        let mut i: i32 = 0;
-        let prefix = vec![0, 0, 0, 0, 0, 0];
-        let fid = 123;
-        let signer = register_fid(fid, messages_tx1.clone()).await;
-
-        loop {
-            info!(i, "sending message");
-
-            let mut hash = prefix.clone();
-            hash.extend_from_slice(&i.to_be_bytes()); // just for now
-
-            let message = MempoolMessage::UserMessage(messages_factory::casts::create_cast_add(
-                fid,
-                format!("Cast {}", i).as_str(),
-                None,
-                Some(&signer),
-            ));
-            messages_tx1
-                .send((message, MempoolSource::Local))
-                .await
-                .unwrap();
-            i += 1;
-            tokio::time::sleep(time::Duration::from_millis(200)).await;
-        }
-    });
+    tokio::spawn(async move { send_messages(messages_tx1).await });
 
     network.produce_blocks(3).await;
 
@@ -539,7 +659,7 @@ async fn test_basic_sync() {
     }
 
     // Add the node to the network and start producing blocks again.
-    network.start_node(3).await;
+    network.start_validator_node(3).await;
 
     // When we start it the new node should not have any blocks or chunks
     assert_eq!(network.nodes[3].num_shard_chunks().await, 0);
@@ -550,4 +670,60 @@ async fn test_basic_sync() {
     // After producing some blocks, the node should've sync'd and have blocks and chunks
     // TODO: The actual number successfully sync'd varies. Figure out why and add a stricter check on exact number of blocks
     wait_for_blocks(&network.nodes[3], 1).await;
+}
+
+async fn wait_for_read_node_blocks(node: &ReadNodeForTest, num_blocks: usize) {
+    let timeout = tokio::time::Duration::from_secs(5);
+    let start = tokio::time::Instant::now();
+    let mut timer = time::interval(tokio::time::Duration::from_millis(10));
+
+    loop {
+        let _ = timer.tick().await;
+        if node.num_blocks().await >= num_blocks {
+            break;
+        }
+        if start.elapsed() > timeout {
+            break;
+        }
+    }
+
+    assert!(
+        node.num_blocks().await >= num_blocks,
+        "Node should have confirmed blocks. Num blocks {}",
+        node.num_blocks().await
+    );
+    assert!(
+        node.num_shard_chunks().await >= num_blocks,
+        "Node should have confirmed shard chunks. Num shard chunks {}",
+        node.num_shard_chunks().await
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_read_node() {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .try_init();
+
+    let num_shards = 2;
+    let mut network = TestNetwork::create(3, num_shards, 3380).await;
+    network.start_validators().await;
+
+    let messages_tx1 = network.nodes[0].mempool_tx.clone();
+
+    tokio::spawn(async move { send_messages(messages_tx1).await });
+
+    network.start_read_node(0).await;
+    network.start_read_node(1).await;
+
+    for node in network.nodes.iter() {
+        wait_for_blocks(node, 3).await;
+    }
+
+    for read_node in network.read_nodes.iter() {
+        // TODO: The actual number successfully sync'd varies. Figure out why and add a stricter check on exact number of blocks
+        wait_for_read_node_blocks(read_node, 1).await;
+    }
 }

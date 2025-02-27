@@ -79,6 +79,19 @@ message FullProposal {
   }
 }
 
+message DecidedValue {
+  oneof value {
+    Block block = 2;
+    ShardChunk shard = 3;
+  }
+}
+
+message ReadNodeMessage {
+  oneof read_node_message {
+    DecidedValue decided_value = 1;
+  }
+}
+
 message ConsensusMessage {
   oneof consensus_message {
     Vote vote = 1;
@@ -204,6 +217,7 @@ message GossipMessage {
     FullProposal full_proposal = 2;
     MempoolMessage mempool_message = 3;
     StatusMessage status = 4;
+    ReadNodeMessage read_node_message = 5;
   }
 }
 

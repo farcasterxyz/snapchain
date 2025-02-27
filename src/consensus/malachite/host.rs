@@ -2,7 +2,8 @@
 
 use crate::consensus::validator::ShardValidator;
 use crate::core::types::SnapchainValidatorContext;
-use crate::proto::{full_proposal, Block, Commits, FullProposal, ShardChunk};
+use crate::network::gossip::GossipEvent;
+use crate::proto::{self, decided_value, full_proposal, Block, Commits, FullProposal, ShardChunk};
 use bytes::Bytes;
 use informalsystems_malachitebft_engine::consensus::ConsensusMsg;
 use informalsystems_malachitebft_engine::host::{HostMsg, LocallyProposedValue};
@@ -13,6 +14,7 @@ use informalsystems_malachitebft_engine::util::streaming::{
 use informalsystems_malachitebft_sync::RawDecidedValue;
 use prost::Message;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SpawnErr};
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 /// Actor for bridging consensus and the application via a set of channels.
@@ -25,6 +27,7 @@ pub struct HostState {
     pub shard_validator: ShardValidator,
     pub network: NetworkRef<SnapchainValidatorContext>,
     pub consensus_start_delay: u32,
+    pub gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
 }
 
 impl Host {
@@ -171,11 +174,30 @@ impl Host {
                 consensus: consensus_ref,
                 extensions: _,
             } => {
-                //commit
-                state
+                let proposed_value = state
                     .shard_validator
-                    .decide(Commits::from_commit_certificate(&certificate))
-                    .await;
+                    .get_proposed_value(&certificate.value_id)
+                    .unwrap();
+
+                let commits = Commits::from_commit_certificate(&certificate);
+                //commit
+                state.shard_validator.decide(commits.clone()).await;
+
+                let decided_value = if let Some(block) = proposed_value.block(commits.clone()) {
+                    Some(decided_value::Value::Block(block))
+                } else if let Some(shard_chunk) = proposed_value.shard_chunk(commits.clone()) {
+                    Some(decided_value::Value::Shard(shard_chunk))
+                } else {
+                    None
+                };
+
+                state
+                    .gossip_tx
+                    .send(GossipEvent::BroadcastDecidedValue(proto::DecidedValue {
+                        value: decided_value,
+                    }))
+                    .await
+                    .unwrap();
 
                 // Start next height
                 let next_height = certificate.height.increment();

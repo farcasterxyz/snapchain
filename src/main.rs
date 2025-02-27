@@ -11,6 +11,7 @@ use snapchain::network::gossip::SnapchainGossip;
 use snapchain::network::http_server::HubHttpServiceImpl;
 use snapchain::network::server::MyHubService;
 use snapchain::node::snapchain_node::SnapchainNode;
+use snapchain::node::snapchain_read_node::SnapchainReadNode;
 use snapchain::proto::admin_service_server::AdminServiceServer;
 use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::storage::db::snapshot::download_snapshots;
@@ -130,8 +131,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
     let (mempool_tx, mempool_rx) = mpsc::channel(app_config.mempool.queue_size as usize);
 
-    let gossip_result =
-        SnapchainGossip::create(keypair.clone(), app_config.gossip, system_tx.clone());
+    let gossip_result = SnapchainGossip::create(
+        keypair.clone(),
+        app_config.gossip,
+        system_tx.clone(),
+        app_config.read_node,
+    );
 
     if let Err(e) = gossip_result {
         error!(error = ?e, "Failed to create SnapchainGossip");
@@ -154,204 +159,254 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Use the new non-global metrics registry when we upgrade to newer version of malachite
     let _ = Metrics::register(registry);
     let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
-    let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
 
-    let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
-    let local_state_store = LocalStateStore::new(global_db);
-
-    let node = SnapchainNode::create(
-        keypair.clone(),
-        app_config.consensus.clone(),
-        local_peer_id,
-        gossip_tx.clone(),
-        shard_decision_tx,
-        None,
-        messages_request_tx,
-        block_store.clone(),
-        local_state_store.clone(),
-        app_config.rocksdb_dir.clone(),
-        statsd_client.clone(),
-        app_config.trie_branching_factor,
-        app_config.fc_network,
-        registry,
-    )
-    .await;
-
-    let mut mempool = Mempool::new(
-        app_config.mempool.clone(),
-        mempool_rx,
-        messages_request_rx,
-        app_config.consensus.num_shards,
-        node.shard_stores.clone(),
-        gossip_tx.clone(),
-        shard_decision_rx,
-        statsd_client.clone(),
-    );
-    tokio::spawn(async move { mempool.run().await });
-
-    let admin_service = MyAdminService::new(
-        db_manager,
-        mempool_tx.clone(),
-        node.shard_stores.clone(),
-        block_store.clone(),
-        app_config.snapshot.clone(),
-        app_config.fc_network,
-    );
-
-    if !app_config.fnames.disable {
-        let mut fetcher = snapchain::connectors::fname::Fetcher::new(
-            app_config.fnames.clone(),
-            mempool_tx.clone(),
+    if app_config.read_node {
+        let node = SnapchainReadNode::create(
+            keypair.clone(),
+            app_config.consensus.clone(),
+            local_peer_id,
+            gossip_tx,
+            messages_request_tx,
+            block_store,
+            app_config.rocksdb_dir.clone(),
             statsd_client.clone(),
+            app_config.trie_branching_factor,
+            registry,
+        )
+        .await;
+
+        loop {
+            select! {
+                _ = ctrl_c() => {
+                    info!("Received Ctrl-C, shutting down");
+                    node.stop();
+                    return Ok(());
+                }
+                _ = shutdown_rx.recv() => {
+                    error!("Received shutdown signal, shutting down");
+                    node.stop();
+                    return Ok(());
+                }
+                Some(msg) = system_rx.recv() => {
+                    match msg {
+                        SystemMessage::MalachiteNetwork(shard, event) => {
+                            // Forward to appropriate consensus actors
+                            node.dispatch_network_event(shard, event);
+                        },
+                        SystemMessage::Mempool(_) => {},// No need to store mempool messages from other nodes in read nodes
+                        SystemMessage::DecidedValueForReadNode(decided_value) => {
+                            node.dispatch_decided_value(decided_value);
+
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
+
+        let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
+        let local_state_store = LocalStateStore::new(global_db);
+
+        let node = SnapchainNode::create(
+            keypair.clone(),
+            app_config.consensus.clone(),
+            local_peer_id,
+            gossip_tx.clone(),
+            shard_decision_tx,
+            None,
+            messages_request_tx,
+            block_store.clone(),
             local_state_store.clone(),
+            app_config.rocksdb_dir.clone(),
+            statsd_client.clone(),
+            app_config.trie_branching_factor,
+            app_config.fc_network,
+            registry,
+        )
+        .await;
+
+        let mut mempool = Mempool::new(
+            app_config.mempool.clone(),
+            mempool_rx,
+            messages_request_rx,
+            app_config.consensus.num_shards,
+            node.shard_stores.clone(),
+            gossip_tx.clone(),
+            shard_decision_rx,
+            statsd_client.clone(),
+        );
+        tokio::spawn(async move { mempool.run().await });
+
+        let admin_service = MyAdminService::new(
+            db_manager,
+            mempool_tx.clone(),
+            node.shard_stores.clone(),
+            block_store.clone(),
+            app_config.snapshot.clone(),
+            app_config.fc_network,
         );
 
-        tokio::spawn(async move {
-            fetcher.run().await;
-        });
-    }
-
-    if !app_config.onchain_events.rpc_url.is_empty() {
-        let mut onchain_events_subscriber = snapchain::connectors::onchain_events::Subscriber::new(
-            app_config.onchain_events,
-            mempool_tx.clone(),
-            statsd_client.clone(),
-            local_state_store,
-        )?;
-        tokio::spawn(async move {
-            let result = onchain_events_subscriber.run().await;
-            match result {
-                Ok(()) => {}
-                Err(e) => {
-                    error!("Error subscribing to on chain events {:#?}", e);
-                }
-            }
-        });
-    }
-
-    let rpc_shard_stores = node.shard_stores.clone();
-    let rpc_shard_senders = node.shard_senders.clone();
-
-    let rpc_block_store = block_store.clone();
-    let l1_client: Option<Box<dyn L1Client>> = match RealL1Client::new(app_config.l1_rpc_url) {
-        Ok(client) => Some(Box::new(client)),
-        Err(_) => None,
-    };
-    let mempool_tx_for_service = mempool_tx.clone();
-    let service = Arc::new(MyHubService::new(
-        rpc_block_store,
-        rpc_shard_stores,
-        rpc_shard_senders,
-        statsd_client.clone(),
-        app_config.consensus.num_shards,
-        Box::new(routing::ShardRouter {}),
-        mempool_tx_for_service,
-        l1_client,
-    ));
-    let grpc_service = service.clone();
-    let grpc_shutdown_tx = shutdown_tx.clone();
-    tokio::spawn(async move {
-        let resp = Server::builder()
-            .add_service(HubServiceServer::from_arc(grpc_service))
-            .add_service(AdminServiceServer::new(admin_service))
-            .serve(grpc_socket_addr)
-            .await;
-
-        let msg = "grpc server stopped";
-        match resp {
-            Ok(()) => error!(msg),
-            Err(e) => error!(error = ?e, "{}", msg),
-        }
-
-        grpc_shutdown_tx.send(()).await.ok();
-    });
-
-    let http_shutdown_tx = shutdown_tx.clone();
-    tokio::spawn(async move {
-        let listener = TcpListener::bind(http_socket_addr).await.unwrap();
-
-        let http_service = HubHttpServiceImpl {
-            service: service.clone(),
-        };
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    let io = TokioIo::new(stream);
-                    let service_clone = http_service.clone();
-                    tokio::spawn(async move {
-                        let router = snapchain::network::http_server::Router::new(service_clone);
-                        if let Err(err) = http1::Builder::new()
-                            .serve_connection(io, service_fn(|r| router.handle(r)))
-                            .await
-                        {
-                            error!("Error serving connection: {}", err);
-                        }
-                    });
-                }
-                Err(e) => {
-                    error!("Error accepting connection: {}", e);
-                    break;
-                }
-            }
-        }
-
-        http_shutdown_tx.send(()).await.ok();
-    });
-
-    // TODO(aditi): We may want to reconsider this code when we upload snapshots on a schedule.
-    if app_config.snapshot.backup_on_startup {
-        let shard_ids = app_config.consensus.shard_ids.clone();
-        let block_db = block_store.db.clone();
-        let mut dbs = HashMap::new();
-        dbs.insert(0, block_db.clone());
-        node.shard_stores
-            .iter()
-            .for_each(|(shard_id, shard_store)| {
-                dbs.insert(*shard_id, shard_store.shard_store.db.clone());
-            });
-        tokio::spawn(async move {
-            info!(
-                "Backing up {:?} shard databases to {:?}",
-                shard_ids, app_config.snapshot.backup_dir
+        if !app_config.fnames.disable {
+            let mut fetcher = snapchain::connectors::fname::Fetcher::new(
+                app_config.fnames.clone(),
+                mempool_tx.clone(),
+                statsd_client.clone(),
+                local_state_store.clone(),
             );
-            let timestamp = chrono::Utc::now().timestamp_millis();
-            dbs.iter().for_each(|(shard_id, db)| {
-                RocksDB::backup_db(
-                    db.clone(),
-                    &app_config.snapshot.backup_dir,
-                    *shard_id,
-                    timestamp,
-                )
-                .unwrap();
-            });
-        });
-    }
 
-    // Kick it off
-    loop {
-        select! {
-            _ = ctrl_c() => {
-                info!("Received Ctrl-C, shutting down");
-                node.stop();
-                return Ok(());
+            tokio::spawn(async move {
+                fetcher.run().await;
+            });
+        }
+
+        if !app_config.onchain_events.rpc_url.is_empty() {
+            let mut onchain_events_subscriber =
+                snapchain::connectors::onchain_events::Subscriber::new(
+                    app_config.onchain_events,
+                    mempool_tx.clone(),
+                    statsd_client.clone(),
+                    local_state_store,
+                )?;
+            tokio::spawn(async move {
+                let result = onchain_events_subscriber.run().await;
+                match result {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!("Error subscribing to on chain events {:#?}", e);
+                    }
+                }
+            });
+        }
+
+        let rpc_shard_stores = node.shard_stores.clone();
+        let rpc_shard_senders = node.shard_senders.clone();
+
+        let rpc_block_store = block_store.clone();
+        let l1_client: Option<Box<dyn L1Client>> = match RealL1Client::new(app_config.l1_rpc_url) {
+            Ok(client) => Some(Box::new(client)),
+            Err(_) => None,
+        };
+        let mempool_tx_for_service = mempool_tx.clone();
+        let service = Arc::new(MyHubService::new(
+            rpc_block_store,
+            rpc_shard_stores,
+            rpc_shard_senders,
+            statsd_client.clone(),
+            app_config.consensus.num_shards,
+            Box::new(routing::ShardRouter {}),
+            mempool_tx_for_service,
+            l1_client,
+        ));
+        let grpc_service = service.clone();
+        let grpc_shutdown_tx = shutdown_tx.clone();
+        tokio::spawn(async move {
+            let resp = Server::builder()
+                .add_service(HubServiceServer::from_arc(grpc_service))
+                .add_service(AdminServiceServer::new(admin_service))
+                .serve(grpc_socket_addr)
+                .await;
+
+            let msg = "grpc server stopped";
+            match resp {
+                Ok(()) => error!(msg),
+                Err(e) => error!(error = ?e, "{}", msg),
             }
-            _ = shutdown_rx.recv() => {
-                error!("Received shutdown signal, shutting down");
-                node.stop();
-                return Ok(());
+
+            grpc_shutdown_tx.send(()).await.ok();
+        });
+
+        let http_shutdown_tx = shutdown_tx.clone();
+        tokio::spawn(async move {
+            let listener = TcpListener::bind(http_socket_addr).await.unwrap();
+
+            let http_service = HubHttpServiceImpl {
+                service: service.clone(),
+            };
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let io = TokioIo::new(stream);
+                        let service_clone = http_service.clone();
+                        tokio::spawn(async move {
+                            let router =
+                                snapchain::network::http_server::Router::new(service_clone);
+                            if let Err(err) = http1::Builder::new()
+                                .serve_connection(io, service_fn(|r| router.handle(r)))
+                                .await
+                            {
+                                error!("Error serving connection: {}", err);
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        error!("Error accepting connection: {}", e);
+                        break;
+                    }
+                }
             }
-            Some(msg) = system_rx.recv() => {
-                match msg {
-                    SystemMessage::MalachiteNetwork(shard, event) => {
-                        // Forward to appropriate consensus actors
-                        node.dispatch(shard, event);
-                    },
-                    SystemMessage::Mempool(msg) => {
-                        let res = mempool_tx.try_send(msg);
-                        if let Err(e) = res {
-                            warn!("Failed to add to local mempool: {:?}", e);
+
+            http_shutdown_tx.send(()).await.ok();
+        });
+
+        // TODO(aditi): We may want to reconsider this code when we upload snapshots on a schedule.
+        if app_config.snapshot.backup_on_startup {
+            let shard_ids = app_config.consensus.shard_ids.clone();
+            let block_db = block_store.db.clone();
+            let mut dbs = HashMap::new();
+            dbs.insert(0, block_db.clone());
+            node.shard_stores
+                .iter()
+                .for_each(|(shard_id, shard_store)| {
+                    dbs.insert(*shard_id, shard_store.shard_store.db.clone());
+                });
+            tokio::spawn(async move {
+                info!(
+                    "Backing up {:?} shard databases to {:?}",
+                    shard_ids, app_config.snapshot.backup_dir
+                );
+                let timestamp = chrono::Utc::now().timestamp_millis();
+                dbs.iter().for_each(|(shard_id, db)| {
+                    RocksDB::backup_db(
+                        db.clone(),
+                        &app_config.snapshot.backup_dir,
+                        *shard_id,
+                        timestamp,
+                    )
+                    .unwrap();
+                });
+            });
+        }
+
+        // Kick it off
+        loop {
+            select! {
+                _ = ctrl_c() => {
+                    info!("Received Ctrl-C, shutting down");
+                    node.stop();
+                    return Ok(());
+                }
+                _ = shutdown_rx.recv() => {
+                    error!("Received shutdown signal, shutting down");
+                    node.stop();
+                    return Ok(());
+                }
+                Some(msg) = system_rx.recv() => {
+                    match msg {
+                        SystemMessage::MalachiteNetwork(shard, event) => {
+                            // Forward to appropriate consensus actors
+                            node.dispatch(shard, event);
+                        },
+                        SystemMessage::Mempool(msg) => {
+                            let res = mempool_tx.try_send(msg);
+                            if let Err(e) = res {
+                                warn!("Failed to add to local mempool: {:?}", e);
+                            }
+                        },
+                        SystemMessage::DecidedValueForReadNode(_) => {
+                            // Ignore these for validator nodes
                         }
-                    },
+                    }
                 }
             }
         }
