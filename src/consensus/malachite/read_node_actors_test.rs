@@ -11,7 +11,8 @@ mod tests {
     use crate::proto::{self, Height, ShardChunk, StatusMessage};
     use crate::storage::store::engine::ShardEngine;
     use crate::storage::store::test_helper::{
-        self, commit_event, default_storage_event, FID_FOR_TEST,
+        self, commit_event, default_storage_event, new_engine_with_options, EngineOptions,
+        FID_FOR_TEST,
     };
     use bytes::Bytes;
     use informalsystems_malachitebft_metrics::SharedRegistry;
@@ -39,9 +40,14 @@ mod tests {
         let (gossip_tx, gossip_rx) = mpsc::channel(100);
         let shard_id = read_node_engine.shard_id();
 
+        let (read_node_engine_clone, _) = new_engine_with_options(EngineOptions {
+            limits: None,
+            db: Some(read_node_engine.db.clone()),
+            messages_request_tx: None,
+        });
         let read_node_actors = MalachiteReadNodeActors::create_and_start(
             SnapchainValidatorContext::new(keypair),
-            Engine::ShardEngine(read_node_engine.clone()),
+            Engine::ShardEngine(read_node_engine_clone),
             libp2p::PeerId::random(),
             gossip_tx,
             SharedRegistry::global(),

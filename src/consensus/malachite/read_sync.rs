@@ -191,7 +191,7 @@ impl ReadSync {
             }
 
             Effect::SendValueRequest(peer_id, value_request) => {
-                info!(
+                debug!(
                     height = %value_request.height, peer = %peer_id,
                     "Send the value request to peer"
                 );
@@ -219,7 +219,7 @@ impl ReadSync {
             }
 
             Effect::SendValueResponse(request_id, value_response) => {
-                warn!(
+                debug!(
                     height = %value_response.height, request = %request_id,
                     "Sending the value response"
                 );
@@ -273,7 +273,7 @@ impl ReadSync {
             }
 
             Msg::NetworkEvent(NetworkEvent::Status(peer_id, status)) => {
-                info!(%peer_id, height = %status.height, "Received peer status");
+                debug!(%peer_id, height = %status.height, "Received peer status");
                 let status = sync::Status {
                     peer_id,
                     height: status.height,
@@ -319,7 +319,7 @@ impl ReadSync {
                                 proto::ShardChunk::decode(value_bytes).unwrap(),
                             )
                         };
-                        info!(peer_id = %peer, height = %decided_value.certificate.height, "Received sync value response");
+                        debug!(peer_id = %peer, height = %decided_value.certificate.height, "Received sync value response");
                         self.host
                             .cast(ReadHostMsg::ProcessDecidedValue {
                                 value: proto::DecidedValue { value: Some(value) },

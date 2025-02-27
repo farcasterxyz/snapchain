@@ -37,7 +37,6 @@ impl Codec<SignedConsensusMsg<SnapchainValidatorContext>> for SnapchainCodec {
     ) -> Result<SignedConsensusMsg<SnapchainValidatorContext>, Self::Error> {
         let message = ConsensusMessage::decode(bytes)?;
         match message.consensus_message {
-            None => panic!(),
             Some(consensus_message::ConsensusMessage::Vote(vote)) => {
                 Ok(SignedConsensusMsg::Vote(SignedVote {
                     message: Vote::from_proto(vote),
@@ -50,6 +49,9 @@ impl Codec<SignedConsensusMsg<SnapchainValidatorContext>> for SnapchainCodec {
                     signature: Signature(message.signature),
                 }))
             }
+            None => Err(SnapchainCodecError::Decode(DecodeError::new(
+                "No consensus message",
+            ))),
         }
     }
 

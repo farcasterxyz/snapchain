@@ -6,7 +6,7 @@ use crate::storage::store::engine::{BlockEngine, ShardEngine};
 use bytes::Bytes;
 use informalsystems_malachitebft_sync::RawDecidedValue;
 use prost::Message;
-use tracing::info;
+use tracing::{debug, warn};
 
 pub enum Engine {
     ShardEngine(ShardEngine),
@@ -39,7 +39,7 @@ impl ReadValidator {
             Engine::ShardEngine(shard_engine) => match &value.value {
                 Some(proto::decided_value::Value::Shard(shard_chunk)) => {
                     shard_engine.commit_shard_chunk(&shard_chunk);
-                    info!(
+                    debug!(
                         %height,
                         hash = hex::encode(&shard_chunk.hash),
                         "Processed decided shard chunk"
@@ -52,7 +52,7 @@ impl ReadValidator {
             Engine::BlockEngine(block_engine) => match &value.value {
                 Some(proto::decided_value::Value::Block(block)) => {
                     block_engine.commit_block(&block);
-                    info!(
+                    debug!(
                         %height,
                         hash = hex::encode(&block.hash),
                         "Processed decided block"
@@ -68,6 +68,7 @@ impl ReadValidator {
 
     fn process_buffered_blocks(&mut self) -> u64 {
         let mut num_blocks_processed = 0;
+        // This works only because [buffered_blocks] is ordered by height. It's important to maintain this property
         while let Some((height, value)) = self.buffered_blocks.pop_first() {
             if height == self.last_height.increment() {
                 self.commit_decided_value(&value, height);
@@ -100,7 +101,7 @@ impl ReadValidator {
                 self.buffered_blocks.insert(height, value);
                 0
             } else {
-                info!(%height, last_height = %self.last_height, "Dropping decided block because buffered block space is full");
+                warn!(%height, last_height = %self.last_height, "Dropping decided block because buffered block space is full");
                 0
             }
         } else if height == self.last_height.increment() {
@@ -108,7 +109,7 @@ impl ReadValidator {
             let num_buffered_blocks_processed = self.process_buffered_blocks();
             num_buffered_blocks_processed + 1
         } else {
-            info!(%height, last_height = %self.last_height, "Dropping decided block because height is too low");
+            debug!(%height, last_height = %self.last_height, "Dropping decided block because height is too low");
             0
         }
     }

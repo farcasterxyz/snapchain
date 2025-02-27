@@ -7,7 +7,8 @@ mod tests {
     use crate::proto::{self, Commits, Height, ShardChunk, ShardHash};
     use crate::storage::store::engine::ShardEngine;
     use crate::storage::store::test_helper::{
-        self, commit_event, default_storage_event, FID_FOR_TEST,
+        self, commit_event, default_storage_event, new_engine_with_options, EngineOptions,
+        FID_FOR_TEST,
     };
 
     async fn setup(num_already_decided_blocks: u64) -> (ShardEngine, ShardEngine, ReadValidator) {
@@ -18,13 +19,19 @@ mod tests {
             read_node_engine.commit_shard_chunk(&shard_chunk);
         }
 
+        let (read_node_engine_clone, _) = new_engine_with_options(EngineOptions {
+            limits: None,
+            db: Some(read_node_engine.db.clone()),
+            messages_request_tx: None,
+        });
+
         let read_validator = ReadValidator {
             shard_id: read_node_engine.shard_id(),
             last_height: Height {
                 shard_index: read_node_engine.shard_id(),
                 block_number: 0,
             },
-            engine: Engine::ShardEngine(read_node_engine.clone()),
+            engine: Engine::ShardEngine(read_node_engine_clone),
             max_num_buffered_blocks: 1,
             buffered_blocks: BTreeMap::new(),
         };

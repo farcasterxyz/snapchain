@@ -1,5 +1,5 @@
 use crate::mempool::mempool::MempoolMessagesRequest;
-use crate::storage::db;
+use crate::storage::db::{self, RocksDB};
 use crate::storage::store::engine::ShardEngine;
 use crate::storage::store::stores::StoreLimits;
 use crate::storage::trie::merkle_trie;
@@ -94,7 +94,7 @@ pub mod limits {
 
 pub struct EngineOptions {
     pub limits: Option<StoreLimits>,
-    pub db_name: Option<String>,
+    pub db: Option<Arc<RocksDB>>,
     pub messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
 }
 
@@ -104,12 +104,17 @@ pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile
         true,
     );
     let dir = tempfile::TempDir::new().unwrap();
-    let db_path = dir
-        .path()
-        .join(options.db_name.unwrap_or("test.db".to_string()));
 
-    let db = db::RocksDB::new(db_path.to_str().unwrap());
-    db.open().unwrap();
+    let db = match options.db {
+        None => {
+            let db_path = dir.path().join("test.db");
+
+            let db = db::RocksDB::new(db_path.to_str().unwrap());
+            db.open().unwrap();
+            Arc::new(db)
+        }
+        Some(db) => db,
+    };
 
     let test_limits = options.limits.unwrap_or(StoreLimits {
         limits: limits::test(),
@@ -118,7 +123,7 @@ pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile
 
     (
         ShardEngine::new(
-            Arc::new(db),
+            db,
             merkle_trie::MerkleTrie::new(16).unwrap(),
             1,
             test_limits,
@@ -134,7 +139,7 @@ pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile
 pub fn new_engine() -> (ShardEngine, tempfile::TempDir) {
     new_engine_with_options(EngineOptions {
         limits: None,
-        db_name: None,
+        db: None,
         messages_request_tx: None,
     })
 }

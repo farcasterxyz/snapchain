@@ -148,7 +148,6 @@ struct TransactionCounts {
     system_messages: u64,
 }
 
-#[derive(Clone)]
 pub struct ShardEngine {
     shard_id: u32,
     pub db: Arc<RocksDB>,

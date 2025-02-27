@@ -144,12 +144,12 @@ mod tests {
         let limits = test_helper::limits::test_store_limits();
         let (engine1, _) = test_helper::new_engine_with_options(test_helper::EngineOptions {
             limits: Some(limits.clone()),
-            db_name: Some("db1.db".to_string()),
+            db: None,
             messages_request_tx: None,
         });
         let (engine2, _) = test_helper::new_engine_with_options(test_helper::EngineOptions {
             limits: Some(limits.clone()),
-            db_name: Some("db2.db".to_string()),
+            db: None,
             messages_request_tx: None,
         });
         let db1 = engine1.db.clone();
