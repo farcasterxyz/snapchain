@@ -8,8 +8,6 @@ use informalsystems_malachitebft_sync::RawDecidedValue;
 use prost::Message;
 use tracing::info;
 
-use super::malachite::read_sync::{self, ReadSyncRef};
-
 pub enum Engine {
     ShardEngine(ShardEngine),
     BlockEngine(BlockEngine),
@@ -23,13 +21,12 @@ pub struct ReadValidator {
 }
 
 impl ReadValidator {
-    pub fn initialize_height(&mut self, sync: &ReadSyncRef) {
+    pub fn initialize_height(&mut self) {
         let height = match &self.engine {
             Engine::BlockEngine(engine) => engine.get_confirmed_height(),
             Engine::ShardEngine(engine) => engine.get_confirmed_height(),
         };
         self.last_height = height;
-        sync.cast(read_sync::Msg::Decided(height)).unwrap();
     }
 
     pub fn get_min_height(&self) -> Height {
@@ -37,7 +34,7 @@ impl ReadValidator {
         Height::new(self.shard_id, 1)
     }
 
-    fn commit_decided_value(&mut self, value: &DecidedValue, height: Height, sync: &ReadSyncRef) {
+    fn commit_decided_value(&mut self, value: &DecidedValue, height: Height) {
         match &mut self.engine {
             Engine::ShardEngine(shard_engine) => match &value.value {
                 Some(proto::decided_value::Value::Shard(shard_chunk)) => {
@@ -67,18 +64,21 @@ impl ReadValidator {
             },
         };
         self.last_height = height;
-        sync.cast(read_sync::Msg::Decided(height)).unwrap();
     }
 
-    fn process_buffered_blocks(&mut self, sync: &read_sync::ReadSyncRef) {
+    fn process_buffered_blocks(&mut self) -> u64 {
+        let mut num_blocks_processed = 0;
         while let Some((height, value)) = self.buffered_blocks.pop_first() {
             if height == self.last_height.increment() {
-                self.commit_decided_value(&value, height, sync);
+                self.commit_decided_value(&value, height);
+                num_blocks_processed += 1;
             } else if height > self.last_height.increment() {
                 self.buffered_blocks.insert(height, value);
                 break;
             }
         }
+
+        num_blocks_processed
     }
 
     fn get_decided_value_height(value: &proto::DecidedValue) -> Height {
@@ -93,19 +93,23 @@ impl ReadValidator {
         }
     }
 
-    pub fn process_decided_value(&mut self, value: DecidedValue, sync: &ReadSyncRef) {
+    pub fn process_decided_value(&mut self, value: DecidedValue) -> u64 {
         let height = Self::get_decided_value_height(&value);
         if height > self.last_height.increment() {
             if (self.buffered_blocks.len() as u32) < self.max_num_buffered_blocks {
                 self.buffered_blocks.insert(height, value);
+                0
             } else {
-                info!(%height, last_height = %self.last_height, "Dropping decided block because buffered block space is full")
+                info!(%height, last_height = %self.last_height, "Dropping decided block because buffered block space is full");
+                0
             }
         } else if height == self.last_height.increment() {
-            self.commit_decided_value(&value, height, &sync);
-            self.process_buffered_blocks(&sync);
+            self.commit_decided_value(&value, height);
+            let num_buffered_blocks_processed = self.process_buffered_blocks();
+            num_buffered_blocks_processed + 1
         } else {
-            info!(%height, last_height = %self.last_height, "Dropping decided block because height is too low")
+            info!(%height, last_height = %self.last_height, "Dropping decided block because height is too low");
+            0
         }
     }
 

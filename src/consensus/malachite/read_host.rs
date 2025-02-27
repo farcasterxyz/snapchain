@@ -7,7 +7,7 @@ use informalsystems_malachitebft_sync::RawDecidedValue;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SpawnErr};
 use tracing::error;
 
-use super::read_sync::ReadSyncRef;
+use super::read_sync::{self, ReadSyncRef};
 
 /// Messages that need to be handled by the host actor.
 #[derive(Debug)]
@@ -61,7 +61,9 @@ impl ReadHost {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             ReadHostMsg::Started { sync } => {
-                state.validator.initialize_height(&sync);
+                state.validator.initialize_height();
+                sync.cast(read_sync::Msg::Decided(state.validator.last_height))
+                    .unwrap();
             }
 
             ReadHostMsg::GetHistoryMinHeight { reply_to } => {
@@ -70,7 +72,11 @@ impl ReadHost {
             }
 
             ReadHostMsg::ProcessDecidedValue { value, sync } => {
-                state.validator.process_decided_value(value, &sync);
+                let num_values_processed = state.validator.process_decided_value(value);
+                if num_values_processed > 0 {
+                    sync.cast(read_sync::Msg::Decided(state.validator.last_height))
+                        .unwrap();
+                }
             }
 
             ReadHostMsg::GetDecidedValue { height, reply_to } => {
