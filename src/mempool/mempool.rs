@@ -232,7 +232,7 @@ impl ReadNodeMempool {
         }
     }
 
-    pub fn message_is_valid(&mut self, message: &MempoolMessage) -> bool {
+    fn message_is_valid(&mut self, message: &MempoolMessage) -> bool {
         let fid = message.fid();
         let shard = self.message_router.route_message(fid, self.num_shards);
         if message_already_exists(shard, &mut self.shard_stores, message) {
@@ -243,7 +243,9 @@ impl ReadNodeMempool {
 
     pub async fn run(&mut self) {
         while let Some((message, source)) = self.mempool_rx.recv().await {
-            gossip_message(message, source, &self.gossip_tx).await
+            if self.message_is_valid(&message) {
+                gossip_message(message, source, &self.gossip_tx).await
+            }
         }
         panic!("Mempool has exited");
     }
