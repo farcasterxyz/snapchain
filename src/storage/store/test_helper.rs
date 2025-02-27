@@ -98,11 +98,15 @@ pub struct EngineOptions {
     pub messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
 }
 
-pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile::TempDir) {
-    let statsd_client = StatsdClientWrapper::new(
+pub fn statsd_client() -> StatsdClientWrapper {
+    StatsdClientWrapper::new(
         cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
         true,
-    );
+    )
+}
+
+pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile::TempDir) {
+    let statsd_client = statsd_client();
     let dir = tempfile::TempDir::new().unwrap();
 
     let db = match options.db {

@@ -34,6 +34,7 @@ mod tests {
             engine: Engine::ShardEngine(read_node_engine_clone),
             max_num_buffered_blocks: 1,
             buffered_blocks: BTreeMap::new(),
+            statsd_client: test_helper::statsd_client(),
         };
 
         (proposer_engine, read_node_engine, read_validator)

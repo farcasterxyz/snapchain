@@ -52,6 +52,7 @@ mod tests {
             gossip_tx,
             SharedRegistry::global(),
             shard_id,
+            test_helper::statsd_client(),
         )
         .await
         .unwrap();

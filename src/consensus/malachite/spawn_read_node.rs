@@ -11,6 +11,7 @@ use crate::consensus::read_validator::{self, Engine};
 use crate::core::types::SnapchainValidatorContext;
 use crate::network::gossip::GossipEvent;
 use crate::proto::{self, Height};
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::PeerId;
 use tokio::sync::mpsc;
@@ -21,6 +22,7 @@ use super::spawn::spawn_network_actor;
 
 pub async fn spawn_read_host(
     shard_id: u32,
+    statsd_client: StatsdClientWrapper,
     engine: Engine,
 ) -> Result<ReadHostRef, ractor::SpawnErr> {
     let state = ReadHostState {
@@ -33,6 +35,7 @@ pub async fn spawn_read_host(
             },
             max_num_buffered_blocks: 100,
             buffered_blocks: BTreeMap::new(),
+            statsd_client,
         },
     };
     let actor_ref = ReadHost::spawn(state).await?;
@@ -74,6 +77,7 @@ impl MalachiteReadNodeActors {
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         registry: &SharedRegistry,
         shard_id: u32,
+        statsd_client: StatsdClientWrapper,
     ) -> Result<Self, ractor::SpawnErr> {
         let name = if shard_id == 0 {
             format!("Block")
@@ -83,7 +87,7 @@ impl MalachiteReadNodeActors {
         let span = tracing::info_span!("node", name = %name);
 
         let network_actor = spawn_network_actor(gossip_tx.clone(), local_peer_id).await?;
-        let host_actor = spawn_read_host(shard_id, engine).await?;
+        let host_actor = spawn_read_host(shard_id, statsd_client, engine).await?;
         let sync_actor = spawn_read_sync_actor(
             ctx.clone(),
             network_actor.clone(),

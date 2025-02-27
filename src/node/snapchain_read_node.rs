@@ -82,6 +82,7 @@ impl SnapchainReadNode {
                 gossip_tx.clone(),
                 registry,
                 shard_id,
+                statsd_client.clone(),
             )
             .await;
 
@@ -105,6 +106,7 @@ impl SnapchainReadNode {
             gossip_tx.clone(),
             registry,
             block_shard.shard_id(),
+            statsd_client.clone(),
         )
         .await;
         if block_actor.is_err() {

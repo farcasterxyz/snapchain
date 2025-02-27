@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use crate::core::types::SnapchainValidatorContext;
 use crate::proto::{self, DecidedValue, Height};
 use crate::storage::store::engine::{BlockEngine, ShardEngine};
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use bytes::Bytes;
 use informalsystems_malachitebft_sync::RawDecidedValue;
 use prost::Message;
@@ -18,6 +19,7 @@ pub struct ReadValidator {
     pub last_height: Height,
     pub max_num_buffered_blocks: u32,
     pub buffered_blocks: BTreeMap<Height, proto::DecidedValue>,
+    pub statsd_client: StatsdClientWrapper,
 }
 
 impl ReadValidator {
@@ -96,7 +98,7 @@ impl ReadValidator {
 
     pub fn process_decided_value(&mut self, value: DecidedValue) -> u64 {
         let height = Self::get_decided_value_height(&value);
-        if height > self.last_height.increment() {
+        let num_committed_values = if height > self.last_height.increment() {
             if (self.buffered_blocks.len() as u32) < self.max_num_buffered_blocks {
                 self.buffered_blocks.insert(height, value);
                 0
@@ -111,7 +113,18 @@ impl ReadValidator {
         } else {
             debug!(%height, last_height = %self.last_height, "Dropping decided block because height is too low");
             0
-        }
+        };
+        self.statsd_client.gauge_with_shard(
+            self.shard_id,
+            "read_validator.num_buffered_blocks",
+            self.buffered_blocks.len() as u64,
+        );
+        self.statsd_client.count_with_shard(
+            self.shard_id,
+            "read_validator.num_commited_values",
+            num_committed_values,
+        );
+        num_committed_values
     }
 
     pub fn get_decided_value(
