@@ -576,7 +576,7 @@ impl Subscriber {
         let latest_block_in_db = self.latest_block_in_db();
         info!(
             start_block_number = self.start_block_number,
-            stop_block_numer = self.stop_block_number,
+            stop_block_number = self.stop_block_number,
             latest_block_on_chain,
             latest_block_in_db,
             "Starting l2 events subscription"
