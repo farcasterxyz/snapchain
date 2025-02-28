@@ -2,12 +2,12 @@
     {
         "inputs": [
             {
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "_idRegistry",
                 "type": "address"
             },
             {
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "_initialOwner",
                 "type": "address"
             }
@@ -23,12 +23,12 @@
     {
         "inputs": [
             {
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "account",
                 "type": "address"
             },
             {
-                "internaltype": "uint256",
+                "internalType": "uint256",
                 "name": "currentNonce",
                 "type": "uint256"
             }
@@ -99,7 +99,7 @@
     {
         "inputs": [
             {
-                "internaltype": "string",
+                "internalType": "string",
                 "name": "str",
                 "type": "string"
             }
@@ -115,12 +115,12 @@
     {
         "inputs": [
             {
-                "internaltype": "uint32",
+                "internalType": "uint32",
                 "name": "keytype",
                 "type": "uint32"
             },
             {
-                "internaltype": "uint8",
+                "internalType": "uint8",
                 "name": "metadatatype",
                 "type": "uint8"
             }
@@ -133,37 +133,37 @@
         "inputs": [
             {
                 "indexed": true,
-                "internaltype": "uint256",
+                "internalType": "uint256",
                 "name": "fid",
                 "type": "uint256"
             },
             {
                 "indexed": true,
-                "internaltype": "uint32",
+                "internalType": "uint32",
                 "name": "keytype",
                 "type": "uint32"
             },
             {
                 "indexed": true,
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "key",
                 "type": "bytes"
             },
             {
                 "indexed": false,
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "keyBytes",
                 "type": "bytes"
             },
             {
                 "indexed": false,
-                "internaltype": "uint8",
+                "internalType": "uint8",
                 "name": "metadatatype",
                 "type": "uint8"
             },
             {
                 "indexed": false,
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "metadata",
                 "type": "bytes"
             }
@@ -176,19 +176,19 @@
         "inputs": [
             {
                 "indexed": true,
-                "internaltype": "uint256",
+                "internalType": "uint256",
                 "name": "fid",
                 "type": "uint256"
             },
             {
                 "indexed": true,
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "key",
                 "type": "bytes"
             },
             {
                 "indexed": false,
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "keyBytes",
                 "type": "bytes"
             }
@@ -213,7 +213,7 @@
         "inputs": [
             {
                 "indexed": true,
-                "internaltype": "uint256",
+                "internalType": "uint256",
                 "name": "keysMigratedAt",
                 "type": "uint256"
             }
@@ -226,13 +226,13 @@
         "inputs": [
             {
                 "indexed": true,
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "previousOwner",
                 "type": "address"
             },
             {
                 "indexed": true,
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "newOwner",
                 "type": "address"
             }
@@ -245,13 +245,13 @@
         "inputs": [
             {
                 "indexed": true,
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "previousOwner",
                 "type": "address"
             },
             {
                 "indexed": true,
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "newOwner",
                 "type": "address"
             }
@@ -264,19 +264,19 @@
         "inputs": [
             {
                 "indexed": true,
-                "internaltype": "uint256",
+                "internalType": "uint256",
                 "name": "fid",
                 "type": "uint256"
             },
             {
                 "indexed": true,
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "key",
                 "type": "bytes"
             },
             {
                 "indexed": false,
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "keyBytes",
                 "type": "bytes"
             }
@@ -289,13 +289,13 @@
         "inputs": [
             {
                 "indexed": false,
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "oldIdRegistry",
                 "type": "address"
             },
             {
                 "indexed": false,
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "newIdRegistry",
                 "type": "address"
             }
@@ -308,19 +308,19 @@
         "inputs": [
             {
                 "indexed": true,
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "oldCaller",
                 "type": "address"
             },
             {
                 "indexed": true,
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "newCaller",
                 "type": "address"
             },
             {
                 "indexed": false,
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "owner",
                 "type": "address"
             }
@@ -333,25 +333,25 @@
         "inputs": [
             {
                 "indexed": false,
-                "internaltype": "uint32",
+                "internalType": "uint32",
                 "name": "keytype",
                 "type": "uint32"
             },
             {
                 "indexed": false,
-                "internaltype": "uint8",
+                "internalType": "uint8",
                 "name": "metadatatype",
                 "type": "uint8"
             },
             {
                 "indexed": false,
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "oldValidator",
                 "type": "address"
             },
             {
                 "indexed": false,
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "newValidator",
                 "type": "address"
             }
@@ -369,22 +369,22 @@
     {
         "inputs": [
             {
-                "internaltype": "uint32",
+                "internalType": "uint32",
                 "name": "keytype",
                 "type": "uint32"
             },
             {
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "key",
                 "type": "bytes"
             },
             {
-                "internaltype": "uint8",
+                "internalType": "uint8",
                 "name": "metadatatype",
                 "type": "uint8"
             },
             {
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "metadata",
                 "type": "bytes"
             }
@@ -397,37 +397,37 @@
     {
         "inputs": [
             {
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "fidOwner",
                 "type": "address"
             },
             {
-                "internaltype": "uint32",
+                "internalType": "uint32",
                 "name": "keytype",
                 "type": "uint32"
             },
             {
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "key",
                 "type": "bytes"
             },
             {
-                "internaltype": "uint8",
+                "internalType": "uint8",
                 "name": "metadatatype",
                 "type": "uint8"
             },
             {
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "metadata",
                 "type": "bytes"
             },
             {
-                "internaltype": "uint256",
+                "internalType": "uint256",
                 "name": "deadline",
                 "type": "uint256"
             },
             {
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "sig",
                 "type": "bytes"
             }
@@ -440,17 +440,17 @@
     {
         "inputs": [
             {
-                "internaltype": "uint256[]",
+                "internalType": "uint256[]",
                 "name": "fids",
                 "type": "uint256[]"
             },
             {
-                "internaltype": "bytes[][]",
+                "internalType": "bytes[][]",
                 "name": "fidKeys",
                 "type": "bytes[][]"
             },
             {
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "metadata",
                 "type": "bytes"
             }
@@ -463,12 +463,12 @@
     {
         "inputs": [
             {
-                "internaltype": "uint256[]",
+                "internalType": "uint256[]",
                 "name": "fids",
                 "type": "uint256[]"
             },
             {
-                "internaltype": "bytes[][]",
+                "internalType": "bytes[][]",
                 "name": "fidKeys",
                 "type": "bytes[][]"
             }
@@ -490,37 +490,37 @@
         "name": "eip712Domain",
         "outputs": [
             {
-                "internaltype": "bytes1",
+                "internalType": "bytes1",
                 "name": "fields",
                 "type": "bytes1"
             },
             {
-                "internaltype": "string",
+                "internalType": "string",
                 "name": "name",
                 "type": "string"
             },
             {
-                "internaltype": "string",
+                "internalType": "string",
                 "name": "version",
                 "type": "string"
             },
             {
-                "internaltype": "uint256",
+                "internalType": "uint256",
                 "name": "chainId",
                 "type": "uint256"
             },
             {
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "verifyingContract",
                 "type": "address"
             },
             {
-                "internaltype": "bytes32",
+                "internalType": "bytes32",
                 "name": "salt",
                 "type": "bytes32"
             },
             {
-                "internaltype": "uint256[]",
+                "internalType": "uint256[]",
                 "name": "extensions",
                 "type": "uint256[]"
             }
@@ -533,7 +533,7 @@
         "name": "gracePeriod",
         "outputs": [
             {
-                "internaltype": "uint24",
+                "internalType": "uint24",
                 "name": "",
                 "type": "uint24"
             }
@@ -546,7 +546,7 @@
         "name": "idRegistry",
         "outputs": [
             {
-                "internaltype": "contract IdRegistryLike",
+                "internalType": "contract IdRegistryLike",
                 "name": "",
                 "type": "address"
             }
@@ -559,7 +559,7 @@
         "name": "isMigrated",
         "outputs": [
             {
-                "internaltype": "bool",
+                "internalType": "bool",
                 "name": "",
                 "type": "bool"
             }
@@ -570,12 +570,12 @@
     {
         "inputs": [
             {
-                "internaltype": "uint256",
+                "internalType": "uint256",
                 "name": "fid",
                 "type": "uint256"
             },
             {
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "key",
                 "type": "bytes"
             }
@@ -585,17 +585,17 @@
             {
                 "components": [
                     {
-                        "internaltype": "enum KeyRegistry.KeyState",
+                        "internalType": "enum KeyRegistry.KeyState",
                         "name": "state",
                         "type": "uint8"
                     },
                     {
-                        "internaltype": "uint32",
+                        "internalType": "uint32",
                         "name": "keytype",
                         "type": "uint32"
                     }
                 ],
-                "internaltype": "struct KeyRegistry.KeyData",
+                "internalType": "struct KeyRegistry.KeyData",
                 "name": "",
                 "type": "tuple"
             }
@@ -606,12 +606,12 @@
     {
         "inputs": [
             {
-                "internaltype": "uint256",
+                "internalType": "uint256",
                 "name": "fid",
                 "type": "uint256"
             },
             {
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "key",
                 "type": "bytes"
             }
@@ -619,12 +619,12 @@
         "name": "keys",
         "outputs": [
             {
-                "internaltype": "enum KeyRegistry.KeyState",
+                "internalType": "enum KeyRegistry.KeyState",
                 "name": "state",
                 "type": "uint8"
             },
             {
-                "internaltype": "uint32",
+                "internalType": "uint32",
                 "name": "keytype",
                 "type": "uint32"
             }
@@ -637,7 +637,7 @@
         "name": "keysMigratedAt",
         "outputs": [
             {
-                "internaltype": "uint40",
+                "internalType": "uint40",
                 "name": "",
                 "type": "uint40"
             }
@@ -655,7 +655,7 @@
     {
         "inputs": [
             {
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "owner",
                 "type": "address"
             }
@@ -663,7 +663,7 @@
         "name": "nonces",
         "outputs": [
             {
-                "internaltype": "uint256",
+                "internalType": "uint256",
                 "name": "",
                 "type": "uint256"
             }
@@ -676,7 +676,7 @@
         "name": "owner",
         "outputs": [
             {
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "",
                 "type": "address"
             }
@@ -689,7 +689,7 @@
         "name": "pendingOwner",
         "outputs": [
             {
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "",
                 "type": "address"
             }
@@ -700,7 +700,7 @@
     {
         "inputs": [
             {
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "key",
                 "type": "bytes"
             }
@@ -713,22 +713,22 @@
     {
         "inputs": [
             {
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "fidOwner",
                 "type": "address"
             },
             {
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "key",
                 "type": "bytes"
             },
             {
-                "internaltype": "uint256",
+                "internalType": "uint256",
                 "name": "deadline",
                 "type": "uint256"
             },
             {
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "sig",
                 "type": "bytes"
             }
@@ -748,7 +748,7 @@
     {
         "inputs": [
             {
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "_idRegistry",
                 "type": "address"
             }
@@ -761,7 +761,7 @@
     {
         "inputs": [
             {
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "_trustedCaller",
                 "type": "address"
             }
@@ -774,17 +774,17 @@
     {
         "inputs": [
             {
-                "internaltype": "uint32",
+                "internalType": "uint32",
                 "name": "keytype",
                 "type": "uint32"
             },
             {
-                "internaltype": "uint8",
+                "internalType": "uint8",
                 "name": "metadatatype",
                 "type": "uint8"
             },
             {
-                "internaltype": "contract IMetadataValidator",
+                "internalType": "contract IMetadataValidator",
                 "name": "validator",
                 "type": "address"
             }
@@ -797,7 +797,7 @@
     {
         "inputs": [
             {
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "newOwner",
                 "type": "address"
             }
@@ -810,27 +810,27 @@
     {
         "inputs": [
             {
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "fidOwner",
                 "type": "address"
             },
             {
-                "internaltype": "uint32",
+                "internalType": "uint32",
                 "name": "keytype",
                 "type": "uint32"
             },
             {
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "key",
                 "type": "bytes"
             },
             {
-                "internaltype": "uint8",
+                "internalType": "uint8",
                 "name": "metadatatype",
                 "type": "uint8"
             },
             {
-                "internaltype": "bytes",
+                "internalType": "bytes",
                 "name": "metadata",
                 "type": "bytes"
             }
@@ -845,7 +845,7 @@
         "name": "trustedCaller",
         "outputs": [
             {
-                "internaltype": "address",
+                "internalType": "address",
                 "name": "",
                 "type": "address"
             }
@@ -858,7 +858,7 @@
         "name": "trustedOnly",
         "outputs": [
             {
-                "internaltype": "uint256",
+                "internalType": "uint256",
                 "name": "",
                 "type": "uint256"
             }
@@ -869,12 +869,12 @@
     {
         "inputs": [
             {
-                "internaltype": "uint32",
+                "internalType": "uint32",
                 "name": "keytype",
                 "type": "uint32"
             },
             {
-                "internaltype": "uint8",
+                "internalType": "uint8",
                 "name": "metadatatype",
                 "type": "uint8"
             }
@@ -882,7 +882,7 @@
         "name": "validators",
         "outputs": [
             {
-                "internaltype": "contract IMetadataValidator",
+                "internalType": "contract IMetadataValidator",
                 "name": "validator",
                 "type": "address"
             }
