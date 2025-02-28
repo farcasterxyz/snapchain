@@ -94,7 +94,7 @@ mod tests {
                 r#type: 1,
             })
         };
-        let result = validate_fname_transfer(transfer);
+        let result = validate_fname_transfer(transfer, None);
         assert!(result.is_ok());
     }
 
@@ -112,7 +112,7 @@ mod tests {
                 r#type: 1,
             })
         };
-        let result = validate_fname_transfer(transfer);
+        let result = validate_fname_transfer(transfer, None);
         assert!(result.is_ok());
     }
 
@@ -130,7 +130,7 @@ mod tests {
                 r#type: 1,
             })
         };
-        let result = validate_fname_transfer(transfer);
+        let result = validate_fname_transfer(transfer, None);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), ValidationError::InvalidSignature);
     }
@@ -149,7 +149,7 @@ mod tests {
         r#type: 1,
       })
     };
-        let result = validate_fname_transfer(transfer);
+        let result = validate_fname_transfer(transfer, None);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), ValidationError::InvalidSignature);
     }

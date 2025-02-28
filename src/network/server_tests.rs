@@ -146,11 +146,13 @@ mod tests {
             limits: Some(limits.clone()),
             db: None,
             messages_request_tx: None,
+            fname_signer_address: None,
         });
         let (engine2, _) = test_helper::new_engine_with_options(test_helper::EngineOptions {
             limits: Some(limits.clone()),
             db: None,
             messages_request_tx: None,
+            fname_signer_address: None,
         });
         let db1 = engine1.db.clone();
         let db2 = engine2.db.clone();
