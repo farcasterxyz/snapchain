@@ -320,12 +320,10 @@ impl ReadSync {
                             )
                         };
                         debug!(peer_id = %peer, height = %decided_value.certificate.height, "Received sync value response");
-                        self.host
-                            .cast(ReadHostMsg::ProcessDecidedValue {
-                                value: proto::DecidedValue { value: Some(value) },
-                                sync: myself.clone(),
-                            })
-                            .unwrap();
+                        self.host.cast(ReadHostMsg::ProcessDecidedValue {
+                            value: proto::DecidedValue { value: Some(value) },
+                            sync: myself.clone(),
+                        })?;
                         self.process_input(
                             &myself,
                             state,
