@@ -116,98 +116,6 @@ pub struct MempoolMessagesRequest {
     pub max_messages_per_block: u32,
 }
 
-fn message_already_exists(
-    shard: u32,
-    shard_stores: &mut HashMap<u32, Stores>,
-    message: &MempoolMessage,
-) -> bool {
-    let fid = message.fid();
-
-    let stores = shard_stores.get_mut(&shard);
-    // Default to false in the error paths
-    match stores {
-        None => {
-            error!("Error finding store for shard: {}", shard);
-            false
-        }
-        Some(stores) => match message {
-            MempoolMessage::UserMessage(message) => match &message.data {
-                None => false,
-                Some(message_data) => {
-                    let ts_hash = make_ts_hash(message_data.timestamp, &message.hash).unwrap();
-                    match type_to_set_postfix(message_data.r#type()) {
-                        Err(err) => {
-                            error!("Error retrieving set postfix: {}", err.to_string());
-                            false
-                        }
-                        Ok(set_postfix) => {
-                            let primary_key =
-                                make_message_primary_key(fid, set_postfix as u8, Some(&ts_hash));
-                            let existing_message = get_message_by_key(
-                                &stores.db,
-                                &mut RocksDbTransactionBatch::new(),
-                                &primary_key,
-                            );
-                            match existing_message {
-                                Ok(Some(_)) => true,
-                                Err(_) | Ok(None) => false,
-                            }
-                        }
-                    }
-                }
-            },
-            MempoolMessage::ValidatorMessage(message) => {
-                if let Some(onchain_event) = &message.on_chain_event {
-                    match stores.onchain_event_store.exists(&onchain_event) {
-                        Err(_) => return false,
-                        Ok(exists) => return exists,
-                    }
-                }
-
-                if let Some(fname_transfer) = &message.fname_transfer {
-                    match &fname_transfer.proof {
-                        None => return false,
-                        Some(proof) => {
-                            let username_proof = UserDataStore::get_username_proof(
-                                &stores.user_data_store,
-                                &mut RocksDbTransactionBatch::new(),
-                                &proof.name,
-                            );
-                            match username_proof {
-                                Err(_) | Ok(None) => return false,
-                                Ok(Some(_)) => return true,
-                            }
-                        }
-                    }
-                }
-                return false;
-            }
-        },
-    }
-}
-
-async fn gossip_message(
-    message: MempoolMessage,
-    source: MempoolSource,
-    gossip_tx: &mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
-) {
-    match message {
-        MempoolMessage::UserMessage(_) => {
-            // Don't re-broadcast messages that were received from gossip, other nodes will already have them.
-            if source != MempoolSource::Gossip {
-                let result = gossip_tx
-                    .send(GossipEvent::BroadcastMempoolMessage(message))
-                    .await;
-
-                if let Err(e) = result {
-                    warn!("Failed to gossip message {:?}", e);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
 pub struct ReadNodeMempool {
     shard_stores: HashMap<u32, Stores>,
     message_router: Box<dyn MessageRouter>,
@@ -232,10 +140,98 @@ impl ReadNodeMempool {
         }
     }
 
+    fn message_already_exists(&self, shard: u32, message: &MempoolMessage) -> bool {
+        let fid = message.fid();
+
+        let stores = self.shard_stores.get(&shard);
+        // Default to false in the error paths
+        match stores {
+            None => {
+                error!("Error finding store for shard: {}", shard);
+                false
+            }
+            Some(stores) => match message {
+                MempoolMessage::UserMessage(message) => match &message.data {
+                    None => false,
+                    Some(message_data) => {
+                        let ts_hash = make_ts_hash(message_data.timestamp, &message.hash).unwrap();
+                        match type_to_set_postfix(message_data.r#type()) {
+                            Err(err) => {
+                                error!("Error retrieving set postfix: {}", err.to_string());
+                                false
+                            }
+                            Ok(set_postfix) => {
+                                let primary_key = make_message_primary_key(
+                                    fid,
+                                    set_postfix as u8,
+                                    Some(&ts_hash),
+                                );
+                                let existing_message = get_message_by_key(
+                                    &stores.db,
+                                    &mut RocksDbTransactionBatch::new(),
+                                    &primary_key,
+                                );
+                                match existing_message {
+                                    Ok(Some(_)) => true,
+                                    Err(_) | Ok(None) => false,
+                                }
+                            }
+                        }
+                    }
+                },
+                MempoolMessage::ValidatorMessage(message) => {
+                    if let Some(onchain_event) = &message.on_chain_event {
+                        match stores.onchain_event_store.exists(&onchain_event) {
+                            Err(_) => return false,
+                            Ok(exists) => return exists,
+                        }
+                    }
+
+                    if let Some(fname_transfer) = &message.fname_transfer {
+                        match &fname_transfer.proof {
+                            None => return false,
+                            Some(proof) => {
+                                let username_proof = UserDataStore::get_username_proof(
+                                    &stores.user_data_store,
+                                    &mut RocksDbTransactionBatch::new(),
+                                    &proof.name,
+                                );
+                                match username_proof {
+                                    Err(_) | Ok(None) => return false,
+                                    Ok(Some(_)) => return true,
+                                }
+                            }
+                        }
+                    }
+                    return false;
+                }
+            },
+        }
+    }
+
+    async fn gossip_message(&self, message: MempoolMessage, source: MempoolSource) {
+        match message {
+            MempoolMessage::UserMessage(_) => {
+                // Don't re-broadcast messages that were received from gossip, other nodes will already have them.
+                if source != MempoolSource::Gossip {
+                    let result = self
+                        .gossip_tx
+                        .send(GossipEvent::BroadcastMempoolMessage(message))
+                        .await;
+
+                    if let Err(e) = result {
+                        warn!("Failed to gossip message {:?}", e);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn message_is_valid(&mut self, message: &MempoolMessage) -> bool {
         let fid = message.fid();
         let shard = self.message_router.route_message(fid, self.num_shards);
-        if message_already_exists(shard, &mut self.shard_stores, message) {
+        if self.message_already_exists(shard, message) {
             return false;
         }
         true
@@ -244,7 +240,7 @@ impl ReadNodeMempool {
     pub async fn run(&mut self) {
         while let Some((message, source)) = self.mempool_rx.recv().await {
             if self.message_is_valid(&message) {
-                gossip_message(message, source, &self.gossip_tx).await
+                self.gossip_message(message, source).await
             }
         }
         panic!("Mempool has exited");
@@ -253,15 +249,11 @@ impl ReadNodeMempool {
 
 pub struct Mempool {
     config: Config,
-    shard_stores: HashMap<u32, Stores>,
-    message_router: Box<dyn MessageRouter>,
-    num_shards: u32,
-    mempool_rx: mpsc::Receiver<MempoolMessageWithSource>,
     messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
     messages: HashMap<u32, BTreeMap<MempoolKey, MempoolMessage>>,
-    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     shard_decision_rx: broadcast::Receiver<ShardChunk>,
     statsd_client: StatsdClientWrapper,
+    read_node_mempool: ReadNodeMempool,
 }
 
 impl Mempool {
@@ -277,21 +269,25 @@ impl Mempool {
     ) -> Self {
         Mempool {
             config,
-            shard_stores,
-            num_shards,
-            mempool_rx,
-            message_router: Box::new(ShardRouter {}),
             messages: HashMap::new(),
             messages_request_rx,
-            gossip_tx,
             shard_decision_rx,
             statsd_client,
+            read_node_mempool: ReadNodeMempool::new(
+                mempool_rx,
+                num_shards,
+                shard_stores,
+                gossip_tx,
+            ),
         }
     }
 
     fn message_already_exists(&mut self, message: &MempoolMessage) -> bool {
         let fid = message.fid();
-        let shard = self.message_router.route_message(fid, self.num_shards);
+        let shard = self
+            .read_node_mempool
+            .message_router
+            .route_message(fid, self.read_node_mempool.num_shards);
 
         // First check if it already exists in the mempool
         match self.messages.get_mut(&shard) {
@@ -302,7 +298,9 @@ impl Mempool {
             }
             _ => {}
         }
-        message_already_exists(shard, &mut self.shard_stores, message)
+
+        self.read_node_mempool
+            .message_already_exists(shard, message)
     }
 
     async fn pull_messages(&mut self, request: MempoolMessagesRequest) {
@@ -340,7 +338,10 @@ impl Mempool {
         // TODO(aditi): Maybe we don't need to run validations here?
         if self.message_is_valid(&message) {
             let fid = message.fid();
-            let shard_id = self.message_router.route_message(fid, self.num_shards);
+            let shard_id = self
+                .read_node_mempool
+                .message_router
+                .route_message(fid, self.read_node_mempool.num_shards);
             match self.messages.get_mut(&shard_id) {
                 None => {
                     let mut messages = BTreeMap::new();
@@ -362,7 +363,7 @@ impl Mempool {
             self.statsd_client
                 .count_with_shard(shard_id, "mempool.insert.success", 1);
 
-            gossip_message(message, source, &self.gossip_tx).await;
+            self.read_node_mempool.gossip_message(message, source).await;
         } else {
             self.statsd_client.count("mempool.insert.failure", 1);
         }
@@ -410,7 +411,7 @@ impl Mempool {
                     // We want to pull in multiple messages per poll so that throughput is not blocked on the polling frequency. The number of messages we pull should be fixed and relatively small so that the mempool isn't always stuck here.
                     for _ in 0..256 {
                         if self.config.allow_unlimited_mempool_size || (self.messages.len() as u64) < self.config.capacity_per_shard {
-                            match self.mempool_rx.try_recv() {
+                            match self.read_node_mempool.mempool_rx.try_recv() {
                                 Ok((message, source)) => {
                                     self.insert(message, source).await;
                                 }, Err(mpsc::error::TryRecvError::Disconnected) => {
