@@ -314,6 +314,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     } else {
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
+
         let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
         let local_state_store = LocalStateStore::new(global_db);
 
