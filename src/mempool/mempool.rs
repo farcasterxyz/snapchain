@@ -297,16 +297,6 @@ impl Mempool {
             .message_router
             .route_message(fid, self.read_node_mempool.num_shards);
 
-        // First check if it already exists in the mempool
-        match self.messages.get_mut(&shard) {
-            Some(shard_messages) => {
-                if shard_messages.contains_key(&message.mempool_key()) {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-
         self.read_node_mempool
             .message_already_exists(shard, message)
     }
@@ -344,12 +334,23 @@ impl Mempool {
 
     async fn insert(&mut self, message: MempoolMessage, source: MempoolSource) {
         // TODO(aditi): Maybe we don't need to run validations here?
+        let fid = message.fid();
+        let shard_id = self
+            .read_node_mempool
+            .message_router
+            .route_message(fid, self.read_node_mempool.num_shards);
+
+        match self.messages.get_mut(&shard_id) {
+            Some(shard_messages) => {
+                if shard_messages.contains_key(&message.mempool_key()) {
+                    // Exit early if the message already exists in the mempool
+                    return;
+                }
+            }
+            None => {}
+        }
+
         if self.message_is_valid(&message) {
-            let fid = message.fid();
-            let shard_id = self
-                .read_node_mempool
-                .message_router
-                .route_message(fid, self.read_node_mempool.num_shards);
             match self.messages.get_mut(&shard_id) {
                 None => {
                     let mut messages = BTreeMap::new();
