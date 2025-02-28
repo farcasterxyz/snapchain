@@ -1,4 +1,4 @@
-//! Implementation of a host actor for bridiging consensus and the application via a set of channels.
+//! Implementation of a host actor for bridging consensus and the application via a set of channels.
 
 use crate::consensus::read_validator::ReadValidator;
 use crate::core::types::SnapchainValidatorContext;

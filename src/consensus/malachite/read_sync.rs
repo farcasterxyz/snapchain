@@ -46,7 +46,7 @@ pub enum Msg {
     /// Internal tick
     Tick { reply_to: Option<RpcReplyPort<()>> },
 
-    /// Receive an even from gossip layer
+    /// Receive an event from gossip layer
     NetworkEvent(NetworkEvent<SnapchainValidatorContext>),
 
     /// Consensus has decided on a value at the given height
