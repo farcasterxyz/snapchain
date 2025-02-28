@@ -269,6 +269,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_config.consensus.num_shards,
             node.shard_stores.clone(),
             gossip_tx.clone(),
+            statsd_client.clone(),
         );
         tokio::spawn(async move { mempool.run().await });
 

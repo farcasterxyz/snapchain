@@ -122,6 +122,7 @@ pub struct ReadNodeMempool {
     num_shards: u32,
     mempool_rx: mpsc::Receiver<MempoolMessageWithSource>,
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+    statsd_client: StatsdClientWrapper,
 }
 
 impl ReadNodeMempool {
@@ -130,6 +131,7 @@ impl ReadNodeMempool {
         num_shards: u32,
         shard_stores: HashMap<u32, Stores>,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+        statsd_client: StatsdClientWrapper,
     ) -> Self {
         ReadNodeMempool {
             shard_stores,
@@ -137,6 +139,7 @@ impl ReadNodeMempool {
             mempool_rx,
             message_router: Box::new(ShardRouter {}),
             gossip_tx,
+            statsd_client,
         }
     }
 
@@ -239,8 +242,12 @@ impl ReadNodeMempool {
 
     pub async fn run(&mut self) {
         while let Some((message, source)) = self.mempool_rx.recv().await {
+            self.statsd_client
+                .count("read_mempool.messages_received", 1);
             if self.message_is_valid(&message) {
-                self.gossip_message(message, source).await
+                self.gossip_message(message, source).await;
+                self.statsd_client
+                    .count("read_mempool.messages_published", 1);
             }
         }
         panic!("Mempool has exited");
@@ -272,12 +279,13 @@ impl Mempool {
             messages: HashMap::new(),
             messages_request_rx,
             shard_decision_rx,
-            statsd_client,
+            statsd_client: statsd_client.clone(),
             read_node_mempool: ReadNodeMempool::new(
                 mempool_rx,
                 num_shards,
                 shard_stores,
                 gossip_tx,
+                statsd_client,
             ),
         }
     }
