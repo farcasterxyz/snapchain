@@ -333,7 +333,6 @@ impl Mempool {
     }
 
     async fn insert(&mut self, message: MempoolMessage, source: MempoolSource) {
-        // TODO(aditi): Maybe we don't need to run validations here?
         let fid = message.fid();
         let shard_id = self
             .read_node_mempool
@@ -350,6 +349,7 @@ impl Mempool {
             None => {}
         }
 
+        // TODO(aditi): Maybe we don't need to run validations here?
         if self.message_is_valid(&message) {
             match self.messages.get_mut(&shard_id) {
                 None => {
