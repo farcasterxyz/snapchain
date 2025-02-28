@@ -71,6 +71,7 @@ async fn main() {
     .to_string();
 
     let base_rpc_port = 3382;
+    let base_http_port = 3482;
     let base_gossip_port = 50050;
     for i in 1..=nodes {
         let id = i;
@@ -87,9 +88,11 @@ async fn main() {
         }
         let secret_key = hex::encode(&keypairs[i - 1]);
         let rpc_port = base_rpc_port + i;
+        let http_port = base_http_port + i;
         let gossip_port = base_gossip_port + i;
         let host = format!("127.0.0.1");
         let rpc_address = format!("{host}:{rpc_port}");
+        let http_address = format!("{host}:{http_port}");
         let gossip_multi_addr = format!("/ip4/{host}/udp/{gossip_port}/quic-v1");
         let other_nodes_addresses = (1..=nodes)
             .filter(|&x| x != id)
@@ -123,6 +126,7 @@ async fn main() {
         let config_file_content = format!(
             r#"
 rpc_address="{rpc_address}"
+http_address="{http_address}"
 rocksdb_dir="{db_dir}"
 l1_rpc_url="{l1_rpc_url}"
 
