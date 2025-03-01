@@ -83,6 +83,7 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
     ),
     SyncReply(InboundRequestId, sync::Response<SnapchainValidatorContext>),
     BroadcastDecidedValue(proto::DecidedValue),
+    ReadNodeSynced(),
 }
 
 pub enum GossipTopic {
@@ -188,29 +189,20 @@ impl SnapchainGossip {
             }
         }
 
-        if read_node {
-            let topic = gossipsub::IdentTopic::new(READ_NODE_TOPIC);
-            let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
-            if let Err(e) = result {
-                warn!("Failed to subscribe to topic: {:?}", e);
-                return Err(Box::new(e));
-            }
-        } else {
-            // Create a Gossipsub topic
-            let topic = gossipsub::IdentTopic::new(CONSENSUS_TOPIC);
-            // subscribes to our topic
-            let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
-            if let Err(e) = result {
-                warn!("Failed to subscribe to topic: {:?}", e);
-                return Err(Box::new(e));
-            }
+        // Create a Gossipsub topic
+        let topic = gossipsub::IdentTopic::new(CONSENSUS_TOPIC);
+        // subscribes to our topic
+        let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
+        if let Err(e) = result {
+            warn!("Failed to subscribe to topic: {:?}", e);
+            return Err(Box::new(e));
+        }
 
-            let topic = gossipsub::IdentTopic::new(MEMPOOL_TOPIC);
-            let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
-            if let Err(e) = result {
-                warn!("Failed to subscribe to topic: {:?}", e);
-                return Err(Box::new(e));
-            }
+        let topic = gossipsub::IdentTopic::new(MEMPOOL_TOPIC);
+        let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
+        if let Err(e) = result {
+            warn!("Failed to subscribe to topic: {:?}", e);
+            return Err(Box::new(e));
         }
 
         // Listen on all assigned port for this id
@@ -320,7 +312,7 @@ impl SnapchainGossip {
                     }
                 }
                 event = self.rx.recv() => {
-                    if let Some((gossip_topics, encoded_message)) = self.map_gossip_event_to_bytes(event) {
+                    if let Some((gossip_topics, encoded_message)) = self.process_gossip_event(event) {
                         for gossip_topic in gossip_topics {
                             match gossip_topic {
                                 GossipTopic::Consensus => self.publish(encoded_message.clone(), CONSENSUS_TOPIC),
@@ -508,12 +500,21 @@ impl SnapchainGossip {
         }
     }
 
-    pub fn map_gossip_event_to_bytes(
-        &self,
+    // Return the bytes for the associated network message if there's one
+    pub fn process_gossip_event(
+        &mut self,
         event: Option<GossipEvent<SnapchainValidatorContext>>,
     ) -> Option<(Vec<GossipTopic>, Vec<u8>)> {
         let snapchain_codec = SnapchainCodec {};
         match event {
+            Some(GossipEvent::ReadNodeSynced()) => {
+                let topic = gossipsub::IdentTopic::new(READ_NODE_TOPIC);
+                let result = self.swarm.behaviour_mut().gossipsub.subscribe(&topic);
+                if let Err(e) = result {
+                    warn!("Failed to subscribe to topic: {:?}", e);
+                }
+                None
+            }
             Some(GossipEvent::BroadcastDecidedValue(decided_value)) => {
                 let gossip_message = proto::GossipMessage {
                     gossip_message: Some(proto::gossip_message::GossipMessage::ReadNodeMessage(

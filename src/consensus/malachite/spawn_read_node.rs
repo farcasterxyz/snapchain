@@ -24,6 +24,7 @@ pub async fn spawn_read_host(
     shard_id: u32,
     statsd_client: StatsdClientWrapper,
     engine: Engine,
+    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
 ) -> Result<ReadHostRef, ractor::SpawnErr> {
     let state = ReadHostState {
         validator: read_validator::ReadValidator {
@@ -37,6 +38,7 @@ pub async fn spawn_read_host(
             buffered_blocks: BTreeMap::new(),
             statsd_client,
         },
+        gossip_tx,
     };
     let actor_ref = ReadHost::spawn(state).await?;
     Ok(actor_ref)
@@ -87,7 +89,8 @@ impl MalachiteReadNodeActors {
         let span = tracing::info_span!("node", name = %name);
 
         let network_actor = spawn_network_actor(gossip_tx.clone(), local_peer_id).await?;
-        let host_actor = spawn_read_host(shard_id, statsd_client, engine).await?;
+        let host_actor =
+            spawn_read_host(shard_id, statsd_client, engine, gossip_tx.clone()).await?;
         let sync_actor = spawn_read_sync_actor(
             ctx.clone(),
             network_actor.clone(),
