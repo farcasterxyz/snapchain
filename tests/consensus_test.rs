@@ -3,7 +3,7 @@ use hex;
 use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
 use serial_test::serial;
-use snapchain::consensus::consensus::SystemMessage;
+use snapchain::consensus::consensus::{SystemMessage, ValidatorSetConfig};
 use snapchain::consensus::proposer::GENESIS_MESSAGE;
 use snapchain::mempool::mempool::{
     self, Mempool, MempoolMessageWithSource, MempoolMessagesRequest, MempoolSource,
@@ -115,7 +115,7 @@ impl ReadNodeForTest {
     pub async fn create(
         keypair: Keypair,
         num_shards: u32,
-        validator_addresses: &Vec<String>,
+        validator_sets: &Vec<ValidatorSetConfig>,
         gossip_address: String,
         bootstrap_address: String,
     ) -> Self {
@@ -128,7 +128,7 @@ impl ReadNodeForTest {
 
         let mut consensus_config = snapchain::consensus::consensus::Config::default();
         consensus_config =
-            consensus_config.with((1..=num_shards).collect(), validator_addresses.clone());
+            consensus_config.with((1..=num_shards).collect(), validator_sets.clone());
 
         let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
 
@@ -207,7 +207,7 @@ impl NodeForTest {
         keypair: Keypair,
         num_shards: u32,
         grpc_port: u32,
-        validator_addresses: &Vec<String>,
+        validator_sets: &Vec<ValidatorSetConfig>,
         gossip_address: String,
         bootstrap_address: String,
     ) -> Self {
@@ -220,7 +220,7 @@ impl NodeForTest {
 
         let mut consensus_config = snapchain::consensus::consensus::Config::default();
         consensus_config =
-            consensus_config.with((1..=num_shards).collect(), validator_addresses.clone());
+            consensus_config.with((1..=num_shards).collect(), validator_sets.clone());
         consensus_config.block_time = time::Duration::from_millis(250);
 
         let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
@@ -400,7 +400,7 @@ pub struct TestNetwork {
     num_shards: u32,
     base_grpc_port: u32,
     keypairs: Vec<Keypair>,
-    validator_addresses: Vec<String>,
+    validator_sets: Vec<ValidatorSetConfig>,
     gossip_addresses: Vec<String>,
     nodes: Vec<NodeForTest>,
     read_nodes: Vec<ReadNodeForTest>,
@@ -420,12 +420,17 @@ impl TestNetwork {
             let gossip_address = format!("/ip4/{HOST_FOR_TEST}/udp/{port}/quic-v1");
             node_addresses.push(gossip_address);
         }
+        let validator_sets = vec![ValidatorSetConfig {
+            effective_at: 0,
+            validator_public_keys: validator_addresses,
+            shard_ids: (1..=num_shards).collect(),
+        }];
         Self {
             num_validator_nodes,
             num_shards,
             base_grpc_port,
             keypairs,
-            validator_addresses,
+            validator_sets,
             gossip_addresses: node_addresses,
             nodes: vec![],
             read_nodes: vec![],
@@ -440,7 +445,7 @@ impl TestNetwork {
             keypair,
             self.num_shards,
             grpc_port,
-            &self.validator_addresses,
+            &self.validator_sets,
             gossip_address,
             self.gossip_addresses[0].clone(),
         )
@@ -455,7 +460,7 @@ impl TestNetwork {
         let node = ReadNodeForTest::create(
             keypair,
             self.num_shards,
-            &self.validator_addresses,
+            &self.validator_sets,
             gossip_address,
             self.gossip_addresses[0].clone(),
         )

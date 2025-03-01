@@ -1,3 +1,4 @@
+use super::consensus::ValidatorSetConfig;
 use crate::consensus::proposer::{BlockProposer, Proposer, ShardProposer};
 use crate::core::types::{
     Address, Height, ShardId, SnapchainShard, SnapchainValidator, SnapchainValidatorContext,
@@ -8,6 +9,7 @@ use crate::storage::store::node_local_state::LocalStateStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_core_consensus::ProposedValue;
 use informalsystems_malachitebft_core_types::{Round, ValidatorSet};
+use libp2p::identity::ed25519::PublicKey;
 use std::cmp::PartialEq;
 use std::time::Duration;
 use tracing::{error, warn};
@@ -24,7 +26,7 @@ pub struct ShardValidator {
     #[allow(dead_code)] // TODO
     address: Address,
 
-    validator_set: SnapchainValidatorSet,
+    validator_set: Vec<ValidatorSetConfig>,
     current_round: Round,
     proposal_source: ProposalSource,
     current_height: Option<Height>,
@@ -44,7 +46,7 @@ impl ShardValidator {
     pub fn new(
         address: Address,
         shard: SnapchainShard,
-        initial_validator_set: SnapchainValidatorSet,
+        validator_set: Vec<ValidatorSetConfig>,
         block_proposer: Option<BlockProposer>,
         shard_proposer: Option<ShardProposer>,
         local_state_store: LocalStateStore,
@@ -53,7 +55,7 @@ impl ShardValidator {
         ShardValidator {
             shard_id: shard.clone(),
             address: address.clone(),
-            validator_set: initial_validator_set,
+            validator_set,
             current_height: None,
             proposal_source: ProposalSource::Consensus,
             current_round: Round::new(0),
@@ -68,12 +70,33 @@ impl ShardValidator {
         }
     }
 
-    pub fn get_validator_set(&self) -> SnapchainValidatorSet {
-        self.validator_set.clone()
+    fn get_validator_set_config(&self, height: u64) -> ValidatorSetConfig {
+        let mut result = &self.validator_set[0];
+        for config in &self.validator_set {
+            if config.effective_at <= height && config.effective_at > result.effective_at {
+                result = config;
+            }
+        }
+        result.clone()
     }
 
-    pub fn validator_count(&self) -> usize {
-        self.validator_set.count()
+    pub fn get_validator_set(&self, height: u64) -> SnapchainValidatorSet {
+        let config = self.get_validator_set_config(height);
+        let mut validators = SnapchainValidatorSet::new(vec![]);
+        for address in config.validator_public_keys {
+            let validator = SnapchainValidator::new(
+                self.shard_id,
+                PublicKey::try_from_bytes(&hex::decode(address).unwrap()).unwrap(),
+                None,
+                height,
+            );
+            validators.add(validator);
+        }
+        validators
+    }
+
+    pub fn validator_count(&self, height: u64) -> usize {
+        self.get_validator_set(height).count()
     }
 
     pub fn get_address(&self) -> Address {
@@ -96,10 +119,6 @@ impl ShardValidator {
             return p.get_min_height();
         }
         panic!("No proposer set on validator");
-    }
-
-    pub fn add_validator(&mut self, validator: SnapchainValidator) -> bool {
-        self.validator_set.add(validator)
     }
 
     pub fn start(&mut self) {
