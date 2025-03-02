@@ -114,6 +114,10 @@ impl State {
             return false;
         }
 
+        if self.sync.peers.len() == 0 {
+            return false;
+        }
+
         let sync_height = self.sync.sync_height;
         let peer_ahead_by_threshold = self
             .sync
