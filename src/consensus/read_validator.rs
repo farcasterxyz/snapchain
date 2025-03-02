@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
 
-use crate::core::types::SnapchainValidatorContext;
+use crate::core::types::{SnapchainValidatorContext, Vote};
 use crate::proto::{self, DecidedValue, Height};
 use crate::storage::store::engine::{BlockEngine, ShardEngine};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use bytes::Bytes;
+use informalsystems_malachitebft_core_types::NilOrVal;
 use informalsystems_malachitebft_sync::RawDecidedValue;
+use libp2p::identity::ed25519::PublicKey;
 use prost::Message;
 use tracing::{debug, info, warn};
 
@@ -98,7 +100,41 @@ impl ReadValidator {
         }
     }
 
+    fn verify_signatures(value: &proto::DecidedValue) -> bool {
+        let certificate = match value.value.as_ref().unwrap() {
+            proto::decided_value::Value::Shard(shard_chunk) => shard_chunk
+                .commits
+                .as_ref()
+                .unwrap()
+                .to_commit_certificate(),
+
+            proto::decided_value::Value::Block(block) => {
+                block.commits.as_ref().unwrap().to_commit_certificate()
+            }
+        };
+
+        for signature in certificate.aggregated_signature.signatures {
+            let vote = Vote::new_precommit(
+                certificate.height,
+                certificate.round,
+                NilOrVal::Val(certificate.value_id.clone()),
+                signature.address.clone(),
+            );
+
+            let public_key = PublicKey::try_from_bytes(&signature.address.0).unwrap();
+            if !public_key.verify(&vote.to_sign_bytes(), &signature.signature.0) {
+                return false;
+            }
+        }
+
+        true
+    }
+
     pub fn process_decided_value(&mut self, value: DecidedValue) -> u64 {
+        let verified = Self::verify_signatures(&value);
+        if !verified {
+            return 0;
+        }
         let height = Self::get_decided_value_height(&value);
         let num_committed_values = if height > self.last_height.increment() {
             if (self.buffered_blocks.len() as u32) < self.max_num_buffered_blocks {
