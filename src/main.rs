@@ -302,8 +302,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 Some(msg) = system_rx.recv() => {
                     match msg {
                         SystemMessage::ReadNodeFinishedInitialSync {shard_id} => {
+                            info!({shard_id}, "Initial sync completed for shard");
                             shards_finished_syncing.insert(shard_id);
                             if shards_finished_syncing.len() as u32 == app_config.consensus.num_shards {
+                                info!("Initial sync completed for all shards");
                                 gossip_tx.send(GossipEvent::SubscribeToDecidedValuesTopic()).await?
                             }
                         }
