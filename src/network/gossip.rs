@@ -34,7 +34,8 @@ const MAX_GOSSIP_MESSAGE_SIZE: usize = 1024 * 1024 * 10; // 10 mb
 
 const CONSENSUS_TOPIC: &str = "consensus";
 const MEMPOOL_TOPIC: &str = "mempool";
-const READ_NODE_TOPIC: &str = "read-node";
+const DECIDED_VALUES: &str = "decided-values";
+const READ_NODE_PEER_STATUSES: &str = "read-node-peers";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -88,7 +89,8 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
 
 pub enum GossipTopic {
     Consensus,
-    ReadNode,
+    DecidedValues,
+    ReadNodePeerStatuses,
     Mempool,
     SyncRequest(MalachitePeerId, oneshot::Sender<OutboundRequestId>),
     SyncReply(InboundRequestId),
@@ -189,7 +191,14 @@ impl SnapchainGossip {
             }
         }
 
-        if !read_node {
+        if read_node {
+            let topic = gossipsub::IdentTopic::new(READ_NODE_PEER_STATUSES);
+            let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
+            if let Err(e) = result {
+                warn!("Failed to subscribe to topic: {:?}", e);
+                return Err(Box::new(e));
+            }
+        } else {
             // Create a Gossipsub topic
             let topic = gossipsub::IdentTopic::new(CONSENSUS_TOPIC);
             // subscribes to our topic
@@ -318,7 +327,8 @@ impl SnapchainGossip {
                         for gossip_topic in gossip_topics {
                             match gossip_topic {
                                 GossipTopic::Consensus => self.publish(encoded_message.clone(), CONSENSUS_TOPIC),
-                                GossipTopic::ReadNode=> self.publish(encoded_message.clone(), READ_NODE_TOPIC),
+                                GossipTopic::DecidedValues=> self.publish(encoded_message.clone(), DECIDED_VALUES),
+                                GossipTopic::ReadNodePeerStatuses => self.publish(encoded_message.clone(), READ_NODE_PEER_STATUSES),
                                 GossipTopic::Mempool => self.publish(encoded_message.clone(), MEMPOOL_TOPIC),
                                 GossipTopic::SyncRequest(peer_id, reply_tx) => {
                                     let peer = peer_id.to_libp2p();
@@ -510,7 +520,7 @@ impl SnapchainGossip {
         let snapchain_codec = SnapchainCodec {};
         match event {
             Some(GossipEvent::SubscribeToDecidedValuesTopic()) => {
-                let topic = gossipsub::IdentTopic::new(READ_NODE_TOPIC);
+                let topic = gossipsub::IdentTopic::new(DECIDED_VALUES);
                 let result = self.swarm.behaviour_mut().gossipsub.subscribe(&topic);
                 if let Err(e) = result {
                     warn!("Failed to subscribe to topic: {:?}", e);
@@ -529,7 +539,10 @@ impl SnapchainGossip {
                         },
                     )),
                 };
-                Some((vec![GossipTopic::ReadNode], gossip_message.encode_to_vec()))
+                Some((
+                    vec![GossipTopic::DecidedValues],
+                    gossip_message.encode_to_vec(),
+                ))
             }
             Some(GossipEvent::BroadcastSignedVote(vote)) => {
                 let vote_proto = vote.to_proto();
@@ -615,9 +628,9 @@ impl SnapchainGossip {
                         };
 
                         let topics = if self.read_node {
-                            vec![GossipTopic::ReadNode]
+                            vec![GossipTopic::ReadNodePeerStatuses]
                         } else {
-                            vec![GossipTopic::Consensus, GossipTopic::ReadNode]
+                            vec![GossipTopic::Consensus, GossipTopic::ReadNodePeerStatuses]
                         };
 
                         // Should probably use a separate topic for status messages, but these are infrequent
