@@ -1,4 +1,4 @@
-use crate::consensus::consensus::{Config, MalachiteEventShard};
+use crate::consensus::consensus::{Config, MalachiteEventShard, SystemMessage};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::spawn_read_node::MalachiteReadNodeActors;
 use crate::consensus::read_validator::Engine;
@@ -36,6 +36,7 @@ impl SnapchainReadNode {
         config: Config,
         local_peer_id: PeerId,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+        system_tx: mpsc::Sender<SystemMessage>,
         messages_request_tx: mpsc::Sender<MempoolMessagesRequest>,
         block_store: BlockStore,
         rocksdb_dir: String,
@@ -80,6 +81,7 @@ impl SnapchainReadNode {
                 Engine::ShardEngine(engine),
                 local_peer_id,
                 gossip_tx.clone(),
+                system_tx.clone(),
                 registry,
                 shard_id,
                 statsd_client.clone(),
@@ -104,6 +106,7 @@ impl SnapchainReadNode {
             Engine::BlockEngine(engine),
             local_peer_id,
             gossip_tx.clone(),
+            system_tx.clone(),
             registry,
             block_shard.shard_id(),
             statsd_client.clone(),

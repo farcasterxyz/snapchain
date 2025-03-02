@@ -7,7 +7,7 @@ use snapchain::consensus::consensus::SystemMessage;
 use snapchain::mempool::mempool::{Mempool, MempoolSource, ReadNodeMempool};
 use snapchain::mempool::routing;
 use snapchain::network::admin_server::{DbManager, MyAdminService};
-use snapchain::network::gossip::SnapchainGossip;
+use snapchain::network::gossip::{GossipEvent, SnapchainGossip};
 use snapchain::network::http_server::HubHttpServiceImpl;
 use snapchain::network::server::MyHubService;
 use snapchain::node::snapchain_node::SnapchainNode;
@@ -21,7 +21,7 @@ use snapchain::storage::store::node_local_state::LocalStateStore;
 use snapchain::storage::store::stores::Stores;
 use snapchain::storage::store::BlockStore;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::net;
 use std::net::SocketAddr;
@@ -255,6 +255,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_config.consensus.clone(),
             local_peer_id,
             gossip_tx.clone(),
+            system_tx.clone(),
             messages_request_tx,
             block_store.clone(),
             app_config.rocksdb_dir.clone(),
@@ -285,6 +286,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .await;
 
+        let mut shards_finished_syncing = HashSet::new();
         loop {
             select! {
                 _ = ctrl_c() => {
@@ -299,6 +301,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
                 Some(msg) = system_rx.recv() => {
                     match msg {
+                        SystemMessage::ReadNodeFinishedInitialSync {shard_id} => {
+                            shards_finished_syncing.insert(shard_id);
+                            if shards_finished_syncing.len() as u32 == app_config.consensus.num_shards {
+                                gossip_tx.send(GossipEvent::SubscribeToDecidedValuesTopic()).await?
+                            }
+                        }
                         SystemMessage::MalachiteNetwork(shard, event) => {
                             // Forward to appropriate consensus actors
                             node.dispatch_network_event(shard, event);
@@ -447,6 +455,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             }
                         },
                         SystemMessage::DecidedValueForReadNode(_) => {
+                            // Ignore these for validator nodes
+                        }
+                        SystemMessage::ReadNodeFinishedInitialSync{shard_id: _} => {
                             // Ignore these for validator nodes
                         }
                     }

@@ -148,6 +148,7 @@ impl ReadNodeForTest {
             consensus_config,
             peer_id,
             gossip_tx.clone(),
+            system_tx.clone(),
             messages_request_tx,
             block_store.clone(),
             make_tmp_path(),

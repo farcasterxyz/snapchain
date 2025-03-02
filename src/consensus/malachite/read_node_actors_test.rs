@@ -3,6 +3,7 @@ mod tests {
 
     use std::time::Duration;
 
+    use crate::consensus::consensus::SystemMessage;
     use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
     use crate::consensus::malachite::spawn_read_node::MalachiteReadNodeActors;
     use crate::consensus::read_validator::Engine;
@@ -28,6 +29,7 @@ mod tests {
         ShardEngine,
         ShardEngine,
         mpsc::Receiver<GossipEvent<SnapchainValidatorContext>>,
+        mpsc::Receiver<SystemMessage>,
         MalachiteReadNodeActors,
     ) {
         let (mut proposer_engine, _) = test_helper::new_engine();
@@ -38,6 +40,7 @@ mod tests {
         }
         let keypair = Keypair::generate();
         let (gossip_tx, gossip_rx) = mpsc::channel(100);
+        let (system_tx, system_rx) = mpsc::channel(100);
         let shard_id = read_node_engine.shard_id();
 
         let (read_node_engine_clone, _) = new_engine_with_options(EngineOptions {
@@ -50,6 +53,7 @@ mod tests {
             Engine::ShardEngine(read_node_engine_clone),
             libp2p::PeerId::random(),
             gossip_tx,
+            system_tx,
             SharedRegistry::global(),
             shard_id,
             test_helper::statsd_client(),
@@ -60,6 +64,7 @@ mod tests {
             proposer_engine,
             read_node_engine,
             gossip_rx,
+            system_rx,
             read_node_actors,
         )
     }
@@ -101,7 +106,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_decided_value() {
-        let (mut proposer_engine, read_node_engine, mut gossip_rx, actors) = setup(0).await;
+        let (mut proposer_engine, read_node_engine, mut gossip_rx, _system_rx, actors) =
+            setup(0).await;
 
         let shard_chunk = commit_shard_chunk(&mut proposer_engine).await;
         process_shard_chunk(&actors, &shard_chunk).await;
@@ -119,7 +125,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_out_of_order_decided_values() {
-        let (mut proposer_engine, read_node_engine, _gossip_rx, actors) = setup(0).await;
+        let (mut proposer_engine, read_node_engine, _gossip_rx, _system_rx, actors) =
+            setup(0).await;
 
         let shard_chunk1 = commit_shard_chunk(&mut proposer_engine).await;
         let shard_chunk2 = commit_shard_chunk(&mut proposer_engine).await;
@@ -153,7 +160,7 @@ mod tests {
     #[tokio::test]
     async fn test_startup_with_already_decided_blocks() {
         let num_initial_blocks = 3;
-        let (mut proposer_engine, read_node_engine, mut gossip_rx, actors) =
+        let (mut proposer_engine, read_node_engine, mut gossip_rx, _system_rx, actors) =
             setup(num_initial_blocks).await;
 
         let start_height = Height {
@@ -174,7 +181,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_block_with_height_too_low() {
-        let (mut proposer_engine, read_node_engine, _gossip_rx, actors) = setup(0).await;
+        let (mut proposer_engine, read_node_engine, _gossip_rx, _system_rx, actors) =
+            setup(0).await;
 
         let shard_chunk1 = commit_shard_chunk(&mut proposer_engine).await;
         process_shard_chunk(&actors, &shard_chunk1).await;
@@ -207,7 +215,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_sync_request() {
-        let (_proposer_engine, read_node_engine, mut gossip_rx, actors) = setup(0).await;
+        let (_proposer_engine, read_node_engine, mut gossip_rx, _system_rx, actors) =
+            setup(0).await;
 
         let peer = PeerId::from_libp2p(&libp2p::PeerId::random());
         actors

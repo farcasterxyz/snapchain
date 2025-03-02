@@ -20,6 +20,8 @@ pub enum SystemMessage {
     Mempool(MempoolMessageWithSource),
 
     DecidedValueForReadNode(proto::DecidedValue),
+
+    ReadNodeFinishedInitialSync { shard_id: u32 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -83,7 +83,7 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
     ),
     SyncReply(InboundRequestId, sync::Response<SnapchainValidatorContext>),
     BroadcastDecidedValue(proto::DecidedValue),
-    ReadNodeSynced(),
+    SubscribeToDecidedValuesTopic(),
 }
 
 pub enum GossipTopic {
@@ -189,20 +189,22 @@ impl SnapchainGossip {
             }
         }
 
-        // Create a Gossipsub topic
-        let topic = gossipsub::IdentTopic::new(CONSENSUS_TOPIC);
-        // subscribes to our topic
-        let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
-        if let Err(e) = result {
-            warn!("Failed to subscribe to topic: {:?}", e);
-            return Err(Box::new(e));
-        }
+        if !read_node {
+            // Create a Gossipsub topic
+            let topic = gossipsub::IdentTopic::new(CONSENSUS_TOPIC);
+            // subscribes to our topic
+            let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
+            if let Err(e) = result {
+                warn!("Failed to subscribe to topic: {:?}", e);
+                return Err(Box::new(e));
+            }
 
-        let topic = gossipsub::IdentTopic::new(MEMPOOL_TOPIC);
-        let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
-        if let Err(e) = result {
-            warn!("Failed to subscribe to topic: {:?}", e);
-            return Err(Box::new(e));
+            let topic = gossipsub::IdentTopic::new(MEMPOOL_TOPIC);
+            let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
+            if let Err(e) = result {
+                warn!("Failed to subscribe to topic: {:?}", e);
+                return Err(Box::new(e));
+            }
         }
 
         // Listen on all assigned port for this id
@@ -507,7 +509,7 @@ impl SnapchainGossip {
     ) -> Option<(Vec<GossipTopic>, Vec<u8>)> {
         let snapchain_codec = SnapchainCodec {};
         match event {
-            Some(GossipEvent::ReadNodeSynced()) => {
+            Some(GossipEvent::SubscribeToDecidedValuesTopic()) => {
                 let topic = gossipsub::IdentTopic::new(READ_NODE_TOPIC);
                 let result = self.swarm.behaviour_mut().gossipsub.subscribe(&topic);
                 if let Err(e) = result {

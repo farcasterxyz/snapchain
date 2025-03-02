@@ -2,9 +2,9 @@
 
 use tokio::sync::mpsc;
 
+use crate::consensus::consensus::SystemMessage;
 use crate::consensus::read_validator::ReadValidator;
 use crate::core::types::SnapchainValidatorContext;
-use crate::network::gossip::GossipEvent;
 use crate::proto::{self, Height};
 use informalsystems_malachitebft_sync::RawDecidedValue;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SpawnErr};
@@ -44,7 +44,7 @@ pub struct ReadHost {}
 
 pub struct ReadHostState {
     pub validator: ReadValidator,
-    pub gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+    pub system_tx: mpsc::Sender<SystemMessage>,
 }
 
 impl ReadHost {
@@ -89,7 +89,12 @@ impl ReadHost {
             }
 
             ReadHostMsg::InitialSyncCompleted => {
-                state.gossip_tx.send(GossipEvent::ReadNodeSynced()).await?;
+                state
+                    .system_tx
+                    .send(SystemMessage::ReadNodeFinishedInitialSync {
+                        shard_id: state.validator.shard_id,
+                    })
+                    .await?
             }
         };
 
