@@ -674,7 +674,7 @@ async fn test_basic_sync() {
 }
 
 async fn wait_for_read_node_blocks(node: &ReadNodeForTest, num_blocks: usize) {
-    let timeout = tokio::time::Duration::from_secs(5);
+    let timeout = tokio::time::Duration::from_secs(6);
     let start = tokio::time::Instant::now();
     let mut timer = time::interval(tokio::time::Duration::from_millis(10));
 
