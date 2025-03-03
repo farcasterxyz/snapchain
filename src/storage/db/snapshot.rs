@@ -1,6 +1,7 @@
 use crate::proto::FarcasterNetwork;
 use aws_config::Region;
 use aws_sdk_s3::config::http::HttpResponse;
+use aws_sdk_s3::config::Credentials;
 use aws_sdk_s3::error::{BuildError, DisplayErrorContext, SdkError};
 use aws_sdk_s3::operation::delete_objects::DeleteObjectsError;
 use aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Error;
@@ -27,6 +28,8 @@ pub struct Config {
     pub load_db_from_snapshot: bool,
     pub snapshot_download_url: String,
     pub snapshot_download_dir: String,
+    pub aws_access_key_id: String,
+    pub aws_secret_access_key: String,
 }
 
 impl Default for Config {
@@ -40,6 +43,8 @@ impl Default for Config {
             load_db_from_snapshot: true,
             snapshot_download_url: "https://pub-d352dd8819104a778e20d08888c5a661.r2.dev"
                 .to_string(),
+            aws_access_key_id: "".to_string(),
+            aws_secret_access_key: "".to_string(),
         }
     }
 }
@@ -95,11 +100,18 @@ struct SnapshotMetadata {
 
 async fn create_s3_client(snapshot_config: &Config) -> aws_sdk_s3::Client {
     // AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION are loaded from envvars
-    let config = aws_config::load_from_env().await;
-    let s3_config = aws_sdk_s3::config::Builder::from(&config)
+    let credentials = Credentials::new(
+        snapshot_config.aws_access_key_id.clone(),
+        snapshot_config.aws_secret_access_key.clone(),
+        None,
+        None,
+        "manual",
+    );
+    let s3_config = aws_sdk_s3::config::Config::builder()
         .force_path_style(true)
         .endpoint_url(snapshot_config.endpoint_url.clone())
-        .region(Region::new("auto".to_string()))
+        .credentials_provider(credentials)
+        .region(Some(Region::new("auto")))
         .build();
     aws_sdk_s3::Client::from_conf(s3_config)
 }

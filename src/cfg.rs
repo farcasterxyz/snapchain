@@ -61,7 +61,7 @@ impl Default for Config {
             statsd: StatsdConfig::default(),
             trie_branching_factor: 16,
             l1_rpc_url: "".to_string(),
-            fc_network: FarcasterNetwork::Testnet,
+            fc_network: FarcasterNetwork::Devnet,
             snapshot: storage::db::snapshot::Config::default(),
             read_node: false,
         }
