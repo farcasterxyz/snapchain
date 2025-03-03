@@ -6,6 +6,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
+    use tokio::time::timeout;
 
     use crate::connectors::onchain_events::L1Client;
     use crate::core::validations::{self, verification::VerificationAddressClaim};
@@ -68,10 +69,15 @@ mod tests {
         }
     }
 
-    async fn subscribe_and_listen(service: &MyHubService, shard_id: u32, num_events_expected: u64) {
+    async fn subscribe_and_listen(
+        service: &MyHubService,
+        shard_id: u32,
+        num_events_expected: u64,
+        event_types: Vec<i32>,
+    ) -> tokio::task::JoinHandle<()> {
         let mut listener = service
             .subscribe(Request::new(SubscribeRequest {
-                event_types: vec![HubEventType::MergeMessage as i32],
+                event_types,
                 from_id: None,
                 shard_index: Some(shard_id),
                 fid_partitions: None,
@@ -82,14 +88,22 @@ mod tests {
 
         let mut num_events_seen = 0;
 
-        tokio::spawn(async move {
+        return tokio::spawn(async move {
             loop {
-                let _event = listener.get_mut().next().await;
-                num_events_seen += 1;
-                if num_events_seen == num_events_expected {
-                    break;
+                let event = timeout(Duration::from_millis(100), listener.get_mut().next()).await;
+                if event.is_ok() {
+                    num_events_seen += 1;
+                    if num_events_seen == num_events_expected {
+                        break;
+                    }
+                } else {
+                    if num_events_seen == num_events_expected {
+                        break;
+                    }
                 }
             }
+
+            assert_eq!(num_events_seen, num_events_expected);
         });
     }
 
@@ -233,16 +247,18 @@ mod tests {
 
         let num_shard1_events = 5;
         let num_shard2_events = 10;
-        subscribe_and_listen(
+        let shard1_subscriber = subscribe_and_listen(
             &service,
             1,
             num_shard1_events + num_shard1_pre_existing_events,
+            vec![HubEventType::MergeMessage as i32],
         )
         .await;
-        subscribe_and_listen(
+        let shard2_subscriber = subscribe_and_listen(
             &service,
             2,
             num_shard2_events + num_shard2_pre_existing_events,
+            vec![HubEventType::MergeMessage as i32],
         )
         .await;
 
@@ -259,6 +275,52 @@ mod tests {
             num_shard2_events,
         )
         .await;
+
+        let _ = shard1_subscriber.await;
+        let _ = shard2_subscriber.await;
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_with_filter_rpc() {
+        let (stores, senders, _, service) = make_server().await;
+
+        let num_shard1_pre_existing_events = 10;
+        let num_shard2_pre_existing_events = 20;
+
+        write_events_to_db(
+            stores.get(&1u32).unwrap().shard_store.db.clone(),
+            num_shard1_pre_existing_events,
+        )
+        .await;
+        write_events_to_db(
+            stores.get(&2u32).unwrap().shard_store.db.clone(),
+            num_shard2_pre_existing_events,
+        )
+        .await;
+
+        let num_shard1_events = 5;
+        let shard1_subscriber = subscribe_and_listen(
+            &service,
+            1,
+            num_shard1_events + num_shard1_pre_existing_events,
+            vec![HubEventType::MergeMessage as i32],
+        )
+        .await;
+        let shard2_subscriber =
+            subscribe_and_listen(&service, 2, 0, vec![HubEventType::PruneMessage as i32]).await;
+
+        // Allow time for rpc handler to subscribe to event rx channels
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        send_events(
+            senders.get(&1u32).unwrap().events_tx.clone(),
+            num_shard1_events,
+        )
+        .await;
+        send_events(senders.get(&2u32).unwrap().events_tx.clone(), 0).await;
+
+        let _ = shard1_subscriber.await;
+        let _ = shard2_subscriber.await;
     }
 
     #[tokio::test]
