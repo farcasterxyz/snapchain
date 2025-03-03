@@ -304,6 +304,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         SystemMessage::ReadNodeFinishedInitialSync {shard_id} => {
                             info!({shard_id}, "Initial sync completed for shard");
                             shards_finished_syncing.insert(shard_id);
+                            // [num_shards] doesn't account for the block shard, so account for it manually
                             if shards_finished_syncing.len() as u32 == app_config.consensus.num_shards + 1 {
                                 info!("Initial sync completed for all shards");
                                 gossip_tx.send(GossipEvent::SubscribeToDecidedValuesTopic()).await?
