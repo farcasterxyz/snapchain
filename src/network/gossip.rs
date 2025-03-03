@@ -109,6 +109,7 @@ pub struct SnapchainGossip {
     system_tx: Sender<SystemMessage>,
     sync_channels: HashMap<InboundRequestId, sync::ResponseChannel>,
     read_node: bool,
+    bootstrap_addrs: Vec<String>,
 }
 
 impl SnapchainGossip {
@@ -175,20 +176,7 @@ impl SnapchainGossip {
             .build();
 
         for addr in config.bootstrap_addrs() {
-            info!("Processing bootstrap peer: {:?}", addr);
-            let parsed_addr: libp2p::Multiaddr = addr.parse()?;
-            let opts = DialOpts::unknown_peer_id()
-                .address(parsed_addr.clone())
-                .build();
-            info!("Dialing bootstrap peer: {:?} ({:?})", parsed_addr, addr);
-            let res = swarm.dial(opts);
-            if let Err(e) = res {
-                warn!(
-                    "Failed to dial bootstrap peer {:?}: {:?}",
-                    parsed_addr.clone(),
-                    e
-                );
-            }
+            let _ = Self::dial(&mut swarm, &addr);
         }
 
         if read_node {
@@ -228,12 +216,46 @@ impl SnapchainGossip {
             system_tx,
             sync_channels: HashMap::new(),
             read_node,
+            bootstrap_addrs: config.bootstrap_addrs(),
         })
     }
 
+    fn dial(
+        swarm: &mut Swarm<SnapchainBehavior>,
+        addr: &String,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let parsed_addr: libp2p::Multiaddr = addr.parse()?;
+        let opts = DialOpts::unknown_peer_id()
+            .address(parsed_addr.clone())
+            .build();
+        info!("Dialing peer: {:?} ({:?})", parsed_addr, addr);
+        let res = swarm.dial(opts);
+        if let Err(e) = res {
+            warn!("Failed to dial peer {:?}: {:?}", parsed_addr.clone(), e);
+            return Err(Box::new(e));
+        }
+        Ok(())
+    }
+
+    pub async fn check_and_reconnect_to_bootstrap_peers(&mut self) {
+        let connected_peers_count = self.swarm.connected_peers().count();
+        // If we have no connected peers, try to reconnect to bootstrap peers
+        if connected_peers_count == 0 && !self.bootstrap_addrs.is_empty() {
+            warn!("No connected peers. Attempting to reconnect to bootstrap peers...");
+            for addr in &self.bootstrap_addrs {
+                let _ = Self::dial(&mut self.swarm, &addr);
+            }
+        }
+    }
+
     pub async fn start(self: &mut Self) {
+        let mut reconnect_timer = tokio::time::interval(Duration::from_secs(30));
+
         loop {
             tokio::select! {
+                _ = reconnect_timer.tick() => {
+                    self.check_and_reconnect_to_bootstrap_peers().await;
+                },
                 gossip_event = self.swarm.select_next_some() => {
                     match gossip_event {
                         SwarmEvent::ConnectionEstablished {peer_id, ..} => {
