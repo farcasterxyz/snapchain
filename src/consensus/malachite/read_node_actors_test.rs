@@ -9,7 +9,7 @@ mod tests {
     use crate::consensus::read_validator::Engine;
     use crate::core::types::SnapchainValidatorContext;
     use crate::network::gossip::GossipEvent;
-    use crate::proto::{self, Height, ShardChunk, StatusMessage};
+    use crate::proto::{self, Commits, Height, ShardChunk, ShardHash, StatusMessage};
     use crate::storage::store::engine::ShardEngine;
     use crate::storage::store::test_helper::{
         self, commit_event, default_storage_event, new_engine_with_options, EngineOptions,
@@ -93,7 +93,23 @@ mod tests {
     }
 
     async fn commit_shard_chunk(engine: &mut ShardEngine) -> ShardChunk {
-        commit_event(engine, &default_storage_event(FID_FOR_TEST)).await
+        let mut shard_chunk = commit_event(engine, &default_storage_event(FID_FOR_TEST)).await;
+        shard_chunk.commits = Some(Commits {
+            height: shard_chunk.header.as_ref().unwrap().height,
+            round: 0,
+            value: Some(ShardHash {
+                shard_index: shard_chunk
+                    .header
+                    .as_ref()
+                    .unwrap()
+                    .height
+                    .unwrap()
+                    .shard_index,
+                hash: shard_chunk.hash.clone(),
+            }),
+            signatures: vec![],
+        });
+        shard_chunk
     }
 
     async fn wait_for_block() {
