@@ -26,7 +26,7 @@ use std::time::Duration;
 use tokio::io;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 const DEFAULT_GOSSIP_PORT: u16 = 3382;
 const DEFAULT_GOSSIP_HOST: &str = "127.0.0.1";
@@ -357,9 +357,14 @@ impl SnapchainGossip {
     }
 
     fn publish(&mut self, message: Vec<u8>, topic: &str) {
-        let topic = gossipsub::IdentTopic::new(topic);
-        if let Err(e) = self.swarm.behaviour_mut().gossipsub.publish(topic, message) {
-            warn!("Failed to publish gossip message: {:?}", e);
+        let publish_topic = gossipsub::IdentTopic::new(topic);
+        if let Err(e) = self
+            .swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(publish_topic, message)
+        {
+            warn!("Failed to publish gossip message: {:?} ({:?})", e, topic);
         }
     }
 
@@ -523,7 +528,7 @@ impl SnapchainGossip {
                 let topic = gossipsub::IdentTopic::new(DECIDED_VALUES);
                 let result = self.swarm.behaviour_mut().gossipsub.subscribe(&topic);
                 if let Err(e) = result {
-                    warn!("Failed to subscribe to topic: {:?}", e);
+                    error!("Failed to subscribe to {} topic: {:?}", DECIDED_VALUES, e);
                 }
                 None
             }

@@ -7,7 +7,7 @@ use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use bytes::Bytes;
 use informalsystems_malachitebft_sync::RawDecidedValue;
 use prost::Message;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 pub enum Engine {
     ShardEngine(ShardEngine),
@@ -41,7 +41,7 @@ impl ReadValidator {
             Engine::ShardEngine(shard_engine) => match &value.value {
                 Some(proto::decided_value::Value::Shard(shard_chunk)) => {
                     shard_engine.commit_shard_chunk(&shard_chunk);
-                    debug!(
+                    info!(
                         %height,
                         hash = hex::encode(&shard_chunk.hash),
                         "Processed decided shard chunk"
@@ -54,7 +54,7 @@ impl ReadValidator {
             Engine::BlockEngine(block_engine) => match &value.value {
                 Some(proto::decided_value::Value::Block(block)) => {
                     block_engine.commit_block(&block);
-                    debug!(
+                    info!(
                         %height,
                         hash = hex::encode(&block.hash),
                         "Processed decided block"
