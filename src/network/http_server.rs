@@ -1,4 +1,3 @@
-use base64::prelude::*;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Bytes, Method};
@@ -21,12 +20,32 @@ use crate::proto::{
 
 use super::server::MyHubService;
 
+mod serdebase64 {
+    use base64::prelude::*;
+
+    use serde::{Deserialize, Serialize};
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+        let base64 = BASE64_STANDARD.encode(v);
+        String::serialize(&base64, s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let base64 = String::deserialize(d)?;
+        BASE64_STANDARD
+            .decode(base64.as_bytes())
+            .map_err(|e| serde::de::Error::custom(e))
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Message {
     pub data: MessageData,
     pub hash: String,
     #[serde(rename = "hashScheme")]
     pub hash_scheme: String,
+    #[serde(with = "serdebase64")]
     pub signature: Vec<u8>,
     #[serde(rename = "signatureScheme")]
     pub signature_scheme: String,
@@ -125,8 +144,8 @@ pub struct ReactionBody {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationAddAddressBody {
     pub address: String,
-    #[serde(rename = "claimSignature")]
-    pub claim_signature: String,
+    #[serde(rename = "claimSignature", with = "serdebase64")]
+    pub claim_signature: Vec<u8>,
     #[serde(rename = "blockHash")]
     pub block_hash: String,
     #[serde(rename = "type")]
@@ -164,7 +183,8 @@ pub struct UsernameProofBody {
     pub timestamp: u64,
     pub name: String,
     pub owner: String,
-    pub signature: String,
+    #[serde(with = "serdebase64")]
+    pub signature: Vec<u8>,
     pub fid: u64,
     #[serde(rename = "type")]
     pub username_proof_type: String,
@@ -332,8 +352,9 @@ pub struct UsernameProofRequest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UserNameProof {
     pub timestamp: u64,
-    pub name: Vec<u8>,
-    pub owner: Vec<u8>,
+    pub name: String,
+    pub owner: String,
+    #[serde(with = "serdebase64")]
     pub signature: Vec<u8>,
     pub fid: u64,
     pub r#type: i32,
@@ -621,7 +642,7 @@ fn map_proto_username_proof_body_to_json_username_proof_body(
             })?
             .to_string(),
         owner: format!("0x{}", hex::encode(username_proof_body.owner)),
-        signature: BASE64_STANDARD.encode(username_proof_body.signature),
+        signature: username_proof_body.signature,
         fid: username_proof_body.fid,
     })
 }
@@ -635,7 +656,7 @@ fn map_proto_verification_add_body_to_json_verification_add_body(
         } else {
             bs58::encode(verification_add_address_body.address).into_string()
         },
-        claim_signature: BASE64_STANDARD.encode(verification_add_address_body.claim_signature),
+        claim_signature: verification_add_address_body.claim_signature,
         block_hash: if verification_add_address_body.protocol == 0 {
             format!(
                 "0x{}",
@@ -1477,8 +1498,10 @@ impl HubHttpService for HubHttpServiceImpl {
         let proof = response.into_inner();
         Ok(UserNameProof {
             timestamp: proof.timestamp,
-            name: proof.name,
-            owner: proof.owner,
+            name: std::str::from_utf8(&proof.name.as_slice())
+                .unwrap()
+                .to_string(),
+            owner: format!("0x{}", hex::encode(&proof.owner)),
             signature: proof.signature,
             fid: proof.fid,
             r#type: proof.r#type,
@@ -1511,8 +1534,8 @@ impl HubHttpService for HubHttpServiceImpl {
                 .iter()
                 .map(|p| UserNameProof {
                     timestamp: p.timestamp,
-                    name: p.name.clone(),
-                    owner: p.owner.clone(),
+                    name: std::str::from_utf8(&p.name.as_slice()).unwrap().to_string(),
+                    owner: format!("0x{}", hex::encode(&p.owner)),
                     signature: p.signature.clone(),
                     fid: p.fid,
                     r#type: p.r#type,
