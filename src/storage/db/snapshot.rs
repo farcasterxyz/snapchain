@@ -3,6 +3,7 @@ use aws_config::Region;
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::config::Credentials;
 use aws_sdk_s3::error::{BuildError, DisplayErrorContext, SdkError};
+use aws_sdk_s3::operation::abort_multipart_upload::AbortMultipartUploadError;
 use aws_sdk_s3::operation::complete_multipart_upload::CompleteMultipartUploadError;
 use aws_sdk_s3::operation::create_multipart_upload::CreateMultipartUploadError;
 use aws_sdk_s3::operation::delete_objects::DeleteObjectsError;
@@ -75,6 +76,9 @@ pub enum SnapshotError {
 
     #[error(transparent)]
     CompleteMultipartUploadError(#[from] SdkError<CompleteMultipartUploadError, HttpResponse>),
+
+    #[error(transparent)]
+    AbortMultipartUploadError(#[from] SdkError<AbortMultipartUploadError, HttpResponse>),
 
     #[error(transparent)]
     UploadPartError(#[from] SdkError<UploadPartError, HttpResponse>),
@@ -308,7 +312,7 @@ pub async fn upload_to_s3(
             let part_number = (i + 1) as i32;
             info!(key, part_number, "Uploading snapshot chunk to s3");
 
-            let upload_res = s3_client
+            match s3_client
                 .upload_part()
                 .bucket(snapshot_config.s3_bucket.clone())
                 .key(key.clone())
@@ -316,14 +320,28 @@ pub async fn upload_to_s3(
                 .part_number(part_number)
                 .body(ByteStream::from(chunk.to_vec()))
                 .send()
-                .await?;
-
-            parts.push(
-                aws_sdk_s3::types::CompletedPart::builder()
-                    .part_number(part_number)
-                    .e_tag(upload_res.e_tag().unwrap())
-                    .build(),
-            );
+                .await
+            {
+                Err(err) => {
+                    info!(key, "Aborting multipart snapshot upload");
+                    s3_client
+                        .abort_multipart_upload()
+                        .bucket(snapshot_config.s3_bucket.clone())
+                        .key(key.clone())
+                        .upload_id(upload_id)
+                        .send()
+                        .await?;
+                    return Err(SnapshotError::UploadPartError(err));
+                }
+                Ok(upload_res) => {
+                    parts.push(
+                        aws_sdk_s3::types::CompletedPart::builder()
+                            .part_number(part_number)
+                            .e_tag(upload_res.e_tag().unwrap())
+                            .build(),
+                    );
+                }
+            }
         }
 
         info!(key, "Finished uploading snapshot to s3");
