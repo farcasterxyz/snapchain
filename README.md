@@ -36,13 +36,19 @@ We will ban and report accounts that appear to engage in reputating farming by u
 Before you begin, ensure you have the following installed:
 - Rust (latest stable version)
 - Cargo (comes with Rust)
-- Protocol Buffers compiler (protoc)
+- Protocol Buffers compiler (`brew install protobuf`)
+- cmake (`brew install cmake`) 
 
 ### Installation
 
-Clone the snapchain repo and build it:
+Clone the snapchain and dependent repos and build snapchain:
 ```
-git clone https://github.com/farcasterxyz/snapchain.git
+git clone git@github.com:CassOnMars/eth-signature-verifier.git
+git clone git@github.com:informalsystems/malachite.git
+cd malachite
+git checkout 96b39f6de9e05e6db14becd9cf0af5401470e361
+cd ..
+git clone git@github.com:farcasterxyz/snapchain.git
 cd snapchain
 cargo build
 ```
