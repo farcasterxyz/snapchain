@@ -23,6 +23,17 @@ The main goals of this implementation are:
 
 Snapchain is currently in early alpha. Please check the release section of the [specification](https://github.com/farcasterxyz/protocol/discussions/207) for the latest timelines.
 
+## Running Read Node
+
+To start a read node, you can run the following command:
+
+```bash
+mkdir snapchain
+cd snapchain
+wget https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/docker-compose.read.yml -O docker-compose.yml
+docker compose up  # append -d to run in the background
+```
+
 ## Contributing 
 
 We welcome contributions from developers of all skill levels. Please look for issues labeled with "help wanted" to find good tickets to work on. If you are working on something that is not explicitly a ticket, we may or may not accept it. We encourage checking with someone on the team before spending a lot of time on something. 
