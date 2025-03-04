@@ -347,7 +347,7 @@ pub struct StorageLimitsResponse {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UsernameProofRequest {
-    name: Vec<u8>,
+    name: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1490,7 +1490,9 @@ impl HubHttpService for HubHttpServiceImpl {
         req: UsernameProofRequest,
     ) -> Result<UserNameProof, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(proto::UsernameProofRequest { name: req.name });
+        let grpc_req = tonic::Request::new(proto::UsernameProofRequest {
+            name: req.name.into(),
+        });
         let response = service
             .get_username_proof(grpc_req)
             .await
