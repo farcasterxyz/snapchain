@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.3] - 2025-03-04
+
+### 🚀 Features
+
+- Read node documentation and related fixes (#289)
+
+### 🐛 Bug Fixes
+
+- Remove stop id requirement for fnames (#270)
+- Update rest types (#284)
+- Update target_hash (#285)
+- Update page token (#287)
+- Name param should be string (#288)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update README.md (#286)
+
 ## [0.1.2] - 2025-02-21
 
 ### 🚀 Features
