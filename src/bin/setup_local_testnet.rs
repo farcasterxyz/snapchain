@@ -35,6 +35,12 @@ struct Args {
     #[arg(long, default_value = "")]
     snapshot_endpoint_url: String,
 
+    #[arg(long, default_value = "")]
+    aws_access_key_id: String,
+
+    #[arg(long, default_value = "")]
+    aws_secret_access_key: String,
+
     #[arg(long, default_value = "2")]
     num_shards: u32,
 }
@@ -118,6 +124,8 @@ async fn main() {
         let l2_rpc_url = args.l2_rpc_url.clone();
         let start_block_number = args.start_block_number;
         let snapshot_endpoint_url = args.snapshot_endpoint_url.clone();
+        let aws_access_key_id = args.aws_access_key_id.clone();
+        let aws_secret_access_key = args.aws_secret_access_key.clone();
         let stop_block_number = match args.stop_block_number {
             None => "".to_string(),
             Some(number) => format!("stop_block_number = {number}").to_string(),
@@ -156,6 +164,8 @@ endpoint_url = "{snapshot_endpoint_url}"
 backup_dir = "{backup_dir}"
 snapshot_download_dir = "{snapshot_download_dir}"
 load_db_from_snapshot=false
+aws_access_key_id = "{aws_access_key_id}"
+aws_secret_access_key = "{aws_secret_access_key}"
             "#
         );
 

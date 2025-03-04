@@ -1,10 +1,14 @@
 use crate::proto::FarcasterNetwork;
 use aws_config::Region;
 use aws_sdk_s3::config::http::HttpResponse;
+use aws_sdk_s3::config::Credentials;
 use aws_sdk_s3::error::{BuildError, DisplayErrorContext, SdkError};
+use aws_sdk_s3::operation::complete_multipart_upload::CompleteMultipartUploadError;
+use aws_sdk_s3::operation::create_multipart_upload::CreateMultipartUploadError;
 use aws_sdk_s3::operation::delete_objects::DeleteObjectsError;
 use aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Error;
 use aws_sdk_s3::operation::put_object::PutObjectError;
+use aws_sdk_s3::operation::upload_part::UploadPartError;
 use aws_sdk_s3::primitives::{ByteStream, ByteStreamError};
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_sdk_s3::Client;
@@ -15,6 +19,7 @@ use std::io::{self};
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 use tar::Archive;
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tracing::{error, info};
 
@@ -27,6 +32,8 @@ pub struct Config {
     pub load_db_from_snapshot: bool,
     pub snapshot_download_url: String,
     pub snapshot_download_dir: String,
+    pub aws_access_key_id: String,
+    pub aws_secret_access_key: String,
 }
 
 impl Default for Config {
@@ -40,6 +47,8 @@ impl Default for Config {
             load_db_from_snapshot: true,
             snapshot_download_url: "https://pub-d352dd8819104a778e20d08888c5a661.r2.dev"
                 .to_string(),
+            aws_access_key_id: "".to_string(),
+            aws_secret_access_key: "".to_string(),
         }
     }
 }
@@ -60,6 +69,15 @@ pub enum SnapshotError {
 
     #[error(transparent)]
     PutError(#[from] SdkError<PutObjectError, HttpResponse>),
+
+    #[error(transparent)]
+    CreateMultipartUploadError(#[from] SdkError<CreateMultipartUploadError, HttpResponse>),
+
+    #[error(transparent)]
+    CompleteMultipartUploadError(#[from] SdkError<CompleteMultipartUploadError, HttpResponse>),
+
+    #[error(transparent)]
+    UploadPartError(#[from] SdkError<UploadPartError, HttpResponse>),
 
     #[error(transparent)]
     DeleteObjectsError(#[from] SdkError<DeleteObjectsError, HttpResponse>),
@@ -95,11 +113,18 @@ struct SnapshotMetadata {
 
 async fn create_s3_client(snapshot_config: &Config) -> aws_sdk_s3::Client {
     // AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION are loaded from envvars
-    let config = aws_config::load_from_env().await;
-    let s3_config = aws_sdk_s3::config::Builder::from(&config)
+    let credentials = Credentials::new(
+        snapshot_config.aws_access_key_id.clone(),
+        snapshot_config.aws_secret_access_key.clone(),
+        None,
+        None,
+        "manual",
+    );
+    let s3_config = aws_sdk_s3::config::Config::builder()
         .force_path_style(true)
         .endpoint_url(snapshot_config.endpoint_url.clone())
-        .region(Region::new("auto".to_string()))
+        .credentials_provider(credentials)
+        .region(Some(Region::new("auto")))
         .build();
     aws_sdk_s3::Client::from_conf(s3_config)
 }
@@ -149,7 +174,7 @@ pub async fn clear_snapshots(
             .await;
         if let Err(err) = &delete_result {
             info!(
-                "Error uploading to s3: {}, bucket: {}",
+                "Error clearing snapshot from s3: {}, bucket: {}",
                 DisplayErrorContext(err),
                 snapshot_dir
             );
@@ -264,24 +289,59 @@ pub async fn upload_to_s3(
             .to_string();
         let key = format!("{}/{}", upload_dir, file_name);
 
-        info!(key, "Uploading chunk to s3");
-        let byte_stream = ByteStream::from_path(entry.path()).await?;
-        let upload_result = s3_client
-            .put_object()
-            .key(key.clone())
+        let mut file = tokio::fs::File::open(entry.path()).await?;
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer).await?;
+
+        let create_res = s3_client
+            .create_multipart_upload()
             .bucket(snapshot_config.s3_bucket.clone())
-            .body(byte_stream)
+            .key(key.clone())
             .send()
-            .await;
-        if let Err(err) = &upload_result {
-            info!(
-                "Error uploading to s3: {}, key: {}, bucket: {}",
-                DisplayErrorContext(err),
-                key,
-                snapshot_config.s3_bucket
+            .await?;
+
+        let upload_id = create_res.upload_id().unwrap();
+        let mut parts = Vec::new();
+
+        // 5 MB is the minimum size
+        for (i, chunk) in buffer.chunks(5 * 1024 * 1024).enumerate() {
+            let part_number = (i + 1) as i32;
+            info!(key, part_number, "Uploading snapshot chunk to s3");
+
+            let upload_res = s3_client
+                .upload_part()
+                .bucket(snapshot_config.s3_bucket.clone())
+                .key(key.clone())
+                .upload_id(upload_id)
+                .part_number(part_number)
+                .body(ByteStream::from(chunk.to_vec()))
+                .send()
+                .await?;
+
+            parts.push(
+                aws_sdk_s3::types::CompletedPart::builder()
+                    .part_number(part_number)
+                    .e_tag(upload_res.e_tag().unwrap())
+                    .build(),
             );
         }
-        upload_result?;
+
+        info!(key, "Finished uploading snapshot to s3");
+
+        // Complete Multipart Upload
+        s3_client
+            .complete_multipart_upload()
+            .bucket(snapshot_config.s3_bucket.clone())
+            .key(key)
+            .upload_id(upload_id)
+            .multipart_upload(
+                aws_sdk_s3::types::CompletedMultipartUpload::builder()
+                    .set_parts(Some(parts))
+                    .build(),
+            )
+            .send()
+            .await?;
+
         file_names.push(file_name);
     }
 
@@ -301,9 +361,10 @@ pub async fn upload_to_s3(
         .content_type("application/json")
         .send()
         .await;
+
     if let Err(err) = &upload_result {
-        info!(
-            "Error uploading to s3: {}, key: {}, bucket: {}",
+        error!(
+            "Error uploading metadata to s3: {}, key: {}, bucket: {}",
             DisplayErrorContext(err),
             metadata_key,
             snapshot_config.s3_bucket
