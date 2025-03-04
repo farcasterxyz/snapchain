@@ -35,6 +35,8 @@ use tonic::transport::Server;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+const READ_NODE_EXPIRES_AT: i64 = 1742515200000; // March 21 2025
+
 async fn start_servers(
     app_config: &snapchain::cfg::Config,
     mempool_tx: mpsc::Sender<(MempoolMessage, MempoolSource)>,
@@ -96,6 +98,7 @@ async fn start_servers(
     let http_shutdown_tx = shutdown_tx.clone();
     tokio::spawn(async move {
         let listener = TcpListener::bind(http_socket_addr).await.unwrap();
+        info!(http_addr = http_addr, "HttpService listening",);
 
         let http_service = HubHttpServiceImpl {
             service: service.clone(),
@@ -105,6 +108,7 @@ async fn start_servers(
                 Ok((stream, _)) => {
                     let io = TokioIo::new(stream);
                     let service_clone = http_service.clone();
+
                     tokio::spawn(async move {
                         let router = snapchain::network::http_server::Router::new(service_clone);
                         if let Err(err) = http1::Builder::new()
@@ -206,11 +210,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let keypair = app_config.consensus.keypair().clone();
 
-    info!(
-        "Starting Snapchain node with public key: {}",
-        hex::encode(keypair.public().to_bytes())
-    );
-
     let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
     let (mempool_tx, mempool_rx) = mpsc::channel(app_config.mempool.queue_size as usize);
 
@@ -228,6 +227,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut gossip = gossip_result?;
     let local_peer_id = gossip.swarm.local_peer_id().clone();
+    let read_or_validator = if app_config.read_node {
+        "read"
+    } else {
+        "validator"
+    };
+    info!(
+        "Starting Snapchain {} node with public key: {} ({})",
+        read_or_validator,
+        hex::encode(keypair.public().to_bytes()),
+        local_peer_id.to_string()
+    );
+
     let gossip_tx = gossip.tx.clone();
 
     tokio::spawn(async move {
@@ -250,6 +261,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         };
 
     if app_config.read_node {
+        // Expire the read node build after 2 weeks
+
         let node = SnapchainReadNode::create(
             keypair.clone(),
             app_config.consensus.clone(),

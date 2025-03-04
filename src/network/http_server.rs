@@ -1,3 +1,12 @@
+use crate::proto::{
+    self, embed, hub_service_server::HubService, link_body::Target, message_data::Body, CastType,
+    FarcasterNetwork, FidTimestampRequest, HashScheme, MessageType, ReactionType, SignatureScheme,
+    UserDataType, UserNameType,
+};
+use crate::proto::{
+    link_request, links_by_target_request, on_chain_event, reaction_request,
+    reactions_by_target_request, LinksByFidRequest, Protocol,
+};
 use base64::prelude::*;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
@@ -8,16 +17,7 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::sync::Arc;
 use tonic::async_trait;
-
-use crate::proto::{
-    self, embed, hub_service_server::HubService, link_body::Target, message_data::Body, CastType,
-    FarcasterNetwork, FidTimestampRequest, HashScheme, MessageType, ReactionType, SignatureScheme,
-    UserDataType, UserNameType,
-};
-use crate::proto::{
-    link_request, links_by_target_request, on_chain_event, reaction_request,
-    reactions_by_target_request, LinksByFidRequest, Protocol,
-};
+use tracing::info;
 
 use super::server::MyHubService;
 
@@ -1760,6 +1760,7 @@ impl Router {
         &self,
         req: Request<hyper::body::Incoming>,
     ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
+        info!("Handling: {} {}", req.method(), req.uri().path());
         match (req.method(), req.uri().path()) {
             (&Method::GET, "/v1/castById") => {
                 self.handle_request::<IdRequest, Message, _>(req, |service, req| {
