@@ -12,13 +12,37 @@ use libp2p::identity::ed25519::PublicKey;
 use std::time::Duration;
 use tracing::{error, warn};
 
+struct StoredValidatorSet {
+    pub effective_at: u64,
+    pub validators: SnapchainValidatorSet,
+}
+
+impl StoredValidatorSet {
+    pub fn new(shard_id: SnapchainShard, config: &ValidatorSetConfig) -> Self {
+        let mut validators = SnapchainValidatorSet::new(vec![]);
+        for address in &config.validator_public_keys {
+            let validator = SnapchainValidator::new(
+                shard_id,
+                PublicKey::try_from_bytes(&hex::decode(address).unwrap()).unwrap(),
+                None,
+                config.effective_at,
+            );
+            validators.add(validator);
+        }
+
+        Self {
+            validators,
+            effective_at: config.effective_at,
+        }
+    }
+}
 pub struct ShardValidator {
     pub(crate) shard_id: SnapchainShard,
 
     #[allow(dead_code)] // TODO
     address: Address,
 
-    validator_set: Vec<ValidatorSetConfig>,
+    validator_set: Vec<StoredValidatorSet>,
     confirmed_height: Option<Height>,
     current_round: Round,
     current_height: Option<Height>,
@@ -43,7 +67,10 @@ impl ShardValidator {
         ShardValidator {
             shard_id: shard.clone(),
             address: address.clone(),
-            validator_set,
+            validator_set: validator_set
+                .iter()
+                .map(|config| StoredValidatorSet::new(shard, &config))
+                .collect(),
             confirmed_height: None,
             current_round: Round::new(0),
             current_height: None,
@@ -55,29 +82,14 @@ impl ShardValidator {
         }
     }
 
-    fn get_validator_set_config(&self, height: u64) -> ValidatorSetConfig {
+    pub fn get_validator_set(&self, height: u64) -> SnapchainValidatorSet {
         let mut result = &self.validator_set[0];
         for config in &self.validator_set {
             if config.effective_at <= height && config.effective_at > result.effective_at {
                 result = config;
             }
         }
-        result.clone()
-    }
-
-    pub fn get_validator_set(&self, height: u64) -> SnapchainValidatorSet {
-        let config = self.get_validator_set_config(height);
-        let mut validators = SnapchainValidatorSet::new(vec![]);
-        for address in config.validator_public_keys {
-            let validator = SnapchainValidator::new(
-                self.shard_id,
-                PublicKey::try_from_bytes(&hex::decode(address).unwrap()).unwrap(),
-                None,
-                height,
-            );
-            validators.add(validator);
-        }
-        validators
+        result.validators.clone()
     }
 
     pub fn validator_count(&self, height: u64) -> usize {
