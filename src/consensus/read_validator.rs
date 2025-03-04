@@ -113,6 +113,10 @@ impl ReadValidator {
             }
         };
 
+        if certificate.aggregated_signature.signatures.len() == 0 {
+            return false;
+        }
+
         for signature in certificate.aggregated_signature.signatures {
             let vote = Vote::new_precommit(
                 certificate.height,
