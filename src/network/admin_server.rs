@@ -8,6 +8,7 @@ use crate::storage::db::RocksDB;
 use crate::storage::store::engine::MempoolMessage;
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use rocksdb;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -75,6 +76,7 @@ pub struct MyAdminService {
     shard_stores: HashMap<u32, Stores>,
     block_store: BlockStore,
     fc_network: FarcasterNetwork,
+    statsd_client: StatsdClientWrapper,
 }
 
 #[derive(Debug, Error)]
@@ -96,6 +98,7 @@ impl MyAdminService {
         block_store: BlockStore,
         snapshot_config: storage::db::snapshot::Config,
         fc_network: FarcasterNetwork,
+        statsd_client: StatsdClientWrapper,
     ) -> Self {
         Self {
             db_manager,
@@ -104,6 +107,7 @@ impl MyAdminService {
             block_store,
             snapshot_config,
             fc_network,
+            statsd_client,
         }
     }
 
@@ -113,6 +117,7 @@ impl MyAdminService {
         shard_id: u32,
         db: Arc<RocksDB>,
         now: i64,
+        statsd_client: StatsdClientWrapper,
     ) -> Result<(), Status> {
         // TODO(aditi): Eventually, we should upload a metadata file. For now, just clear all existing snapshots on s3 and only keep 1 snapshot per shard
         clear_snapshots(fc_network, &snapshot_config, shard_id)
@@ -121,9 +126,15 @@ impl MyAdminService {
         let backup_dir = snapshot_config.backup_dir.clone();
         let tar_gz_path = RocksDB::backup_db(db, &backup_dir, shard_id, now)
             .map_err(|err| Status::from_error(Box::new(err)))?;
-        storage::db::snapshot::upload_to_s3(fc_network, tar_gz_path, &snapshot_config, shard_id)
-            .await
-            .map_err(|err| Status::from_error(Box::new(err)))?;
+        storage::db::snapshot::upload_to_s3(
+            fc_network,
+            tar_gz_path,
+            &snapshot_config,
+            shard_id,
+            &statsd_client,
+        )
+        .await
+        .map_err(|err| Status::from_error(Box::new(err)))?;
         Ok(())
     }
 }
@@ -227,13 +238,16 @@ impl AdminService for MyAdminService {
         &self,
         _request: Request<Empty>,
     ) -> std::result::Result<Response<Empty>, Status> {
+        if std::fs::exists(self.snapshot_config.backup_dir.clone())? {
+            return Err(Status::aborted("snapshot already in progress"));
+        }
+
         let fc_network = self.fc_network.clone();
         let snapshot_config = self.snapshot_config.clone();
         let shard_stores = self.shard_stores.clone();
         let block_store = self.block_store.clone();
+        let statsd_client = self.statsd_client.clone();
         tokio::spawn(async move {
-            std::fs::exists(snapshot_config.backup_dir.clone()).unwrap();
-
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -245,6 +259,7 @@ impl AdminService for MyAdminService {
                 0,
                 block_store.db.clone(),
                 now as i64,
+                statsd_client.clone(),
             )
             .await
             {
@@ -262,6 +277,7 @@ impl AdminService for MyAdminService {
                     *shard,
                     stores.db.clone(),
                     now as i64,
+                    statsd_client.clone(),
                 )
                 .await
                 {

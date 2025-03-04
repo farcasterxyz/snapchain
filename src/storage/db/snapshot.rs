@@ -1,4 +1,5 @@
 use crate::proto::FarcasterNetwork;
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use aws_config::Region;
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::config::Credentials;
@@ -20,10 +21,11 @@ use std::io::{self};
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 use tar::Archive;
 use thiserror::Error;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, BufReader};
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tracing::{error, info};
 
+const UPLOAD_CHUNK_SIZE: usize = 5 * 1024 * 1024;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
     pub endpoint_url: String,
@@ -269,6 +271,7 @@ pub async fn upload_to_s3(
     chunked_dir_path: String,
     snapshot_config: &Config,
     shard_id: u32,
+    statsd_client: &StatsdClientWrapper,
 ) -> Result<(), SnapshotError> {
     info!(shard_id, chunked_dir_path, "Starting upload to s3");
     let start_timetamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
@@ -293,9 +296,8 @@ pub async fn upload_to_s3(
             .to_string();
         let key = format!("{}/{}", upload_dir, file_name);
 
-        let mut file = tokio::fs::File::open(entry.path()).await?;
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer).await?;
+        let file = tokio::fs::File::open(entry.path()).await?;
+        let mut reader = BufReader::new(file);
 
         let create_res = s3_client
             .create_multipart_upload()
@@ -306,10 +308,15 @@ pub async fn upload_to_s3(
 
         let upload_id = create_res.upload_id().unwrap();
         let mut parts = Vec::new();
-
         // 5 MB is the minimum size
-        for (i, chunk) in buffer.chunks(5 * 1024 * 1024).enumerate() {
-            let part_number = (i + 1) as i32;
+        let mut buf = [0; UPLOAD_CHUNK_SIZE];
+        let mut part_number = 0;
+        while let Ok(bytes_read) = reader.read(&mut buf).await {
+            if bytes_read == 0 {
+                break;
+            }
+
+            part_number += 1;
             info!(key, part_number, "Uploading snapshot chunk to s3");
 
             match s3_client
@@ -318,7 +325,7 @@ pub async fn upload_to_s3(
                 .key(key.clone())
                 .upload_id(upload_id)
                 .part_number(part_number)
-                .body(ByteStream::from(chunk.to_vec()))
+                .body(ByteStream::from(buf.to_vec()))
                 .send()
                 .await
             {
@@ -331,6 +338,7 @@ pub async fn upload_to_s3(
                         .upload_id(upload_id)
                         .send()
                         .await?;
+                    statsd_client.count_with_shard(shard_id, "snapshots.failed_upload", 1);
                     return Err(SnapshotError::UploadPartError(err));
                 }
                 Ok(upload_res) => {
@@ -345,6 +353,7 @@ pub async fn upload_to_s3(
         }
 
         info!(key, "Finished uploading snapshot to s3");
+        statsd_client.count_with_shard(shard_id, "snapshots.successful_upload", 1);
 
         // Complete Multipart Upload
         s3_client
