@@ -585,9 +585,7 @@ impl HubService for MyHubService {
         &self,
         request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
-        // TODO(aditi): Incorporate event types
         info!("Received call to [subscribe] RPC");
-        // TODO(aditi): Rethink the channel size
         let (server_tx, client_rx) = mpsc::channel::<Result<HubEvent, Status>>(100);
         let events_txs = match request.get_ref().shard_index {
             Some(shard_id) => match self.shard_senders.get(&(shard_id)) {
@@ -613,8 +611,17 @@ impl HubService for MyHubService {
         };
 
         let start_id = request.get_ref().from_id.unwrap_or(0);
+        let events = request.into_inner().event_types;
+        let mut inner_events: Vec<i32> = Vec::new();
+        inner_events.resize(events.len(), 0);
+        inner_events.copy_from_slice(events.as_slice());
 
         tokio::spawn(async move {
+            let event_types = inner_events;
+            let mut event_types_filter = Vec::new();
+            event_types_filter.resize(event_types.len(), 0);
+            event_types_filter.copy_from_slice(event_types.as_slice());
+
             let mut page_token = None;
             for store in shard_stores {
                 loop {
@@ -632,9 +639,11 @@ impl HubService for MyHubService {
                     .unwrap();
 
                     for event in old_events.events {
-                        let event = Self::rewrite_hub_event(event);
-                        if let Err(_) = server_tx.send(Ok(event)).await {
-                            return;
+                        if event_types.contains(&event.r#type) {
+                            let event = Self::rewrite_hub_event(event);
+                            if let Err(_) = server_tx.send(Ok(event)).await {
+                                return;
+                            }
                         }
                     }
 
@@ -647,18 +656,24 @@ impl HubService for MyHubService {
 
             // TODO(aditi): It's possible that events show up between when we finish reading from the db and the subscription starts. We don't handle this case in the current hub code, but we may want to down the line.
             for event_tx in events_txs {
+                let mut inner_events: Vec<i32> = Vec::new();
+                inner_events.resize(event_types_filter.len(), 0);
+                inner_events.copy_from_slice(event_types_filter.as_slice());
                 let tx = server_tx.clone();
                 tokio::spawn(async move {
+                    let filtered_events = inner_events.clone();
                     let mut event_rx = event_tx.subscribe();
                     loop {
                         match event_rx.recv().await {
                             Ok(hub_event) => {
-                                let hub_event = Self::rewrite_hub_event(hub_event);
-                                match tx.send(Ok(hub_event)).await {
-                                    Ok(_) => {}
-                                    Err(_) => {
-                                        // This means the client hung up
-                                        break;
+                                if filtered_events.contains(&hub_event.r#type) {
+                                    let hub_event = Self::rewrite_hub_event(hub_event);
+                                    match tx.send(Ok(hub_event)).await {
+                                        Ok(_) => {}
+                                        Err(_) => {
+                                            // This means the client hung up
+                                            break;
+                                        }
                                     }
                                 }
                             }
