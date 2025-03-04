@@ -1,3 +1,4 @@
+use base64::prelude::*;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Bytes, Method};
@@ -211,7 +212,7 @@ pub struct CastId {
 pub struct PagedResponse {
     pub messages: Vec<Message>,
     #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
-    pub next_page_token: Option<Vec<u8>>,
+    pub next_page_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -467,7 +468,7 @@ pub struct OnChainEvent {
 pub struct OnChainEventResponse {
     pub events: Vec<OnChainEvent>,
     #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
-    pub next_page_token: Option<Vec<u8>>,
+    pub next_page_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1036,7 +1037,9 @@ fn map_proto_messages_response_to_json_paged_response(
             .iter()
             .map(|m| map_proto_message_to_json_message(m.clone()).unwrap())
             .collect(),
-        next_page_token: messages_response.next_page_token,
+        next_page_token: messages_response
+            .next_page_token
+            .map(|t| BASE64_STANDARD.encode(t)),
     })
 }
 
@@ -1662,7 +1665,9 @@ impl HubHttpService for HubHttpServiceImpl {
                     };
                 })
                 .collect(),
-            next_page_token: onchain_event_response.next_page_token,
+            next_page_token: onchain_event_response
+                .next_page_token
+                .map(|t| BASE64_STANDARD.encode(t)),
         })
     }
 
@@ -1762,7 +1767,9 @@ impl HubHttpService for HubHttpServiceImpl {
                     };
                 })
                 .collect(),
-            next_page_token: onchain_event_response.next_page_token,
+            next_page_token: onchain_event_response
+                .next_page_token
+                .map(|t| BASE64_STANDARD.encode(t)),
         })
     }
 }
