@@ -256,6 +256,8 @@ pub struct ShardInfo {
     pub num_fid_registrations: u64,
     #[serde(rename = "approxSize")]
     pub approx_size: u64,
+    #[serde(rename = "blockDelay")]
+    pub block_delay: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -553,6 +555,7 @@ fn map_get_info_response_to_json_info_response(
                 num_messages: shard_info.num_messages,
                 num_fid_registrations: shard_info.num_fid_registrations,
                 approx_size: shard_info.approx_size,
+                block_delay: shard_info.block_delay,
             })
             .collect(),
     })

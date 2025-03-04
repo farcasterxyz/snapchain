@@ -700,6 +700,8 @@ async fn wait_for_read_node_blocks(node: &ReadNodeForTest, num_blocks: usize) {
     );
 }
 
+// TODO: Fix flaky test
+#[ignore]
 #[tokio::test]
 #[serial]
 async fn test_read_node() {

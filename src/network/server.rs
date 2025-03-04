@@ -1,6 +1,7 @@
 use super::rpc_extensions::{AsMessagesResponse, AsSingleMessageResponse};
 use crate::connectors::onchain_events::L1Client;
 use crate::core::error::HubError;
+use crate::core::util::get_farcaster_time;
 use crate::core::validations;
 use crate::core::validations::verification::VerificationAddressClaim;
 use crate::mempool::mempool::{MempoolMessageWithSource, MempoolSource};
@@ -530,12 +531,14 @@ impl HubService for MyHubService {
         let mut total_num_messages = 0;
         let mut shard_infos = Vec::new();
 
+        let current_time = get_farcaster_time().unwrap_or(0);
         let block_info = proto::ShardInfo {
             shard_id: 0,
             max_height: self.block_store.max_block_number().unwrap_or(0),
             num_messages: 0,
             num_fid_registrations: 0,
             approx_size: self.block_store.db.approximate_size(),
+            block_delay: current_time - self.block_store.max_block_timestamp().unwrap_or(0),
         };
         shard_infos.push(block_info);
 
@@ -555,12 +558,15 @@ impl HubService for MyHubService {
                 .map_err(|err| Status::from_error(Box::new(err)))?
                 as u64;
 
+            let max_block_time = shard_store.shard_store.max_block_timestamp().unwrap_or(0);
+
             let info = proto::ShardInfo {
                 shard_id: *shard_index,
                 max_height: shard_store.shard_store.max_block_number().unwrap_or(0),
                 num_messages: shard_num_messages,
                 num_fid_registrations: shard_fid_registrations,
                 approx_size: shard_approx_size,
+                block_delay: current_time - max_block_time,
             };
             shard_infos.push(info);
             total_num_messages += shard_num_messages;

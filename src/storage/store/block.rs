@@ -1,5 +1,6 @@
 use super::super::constants::PAGE_SIZE_MAX;
 use crate::core::error::HubError;
+use crate::proto;
 use crate::proto::Block;
 use crate::storage::constants::RootPrefix;
 use crate::storage::db::{PageOptions, RocksDB, RocksdbError};
@@ -114,17 +115,11 @@ pub fn get_last_block(db: &RocksDB) -> Result<Option<Block>, BlockStorageError> 
     Ok(block_page.blocks.get(0).cloned())
 }
 
-pub fn get_current_height(db: &RocksDB) -> Result<Option<u64>, BlockStorageError> {
+pub fn get_current_header(db: &RocksDB) -> Result<Option<proto::BlockHeader>, BlockStorageError> {
     let last_block = get_last_block(db)?;
     match last_block {
         None => Ok(None),
-        Some(block) => match block.header {
-            None => Ok(None),
-            Some(header) => match header.height {
-                None => Ok(None),
-                Some(height) => Ok(Some(height.block_number)),
-            },
-        },
+        Some(block) => Ok(block.header),
     }
 }
 
@@ -191,10 +186,21 @@ impl BlockStore {
     }
 
     pub fn max_block_number(&self) -> Result<u64, BlockStorageError> {
-        let current_height = get_current_height(&self.db)?;
-        match current_height {
+        let current_header = get_current_header(&self.db)?;
+        match current_header {
             None => Ok(0),
-            Some(height) => Ok(height),
+            Some(header) => match header.height {
+                None => Ok(0),
+                Some(height) => Ok(height.block_number),
+            },
+        }
+    }
+
+    pub fn max_block_timestamp(&self) -> Result<u64, BlockStorageError> {
+        let current_header = get_current_header(&self.db)?;
+        match current_header {
+            None => Ok(0),
+            Some(header) => Ok(header.timestamp),
         }
     }
 

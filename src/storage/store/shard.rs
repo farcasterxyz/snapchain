@@ -1,5 +1,6 @@
 use super::super::constants::PAGE_SIZE_MAX;
 use crate::core::error::HubError;
+use crate::proto;
 use crate::proto::ShardChunk;
 use crate::storage::constants::RootPrefix;
 use crate::storage::db::{PageOptions, RocksDB, RocksdbError};
@@ -121,17 +122,11 @@ pub fn get_last_shard_chunk(db: &RocksDB) -> Result<Option<ShardChunk>, ShardSto
     Ok(shard_page.shard_chunks.get(0).cloned())
 }
 
-pub fn get_current_height(db: &RocksDB) -> Result<Option<u64>, ShardStorageError> {
+pub fn get_current_header(db: &RocksDB) -> Result<Option<proto::ShardHeader>, ShardStorageError> {
     let shard_chunk = get_last_shard_chunk(db)?;
     match shard_chunk {
         None => Ok(None),
-        Some(shard_chunk) => match shard_chunk.header {
-            None => Ok(None),
-            Some(header) => match header.height {
-                None => Ok(None),
-                Some(height) => Ok(Some(height.block_number)),
-            },
-        },
+        Some(shard_chunk) => Ok(shard_chunk.header),
     }
 }
 
@@ -199,10 +194,21 @@ impl ShardStore {
     }
 
     pub fn max_block_number(&self) -> Result<u64, ShardStorageError> {
-        let current_height = get_current_height(&self.db)?;
-        match current_height {
+        let current_header = get_current_header(&self.db)?;
+        match current_header {
             None => Ok(0),
-            Some(height) => Ok(height),
+            Some(header) => match header.height {
+                None => Ok(0),
+                Some(height) => Ok(height.block_number),
+            },
+        }
+    }
+
+    pub fn max_block_timestamp(&self) -> Result<u64, ShardStorageError> {
+        let current_header = get_current_header(&self.db)?;
+        match current_header {
+            None => Ok(0),
+            Some(header) => Ok(header.timestamp),
         }
     }
 
