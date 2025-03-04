@@ -82,7 +82,7 @@ impl std::fmt::Debug for RocksDB {
 
 impl RocksDB {
     pub fn new(path: &str) -> RocksDB {
-        info!({ path }, "Creating new RocksDB");
+        info!({ path }, "Opening RocksDB database");
 
         RocksDB {
             db: RwLock::new(None),
