@@ -222,6 +222,43 @@ pub struct IdRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct InfoRequest {}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct InfoResponse {
+    #[serde(rename = "dbStats", skip_serializing_if = "Option::is_none")]
+    pub db_stats: Option<DbStats>,
+    #[serde(rename = "numShards")]
+    pub num_shards: u32,
+    #[serde(rename = "shardInfos")]
+    pub shard_infos: Vec<ShardInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DbStats {
+    #[serde(rename = "numMessages")]
+    pub num_messages: u64,
+    #[serde(rename = "numFidRegistrations")]
+    pub num_fid_registrations: u64,
+    #[serde(rename = "approxSize")]
+    pub approx_size: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ShardInfo {
+    #[serde(rename = "shardId")]
+    pub shard_id: u32,
+    #[serde(rename = "maxHeight")]
+    pub max_height: u64,
+    #[serde(rename = "numMessages")]
+    pub num_messages: u64,
+    #[serde(rename = "numFidRegistrations")]
+    pub num_fid_registrations: u64,
+    #[serde(rename = "approxSize")]
+    pub approx_size: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FidRequest {
     pub fid: u64,
     #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
@@ -495,6 +532,30 @@ pub struct ErrorResponse {
 #[derive(Clone)]
 pub struct HubHttpServiceImpl {
     pub service: Arc<MyHubService>,
+}
+
+fn map_get_info_response_to_json_info_response(
+    info_response: proto::GetInfoResponse,
+) -> Result<InfoResponse, ErrorResponse> {
+    Ok(InfoResponse {
+        db_stats: info_response.db_stats.map(|db_stats| DbStats {
+            num_messages: db_stats.num_messages,
+            num_fid_registrations: db_stats.num_fid_registrations,
+            approx_size: db_stats.approx_size,
+        }),
+        num_shards: info_response.num_shards,
+        shard_infos: info_response
+            .shard_infos
+            .iter()
+            .map(|shard_info| ShardInfo {
+                shard_id: shard_info.shard_id,
+                max_height: shard_info.max_height,
+                num_messages: shard_info.num_messages,
+                num_fid_registrations: shard_info.num_fid_registrations,
+                approx_size: shard_info.approx_size,
+            })
+            .collect(),
+    })
 }
 
 fn map_proto_cast_add_body_to_json_cast_add_body(
@@ -1046,6 +1107,7 @@ fn map_proto_messages_response_to_json_paged_response(
 // Service trait for type-safe request handling
 #[async_trait]
 pub trait HubHttpService {
+    async fn get_info(&self, req: InfoRequest) -> Result<InfoResponse, ErrorResponse>;
     async fn get_cast_by_id(&self, req: IdRequest) -> Result<Message, ErrorResponse>;
     async fn get_casts_by_fid(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse>;
     async fn get_casts_by_mention(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse>;
@@ -1100,6 +1162,21 @@ pub trait HubHttpService {
 
 #[async_trait]
 impl HubHttpService for HubHttpServiceImpl {
+    async fn get_info(&self, _request: InfoRequest) -> Result<InfoResponse, ErrorResponse> {
+        let response = self
+            .service
+            .get_info(tonic::Request::<proto::GetInfoRequest>::new(
+                proto::GetInfoRequest {},
+            ))
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get info".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+        let proto = response.into_inner();
+        map_get_info_response_to_json_info_response(proto)
+    }
+
     async fn get_cast_by_id(&self, req: IdRequest) -> Result<Message, ErrorResponse> {
         let fid = req.fid.parse::<u64>().map_err(|e| ErrorResponse {
             error: "Invalid fid".to_string(),
@@ -1793,6 +1870,12 @@ impl Router {
         req: Request<hyper::body::Incoming>,
     ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
         match (req.method(), req.uri().path()) {
+            (&Method::GET, "/v1/info") => {
+                self.handle_request::<InfoRequest, InfoResponse, _>(req, |service, req| {
+                    Box::pin(async move { service.get_info(req).await })
+                })
+                .await
+            }
             (&Method::GET, "/v1/castById") => {
                 self.handle_request::<IdRequest, Message, _>(req, |service, req| {
                     Box::pin(async move { service.get_cast_by_id(req).await })
