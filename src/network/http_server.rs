@@ -127,8 +127,8 @@ pub struct CastAddBody {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CastRemoveBody {
-    #[serde(rename = "targetHash")]
-    pub target_hash: String,
+    #[serde(rename = "targetHash", with = "serdebase64")]
+    pub target_hash: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -750,7 +750,7 @@ fn map_proto_message_data_to_json_message_data(
             timestamp: message_data.timestamp,
             cast_add_body: None,
             cast_remove_body: Some(CastRemoveBody {
-                target_hash: format!("0x{}", hex::encode(cast_remove_body.target_hash)),
+                target_hash: cast_remove_body.target_hash,
             }),
             reaction_body: None,
             verification_add_address_body: None,
