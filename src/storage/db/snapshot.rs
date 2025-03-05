@@ -23,7 +23,7 @@ use tar::Archive;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::io::{AsyncWriteExt, BufWriter};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 const UPLOAD_CHUNK_SIZE: usize = 5 * 1024 * 1024;
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -297,7 +297,7 @@ pub async fn upload_to_s3(
         let key = format!("{}/{}", upload_dir, file_name);
 
         let file = tokio::fs::File::open(entry.path()).await?;
-        let mut reader = BufReader::new(file);
+        let mut reader = BufReader::with_capacity(UPLOAD_CHUNK_SIZE, file);
 
         let create_res = s3_client
             .create_multipart_upload()
@@ -309,7 +309,7 @@ pub async fn upload_to_s3(
         let upload_id = create_res.upload_id().unwrap();
         let mut parts = Vec::new();
         // 5 MB is the minimum size
-        let mut buf = [0; UPLOAD_CHUNK_SIZE];
+        let mut buf = vec![0; UPLOAD_CHUNK_SIZE];
         let mut part_number = 0;
         while let Ok(bytes_read) = reader.read(&mut buf).await {
             if bytes_read == 0 {
@@ -330,7 +330,7 @@ pub async fn upload_to_s3(
                 .await
             {
                 Err(err) => {
-                    info!(key, "Aborting multipart snapshot upload");
+                    warn!(key, "Aborting multipart snapshot upload");
                     s3_client
                         .abort_multipart_upload()
                         .bucket(snapshot_config.s3_bucket.clone())
