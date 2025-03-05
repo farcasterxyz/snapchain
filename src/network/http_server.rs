@@ -15,9 +15,10 @@ use crate::proto::{
     UserDataType, UserNameType,
 };
 use crate::proto::{
-    link_request, links_by_target_request, on_chain_event, reaction_request,
-    reactions_by_target_request, LinksByFidRequest, Protocol,
+    casts_by_parent_request, link_request, links_by_target_request, on_chain_event,
+    reaction_request, reactions_by_target_request, LinksByFidRequest, Protocol,
 };
+use crate::storage::store::account::message_decode;
 
 use super::server::MyHubService;
 
@@ -276,6 +277,22 @@ pub struct FidRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CastsByParentRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fid: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+    #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
+    pub page_token: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reverse: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReactionRequest {
     fid: u64,
     #[serde(rename = "reactionType")]
@@ -521,6 +538,12 @@ pub struct OnChainEventRequest {
     page_token: Option<Vec<u8>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reverse: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ValidationResult {
+    pub valid: bool,
+    pub message: Option<Message>,
 }
 
 // Common error response
@@ -1114,6 +1137,10 @@ pub trait HubHttpService {
     async fn get_cast_by_id(&self, req: IdRequest) -> Result<Message, ErrorResponse>;
     async fn get_casts_by_fid(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse>;
     async fn get_casts_by_mention(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse>;
+    async fn get_casts_by_parent(
+        &self,
+        req: CastsByParentRequest,
+    ) -> Result<PagedResponse, ErrorResponse>;
     async fn get_reaction_by_id(&self, req: ReactionRequest) -> Result<Message, ErrorResponse>;
     async fn get_reactions_by_fid(
         &self,
@@ -1149,6 +1176,10 @@ pub trait HubHttpService {
         &self,
         req: FidRequest,
     ) -> Result<UsernameProofsResponse, ErrorResponse>;
+    async fn validate_message(
+        &self,
+        req: proto::Message,
+    ) -> Result<ValidationResult, ErrorResponse>;
     async fn get_verifications_by_fid(
         &self,
         req: FidRequest,
@@ -1246,6 +1277,54 @@ impl HubHttpService for HubHttpServiceImpl {
                 error: "Failed to get casts by mention".to_string(),
                 error_detail: Some(e.to_string()),
             })?;
+        let proto_resp = response.into_inner();
+        map_proto_messages_response_to_json_paged_response(proto_resp)
+    }
+
+    async fn get_casts_by_parent(
+        &self,
+        req: CastsByParentRequest,
+    ) -> Result<PagedResponse, ErrorResponse> {
+        let service = &self.service;
+        let parent = if req.hash.is_some() && req.fid.is_some() {
+            Ok(Some(casts_by_parent_request::Parent::ParentCastId(
+                proto::CastId {
+                    fid: req.fid.unwrap(),
+                    hash: hex::decode(req.hash.unwrap().replace("0x", "")).map_err(|e| {
+                        ErrorResponse {
+                            error: "Invalid request".to_string(),
+                            error_detail: Some(e.to_string()),
+                        }
+                    })?,
+                },
+            )))
+        } else if req.url.is_some() {
+            Ok(Some(casts_by_parent_request::Parent::ParentUrl(
+                req.url.unwrap(),
+            )))
+        } else {
+            Err(ErrorResponse {
+                error: "Invalid request".to_string(),
+                error_detail: Some(
+                    "fid and hash must be specified or url must be specified".to_string(),
+                ),
+            })
+        }?;
+
+        let grpc_req = tonic::Request::new(proto::CastsByParentRequest {
+            parent: parent,
+            page_size: req.page_size,
+            page_token: req.page_token,
+            reverse: req.reverse,
+        });
+        let response = service
+            .get_casts_by_parent(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get casts by mention".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+
         let proto_resp = response.into_inner();
         map_proto_messages_response_to_json_paged_response(proto_resp)
     }
@@ -1629,6 +1708,29 @@ impl HubHttpService for HubHttpServiceImpl {
         })
     }
 
+    /// POST /v1/validateMessage
+    async fn validate_message(
+        &self,
+        req: proto::Message,
+    ) -> Result<ValidationResult, ErrorResponse> {
+        let service = &self.service;
+        let grpc_req = tonic::Request::new(req);
+        let response = service
+            .validate_message(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to validate message".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+        let proto_resp = response.into_inner();
+        return Ok(ValidationResult {
+            valid: proto_resp.valid,
+            message: Some(map_proto_message_to_json_message(
+                proto_resp.message.unwrap(),
+            )?),
+        });
+    }
+
     /// GET /v1/verificationsByFid
     async fn get_verifications_by_fid(
         &self,
@@ -1897,6 +1999,13 @@ impl Router {
                 })
                 .await
             }
+            (&Method::GET, "/v1/castsByParent") => {
+                self.handle_request::<CastsByParentRequest, PagedResponse, _>(
+                    req,
+                    |service, req| Box::pin(async move { service.get_casts_by_parent(req).await }),
+                )
+                .await
+            }
             (&Method::GET, "/v1/reactionById") => {
                 self.handle_request::<ReactionRequest, Message, _>(req, |service, req| {
                     Box::pin(async move { service.get_reaction_by_id(req).await })
@@ -1978,6 +2087,12 @@ impl Router {
                 })
                 .await
             }
+            (&Method::GET, "/v1/validateMessage") => {
+                self.handle_protobuf_request::<ValidationResult, _>(req, |service, req| {
+                    Box::pin(async move { service.validate_message(req).await })
+                })
+                .await
+            }
             (&Method::GET, "/v1/verificationsByFid") => {
                 self.handle_request::<FidRequest, PagedResponse, _>(req, |service, req| {
                     Box::pin(async move { service.get_verifications_by_fid(req).await })
@@ -2002,6 +2117,71 @@ impl Router {
             _ => Ok(Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .body(Full::new(Bytes::from("Not Found")).boxed())
+                .unwrap()),
+        }
+    }
+
+    async fn handle_protobuf_request<Resp, F>(
+        &self,
+        req: Request<hyper::body::Incoming>,
+        handler: impl FnOnce(Arc<HubHttpServiceImpl>, proto::Message) -> F,
+    ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible>
+    where
+        Resp: Serialize,
+        F: Future<Output = Result<Resp, ErrorResponse>>,
+    {
+        let content_type = req.headers().get("content-type");
+        if content_type.is_none() {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::new(Bytes::from("Missing content type")).boxed())
+                .unwrap());
+        } else {
+            let content_type_str = content_type.unwrap().to_str();
+            if content_type_str.is_err() {
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Full::new(Bytes::from("Missing content type")).boxed())
+                    .unwrap());
+            }
+
+            let content_type_str = content_type_str.unwrap();
+            if content_type_str != "application/octet-stream" {
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(
+                        Full::new(Bytes::from(format!(
+                            "Invalid content type: {}",
+                            content_type_str
+                        )))
+                        .boxed(),
+                    )
+                    .unwrap());
+            }
+        }
+
+        // Parse request
+        let req_obj = match self.parse_protobuf_request(req).await {
+            Ok(req) => req,
+            Err(resp) => {
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Full::new(resp.into_body()).boxed())
+                    .unwrap())
+            }
+        };
+
+        // Handle request
+        match handler(self.service.clone(), req_obj).await {
+            Ok(resp) => Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Full::new(Bytes::from(serde_json::to_vec(&resp).unwrap())).boxed())
+                .unwrap()),
+            Err(err) => Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header("content-type", "application/json")
+                .body(Full::new(Bytes::from(serde_json::to_vec(&err).unwrap())).boxed())
                 .unwrap()),
         }
     }
@@ -2038,6 +2218,31 @@ impl Router {
                 .status(StatusCode::BAD_REQUEST)
                 .header("content-type", "application/json")
                 .body(Full::new(Bytes::from(serde_json::to_vec(&err).unwrap())).boxed())
+                .unwrap()),
+        }
+    }
+
+    async fn parse_protobuf_request(
+        &self,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<proto::Message, Response<Bytes>> {
+        // For POST/PUT requests, parse body
+        let body_bytes = req.collect().await;
+        if body_bytes.is_err() {
+            return Err(Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Bytes::from(format!(
+                    "Internal server error: {}",
+                    body_bytes.unwrap_err().to_string()
+                )))
+                .unwrap());
+        }
+
+        match message_decode(&body_bytes.unwrap().to_bytes().slice(..)) {
+            Ok(parsed) => Ok(parsed),
+            Err(e) => Err(Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Bytes::from(format!("Invalid protobuf data: {}", e)))
                 .unwrap()),
         }
     }
