@@ -121,7 +121,7 @@ impl ReadValidator {
         );
         self.statsd_client.count_with_shard(
             self.shard_id,
-            "read_validator.num_commited_values",
+            "read_validator.num_committed_values",
             num_committed_values,
         );
         num_committed_values
