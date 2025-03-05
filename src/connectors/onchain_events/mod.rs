@@ -162,6 +162,7 @@ pub struct Subscriber {
     stop_block_number: Option<u64>,
     statsd_client: StatsdClientWrapper,
     local_state_store: LocalStateStore,
+    start_from_current: bool,
 }
 
 // TODO(aditi): Wait for 1 confirmation before "committing" an onchain event.
@@ -171,6 +172,7 @@ impl Subscriber {
         mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
         statsd_client: StatsdClientWrapper,
         local_state_store: LocalStateStore,
+        start_from_current: bool,
     ) -> Result<Subscriber, SubscribeError> {
         if config.rpc_url.is_empty() {
             return Err(SubscribeError::EmptyRpcUrl);
@@ -184,6 +186,7 @@ impl Subscriber {
             start_block_number: config.start_block_number,
             stop_block_number: config.stop_block_number,
             statsd_client,
+            start_from_current,
         })
     }
 
@@ -571,6 +574,42 @@ impl Subscriber {
             .number)
     }
 
+    async fn sync_live_events(&mut self, start_block_number: u64) -> Result<(), SubscribeError> {
+        // Subscribe to new events starting from now.
+        let filter = Filter::new()
+            .address(vec![STORAGE_REGISTRY, KEY_REGISTRY, ID_REGISTRY])
+            .from_block(start_block_number);
+
+        let filter = match self.stop_block_number {
+            None => filter,
+            Some(stop_block) => filter.to_block(stop_block),
+        };
+
+        let subscription = self.provider.watch_logs(&filter).await?;
+        let mut stream = subscription.into_stream();
+        while let Some(events) = stream.next().await {
+            for event in events {
+                let result = self.process_log(&event).await;
+                match result {
+                    Err(err) => {
+                        error!(
+                            "Error processing onchain event. Error: {:#?}. Event: {:#?}",
+                            err, event,
+                        )
+                    }
+                    Ok(()) => match event.block_number {
+                        None => {}
+                        Some(block_number) => {
+                            self.record_block_number(block_number);
+                        }
+                    },
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn run(&mut self) -> Result<(), SubscribeError> {
         let latest_block_on_chain = self.latest_block_on_chain().await?;
         let latest_block_in_db = self.latest_block_in_db();
@@ -581,49 +620,26 @@ impl Subscriber {
             latest_block_in_db,
             "Starting l2 events subscription"
         );
-        let historical_sync_start_block = latest_block_in_db.max(self.start_block_number);
-        let historical_sync_stop_block =
-            latest_block_on_chain.min(self.stop_block_number.unwrap_or(latest_block_on_chain));
+        if self.start_from_current {
+            self.sync_live_events(latest_block_on_chain).await?;
+        } else {
+            let historical_sync_start_block = latest_block_in_db.max(self.start_block_number);
+            let historical_sync_stop_block =
+                latest_block_on_chain.min(self.stop_block_number.unwrap_or(latest_block_on_chain));
 
-        self.sync_historical_events(historical_sync_start_block, historical_sync_stop_block)
-            .await?;
+            self.sync_historical_events(historical_sync_start_block, historical_sync_stop_block)
+                .await?;
 
-        let should_start_live_sync = match self.stop_block_number {
-            None => true,
-            Some(stop_block) => stop_block > historical_sync_stop_block,
-        };
-
-        if should_start_live_sync {
-            // Subscribe to new events starting from now.
-            let filter = Filter::new()
-                .address(vec![STORAGE_REGISTRY, KEY_REGISTRY, ID_REGISTRY])
-                .from_block(historical_sync_stop_block);
-            let filter = match self.stop_block_number {
-                None => filter,
-                Some(stop_block) => filter.to_block(stop_block),
+            let should_start_live_sync = match self.stop_block_number {
+                None => true,
+                Some(stop_block) => stop_block > historical_sync_stop_block,
             };
-            let subscription = self.provider.watch_logs(&filter).await?;
-            let mut stream = subscription.into_stream();
-            while let Some(events) = stream.next().await {
-                for event in events {
-                    let result = self.process_log(&event).await;
-                    match result {
-                        Err(err) => {
-                            error!(
-                                "Error processing onchain event. Error: {:#?}. Event: {:#?}",
-                                err, event,
-                            )
-                        }
-                        Ok(()) => match event.block_number {
-                            None => {}
-                            Some(block_number) => {
-                                self.record_block_number(block_number);
-                            }
-                        },
-                    }
-                }
+
+            if should_start_live_sync {
+                self.sync_live_events(historical_sync_stop_block).await?;
             }
         }
+
         Ok(())
     }
 }

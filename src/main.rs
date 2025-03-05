@@ -23,10 +23,10 @@ use snapchain::storage::store::BlockStore;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::net;
 use std::net::SocketAddr;
 use std::process;
 use std::sync::Arc;
+use std::{fs, net};
 use tokio::net::TcpListener;
 use tokio::select;
 use tokio::signal::ctrl_c;
@@ -170,7 +170,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    if app_config.snapshot.load_db_from_snapshot {
+    // We only use snapshots if the db directory doesn't exist.
+    let using_snapshots = if app_config.snapshot.load_db_from_snapshot
+        && !fs::exists(app_config.rocksdb_dir.clone()).unwrap()
+    {
         let mut shard_ids = app_config.consensus.shard_ids.clone();
         shard_ids.push(0);
         for shard_id in shard_ids {
@@ -184,7 +187,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .await
             .unwrap();
         }
-    }
+        true
+    } else {
+        false
+    };
 
     if app_config.statsd.prefix == "" {
         // TODO: consider removing this check
@@ -377,6 +383,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         tokio::spawn(async move { mempool.run().await });
 
         if !app_config.fnames.disable {
+            // TODO(aditi): We should start from the latest fname transfer if we used snapshots. Currently it's not possible to figure out what the latest fname transfer id is easily but we can expose something.
             let mut fetcher = snapchain::connectors::fname::Fetcher::new(
                 app_config.fnames.clone(),
                 mempool_tx.clone(),
@@ -396,6 +403,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     mempool_tx.clone(),
                     statsd_client.clone(),
                     local_state_store,
+                    using_snapshots,
                 )?;
             tokio::spawn(async move {
                 let result = onchain_events_subscriber.run().await;
