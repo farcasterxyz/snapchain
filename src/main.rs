@@ -24,6 +24,7 @@ use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::process;
 use std::sync::Arc;
 use std::{fs, net};
@@ -129,6 +130,11 @@ async fn start_servers(
     });
 }
 
+fn is_dir_empty(path: &str) -> std::io::Result<bool> {
+    let mut entries = fs::read_dir(path)?; // Get directory iterator
+    Ok(entries.next().is_none()) // Check if the first entry exists
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -170,9 +176,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // We only use snapshots if the db directory doesn't exist.
+    // We only use snapshots if the db directory doesn't exist or is empty.
     if app_config.snapshot.load_db_from_snapshot
-        && !fs::exists(app_config.rocksdb_dir.clone()).unwrap()
+        && (!fs::exists(app_config.rocksdb_dir.clone()).unwrap()
+            || is_dir_empty(&app_config.rocksdb_dir).unwrap())
     {
         let mut shard_ids = app_config.consensus.shard_ids.clone();
         shard_ids.push(0);
