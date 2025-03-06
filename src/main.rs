@@ -171,7 +171,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // We only use snapshots if the db directory doesn't exist.
-    let using_snapshots = if app_config.snapshot.load_db_from_snapshot
+    if app_config.snapshot.load_db_from_snapshot
         && !fs::exists(app_config.rocksdb_dir.clone()).unwrap()
     {
         let mut shard_ids = app_config.consensus.shard_ids.clone();
@@ -187,9 +187,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .await
             .unwrap();
         }
-        true
-    } else {
-        false
     };
 
     if app_config.statsd.prefix == "" {
@@ -212,6 +209,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let block_db = RocksDB::open_shard_db(app_config.rocksdb_dir.as_str(), 0);
     let block_store = BlockStore::new(block_db);
+    info!(
+        "Block db height {}",
+        block_store.max_block_number().unwrap()
+    );
 
     let keypair = app_config.consensus.keypair().clone();
 
@@ -403,7 +404,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     mempool_tx.clone(),
                     statsd_client.clone(),
                     local_state_store,
-                    using_snapshots,
                 )?;
             tokio::spawn(async move {
                 let result = onchain_events_subscriber.run().await;

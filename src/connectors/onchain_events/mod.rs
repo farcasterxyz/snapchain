@@ -53,14 +53,15 @@ static KEY_REGISTRY: Address = address!("00000000Fc1237824fb747aBDE0FF18990E59b7
 
 static ID_REGISTRY: Address = address!("00000000Fc6c5F01Fc30151999387Bb99A9f489b");
 
+// For reference, in case it needs to be specified manually
+// const FIRST_BLOCK: u64 = 108864739;
 static CHAIN_ID: u32 = 10; // OP mainnet
 const RENT_EXPIRY_IN_SECONDS: u64 = 365 * 24 * 60 * 60; // One year
-const FIRST_BLOCK: u64 = 108864739;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub rpc_url: String,
-    pub start_block_number: u64,
+    pub start_block_number: Option<u64>,
     pub stop_block_number: Option<u64>,
 }
 
@@ -68,7 +69,7 @@ impl Default for Config {
     fn default() -> Config {
         return Config {
             rpc_url: String::new(),
-            start_block_number: FIRST_BLOCK,
+            start_block_number: None,
             stop_block_number: None,
         };
     }
@@ -158,11 +159,10 @@ impl L1Client for RealL1Client {
 pub struct Subscriber {
     provider: RootProvider<Http<Client>>,
     mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
-    start_block_number: u64,
+    start_block_number: Option<u64>,
     stop_block_number: Option<u64>,
     statsd_client: StatsdClientWrapper,
     local_state_store: LocalStateStore,
-    start_from_current: bool,
 }
 
 // TODO(aditi): Wait for 1 confirmation before "committing" an onchain event.
@@ -172,7 +172,6 @@ impl Subscriber {
         mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
         statsd_client: StatsdClientWrapper,
         local_state_store: LocalStateStore,
-        start_from_current: bool,
     ) -> Result<Subscriber, SubscribeError> {
         if config.rpc_url.is_empty() {
             return Err(SubscribeError::EmptyRpcUrl);
@@ -186,7 +185,6 @@ impl Subscriber {
             start_block_number: config.start_block_number,
             stop_block_number: config.stop_block_number,
             statsd_client,
-            start_from_current,
         })
     }
 
@@ -620,26 +618,31 @@ impl Subscriber {
             latest_block_in_db,
             "Starting l2 events subscription"
         );
-        if self.start_from_current {
-            self.sync_live_events(latest_block_on_chain).await?;
-        } else {
-            let historical_sync_start_block = latest_block_in_db.max(self.start_block_number);
-            let historical_sync_stop_block =
-                latest_block_on_chain.min(self.stop_block_number.unwrap_or(latest_block_on_chain));
+        match self.start_block_number {
+            None => {
+                self.sync_live_events(latest_block_on_chain).await?;
+            }
+            Some(start_block_number) => {
+                let historical_sync_start_block = latest_block_in_db.max(start_block_number);
+                let historical_sync_stop_block = latest_block_on_chain
+                    .min(self.stop_block_number.unwrap_or(latest_block_on_chain));
 
-            self.sync_historical_events(historical_sync_start_block, historical_sync_stop_block)
+                self.sync_historical_events(
+                    historical_sync_start_block,
+                    historical_sync_stop_block,
+                )
                 .await?;
 
-            let should_start_live_sync = match self.stop_block_number {
-                None => true,
-                Some(stop_block) => stop_block > historical_sync_stop_block,
-            };
+                let should_start_live_sync = match self.stop_block_number {
+                    None => true,
+                    Some(stop_block) => stop_block > historical_sync_stop_block,
+                };
 
-            if should_start_live_sync {
-                self.sync_live_events(historical_sync_stop_block).await?;
+                if should_start_live_sync {
+                    self.sync_live_events(historical_sync_stop_block).await?;
+                }
             }
         }
-
         Ok(())
     }
 }

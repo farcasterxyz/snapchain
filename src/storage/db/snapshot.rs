@@ -21,11 +21,11 @@ use std::io::{self};
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 use tar::Archive;
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, BufReader};
+use tokio::io::AsyncReadExt;
 use tokio::io::{AsyncWriteExt, BufWriter};
-use tracing::{error, info, warn};
 
-const UPLOAD_CHUNK_SIZE: usize = 5 * 1024 * 1024;
+use tracing::{error, info};
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
     pub endpoint_url: String,
@@ -225,7 +225,7 @@ pub async fn download_snapshots(
         let download_response = reqwest::get(download_path).await?;
         let mut byte_stream = download_response.bytes_stream();
         let filename = format!("{}/{}", snapshot_dir.clone(), chunk);
-        info!("Downloading zipped chunk at to {}", filename);
+        info!("Downloading zipped snapshot chunk at to {}", filename);
 
         let mut file = BufWriter::new(tokio::fs::File::create(filename).await?);
 
@@ -237,31 +237,32 @@ pub async fn download_snapshots(
 
     for entry in std::fs::read_dir(snapshot_dir.clone())? {
         let entry = entry?;
-        info!("Unzipping file {}", entry.path().to_string_lossy());
+        info!("Unzipping snapshot file {}", entry.path().to_string_lossy());
         let file = std::fs::File::open(entry.path())?;
         let gz_decoder = GzDecoder::new(file);
         let mut archive = Archive::new(gz_decoder);
         archive.unpack(&db_dir)?;
-
-        // Move contents of subdirectory into parent. The unzipped files are put into a subdirectory
-        for entry in std::fs::read_dir(&db_dir)? {
-            let entry = entry?;
-            if entry.path().is_dir() {
-                for db_file in std::fs::read_dir(entry.path())? {
-                    let db_file = db_file?;
-                    std::fs::rename(
-                        db_file.path(),
-                        db_file
-                            .path()
-                            .parent()
-                            .ok_or(SnapshotError::MissingParentDirectory)?
-                            .join(db_file.file_name()),
-                    )?
-                }
-                std::fs::remove_dir_all(entry.path())?;
-            }
-        }
     }
+
+    // // Move contents of subdirectory into parent. The unzipped files are put into a subdirectory
+    // for entry in std::fs::read_dir(&db_dir)? {
+    //     let entry = entry?;
+    //     if entry.path().is_dir() {
+    //         for db_file in std::fs::read_dir(entry.path())? {
+    //             let db_file = db_file?;
+    //             std::fs::rename(
+    //                 db_file.path(),
+    //                 db_file
+    //                     .path()
+    //                     .parent()
+    //                     .ok_or(SnapshotError::MissingParentDirectory)?
+    //                     .join(db_file.file_name()),
+    //             )?
+    //         }
+    //         std::fs::remove_dir_all(entry.path())?;
+    //     }
+    // }
+
     std::fs::remove_dir_all(snapshot_dir)?;
     Ok(())
 }
@@ -296,80 +297,22 @@ pub async fn upload_to_s3(
             .to_string();
         let key = format!("{}/{}", upload_dir, file_name);
 
-        let file = tokio::fs::File::open(entry.path()).await?;
-        let mut reader = BufReader::with_capacity(UPLOAD_CHUNK_SIZE, file);
+        let mut file = tokio::fs::File::open(entry.path()).await?;
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer).await?;
 
-        let create_res = s3_client
-            .create_multipart_upload()
+        s3_client
+            .put_object()
             .bucket(snapshot_config.s3_bucket.clone())
             .key(key.clone())
+            .body(ByteStream::from(buffer))
             .send()
             .await?;
-
-        let upload_id = create_res.upload_id().unwrap();
-        let mut parts = Vec::new();
-        // 5 MB is the minimum size
-        let mut buf = vec![0; UPLOAD_CHUNK_SIZE];
-        let mut part_number = 0;
-        while let Ok(bytes_read) = reader.read(&mut buf).await {
-            if bytes_read == 0 {
-                break;
-            }
-
-            part_number += 1;
-            info!(key, part_number, "Uploading snapshot chunk to s3");
-
-            match s3_client
-                .upload_part()
-                .bucket(snapshot_config.s3_bucket.clone())
-                .key(key.clone())
-                .upload_id(upload_id)
-                .part_number(part_number)
-                .body(ByteStream::from(buf.to_vec()))
-                .send()
-                .await
-            {
-                Err(err) => {
-                    warn!(key, "Aborting multipart snapshot upload");
-                    s3_client
-                        .abort_multipart_upload()
-                        .bucket(snapshot_config.s3_bucket.clone())
-                        .key(key.clone())
-                        .upload_id(upload_id)
-                        .send()
-                        .await?;
-                    statsd_client.count_with_shard(shard_id, "snapshots.failed_upload", 1);
-                    return Err(SnapshotError::UploadPartError(err));
-                }
-                Ok(upload_res) => {
-                    parts.push(
-                        aws_sdk_s3::types::CompletedPart::builder()
-                            .part_number(part_number)
-                            .e_tag(upload_res.e_tag().unwrap())
-                            .build(),
-                    );
-                }
-            }
-        }
 
         info!(key, "Finished uploading snapshot to s3");
         statsd_client.count_with_shard(shard_id, "snapshots.successful_upload", 1);
 
-        // Complete Multipart Upload
-        s3_client
-            .complete_multipart_upload()
-            .bucket(snapshot_config.s3_bucket.clone())
-            .key(key)
-            .upload_id(upload_id)
-            .multipart_upload(
-                aws_sdk_s3::types::CompletedMultipartUpload::builder()
-                    .set_parts(Some(parts))
-                    .build(),
-            )
-            .send()
-            .await?;
-
-        file_names.push(file_name);
+        file_names.push(file_name)
     }
 
     let metadata = SnapshotMetadata {
