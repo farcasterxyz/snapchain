@@ -391,7 +391,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         tokio::spawn(async move { mempool.run().await });
 
         if !app_config.fnames.disable {
-            // TODO(aditi): We should start from the latest fname transfer if we used snapshots. Currently it's not possible to figure out what the latest fname transfer id is easily but we can expose something.
             let mut fetcher = snapchain::connectors::fname::Fetcher::new(
                 app_config.fnames.clone(),
                 mempool_tx.clone(),
