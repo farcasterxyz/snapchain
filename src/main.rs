@@ -24,7 +24,6 @@ use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::process;
 use std::sync::Arc;
 use std::{fs, net};
