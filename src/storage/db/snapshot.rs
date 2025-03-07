@@ -247,6 +247,7 @@ pub async fn download_snapshots(
         let reader = BufReader::new(file);
         let mut gz_decoder = GzDecoder::new(reader);
         let mut buffer = Vec::new();
+        // These files are small, 100MB max each
         gz_decoder.read_to_end(&mut buffer)?;
         tar_file.write_all(&buffer).await?;
     }

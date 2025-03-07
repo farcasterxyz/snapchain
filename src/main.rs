@@ -130,8 +130,8 @@ async fn start_servers(
 }
 
 fn is_dir_empty(path: &str) -> std::io::Result<bool> {
-    let mut entries = fs::read_dir(path)?; // Get directory iterator
-    Ok(entries.next().is_none()) // Check if the first entry exists
+    let mut entries = fs::read_dir(path)?;
+    Ok(entries.next().is_none())
 }
 
 #[tokio::main]
