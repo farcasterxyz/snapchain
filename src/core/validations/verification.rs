@@ -50,7 +50,7 @@ fn eip_712_farcaster_verification_claim() -> Value {
     })
 }
 
-fn eip_712_domain() -> Value {
+pub fn eip_712_domain() -> Value {
     json!({
         "EIP712Domain": [
             {
@@ -97,7 +97,7 @@ fn address_verification_domain() -> Value {
     })
 }
 
-fn name_registry_domain() -> Value {
+pub fn name_registry_domain() -> Value {
     json!({
         "name": "Farcaster name verification",
         "version": "1",
@@ -106,7 +106,10 @@ fn name_registry_domain() -> Value {
     })
 }
 
-pub fn validate_fname_transfer(transfer: &proto::FnameTransfer) -> Result<(), ValidationError> {
+pub fn validate_fname_transfer(
+    transfer: &proto::FnameTransfer,
+    signer_address: Option<alloy_primitives::Address>,
+) -> Result<(), ValidationError> {
     let proof = transfer.proof.as_ref().unwrap();
     let username = std::str::from_utf8(&proof.name);
     if username.is_err() {
@@ -140,7 +143,9 @@ pub fn validate_fname_transfer(transfer: &proto::FnameTransfer) -> Result<(), Va
     }
 
     let hash = prehash.unwrap();
-    let fname_signer = alloy_primitives::address!("Bc5274eFc266311015793d89E9B591fa46294741");
+    let fname_signer = signer_address.unwrap_or(alloy_primitives::address!(
+        "Bc5274eFc266311015793d89E9B591fa46294741"
+    ));
     let signature = alloy_primitives::PrimitiveSignature::from_bytes_and_parity(
         &proof.signature[0..64],
         proof.signature[64] != 0x1b && proof.signature[64] != 0x00,
