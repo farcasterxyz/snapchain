@@ -181,6 +181,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         && (!fs::exists(app_config.rocksdb_dir.clone()).unwrap()
             || is_dir_empty(&app_config.rocksdb_dir).unwrap())
     {
+        info!("Downloading snapshots");
         let mut shard_ids = app_config.consensus.shard_ids.clone();
         shard_ids.push(0);
         for shard_id in shard_ids {

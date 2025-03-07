@@ -17,7 +17,7 @@ use aws_sdk_s3::Client;
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::io::{self};
+use std::io::{self, BufReader, Read};
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 use tar::Archive;
 use thiserror::Error;
@@ -217,51 +217,45 @@ pub async fn download_snapshots(
         .json::<SnapshotMetadata>()
         .await?;
     let base_path = metadata_json.key_base;
+
+    let mut local_chunks = vec![];
     for chunk in metadata_json.chunks {
+        info!("Downloading zipped snapshot chunk {}", chunk);
         let download_path = format!(
             "{}/{}/{}",
             snapshot_config.snapshot_download_url, base_path, chunk
         );
+
+        let filename = format!("{}/{}", snapshot_dir, chunk);
+        let mut file = BufWriter::new(tokio::fs::File::create(filename.clone()).await?);
         let download_response = reqwest::get(download_path).await?;
         let mut byte_stream = download_response.bytes_stream();
-        let filename = format!("{}/{}", snapshot_dir.clone(), chunk);
-        info!("Downloading zipped snapshot chunk at to {}", filename);
-
-        let mut file = BufWriter::new(tokio::fs::File::create(filename).await?);
 
         while let Some(piece) = byte_stream.next().await {
             file.write_all(&piece?).await?;
         }
         file.flush().await?;
+        local_chunks.push(filename);
     }
 
-    for entry in std::fs::read_dir(snapshot_dir.clone())? {
-        let entry = entry?;
-        info!("Unzipping snapshot file {}", entry.path().to_string_lossy());
-        let file = std::fs::File::open(entry.path())?;
-        let gz_decoder = GzDecoder::new(file);
-        let mut archive = Archive::new(gz_decoder);
-        archive.unpack(&db_dir)?;
-    }
+    let tar_filename = format!("{}/snapshot.tar", snapshot_dir);
+    let mut tar_file = BufWriter::new(tokio::fs::File::create(tar_filename.clone()).await?);
 
-    // // Move contents of subdirectory into parent. The unzipped files are put into a subdirectory
-    // for entry in std::fs::read_dir(&db_dir)? {
-    //     let entry = entry?;
-    //     if entry.path().is_dir() {
-    //         for db_file in std::fs::read_dir(entry.path())? {
-    //             let db_file = db_file?;
-    //             std::fs::rename(
-    //                 db_file.path(),
-    //                 db_file
-    //                     .path()
-    //                     .parent()
-    //                     .ok_or(SnapshotError::MissingParentDirectory)?
-    //                     .join(db_file.file_name()),
-    //             )?
-    //         }
-    //         std::fs::remove_dir_all(entry.path())?;
-    //     }
-    // }
+    for filename in local_chunks {
+        info!("Unzipping snapshot chunk {}", filename);
+        let file = std::fs::File::open(filename)?;
+        let reader = BufReader::new(file);
+        let mut gz_decoder = GzDecoder::new(reader);
+        let mut buffer = Vec::new();
+        gz_decoder.read_to_end(&mut buffer)?;
+        tar_file.write_all(&buffer).await?;
+    }
+    tar_file.flush().await?;
+
+    let file = std::fs::File::open(tar_filename.clone())?;
+    info!("Unpacking snapshot file {}", tar_filename);
+    let mut archive = Archive::new(file);
+    archive.unpack(&db_dir)?;
 
     std::fs::remove_dir_all(snapshot_dir)?;
     Ok(())
