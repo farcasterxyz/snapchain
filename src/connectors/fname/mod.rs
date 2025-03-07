@@ -249,6 +249,7 @@ impl Fetcher {
                 )
             }
         }
+        info!(start_id = self.position, "Starting fname ingest");
 
         loop {
             let result = self.fetch().await;
