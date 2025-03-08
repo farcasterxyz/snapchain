@@ -117,6 +117,11 @@ async fn main() {
                 .join(",")
         );
 
+        let validator_sets = format!(
+            "{{ effective_at = 0, validator_public_keys = {}, shard_ids = {} }}",
+            validator_addresses, shard_ids,
+        );
+
         let statsd_prefix = format!("{}{}", args.statsd_prefix, id);
         let statsd_addr = args.statsd_addr.clone();
         let statsd_use_tags = args.statsd_use_tags;
@@ -150,9 +155,9 @@ bootstrap_peers = "{other_nodes_addresses}"
 [consensus]
 private_key = "{secret_key}"
 block_time = "{block_time}"
-validator_addresses = {validator_addresses}
 shard_ids = {shard_ids}
 num_shards = {num_shards}
+validator_sets = [{validator_sets}]
 
 [onchain_events]
 rpc_url= "{l2_rpc_url}"
