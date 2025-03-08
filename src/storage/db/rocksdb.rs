@@ -202,7 +202,7 @@ impl RocksDB {
 
         let mut multi_chunk_writer = MultiChunkWriter::new(
             PathBuf::from(chunked_output_dir.clone()),
-            100 * 1024 * 1024, // 100MB
+            100 * 1024 * 1024, // 100MB, this is the max size recommended for the S3 [put_object] API
         );
 
         let mut tar = tar::Builder::new(&mut multi_chunk_writer);

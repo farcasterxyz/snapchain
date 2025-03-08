@@ -54,7 +54,7 @@ static KEY_REGISTRY: Address = address!("00000000Fc1237824fb747aBDE0FF18990E59b7
 static ID_REGISTRY: Address = address!("00000000Fc6c5F01Fc30151999387Bb99A9f489b");
 
 // For reference, in case it needs to be specified manually
-// const FIRST_BLOCK: u64 = 108864739;
+const FIRST_BLOCK: u64 = 108864739;
 static CHAIN_ID: u32 = 10; // OP mainnet
 const RENT_EXPIRY_IN_SECONDS: u64 = 365 * 24 * 60 * 60; // One year
 
@@ -182,7 +182,9 @@ impl Subscriber {
             local_state_store,
             provider,
             mempool_tx,
-            start_block_number: config.start_block_number,
+            start_block_number: config
+                .start_block_number
+                .map(|start_block| start_block.max(FIRST_BLOCK)),
             stop_block_number: config.stop_block_number,
             statsd_client,
         })
