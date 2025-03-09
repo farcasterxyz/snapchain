@@ -152,7 +152,7 @@ impl MalachiteConsensusActors {
         config: Config,
     ) -> Result<Self, ractor::SpawnErr> {
         let current_height = shard_validator.get_current_height();
-        let validator_set = shard_validator.get_validator_set();
+        let validator_set = shard_validator.get_validator_set(current_height.as_u64());
         let address = shard_validator.get_address();
         let shard_id = shard_validator.shard_id.shard_id();
         let name = if shard_id == 0 {
