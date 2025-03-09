@@ -191,13 +191,16 @@ impl Host {
                     None
                 };
 
-                state
-                    .gossip_tx
-                    .send(GossipEvent::BroadcastDecidedValue(proto::DecidedValue {
-                        value: decided_value,
-                    }))
-                    .await
-                    .unwrap();
+                // Only publish decided values if you're the proposer to reduce network traffic
+                if proposed_value.proposer_address() == state.shard_validator.get_address() {
+                    state
+                        .gossip_tx
+                        .send(GossipEvent::BroadcastDecidedValue(proto::DecidedValue {
+                            value: decided_value,
+                        }))
+                        .await
+                        .unwrap();
+                }
 
                 // Start next height
                 let next_height = certificate.height.increment();
