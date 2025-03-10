@@ -98,6 +98,7 @@ impl SnapchainNode {
                 None,
                 Some(shard_proposer),
                 local_state_store.clone(),
+                statsd_client.clone(),
             );
             let consensus_actor = MalachiteConsensusActors::create_and_start(
                 ctx,
@@ -107,6 +108,7 @@ impl SnapchainNode {
                 gossip_tx.clone(),
                 registry,
                 config.clone(),
+                statsd_client.clone(),
             )
             .await;
 
@@ -146,6 +148,7 @@ impl SnapchainNode {
             Some(block_proposer),
             None,
             local_state_store,
+            statsd_client.clone(),
         );
         let ctx = SnapchainValidatorContext::new(keypair.clone());
         let block_consensus_actor = MalachiteConsensusActors::create_and_start(
@@ -156,6 +159,7 @@ impl SnapchainNode {
             gossip_tx.clone(),
             registry,
             config,
+            statsd_client.clone(),
         )
         .await;
         if block_consensus_actor.is_err() {

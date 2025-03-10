@@ -18,6 +18,7 @@ use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::consensus::validator::ShardValidator;
 use crate::core::types::{ShardId, SnapchainValidatorContext};
 use crate::network::gossip::GossipEvent;
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_engine::sync::{Params as SyncParams, Sync, SyncRef};
 use informalsystems_malachitebft_engine::util::events::TxEvent;
 use informalsystems_malachitebft_engine::wal::{Wal, WalRef};
@@ -61,12 +62,14 @@ pub async fn spawn_host(
     shard_validator: ShardValidator,
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     consensus_start_delay: u32,
+    statsd: StatsdClientWrapper,
 ) -> Result<HostRef<SnapchainValidatorContext>, ractor::SpawnErr> {
     let state = HostState {
         network,
         shard_validator,
         consensus_start_delay,
         gossip_tx,
+        statsd,
     };
     let actor_ref = Host::spawn(state).await?;
     Ok(actor_ref)
@@ -150,6 +153,7 @@ impl MalachiteConsensusActors {
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         registry: &SharedRegistry,
         config: Config,
+        statsd: StatsdClientWrapper,
     ) -> Result<Self, ractor::SpawnErr> {
         let current_height = shard_validator.get_current_height();
         let validator_set = shard_validator.get_validator_set();
@@ -175,6 +179,7 @@ impl MalachiteConsensusActors {
             shard_validator,
             gossip_tx.clone(),
             config.consensus_start_delay,
+            statsd,
         )
         .await?;
         let sync_actor = spawn_sync_actor(

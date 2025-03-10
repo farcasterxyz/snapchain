@@ -4,6 +4,7 @@ use crate::consensus::validator::ShardValidator;
 use crate::core::types::SnapchainValidatorContext;
 use crate::network::gossip::GossipEvent;
 use crate::proto::{self, decided_value, full_proposal, Block, Commits, FullProposal, ShardChunk};
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use bytes::Bytes;
 use informalsystems_malachitebft_engine::consensus::ConsensusMsg;
 use informalsystems_malachitebft_engine::host::{HostMsg, LocallyProposedValue};
@@ -28,6 +29,7 @@ pub struct HostState {
     pub network: NetworkRef<SnapchainValidatorContext>,
     pub consensus_start_delay: u32,
     pub gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+    pub statsd: StatsdClientWrapper,
 }
 
 impl Host {
@@ -84,6 +86,7 @@ impl Host {
                 timeout,
                 reply_to,
             } => {
+                let now = tokio::time::Instant::now();
                 let value = state
                     .shard_validator
                     .propose_value(height, round, timeout)
@@ -101,6 +104,12 @@ impl Host {
                 state
                     .network
                     .cast(NetworkMsg::PublishProposalPart(stream_message))?;
+                let elapsed = now.elapsed();
+                state.statsd.time_with_shard(
+                    height.shard_index,
+                    "host.get_value_time",
+                    elapsed.as_millis() as u64,
+                );
             }
 
             HostMsg::RestreamValue {
@@ -174,6 +183,7 @@ impl Host {
                 consensus: consensus_ref,
                 extensions: _,
             } => {
+                let now = tokio::time::Instant::now();
                 let proposed_value = state
                     .shard_validator
                     .get_proposed_value(&certificate.value_id)
@@ -206,6 +216,12 @@ impl Host {
                 let next_height = certificate.height.increment();
                 let validator_set = state.shard_validator.get_validator_set();
                 consensus_ref.cast(ConsensusMsg::StartHeight(next_height, validator_set))?;
+                let elapsed = now.elapsed();
+                state.statsd.time_with_shard(
+                    certificate.height.shard_index,
+                    "host.decided_time",
+                    elapsed.as_millis() as u64,
+                );
             }
 
             HostMsg::GetDecidedValue { height, reply_to } => {

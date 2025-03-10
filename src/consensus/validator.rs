@@ -5,6 +5,7 @@ use crate::core::types::{
 };
 use crate::proto::{full_proposal, Commits, FullProposal, ShardHash};
 use crate::storage::store::node_local_state::LocalStateStore;
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_core_consensus::ProposedValue;
 use informalsystems_malachitebft_core_types::{Round, ValidatorSet};
 use std::time::Duration;
@@ -17,16 +18,17 @@ pub struct ShardValidator {
     address: Address,
 
     validator_set: SnapchainValidatorSet,
-    confirmed_height: Option<Height>,
     current_round: Round,
     current_height: Option<Height>,
     current_proposer: Option<Address>,
+    height_started_at: Option<std::time::Instant>,
     // This should be proposer: Box<dyn Proposer> but that doesn't implement Send which is required for the actor system.
     // TODO: Fix once we remove the actor system
     block_proposer: Option<BlockProposer>,
     shard_proposer: Option<ShardProposer>,
     pub started: bool,
     local_state_store: LocalStateStore,
+    pub statsd: StatsdClientWrapper,
 }
 
 impl ShardValidator {
@@ -37,19 +39,21 @@ impl ShardValidator {
         block_proposer: Option<BlockProposer>,
         shard_proposer: Option<ShardProposer>,
         local_state_store: LocalStateStore,
+        statsd: StatsdClientWrapper,
     ) -> ShardValidator {
         ShardValidator {
             shard_id: shard.clone(),
             address: address.clone(),
             validator_set: initial_validator_set,
-            confirmed_height: None,
-            current_round: Round::new(0),
             current_height: None,
+            current_round: Round::new(0),
+            height_started_at: None,
             current_proposer: None,
             block_proposer,
             shard_proposer,
             started: false,
             local_state_store,
+            statsd,
         }
     }
 
@@ -92,6 +96,9 @@ impl ShardValidator {
     }
 
     pub fn start_round(&mut self, height: Height, round: Round, proposer: Address) {
+        if self.current_height.is_none() || self.current_height.unwrap() != height {
+            self.height_started_at = Some(std::time::Instant::now());
+        }
         self.current_height = Some(height);
         self.current_round = round;
         self.current_proposer = Some(proposer);
@@ -121,8 +128,21 @@ impl ShardValidator {
         {
             error!("Error deleting proposal {}", err.to_string())
         }
-        self.confirmed_height = commits.height;
+        self.current_height = commits.height;
         self.current_round = Round::Nil;
+        if let Some(height_started_at) = self.height_started_at {
+            let duration = height_started_at.elapsed();
+            self.statsd.time_with_shard(
+                self.shard_id.shard_id(),
+                "block_time",
+                duration.as_millis() as u64,
+            );
+        }
+        self.statsd.gauge_with_shard(
+            self.shard_id.shard_id(),
+            "round",
+            commits.round.unsigned_abs(),
+        );
     }
 
     pub async fn get_decided_value(

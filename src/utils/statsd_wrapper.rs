@@ -55,6 +55,18 @@ impl StatsdClientWrapper {
         _ = self.client.gauge(key, value)
     }
 
+    pub fn time_with_shard(&self, shard_id: u32, key: &str, value: u64) {
+        if self.use_tags {
+            self.client
+                .time_with_tags(key, value)
+                .with_tag("shard", format!("{}", shard_id).as_str())
+                .send()
+        } else {
+            let key = format!("shard{}.{}", shard_id, key);
+            _ = self.client.time(key.as_str(), value)
+        }
+    }
+
     pub fn time(&self, key: &str, value: u64) {
         _ = self.client.time(key, value)
     }
