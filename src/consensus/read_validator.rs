@@ -9,7 +9,7 @@ use informalsystems_malachitebft_core_types::NilOrVal;
 use informalsystems_malachitebft_sync::RawDecidedValue;
 use libp2p::identity::ed25519::PublicKey;
 use prost::Message;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub enum Engine {
     ShardEngine(ShardEngine),
@@ -137,6 +137,7 @@ impl ReadValidator {
     pub fn process_decided_value(&mut self, value: DecidedValue) -> u64 {
         let verified = Self::verify_signatures(&value);
         if !verified {
+            error!("Dropping decided block because its signatures are invalid");
             return 0;
         }
         let height = Self::get_decided_value_height(&value);
