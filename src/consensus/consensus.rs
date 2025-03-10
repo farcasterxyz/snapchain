@@ -48,7 +48,8 @@ pub struct Config {
     pub block_time: Duration,
 
     pub max_messages_per_block: u32,
-    pub validator_sets: Vec<ValidatorSetConfig>,
+    validator_sets: Option<Vec<ValidatorSetConfig>>,
+    validator_addresses: Option<Vec<String>>, // Deprecated
 
     // Number of seconds to wait before kicking off start height
     pub consensus_start_delay: u32,
@@ -72,9 +73,28 @@ impl Config {
             precommit_time: self.precommit_time,
             step_delta: self.step_delta,
             max_messages_per_block: self.max_messages_per_block,
-            validator_sets: validator_sets.clone(),
+            validator_addresses: None,
+            validator_sets: Some(validator_sets.clone()),
             consensus_start_delay: self.consensus_start_delay,
         }
+    }
+
+    pub fn get_validator_set_config(&self, shard_id: u32) -> Vec<ValidatorSetConfig> {
+        if let Some(sets) = &self.validator_sets {
+            assert!(sets.len() > 0);
+            return sets.to_vec();
+        }
+
+        if let Some(addresses) = &self.validator_addresses {
+            assert!(addresses.len() > 0);
+            return vec![ValidatorSetConfig {
+                effective_at: 0,
+                validator_public_keys: addresses.clone(),
+                shard_ids: vec![shard_id],
+            }];
+        }
+
+        panic!("No validator configuration provided")
     }
 }
 
@@ -90,7 +110,8 @@ impl Default for Config {
             step_delta: Duration::from_millis(500),
             block_time: Duration::from_millis(1000),
             max_messages_per_block: 1000,
-            validator_sets: vec![],
+            validator_addresses: None,
+            validator_sets: Some(vec![]),
             consensus_start_delay: 2,
         }
     }

@@ -91,10 +91,11 @@ impl SnapchainNode {
                 shard_decision_tx.clone(),
             );
 
+            let validator_sets = config.get_validator_set_config(shard_id);
             let shard_validator = ShardValidator::new(
                 validator_address.clone(),
                 shard.clone(),
-                config.validator_sets.clone(),
+                validator_sets,
                 None,
                 Some(shard_proposer),
                 local_state_store.clone(),
@@ -134,10 +135,11 @@ impl SnapchainNode {
             engine,
             statsd_client.clone(),
         );
+        let validator_sets = config.get_validator_set_config(0);
         let block_validator = ShardValidator::new(
             validator_address.clone(),
             block_shard.clone(),
-            config.validator_sets.clone(),
+            validator_sets,
             Some(block_proposer),
             None,
             local_state_store,
