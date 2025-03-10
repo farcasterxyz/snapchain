@@ -15,6 +15,7 @@ use tracing::{error, warn};
 struct StoredValidatorSet {
     pub effective_at: u64,
     pub validators: SnapchainValidatorSet,
+    pub shard_ids: Vec<u32>,
 }
 
 impl StoredValidatorSet {
@@ -33,6 +34,7 @@ impl StoredValidatorSet {
         Self {
             validators,
             effective_at: config.effective_at,
+            shard_ids: config.shard_ids.clone(),
         }
     }
 }
@@ -85,7 +87,10 @@ impl ShardValidator {
     pub fn get_validator_set(&self, height: u64) -> SnapchainValidatorSet {
         let mut result = &self.validator_set[0];
         for config in &self.validator_set {
-            if config.effective_at <= height && config.effective_at > result.effective_at {
+            if config.shard_ids.contains(&self.shard_id.shard_id())
+                && config.effective_at <= height
+                && config.effective_at > result.effective_at
+            {
                 result = config;
             }
         }
