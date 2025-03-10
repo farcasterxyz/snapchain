@@ -6,7 +6,7 @@ mod tests {
     use libp2p::identity::ed25519::Keypair;
 
     use crate::consensus::read_validator::{Engine, ReadValidator};
-    use crate::proto::{self, Height, ShardChunk};
+    use crate::proto::{self, CommitSignature, Commits, Height, ShardChunk, ShardHash};
     use crate::storage::store::engine::ShardEngine;
     use crate::storage::store::test_helper::{
         self, commit_event, default_storage_event, new_engine_with_options, sign_chunk,
@@ -143,5 +143,59 @@ mod tests {
                 block_number: 3
             }
         );
+    }
+
+    #[tokio::test]
+    async fn test_ignore_no_signatures() {
+        let (mut proposer_engine, _read_node_engine, mut read_validator, proposer_keypair) =
+            setup(0).await;
+        let mut shard_chunk = commit_shard_chunk(&mut proposer_engine, &proposer_keypair).await;
+        // Remove signatures from chunk
+        shard_chunk.commits = Some(Commits {
+            height: shard_chunk.header.as_ref().unwrap().height,
+            round: 0,
+            value: Some(ShardHash {
+                shard_index: shard_chunk
+                    .header
+                    .as_ref()
+                    .unwrap()
+                    .height
+                    .unwrap()
+                    .shard_index,
+                hash: shard_chunk.hash.clone(),
+            }),
+            signatures: vec![],
+        });
+        let num_processed = process_decided_value(&mut read_validator, &shard_chunk).await;
+        assert_eq!(num_processed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_ignore_invalid_signatures() {
+        let (mut proposer_engine, _read_node_engine, mut read_validator, proposer_keypair) =
+            setup(0).await;
+        let mut shard_chunk = commit_shard_chunk(&mut proposer_engine, &proposer_keypair).await;
+        let signer = proposer_keypair.public().to_bytes().to_vec();
+        // Add invalid signatures to chunk
+        shard_chunk.commits = Some(Commits {
+            height: shard_chunk.header.as_ref().unwrap().height,
+            round: 0,
+            value: Some(ShardHash {
+                shard_index: shard_chunk
+                    .header
+                    .as_ref()
+                    .unwrap()
+                    .height
+                    .unwrap()
+                    .shard_index,
+                hash: shard_chunk.hash.clone(),
+            }),
+            signatures: vec![CommitSignature {
+                signature: vec![],
+                signer,
+            }],
+        });
+        let num_processed = process_decided_value(&mut read_validator, &shard_chunk).await;
+        assert_eq!(num_processed, 0);
     }
 }
