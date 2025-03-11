@@ -7464,6 +7464,7 @@ dependencies = [
  "informalsystems-malachitebft-metrics",
  "informalsystems-malachitebft-network",
  "informalsystems-malachitebft-sync",
+ "informalsystems-malachitebft-wal",
  "itertools 0.13.0",
  "libp2p",
  "once_cell",

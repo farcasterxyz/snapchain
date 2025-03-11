@@ -34,6 +34,7 @@ informalsystems-malachitebft-core-types = { path = "../malachite/code/crates/cor
 informalsystems-malachitebft-config = { path = "../malachite/code/crates/config" }
 informalsystems-malachitebft-codec = { path = "../malachite/code/crates/codec" }
 informalsystems-malachitebft-metrics = { path = "../malachite/code/crates/metrics" }
+informalsystems-malachitebft-wal = { path = "../malachite/code/crates/wal" }
 blake3 = "1.4.1"
 tracing = "0.1.40"
 thiserror = "1.0.66"
