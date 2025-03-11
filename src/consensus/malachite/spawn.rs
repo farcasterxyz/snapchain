@@ -6,6 +6,7 @@ use informalsystems_malachitebft_engine::network::NetworkRef;
 use informalsystems_malachitebft_network::{PeerId as MalachitePeerId, PeerIdExt};
 use informalsystems_malachitebft_sync::Metrics as SyncMetrics;
 use std::path::Path;
+use std::time::Duration;
 use tracing::Span;
 
 use crate::consensus::consensus::Config;
@@ -145,6 +146,19 @@ pub struct MalachiteConsensusActors {
     pub consensus_actor: ConsensusRef<SnapchainValidatorContext>,
 }
 
+fn timeout_from_config(config: &Config) -> TimeoutConfig {
+    TimeoutConfig {
+        timeout_propose: config.step_time,
+        timeout_prevote: config.step_time,
+        timeout_precommit: config.step_time,
+        timeout_precommit_delta: config.step_delta,
+        timeout_prevote_delta: config.step_delta,
+        timeout_propose_delta: config.step_delta,
+        timeout_commit: config.block_time, // Sets up a fixed block production rate
+        timeout_step: Duration::from_secs(10),
+    }
+}
+
 impl MalachiteConsensusActors {
     pub async fn create_and_start(
         ctx: SnapchainValidatorContext,
@@ -193,9 +207,7 @@ impl MalachiteConsensusActors {
         )
         .await?;
 
-        let mut timeout_config = TimeoutConfig::default();
-        // setting the commit timeout sets up a fixed block production rate.
-        timeout_config.timeout_commit = config.block_time;
+        let timeout_config = timeout_from_config(&config);
         let consensus_actor = spawn_consensus_actor(
             ctx.clone(),
             timeout_config,

@@ -22,6 +22,7 @@ pub struct ShardValidator {
     current_height: Option<Height>,
     current_proposer: Option<Address>,
     height_started_at: Option<std::time::Instant>,
+    proposed_at: Option<std::time::Instant>,
     // This should be proposer: Box<dyn Proposer> but that doesn't implement Send which is required for the actor system.
     // TODO: Fix once we remove the actor system
     block_proposer: Option<BlockProposer>,
@@ -48,6 +49,7 @@ impl ShardValidator {
             current_height: None,
             current_round: Round::new(0),
             height_started_at: None,
+            proposed_at: None,
             current_proposer: None,
             block_proposer,
             shard_proposer,
@@ -102,9 +104,19 @@ impl ShardValidator {
         self.current_height = Some(height);
         self.current_round = round;
         self.current_proposer = Some(proposer);
+        self.proposed_at = None;
     }
 
     pub async fn decide(&mut self, commits: Commits) {
+        if self.proposed_at.is_some() {
+            let duration = self.proposed_at.unwrap().elapsed();
+            // Time spent in achieving consensus (just after the app proposes to just before it commits)
+            self.statsd.time_with_shard(
+                self.shard_id.shard_id(),
+                "consensus_time",
+                duration.as_millis() as u64,
+            );
+        }
         let received_shard_id = commits.height.unwrap().shard_index;
         if self.shard_id.shard_id() != received_shard_id {
             warn!(
@@ -217,6 +229,7 @@ impl ShardValidator {
             error!("Unable to store proposal {}", err.to_string());
         };
 
+        self.proposed_at = Some(std::time::Instant::now());
         proposal
     }
 
