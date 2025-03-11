@@ -1,4 +1,4 @@
-use informalsystems_malachitebft_config::SyncConfig;
+use informalsystems_malachitebft_config::ValueSyncConfig;
 use informalsystems_malachitebft_engine::network::NetworkRef;
 use informalsystems_malachitebft_sync::Metrics as SyncMetrics;
 use std::collections::BTreeMap;
@@ -49,7 +49,7 @@ pub async fn spawn_read_sync_actor(
     ctx: SnapchainValidatorContext,
     network: NetworkRef<SnapchainValidatorContext>,
     host: ReadHostRef,
-    config: SyncConfig,
+    config: ValueSyncConfig,
     registry: &SharedRegistry,
     span: Span,
 ) -> Result<ReadSyncRef, ractor::SpawnErr> {
@@ -96,7 +96,7 @@ impl MalachiteReadNodeActors {
             ctx.clone(),
             network_actor.clone(),
             host_actor.clone(),
-            SyncConfig::default(),
+            ValueSyncConfig::default(),
             registry,
             span.clone(),
         )

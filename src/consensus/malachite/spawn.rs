@@ -1,5 +1,5 @@
-use informalsystems_malachitebft_config::{SyncConfig, TimeoutConfig};
-use informalsystems_malachitebft_core_consensus::ValuePayload;
+use informalsystems_malachitebft_config::{TimeoutConfig, ValueSyncConfig};
+use informalsystems_malachitebft_core_consensus::{ValuePayload, VoteSyncMode};
 use informalsystems_malachitebft_engine::consensus::{Consensus, ConsensusParams, ConsensusRef};
 use informalsystems_malachitebft_engine::host::HostRef;
 use informalsystems_malachitebft_engine::network::NetworkRef;
@@ -95,6 +95,7 @@ pub async fn spawn_consensus_actor(
         address,
         threshold_params: Default::default(),
         value_payload: ValuePayload::ProposalAndParts,
+        vote_sync_mode: VoteSyncMode::RequestResponse,
     };
     let signing_provider = ctx.signing_provider();
 
@@ -119,7 +120,7 @@ pub async fn spawn_sync_actor(
     ctx: SnapchainValidatorContext,
     network: NetworkRef<SnapchainValidatorContext>,
     host: HostRef<SnapchainValidatorContext>,
-    config: SyncConfig,
+    config: ValueSyncConfig,
     registry: &SharedRegistry,
     span: Span,
 ) -> Result<SyncRef<SnapchainValidatorContext>, ractor::SpawnErr> {
@@ -186,7 +187,7 @@ impl MalachiteConsensusActors {
             ctx.clone(),
             network_actor.clone(),
             host_actor.clone(),
-            SyncConfig::default(),
+            ValueSyncConfig::default(),
             registry,
             span.clone(),
         )
