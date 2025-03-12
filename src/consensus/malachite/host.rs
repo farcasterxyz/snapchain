@@ -6,6 +6,7 @@ use crate::network::gossip::GossipEvent;
 use crate::proto::{self, decided_value, full_proposal, Block, Commits, FullProposal, ShardChunk};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use bytes::Bytes;
+use informalsystems_malachitebft_core_types::Round;
 use informalsystems_malachitebft_engine::consensus::ConsensusMsg;
 use informalsystems_malachitebft_engine::host::{HostMsg, LocallyProposedValue};
 use informalsystems_malachitebft_engine::network::{NetworkMsg, NetworkRef};
@@ -76,6 +77,9 @@ impl Host {
                 round,
                 proposer,
             } => {
+                // Change the log level dynamically based on the round
+                reload_tracing_handle(round);
+
                 state.shard_validator.start_round(height, round, proposer);
                 // Replay undecided values?
             }
@@ -295,6 +299,20 @@ impl Host {
         };
 
         Ok(())
+    }
+}
+
+/// Set the log level dynamically based on the round
+///
+/// - If the round is greater than 0, set the log level to DEBUG
+/// - Otherwise, reset the log level to the default
+fn reload_tracing_handle(round: Round) {
+    use crate::utils::tracing::{reload, reset, LogLevel};
+
+    if round.as_i64() > 0 {
+        reload(LogLevel::Debug);
+    } else {
+        reset();
     }
 }
 
