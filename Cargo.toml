@@ -85,6 +85,11 @@ tonic-build = "0.9.2"
 [dev-dependencies]
 serial_test = "3.1.1"
 tracing-test = { version = "0.2.5", features = ["no-env-filter"] }
+criterion = { version = "0.5.1", features = ["async_tokio", "html_reports"] }
+
+[[bench]]
+name = "snapchain_benchmark"
+harness = false
 
 [package.metadata.precommit]
 fmt = "cargo fmt --check --quiet"
