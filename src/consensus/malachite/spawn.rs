@@ -148,9 +148,9 @@ pub struct MalachiteConsensusActors {
 
 fn timeout_from_config(config: &Config) -> TimeoutConfig {
     TimeoutConfig {
-        timeout_propose: config.step_time,
-        timeout_prevote: config.step_time,
-        timeout_precommit: config.step_time,
+        timeout_propose: config.propose_time,
+        timeout_prevote: config.prevote_time,
+        timeout_precommit: config.precommit_time,
         timeout_precommit_delta: config.step_delta,
         timeout_prevote_delta: config.step_delta,
         timeout_propose_delta: config.step_delta,

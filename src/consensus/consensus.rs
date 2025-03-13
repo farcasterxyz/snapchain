@@ -33,7 +33,11 @@ pub struct Config {
     #[serde(with = "humantime_serde")]
     pub step_delta: Duration, // Timeout delta between steps
     #[serde(with = "humantime_serde")]
-    pub step_time: Duration, // Timeout for each propose/prevote/precommit step
+    pub propose_time: Duration, // Timeout for each propose/prevote/precommit step
+    #[serde(with = "humantime_serde")]
+    pub prevote_time: Duration, // Timeout for each propose/prevote/precommit step
+    #[serde(with = "humantime_serde")]
+    pub precommit_time: Duration, // Timeout for each propose/prevote/precommit step
     #[serde(with = "humantime_serde")]
     pub block_time: Duration,
 
@@ -57,7 +61,9 @@ impl Config {
             num_shards: shard_ids.len() as u32,
             shard_ids,
             block_time: self.block_time,
-            step_time: self.step_time,
+            propose_time: self.propose_time,
+            prevote_time: self.prevote_time,
+            precommit_time: self.precommit_time,
             step_delta: self.step_delta,
             max_messages_per_block: self.max_messages_per_block,
             validator_addresses: validator_addresses.clone(),
@@ -86,8 +92,10 @@ impl Default for Config {
             private_key: hex::encode(SecretKey::generate()),
             shard_ids: vec![1],
             num_shards: 1,
-            step_time: Duration::from_millis(200),
-            step_delta: Duration::from_millis(100),
+            propose_time: Duration::from_millis(500),
+            prevote_time: Duration::from_millis(250),
+            precommit_time: Duration::from_secs(250),
+            step_delta: Duration::from_millis(250),
             block_time: Duration::from_millis(250),
             max_messages_per_block: 500,
             validator_addresses: vec![],

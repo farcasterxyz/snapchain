@@ -1,6 +1,7 @@
 use crate::core::types::{
     proto, Address, Height, ShardHash, ShardId, SnapchainShard, FARCASTER_EPOCH,
 };
+use crate::core::util::get_farcaster_time;
 use crate::proto::{
     full_proposal, Block, BlockHeader, Commits, FullProposal, ShardChunk, ShardChunkWitness,
     ShardHeader, ShardWitness,
@@ -146,7 +147,16 @@ impl Proposer for ShardProposer {
         {
             self.proposed_chunks
                 .insert(full_proposal.shard_hash(), full_proposal.clone());
-            let height = chunk.header.clone().unwrap().height.unwrap();
+            let header = chunk.header.as_ref().unwrap();
+            if let Ok(timestamp) = get_farcaster_time() {
+                let receive_delay = current_time() - timestamp;
+                self.statsd_client.gauge_with_shard(
+                    self.shard_id.shard_id(),
+                    "proposer.receive_delay",
+                    receive_delay,
+                );
+            }
+            let height = header.height.unwrap();
 
             let confirmed_height = self.get_confirmed_height();
             if height != confirmed_height.increment() {
@@ -161,7 +171,7 @@ impl Proposer for ShardProposer {
 
             let state = ShardStateChange {
                 shard_id: height.shard_index,
-                new_state_root: chunk.header.clone().unwrap().shard_root.clone(),
+                new_state_root: header.shard_root.clone(),
                 transactions: chunk.transactions.clone(),
             };
             return if self.engine.validate_state_change(&state) {
