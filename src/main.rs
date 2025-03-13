@@ -23,10 +23,10 @@ use snapchain::storage::store::BlockStore;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::net;
 use std::net::SocketAddr;
 use std::process;
 use std::sync::Arc;
+use std::{fs, net};
 use tokio::net::TcpListener;
 use tokio::select;
 use tokio::signal::ctrl_c;
@@ -129,6 +129,11 @@ async fn start_servers(
     });
 }
 
+fn is_dir_empty(path: &str) -> std::io::Result<bool> {
+    let mut entries = fs::read_dir(path)?;
+    Ok(entries.next().is_none())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -170,7 +175,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    if app_config.snapshot.load_db_from_snapshot {
+    // We only use snapshots if the db directory doesn't exist or is empty.
+    if app_config.snapshot.load_db_from_snapshot
+        && (!fs::exists(app_config.rocksdb_dir.clone()).unwrap()
+            || is_dir_empty(&app_config.rocksdb_dir).unwrap())
+    {
+        info!("Downloading snapshots");
         let mut shard_ids = app_config.consensus.shard_ids.clone();
         shard_ids.push(0);
         for shard_id in shard_ids {
@@ -184,7 +194,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .await
             .unwrap();
         }
-    }
+    };
 
     if app_config.statsd.prefix == "" {
         // TODO: consider removing this check
@@ -206,6 +216,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let block_db = RocksDB::open_shard_db(app_config.rocksdb_dir.as_str(), 0);
     let block_store = BlockStore::new(block_db);
+    info!(
+        "Block db height {}",
+        block_store.max_block_number().unwrap()
+    );
 
     let keypair = app_config.consensus.keypair().clone();
 

@@ -198,6 +198,12 @@ impl ShardEngine {
             .gauge_with_shard(self.shard_id, key.as_str(), value);
     }
 
+    fn time_with_shard(&self, key: &str, value: u64) {
+        let key = format!("engine.{}", key);
+        self.statsd_client
+            .time_with_shard(self.shard_id, key.as_str(), value);
+    }
+
     pub fn get_stores(&self) -> Stores {
         self.stores.clone()
     }
@@ -214,6 +220,7 @@ impl ShardEngine {
         &mut self,
         max_wait: Duration,
     ) -> Result<Vec<MempoolMessage>, EngineError> {
+        let now = std::time::Instant::now();
         if let Some(messages_request_tx) = &self.messages_request_tx {
             let (message_tx, message_rx) = oneshot::channel();
 
@@ -233,7 +240,11 @@ impl ShardEngine {
 
             match timeout(max_wait, message_rx).await {
                 Ok(response) => match response {
-                    Ok(new_messages) => Ok(new_messages),
+                    Ok(new_messages) => {
+                        let elapsed = now.elapsed();
+                        self.time_with_shard("pull_messages", elapsed.as_millis() as u64);
+                        Ok(new_messages)
+                    }
                     Err(err) => Err(EngineError::from(err)),
                 },
                 Err(_) => {
@@ -340,6 +351,7 @@ impl ShardEngine {
         shard: u32,
         messages: Vec<MempoolMessage>,
     ) -> ShardStateChange {
+        let now = std::time::Instant::now();
         let mut txn = RocksDbTransactionBatch::new();
 
         let count_fn = Self::make_count_fn(self.statsd_client.clone(), self.shard_id);
@@ -349,7 +361,6 @@ impl ShardEngine {
             count_fn("trie.mem_get_count.total", read_count.1);
             count_fn("trie.mem_get_count.for_propose", read_count.1);
         };
-
         let result = self
             .prepare_proposal(
                 &merkle_trie::Context::with_callback(count_callback),
@@ -361,6 +372,9 @@ impl ShardEngine {
 
         // TODO: this should probably operate automatically via drop trait
         self.stores.trie.reload(&self.db).unwrap();
+
+        let proposal_duration = now.elapsed();
+        self.time_with_shard("propose_time", proposal_duration.as_millis() as u64);
 
         self.count("propose.invoked", 1);
         result
@@ -427,6 +441,7 @@ impl ShardEngine {
         shard_root: &[u8],
         source: String,
     ) -> Result<Vec<HubEvent>, EngineError> {
+        let now = std::time::Instant::now();
         let mut events = vec![];
         // Validate that the trie is in a good place to start with
         match self.get_last_shard_chunk() {
@@ -485,6 +500,8 @@ impl ShardEngine {
             return Err(EngineError::HashMismatch);
         }
 
+        let elapsed = now.elapsed();
+        self.time_with_shard("replay_proposal_time", elapsed.as_millis() as u64);
         Ok(events)
     }
 
@@ -495,6 +512,7 @@ impl ShardEngine {
         txn_batch: &mut RocksDbTransactionBatch,
         source: String,
     ) -> Result<(Vec<u8>, Vec<HubEvent>, Vec<MessageValidationError>), EngineError> {
+        let now = std::time::Instant::now();
         let total_user_messages = snapchain_txn.user_messages.len();
         let total_system_messages = snapchain_txn.system_messages.len();
         let mut user_messages_count = 0;
@@ -713,6 +731,8 @@ impl ShardEngine {
             source,
             "Replayed transaction"
         );
+        let elapsed = now.elapsed();
+        self.time_with_shard("replay_txn_time_us", elapsed.as_micros() as u64);
 
         // Return the new account root hash
         Ok((account_root, events, validation_errors))
@@ -723,6 +743,7 @@ impl ShardEngine {
         msg: &proto::Message,
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<proto::HubEvent, MessageValidationError> {
+        let now = std::time::Instant::now();
         let data = msg
             .data
             .as_ref()
@@ -767,7 +788,8 @@ impl ShardEngine {
                 ));
             }
         }?;
-
+        let elapsed = now.elapsed();
+        self.time_with_shard("merge_message_time_us", elapsed.as_micros() as u64);
         Ok(event)
     }
 
@@ -830,6 +852,7 @@ impl ShardEngine {
         event: &proto::HubEvent,
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<(), EngineError> {
+        let now = std::time::Instant::now();
         match &event.body {
             Some(proto::hub_event::Body::MergeMessageBody(merge)) => {
                 if let Some(msg) = &merge.message {
@@ -927,6 +950,8 @@ impl ShardEngine {
                 panic!("No body in event");
             }
         }
+        let elapsed = now.elapsed();
+        self.time_with_shard("update_trie_time_us", elapsed.as_micros() as u64);
         Ok(())
     }
 
@@ -935,6 +960,7 @@ impl ShardEngine {
         message: &proto::Message,
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<(), MessageValidationError> {
+        let now = std::time::Instant::now();
         // Ensure message data is present
         let message_data = message
             .data
@@ -967,6 +993,8 @@ impl ShardEngine {
             _ => {}
         }
 
+        let elapsed = now.elapsed();
+        self.time_with_shard("validate_user_message_time_us", elapsed.as_micros() as u64);
         Ok(())
     }
 
@@ -1045,6 +1073,7 @@ impl ShardEngine {
     pub fn validate_state_change(&mut self, shard_state_change: &ShardStateChange) -> bool {
         let mut txn = RocksDbTransactionBatch::new();
 
+        let now = std::time::Instant::now();
         let transactions = &shard_state_change.transactions;
         let shard_root = &shard_state_change.new_state_root;
 
@@ -1070,6 +1099,8 @@ impl ShardEngine {
         }
 
         self.stores.trie.reload(&self.db).unwrap();
+        let elapsed = now.elapsed();
+        self.time_with_shard("validate_time", elapsed.as_millis() as u64);
 
         if result {
             self.count("validate.true", 1);
@@ -1088,6 +1119,7 @@ impl ShardEngine {
         events: Vec<HubEvent>,
         txn: RocksDbTransactionBatch,
     ) {
+        let now = std::time::Instant::now();
         self.db.commit(txn).unwrap();
         for event in events {
             // An error here just means there are no active receivers, which is fine and will happen if there are no active subscribe rpcs
@@ -1103,6 +1135,8 @@ impl ShardEngine {
             }
             Ok(()) => {}
         }
+        let elapsed = now.elapsed();
+        self.time_with_shard("commit_time", elapsed.as_millis() as u64);
     }
 
     fn emit_commit_metrics(&mut self, shard_chunk: &&ShardChunk) -> Result<(), EngineError> {

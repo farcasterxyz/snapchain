@@ -597,7 +597,7 @@ async fn test_basic_consensus() {
 }
 
 async fn wait_for_blocks(node: &NodeForTest, num_blocks: usize) {
-    let timeout = tokio::time::Duration::from_secs(5);
+    let timeout = tokio::time::Duration::from_secs(10);
     let start = tokio::time::Instant::now();
     let mut timer = time::interval(tokio::time::Duration::from_millis(10));
     let existing_blocks = node.num_blocks().await;

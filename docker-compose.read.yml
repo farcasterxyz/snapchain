@@ -28,7 +28,7 @@ services:
 
         [gossip]
         address="/ip4/0.0.0.0/udp/3382/quic-v1"
-        bootstrap_peers = "/ip4/10.0.0.63/udp/3382/quic-v1, /ip4/10.0.2.97/udp/3382/quic-v1, /ip4/10.0.1.144/udp/3382/quic-v1, /ip4/3.208.115.198/udp/3382/quic-v1, /ip4/10.0.1.18/udp/3382/quic-v1"
+        bootstrap_peers = "/ip4/52.21.4.237/udp/3382/quic-v1, /ip4/3.219.203.198/udp/3382/quic-v1, /ip4/52.73.172.10/udp/3382/quic-v1, /ip4/98.85.82.165/udp/3382/quic-v1, /ip4/3.208.115.198/udp/3382/quic-v1"
 
         [consensus]
         # Cluster 1 (testnet)

@@ -200,6 +200,11 @@ message UsernameProofsResponse {
   repeated UserNameProof proofs = 1;
 }
 
+message ValidationResponse {
+  bool valid = 1;
+  Message message = 2;
+}
+
 message VerificationRequest {
   uint64 fid = 1;
   bytes address = 2;

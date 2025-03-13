@@ -111,11 +111,7 @@ impl RocksDB {
         let now = chrono::DateTime::from_timestamp_millis(timestamp_ms)
             .unwrap()
             .naive_utc();
-        let backup_path = Path::new(backup_dir).join(format!(
-            "backup-shard-{}-{}",
-            shard_id,
-            now.format("%Y-%m-%d-%s")
-        ));
+        let backup_path = Path::new(backup_dir).join(format!("shard-{}", shard_id));
         let span = tracing::span!(
             tracing::Level::INFO,
             "backup_db",
@@ -206,7 +202,7 @@ impl RocksDB {
 
         let mut multi_chunk_writer = MultiChunkWriter::new(
             PathBuf::from(chunked_output_dir.clone()),
-            4 * 1024 * 1024 * 1024, // 4GB
+            100 * 1024 * 1024, // 100MB, this is the max size recommended for the S3 [put_object] API
         );
 
         let mut tar = tar::Builder::new(&mut multi_chunk_writer);

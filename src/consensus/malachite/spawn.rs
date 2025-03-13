@@ -1,11 +1,12 @@
-use informalsystems_malachitebft_config::{SyncConfig, TimeoutConfig};
-use informalsystems_malachitebft_core_consensus::ValuePayload;
+use informalsystems_malachitebft_config::{TimeoutConfig, ValueSyncConfig};
+use informalsystems_malachitebft_core_consensus::{ValuePayload, VoteSyncMode};
 use informalsystems_malachitebft_engine::consensus::{Consensus, ConsensusParams, ConsensusRef};
 use informalsystems_malachitebft_engine::host::HostRef;
 use informalsystems_malachitebft_engine::network::NetworkRef;
 use informalsystems_malachitebft_network::{PeerId as MalachitePeerId, PeerIdExt};
 use informalsystems_malachitebft_sync::Metrics as SyncMetrics;
 use std::path::Path;
+use std::time::Duration;
 use tracing::Span;
 
 use crate::consensus::consensus::Config;
@@ -18,6 +19,7 @@ use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::consensus::validator::ShardValidator;
 use crate::core::types::{ShardId, SnapchainValidatorContext};
 use crate::network::gossip::GossipEvent;
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_engine::sync::{Params as SyncParams, Sync, SyncRef};
 use informalsystems_malachitebft_engine::util::events::TxEvent;
 use informalsystems_malachitebft_engine::wal::{Wal, WalRef};
@@ -61,12 +63,14 @@ pub async fn spawn_host(
     shard_validator: ShardValidator,
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     consensus_start_delay: u32,
+    statsd: StatsdClientWrapper,
 ) -> Result<HostRef<SnapchainValidatorContext>, ractor::SpawnErr> {
     let state = HostState {
         network,
         shard_validator,
         consensus_start_delay,
         gossip_tx,
+        statsd,
     };
     let actor_ref = Host::spawn(state).await?;
     Ok(actor_ref)
@@ -92,6 +96,7 @@ pub async fn spawn_consensus_actor(
         address,
         threshold_params: Default::default(),
         value_payload: ValuePayload::ProposalAndParts,
+        vote_sync_mode: VoteSyncMode::RequestResponse,
     };
     let signing_provider = ctx.signing_provider();
 
@@ -116,7 +121,7 @@ pub async fn spawn_sync_actor(
     ctx: SnapchainValidatorContext,
     network: NetworkRef<SnapchainValidatorContext>,
     host: HostRef<SnapchainValidatorContext>,
-    config: SyncConfig,
+    config: ValueSyncConfig,
     registry: &SharedRegistry,
     span: Span,
 ) -> Result<SyncRef<SnapchainValidatorContext>, ractor::SpawnErr> {
@@ -141,6 +146,19 @@ pub struct MalachiteConsensusActors {
     pub consensus_actor: ConsensusRef<SnapchainValidatorContext>,
 }
 
+fn timeout_from_config(config: &Config) -> TimeoutConfig {
+    TimeoutConfig {
+        timeout_propose: config.propose_time,
+        timeout_prevote: config.prevote_time,
+        timeout_precommit: config.precommit_time,
+        timeout_precommit_delta: config.step_delta,
+        timeout_prevote_delta: config.step_delta,
+        timeout_propose_delta: config.step_delta,
+        timeout_commit: config.block_time, // Sets up a fixed block production rate
+        timeout_step: Duration::from_secs(10),
+    }
+}
+
 impl MalachiteConsensusActors {
     pub async fn create_and_start(
         ctx: SnapchainValidatorContext,
@@ -150,6 +168,7 @@ impl MalachiteConsensusActors {
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         registry: &SharedRegistry,
         config: Config,
+        statsd: StatsdClientWrapper,
     ) -> Result<Self, ractor::SpawnErr> {
         let current_height = shard_validator.get_current_height();
         let validator_set = shard_validator.get_validator_set();
@@ -175,21 +194,20 @@ impl MalachiteConsensusActors {
             shard_validator,
             gossip_tx.clone(),
             config.consensus_start_delay,
+            statsd,
         )
         .await?;
         let sync_actor = spawn_sync_actor(
             ctx.clone(),
             network_actor.clone(),
             host_actor.clone(),
-            SyncConfig::default(),
+            ValueSyncConfig::default(),
             registry,
             span.clone(),
         )
         .await?;
 
-        let mut timeout_config = TimeoutConfig::default();
-        // setting the commit timeout sets up a fixed block production rate.
-        timeout_config.timeout_commit = config.block_time;
+        let timeout_config = timeout_from_config(&config);
         let consensus_actor = spawn_consensus_actor(
             ctx.clone(),
             timeout_config,

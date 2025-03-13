@@ -35,6 +35,7 @@ use crate::proto::UserNameProof;
 use crate::proto::UserNameType;
 use crate::proto::UsernameProofRequest;
 use crate::proto::UsernameProofsResponse;
+use crate::proto::ValidationResponse;
 use crate::proto::VerificationAddAddressBody;
 use crate::proto::{Block, CastId, DbStats};
 use crate::proto::{BlocksRequest, ShardChunksRequest, ShardChunksResponse, SubscribeRequest};
@@ -866,6 +867,20 @@ impl HubService for MyHubService {
             .user_data_store
             .get_all_messages_by_fid(request.fid, start_ts, stop_ts, &request.page_options())
             .as_response()
+    }
+
+    async fn validate_message(
+        &self,
+        request: Request<Message>,
+    ) -> Result<Response<ValidationResponse>, Status> {
+        let request = request.into_inner();
+        let result =
+            validations::message::validate_message(&request).map_or_else(|_| false, |_| true);
+
+        Ok(Response::new(ValidationResponse {
+            valid: result,
+            message: Some(request),
+        }))
     }
 
     async fn get_verification(

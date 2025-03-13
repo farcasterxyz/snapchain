@@ -13,6 +13,8 @@ service HubService {
   rpc SubmitMessageWithOptions(SubmitMessageRequest) returns (SubmitMessageResponse);
 //  rpc SubmitBulkMessages(SubmitBulkMessagesRequest) returns (SubmitBulkMessagesResponse);
 
+  // Validation Methods
+  rpc ValidateMessage(Message) returns (ValidationResponse);
 
   // Block API
   rpc GetBlocks(BlocksRequest) returns (stream Block);

@@ -23,16 +23,34 @@ The main goals of this implementation are:
 
 Snapchain is currently in early alpha. Please check the release section of the [specification](https://github.com/farcasterxyz/protocol/discussions/207) for the latest timelines.
 
-## Running Read Node
+## Running a Read Node
 
-To start a read node, you can run the following command:
+A read node can mirror all the data on the Snapchain network, but cannot participate in consensus. It validates
+blocks and messages, and ensure the validators are honest. It can also be used to submit messages to the global mempool,
+to be included by the validators.
+
+In order to run a read node, you need the following system requirements:
+- 16 GB of RAM
+- 4 CPU cores or vCPUs
+- 1TB of free storage
+- A public IP address with ports 3381 - 3383 exposed on both TCP and UDP. 
+
+To start (or upgrade) a read node, you can run the following command:
 
 ```bash
 mkdir snapchain
 cd snapchain
+docker compose down # If you have a previous version running
 wget https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/docker-compose.read.yml -O docker-compose.yml
 docker compose up  # append -d to run in the background
 ```
+
+You can check that the node is syncing by running:
+```bash
+curl http://localhost:3381/v1/info
+```
+
+You should see `maxHeight` increasing and `blockDelay` decreasing.
 
 ## Contributing 
 
@@ -57,7 +75,7 @@ Clone the snapchain and dependent repos and build snapchain:
 git clone git@github.com:CassOnMars/eth-signature-verifier.git
 git clone git@github.com:informalsystems/malachite.git
 cd malachite
-git checkout 96b39f6de9e05e6db14becd9cf0af5401470e361
+git checkout 13bca14cd209d985c3adf101a02924acde8723a5
 cd ..
 git clone git@github.com:farcasterxyz/snapchain.git
 cd snapchain

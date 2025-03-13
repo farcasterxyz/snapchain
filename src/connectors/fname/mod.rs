@@ -15,7 +15,7 @@ use crate::{
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
-    pub start_from: u64,
+    pub start_from: Option<u64>,
     pub stop_at: Option<u64>,
     pub url: String,
     pub disable: bool,
@@ -24,7 +24,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            start_from: 0,
+            start_from: None,
             stop_at: None,
             url: "https://fnames.farcaster.xyz/transfers".to_string(),
             disable: false,
@@ -35,6 +35,11 @@ impl Default for Config {
 #[derive(Deserialize, Debug)]
 struct TransfersData {
     transfers: Vec<Transfer>,
+}
+
+#[derive(Deserialize, Debug)]
+struct CurrentTransfer {
+    transfer: Transfer,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -94,7 +99,7 @@ impl Fetcher {
         local_state_store: LocalStateStore,
     ) -> Self {
         Fetcher {
-            position: cfg.start_from,
+            position: 0,
             cfg,
             mempool_tx,
             statsd_client,
@@ -216,8 +221,36 @@ impl Fetcher {
         }
     }
 
+    async fn set_initial_position(&mut self) -> Result<(), FetchError> {
+        match self.cfg.start_from {
+            None => {
+                let url = format!("{}/current", self.cfg.url);
+                debug!(%url, "fetching transfers");
+
+                let response = reqwest::get(&url).await?.json::<CurrentTransfer>().await?;
+
+                self.position = response.transfer.id;
+            }
+            Some(start_from) => {
+                self.position = start_from.max(self.latest_fname_transfer_in_db());
+            }
+        };
+        Ok(())
+    }
+
     pub async fn run(&mut self) -> () {
-        self.position = self.position.max(self.latest_fname_transfer_in_db());
+        match self.set_initial_position().await {
+            Ok(()) => {}
+            Err(err) => {
+                // We will just keep the default, 0
+                warn!(
+                    "Unable to set initial position for fname ingest {}",
+                    err.to_string()
+                )
+            }
+        }
+        info!(start_id = self.position, "Starting fname ingest");
+
         loop {
             let result = self.fetch().await;
 
