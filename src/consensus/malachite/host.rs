@@ -184,10 +184,22 @@ impl Host {
                 extensions: _,
             } => {
                 let now = tokio::time::Instant::now();
-                let proposed_value = state
+                let result = state
                     .shard_validator
-                    .get_proposed_value(&certificate.value_id)
-                    .unwrap();
+                    .get_proposed_value(&certificate.value_id);
+
+                if result.is_none() {
+                    error!(
+                        "Could not find proposed value for decided value: {} at height: {}. Restarting Height.",
+                        hex::encode(certificate.value_id.hash),
+                        certificate.height
+                    );
+                    let validator_set = state.shard_validator.get_validator_set();
+                    consensus_ref
+                        .cast(ConsensusMsg::StartHeight(certificate.height, validator_set))?;
+                    return Ok(());
+                }
+                let proposed_value = result.unwrap();
 
                 let commits = Commits::from_commit_certificate(&certificate);
                 //commit
