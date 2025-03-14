@@ -97,8 +97,11 @@ impl Proposer for ShardProposer {
     ) -> FullProposal {
         // TODO: perhaps not the best place to get our messages, but this is (currently) the
         // last place we're still in an async function
+
+        let now = Instant::now();
         let mempool_timeout = Duration::from_millis(200);
         let messages = self.engine.pull_messages(mempool_timeout).await.unwrap(); // TODO: don't unwrap
+        println!("propose_value (pull messages): {:?}", now.elapsed());
 
         let previous_chunk = self.engine.get_last_shard_chunk();
         let parent_hash = match previous_chunk {
@@ -109,6 +112,11 @@ impl Proposer for ShardProposer {
         let state_change = self
             .engine
             .propose_state_change(self.shard_id.shard_id(), messages);
+        println!(
+            "propose_value (engine propose state change): {:?}",
+            now.elapsed()
+        );
+
         let shard_header = ShardHeader {
             parent_hash,
             timestamp: current_time(),
@@ -137,6 +145,7 @@ impl Proposer for ShardProposer {
             proposer: self.address.to_vec(),
         };
         self.proposed_chunks.insert(shard_hash, proposal.clone());
+        println!("propose_value: {:?}", now.elapsed());
         proposal
     }
 
@@ -144,6 +153,7 @@ impl Proposer for ShardProposer {
         if let Some(proto::full_proposal::ProposedValue::Shard(chunk)) =
             full_proposal.proposed_value.clone()
         {
+            let now = Instant::now();
             self.proposed_chunks
                 .insert(full_proposal.shard_hash(), full_proposal.clone());
             let header = chunk.header.as_ref().unwrap();
@@ -171,6 +181,7 @@ impl Proposer for ShardProposer {
                 new_state_root: header.shard_root.clone(),
                 transactions: chunk.transactions.clone(),
             };
+            println!("add_proposed_value: {:?}", now.elapsed());
             return if self.engine.validate_state_change(&state) {
                 Validity::Valid
             } else {
@@ -193,10 +204,12 @@ impl Proposer for ShardProposer {
     async fn decide(&mut self, commits: Commits) {
         let value = commits.value.clone().unwrap();
         if let Some(proposal) = self.proposed_chunks.get(&value) {
+            let now = Instant::now();
             let chunk = proposal.shard_chunk(commits).unwrap();
             self.publish_new_shard_chunk(&chunk.clone()).await;
             self.engine.commit_shard_chunk(&chunk);
             self.proposed_chunks.remove(&value);
+            println!("decide: {:?}", now.elapsed());
         } else {
             panic!(
                 "Unable to find proposal for decided value. height {}, round {}, shard_hash {}",
@@ -205,18 +218,22 @@ impl Proposer for ShardProposer {
                 hex::encode(value.hash),
             )
         }
+        let now = Instant::now();
         self.statsd_client.gauge_with_shard(
             self.shard_id.shard_id(),
             "proposer.pending_blocks",
             self.proposed_chunks.len() as u64,
         );
+        println!("statsd_gauge_with_shard: {:?}", now.elapsed());
     }
 
     async fn get_decided_value(
         &self,
         height: Height,
     ) -> Option<(Commits, full_proposal::ProposedValue)> {
+        let now = Instant::now();
         let shard_chunk = self.engine.get_shard_chunk_by_height(height);
+        println!("get_decided_value: {:?}", now.elapsed());
         match shard_chunk {
             Some(chunk) => {
                 let commits = chunk.commits.clone().unwrap();

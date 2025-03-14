@@ -22,7 +22,7 @@ use merkle_trie::TrieKey;
 use std::collections::HashSet;
 use std::str;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::oneshot;
 use tokio::sync::{broadcast, mpsc};
@@ -266,7 +266,7 @@ impl ShardEngine {
         messages: Vec<MempoolMessage>,
     ) -> Result<ShardStateChange, EngineError> {
         self.count("prepare_proposal.recv_messages", messages.len() as u64);
-
+        let now = Instant::now();
         let mut snapchain_txns = self.create_transactions_from_mempool(messages)?;
         let mut validation_error_count = 0;
         for snapchain_txn in &mut snapchain_txns {
@@ -296,7 +296,7 @@ impl ShardEngine {
             new_state_root: new_root_hash.clone(),
             transactions: snapchain_txns,
         };
-
+        println!("prepare_proposal: {:?}", now.elapsed());
         Ok(result)
     }
 
@@ -307,6 +307,7 @@ impl ShardEngine {
     ) -> Result<Vec<Transaction>, EngineError> {
         let mut transactions = vec![];
 
+        let now = Instant::now();
         let grouped_messages = messages.iter().into_group_map_by(|msg| msg.fid());
         let unique_fids = grouped_messages.keys().len();
         for (fid, messages) in grouped_messages {
@@ -343,6 +344,7 @@ impl ShardEngine {
             fids = unique_fids,
             "Created transactions from mempool"
         );
+        println!("create_transactions_from_mempool: {:?}", now.elapsed());
         Ok(transactions)
     }
 
@@ -1071,9 +1073,9 @@ impl ShardEngine {
     }
 
     pub fn validate_state_change(&mut self, shard_state_change: &ShardStateChange) -> bool {
+        let now = Instant::now();
         let mut txn = RocksDbTransactionBatch::new();
 
-        let now = std::time::Instant::now();
         let transactions = &shard_state_change.transactions;
         let shard_root = &shard_state_change.new_state_root;
 
@@ -1109,7 +1111,7 @@ impl ShardEngine {
             self.count("validate.false", 1);
             self.count("validate.true", 0);
         }
-
+        println!("validate_state_change: {:?}", now.elapsed());
         result
     }
 

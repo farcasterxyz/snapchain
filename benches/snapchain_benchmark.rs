@@ -554,8 +554,6 @@ fn mempool_to_settlement(base_port: u32) -> std::time::Duration {
         tokio::spawn(async move {
             let mut i = 0i32;
             loop {
-                println!("sending message {} to mempool", i);
-
                 let message =
                     MempoolMessage::UserMessage(messages_factory::casts::create_cast_add(
                         123,
@@ -569,7 +567,7 @@ fn mempool_to_settlement(base_port: u32) -> std::time::Duration {
                     .unwrap();
 
                 // there needs to be some sleep interval or the working thread for benchmarking will be exhausted
-                tokio::time::sleep(time::Duration::from_millis(10)).await;
+                tokio::time::sleep(time::Duration::from_micros(10)).await;
                 i += 1;
             }
         });
@@ -589,6 +587,7 @@ fn mempool_to_settlement(base_port: u32) -> std::time::Duration {
                 i
             );
 
+            println!("{} messages", network.nodes[i].total_messages().await);
             assert!(
                 network.nodes[i].total_messages().await > 0,
                 "Node {} should have messages",
