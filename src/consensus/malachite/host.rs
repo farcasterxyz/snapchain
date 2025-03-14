@@ -56,8 +56,8 @@ impl Host {
             HostMsg::ConsensusReady(consensus_ref) => {
                 // Start height
                 state.shard_validator.start(); // Call each time?
-                let validator_set = state.shard_validator.get_validator_set();
                 let height = state.shard_validator.get_current_height().increment();
+                let validator_set = state.shard_validator.get_validator_set(height.as_u64());
                 // Wait a few seconds before starting
                 tokio::time::sleep(tokio::time::Duration::from_secs(
                     state.consensus_start_delay as u64,
@@ -171,11 +171,8 @@ impl Host {
                 }
             }
 
-            HostMsg::GetValidatorSet {
-                height: _,
-                reply_to,
-            } => {
-                reply_to.send(state.shard_validator.get_validator_set())?;
+            HostMsg::GetValidatorSet { height, reply_to } => {
+                reply_to.send(state.shard_validator.get_validator_set(height.as_u64()))?;
             }
 
             HostMsg::Decided {
@@ -194,7 +191,9 @@ impl Host {
                         hex::encode(certificate.value_id.hash),
                         certificate.height
                     );
-                    let validator_set = state.shard_validator.get_validator_set();
+                    let validator_set = state
+                        .shard_validator
+                        .get_validator_set(certificate.height.as_u64());
                     consensus_ref
                         .cast(ConsensusMsg::StartHeight(certificate.height, validator_set))?;
                     return Ok(());
@@ -226,7 +225,9 @@ impl Host {
 
                 // Start next height
                 let next_height = certificate.height.increment();
-                let validator_set = state.shard_validator.get_validator_set();
+                let validator_set = state
+                    .shard_validator
+                    .get_validator_set(next_height.as_u64());
                 consensus_ref.cast(ConsensusMsg::StartHeight(next_height, validator_set))?;
                 let elapsed = now.elapsed();
                 state.statsd.time_with_shard(
