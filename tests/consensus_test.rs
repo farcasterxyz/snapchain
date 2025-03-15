@@ -219,6 +219,7 @@ impl NodeForTest {
         let mut consensus_config = snapchain::consensus::consensus::Config::default();
         consensus_config =
             consensus_config.with((1..=num_shards).collect(), validator_addresses.clone());
+        consensus_config.block_time = time::Duration::from_millis(250);
 
         let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
 
