@@ -107,6 +107,23 @@ impl ShardValidator {
         self.proposed_at = None;
     }
 
+    pub fn next_height_delay(&self, target_block_time: u64) -> Duration {
+        if self.height_started_at.is_none() {
+            return Duration::from_secs(0);
+        }
+        let last_height_start_time = self.height_started_at.unwrap();
+        let current_time = std::time::Instant::now();
+        let duration = current_time.duration_since(last_height_start_time);
+        let target_duration = Duration::from_millis(target_block_time);
+        if duration < target_duration {
+            // If we're ahead of schedule, wait until the target duration
+            target_duration - duration
+        } else {
+            // If we're behind schedule, don't wait to start next block
+            Duration::from_secs(0)
+        }
+    }
+
     pub async fn decide(&mut self, commits: Commits) {
         if self.proposed_at.is_some() {
             let duration = self.proposed_at.unwrap().elapsed();
