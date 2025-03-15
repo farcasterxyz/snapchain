@@ -560,7 +560,7 @@ async fn send_messages(messages_tx: mpsc::Sender<(MempoolMessage, MempoolSource)
 #[tokio::test]
 #[serial]
 async fn test_basic_consensus() {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .try_init();

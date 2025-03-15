@@ -15,7 +15,6 @@ use informalsystems_malachitebft_engine::util::streaming::{
 use informalsystems_malachitebft_sync::RawDecidedValue;
 use prost::Message;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SpawnErr};
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
