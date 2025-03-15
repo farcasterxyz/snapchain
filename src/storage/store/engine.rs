@@ -17,6 +17,7 @@ use crate::storage::store::BlockStore;
 use crate::storage::trie;
 use crate::storage::trie::merkle_trie;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use informalsystems_malachitebft_core_types::Round;
 use itertools::Itertools;
 use merkle_trie::TrieKey;
 use std::collections::HashSet;
@@ -128,6 +129,7 @@ pub struct ShardStateChange {
     pub shard_id: u32,
     pub new_state_root: Vec<u8>,
     pub transactions: Vec<Transaction>,
+    pub events: Vec<HubEvent>,
 }
 
 #[derive(Clone)]
@@ -148,6 +150,13 @@ struct TransactionCounts {
     system_messages: u64,
 }
 
+#[derive(Clone)]
+struct CachedTransaction {
+    shard_root: Vec<u8>,
+    events: Vec<HubEvent>,
+    txn: RocksDbTransactionBatch,
+}
+
 pub struct ShardEngine {
     shard_id: u32,
     pub db: Arc<RocksDB>,
@@ -156,6 +165,7 @@ pub struct ShardEngine {
     statsd_client: StatsdClientWrapper,
     max_messages_per_block: u32,
     messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
+    pending_txn: Option<CachedTransaction>,
 }
 
 impl ShardEngine {
@@ -177,6 +187,7 @@ impl ShardEngine {
             statsd_client,
             max_messages_per_block,
             messages_request_tx,
+            pending_txn: None,
         }
     }
 
@@ -268,15 +279,17 @@ impl ShardEngine {
         self.count("prepare_proposal.recv_messages", messages.len() as u64);
 
         let mut snapchain_txns = self.create_transactions_from_mempool(messages)?;
+        let mut events = vec![];
         let mut validation_error_count = 0;
         for snapchain_txn in &mut snapchain_txns {
-            let (account_root, _events, validation_errors) = self.replay_snapchain_txn(
+            let (account_root, txn_events, validation_errors) = self.replay_snapchain_txn(
                 trie_ctx,
                 &snapchain_txn,
                 txn_batch,
                 "prepare_proposal".to_string(),
             )?;
             snapchain_txn.account_root = account_root;
+            events.extend(txn_events);
             validation_error_count += validation_errors.len();
         }
 
@@ -295,6 +308,7 @@ impl ShardEngine {
             shard_id,
             new_state_root: new_root_hash.clone(),
             transactions: snapchain_txns,
+            events,
         };
 
         Ok(result)
@@ -346,6 +360,10 @@ impl ShardEngine {
         Ok(transactions)
     }
 
+    pub fn start_round(&mut self, _height: Height, _round: Round) {
+        self.pending_txn = None;
+    }
+
     pub fn propose_state_change(
         &mut self,
         shard: u32,
@@ -372,6 +390,11 @@ impl ShardEngine {
 
         // TODO: this should probably operate automatically via drop trait
         self.stores.trie.reload(&self.db).unwrap();
+        self.pending_txn = Some(CachedTransaction {
+            shard_root: result.new_state_root.clone(),
+            events: result.events.clone(),
+            txn,
+        });
 
         let proposal_duration = now.elapsed();
         self.time_with_shard("propose_time", proposal_duration.as_millis() as u64);
@@ -1076,6 +1099,7 @@ impl ShardEngine {
         let now = std::time::Instant::now();
         let transactions = &shard_state_change.transactions;
         let shard_root = &shard_state_change.new_state_root;
+        // We ignore the events here, we don't know what they are yet. If state roots match, the events should match
 
         let mut result = true;
 
@@ -1087,15 +1111,26 @@ impl ShardEngine {
             count_fn("trie.mem_get_count.for_validate", read_count.1);
         };
 
-        if let Err(err) = self.replay_proposal(
+        let proposal_result = self.replay_proposal(
             &merkle_trie::Context::with_callback(count_callback),
             &mut txn,
             transactions,
             shard_root,
             "validate_state_change".to_string(),
-        ) {
-            error!("State change validation failed: {}", err);
-            result = false;
+        );
+
+        match proposal_result {
+            Err(err) => {
+                error!("State change validation failed: {}", err);
+                result = false;
+            }
+            Ok(events) => {
+                self.pending_txn = Some(CachedTransaction {
+                    shard_root: shard_root.clone(),
+                    txn,
+                    events,
+                });
+            }
         }
 
         self.stores.trie.reload(&self.db).unwrap();
@@ -1193,19 +1228,41 @@ impl ShardEngine {
         };
         let trie_ctx = &merkle_trie::Context::with_callback(count_callback);
 
-        match self.replay_proposal(
-            trie_ctx,
-            &mut txn,
-            transactions,
-            shard_root,
-            "commit".to_string(),
-        ) {
-            Err(err) => {
-                error!("State change commit failed: {}", err);
-                panic!("State change commit failed: {}", err);
+        let mut applied_cached_txn = false;
+        if let Some(cached_txn) = self.pending_txn.clone() {
+            if &cached_txn.shard_root == shard_root {
+                applied_cached_txn = true;
+                self.commit_and_emit_events(shard_chunk, cached_txn.events, cached_txn.txn);
+            } else {
+                error!(
+                    shard_id = self.shard_id,
+                    cached_shard_root = hex::encode(&cached_txn.shard_root),
+                    commit_shard_root = hex::encode(shard_root),
+                    "Cached shard root mismatch"
+                );
             }
-            Ok(events) => {
-                self.commit_and_emit_events(shard_chunk, events, txn);
+        }
+
+        if !applied_cached_txn {
+            warn!(
+                shard_id = self.shard_id,
+                shard_root = hex::encode(shard_root),
+                "No valid cached transaction to apply. Replaying proposal"
+            );
+            match self.replay_proposal(
+                trie_ctx,
+                &mut txn,
+                transactions,
+                shard_root,
+                "commit".to_string(),
+            ) {
+                Err(err) => {
+                    error!("State change commit failed: {}", err);
+                    panic!("State change commit failed: {}", err);
+                }
+                Ok(events) => {
+                    self.commit_and_emit_events(shard_chunk, events, txn);
+                }
             }
         }
     }

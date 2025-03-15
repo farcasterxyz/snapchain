@@ -86,6 +86,10 @@ impl ShardProposer {
     async fn publish_new_shard_chunk(&self, shard_chunk: &ShardChunk) {
         let _ = &self.tx_decision.send(shard_chunk.clone());
     }
+
+    pub fn start_round(&mut self, height: Height, round: Round) {
+        self.engine.start_round(height, round);
+    }
 }
 
 impl Proposer for ShardProposer {
@@ -170,6 +174,7 @@ impl Proposer for ShardProposer {
                 shard_id: height.shard_index,
                 new_state_root: header.shard_root.clone(),
                 transactions: chunk.transactions.clone(),
+                events: vec![],
             };
             return if self.engine.validate_state_change(&state) {
                 Validity::Valid

@@ -30,6 +30,7 @@ pub struct HostState {
     pub consensus_start_delay: u32,
     pub gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     pub statsd: StatsdClientWrapper,
+    pub consensus_block_time: u64, // in ms
 }
 
 impl Host {
@@ -77,6 +78,13 @@ impl Host {
                 proposer,
             } => {
                 state.shard_validator.start_round(height, round, proposer);
+                info!(
+                    height = height.to_string(),
+                    round = round.as_i64(),
+                    at = "host_trace",
+                    "Started height with round: {}",
+                    round.as_i64()
+                );
                 // Replay undecided values?
             }
 
@@ -105,6 +113,14 @@ impl Host {
                     .network
                     .cast(NetworkMsg::PublishProposalPart(stream_message))?;
                 let elapsed = now.elapsed();
+                info!(
+                    height = height.to_string(),
+                    round = round.as_i64(),
+                    at = "host_trace",
+                    "Proposed value with round: {} ({} ms)",
+                    round.as_i64(),
+                    elapsed.as_millis()
+                );
                 state.statsd.time_with_shard(
                     height.shard_index,
                     "host.get_value_time",
@@ -158,12 +174,27 @@ impl Host {
                 part,
                 reply_to,
             } => {
-                // store proposal part
+                let now = tokio::time::Instant::now();
                 let data = part.content.as_data();
                 match data {
                     Some(proposal) => {
                         let proposed_value = state.shard_validator.add_proposed_value(proposal);
+                        let height = proposed_value.height;
+                        let round = proposed_value.round.as_i64();
+                        let valid_round = proposed_value.valid_round.as_i64();
+                        let is_valid = proposed_value.validity.is_valid();
                         reply_to.send(proposed_value)?;
+                        let elapsed = now.elapsed();
+                        info!(
+                            height = height.to_string(),
+                            round = round,
+                            at = "host_trace",
+                            "Received value at with round: {}, valid_round: {}, valid: {} ({} ms)",
+                            round,
+                            valid_round,
+                            is_valid,
+                            elapsed.as_millis()
+                        );
                     }
                     None => {
                         error!("Received invalid proposal part from {from}");
@@ -224,16 +255,30 @@ impl Host {
                         .unwrap();
                 }
 
-                // Start next height
-                let next_height = certificate.height.increment();
-                let validator_set = state.shard_validator.get_validator_set();
-                consensus_ref.cast(ConsensusMsg::StartHeight(next_height, validator_set))?;
                 let elapsed = now.elapsed();
+                let height = certificate.height;
+                let round = certificate.round;
+                info!(
+                    height = height.to_string(),
+                    round = round.as_i64(),
+                    at = "host_trace",
+                    "Decided value with round: {} ({} ms)",
+                    round.as_i64(),
+                    elapsed.as_millis()
+                );
                 state.statsd.time_with_shard(
                     certificate.height.shard_index,
                     "host.decided_time",
                     elapsed.as_millis() as u64,
                 );
+                // Start next height, while trying to maintain the block time
+                let delay = state
+                    .shard_validator
+                    .next_height_delay(state.consensus_block_time);
+                tokio::time::sleep(delay).await;
+                let next_height = certificate.height.increment();
+                let validator_set = state.shard_validator.get_validator_set();
+                consensus_ref.cast(ConsensusMsg::StartHeight(next_height, validator_set))?;
             }
 
             HostMsg::GetDecidedValue { height, reply_to } => {

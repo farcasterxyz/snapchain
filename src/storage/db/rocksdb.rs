@@ -26,6 +26,7 @@ pub enum RocksdbError {
 }
 
 /** Hold a transaction. List of key/value pairs that will be committed together */
+#[derive(Clone)]
 pub struct RocksDbTransactionBatch {
     pub batch: HashMap<Vec<u8>, Option<Vec<u8>>>,
 }
