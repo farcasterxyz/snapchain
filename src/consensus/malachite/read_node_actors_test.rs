@@ -15,6 +15,7 @@ mod tests {
         self, commit_event, default_storage_event, new_engine_with_options, EngineOptions,
         FID_FOR_TEST,
     };
+    use crate::utils::statsd_wrapper::StatsdClientWrapper;
     use bytes::Bytes;
     use informalsystems_malachitebft_metrics::SharedRegistry;
     use informalsystems_malachitebft_network::{Channel, PeerIdExt};
@@ -32,6 +33,11 @@ mod tests {
         mpsc::Receiver<SystemMessage>,
         MalachiteReadNodeActors,
     ) {
+        let statsd_client = StatsdClientWrapper::new(
+            cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
+            true,
+        );
+
         let (mut proposer_engine, _) = test_helper::new_engine();
         let (mut read_node_engine, _) = test_helper::new_engine();
         for _ in 0..num_already_decided_blocks {
@@ -49,7 +55,7 @@ mod tests {
             messages_request_tx: None,
         });
         let read_node_actors = MalachiteReadNodeActors::create_and_start(
-            SnapchainValidatorContext::new(keypair),
+            SnapchainValidatorContext::new(keypair, statsd_client.clone()),
             Engine::ShardEngine(read_node_engine_clone),
             libp2p::PeerId::random(),
             gossip_tx,

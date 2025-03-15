@@ -66,7 +66,7 @@ impl SnapchainNode {
 
             let shard = SnapchainShard::new(shard_id);
             let shard_validator_set = config.validator_set_for(shard_id);
-            let ctx = SnapchainValidatorContext::new(keypair.clone());
+            let ctx = SnapchainValidatorContext::new(keypair.clone(), statsd_client.clone());
 
             let db = RocksDB::open_shard_db(rocksdb_dir.clone().as_str(), shard_id);
             let trie = merkle_trie::MerkleTrie::new(trie_branching_factor).unwrap(); //TODO: don't unwrap()
@@ -150,7 +150,7 @@ impl SnapchainNode {
             local_state_store,
             statsd_client.clone(),
         );
-        let ctx = SnapchainValidatorContext::new(keypair.clone());
+        let ctx = SnapchainValidatorContext::new(keypair.clone(), statsd_client.clone());
         let block_consensus_actor = MalachiteConsensusActors::create_and_start(
             ctx,
             block_validator,

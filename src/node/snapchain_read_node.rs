@@ -59,7 +59,7 @@ impl SnapchainReadNode {
                 panic!("Shard ID must be between 1 and {}", MAX_SHARDS);
             }
 
-            let ctx = SnapchainValidatorContext::new(keypair.clone());
+            let ctx = SnapchainValidatorContext::new(keypair.clone(), statsd_client.clone());
 
             let db = RocksDB::open_shard_db(rocksdb_dir.clone().as_str(), shard_id);
             let trie = merkle_trie::MerkleTrie::new(trie_branching_factor).unwrap(); //TODO: don't unwrap()
@@ -100,7 +100,7 @@ impl SnapchainReadNode {
 
         // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
         let engine = BlockEngine::new(block_store.clone(), statsd_client.clone());
-        let ctx = SnapchainValidatorContext::new(keypair.clone());
+        let ctx = SnapchainValidatorContext::new(keypair.clone(), statsd_client.clone());
         let block_actor = MalachiteReadNodeActors::create_and_start(
             ctx,
             Engine::BlockEngine(engine),

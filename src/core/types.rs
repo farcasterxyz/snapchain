@@ -17,6 +17,7 @@ pub use crate::proto; // TODO: reconsider how this is imported
 
 use crate::proto::full_proposal::ProposedValue;
 use crate::proto::{Block, Commits, FullProposal, ShardChunk};
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 pub use proto::Height;
 pub use proto::ShardHash;
 
@@ -96,14 +97,15 @@ impl informalsystems_malachitebft_core_types::Address for Address {}
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Ed25519 {}
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Ed25519Provider {
     keypair: Arc<Keypair>,
+    statsd: StatsdClientWrapper,
 }
 
 impl Ed25519Provider {
-    pub fn new(keypair: Arc<Keypair>) -> Self {
-        Self { keypair }
+    pub fn new(keypair: Arc<Keypair>, statsd: StatsdClientWrapper) -> Self {
+        Self { keypair, statsd }
     }
 }
 
@@ -125,6 +127,7 @@ impl SigningProvider<SnapchainValidatorContext> for Ed25519Provider {
         signature: &informalsystems_malachitebft_core_types::Signature<SnapchainValidatorContext>,
         public_key: &informalsystems_malachitebft_core_types::PublicKey<SnapchainValidatorContext>,
     ) -> bool {
+        let now = std::time::Instant::now();
         let valid = public_key.verify(&vote.to_sign_bytes(), &signature.0);
         if !valid {
             error!(
@@ -132,11 +135,22 @@ impl SigningProvider<SnapchainValidatorContext> for Ed25519Provider {
                 vote.shard_hash, vote.height, vote.voter
             );
         }
+        self.statsd.time_with_shard(
+            vote.height.shard_index,
+            "signing.vote.verify_time_us",
+            now.elapsed().as_micros() as u64,
+        );
         valid
     }
 
     fn sign_proposal(&self, proposal: Proposal) -> SignedProposal<SnapchainValidatorContext> {
+        let now = std::time::Instant::now();
         let signature = self.keypair.sign(&proposal.to_sign_bytes());
+        self.statsd.time_with_shard(
+            proposal.height.shard_index,
+            "signing.proposal.sign_time_us",
+            now.elapsed().as_micros() as u64,
+        );
         SignedProposal::new(proposal, Signature(signature))
     }
 
@@ -146,7 +160,13 @@ impl SigningProvider<SnapchainValidatorContext> for Ed25519Provider {
         signature: &informalsystems_malachitebft_core_types::Signature<SnapchainValidatorContext>,
         public_key: &informalsystems_malachitebft_core_types::PublicKey<SnapchainValidatorContext>,
     ) -> bool {
+        let now = std::time::Instant::now();
         let valid = public_key.verify(&proposal.to_sign_bytes(), &signature.0);
+        self.statsd.time_with_shard(
+            proposal.height.shard_index,
+            "signing.proposal.verify_time_us",
+            now.elapsed().as_micros() as u64,
+        );
         if !valid {
             error!(
                 "Invalid signature on proposal for {:?} at height {:?} by {:?}",
@@ -160,7 +180,13 @@ impl SigningProvider<SnapchainValidatorContext> for Ed25519Provider {
         &self,
         proposal_part: <SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::ProposalPart,
     ) -> SignedMessage<SnapchainValidatorContext, <SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::ProposalPart>{
+        let now = std::time::Instant::now();
         let signature = self.keypair.sign(&proposal_part.to_sign_bytes());
+        self.statsd.time_with_shard(
+            proposal_part.height.unwrap().shard_index,
+            "signing.proposal_part.sign_time_us",
+            now.elapsed().as_micros() as u64,
+        );
         SignedProposalPart::new(proposal_part, Signature(signature))
     }
 
@@ -170,7 +196,13 @@ impl SigningProvider<SnapchainValidatorContext> for Ed25519Provider {
         signature: &informalsystems_malachitebft_core_types::Signature<SnapchainValidatorContext>,
         public_key: &informalsystems_malachitebft_core_types::PublicKey<SnapchainValidatorContext>,
     ) -> bool {
+        let now = std::time::Instant::now();
         let valid = public_key.verify(&proposal_part.to_sign_bytes(), &signature.0);
+        self.statsd.time_with_shard(
+            proposal_part.height.unwrap().shard_index,
+            "signing.proposal_part.verify_time_us",
+            now.elapsed().as_micros() as u64,
+        );
         if !valid {
             error!(
                 "Invalid signature on proposal part at height {:?} by {:?}",
@@ -605,18 +637,18 @@ impl Proposal {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SnapchainValidatorContext {
     keypair: Arc<Keypair>,
     signing_provider: Ed25519Provider,
 }
 
 impl SnapchainValidatorContext {
-    pub fn new(keypair: Keypair) -> Self {
+    pub fn new(keypair: Keypair, statsd: StatsdClientWrapper) -> Self {
         let keypair = Arc::new(keypair);
         Self {
             keypair: keypair.clone(),
-            signing_provider: Ed25519Provider::new(keypair),
+            signing_provider: Ed25519Provider::new(keypair, statsd),
         }
     }
 
