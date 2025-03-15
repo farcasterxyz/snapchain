@@ -105,6 +105,9 @@ impl ShardValidator {
         self.current_round = round;
         self.current_proposer = Some(proposer);
         self.proposed_at = None;
+        if let Some(shard_proposer) = &mut self.shard_proposer {
+            shard_proposer.start_round(height, round);
+        }
     }
 
     pub fn next_height_delay(&self, target_block_time: u64) -> Duration {
