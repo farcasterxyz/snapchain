@@ -117,7 +117,13 @@ impl SigningProvider<SnapchainValidatorContext> for Ed25519Provider {
         SnapchainValidatorContext,
         <SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::Vote,
     > {
+        let now = std::time::Instant::now();
         let signature = self.keypair.sign(&vote.to_sign_bytes());
+        self.statsd.time_with_shard(
+            vote.height.shard_index,
+            "signing.vote.sign_time_us",
+            now.elapsed().as_micros() as u64,
+        );
         SignedVote::new(vote, Signature(signature))
     }
 
