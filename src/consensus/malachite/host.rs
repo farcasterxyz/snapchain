@@ -15,6 +15,7 @@ use informalsystems_malachitebft_engine::util::streaming::{
 use informalsystems_malachitebft_sync::RawDecidedValue;
 use prost::Message;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, SpawnErr};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
@@ -30,6 +31,7 @@ pub struct HostState {
     pub consensus_start_delay: u32,
     pub gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     pub statsd: StatsdClientWrapper,
+    pub consensus_block_time: u64, // in ms
 }
 
 impl Host {
@@ -254,10 +256,6 @@ impl Host {
                         .unwrap();
                 }
 
-                // Start next height
-                let next_height = certificate.height.increment();
-                let validator_set = state.shard_validator.get_validator_set();
-                consensus_ref.cast(ConsensusMsg::StartHeight(next_height, validator_set))?;
                 let elapsed = now.elapsed();
                 let height = certificate.height;
                 let round = certificate.round;
@@ -274,6 +272,14 @@ impl Host {
                     "host.decided_time",
                     elapsed.as_millis() as u64,
                 );
+                // Start next height, while trying to maintain the block time
+                let delay = state
+                    .shard_validator
+                    .next_height_delay(state.consensus_block_time);
+                tokio::time::sleep(delay).await;
+                let next_height = certificate.height.increment();
+                let validator_set = state.shard_validator.get_validator_set();
+                consensus_ref.cast(ConsensusMsg::StartHeight(next_height, validator_set))?;
             }
 
             HostMsg::GetDecidedValue { height, reply_to } => {

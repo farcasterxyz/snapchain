@@ -63,12 +63,14 @@ pub async fn spawn_host(
     shard_validator: ShardValidator,
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     consensus_start_delay: u32,
+    consensus_block_time: u64,
     statsd: StatsdClientWrapper,
 ) -> Result<HostRef<SnapchainValidatorContext>, ractor::SpawnErr> {
     let state = HostState {
         network,
         shard_validator,
         consensus_start_delay,
+        consensus_block_time,
         gossip_tx,
         statsd,
     };
@@ -154,7 +156,7 @@ fn timeout_from_config(config: &Config) -> TimeoutConfig {
         timeout_precommit_delta: config.step_delta,
         timeout_prevote_delta: config.step_delta,
         timeout_propose_delta: config.step_delta,
-        timeout_commit: config.block_time, // Sets up a fixed block production rate
+        timeout_commit: Duration::from_millis(0),
         timeout_step: Duration::from_secs(10),
     }
 }
@@ -194,6 +196,7 @@ impl MalachiteConsensusActors {
             shard_validator,
             gossip_tx.clone(),
             config.consensus_start_delay,
+            config.block_time.as_millis() as u64,
             statsd,
         )
         .await?;

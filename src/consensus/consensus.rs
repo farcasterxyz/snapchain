@@ -96,7 +96,7 @@ impl Default for Config {
             prevote_time: Duration::from_millis(500),
             precommit_time: Duration::from_millis(500),
             step_delta: Duration::from_millis(500),
-            block_time: Duration::from_millis(250),
+            block_time: Duration::from_millis(1000),
             max_messages_per_block: 1000,
             validator_addresses: vec![],
             consensus_start_delay: 2,
