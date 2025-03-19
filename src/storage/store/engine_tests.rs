@@ -6,6 +6,7 @@ mod tests {
     use crate::proto::{HubEvent, ValidatorMessage};
     use crate::proto::{OnChainEvent, OnChainEventType};
     use crate::storage::db::{PageOptions, RocksDbTransactionBatch};
+    use crate::storage::store::account::HubEventIdGenerator;
     use crate::storage::store::engine::{MempoolMessage, ShardEngine};
     use crate::storage::store::test_helper::{self, FID3_FOR_TEST};
     use crate::storage::store::test_helper::{
@@ -54,7 +55,16 @@ mod tests {
         (msg1, msg2)
     }
 
-    fn assert_merge_event(event: &HubEvent, merged_message: &proto::Message) {
+    fn assert_event_id(event: &HubEvent, expected_block: Option<u64>, expected_event_seq: u64) {
+        // Take the last 14 bits of event.id and assert it's equal to event_seq
+        let (block, seq) = HubEventIdGenerator::extract_height_and_seq(event.id);
+        if let Some(expected_block) = expected_block {
+            assert_eq!(block, expected_block);
+        }
+        assert_eq!(seq, expected_event_seq);
+    }
+
+    fn assert_merge_event(event: &HubEvent, merged_message: &proto::Message, event_seq: u64) {
         let generated_event = match &event.body {
             Some(proto::hub_event::Body::MergeMessageBody(msg)) => msg,
             _ => panic!("Unexpected event type: {:?}", event.body),
@@ -63,9 +73,10 @@ mod tests {
             to_hex(&merged_message.hash),
             to_hex(&generated_event.message.as_ref().unwrap().hash)
         );
+        assert_event_id(event, None, event_seq);
     }
 
-    fn assert_prune_event(event: &HubEvent, pruned_message: &proto::Message) {
+    fn assert_prune_event(event: &HubEvent, pruned_message: &proto::Message, event_seq: u64) {
         let generated_event = match &event.body {
             Some(proto::hub_event::Body::PruneMessageBody(msg)) => msg,
             _ => panic!("Unexpected event type: {:?}", event.body),
@@ -74,9 +85,10 @@ mod tests {
             to_hex(&pruned_message.hash),
             to_hex(&generated_event.message.as_ref().unwrap().hash)
         );
+        assert_event_id(event, None, event_seq);
     }
 
-    fn assert_revoke_event(event: &HubEvent, revoked_message: &proto::Message) {
+    fn assert_revoke_event(event: &HubEvent, revoked_message: &proto::Message, event_seq: u64) {
         let generated_event = match &event.body {
             Some(proto::hub_event::Body::RevokeMessageBody(msg)) => msg,
             _ => panic!("Unexpected event type: {:?}", event.body),
@@ -85,9 +97,10 @@ mod tests {
             to_hex(&revoked_message.hash),
             to_hex(&generated_event.message.as_ref().unwrap().hash)
         );
+        assert_event_id(event, None, event_seq);
     }
 
-    fn assert_onchain_hub_event(event: &HubEvent, onchain_event: &OnChainEvent) {
+    fn assert_onchain_hub_event(event: &HubEvent, onchain_event: &OnChainEvent, event_seq: u64) {
         let generated_event = match &event.body {
             Some(proto::hub_event::Body::MergeOnChainEventBody(onchain)) => onchain,
             _ => panic!("Unexpected event type: {:?}", event.body),
@@ -100,6 +113,7 @@ mod tests {
             to_hex(&generated_event.transaction_hash)
         );
         assert_eq!(&onchain_event.r#type, &generated_event.r#type);
+        assert_event_id(event, None, event_seq);
     }
 
     async fn assert_commit_fails(engine: &mut ShardEngine, msg: &proto::Message) -> ShardChunk {
@@ -300,7 +314,7 @@ mod tests {
         let generated_event = event_rx.recv().await.unwrap();
         assert_eq!(generated_event, events.events[initial_events_count]);
 
-        assert_merge_event(&generated_event, &msg1);
+        assert_merge_event(&generated_event, &msg1, 0);
 
         // The message exists in the trie
         assert_eq!(message_exists_in_trie(&mut engine, &msg1), true);
@@ -796,9 +810,9 @@ mod tests {
         test_helper::assert_contains_all_messages(messages, &[cast3]);
 
         // We receive a merge event for the add and the intermediate remove, even though it would never get committed to the db
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast1);
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast2);
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast3);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast1, 0);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast2, 1);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast3, 2);
     }
 
     #[tokio::test]
@@ -817,7 +831,7 @@ mod tests {
         assert_eq!(state_change.transactions.len(), 1);
         assert_eq!(1, state_change.transactions[0].system_messages.len());
 
-        // No hub events are generated
+        // No hub events are generated until after commit
         let events = HubEvent::get_events(engine.db.clone(), 0, None, None).unwrap();
         assert_eq!(0, events.events.len());
         assert!(event_rx.try_recv().is_err());
@@ -835,7 +849,9 @@ mod tests {
         // Hub events are generated
         let events = HubEvent::get_events(engine.db.clone(), 0, None, None).unwrap();
         assert_eq!(1, events.events.len());
-        assert_eq!(event_rx.recv().await.unwrap(), events.events[0]);
+        let received_event = event_rx.recv().await.unwrap();
+        assert_eq!(received_event, events.events[0]);
+        assert!(event_rx.try_recv().is_err()); // only 1 event
 
         let generated_event = match events.events[0].clone().body {
             Some(proto::hub_event::Body::MergeOnChainEventBody(e)) => e,
@@ -845,6 +861,63 @@ mod tests {
             to_hex(&onchain_event.transaction_hash),
             to_hex(&generated_event.on_chain_event.unwrap().transaction_hash)
         );
+        assert_event_id(&received_event, Some(1), 0);
+    }
+
+    #[tokio::test]
+    async fn test_event_ids() {
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let cast1 = default_message("cast1");
+        let cast2 = default_message("cast2");
+        let state_change = engine.propose_state_change(
+            1,
+            vec![
+                MempoolMessage::UserMessage(cast1.clone()),
+                MempoolMessage::UserMessage(cast2.clone()),
+            ],
+        );
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+
+        let cast3 = default_message("cast3");
+        let cast4 = default_message("cast4");
+        let state_change = engine.propose_state_change(
+            1,
+            vec![
+                MempoolMessage::UserMessage(cast3.clone()),
+                MempoolMessage::UserMessage(cast4.clone()),
+            ],
+        );
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+
+        // Ignore first 3 blocks which are user registration events
+        let events = HubEvent::get_events(
+            engine.db.clone(),
+            HubEventIdGenerator::make_event_id(4, 0),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(4, events.events.len());
+        // First two events are in block 1, second two are in block 2. sequence resets for each block
+        assert_merge_event(&events.events[0], &cast1, 0);
+        assert_event_id(&events.events[0], Some(4), 0);
+
+        assert_merge_event(&events.events[1], &cast2, 1);
+        assert_event_id(&events.events[1], Some(4), 1);
+
+        assert_merge_event(&events.events[2], &cast3, 0);
+        assert_event_id(&events.events[2], Some(5), 0);
+
+        assert_merge_event(&events.events[3], &cast4, 1);
+        assert_event_id(&events.events[3], Some(5), 1);
     }
 
     #[tokio::test]
@@ -907,18 +980,18 @@ mod tests {
 
         // Default size in tests is 4 casts, so first four messages should merge without issues
         commit_message(&mut engine, &cast1).await;
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast1);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast1, 0);
         commit_message(&mut engine, &cast2).await;
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast2);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast2, 0);
         commit_message(&mut engine, &cast3).await;
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast3);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast3, 0);
         commit_message(&mut engine, &cast4).await;
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast4);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast4, 0);
 
         // Fifth message should be merged, but should cause cast1 to be pruned
         commit_message(&mut engine, &cast5).await;
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast5);
-        assert_prune_event(&event_rx.try_recv().unwrap(), &cast1);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast5, 0);
+        assert_prune_event(&event_rx.try_recv().unwrap(), &cast1, 1);
 
         // Prunes are reflected in the trie
         assert_eq!(message_exists_in_trie(&mut engine, &cast1), false);
@@ -986,9 +1059,9 @@ mod tests {
         ];
         let state_change = engine.propose_state_change(1, messages);
         test_helper::validate_and_commit_state_change(&mut engine, &state_change);
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast1);
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast2);
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast3);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast1, 0);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast2, 1);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast3, 2);
 
         // Now send the last three messages, all of them should be merged, and the first two should be pruned
         let messages = vec![
@@ -998,12 +1071,12 @@ mod tests {
         ];
         let state_change = engine.propose_state_change(1, messages);
         let chunk = test_helper::validate_and_commit_state_change(&mut engine, &state_change);
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast4);
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast5);
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast6);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast4, 0);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast5, 1);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast6, 2);
 
-        assert_prune_event(&event_rx.try_recv().unwrap(), &cast1);
-        assert_prune_event(&event_rx.try_recv().unwrap(), &cast2);
+        assert_prune_event(&event_rx.try_recv().unwrap(), &cast1, 3);
+        assert_prune_event(&event_rx.try_recv().unwrap(), &cast2, 4);
 
         let user_messages = chunk.transactions[0]
             .user_messages
@@ -1101,9 +1174,9 @@ mod tests {
             Some(revoke_timestamp),
         );
         test_helper::commit_event(&mut engine, &revoke_event).await;
-        assert_onchain_hub_event(&event_rx.try_recv().unwrap(), &revoke_event);
-        assert_revoke_event(&event_rx.try_recv().unwrap(), &msg1);
-        assert_revoke_event(&event_rx.try_recv().unwrap(), &msg2);
+        assert_onchain_hub_event(&event_rx.try_recv().unwrap(), &revoke_event, 0);
+        assert_revoke_event(&event_rx.try_recv().unwrap(), &msg1, 1);
+        assert_revoke_event(&event_rx.try_recv().unwrap(), &msg2, 2);
 
         assert_eq!(event_rx.try_recv().is_err(), true); // No more events
 

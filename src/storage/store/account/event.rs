@@ -6,68 +6,69 @@ use crate::storage::db::{PageOptions, RocksDB};
 use crate::storage::util::increment_vec_u8;
 use prost::Message as _;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-const TIMESTAMP_BITS: u32 = 41;
-const SEQUENCE_BITS: u32 = 12;
-pub const FARCASTER_EPOCH: u64 = 1609459200000;
-
-fn make_event_id(timestamp: u64, seq: u64) -> u64 {
-    let shifted_timestamp = timestamp << SEQUENCE_BITS;
-    let padded_seq = seq & ((1 << SEQUENCE_BITS) - 1); // Ensures seq fits in SEQUENCE_BITS
-    shifted_timestamp | padded_seq
-}
+const HEIGHT_BITS: u32 = 50;
+pub const SEQUENCE_BITS: u32 = 14; // Allows for 16384 events per block
 
 pub struct EventsPage {
     pub events: Vec<HubEvent>,
     pub next_page_token: Option<Vec<u8>>,
 }
 
-struct HubEventIdGenerator {
-    last_timestamp: u64, // ms since epoch
-    last_seq: u64,
-    epoch: u64,
+pub struct HubEventIdGenerator {
+    current_height: u64, // current block number
+    current_seq: u64,    // current event index within the block number
 }
 
 impl HubEventIdGenerator {
-    fn new(epoch: Option<u64>, last_timestamp: Option<u64>, last_seq: Option<u64>) -> Self {
+    fn new(current_block: Option<u64>, last_seq: Option<u64>) -> Self {
         HubEventIdGenerator {
-            epoch: epoch.unwrap_or(0),
-            last_timestamp: last_timestamp.unwrap_or(0),
-            last_seq: last_seq.unwrap_or(0),
+            current_height: current_block.unwrap_or(0),
+            current_seq: last_seq.unwrap_or(0),
         }
     }
 
-    fn generate_id(&mut self, current_timestamp: Option<u64>) -> Result<u64, HubError> {
-        let current_timestamp = current_timestamp.unwrap_or_else(|| {
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("Time went backwards")
-                .as_millis() as u64
-        }) - self.epoch;
+    fn set_current_height(&mut self, height: u64) {
+        self.current_height = height;
+        self.current_seq = 0;
+    }
 
-        if current_timestamp == self.last_timestamp {
-            self.last_seq += 1;
-        } else {
-            self.last_timestamp = current_timestamp;
-            self.last_seq = 0;
-        }
-
-        if self.last_timestamp >= 2u64.pow(TIMESTAMP_BITS) {
+    fn generate_id(&mut self) -> Result<u64, HubError> {
+        if self.current_height >= 2u64.pow(HEIGHT_BITS) {
             return Err(HubError {
                 code: "bad_request.invalid_param".to_string(),
-                message: format!("timestamp > {} bits", TIMESTAMP_BITS),
+                message: format!(
+                    "height cannot fit in event id. Height > {} bits",
+                    HEIGHT_BITS
+                ),
             });
         }
 
-        if self.last_seq >= 2u64.pow(SEQUENCE_BITS) {
+        if self.current_seq >= 2u64.pow(SEQUENCE_BITS) {
             return Err(HubError {
                 code: "bad_request.invalid_param".to_string(),
-                message: format!("sequence > {} bits", SEQUENCE_BITS),
+                message: format!(
+                    "sequence cannot fit in event id. Seq> {} bits",
+                    SEQUENCE_BITS
+                ),
             });
         }
 
-        Ok(make_event_id(self.last_timestamp, self.last_seq))
+        let event_id = Self::make_event_id(self.current_height, self.current_seq);
+        self.current_seq += 1;
+        Ok(event_id)
+    }
+
+    pub fn make_event_id(height: u64, seq: u64) -> u64 {
+        let shifted_height = height << SEQUENCE_BITS;
+        let padded_seq = seq & ((1 << SEQUENCE_BITS) - 1); // Ensures seq fits in SEQUENCE_BITS
+        shifted_height | padded_seq
+    }
+
+    pub fn extract_height_and_seq(event_id: u64) -> (u64, u64) {
+        let height = event_id >> SEQUENCE_BITS;
+        let seq = event_id & ((1 << SEQUENCE_BITS) - 1);
+        (height, seq)
     }
 }
 
@@ -76,21 +77,18 @@ pub struct StoreEventHandler {
 }
 
 impl StoreEventHandler {
-    pub fn new(
-        epoch: Option<u64>,
-        last_timestamp: Option<u64>,
-        last_seq: Option<u64>,
-    ) -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         Arc::new(StoreEventHandler {
-            generator: Arc::new(Mutex::new(HubEventIdGenerator::new(
-                Some(epoch.unwrap_or(FARCASTER_EPOCH)),
-                last_timestamp,
-                last_seq,
-            ))),
+            generator: Arc::new(Mutex::new(HubEventIdGenerator::new(None, None))),
         })
     }
 
-    // TODO(aditi): This is named "commit_transaction" but the commit doesn't actually happen here. This function is provided a [txn] that's committed elsewhere.
+    pub fn set_current_height(&self, height: u64) {
+        let mut generator = self.generator.lock().unwrap();
+        generator.set_current_height(height);
+    }
+
+    // This is named "commit_transaction" but the commit doesn't actually happen here. This function is provided a [txn] that's committed elsewhere.
     pub fn commit_transaction(
         &self,
         txn: &mut RocksDbTransactionBatch,
@@ -100,13 +98,10 @@ impl StoreEventHandler {
         let mut generator = self.generator.lock().unwrap();
 
         // Generate the event ID
-        let event_id = generator.generate_id(None)?;
+        let event_id = generator.generate_id()?;
         raw_event.id = event_id;
 
         HubEvent::put_event_transaction(txn, &raw_event)?;
-
-        // These two calls are made in the JS code
-        // this._storageCache.processEvent(event);
 
         Ok(event_id)
     }
