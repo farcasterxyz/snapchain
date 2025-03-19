@@ -11,8 +11,9 @@ use std::collections::HashMap;
 use std::sync::atomic;
 use tracing::error;
 
-// TODO: remove or reduce this and/or rename (make sure it works under all branching factors)
-pub const TIMESTAMP_LENGTH: usize = 10;
+// This represents 6 bytes (1 byte for virtual shard id, 4 for fid and 1 for message type).
+// This is only tested with branching factor 16, make sure it works with all branching factors
+pub const UNCOMPACTED_LENGTH: usize = 12;
 
 // This value is mirrored in [rpc/server.ts], make sure to change it in both places
 const MAX_VALUES_RETURNED_PER_CALL: usize = 1024;
@@ -255,8 +256,8 @@ impl TrieNode {
         // Vec to store the keys that were not inserted and their index
         let remaining_keys;
 
-        // Do not compact the timestamp portion of the trie, since it is used to compare snapshots
-        if current_index >= TIMESTAMP_LENGTH && self.is_leaf() {
+        // Do not compact first few bytes of the trie, since it is used to compare snapshots
+        if current_index >= UNCOMPACTED_LENGTH && self.is_leaf() {
             let mut inserted = false;
             if self.key.is_none() {
                 let key = keys.pop().unwrap();
@@ -461,7 +462,7 @@ impl TrieNode {
                 return Ok(results);
             }
 
-            if self.items == 1 && self.children.len() == 1 && current_index >= TIMESTAMP_LENGTH {
+            if self.items == 1 && self.children.len() == 1 && current_index >= UNCOMPACTED_LENGTH {
                 // Compact the trie by removing the child and moving the key up
                 let char = *self.children.keys().next().unwrap();
                 let child = self.get_or_load_child(ctx, db, &prefix, char)?;
