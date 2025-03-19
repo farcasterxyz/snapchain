@@ -15,7 +15,7 @@ mod tests {
         db.open().unwrap();
 
         (
-            OnchainEventStore::new(Arc::new(db), StoreEventHandler::new(None, None, None)),
+            OnchainEventStore::new(Arc::new(db), StoreEventHandler::new()),
             dir,
         )
     }

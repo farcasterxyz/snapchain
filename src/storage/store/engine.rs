@@ -360,8 +360,11 @@ impl ShardEngine {
         Ok(transactions)
     }
 
-    pub fn start_round(&mut self, _height: Height, _round: Round) {
+    pub fn start_round(&mut self, height: Height, _round: Round) {
         self.pending_txn = None;
+        self.stores
+            .event_handler
+            .set_current_height(height.block_number);
     }
 
     pub fn propose_state_change(
@@ -1249,6 +1252,15 @@ impl ShardEngine {
                 shard_root = hex::encode(shard_root),
                 "No valid cached transaction to apply. Replaying proposal"
             );
+            // If we need to replay, reset the sequence number on the event id generator, just in case
+            let block_number = &shard_chunk
+                .header
+                .as_ref()
+                .unwrap()
+                .height
+                .unwrap()
+                .block_number;
+            self.stores.event_handler.set_current_height(*block_number);
             match self.replay_proposal(
                 trie_ctx,
                 &mut txn,

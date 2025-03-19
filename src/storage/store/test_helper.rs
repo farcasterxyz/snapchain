@@ -23,6 +23,7 @@ use crate::storage::util::bytes_compare;
 #[allow(unused_imports)]
 use crate::utils::factory::{events_factory, username_factory};
 use hex::FromHex;
+use informalsystems_malachitebft_core_types::Round;
 use tonic::{Response, Status};
 use tracing_subscriber::EnvFilter;
 
@@ -211,7 +212,15 @@ pub fn key_exists_in_trie(engine: &mut ShardEngine, key: &Vec<u8>) -> bool {
 
 pub fn default_shard_chunk() -> ShardChunk {
     ShardChunk {
-        header: Some(ShardHeader::default()),
+        header: Some(ShardHeader {
+            height: Some(Height {
+                shard_index: 1,
+                block_number: 1,
+            }),
+            timestamp: 0,
+            shard_root: vec![],
+            parent_hash: vec![],
+        }),
         // TODO: eventually we won't hardcode one transaction here
         transactions: vec![Transaction {
             user_messages: vec![],
@@ -244,10 +253,12 @@ pub fn validate_and_commit_state_change(
     engine: &mut ShardEngine,
     state_change: &ShardStateChange,
 ) -> ShardChunk {
+    let height = engine.get_confirmed_height();
+    engine.start_round(height.increment(), Round::Nil); // So event id is reset
+
     let valid = engine.validate_state_change(state_change);
     assert!(valid);
 
-    let height = engine.get_confirmed_height();
     let chunk = state_change_to_shard_chunk(1, height.block_number + 1, state_change);
     engine.commit_shard_chunk(&chunk);
     assert_eq!(state_change.new_state_root, engine.trie_root_hash());
