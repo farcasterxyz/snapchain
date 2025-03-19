@@ -1,6 +1,7 @@
 use super::super::db::{RocksDB, RocksDbTransactionBatch};
 use super::errors::TrieError;
-use super::trie_node::{TrieNode, TIMESTAMP_LENGTH};
+use super::trie_node::{TrieNode, UNCOMPACTED_LENGTH};
+use crate::mempool::routing::{MessageRouter, ShardRouter};
 use crate::proto;
 use crate::storage::store::account::{make_fid_key, IntoU8};
 use crate::storage::trie::{trie_node, util};
@@ -10,6 +11,8 @@ pub use trie_node::Context;
 
 pub const TRIE_DBPATH_PREFIX: &str = "trieDb";
 pub const USERNAME_MAX_LENGTH: u32 = 20;
+
+const TRIE_SHARD_SIZE: u32 = 256; // So it fits into 1 byte
 
 pub struct TrieKey {}
 
@@ -54,7 +57,20 @@ impl TrieKey {
     }
 
     pub fn for_fid(fid: u64) -> Vec<u8> {
-        make_fid_key(fid)
+        let mut key = Vec::new();
+        key.push(Self::fid_shard(fid));
+        key.extend_from_slice(&make_fid_key(fid));
+        key
+    }
+
+    // We divide fids into shards in the trie so in case we need to change the number of shards in the network,
+    // we don't need to move the fids individually. This function maps an fid into a 1 byte shard number.
+    // i.e. the trie behaves as if there are 256 virtual shards regardless of the actual number of shards in the network.
+    pub fn fid_shard(fid: u64) -> u8 {
+        static TRIE_ROUTER: ShardRouter = ShardRouter {};
+        // route_fid adds 1 to avoid using shard 0 (the root shard). Subtract it to make it
+        // 0-indexed, so it fits into 1 byte without overflow
+        (TRIE_ROUTER.route_fid(fid, TRIE_SHARD_SIZE) - 1) as u8
     }
 }
 
@@ -156,7 +172,7 @@ impl MerkleTrie {
         }
 
         for key in keys.iter() {
-            if key.len() < TIMESTAMP_LENGTH {
+            if key.len() < UNCOMPACTED_LENGTH {
                 return Err(TrieError::KeyLengthTooShort);
             }
         }
@@ -190,7 +206,7 @@ impl MerkleTrie {
         }
 
         for key in keys.iter() {
-            if key.len() < TIMESTAMP_LENGTH {
+            if key.len() < UNCOMPACTED_LENGTH {
                 return Err(TrieError::KeyLengthTooShort);
             }
         }
@@ -375,7 +391,9 @@ impl MerkleTrie {
 mod tests {
     use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
     use crate::storage::trie::errors::TrieError;
-    use crate::storage::trie::merkle_trie::{Context, MerkleTrie};
+    use crate::storage::trie::merkle_trie::{Context, MerkleTrie, TrieKey};
+    use crate::storage::trie::trie_node::UNCOMPACTED_LENGTH;
+    use std::collections::HashSet;
 
     #[test]
     fn test_merkle_trie_get_node() {
@@ -400,7 +418,7 @@ mod tests {
             ctx,
             db,
             &mut txn_batch,
-            vec![vec![1, 2, 3, 4, 5, 6, 7, 8, 9]],
+            vec![vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]],
         );
         assert!(result.is_err());
         if let Err(TrieError::KeyLengthTooShort) = result {
@@ -409,7 +427,7 @@ mod tests {
             panic!("Unexpected error type");
         }
 
-        let key1: Vec<_> = "0000482712".bytes().collect();
+        let key1: Vec<_> = "120000482712".bytes().collect();
         trie.insert(ctx, db, &mut txn_batch, vec![key1.clone()])
             .unwrap();
 
@@ -417,7 +435,7 @@ mod tests {
         assert_eq!(node.value().unwrap(), key1);
 
         // Add another key
-        let key2: Vec<_> = "0000482713".bytes().collect();
+        let key2: Vec<_> = "120000482713".bytes().collect();
         trie.insert(ctx, db, &mut txn_batch, vec![key2.clone()])
             .unwrap();
 
@@ -427,28 +445,28 @@ mod tests {
         let node = trie.get_node(db, &mut txn_batch, &key2).unwrap();
         assert_eq!(node.value().unwrap(), key2);
 
-        // Getting the node with first 9 bytes should return the node with key1
+        // Getting the node with first 11 bytes should return the node with key1
         let common_node = trie
-            .get_node(db, &mut txn_batch, &key1[0..9].to_vec())
+            .get_node(db, &mut txn_batch, &key1[0..11].to_vec())
             .unwrap();
         assert_eq!(common_node.is_leaf(), false);
         assert_eq!(common_node.children().len(), 2);
         let mut children_keys: Vec<_> = common_node.children().keys().collect();
         children_keys.sort();
 
-        assert_eq!(*children_keys[0], key1[9]);
-        assert_eq!(*children_keys[1], key2[9]);
+        assert_eq!(*children_keys[0], key1[11]);
+        assert_eq!(*children_keys[1], key2[11]);
 
         // Get the metadata for the root node
         let root_metadata = trie
             .get_trie_node_metadata(db, &mut txn_batch, &key1[0..1])
             .unwrap();
-        assert_eq!(root_metadata.prefix, "0".bytes().collect::<Vec<_>>());
+        assert_eq!(root_metadata.prefix, "1".bytes().collect::<Vec<_>>());
         assert_eq!(root_metadata.num_messages, 2);
         assert_eq!(root_metadata.children.len(), 1);
 
         let metadata = trie
-            .get_trie_node_metadata(db, &mut txn_batch, &key1[0..9])
+            .get_trie_node_metadata(db, &mut txn_batch, &key1[0..11])
             .unwrap();
 
         // Get the children
@@ -458,11 +476,11 @@ mod tests {
             .map(|(k, v)| (k, v))
             .collect::<Vec<_>>();
         children.sort_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(children[0].0, key1[9]);
+        assert_eq!(children[0].0, key1[11]);
         assert_eq!(children[0].1.prefix, key1);
         assert_eq!(children[0].1.num_messages, 1);
 
-        assert_eq!(children[1].0, key2[9]);
+        assert_eq!(children[1].0, key2[11]);
         assert_eq!(children[1].1.prefix, key2);
         assert_eq!(children[1].1.num_messages, 1);
 
@@ -470,5 +488,34 @@ mod tests {
 
         // Clean up
         std::fs::remove_dir_all(&tmp_path).unwrap();
+    }
+
+    #[test]
+    fn test_trie_keys_matches_uncompacted_length() {
+        // The trie key for a message type should equal the uncompacted length in nibbles (due to the branching factor).
+        // Compacting the keys before the message type is not supported and can cause weird bugs.
+        assert_eq!(
+            TrieKey::for_message_type(123, 1).len(),
+            UNCOMPACTED_LENGTH / 2
+        );
+    }
+
+    #[test]
+    fn test_trie_shard_routing() {
+        let mut map = HashSet::new();
+        for i in 0..10000 {
+            let shard = TrieKey::fid_shard(i);
+            map.insert(shard);
+        }
+        // Ensure all 256 shards are used
+        assert_eq!(map.len(), 256);
+
+        // Verify the shard for a few fids, and ensure the hashing function doesn't change
+        // IF THE SHARD ASSIGNMENT CHANGES, YOU WILL BREAK THE MERKLE TRIE
+        assert_eq!(TrieKey::fid_shard(0), 152);
+        assert_eq!(TrieKey::fid_shard(1), 168);
+        assert_eq!(TrieKey::fid_shard(100), 89);
+        assert_eq!(TrieKey::fid_shard(42), 141);
+        assert_eq!(TrieKey::fid_shard(918648237462), 153);
     }
 }

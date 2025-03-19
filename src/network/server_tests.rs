@@ -192,8 +192,8 @@ mod tests {
         let blocks_store = BlockStore::new(make_db(&blocks_dir, "blocks.db"));
 
         let message_router = Box::new(routing::EvenOddRouterForTest {});
-        assert_eq!(message_router.route_message(SHARD1_FID, 2), 1);
-        assert_eq!(message_router.route_message(SHARD2_FID, 2), 2);
+        assert_eq!(message_router.route_fid(SHARD1_FID, 2), 1);
+        assert_eq!(message_router.route_fid(SHARD2_FID, 2), 2);
 
         let (mempool_tx, mempool_rx) = mpsc::channel(1000);
         let (gossip_tx, _gossip_rx) = mpsc::channel(1000);
