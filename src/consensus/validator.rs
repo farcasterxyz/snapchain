@@ -8,8 +8,15 @@ use crate::storage::store::node_local_state::LocalStateStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_core_consensus::ProposedValue;
 use informalsystems_malachitebft_core_types::{Round, ValidatorSet};
+use std::cmp::PartialEq;
 use std::time::Duration;
 use tracing::{error, warn};
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum ProposalSource {
+    Consensus,
+    Sync,
+}
 
 pub struct ShardValidator {
     pub(crate) shard_id: SnapchainShard,
@@ -19,6 +26,7 @@ pub struct ShardValidator {
 
     validator_set: SnapchainValidatorSet,
     current_round: Round,
+    proposal_source: ProposalSource,
     current_height: Option<Height>,
     current_proposer: Option<Address>,
     height_started_at: Option<std::time::Instant>,
@@ -47,6 +55,7 @@ impl ShardValidator {
             address: address.clone(),
             validator_set: initial_validator_set,
             current_height: None,
+            proposal_source: ProposalSource::Consensus,
             current_round: Round::new(0),
             height_started_at: None,
             proposed_at: None,
@@ -105,6 +114,7 @@ impl ShardValidator {
         self.current_round = round;
         self.current_proposer = Some(proposer);
         self.proposed_at = None;
+        self.proposal_source = ProposalSource::Consensus;
         if let Some(shard_proposer) = &mut self.shard_proposer {
             shard_proposer.start_round(height, round);
         }
@@ -112,6 +122,10 @@ impl ShardValidator {
 
     pub fn next_height_delay(&self, target_block_time: u64) -> Duration {
         if self.height_started_at.is_none() {
+            return Duration::from_secs(0);
+        }
+        if self.proposal_source == ProposalSource::Sync {
+            // Don't sleep if we're syncing
             return Duration::from_secs(0);
         }
         let last_height_start_time = self.height_started_at.unwrap();
@@ -192,8 +206,10 @@ impl ShardValidator {
     pub fn add_proposed_value(
         &mut self,
         full_proposal: &FullProposal,
+        proposal_source: ProposalSource,
     ) -> ProposedValue<SnapchainValidatorContext> {
         let value = full_proposal.shard_hash();
+        self.proposal_source = proposal_source;
         if self.shard_id.shard_id() != full_proposal.shard_id().unwrap() {
             warn!(
                 "Received proposal for shard {} on shard {}",
