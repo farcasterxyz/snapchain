@@ -49,6 +49,13 @@ fn make_shard_key(block_number: u64) -> Vec<u8> {
     key
 }
 
+fn make_block_timestamp_index(shard_index: u32, timestamp: u64) -> Vec<u8> {
+    let mut key = vec![RootPrefix::BlockIndex as u8];
+    key.extend_from_slice(&shard_index.to_be_bytes());
+    key.extend_from_slice(&timestamp.to_be_bytes());
+    key
+}
+
 fn get_shard_page_by_prefix(
     db: &RocksDB,
     page_options: &PageOptions,
@@ -131,7 +138,7 @@ pub fn get_current_header(db: &RocksDB) -> Result<Option<proto::ShardHeader>, Sh
 }
 
 pub fn put_shard_chunk(db: &RocksDB, shard_chunk: &ShardChunk) -> Result<(), ShardStorageError> {
-    // TODO: We need to introduce a transaction model
+    let mut txn = db.txn();
     let header = shard_chunk
         .header
         .as_ref()
@@ -141,7 +148,15 @@ pub fn put_shard_chunk(db: &RocksDB, shard_chunk: &ShardChunk) -> Result<(), Sha
         .as_ref()
         .ok_or(ShardStorageError::ShardMissingHeight)?;
     let primary_key = make_shard_key(height.block_number);
-    db.put(&primary_key, shard_chunk.encode_to_vec().as_slice())?;
+    txn.put(primary_key.clone(), shard_chunk.encode_to_vec());
+
+    let timestamp_index_key = make_block_timestamp_index(height.shard_index, header.timestamp);
+
+    if db.get(&timestamp_index_key)? == None {
+        txn.put(timestamp_index_key, primary_key);
+    }
+
+    db.commit(txn)?;
     Ok(())
 }
 

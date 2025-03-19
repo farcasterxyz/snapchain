@@ -43,6 +43,13 @@ fn make_block_key(block_number: u64) -> Vec<u8> {
     key
 }
 
+fn make_block_timestamp_index(shard_index: u32, timestamp: u64) -> Vec<u8> {
+    let mut key = vec![RootPrefix::BlockIndex as u8];
+    key.extend_from_slice(&shard_index.to_be_bytes());
+    key.extend_from_slice(&timestamp.to_be_bytes());
+    key
+}
+
 fn get_block_page_by_prefix(
     db: &RocksDB,
     page_options: &PageOptions,
@@ -136,7 +143,6 @@ pub fn get_blocks_in_range(
 }
 
 pub fn put_block(db: &RocksDB, block: &Block) -> Result<(), BlockStorageError> {
-    // TODO: We need to introduce a transaction model
     let mut txn = db.txn();
     let header = block
         .header
@@ -147,7 +153,14 @@ pub fn put_block(db: &RocksDB, block: &Block) -> Result<(), BlockStorageError> {
         .as_ref()
         .ok_or(BlockStorageError::BlockMissingHeight)?;
     let primary_key = make_block_key(height.block_number);
-    txn.put(primary_key, block.encode_to_vec());
+    txn.put(primary_key.clone(), block.encode_to_vec());
+
+    let timestamp_index_key = make_block_timestamp_index(0, header.timestamp);
+
+    if db.get(&timestamp_index_key)? == None {
+        txn.put(timestamp_index_key, primary_key);
+    }
+
     db.commit(txn)?;
     Ok(())
 }
