@@ -161,7 +161,7 @@ async fn schedule_background_jobs(app_config: &snapchain::cfg::Config, block_sto
                         let mut total = 0u32;
                         let (count, done) = block_store
                             .prune_until(&page_options, |header| {
-                                header.timestamp < cutoff_timestamp
+                                header.timestamp >= cutoff_timestamp
                             })
                             .unwrap_or_else(|e| {
                                 // TODO: handle error

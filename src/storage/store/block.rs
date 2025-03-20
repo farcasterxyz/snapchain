@@ -239,16 +239,16 @@ impl BlockStore {
         )
     }
 
+    // TODO: remove
     pub fn some_method(&self) -> Result<(), BlockStorageError> {
         eprintln!("Placeholder for some method");
-        // Placeholder for some method
         Ok(())
     }
 
     // Prune one page of blocks as specified by page_options from height 0 until
-    // the first block that matches the condition `f`. Returns the number of
-    // blocks pruned, and a boolean which is  true if iteration stopped due to a
-    // block matching the condition, false otherwise.
+    // but excluding the first block that matches the condition `f`. Returns the
+    // number of blocks pruned, and a boolean which is true if iteration stopped
+    // due to a block matching the condition, false otherwise.
     pub fn prune_until<F>(
         &self,
         page_options: &PageOptions,
@@ -266,7 +266,7 @@ impl BlockStore {
                 .header
                 .as_ref()
                 .ok_or(BlockStorageError::BlockMissingHeader)?;
-            if f(&header) {
+            if !f(&header) {
                 let height = header
                     .height
                     .as_ref()
@@ -276,7 +276,7 @@ impl BlockStore {
                 count += 1;
             } else {
                 done = true;
-                break; // Stop pruning once we find a block that doesn't match the condition
+                break; // Stop pruning once we find a block matching the condition
             }
         }
 
