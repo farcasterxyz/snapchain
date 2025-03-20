@@ -8,7 +8,7 @@ use chrono::Duration;
 use prost::Message;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::oneshot;
+use tokio::sync::watch;
 use tracing::{error, info};
 
 // TODO(aditi): This code definitely needs unit tests
@@ -348,13 +348,13 @@ impl BlockStore {
         &self,
         stop_height: u64,
         throttle: Duration,
-        mut shutdown_rx: Option<oneshot::Receiver<()>>,
+        mut shutdown_rx: Option<watch::Receiver<()>>,
         page_options: &PageOptions,
     ) -> Result<u32, BlockStorageError> {
         let mut total_pruned = 0u32;
         loop {
             if let Some(shutdown_rx) = &mut shutdown_rx {
-                if shutdown_rx.try_recv().is_ok() {
+                if shutdown_rx.has_changed().is_err() {
                     break; // Shutdown requested
                 }
             }
@@ -460,8 +460,8 @@ mod tests {
     #[test]
     fn test_prune_until_cancellation() {
         let store = setup_db(100);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        shutdown_tx.send(()).unwrap();
+        let (shutdown_tx, shutdown_rx) = watch::channel(());
+        drop(shutdown_tx); // Simulate immediate cancellation
 
         let stop_height = 42;
         let pruned = store
