@@ -109,13 +109,23 @@ fn get_block_page_by_prefix(
     })
 }
 
-// Returns last block if last is true, first block if false
-fn get_first_or_last_block(db: &RocksDB, last: bool) -> Result<Option<Block>, BlockStorageError> {
+enum FirstOrLast {
+    First,
+    Last,
+}
+
+fn get_first_or_last_block(
+    db: &RocksDB,
+    first_or_last: FirstOrLast,
+) -> Result<Option<Block>, BlockStorageError> {
     let start_block_key = make_block_key(0);
     let block_page = get_block_page_by_prefix(
         db,
         &PageOptions {
-            reverse: last,
+            reverse: match first_or_last {
+                FirstOrLast::First => false,
+                FirstOrLast::Last => true,
+            },
             page_size: Some(1),
             page_token: None,
         },
@@ -131,7 +141,7 @@ fn get_first_or_last_block(db: &RocksDB, last: bool) -> Result<Option<Block>, Bl
 }
 
 pub fn get_current_header(db: &RocksDB) -> Result<Option<proto::BlockHeader>, BlockStorageError> {
-    let last_block = get_first_or_last_block(db, true)?;
+    let last_block = get_first_or_last_block(db, FirstOrLast::Last)?;
     match last_block {
         None => Ok(None),
         Some(block) => Ok(block.header),
@@ -190,12 +200,12 @@ impl BlockStore {
 
     #[inline]
     pub fn get_first_block(&self) -> Result<Option<Block>, BlockStorageError> {
-        get_first_or_last_block(&self.db, false)
+        get_first_or_last_block(&self.db, FirstOrLast::First)
     }
 
     #[inline]
     pub fn get_last_block(&self) -> Result<Option<Block>, BlockStorageError> {
-        get_first_or_last_block(&self.db, true)
+        get_first_or_last_block(&self.db, FirstOrLast::Last)
     }
 
     #[inline]
