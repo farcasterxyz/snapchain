@@ -231,7 +231,7 @@ mod tests {
         match pull_message().await {
             MempoolMessage::UserMessage(_) => {}
             MempoolMessage::ValidatorMessage(_) => {
-                panic!("Expected validator message, got user message")
+                panic!("Expected user message, got validator message")
             }
         }
     }
