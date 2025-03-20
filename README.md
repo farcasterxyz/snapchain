@@ -9,33 +9,31 @@ The open-source, canonical implementation of Farcaster's [Snapchain](https://git
 
 ## What is Snapchain?
 
-Snapchain is a data storage layer for the Farcaster network. It is a blockchain-like decentralized p2p network that stores data created by users of Farcaster's social network. Learn more about Snapchain's design from the [whitepaper](https://github.com/farcasterxyz/protocol/discussions/207).
+Snapchain is a data storage layer for the Farcaster social protocol. It is a blockchain-like decentralized p2p network that stores data created by Farcaster users. Learn more about Snapchain's design from the [whitepaper](https://github.com/farcasterxyz/protocol/discussions/207).
 
 The main goals of this implementation are:
 
-1. **High Throughput**: Written in Rust and aims to process at least 10,000 transactions per second. 
+1. **High Throughput**: Written in Rust and will process at least 10,000 transactions per second. 
 
-2. **Data Availability**: Can be run in the cloud for under $1,000/month and provide real-time access to the entire network. 
+2. **Data Availability**: Can be run for < $1,000/month and provide real-time access to user data. 
 
 3. **Canonical Implementation**: Is the most accurate reference for how Snapchain and Farcaster should work. 
 
 ## Status 
 
-Snapchain is currently in early alpha. Please check the release section of the [specification](https://github.com/farcasterxyz/protocol/discussions/207) for the latest timelines.
+Snapchain is in the migration phase. Please check the [release docs](https://www.notion.so/warpcast/Snapchain-Mainnet-Public-1b96a6c0c101809493cfda3998a65c7a) for more details on timelines. 
 
-## Running a Read Node
+## Running a Node
 
-A read node can mirror all the data on the Snapchain network, but cannot participate in consensus. It validates
-blocks and messages, and ensure the validators are honest. It can also be used to submit messages to the global mempool,
-to be included by the validators.
+A snapchain node lets you read and write messages to the network. You will need a machine with the following system requirements to get started: 
 
-In order to run a read node, you need the following system requirements:
 - 16 GB of RAM
 - 4 CPU cores or vCPUs
 - 1TB of free storage
-- A public IP address with ports 3381 - 3383 exposed on both TCP and UDP. 
+- A public IP address
+- Ports 3381 - 3383 exposed on both TCP and UDP. 
 
-To start (or upgrade) a read node, you can run the following command:
+You can start a new node or upgrade an existing node with the following commands: 
 
 ```bash
 mkdir snapchain
@@ -45,12 +43,7 @@ wget https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/do
 docker compose up  # append -d to run in the background
 ```
 
-You can check that the node is syncing by running:
-```bash
-curl http://localhost:3381/v1/info
-```
-
-You should see `maxHeight` increasing and `blockDelay` decreasing.
+A brand new node will download historical snapshots to catchup to the latest state before it begins sync. This can take up to 2 hours. Check the node's status by running `curl http://localhost:3381/v1/info`. You should see `maxHeight` increasing and `blockDelay` decreasing until it approaches zero. 
 
 ## Contributing 
 
