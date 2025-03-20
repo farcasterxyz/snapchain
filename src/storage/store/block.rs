@@ -1,7 +1,7 @@
 use super::super::constants::PAGE_SIZE_MAX;
 use crate::core::error::HubError;
 use crate::proto;
-use crate::proto::{Block, BlockHeader};
+use crate::proto::Block;
 use crate::storage::constants::RootPrefix;
 use crate::storage::db::{PageOptions, RocksDB, RocksdbError};
 use chrono::Duration;
@@ -9,7 +9,7 @@ use prost::Message;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::oneshot;
-use tracing::error;
+use tracing::{error, info};
 
 // TODO(aditi): This code definitely needs unit tests
 #[derive(Error, Debug)]
@@ -289,12 +289,14 @@ impl BlockStore {
             if count == 0 {
                 break; // No more blocks to prune
             }
+            info!("Pruning blocks... blocks pruned: {}", total_pruned);
 
             // Sleep for the specified throttle duration
             if throttle > Duration::zero() {
                 std::thread::sleep(throttle.to_std().unwrap());
             }
         }
+        info!("Pruning complete. blocks pruned: {}", total_pruned);
         Ok(total_pruned)
     }
 }
@@ -302,7 +304,7 @@ impl BlockStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::Height;
+    use crate::proto::{BlockHeader, Height};
 
     fn make_db(dir: &tempfile::TempDir, filename: &str) -> Arc<RocksDB> {
         let db_path = dir.path().join(filename);
