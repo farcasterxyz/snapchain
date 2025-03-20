@@ -46,7 +46,11 @@ pub struct Config {
     pub l1_rpc_url: String,
     pub fc_network: FarcasterNetwork,
     pub read_node: bool,
-    #[serde(with = "humantime_serde", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        with = "humantime_serde",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub read_node_block_retention: Option<Duration>,
 }
 
