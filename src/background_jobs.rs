@@ -2,7 +2,7 @@ use crate::storage::constants::PAGE_SIZE_MAX;
 use crate::storage::db::PageOptions;
 use crate::storage::store::BlockStore;
 use chrono::Duration;
-use tokio_cron_scheduler::{Job, JobScheduler, JobSchedulerError};
+use tokio_cron_scheduler::{Job, JobSchedulerError};
 use tracing::error;
 
 pub fn job_block_pruning(
@@ -38,6 +38,7 @@ pub fn job_block_pruning(
 mod tests {
     use super::*;
     use tokio::time::{sleep, Duration};
+    use tokio_cron_scheduler::JobScheduler;
 
     #[tokio::test]
     async fn test_job_block_pruning() {
