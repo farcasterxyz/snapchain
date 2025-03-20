@@ -883,7 +883,7 @@ impl ShardEngine {
                         ctx,
                         &self.db,
                         txn_batch,
-                        vec![TrieKey::for_message(&msg)],
+                        vec![&TrieKey::for_message(&msg)],
                     )?;
                 }
                 for deleted_message in &merge.deleted_messages {
@@ -891,7 +891,7 @@ impl ShardEngine {
                         ctx,
                         &self.db,
                         txn_batch,
-                        vec![TrieKey::for_message(&deleted_message)],
+                        vec![&TrieKey::for_message(&deleted_message)],
                     )?;
                 }
             }
@@ -901,7 +901,7 @@ impl ShardEngine {
                         ctx,
                         &self.db,
                         txn_batch,
-                        vec![TrieKey::for_onchain_event(&onchain_event)],
+                        vec![&TrieKey::for_onchain_event(&onchain_event)],
                     )?;
                 }
             }
@@ -911,7 +911,7 @@ impl ShardEngine {
                         ctx,
                         &self.db,
                         txn_batch,
-                        vec![TrieKey::for_message(&msg)],
+                        vec![&TrieKey::for_message(&msg)],
                     )?;
                 }
             }
@@ -921,7 +921,7 @@ impl ShardEngine {
                         ctx,
                         &self.db,
                         txn_batch,
-                        vec![TrieKey::for_message(&msg)],
+                        vec![&TrieKey::for_message(&msg)],
                     )?;
                 }
             }
@@ -931,7 +931,7 @@ impl ShardEngine {
                         ctx,
                         &self.db,
                         txn_batch,
-                        vec![TrieKey::for_message(&msg)],
+                        vec![&TrieKey::for_message(&msg)],
                     )?;
                 }
                 if let Some(msg) = &merge.deleted_username_proof_message {
@@ -939,7 +939,7 @@ impl ShardEngine {
                         ctx,
                         &self.db,
                         txn_batch,
-                        vec![TrieKey::for_message(&msg)],
+                        vec![&TrieKey::for_message(&msg)],
                     )?;
                 }
                 if let Some(proof) = &merge.username_proof {
@@ -952,7 +952,7 @@ impl ShardEngine {
                             ctx,
                             &self.db,
                             txn_batch,
-                            vec![TrieKey::for_fname(proof.fid, &name)],
+                            vec![&TrieKey::for_fname(proof.fid, &name)],
                         )?;
                     }
                 }
@@ -963,7 +963,7 @@ impl ShardEngine {
                             ctx,
                             &self.db,
                             txn_batch,
-                            vec![TrieKey::for_fname(proof.fid, &name)],
+                            vec![&TrieKey::for_fname(proof.fid, &name)],
                         )?;
                     }
                 }

@@ -6,14 +6,16 @@ mod tests {
     use hex;
     use tempfile::TempDir;
 
-    fn generate_hashes(seed: Vec<u8>, chain_size: usize) -> Vec<Vec<u8>> {
-        let mut hash_chain = Vec::new();
+    fn generate_hashes(seed: Vec<u8>, chain_size: usize) -> Vec<&'static [u8]> {
+        let mut hash_chain = Vec::with_capacity(chain_size);
         let mut current_hash = seed;
 
         for _ in 0..chain_size {
             let hash = blake3::hash(&current_hash);
-            hash_chain.push(hash.as_bytes()[..20].to_vec());
-            current_hash = hash.as_bytes()[..20].to_vec();
+            let bytes = hash.as_bytes()[..20].to_vec();
+            let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+            hash_chain.push(leaked);
+            current_hash = leaked.to_vec();
         }
 
         hash_chain
@@ -37,8 +39,8 @@ mod tests {
             db,
             &mut txn_batch,
             vec![
-                vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                vec![2, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                &[2, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             ],
         )?;
 
@@ -57,7 +59,7 @@ mod tests {
             ctx,
             db,
             &mut txn_batch,
-            vec![vec![3, 0, 0, 0, 0, 0, 0, 0, 0, 0]],
+            vec![&[3, 0, 0, 0, 0, 0, 0, 0, 0, 0]],
         )?;
         println!(
             "After insert: root_hash = {}, values = {:?}",

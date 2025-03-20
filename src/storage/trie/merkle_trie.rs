@@ -14,14 +14,17 @@ pub const USERNAME_MAX_LENGTH: u32 = 20;
 pub struct TrieKey {}
 
 impl TrieKey {
+    #[inline]
     pub fn for_message(msg: &proto::Message) -> Vec<u8> {
         let mut key = Self::for_message_type(msg.fid(), msg.msg_type().into_u8());
         key.extend_from_slice(&msg.hash);
         key
     }
 
+    #[inline]
     pub fn for_message_type(fid: u64, msg_type: u8) -> Vec<u8> {
-        let mut key = Vec::new();
+        let fid_bytes = Self::for_fid(fid);
+        let mut key = Vec::with_capacity(fid_bytes.len() + 1);
         key.extend_from_slice(&Self::for_fid(fid));
         // Left shift msg_ype by 3 bits so we don't collide with onchain event types.
         // Supports 8 reserved types (onchain events, fnames etc) and 32 message types
@@ -29,6 +32,7 @@ impl TrieKey {
         key
     }
 
+    #[inline]
     pub fn for_onchain_event(event: &proto::OnChainEvent) -> Vec<u8> {
         let mut key = Vec::new();
         key.extend_from_slice(&Self::for_fid(event.fid));
@@ -38,21 +42,23 @@ impl TrieKey {
         key
     }
 
+    #[inline]
     pub fn for_fname(fid: u64, name: &String) -> Vec<u8> {
-        let mut key = Vec::new();
+        let fid_bytes = Self::for_fid(fid);
+        let mut key = Vec::with_capacity(fid_bytes.len() + 1 + USERNAME_MAX_LENGTH as usize);
         key.extend_from_slice(&Self::for_fid(fid));
         key.push(7); // 1-6 is for onchain events, use 7 for fnames, and everything else for messages
 
         // Pad the name with null bytes to ensure all names have the same length. The trie cannot handle entries that are substrings for another (e.g. "net" and "network")
-        let mut padded_name = String::with_capacity(USERNAME_MAX_LENGTH as usize);
-        padded_name.push_str(name.as_str());
-        while padded_name.len() < USERNAME_MAX_LENGTH as usize {
-            padded_name.push('\0');
+        let name_bytes = name.as_bytes();
+        key.extend_from_slice(name_bytes);
+        if name_bytes.len() < USERNAME_MAX_LENGTH as usize {
+            key.extend(std::iter::repeat(0).take(USERNAME_MAX_LENGTH as usize - name_bytes.len()));
         }
-        key.extend_from_slice(&padded_name.as_bytes());
         key
     }
 
+    #[inline]
     pub fn for_fid(fid: u64) -> Vec<u8> {
         make_fid_key(fid)
     }
@@ -147,7 +153,7 @@ impl MerkleTrie {
         ctx: &Context,
         db: &RocksDB,
         txn_batch: &mut RocksDbTransactionBatch,
-        keys: Vec<Vec<u8>>,
+        keys: Vec<&[u8]>,
     ) -> Result<Vec<bool>, TrieError> {
         let keys: Vec<Vec<u8>> = keys.into_iter().map(self.branch_xform.expand).collect();
 
@@ -181,7 +187,7 @@ impl MerkleTrie {
         ctx: &Context,
         db: &RocksDB,
         txn_batch: &mut RocksDbTransactionBatch,
-        keys: Vec<Vec<u8>>,
+        keys: Vec<&[u8]>,
     ) -> Result<Vec<bool>, TrieError> {
         let keys: Vec<Vec<u8>> = keys.into_iter().map(self.branch_xform.expand).collect();
 
@@ -208,13 +214,8 @@ impl MerkleTrie {
         }
     }
 
-    pub fn exists(
-        &mut self,
-        ctx: &Context,
-        db: &RocksDB,
-        key: &Vec<u8>,
-    ) -> Result<bool, TrieError> {
-        let key: Vec<u8> = (self.branch_xform.expand)(key.clone());
+    pub fn exists(&mut self, ctx: &Context, db: &RocksDB, key: &[u8]) -> Result<bool, TrieError> {
+        let key: Vec<u8> = (self.branch_xform.expand)(key);
 
         if let Some(root) = self.root.as_mut() {
             root.exists(ctx, db, &key, 0)
@@ -237,7 +238,7 @@ impl MerkleTrie {
         txn_batch: &mut RocksDbTransactionBatch,
         prefix: &[u8],
     ) -> Option<TrieNode> {
-        let prefix = (self.branch_xform.expand)(prefix.to_vec());
+        let prefix = (self.branch_xform.expand)(prefix);
         let node_key = TrieNode::make_primary_key(&prefix, None);
 
         // First, attempt to get it from the DB cache
@@ -293,12 +294,15 @@ impl MerkleTrie {
         db: &RocksDB,
         prefix: &[u8],
     ) -> Result<Vec<Vec<u8>>, TrieError> {
-        let prefix = (self.branch_xform.expand)(prefix.to_vec());
+        let prefix = (self.branch_xform.expand)(prefix);
 
         if let Some(root) = self.root.as_mut() {
             if let Some(node) = root.get_node_from_trie(ctx, db, &prefix, 0) {
                 match node.get_all_values(ctx, db, &prefix) {
-                    Ok(values) => Ok(values.into_iter().map(self.branch_xform.combine).collect()),
+                    Ok(values) => Ok(values
+                        .into_iter()
+                        .map(|v| (self.branch_xform.combine)(v.as_slice()))
+                        .collect()),
                     Err(e) => Err(e),
                 }
             } else {
@@ -396,12 +400,7 @@ mod tests {
         trie.initialize(db).unwrap();
         let mut txn_batch = RocksDbTransactionBatch::new();
 
-        let result = trie.insert(
-            ctx,
-            db,
-            &mut txn_batch,
-            vec![vec![1, 2, 3, 4, 5, 6, 7, 8, 9]],
-        );
+        let result = trie.insert(ctx, db, &mut txn_batch, vec![&[1, 2, 3, 4, 5, 6, 7, 8, 9]]);
         assert!(result.is_err());
         if let Err(TrieError::KeyLengthTooShort) = result {
             //ok
@@ -410,7 +409,7 @@ mod tests {
         }
 
         let key1: Vec<_> = "0000482712".bytes().collect();
-        trie.insert(ctx, db, &mut txn_batch, vec![key1.clone()])
+        trie.insert(ctx, db, &mut txn_batch, vec![&key1.clone()])
             .unwrap();
 
         let node = trie.get_node(db, &mut txn_batch, &key1).unwrap();
@@ -418,7 +417,7 @@ mod tests {
 
         // Add another key
         let key2: Vec<_> = "0000482713".bytes().collect();
-        trie.insert(ctx, db, &mut txn_batch, vec![key2.clone()])
+        trie.insert(ctx, db, &mut txn_batch, vec![&key2.clone()])
             .unwrap();
 
         // The get node should still work for both keys

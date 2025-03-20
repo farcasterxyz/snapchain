@@ -30,7 +30,7 @@ mod tests {
         let hash = random_hash();
 
         let res = trie
-            .insert(ctx, db, &mut txn_batch, vec![hash.clone()])
+            .insert(ctx, db, &mut txn_batch, vec![&hash.clone()])
             .unwrap();
         assert_eq!(res, vec![true]);
 
@@ -66,7 +66,7 @@ mod tests {
         let first_hash = random_hash();
         let second_hash = random_hash();
 
-        trie.insert(ctx, db, &mut first_txn, vec![first_hash.clone()])
+        trie.insert(ctx, db, &mut first_txn, vec![&first_hash.clone()])
             .unwrap();
         db.commit(first_txn).unwrap();
         trie.reload(db).unwrap();
@@ -75,7 +75,7 @@ mod tests {
         assert_eq!(res, true);
 
         let mut second_txn = RocksDbTransactionBatch::new();
-        trie.insert(ctx, db, &mut second_txn, vec![second_hash.clone()])
+        trie.insert(ctx, db, &mut second_txn, vec![&second_hash.clone()])
             .unwrap();
 
         trie.reload(db).unwrap();

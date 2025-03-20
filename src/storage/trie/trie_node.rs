@@ -92,6 +92,7 @@ impl TrieNode {
         }
     }
 
+    #[inline]
     pub(crate) fn make_primary_key(prefix: &[u8], child_char: Option<u8>) -> Vec<u8> {
         let mut key = Vec::with_capacity(1 + prefix.len() + 1);
         key.push(RootPrefix::SyncMerkleTrieNode as u8);
@@ -666,7 +667,7 @@ impl TrieNode {
         self.children = serialized_children;
     }
 
-    pub fn get_all_values(
+    pub fn get_all_values<'a>(
         &mut self,
         ctx: &Context,
         db: &RocksDB,
