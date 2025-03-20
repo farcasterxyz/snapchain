@@ -49,7 +49,7 @@ pub struct Config {
     #[serde(
         with = "humantime_serde",
         skip_serializing_if = "Option::is_none",
-        default
+        default // TODO: for now defaults to None, but should be 1mo.
     )]
     pub read_node_block_retention: Option<Duration>,
 }
