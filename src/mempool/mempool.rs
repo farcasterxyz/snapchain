@@ -6,6 +6,7 @@ use std::{
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use crate::core::util::farcaster_time_to_unix_seconds;
 use crate::{
     core::types::SnapchainValidatorContext,
     network::gossip::GossipEvent,
@@ -55,7 +56,7 @@ pub enum MempoolMessageKind {
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MempoolKey {
     message_kind: MempoolMessageKind,
-    timestamp: u64,
+    timestamp: u64, // in unix seconds
     identity: String,
 }
 
@@ -79,7 +80,7 @@ impl proto::Message {
             // TODO: Consider revisiting choice of timestamp here as backdated messages currently are prioritized.
             return MempoolKey::new(
                 MempoolMessageKind::UserMessage,
-                data.timestamp as u64,
+                farcaster_time_to_unix_seconds(data.timestamp as u64),
                 self.hex_hash(),
             );
         }

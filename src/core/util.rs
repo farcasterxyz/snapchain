@@ -26,6 +26,10 @@ pub fn from_farcaster_time(time: u64) -> u64 {
     time * 1000 + FARCASTER_EPOCH
 }
 
+pub fn farcaster_time_to_unix_seconds(time: u64) -> u64 {
+    time + (FARCASTER_EPOCH / 1000)
+}
+
 #[allow(dead_code)]
 pub fn get_farcaster_time() -> Result<u64, HubError> {
     let now = std::time::SystemTime::now()
