@@ -7419,7 +7419,7 @@ dependencies = [
 
 [[package]]
 name = "snapchain"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "alloy-contract",
  "alloy-dyn-abi",
@@ -7464,6 +7464,7 @@ dependencies = [
  "informalsystems-malachitebft-metrics",
  "informalsystems-malachitebft-network",
  "informalsystems-malachitebft-sync",
+ "informalsystems-malachitebft-wal",
  "itertools 0.13.0",
  "libp2p",
  "once_cell",

@@ -90,44 +90,49 @@ mod tests {
     #[test]
     fn test_trie_key() {
         let fid_key = TrieKey::for_fid(1234);
-        assert_eq!(fid_key, (1234u32).to_be_bytes().to_vec());
+        assert_eq!(fid_key[0], 248); // Shard id for 1234
+        assert_eq!(fid_key[1..5], (1234u32).to_be_bytes().to_vec());
 
         let message = messages_factory::casts::create_cast_add(1234, "test", None, None);
         let message_key = TrieKey::for_message(&message);
-        assert_eq!(message_key[0..4], TrieKey::for_fid(1234));
-        assert_eq!(message_key[4], message.msg_type().into_u8() << 3);
-        assert_eq!(message_key[5..], message.hash);
+        assert_eq!(message_key[0], TrieKey::fid_shard(1234));
+        assert_eq!(message_key[0..5], TrieKey::for_fid(1234));
+        assert_eq!(message_key[5], message.msg_type().into_u8() << 3);
+        assert_eq!(message_key[6..], message.hash);
 
         let delete_message =
             messages_factory::casts::create_cast_remove(321456, &message.hash, None, None);
         let delete_message_key = TrieKey::for_message(&delete_message);
-        assert_eq!(delete_message_key[0..4], TrieKey::for_fid(321456));
+        assert_eq!(delete_message_key[0], TrieKey::fid_shard(321456));
+        assert_eq!(delete_message_key[0..5], TrieKey::for_fid(321456));
         assert_eq!(
-            delete_message_key[4],
+            delete_message_key[5],
             delete_message.msg_type().into_u8() << 3
         );
-        assert_eq!(delete_message_key[5..], delete_message.hash);
+        assert_eq!(delete_message_key[6..], delete_message.hash);
 
         let event = events_factory::create_onchain_event(1234);
         let event_key = TrieKey::for_onchain_event(&event);
-        assert_eq!(event_key[0..4], TrieKey::for_fid(1234));
-        assert_eq!(event_key[4], event.r#type as u8);
+        assert_eq!(event_key[0], TrieKey::fid_shard(1234));
+        assert_eq!(event_key[0..5], TrieKey::for_fid(1234));
+        assert_eq!(event_key[5], event.r#type as u8);
         assert_eq!(
-            event_key[5..(5 + event.transaction_hash.len())],
+            event_key[6..(6 + event.transaction_hash.len())],
             event.transaction_hash
         );
         assert_eq!(
-            event_key[(5 + event.transaction_hash.len())..],
+            event_key[(6 + event.transaction_hash.len())..],
             event.log_index.to_be_bytes()
         );
 
         let username = "longishusername";
         let event_key = TrieKey::for_fname(1234, &username.to_string());
-        assert_eq!(event_key[0..4], TrieKey::for_fid(1234));
-        assert_eq!(event_key[4], 7);
+        assert_eq!(event_key[0], TrieKey::fid_shard(1234));
+        assert_eq!(event_key[0..5], TrieKey::for_fid(1234));
+        assert_eq!(event_key[5], 7);
         // Username is padded to length 20
         assert_eq!(
-            event_key[5..],
+            event_key[6..],
             format!("{}{}", username, "\0\0\0\0\0")
                 .bytes()
                 .collect::<Vec<_>>()

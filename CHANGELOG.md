@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.4] - 2025-03-16
+
+### 🚀 Features
+
+- Support event filters (#283)
+- Add missing methods (#291)
+- Upgrade to the latest version of malachite (#298)
+
+### 🐛 Bug Fixes
+
+- Fix read node config (#293)
+- Fix host crash by restarting height if proposed value not found (#303)
+- Fix flaky test due to consensus timeout (#304)
+- Fix timeouts one final time (#305)
+- Bump eth-signature-verifier (#307)
+
+### ⚡ Performance
+
+- Add more perf metrics (#296)
+- Reduce malachite step timeouts to be in line with faster blocktimes (#299)
+- Tune consensus timeouts (#302)
+- Tune consensus timeouts and dynamically adjust commit delay for consistent block times (#308)
+- Cache transaction on propose and validate to replay on commit (#309)
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix Readme typos
+- Clear Docker build cache
+
 ## [0.1.3] - 2025-03-04
 
 ### 🚀 Features

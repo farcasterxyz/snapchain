@@ -112,7 +112,7 @@ impl MyHubService {
             ));
         }
 
-        let dst_shard = self.message_router.route_message(fid, self.num_shards);
+        let dst_shard = self.message_router.route_fid(fid, self.num_shards);
 
         let stores = match self.shard_stores.get(&dst_shard) {
             Some(store) => store,
@@ -221,7 +221,7 @@ impl MyHubService {
     }
 
     fn get_stores_for(&self, fid: u64) -> Result<&Stores, Status> {
-        let shard_id = self.message_router.route_message(fid, self.num_shards);
+        let shard_id = self.message_router.route_fid(fid, self.num_shards);
         self.get_stores_for_shard(shard_id)
     }
 

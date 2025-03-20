@@ -41,6 +41,9 @@ pub enum RootPrefix {
 
     /* Used to maintain information about latest onchain events, fnames ingested */
     NodeLocalState = 17,
+
+    /* Used to index blocks by timestamp */
+    BlockIndex = 18,
 }
 
 /** Copied from the JS code */

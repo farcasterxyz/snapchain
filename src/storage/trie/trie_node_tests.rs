@@ -4,7 +4,7 @@ mod tests {
     use crate::storage::trie::merkle_trie::Context;
     use crate::storage::{
         db::{RocksDB, RocksDbTransactionBatch},
-        trie::trie_node::{TrieNode, TrieNodeType, TIMESTAMP_LENGTH},
+        trie::trie_node::{TrieNode, TrieNodeType, UNCOMPACTED_LENGTH},
     };
     use hex::FromHex as _;
     use std::collections::HashMap;
@@ -45,8 +45,9 @@ mod tests {
         assert_eq!(node.items(), 0);
         assert_eq!(node.hash(), Vec::<u8>::new());
 
-        // Can't insert keylengths < 10
-        let key = (0..9).collect::<Vec<_>>();
+        // Can't insert key lengths < 12
+        let max = (UNCOMPACTED_LENGTH - 1) as u8;
+        let key = (0..max).collect::<Vec<_>>();
         let r = node.insert(ctx, &mut hm(), &db, &mut txn, vec![key], 0);
         assert_eq!(r.is_err(), true);
         if let Err(TrieError::KeyLengthExceeded) = r {
@@ -71,7 +72,7 @@ mod tests {
 
         // Traverse the node and get to the leaf to make sure value exists
         let mut path = &node;
-        for i in 0..10 {
+        for i in 0..UNCOMPACTED_LENGTH {
             assert_eq!(path.items(), 1, "i: {}", i);
             assert_eq!(path.children().len(), 1, "i: {}", i);
             path = match path.children().values().next().unwrap() {
@@ -85,8 +86,8 @@ mod tests {
         assert_eq!(path.value(), Some(key.clone()));
         assert_eq!(path.children().len(), 0);
 
-        // Make sure the txn is correctly populated with all 11 entries (10 uncompacted nodes + 1 leaf node)
-        assert_eq!(txn.batch.len(), 11);
+        // Make sure the txn is correctly populated with all 13 entries (12 uncompacted nodes + 1 leaf node)
+        assert_eq!(txn.batch.len(), 13);
 
         db.commit(txn).unwrap();
         let mut txn = RocksDbTransactionBatch::new();
@@ -101,21 +102,21 @@ mod tests {
 
         // Traverse the node and get to the leaf to make sure value exists
         let mut path = &node;
-        for i in 0..10 {
+        for i in 0..UNCOMPACTED_LENGTH {
             assert_eq!(path.children().len(), 1, "i: {}", i);
             path = match path.children().values().next().unwrap() {
                 TrieNodeType::Node(child) => child,
                 _ => panic!("expected Node"),
             }
         }
-        // The 10th child should be a leaf
+        // The 12th child should be a leaf
         assert_eq!(path.is_leaf(), true);
         assert_eq!(path.value(), Some(key.clone()));
 
         // Now, create a new key with a different value at the 12th position. This should split the leaf node at that position
         let mut key2 = key.clone();
-        let split_pos = 12;
-        key2[split_pos] = 42; // Differs from the original key at the 12th position
+        let split_pos = UNCOMPACTED_LENGTH + 1;
+        key2[split_pos] = 42; // Differs from the original key after the uncompacted length
         let prev_hash = node.hash();
         let r = node.insert(ctx, &mut hm(), &db, &mut txn, vec![key2.clone()], 0);
         assert_eq!(r.unwrap()[0], true);
@@ -141,7 +142,7 @@ mod tests {
         assert_eq!(child_old.is_leaf(), true);
         assert_eq!(child_old.value(), Some(key.clone()));
 
-        // Add another key that splits at the 4th position, which is < timestamp length
+        // Add another key that splits at the 4th position, which is < UNCOMPACTED length
         let mut key3 = key.clone();
         let split_pos = 4;
         key3[split_pos] = 84; // Differs from the original key at the 4th position
@@ -302,9 +303,9 @@ mod tests {
         // Deleting one of 3 keys only compacts that branch of the trie
 
         let ids: Vec<Vec<u8>> = vec![
-            format!("{:0>width$}010680", "0", width = TIMESTAMP_LENGTH * 2),
-            format!("{:0>width$}010a10", "0", width = TIMESTAMP_LENGTH * 2),
-            format!("{:0>width$}05d220", "0", width = TIMESTAMP_LENGTH * 2),
+            format!("{:0>width$}010680", "0", width = UNCOMPACTED_LENGTH * 2),
+            format!("{:0>width$}010a10", "0", width = UNCOMPACTED_LENGTH * 2),
+            format!("{:0>width$}05d220", "0", width = UNCOMPACTED_LENGTH * 2),
         ]
         .into_iter()
         .map(|id| Vec::from_hex(id).unwrap())
@@ -381,13 +382,13 @@ mod tests {
 
         // Ensure the branch is compacted
         let node1 = node
-            .get_node_from_trie(ctx, &db, &ids[1][0..10], 0)
+            .get_node_from_trie(ctx, &db, &ids[1][0..UNCOMPACTED_LENGTH], 0)
             .unwrap();
         assert_eq!(node1.is_leaf(), true);
         assert_eq!(node1.value(), Some(ids[1].clone()));
 
         let node2 = node
-            .get_node_from_trie(ctx, &db, &ids[2][0..10], 0)
+            .get_node_from_trie(ctx, &db, &ids[2][0..UNCOMPACTED_LENGTH], 0)
             .unwrap();
         assert_eq!(node2.is_leaf(), true);
         assert_eq!(node2.value(), Some(ids[2].clone()));
@@ -424,9 +425,9 @@ mod tests {
         assert_eq!(node.hash(), Vec::<u8>::new());
 
         let ids: Vec<Vec<u8>> = vec![
-            format!("{:0>width$}010680", "0", width = TIMESTAMP_LENGTH * 2),
-            format!("{:0>width$}010a10", "0", width = TIMESTAMP_LENGTH * 2),
-            format!("{:0>width$}05d220", "0", width = TIMESTAMP_LENGTH * 2),
+            format!("{:0>width$}010680", "0", width = UNCOMPACTED_LENGTH * 2),
+            format!("{:0>width$}010a10", "0", width = UNCOMPACTED_LENGTH * 2),
+            format!("{:0>width$}05d220", "0", width = UNCOMPACTED_LENGTH * 2),
         ]
         .into_iter()
         .map(|id| Vec::from_hex(id).unwrap())
@@ -509,9 +510,9 @@ mod tests {
         assert_eq!(node.hash(), Vec::<u8>::new());
 
         let ids: Vec<Vec<u8>> = vec![
-            format!("{:0>width$}010680", "0", width = TIMESTAMP_LENGTH * 2),
-            format!("{:0>width$}010a10", "0", width = TIMESTAMP_LENGTH * 2),
-            format!("{:0>width$}05d220", "0", width = TIMESTAMP_LENGTH * 2),
+            format!("{:0>width$}010680", "0", width = UNCOMPACTED_LENGTH * 2),
+            format!("{:0>width$}010a10", "0", width = UNCOMPACTED_LENGTH * 2),
+            format!("{:0>width$}05d220", "0", width = UNCOMPACTED_LENGTH * 2),
         ]
         .into_iter()
         .map(|id| Vec::from_hex(id).unwrap())
@@ -541,7 +542,8 @@ mod tests {
 
         // Inserting a subset of the ids returns true for the new ones
         let mut new_ids = ids.clone();
-        new_ids.push(Vec::from_hex("0030662167aabbccddeeff").unwrap());
+        let vec1 = Vec::from_hex("010030662167aabbccddeeff").unwrap();
+        new_ids.push(vec1);
 
         let mut txn = RocksDbTransactionBatch::new();
         let r = node
@@ -610,10 +612,10 @@ mod tests {
     fn test_random_batch_insert() {
         let ctx = &Context::new();
 
-        // Create 1000 random keys, each between 11 and 20 bytes long
+        // Create 1000 random keys, each between 12 and 22 bytes long
         let mut keys = vec![];
         for _ in 0..1000 {
-            let len = rand::random::<u8>() % 10 + 11;
+            let len = rand::random::<u8>() % 10 + (UNCOMPACTED_LENGTH + 1) as u8;
             let key: Vec<u8> = (0..len).map(|_| rand::random::<u8>()).collect();
             keys.push(key);
         }
@@ -701,7 +703,7 @@ mod tests {
         // Create 1000 random keys, each between 11 and 20 bytes long
         let mut keys = vec![];
         for _ in 0..1000 {
-            let len = rand::random::<u8>() % 10 + 11;
+            let len = rand::random::<u8>() % 10 + (UNCOMPACTED_LENGTH + 1) as u8;
             let key: Vec<u8> = (0..len).map(|_| rand::random::<u8>()).collect();
             keys.push(key);
         }

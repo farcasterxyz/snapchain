@@ -1,6 +1,6 @@
 //! Implementation of a host actor for bridiging consensus and the application via a set of channels.
 
-use crate::consensus::validator::ShardValidator;
+use crate::consensus::validator::{ProposalSource, ShardValidator};
 use crate::core::types::SnapchainValidatorContext;
 use crate::network::gossip::GossipEvent;
 use crate::proto::{self, decided_value, full_proposal, Block, Commits, FullProposal, ShardChunk};
@@ -178,7 +178,9 @@ impl Host {
                 let data = part.content.as_data();
                 match data {
                     Some(proposal) => {
-                        let proposed_value = state.shard_validator.add_proposed_value(proposal);
+                        let proposed_value = state
+                            .shard_validator
+                            .add_proposed_value(proposal, ProposalSource::Consensus);
                         let height = proposed_value.height;
                         let round = proposed_value.round.as_i64();
                         let valid_round = proposed_value.valid_round.as_i64();
@@ -323,7 +325,9 @@ impl Host {
                         proposed_value: Some(full_proposal::ProposedValue::Shard(chunk)),
                     }
                 };
-                let proposed_value = state.shard_validator.add_proposed_value(&proposal);
+                let proposed_value = state
+                    .shard_validator
+                    .add_proposed_value(&proposal, ProposalSource::Sync);
                 info!(
                     height = height.to_string(),
                     "Processed value via sync: {}", proposed_value.value
