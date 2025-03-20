@@ -1,3 +1,4 @@
+use chrono::Duration;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -144,6 +145,7 @@ async fn schedule_background_jobs(app_config: &snapchain::cfg::Config, block_sto
             let job = snapchain::background_jobs::job_block_pruning(
                 schedule,
                 cutoff_timestamp,
+                Duration::milliseconds(100), // TODO: make const or configurable
                 block_store.clone(),
             )
             .unwrap();
