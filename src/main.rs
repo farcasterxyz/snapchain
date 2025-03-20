@@ -1,3 +1,4 @@
+use core::time::Duration;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -32,7 +33,7 @@ use tokio::net::TcpListener;
 use tokio::select;
 use tokio::signal::ctrl_c;
 use tokio::sync::{broadcast, mpsc};
-use tokio_cron_scheduler::{Job, JobScheduler};
+use tokio_cron_scheduler::{Job, JobScheduler, JobSchedulerError};
 use tonic::transport::Server;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -132,6 +133,50 @@ async fn start_servers(
     });
 }
 
+fn job_block_pruning(
+    schedule: &str,
+    block_retention: Duration,
+    block_store: BlockStore,
+) -> Result<Job, JobSchedulerError> {
+    Job::new_async(schedule, move |_uuid, _l| {
+        let block_store = block_store.clone(); // Get Arc for this job (can this clone be avoided?)
+        let cutoff_timestamp = (std::time::SystemTime::now() - block_retention)
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        Box::pin(async move {
+            block_store.some_method().unwrap_or_else(|e| {
+                // TODO: handle error
+                eprintln!("Error running background job: {}", e);
+            });
+
+            let page_options = PageOptions {
+                page_size: Some(PAGE_SIZE_MAX),
+                ..PageOptions::default()
+            };
+
+            loop {
+                let mut total = 0u32;
+                let (count, done) = block_store
+                    .prune_until(&page_options, |header| header.timestamp >= cutoff_timestamp)
+                    .unwrap_or_else(|e| {
+                        // TODO: handle error
+                        eprintln!("Error pruning block store: {}", e);
+
+                        (0, true) // stop iterating if there's an error
+                    });
+                if done {
+                    break;
+                }
+
+                // TODO: better logging
+                total += count;
+                println!("Pruned {} blocks", total);
+            }
+        })
+    })
+}
+
 // TODO: handle shutdown_tx
 // TODO: does this need to be async?
 async fn schedule_background_jobs(app_config: &snapchain::cfg::Config, block_store: BlockStore) {
@@ -139,50 +184,13 @@ async fn schedule_background_jobs(app_config: &snapchain::cfg::Config, block_sto
     if app_config.read_node {
         if let Some(block_retention) = app_config.read_node_block_retention {
             let schedule = "1/5 * * * *"; // TODO: fix this, currently every 5 seconds
-            let job = Job::new_async(schedule, move |_uuid, _l| {
-                let block_store = block_store.clone(); // get Arc for this job
-                let cutoff_timestamp = (std::time::SystemTime::now() - block_retention)
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                Box::pin(async move {
-                    block_store.some_method().unwrap_or_else(|e| {
-                        // TODO: handle error
-                        eprintln!("Error running background job: {}", e);
-                    });
-
-                    let page_options = PageOptions {
-                        page_size: Some(PAGE_SIZE_MAX),
-                        ..PageOptions::default()
-                    };
-
-                    loop {
-                        let mut total = 0u32;
-                        let (count, done) = block_store
-                            .prune_until(&page_options, |header| {
-                                header.timestamp >= cutoff_timestamp
-                            })
-                            .unwrap_or_else(|e| {
-                                // TODO: handle error
-                                eprintln!("Error pruning block store: {}", e);
-
-                                (0, true) // stop iterating if there's an error
-                            });
-                        if done {
-                            break;
-                        }
-
-                        // TODO: better logging
-                        total += count;
-                        println!("Pruned {} blocks", total);
-                    }
-                })
-            })
-            .unwrap();
+            let job = job_block_pruning(schedule, block_retention, block_store.clone()).unwrap();
             sched.add(job).await.unwrap();
-            sched.start().await.unwrap();
         }
     }
+    // Other background jobs can be added here
+
+    sched.start().await.unwrap();
 }
 
 fn is_dir_empty(path: &str) -> std::io::Result<bool> {
