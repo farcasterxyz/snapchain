@@ -1,7 +1,7 @@
 use super::super::constants::PAGE_SIZE_MAX;
 use crate::core::error::HubError;
 use crate::proto;
-use crate::proto::Block;
+use crate::proto::{Block, BlockHeader};
 use crate::storage::constants::RootPrefix;
 use crate::storage::db::{PageOptions, RocksDB, RocksdbError};
 use prost::Message;
@@ -237,5 +237,52 @@ impl BlockStore {
             start_block_number,
             stop_block_number,
         )
+    }
+
+    pub fn some_method(&self) -> Result<(), BlockStorageError> {
+        eprintln!("Placeholder for some method");
+        // Placeholder for some method
+        Ok(())
+    }
+
+    // Prune one page of blocks as specified by page_options from height 0 until
+    // the first block that matches the condition `f`. Returns the number of
+    // blocks pruned, and a boolean which is  true if iteration stopped due to a
+    // block matching the condition, false otherwise.
+    pub fn prune_until<F>(
+        &self,
+        page_options: &PageOptions,
+        f: F,
+    ) -> Result<(u32, bool), BlockStorageError>
+    where
+        F: Fn(&BlockHeader) -> bool,
+    {
+        let page = get_block_page_by_prefix(&self.db, &page_options, None, None)?;
+        let mut txn = self.db.txn();
+        let mut done = false;
+        let mut count = 0u32;
+        for block in page.blocks {
+            let header = block
+                .header
+                .as_ref()
+                .ok_or(BlockStorageError::BlockMissingHeader)?;
+            if f(&header) {
+                let height = header
+                    .height
+                    .as_ref()
+                    .ok_or(BlockStorageError::BlockMissingHeight)?;
+                let primary_key = make_block_key(height.block_number);
+                txn.delete(primary_key);
+                count += 1;
+            } else {
+                done = true;
+                break; // Stop pruning once we find a block that doesn't match the condition
+            }
+        }
+
+        self.db
+            .commit(txn)
+            .map_err(|e| BlockStorageError::from(e))?;
+        Ok((count, done))
     }
 }

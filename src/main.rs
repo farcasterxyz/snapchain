@@ -14,8 +14,9 @@ use snapchain::node::snapchain_node::SnapchainNode;
 use snapchain::node::snapchain_read_node::SnapchainReadNode;
 use snapchain::proto::admin_service_server::AdminServiceServer;
 use snapchain::proto::hub_service_server::HubServiceServer;
+use snapchain::storage::constants::PAGE_SIZE_MAX;
 use snapchain::storage::db::snapshot::download_snapshots;
-use snapchain::storage::db::RocksDB;
+use snapchain::storage::db::{PageOptions, RocksDB};
 use snapchain::storage::store::engine::{MempoolMessage, Senders};
 use snapchain::storage::store::node_local_state::LocalStateStore;
 use snapchain::storage::store::stores::Stores;
@@ -31,6 +32,7 @@ use tokio::net::TcpListener;
 use tokio::select;
 use tokio::signal::ctrl_c;
 use tokio::sync::{broadcast, mpsc};
+use tokio_cron_scheduler::{Job, JobScheduler};
 use tonic::transport::Server;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -128,6 +130,59 @@ async fn start_servers(
 
         http_shutdown_tx.send(()).await.ok();
     });
+}
+
+// TODO: handle shutdown_tx
+// TODO: does this need to be async?
+async fn schedule_background_jobs(app_config: &snapchain::cfg::Config, block_store: BlockStore) {
+    let sched = JobScheduler::new().await.unwrap();
+    if app_config.read_node {
+        if let Some(block_retention) = app_config.read_node_block_retention {
+            let schedule = "1/5 * * * *"; // TODO: fix this, currently every 5 seconds
+            let job = Job::new_async(schedule, move |_uuid, _l| {
+                let block_store = block_store.clone(); // get Arc for this job
+                let cutoff_timestamp = (std::time::SystemTime::now() - block_retention)
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                Box::pin(async move {
+                    block_store.some_method().unwrap_or_else(|e| {
+                        // TODO: handle error
+                        eprintln!("Error running background job: {}", e);
+                    });
+
+                    let page_options = PageOptions {
+                        page_size: Some(PAGE_SIZE_MAX),
+                        ..PageOptions::default()
+                    };
+
+                    loop {
+                        let mut total = 0u32;
+                        let (count, done) = block_store
+                            .prune_until(&page_options, |header| {
+                                header.timestamp < cutoff_timestamp
+                            })
+                            .unwrap_or_else(|e| {
+                                // TODO: handle error
+                                eprintln!("Error pruning block store: {}", e);
+
+                                (0, true) // stop iterating if there's an error
+                            });
+                        if done {
+                            break;
+                        }
+
+                        // TODO: better logging
+                        total += count;
+                        println!("Pruned {} blocks", total);
+                    }
+                })
+            })
+            .unwrap();
+            sched.add(job).await.unwrap();
+            sched.start().await.unwrap();
+        }
+    }
 }
 
 fn is_dir_empty(path: &str) -> std::io::Result<bool> {
@@ -273,6 +328,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Ok(client) => Some(Box::new(client)),
             Err(_) => None,
         };
+
+    schedule_background_jobs(&app_config, block_store.clone()).await;
 
     if app_config.read_node {
         let node = SnapchainReadNode::create(
