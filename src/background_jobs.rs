@@ -1,11 +1,14 @@
 use crate::storage::constants::PAGE_SIZE_MAX;
-use crate::storage::db::{PageOptions, RocksDB};
+use crate::storage::db::PageOptions;
 use crate::storage::store::BlockStore;
+use chrono::Duration;
 use tokio_cron_scheduler::{Job, JobScheduler, JobSchedulerError};
+use tracing::error;
 
 pub fn job_block_pruning(
     schedule: &str,
     cutoff_timestamp: u64,
+    throttle: Duration,
     block_store: BlockStore,
 ) -> Result<Job, JobSchedulerError> {
     Job::new_async(schedule, move |_uuid, _l| {
@@ -16,26 +19,17 @@ pub fn job_block_pruning(
                 ..PageOptions::default()
             };
 
-            loop {
-                let mut total = 0u32;
-                let done = true;
-                let count = 0;
-                //let (count, done) = block_store
-                //    .prune_page(&page_options, |header| header.timestamp >= cutoff_timestamp)
-                //    .unwrap_or_else(|e| {
-                //        // TODO: handle error
-                //        eprintln!("Error pruning block store: {}", e);
+            let stop_height = block_store
+                .get_next_height_by_timestamp(0, cutoff_timestamp)
+                .unwrap_or_else(|e| {
+                    error!("Error getting next height by timestamp: {}", e);
+                    None
+                });
 
-                //        (0, true) // stop iterating if there's an error
-                //    });
-                if done {
-                    break;
-                }
-
-                // TODO: better logging
-                total += count;
-                println!("Pruned {} blocks", total);
-            }
+            // TODO: pass shutdown_rx
+            stop_height.map(|stop_height| {
+                block_store.prune_until(stop_height, throttle, None, &page_options)
+            });
         })
     })
 }
