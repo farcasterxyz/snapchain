@@ -58,6 +58,8 @@ const FIRST_BLOCK: u64 = 108864739;
 static CHAIN_ID: u32 = 10; // OP mainnet
 const RENT_EXPIRY_IN_SECONDS: u64 = 365 * 24 * 60 * 60; // One year
 
+const RETRY_TIMEOUT_SECONDS: u64 = 10;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub rpc_url: String,
@@ -310,18 +312,21 @@ impl Subscriber {
                 }
                 Err(err) => {
                     retry_count += 1;
-                    // Calculate exponential backoff with max of 60 seconds
-                    let backoff_secs = (2_u64.pow(retry_count.min(5) as u32)).min(60);
+
+                    if retry_count > 5 {
+                        return Err(err.into());
+                    }
 
                     error!(
                         "Error getting block timestamp for hash {}: {}. Retry {} in {} seconds",
                         hex::encode(block_hash),
                         err,
                         retry_count,
-                        backoff_secs
+                        RETRY_TIMEOUT_SECONDS
                     );
 
-                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_TIMEOUT_SECONDS))
+                        .await;
                 }
             }
         }
@@ -567,15 +572,22 @@ impl Subscriber {
                         "Unknown Registry"
                     };
 
-                    // Calculate exponential backoff with max of 60 seconds
-                    let backoff_secs = (2_u64.pow(retry_count.min(5) as u32)).min(60);
+                    if retry_count > 5 {
+                        return Err(err);
+                    }
 
                     error!(
                         "Error getting logs for {}, blocks {}-{}: {}. Retry {} in {} seconds",
-                        registry_name, start_block, stop_block, err, retry_count, backoff_secs
+                        registry_name,
+                        start_block,
+                        stop_block,
+                        err,
+                        retry_count,
+                        RETRY_TIMEOUT_SECONDS
                     );
 
-                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_TIMEOUT_SECONDS))
+                        .await;
                 }
             }
         }
@@ -644,15 +656,17 @@ impl Subscriber {
                 }
                 Err(err) => {
                     retry_count += 1;
-                    // Calculate exponential backoff with max of 60 seconds
-                    let backoff_secs = (2_u64.pow(retry_count.min(5) as u32)).min(60);
+                    if retry_count > 5 {
+                        return Err(err.into());
+                    }
 
                     error!(
                         "Error getting latest block on chain: {}. Retry {} in {} seconds",
-                        err, retry_count, backoff_secs
+                        err, retry_count, RETRY_TIMEOUT_SECONDS
                     );
 
-                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_TIMEOUT_SECONDS))
+                        .await;
                 }
             }
         }
@@ -745,11 +759,14 @@ impl Subscriber {
 
         loop {
             match self.sync_live_events(live_sync_block.unwrap()).await {
+                Err(e) => {
+                    error!("Live sync ended with error: {e}. Retrying in 10 seconds",);
+                }
                 _ => {
                     error!("Live sync ended unexpectedly. Retrying in 10 seconds",);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
                 }
             }
+            tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_TIMEOUT_SECONDS)).await;
         }
     }
 }
