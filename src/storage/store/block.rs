@@ -266,7 +266,7 @@ impl BlockStore {
             .map_err(|_| BlockStorageError::TooManyBlocksInResult)?; // TODO: Return the right error
 
         block_key
-            .map(|block_key: Vec<u8>| {
+            .map(|block_key| {
                 let block_bytes = self
                     .db
                     .get(&block_key)?
