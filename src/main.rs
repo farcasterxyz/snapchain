@@ -1,4 +1,3 @@
-use core::time::Duration;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -136,15 +135,11 @@ async fn start_servers(
 
 fn job_block_pruning(
     schedule: &str,
-    block_retention: Duration,
+    cutoff_timestamp: u64,
     block_store: BlockStore,
 ) -> Result<Job, JobSchedulerError> {
     Job::new_async(schedule, move |_uuid, _l| {
         let block_store = block_store.clone(); // Get Arc for this job (can this clone be avoided?)
-        let cutoff_timestamp = (std::time::SystemTime::now() - block_retention)
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
         Box::pin(async move {
             block_store.some_method().unwrap_or_else(|e| {
                 // TODO: handle error
@@ -184,8 +179,12 @@ async fn schedule_background_jobs(app_config: &snapchain::cfg::Config, block_sto
     let sched = JobScheduler::new().await.unwrap();
     if app_config.read_node {
         if let Some(block_retention) = app_config.read_node_block_retention {
+            let cutoff_timestamp = (std::time::SystemTime::now() - block_retention)
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
             let schedule = "1/5 * * * *"; // TODO: fix this, currently every 5 seconds
-            let job = job_block_pruning(schedule, block_retention, block_store.clone()).unwrap();
+            let job = job_block_pruning(schedule, cutoff_timestamp, block_store.clone()).unwrap();
             sched.add(job).await.unwrap();
         }
     }
