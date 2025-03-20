@@ -183,7 +183,7 @@ impl Fetcher {
 
                 let username_proof = UserNameProof {
                     timestamp: t.timestamp,
-                    name: t.username.into_bytes(),
+                    name: t.username.clone().into_bytes(),
                     owner: owner.unwrap(),
                     signature: signature.unwrap(),
                     fid: t.to,
@@ -213,6 +213,12 @@ impl Fetcher {
                         "Unable to send fname transfer to mempool"
                     )
                 }
+                info!(
+                    from = t.from,
+                    fid = t.to,
+                    name = t.username.clone(),
+                    "Processed fname transfer"
+                );
                 last_transfer_id = t.id;
             }
             if last_transfer_id > 0 {
