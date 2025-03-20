@@ -286,3 +286,78 @@ impl BlockStore {
         Ok((count, done))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::Height;
+
+    fn make_db(dir: &tempfile::TempDir, filename: &str) -> Arc<RocksDB> {
+        let db_path = dir.path().join(filename);
+
+        let db = Arc::new(RocksDB::new(db_path.to_str().unwrap()));
+        db.open().unwrap();
+
+        db
+    }
+
+    fn make_block(block_number: u64, timestamp: u64) -> Block {
+        let header = BlockHeader {
+            height: Some(Height {
+                shard_index: 0,
+                block_number,
+            }),
+            timestamp,
+            ..BlockHeader::default()
+        };
+        Block {
+            header: Some(header),
+            ..Block::default()
+        }
+    }
+
+    #[test]
+    fn test_prune_until() {
+        let blocks_dir = tempfile::tempdir().unwrap();
+        let db = make_db(&blocks_dir, "test_db");
+        let store = BlockStore::new(db);
+
+        let number_to_timestamp = |n| n * 100;
+        // Add some blocks to the db for testing
+        (1..=100).for_each(|i| {
+            let block = make_block(i, number_to_timestamp(i));
+            store.put_block(&block).unwrap();
+        });
+
+        let cutoff_block = 42;
+        let cutoff_timestamp = number_to_timestamp(cutoff_block);
+        let page_size = 10;
+        let page_options = PageOptions {
+            page_size: Some(page_size),
+            ..PageOptions::default()
+        };
+
+        let mut pruned = 0u32;
+        loop {
+            let (count, done) = store
+                .prune_until(&page_options, |header| header.timestamp >= cutoff_timestamp)
+                .unwrap();
+            pruned += count;
+            assert!(count <= page_size as u32);
+            let expected_done = pruned as u64 == cutoff_block - 1;
+            assert_eq!(expected_done, done);
+
+            if done {
+                break;
+            }
+        }
+
+        // Verify that first block after pruning is the cutoff block
+        let page = store
+            .get_blocks(0, None, &page_options)
+            .expect("Failed to get blocks");
+        assert!(page.blocks.len() > 0);
+        let header = page.blocks[0].header.as_ref().unwrap();
+        assert!(cutoff_block == header.height.expect("Missing height").block_number);
+    }
+}
