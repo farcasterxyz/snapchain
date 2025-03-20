@@ -47,14 +47,22 @@ impl Default for Config {
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MempoolMessageKind {
+    ValidatorMessage = 1,
+    UserMessage = 2,
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MempoolKey {
+    message_kind: MempoolMessageKind,
     timestamp: u64,
     identity: String,
 }
 
 impl MempoolKey {
-    pub fn new(timestamp: u64, identity: String) -> Self {
+    pub fn new(message_kind: MempoolMessageKind, timestamp: u64, identity: String) -> Self {
         MempoolKey {
+            message_kind,
             timestamp,
             identity,
         }
@@ -69,7 +77,11 @@ impl proto::Message {
     pub fn mempool_key(&self) -> MempoolKey {
         if let Some(data) = &self.data {
             // TODO: Consider revisiting choice of timestamp here as backdated messages currently are prioritized.
-            return MempoolKey::new(data.timestamp as u64, self.hex_hash());
+            return MempoolKey::new(
+                MempoolMessageKind::UserMessage,
+                data.timestamp as u64,
+                self.hex_hash(),
+            );
         }
         todo!();
     }
@@ -79,11 +91,16 @@ impl proto::ValidatorMessage {
     pub fn mempool_key(&self) -> MempoolKey {
         if let Some(fname) = &self.fname_transfer {
             if let Some(proof) = &fname.proof {
-                return MempoolKey::new(proof.timestamp, fname.id.to_string());
+                return MempoolKey::new(
+                    MempoolMessageKind::ValidatorMessage,
+                    proof.timestamp,
+                    fname.id.to_string(),
+                );
             }
         }
         if let Some(event) = &self.on_chain_event {
             return MempoolKey::new(
+                MempoolMessageKind::ValidatorMessage,
                 event.block_timestamp,
                 hex::encode(&event.transaction_hash) + &event.log_index.to_string(),
             );

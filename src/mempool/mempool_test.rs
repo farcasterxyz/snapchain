@@ -161,6 +161,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_mempool_prioritization() {
+        let (_, _, mut mempool, mempool_tx, messages_request_tx, _shard_decision_tx, _) =
+            setup(setup_config(9304));
+
+        // Spawn mempool task
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let fid = 1234;
+        // Cast has lower timestamp and arrives first, but onchain event is still processed first
+        let onchain_event = events_factory::create_rent_event(fid, None, Some(1), false);
+
+        let cast = messages_factory::casts::create_cast_add(
+            fid,
+            "hello",
+            Some(onchain_event.block_timestamp as u32 - 1),
+            None,
+        );
+
+        mempool_tx
+            .send((
+                MempoolMessage::UserMessage(cast.clone()),
+                MempoolSource::Local,
+            ))
+            .await
+            .unwrap();
+
+        mempool_tx
+            .send((
+                MempoolMessage::ValidatorMessage(ValidatorMessage {
+                    on_chain_event: Some(onchain_event),
+                    fname_transfer: None,
+                }),
+                MempoolSource::Local,
+            ))
+            .await
+            .unwrap();
+
+        // Wait for processing
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let pull_message = async || {
+            // Setup channel to retrieve messages
+            let (mempool_retrieval_tx, mempool_retrieval_rx) = oneshot::channel();
+
+            // Query mempool for the messages
+            messages_request_tx
+                .send(MempoolMessagesRequest {
+                    shard_id: 1,
+                    max_messages_per_block: 1,
+                    message_tx: mempool_retrieval_tx,
+                })
+                .await
+                .unwrap();
+
+            let result = mempool_retrieval_rx.await.unwrap();
+            return result[0].clone();
+        };
+
+        match pull_message().await {
+            MempoolMessage::UserMessage(_) => {
+                panic!("Expected validator message, got user message")
+            }
+            MempoolMessage::ValidatorMessage(_) => {}
+        }
+
+        match pull_message().await {
+            MempoolMessage::UserMessage(_) => {}
+            MempoolMessage::ValidatorMessage(_) => {
+                panic!("Expected validator message, got user message")
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_mempool_eviction() {
         let (mut engine, _, mut mempool, mempool_tx, messages_request_tx, shard_decision_tx, _) =
             setup(setup_config(9304));
