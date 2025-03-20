@@ -14,7 +14,7 @@ mod tests {
     };
     use crate::storage::trie::merkle_trie::TrieKey;
     use crate::utils::factory::{self, events_factory, messages_factory, time, username_factory};
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{Signer, SigningKey};
     use prost::Message;
 
     fn from_hex(s: &str) -> Vec<u8> {
@@ -933,6 +933,27 @@ mod tests {
 
         assert_eq!(0, state_change.transactions.len());
         assert_eq!("", to_hex(&state_change.new_state_root));
+    }
+
+    #[tokio::test]
+    async fn test_messages_with_invalid_network_are_not_merged() {
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+
+        let signer = test_helper::default_signer();
+        register_user(
+            FID_FOR_TEST,
+            signer.clone(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+        let mut cast_add =
+            messages_factory::casts::create_cast_add(FID_FOR_TEST, "invalid network", None, None);
+        cast_add.data.as_mut().unwrap().network = 0;
+        cast_add.hash = calculate_message_hash(&cast_add.data.as_ref().unwrap().encode_to_vec());
+        cast_add.signature = signer.sign(&cast_add.hash).to_bytes().to_vec();
+
+        assert_commit_fails(&mut engine, &cast_add).await;
     }
 
     #[tokio::test]

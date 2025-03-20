@@ -20,4 +20,6 @@ pub enum ValidationError {
     MissingSignature,
     #[error("Invalid message signature")]
     InvalidSignature,
+    #[error("Invalid network")]
+    InvalidNetwork,
 }

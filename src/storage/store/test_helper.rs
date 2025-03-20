@@ -129,6 +129,7 @@ pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile
     (
         ShardEngine::new(
             db,
+            proto::FarcasterNetwork::Testnet,
             merkle_trie::MerkleTrie::new(16).unwrap(),
             1,
             test_limits,

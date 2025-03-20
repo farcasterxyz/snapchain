@@ -67,6 +67,7 @@ async fn start_servers(
         shard_senders,
         statsd_client.clone(),
         app_config.consensus.num_shards,
+        app_config.fc_network,
         Box::new(routing::ShardRouter {}),
         mempool_tx.clone(),
         l1_client,
@@ -293,6 +294,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_config.rocksdb_dir.clone(),
             statsd_client.clone(),
             app_config.trie_branching_factor,
+            app_config.fc_network,
             registry,
         )
         .await;

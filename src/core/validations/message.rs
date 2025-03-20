@@ -16,13 +16,19 @@ pub fn validate_message_type(message_type: i32) -> Result<(), ValidationError> {
         .map_or_else(|_| Err(ValidationError::InvalidData), |_| Ok(()))
 }
 
-pub fn validate_message(message: &proto::Message) -> Result<(), ValidationError> {
+pub fn validate_message(
+    message: &proto::Message,
+    current_network: proto::FarcasterNetwork,
+) -> Result<(), ValidationError> {
     let data_bytes;
     let message_data;
     if message.data_bytes.is_some() {
         data_bytes = message.data_bytes.as_ref().unwrap().clone();
         if data_bytes.len() > MAX_DATA_BYTES {
             return Err(ValidationError::InvalidDataLength);
+        }
+        if data_bytes.len() == 0 {
+            return Err(ValidationError::MissingData);
         }
         match MessageData::decode(message.data_bytes.as_ref().unwrap().as_slice()) {
             Ok(data) => {
@@ -40,6 +46,19 @@ pub fn validate_message(message: &proto::Message) -> Result<(), ValidationError>
         message_data = message.data.as_ref().unwrap().clone();
     }
 
+    let network = FarcasterNetwork::try_from(message_data.network)
+        .or_else(|_| Err(ValidationError::InvalidNetwork))?;
+
+    if network == FarcasterNetwork::None {
+        return Err(ValidationError::InvalidNetwork);
+    }
+    // Only allow mainnet messages on mainnet. On testnet and devnet, allow all messages.
+    if current_network == FarcasterNetwork::Mainnet {
+        if network != FarcasterNetwork::Mainnet {
+            return Err(ValidationError::InvalidNetwork);
+        }
+    }
+
     validate_message_hash(message.hash_scheme, &data_bytes, &message.hash)?;
     validate_signature(
         message.signature_scheme,
@@ -47,9 +66,6 @@ pub fn validate_message(message: &proto::Message) -> Result<(), ValidationError>
         &message.signature,
         &message.signer,
     )?;
-
-    let network = FarcasterNetwork::try_from(message_data.network)
-        .or_else(|_| Err(ValidationError::InvalidData))?;
 
     match &message_data.body {
         Some(proto::message_data::Body::UserDataBody(user_data)) => {

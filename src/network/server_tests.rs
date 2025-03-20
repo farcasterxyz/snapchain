@@ -236,6 +236,7 @@ mod tests {
                 senders,
                 statsd_client,
                 num_shards,
+                proto::FarcasterNetwork::Testnet,
                 message_router,
                 mempool_tx,
                 Some(Box::new(MockL1Client {})),

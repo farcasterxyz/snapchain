@@ -46,7 +46,7 @@ impl SnapchainNode {
         rocksdb_dir: String,
         statsd_client: StatsdClientWrapper,
         trie_branching_factor: u32,
-        chain_id: FarcasterNetwork,
+        network: FarcasterNetwork,
         registry: &SharedRegistry,
     ) -> Self {
         let validator_address = Address(keypair.public().to_bytes());
@@ -72,6 +72,7 @@ impl SnapchainNode {
             let trie = merkle_trie::MerkleTrie::new(trie_branching_factor).unwrap(); //TODO: don't unwrap()
             let engine = ShardEngine::new(
                 db.clone(),
+                network,
                 trie,
                 shard_id,
                 StoreLimits::default(),
@@ -125,18 +126,12 @@ impl SnapchainNode {
         // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
         let block_validator_set = config.validator_set_for(0);
         let engine = BlockEngine::new(block_store.clone(), statsd_client.clone());
-        let chain_id = match chain_id {
-            FarcasterNetwork::Mainnet => 1,
-            FarcasterNetwork::Testnet => 2,
-            FarcasterNetwork::Devnet => 3,
-            _ => 0,
-        };
         let block_proposer = BlockProposer::new(
             validator_address.clone(),
             block_shard.clone(),
             shard_stores.clone(),
             config.num_shards,
-            chain_id,
+            network,
             block_tx,
             engine,
             statsd_client.clone(),

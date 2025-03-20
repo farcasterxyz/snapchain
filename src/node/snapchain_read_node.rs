@@ -42,6 +42,7 @@ impl SnapchainReadNode {
         rocksdb_dir: String,
         statsd_client: StatsdClientWrapper,
         trie_branching_factor: u32,
+        farcaster_network: proto::FarcasterNetwork,
         registry: &SharedRegistry,
     ) -> Self {
         let validator_address = Address(keypair.public().to_bytes());
@@ -65,6 +66,7 @@ impl SnapchainReadNode {
             let trie = merkle_trie::MerkleTrie::new(trie_branching_factor).unwrap(); //TODO: don't unwrap()
             let engine = ShardEngine::new(
                 db.clone(),
+                farcaster_network,
                 trie,
                 shard_id,
                 StoreLimits::default(),

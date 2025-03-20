@@ -269,7 +269,7 @@ pub struct BlockProposer {
     proposed_blocks: BTreeMap<ShardHash, FullProposal>,
     shard_stores: HashMap<u32, Stores>,
     num_shards: u32,
-    chain_id: u32,
+    network: proto::FarcasterNetwork,
     block_tx: Option<mpsc::Sender<Block>>,
     engine: BlockEngine,
     statsd_client: StatsdClientWrapper,
@@ -281,7 +281,7 @@ impl BlockProposer {
         shard_id: SnapchainShard,
         shard_stores: HashMap<u32, Stores>,
         num_shards: u32,
-        chain_id: u32,
+        network: proto::FarcasterNetwork,
         block_tx: Option<mpsc::Sender<Block>>,
         engine: BlockEngine,
         statsd_client: StatsdClientWrapper,
@@ -292,7 +292,7 @@ impl BlockProposer {
             proposed_blocks: BTreeMap::new(),
             shard_stores,
             num_shards,
-            chain_id,
+            network,
             block_tx,
             engine,
             statsd_client,
@@ -392,7 +392,7 @@ impl Proposer for BlockProposer {
             .to_vec();
         let block_header = BlockHeader {
             parent_hash,
-            chain_id: self.chain_id as i32,
+            chain_id: self.network as i32,
             version: PROTOCOL_VERSION,
             timestamp: current_time(),
             height: Some(height.clone()),
@@ -442,7 +442,7 @@ impl Proposer for BlockProposer {
                 return Validity::Invalid;
             }
 
-            if header.chain_id != (self.chain_id as i32) {
+            if header.chain_id != (self.network as i32) {
                 error!("Received block with wrong chain_id: {}", header.chain_id);
                 return Validity::Invalid;
             }

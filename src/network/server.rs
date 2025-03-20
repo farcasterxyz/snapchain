@@ -76,6 +76,7 @@ pub struct MyHubService {
     statsd_client: StatsdClientWrapper,
     l1_client: Option<Box<dyn L1Client>>,
     mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
+    network: proto::FarcasterNetwork,
 }
 
 impl MyHubService {
@@ -86,6 +87,7 @@ impl MyHubService {
         shard_senders: HashMap<u32, Senders>,
         statsd_client: StatsdClientWrapper,
         num_shards: u32,
+        network: proto::FarcasterNetwork,
         message_router: Box<dyn routing::MessageRouter>,
         mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
         l1_client: Option<Box<dyn L1Client>>,
@@ -100,6 +102,7 @@ impl MyHubService {
 
         let service = Self {
             allowed_users,
+            network,
             block_store,
             shard_senders,
             shard_stores,
@@ -139,6 +142,7 @@ impl MyHubService {
             // TODO: This is a hack to get around the fact that self cannot be made mutable
             let mut readonly_engine = ShardEngine::new(
                 stores.db.clone(),
+                self.network,
                 stores.trie.clone(),
                 1,
                 stores.store_limits.clone(),
@@ -850,8 +854,8 @@ impl HubService for MyHubService {
         request: Request<Message>,
     ) -> Result<Response<ValidationResponse>, Status> {
         let request = request.into_inner();
-        let result =
-            validations::message::validate_message(&request).map_or_else(|_| false, |_| true);
+        let result = validations::message::validate_message(&request, self.network)
+            .map_or_else(|_| false, |_| true);
 
         Ok(Response::new(ValidationResponse {
             valid: result,

@@ -3,18 +3,30 @@ mod tests {
     use crate::core::validations::error::ValidationError;
     use crate::core::validations::message::validate_message;
     use crate::proto;
+    use crate::proto::FarcasterNetwork;
     use crate::storage::store::test_helper;
     use crate::utils::factory::{messages_factory, time};
+    use ed25519_dalek::Signer;
     use prost::Message;
 
     fn assert_validation_error(msg: &proto::Message, expected_error: ValidationError) {
-        let result = validate_message(msg);
+        let result = validate_message(msg, FarcasterNetwork::Testnet);
         assert!(result.is_err());
         assert_eq!(result.err().unwrap(), expected_error);
     }
 
     fn assert_valid(msg: &proto::Message) {
-        let result = validate_message(msg);
+        let result = validate_message(msg, FarcasterNetwork::Testnet);
+        assert!(result.is_ok());
+    }
+
+    fn assert_mutated_valid(msg: &mut proto::Message) {
+        // Recalculate hash and signature based on the new data
+        msg.hash = calculate_message_hash(&msg.data.as_ref().unwrap().encode_to_vec());
+        let signer = test_helper::generate_signer();
+        msg.signer = signer.verifying_key().to_bytes().to_vec();
+        msg.signature = signer.sign(&msg.hash).to_bytes().to_vec();
+        let result = validate_message(msg, FarcasterNetwork::Testnet);
         assert!(result.is_ok());
     }
 
@@ -62,6 +74,49 @@ mod tests {
 
         msg.hash_scheme = 2;
         assert_validation_error(&msg, ValidationError::InvalidHashScheme);
+    }
+
+    #[test]
+    fn test_validates_network() {
+        let mut msg = valid_message();
+        assert_valid(&msg);
+
+        msg.data.as_mut().unwrap().network = FarcasterNetwork::None as i32;
+        assert_eq!(
+            validate_message(&msg, FarcasterNetwork::Testnet).unwrap_err(),
+            ValidationError::InvalidNetwork
+        );
+
+        // When network is mainnet, other networks are not allowed
+        msg.data.as_mut().unwrap().network = FarcasterNetwork::Testnet as i32;
+        assert_eq!(
+            validate_message(&msg, FarcasterNetwork::Mainnet).unwrap_err(),
+            ValidationError::InvalidNetwork
+        );
+
+        msg.data.as_mut().unwrap().network = FarcasterNetwork::Devnet as i32;
+        assert_eq!(
+            validate_message(&msg, FarcasterNetwork::Mainnet).unwrap_err(),
+            ValidationError::InvalidNetwork
+        );
+
+        msg.data.as_mut().unwrap().network = FarcasterNetwork::None as i32;
+        assert_eq!(
+            validate_message(&msg, FarcasterNetwork::Mainnet).unwrap_err(),
+            ValidationError::InvalidNetwork
+        );
+
+        // mainnet is valid
+        msg.data.as_mut().unwrap().network = FarcasterNetwork::Mainnet as i32;
+        assert_mutated_valid(&mut msg);
+
+        // other networks on testnet/devnet are valid
+        msg.data.as_mut().unwrap().network = FarcasterNetwork::Testnet as i32;
+        assert_mutated_valid(&mut msg);
+        msg.data.as_mut().unwrap().network = FarcasterNetwork::Devnet as i32;
+        assert_mutated_valid(&mut msg);
+        msg.data.as_mut().unwrap().network = FarcasterNetwork::Mainnet as i32;
+        assert_mutated_valid(&mut msg);
     }
 
     #[test]

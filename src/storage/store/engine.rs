@@ -5,10 +5,10 @@ use crate::core::types::Height;
 use crate::core::validations;
 use crate::core::validations::verification;
 use crate::mempool::mempool::MempoolMessagesRequest;
-use crate::proto::HubEvent;
 use crate::proto::UserNameProof;
 use crate::proto::UserNameType;
 use crate::proto::{self, Block, MessageType, ShardChunk, Transaction};
+use crate::proto::{FarcasterNetwork, HubEvent};
 use crate::proto::{OnChainEvent, OnChainEventType};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{CastStore, MessagesPage};
@@ -159,6 +159,7 @@ struct CachedTransaction {
 
 pub struct ShardEngine {
     shard_id: u32,
+    network: FarcasterNetwork,
     pub db: Arc<RocksDB>,
     senders: Senders,
     stores: Stores,
@@ -171,6 +172,7 @@ pub struct ShardEngine {
 impl ShardEngine {
     pub fn new(
         db: Arc<RocksDB>,
+        network: proto::FarcasterNetwork,
         trie: merkle_trie::MerkleTrie,
         shard_id: u32,
         store_limits: StoreLimits,
@@ -181,6 +183,7 @@ impl ShardEngine {
         // TODO: adding the trie here introduces many calls that want to return errors. Rethink unwrap strategy.
         ShardEngine {
             shard_id,
+            network,
             stores: Stores::new(db.clone(), trie, store_limits),
             senders: Senders::new(),
             db,
@@ -703,6 +706,7 @@ impl ShardEngine {
                     }
                 }
                 Err(err) => {
+                    println!("Error validating user message: {:?}", err);
                     warn!(
                         fid = snapchain_txn.fid,
                         hash = msg.hex_hash(),
@@ -993,7 +997,7 @@ impl ShardEngine {
             .as_ref()
             .ok_or(MessageValidationError::NoMessageData)?;
 
-        validations::message::validate_message(message)?;
+        validations::message::validate_message(message, self.network)?;
 
         // Check that the user has a custody address
         self.stores
