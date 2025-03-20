@@ -302,6 +302,7 @@ impl NodeForTest {
         join_handles.push(handle);
 
         let service = MyHubService::new(
+            "".to_string(),
             block_store.clone(),
             node.shard_stores.clone(),
             node.shard_senders.clone(),

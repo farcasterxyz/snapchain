@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
+    use base64::Engine;
     use foundry_common::ens::EnsError;
     use prost::Message;
     use std::collections::HashMap;
@@ -34,6 +35,9 @@ mod tests {
 
     const SHARD1_FID: u64 = 121;
     const SHARD2_FID: u64 = 122;
+
+    const USER_NAME: &str = "user";
+    const PASSWORD: &str = "password";
 
     impl FidRequest {
         fn for_fid(fid: u64) -> Request<Self> {
@@ -75,16 +79,15 @@ mod tests {
         num_events_expected: u64,
         event_types: Vec<i32>,
     ) -> tokio::task::JoinHandle<()> {
-        let mut listener = service
-            .subscribe(Request::new(SubscribeRequest {
-                event_types,
-                from_id: None,
-                shard_index: Some(shard_id),
-                fid_partitions: None,
-                fid_partition_index: None,
-            }))
-            .await
-            .unwrap();
+        let mut request = Request::new(SubscribeRequest {
+            event_types,
+            from_id: None,
+            shard_index: Some(shard_id),
+            fid_partitions: None,
+            fid_partition_index: None,
+        });
+        add_auth_header(&mut request, USER_NAME, PASSWORD);
+        let mut listener = service.subscribe(request).await.unwrap();
 
         let mut num_events_seen = 0;
 
@@ -140,11 +143,22 @@ mod tests {
 
         let db = Arc::new(db::RocksDB::new(db_path.to_str().unwrap()));
         db.open().unwrap();
-
         db
     }
 
-    async fn make_server() -> (
+    fn add_auth_header<T>(request: &mut Request<T>, username: &str, password: &str) {
+        let auth = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", username, password))
+        );
+        request
+            .metadata_mut()
+            .insert("authorization", auth.parse().unwrap());
+    }
+
+    async fn make_server(
+        rpc_auth: Option<String>,
+    ) -> (
         HashMap<u32, Stores>,
         HashMap<u32, Senders>,
         [ShardEngine; 2],
@@ -188,6 +202,7 @@ mod tests {
         let senders = HashMap::from([(1, shard1_senders), (2, shard2_senders)]);
         let num_shards = senders.len() as u32;
 
+        let auth = rpc_auth.unwrap_or_else(|| format!("{}:{}", USER_NAME, PASSWORD));
         let blocks_dir = tempfile::TempDir::new().unwrap();
         let blocks_store = BlockStore::new(make_db(&blocks_dir, "blocks.db"));
 
@@ -215,6 +230,7 @@ mod tests {
             senders.clone(),
             [engine1, engine2],
             MyHubService::new(
+                auth,
                 blocks_store,
                 stores,
                 senders,
@@ -229,7 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscribe_rpc() {
-        let (stores, senders, _, service) = make_server().await;
+        let (stores, senders, _, service) = make_server(None).await;
 
         let num_shard1_pre_existing_events = 10;
         let num_shard2_pre_existing_events = 20;
@@ -282,7 +298,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscribe_with_filter_rpc() {
-        let (stores, senders, _, service) = make_server().await;
+        let (stores, senders, _, service) = make_server(None).await;
 
         let num_shard1_pre_existing_events = 10;
         let num_shard2_pre_existing_events = 20;
@@ -325,23 +341,55 @@ mod tests {
 
     #[tokio::test]
     async fn test_submit_message_fails_with_error_for_invalid_messages() {
-        let (_stores, _senders, _, service) = make_server().await;
+        let (_stores, _senders, _, service) = make_server(None).await;
 
         // Message with no fid registration
         let invalid_message = messages_factory::casts::create_cast_add(123, "test", None, None);
 
-        let response = service
-            .submit_message(Request::new(invalid_message))
-            .await
-            .unwrap_err();
+        let mut request = Request::new(invalid_message);
+        add_auth_header(&mut request, USER_NAME, PASSWORD);
+
+        let response = service.submit_message(request).await.unwrap_err();
 
         assert_eq!(response.code(), tonic::Code::InvalidArgument);
         assert_eq!(response.message(), "Invalid message: missing fid");
     }
 
     #[tokio::test]
+    async fn test_authentication() {
+        let (_stores, _senders, _, service) =
+            make_server(Some("user1:pass1,user2:pass2".to_string())).await;
+        let message = messages_factory::casts::create_cast_add(123, "test", None, None);
+
+        let no_auth_request = Request::new(message.clone());
+        // Providing no auth fails
+        let response = service.submit_message(no_auth_request).await.unwrap_err();
+        assert_eq!(response.code(), tonic::Code::Unauthenticated);
+        assert_eq!(response.message(), "missing authorization header");
+
+        let mut invalid_creds_request = Request::new(message.clone());
+        add_auth_header(&mut invalid_creds_request, "user3", "pass1");
+        let response = service
+            .submit_message(invalid_creds_request)
+            .await
+            .unwrap_err();
+        assert_eq!(response.code(), tonic::Code::Unauthenticated);
+        assert_eq!(response.message(), "invalid username or password");
+
+        let mut valid_creds_request = Request::new(message.clone());
+        add_auth_header(&mut valid_creds_request, "user2", "pass2");
+        let response = service
+            .submit_message(valid_creds_request)
+            .await
+            .unwrap_err();
+        // Authenticated but no fid registration
+        assert_eq!(response.code(), tonic::Code::InvalidArgument);
+        assert_eq!(response.message(), "Invalid message: missing fid");
+    }
+
+    #[tokio::test]
     async fn test_good_ens_proof() {
-        let (_stores, _senders, [mut engine1, mut _engine2], service) = make_server().await;
+        let (_stores, _senders, [mut engine1, mut _engine2], service) = make_server(None).await;
         let signer = test_helper::default_signer();
         let owner = hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap();
         let fid = SHARD1_FID;
@@ -366,7 +414,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ens_proof_with_bad_owner() {
-        let (_stores, _senders, [mut engine1, mut _engine2], service) = make_server().await;
+        let (_stores, _senders, [mut engine1, mut _engine2], service) = make_server(None).await;
         let signer = test_helper::default_signer();
         let owner = test_helper::default_custody_address();
         let fid = SHARD1_FID;
@@ -391,7 +439,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ens_proof_with_bad_custody_address() {
-        let (_stores, _senders, [mut engine1, mut _engine2], service) = make_server().await;
+        let (_stores, _senders, [mut engine1, mut _engine2], service) = make_server(None).await;
         let signer = test_helper::default_signer();
         let owner = test_helper::default_custody_address();
         let fid = SHARD1_FID;
@@ -422,7 +470,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ens_proof_with_verified_address() {
-        let (_stores, _senders, [mut _engine1, mut engine2], service) = make_server().await;
+        let (_stores, _senders, [mut _engine1, mut engine2], service) = make_server(None).await;
         let signer = test_helper::default_signer();
         let fid = 2;
         let owner = test_helper::default_custody_address();
@@ -460,7 +508,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cast_apis() {
-        let (_, _, [mut engine1, mut engine2], service) = make_server().await;
+        let (_, _, [mut engine1, mut engine2], service) = make_server(None).await;
         let engine1 = &mut engine1;
         let engine2 = &mut engine2;
         test_helper::register_user(
@@ -603,7 +651,7 @@ mod tests {
     #[tokio::test]
     async fn test_storage_limits() {
         // Works with no storage
-        let (_, _, [mut engine1, _], service) = make_server().await;
+        let (_, _, [mut engine1, _], service) = make_server(None).await;
 
         let response = service
             .get_current_storage_limits_by_fid(FidRequest::for_fid(SHARD1_FID))
@@ -702,7 +750,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_info() {
-        let (_, _, [mut engine1, _], service) = make_server().await;
+        let (_, _, [mut engine1, _], service) = make_server(None).await;
 
         test_helper::register_user(
             SHARD1_FID,

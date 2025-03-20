@@ -26,12 +26,13 @@ pub async fn send_message(
 }
 
 pub async fn send_on_chain_event(
-    client: &mut AdminServiceClient<Channel>,
-    onchain_event: &OnChainEvent,
+    _client: &mut AdminServiceClient<Channel>,
+    _onchain_event: &OnChainEvent,
 ) -> Result<OnChainEvent, Box<dyn Error>> {
-    let request = tonic::Request::new(onchain_event.clone());
-    let response = client.submit_on_chain_event(request).await?;
-    Ok(response.into_inner())
+    // let request = tonic::Request::new(onchain_event.clone());
+    // let response = client.submit_on_chain_event(request).await?;
+    // Ok(response.into_inner())
+    Err("Not implemented".into())
 }
 
 pub fn compose_rent_event(fid: u64) -> OnChainEvent {

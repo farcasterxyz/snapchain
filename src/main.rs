@@ -6,7 +6,7 @@ use snapchain::connectors::onchain_events::{L1Client, RealL1Client};
 use snapchain::consensus::consensus::SystemMessage;
 use snapchain::mempool::mempool::{Mempool, MempoolSource, ReadNodeMempool};
 use snapchain::mempool::routing;
-use snapchain::network::admin_server::{DbManager, MyAdminService};
+use snapchain::network::admin_server::MyAdminService;
 use snapchain::network::gossip::{GossipEvent, SnapchainGossip};
 use snapchain::network::http_server::HubHttpServiceImpl;
 use snapchain::network::server::MyHubService;
@@ -50,11 +50,8 @@ async fn start_servers(
     let grpc_addr = app_config.rpc_address.clone();
     let grpc_socket_addr: SocketAddr = grpc_addr.parse().unwrap();
 
-    let mut db_manager = DbManager::new(app_config.rocksdb_dir.clone().as_str());
-    db_manager.maybe_destroy_databases().unwrap();
-
     let admin_service = MyAdminService::new(
-        db_manager,
+        app_config.admin_rpc_auth.clone(),
         mempool_tx.clone(),
         shard_stores.clone(),
         block_store.clone(),
@@ -64,6 +61,7 @@ async fn start_servers(
     );
 
     let service = Arc::new(MyHubService::new(
+        app_config.rpc_auth.clone(),
         block_store.clone(),
         shard_stores.clone(),
         shard_senders,
@@ -77,11 +75,14 @@ async fn start_servers(
     let grpc_shutdown_tx = shutdown_tx.clone();
     tokio::spawn(async move {
         info!(grpc_addr = grpc_addr, "GrpcService listening",);
-        let resp = Server::builder()
-            .add_service(HubServiceServer::from_arc(grpc_service))
-            .add_service(AdminServiceServer::new(admin_service))
-            .serve(grpc_socket_addr)
-            .await;
+        let mut server = Server::builder().add_service(HubServiceServer::from_arc(grpc_service));
+
+        if admin_service.enabled() {
+            let admin_service = AdminServiceServer::new(admin_service);
+            server = server.add_service(admin_service);
+        }
+
+        let resp = server.serve(grpc_socket_addr).await;
 
         let msg = "grpc server stopped";
         match resp {
