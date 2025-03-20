@@ -53,10 +53,12 @@ pub trait StoreDef: Send + Sync {
     fn is_compact_state_type(&self, message: &Message) -> bool;
 
     // If the store supports compaction state messages, this should return true
+    #[inline]
     fn compact_state_type_supported(&self) -> bool {
         self.compact_state_message_type() != MessageType::None as u8
     }
 
+    #[inline]
     fn build_secondary_indices(
         &self,
         _txn: &mut RocksDbTransactionBatch,
@@ -66,6 +68,7 @@ pub trait StoreDef: Send + Sync {
         Ok(())
     }
 
+    #[inline]
     fn delete_secondary_indices(
         &self,
         _txn: &mut RocksDbTransactionBatch,
@@ -209,6 +212,7 @@ pub trait StoreDef: Send + Sync {
         bytes_compare(&a_ts_hash[4..24], &b_ts_hash[4..24])
     }
 
+    #[inline]
     fn revoke_event_args(&self, message: &Message) -> HubEvent {
         HubEvent {
             r#type: HubEventType::RevokeMessage as i32,
@@ -219,6 +223,7 @@ pub trait StoreDef: Send + Sync {
         }
     }
 
+    #[inline]
     fn merge_event_args(&self, message: &Message, merge_conflicts: Vec<Message>) -> HubEvent {
         HubEvent {
             r#type: HubEventType::MergeMessage as i32,
@@ -230,6 +235,7 @@ pub trait StoreDef: Send + Sync {
         }
     }
 
+    #[inline]
     fn prune_event_args(&self, message: &Message) -> HubEvent {
         HubEvent {
             r#type: HubEventType::PruneMessage as i32,
@@ -279,10 +285,12 @@ impl<T: StoreDef + Clone> Store<T> {
         self.db.clone()
     }
 
+    #[inline]
     pub fn event_handler(&self) -> Arc<StoreEventHandler> {
         self.store_event_handler.clone()
     }
 
+    #[inline]
     pub fn postfix(&self) -> u8 {
         self.store_def.postfix()
     }

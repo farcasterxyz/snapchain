@@ -26,40 +26,54 @@ pub struct ReactionStoreDef {
 }
 
 impl StoreDef for ReactionStoreDef {
+    #[inline]
     fn postfix(&self) -> u8 {
         UserPostfix::ReactionMessage.as_u8()
     }
 
+    #[inline]
     fn add_message_type(&self) -> u8 {
         MessageType::ReactionAdd as u8
     }
 
+    #[inline]
     fn remove_message_type(&self) -> u8 {
         MessageType::ReactionRemove as u8
     }
 
+    #[inline]
     fn is_add_type(&self, message: &Message) -> bool {
+        if message.data.is_none() {
+            return false;
+        }
+        let data = message.data.as_ref().unwrap();
         message.signature_scheme == SignatureScheme::Ed25519 as i32
-            && message.data.is_some()
-            && message.data.as_ref().unwrap().r#type == MessageType::ReactionAdd as i32
-            && message.data.as_ref().unwrap().body.is_some()
+            && data.r#type == MessageType::ReactionAdd as i32
+            && data.body.is_some()
     }
 
+    #[inline]
     fn is_remove_type(&self, message: &Message) -> bool {
+        if message.data.is_none() {
+            return false;
+        }
+        let data = message.data.as_ref().unwrap();
         message.signature_scheme == SignatureScheme::Ed25519 as i32
-            && message.data.is_some()
-            && message.data.as_ref().unwrap().r#type == MessageType::ReactionRemove as i32
-            && message.data.as_ref().unwrap().body.is_some()
+            && data.r#type == MessageType::ReactionRemove as i32
+            && data.body.is_some()
     }
 
+    #[inline]
     fn compact_state_message_type(&self) -> u8 {
         MessageType::None as u8
     }
 
+    #[inline]
     fn is_compact_state_type(&self, _message: &Message) -> bool {
         false
     }
 
+    #[inline]
     fn build_secondary_indices(
         &self,
         txn: &mut RocksDbTransactionBatch,
@@ -73,6 +87,7 @@ impl StoreDef for ReactionStoreDef {
         Ok(())
     }
 
+    #[inline]
     fn delete_secondary_indices(
         &self,
         txn: &mut RocksDbTransactionBatch,
@@ -86,6 +101,7 @@ impl StoreDef for ReactionStoreDef {
         Ok(())
     }
 
+    #[inline]
     fn make_add_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
         let reaction_body = match message.data.as_ref().unwrap().body.as_ref().unwrap() {
             Body::ReactionBody(reaction_body) => reaction_body,
@@ -104,6 +120,7 @@ impl StoreDef for ReactionStoreDef {
         )
     }
 
+    #[inline]
     fn make_remove_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
         let reaction_body = match message.data.as_ref().unwrap().body.as_ref().unwrap() {
             Body::ReactionBody(reaction_body) => reaction_body,
@@ -122,6 +139,7 @@ impl StoreDef for ReactionStoreDef {
         )
     }
 
+    #[inline]
     fn make_compact_state_add_key(&self, _message: &Message) -> Result<Vec<u8>, HubError> {
         Err(HubError {
             code: "bad_request.invalid_param".to_string(),
@@ -129,6 +147,7 @@ impl StoreDef for ReactionStoreDef {
         })
     }
 
+    #[inline]
     fn make_compact_state_prefix(&self, _fid: u64) -> Result<Vec<u8>, HubError> {
         Err(HubError {
             code: "bad_request.invalid_param".to_string(),
@@ -136,6 +155,7 @@ impl StoreDef for ReactionStoreDef {
         })
     }
 
+    #[inline]
     fn get_prune_size_limit(&self) -> u32 {
         self.prune_size_limit
     }

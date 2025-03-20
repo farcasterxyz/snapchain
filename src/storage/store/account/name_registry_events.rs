@@ -11,6 +11,7 @@ use crate::{
 
 use super::{get_from_db_or_txn, make_fid_key};
 
+#[inline]
 pub fn make_fname_username_proof_key(name: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(1 + 32);
     key.push(RootPrefix::FNameUserNameProof as u8);
@@ -18,6 +19,7 @@ pub fn make_fname_username_proof_key(name: &[u8]) -> Vec<u8> {
     key
 }
 
+#[inline]
 pub fn make_fname_username_proof_by_fid_key(fid: u64) -> Vec<u8> {
     let mut key = Vec::with_capacity(1 + 4);
 
@@ -67,6 +69,7 @@ pub fn get_fname_proof_by_fid(db: &RocksDB, fid: u64) -> Result<Option<UserNameP
     }
 }
 
+#[inline]
 pub fn put_username_proof_transaction(
     txn: &mut RocksDbTransactionBatch,
     username_proof: &UserNameProof,
@@ -80,6 +83,7 @@ pub fn put_username_proof_transaction(
     txn.put(secondary_key, primary_key);
 }
 
+#[inline]
 pub fn delete_username_proof_transaction(
     txn: &mut RocksDbTransactionBatch,
     username_proof: &UserNameProof,

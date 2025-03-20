@@ -50,30 +50,41 @@ pub struct CastStoreDef {
 }
 
 impl StoreDef for CastStoreDef {
+    #[inline]
     fn postfix(&self) -> u8 {
         UserPostfix::CastMessage as u8
     }
 
+    #[inline]
     fn add_message_type(&self) -> u8 {
         MessageType::CastAdd as u8
     }
 
+    #[inline]
     fn remove_message_type(&self) -> u8 {
         MessageType::CastRemove as u8
     }
 
+    #[inline]
     fn is_add_type(&self, message: &Message) -> bool {
+        if message.data.is_none() {
+            return false;
+        }
+        let data = message.data.as_ref().unwrap();
         message.signature_scheme == message::SignatureScheme::Ed25519 as i32
-            && message.data.is_some()
-            && message.data.as_ref().unwrap().r#type == MessageType::CastAdd as i32
-            && message.data.as_ref().unwrap().body.is_some()
+            && data.r#type == MessageType::CastAdd as i32
+            && data.body.is_some()
     }
 
+    #[inline]
     fn is_remove_type(&self, message: &Message) -> bool {
+        if message.data.is_none() {
+            return false;
+        }
+        let data = message.data.as_ref().unwrap();
         message.signature_scheme == message::SignatureScheme::Ed25519 as i32
-            && message.data.is_some()
-            && message.data.as_ref().unwrap().r#type == MessageType::CastRemove as i32
-            && message.data.as_ref().unwrap().body.is_some()
+            && data.r#type == MessageType::CastRemove as i32
+            && data.body.is_some()
     }
 
     fn compact_state_message_type(&self) -> u8 {
@@ -188,6 +199,7 @@ impl StoreDef for CastStoreDef {
         ))
     }
 
+    #[inline]
     fn make_compact_state_add_key(&self, _message: &Message) -> Result<Vec<u8>, HubError> {
         Err(HubError {
             code: "bad_request.invalid_param".to_string(),
@@ -195,6 +207,7 @@ impl StoreDef for CastStoreDef {
         })
     }
 
+    #[inline]
     fn make_compact_state_prefix(&self, _fid: u64) -> Result<Vec<u8>, HubError> {
         Err(HubError {
             code: "bad_request.invalid_param".to_string(),
@@ -202,6 +215,7 @@ impl StoreDef for CastStoreDef {
         })
     }
 
+    #[inline]
     fn get_prune_size_limit(&self) -> u32 {
         self.prune_size_limit
     }
@@ -237,6 +251,7 @@ impl CastStoreDef {
     }
 
     // Generates unique keys used to store or fetch CastAdd messages in the byParentKey index
+    #[inline]
     pub fn make_cast_by_parent_key(
         parent: &Parent,
         fid: u64,
@@ -246,8 +261,10 @@ impl CastStoreDef {
 
         key.push(RootPrefix::CastsByParent as u8); // CastsByParent prefix, 1 byte
         key.extend_from_slice(&Self::make_parent_key(parent));
-        if ts_hash.is_some() && ts_hash.unwrap().len() == TS_HASH_LENGTH {
-            key.extend_from_slice(ts_hash.unwrap());
+        if let Some(ts_hash_val) = ts_hash {
+            if ts_hash_val.len() == TS_HASH_LENGTH {
+                key.extend_from_slice(ts_hash_val);
+            }
         }
         if fid > 0 {
             key.extend_from_slice(&make_fid_key(fid));
@@ -256,6 +273,7 @@ impl CastStoreDef {
         key
     }
 
+    #[inline]
     pub fn make_parent_key(target: &Parent) -> Vec<u8> {
         match target {
             Parent::ParentUrl(url) => url.as_bytes().to_vec(),
@@ -294,6 +312,7 @@ impl CastStoreDef {
     }
 
     // Generates unique keys used to store or fetch CastAdd messages in the adds set index
+    #[inline]
     pub fn make_cast_adds_key(fid: u64, hash: &Vec<u8>) -> Vec<u8> {
         let mut key = Vec::with_capacity(5 + 1 + 20);
 
@@ -307,6 +326,7 @@ impl CastStoreDef {
     }
 
     // Generates unique keys used to store or fetch CastAdd messages in the byMention key index
+    #[inline]
     pub fn make_cast_by_mention_key(
         mention: u64,
         fid: u64,
@@ -325,6 +345,7 @@ impl CastStoreDef {
     }
 
     // Generates unique keys used to store or fetch CastRemove messages in the removes set index
+    #[inline]
     pub fn make_cast_removes_key(fid: u64, hash: &Vec<u8>) -> Vec<u8> {
         let mut key = Vec::with_capacity(5 + 1 + 20);
 

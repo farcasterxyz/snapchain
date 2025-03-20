@@ -451,46 +451,61 @@ impl LinkStore {
 }
 
 impl StoreDef for LinkStore {
+    #[inline]
     fn postfix(&self) -> u8 {
         UserPostfix::LinkMessage.as_u8()
     }
 
+    #[inline]
     fn add_message_type(&self) -> u8 {
         MessageType::LinkAdd as u8
     }
 
+    #[inline]
     fn remove_message_type(&self) -> u8 {
         MessageType::LinkRemove as u8
     }
 
+    #[inline]
     fn compact_state_message_type(&self) -> u8 {
         MessageType::LinkCompactState as u8
     }
 
+    #[inline]
     fn is_add_type(&self, message: &Message) -> bool {
+        if message.data.is_none() {
+            return false;
+        }
+        let data = message.data.as_ref().unwrap();
         message.signature_scheme == SignatureScheme::Ed25519 as i32
-            && message.data.is_some()
-            && message.data.as_ref().is_some_and(|data| {
-                data.r#type == MessageType::LinkAdd as i32 && data.body.is_some()
-            })
+            && data.r#type == MessageType::LinkAdd as i32
+            && data.body.is_some()
     }
 
+    #[inline]
     fn is_remove_type(&self, message: &Message) -> bool {
+        if message.data.is_none() {
+            return false;
+        }
+        let data = message.data.as_ref().unwrap();
         message.signature_scheme == SignatureScheme::Ed25519 as i32
-            && message.data.is_some()
-            && message.data.as_ref().is_some_and(|data| {
-                data.r#type == MessageType::LinkRemove as i32 && data.body.is_some()
-            })
+            && data.r#type == MessageType::LinkRemove as i32
+            && data.body.is_some()
     }
 
+    #[inline]
     fn is_compact_state_type(&self, message: &Message) -> bool {
+        if message.data.is_none() {
+            return false;
+        }
+        let data = message.data.as_ref().unwrap();
         message.signature_scheme == SignatureScheme::Ed25519 as i32
             && message.data.is_some()
-            && message.data.as_ref().is_some_and(|data| {
-                data.r#type == MessageType::LinkCompactState as i32 && data.body.is_some()
-            })
+            && data.r#type == MessageType::LinkCompactState as i32
+            && data.body.is_some()
     }
 
+    #[inline]
     fn build_secondary_indices(
         &self,
         txn: &mut RocksDbTransactionBatch,
@@ -504,6 +519,7 @@ impl StoreDef for LinkStore {
         Ok(())
     }
 
+    #[inline]
     fn delete_secondary_indices(
         &self,
         txn: &mut RocksDbTransactionBatch,
@@ -540,6 +556,7 @@ impl StoreDef for LinkStore {
             })
     }
 
+    #[inline]
     fn make_compact_state_prefix(&self, fid: u64) -> Result<Vec<u8>, HubError> {
         let mut prefix =
             Vec::with_capacity(Self::ROOT_PREFIXED_FID_BYTE_SIZE + Self::POSTFIX_BYTE_SIZE);
@@ -550,16 +567,19 @@ impl StoreDef for LinkStore {
         Ok(prefix)
     }
 
+    #[inline]
     fn make_add_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
         // Type bytes must be padded to 8 bytes, but we had a bug which allowed unpadded types,
         // so this function allows access to both types of keys
         Self::make_add_key(message)
     }
 
+    #[inline]
     fn make_remove_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
         Self::make_remove_key(message)
     }
 
+    #[inline]
     fn get_prune_size_limit(&self) -> u32 {
         self.prune_size_limit
     }

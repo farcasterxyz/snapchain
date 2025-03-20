@@ -424,6 +424,7 @@ impl OnchainEventStore {
         Ok(onchain_events)
     }
 
+    #[inline]
     pub fn get_id_register_event_by_fid(
         &self,
         fid: u64,
@@ -466,6 +467,7 @@ impl OnchainEventStore {
         Ok(storage_slot)
     }
 
+    #[inline]
     pub fn exists(&self, onchain_event: &OnChainEvent) -> Result<bool, OnchainEventStorageError> {
         let primary_key = make_onchain_event_primary_key(onchain_event);
         match self.db.get(&primary_key)? {

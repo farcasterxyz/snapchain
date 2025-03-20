@@ -80,6 +80,7 @@ pub fn type_to_set_postfix(message_type: MessageType) -> Result<UserPostfix, Hub
     });
 }
 
+#[inline]
 pub fn make_ts_hash(timestamp: u32, hash: &Vec<u8>) -> Result<[u8; TS_HASH_LENGTH], HubError> {
     // No need to check if timestamp > 2^32 because it's already a u32
 
@@ -111,11 +112,13 @@ pub fn unpack_ts_hash(ts_hash: &[u8; TS_HASH_LENGTH]) -> (u32, [u8; HASH_LENGTH]
     (timestamp, hash)
 }
 
+#[inline]
 pub fn make_fid_key(fid: u64) -> Vec<u8> {
     // Downcast to u32, since on disk, we only assume 4 bytes for the fid to save space
     (fid as FidOnDisk).to_be_bytes().to_vec()
 }
 
+#[inline]
 pub fn read_fid_key(key: &[u8], offset: usize) -> u64 {
     let mut fid_bytes = [0u8; FID_BYTES];
     fid_bytes.copy_from_slice(&key[offset..offset + FID_BYTES]);
@@ -123,12 +126,14 @@ pub fn read_fid_key(key: &[u8], offset: usize) -> u64 {
     u32::from_be_bytes(fid_bytes) as u64
 }
 
+#[inline]
 pub fn read_ts_hash(key: &[u8], offset: usize) -> [u8; TS_HASH_LENGTH] {
     let mut ts_hash = [0u8; TS_HASH_LENGTH];
     ts_hash.copy_from_slice(&key[offset..offset + TS_HASH_LENGTH]);
     ts_hash
 }
 
+#[inline]
 pub fn make_user_key(fid: u64) -> Vec<u8> {
     let mut key = Vec::with_capacity(1 + 4);
     key.push(RootPrefix::User as u8);
@@ -138,6 +143,7 @@ pub fn make_user_key(fid: u64) -> Vec<u8> {
     key
 }
 
+#[inline]
 pub fn make_message_primary_key(
     fid: u64,
     set: u8,
@@ -153,6 +159,7 @@ pub fn make_message_primary_key(
     key
 }
 
+#[inline]
 pub fn make_cast_id_key(cast_id: &CastId) -> Vec<u8> {
     let mut key = Vec::with_capacity(4 + HASH_LENGTH);
     key.extend_from_slice(&make_fid_key(cast_id.fid));
@@ -161,6 +168,7 @@ pub fn make_cast_id_key(cast_id: &CastId) -> Vec<u8> {
     key
 }
 
+#[inline]
 pub fn get_message(
     db: &RocksDB,
     txn: &mut RocksDbTransactionBatch,
@@ -273,6 +281,7 @@ where
     })
 }
 
+#[inline]
 pub fn message_encode(message: &MessageProto) -> Vec<u8> {
     if message.data_bytes.is_some() && message.data_bytes.as_ref().unwrap().len() > 0 {
         // Clone the message
@@ -285,6 +294,7 @@ pub fn message_encode(message: &MessageProto) -> Vec<u8> {
     }
 }
 
+#[inline]
 pub fn message_bytes_decode(msg: &mut MessageProto) {
     if msg.data.is_none() && msg.data_bytes.is_some() && msg.data_bytes.as_ref().unwrap().len() > 0
     {
@@ -294,6 +304,7 @@ pub fn message_bytes_decode(msg: &mut MessageProto) {
     }
 }
 
+#[inline]
 pub fn message_decode(bytes: &[u8]) -> Result<MessageProto, RocksdbError> {
     if let Ok(mut msg) = MessageProto::decode(bytes) {
         message_bytes_decode(&mut msg);
@@ -307,12 +318,12 @@ pub fn put_message_transaction(
     txn: &mut RocksDbTransactionBatch,
     message: &MessageProto,
 ) -> Result<(), HubError> {
-    let ts_hash = make_ts_hash(message.data.as_ref().unwrap().timestamp, &message.hash)?;
+    let data = message.data.as_ref().unwrap();
+    let ts_hash = make_ts_hash(data.timestamp, &message.hash)?;
 
     let primary_key = make_message_primary_key(
-        message.data.as_ref().unwrap().fid,
-        type_to_set_postfix(MessageType::try_from(message.data.as_ref().unwrap().r#type).unwrap())?
-            as u8,
+        data.fid,
+        type_to_set_postfix(MessageType::try_from(data.r#type).unwrap())? as u8,
         Some(&ts_hash),
     );
     txn.put(primary_key, message_encode(&message));
@@ -324,12 +335,12 @@ pub fn delete_message_transaction(
     txn: &mut RocksDbTransactionBatch,
     message: &MessageProto,
 ) -> Result<(), HubError> {
-    let ts_hash = make_ts_hash(message.data.as_ref().unwrap().timestamp, &message.hash)?;
+    let data = message.data.as_ref().unwrap();
+    let ts_hash = make_ts_hash(data.timestamp, &message.hash)?;
 
     let primary_key = make_message_primary_key(
-        message.data.as_ref().unwrap().fid,
-        type_to_set_postfix(MessageType::try_from(message.data.as_ref().unwrap().r#type).unwrap())?
-            as u8,
+        data.fid,
+        type_to_set_postfix(MessageType::try_from(data.r#type).unwrap())? as u8,
         Some(&ts_hash),
     );
     txn.delete(primary_key);

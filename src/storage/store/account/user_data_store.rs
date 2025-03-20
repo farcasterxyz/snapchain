@@ -31,37 +31,48 @@ pub struct UserDataStoreDef {
 }
 
 impl StoreDef for UserDataStoreDef {
+    #[inline]
     fn postfix(&self) -> u8 {
         UserPostfix::UserDataMessage as u8
     }
 
+    #[inline]
     fn add_message_type(&self) -> u8 {
         MessageType::UserDataAdd as u8
     }
 
+    #[inline]
     fn remove_message_type(&self) -> u8 {
         MessageType::None as u8
     }
 
+    #[inline]
     fn is_add_type(&self, message: &proto::Message) -> bool {
+        if message.data.is_none() {
+            return false;
+        }
+        let data = message.data.as_ref().unwrap();
         message.signature_scheme == SignatureScheme::Ed25519 as i32
-            && message.data.is_some()
-            && message.data.as_ref().unwrap().r#type == MessageType::UserDataAdd as i32
-            && message.data.as_ref().unwrap().body.is_some()
+            && data.r#type == MessageType::UserDataAdd as i32
+            && data.body.is_some()
     }
 
+    #[inline]
     fn is_remove_type(&self, _message: &proto::Message) -> bool {
         false
     }
 
+    #[inline]
     fn compact_state_message_type(&self) -> u8 {
         MessageType::None as u8
     }
 
+    #[inline]
     fn is_compact_state_type(&self, _message: &proto::Message) -> bool {
         false
     }
 
+    #[inline]
     fn make_add_key(&self, message: &proto::Message) -> Result<Vec<u8>, HubError> {
         let user_data_body = match message.data.as_ref().unwrap().body.as_ref().unwrap() {
             Body::UserDataBody(body) => body,
@@ -80,6 +91,7 @@ impl StoreDef for UserDataStoreDef {
         Ok(key)
     }
 
+    #[inline]
     fn make_remove_key(&self, _message: &proto::Message) -> Result<Vec<u8>, HubError> {
         Err(HubError {
             code: "bad_request.invalid_param".to_string(),
@@ -87,6 +99,7 @@ impl StoreDef for UserDataStoreDef {
         })
     }
 
+    #[inline]
     fn make_compact_state_add_key(&self, _message: &proto::Message) -> Result<Vec<u8>, HubError> {
         Err(HubError {
             code: "bad_request.invalid_param".to_string(),
@@ -94,6 +107,7 @@ impl StoreDef for UserDataStoreDef {
         })
     }
 
+    #[inline]
     fn make_compact_state_prefix(&self, _fid: u64) -> Result<Vec<u8>, HubError> {
         Err(HubError {
             code: "bad_request.invalid_param".to_string(),
@@ -101,6 +115,7 @@ impl StoreDef for UserDataStoreDef {
         })
     }
 
+    #[inline]
     fn get_prune_size_limit(&self) -> u32 {
         self.prune_size_limit
     }
@@ -114,6 +129,7 @@ impl UserDataStoreDef {
      * @param dataType type of data being added
      * @returns RocksDB key of the form <root_prefix>:<fid>:<user_postfix>:<dataType?>
      */
+    #[inline]
     fn make_user_data_adds_key(fid: u64, data_type: i32) -> Vec<u8> {
         let mut key = Vec::with_capacity(33 + 1 + 1);
 
