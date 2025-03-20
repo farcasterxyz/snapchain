@@ -4,9 +4,11 @@ use crate::proto;
 use crate::proto::{Block, BlockHeader};
 use crate::storage::constants::RootPrefix;
 use crate::storage::db::{PageOptions, RocksDB, RocksdbError};
+use chrono::Duration;
 use prost::Message;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::oneshot;
 use tracing::error;
 
 // TODO(aditi): This code definitely needs unit tests
@@ -239,51 +241,61 @@ impl BlockStore {
         )
     }
 
-    // TODO: remove
-    pub fn some_method(&self) -> Result<(), BlockStorageError> {
-        eprintln!("Placeholder for some method");
-        Ok(())
-    }
-
     // Prune one page of blocks as specified by page_options from height 0 until
-    // but excluding the first block that matches the condition `f`. Returns the
-    // number of blocks pruned, and a boolean which is true if iteration stopped
-    // due to a block matching the condition, false otherwise.
-    pub fn prune_until<F>(
+    // but excluding stop_height. Returns the number of blocks pruned.
+    fn prune_page(
         &self,
+        stop_height: u64,
         page_options: &PageOptions,
-        f: F,
-    ) -> Result<(u32, bool), BlockStorageError>
-    where
-        F: Fn(&BlockHeader) -> bool,
-    {
-        let page = get_block_page_by_prefix(&self.db, &page_options, None, None)?;
+    ) -> Result<u32, BlockStorageError> {
         let mut txn = self.db.txn();
-        let mut done = false;
-        let mut count = 0u32;
-        for block in page.blocks {
-            let header = block
-                .header
-                .as_ref()
-                .ok_or(BlockStorageError::BlockMissingHeader)?;
-            if !f(&header) {
-                let height = header
-                    .height
-                    .as_ref()
-                    .ok_or(BlockStorageError::BlockMissingHeight)?;
-                let primary_key = make_block_key(height.block_number);
-                txn.delete(primary_key);
-                count += 1;
-            } else {
-                done = true;
-                break; // Stop pruning once we find a block matching the condition
-            }
-        }
 
+        let stop_prefix = make_block_key(stop_height);
+        self.db
+            .for_each_iterator_by_prefix_paged(None, Some(stop_prefix), page_options, |key, _| {
+                txn.delete(key.to_vec());
+                Ok(false) // Continue iterating
+            })
+            .map_err(|_| BlockStorageError::TooManyBlocksInResult)?; // TODO: Return the right error
+
+        let count = txn.len() as u32;
         self.db
             .commit(txn)
             .map_err(|e| BlockStorageError::from(e))?;
-        Ok((count, done))
+        Ok(count)
+    }
+
+    // Prune blocks with height less than stop_height. Returns the total number
+    // of blocks pruned. Sleeps after each page for the throttle duration and
+    // will stop if a shutdown is requested.
+    pub fn prune_until(
+        &self,
+        stop_height: u64,
+        throttle: Duration,
+        mut shutdown_rx: Option<oneshot::Receiver<()>>,
+        page_options: &PageOptions,
+    ) -> Result<u32, BlockStorageError> {
+        let mut total_pruned = 0u32;
+        loop {
+            if let Some(shutdown_rx) = &mut shutdown_rx {
+                if shutdown_rx.try_recv().is_ok() {
+                    break; // Shutdown requested
+                }
+            }
+
+            let count = self.prune_page(stop_height, page_options)?;
+            total_pruned += count;
+
+            if count == 0 {
+                break; // No more blocks to prune
+            }
+
+            // Sleep for the specified throttle duration
+            if throttle > Duration::zero() {
+                std::thread::sleep(throttle.to_std().unwrap());
+            }
+        }
+        Ok(total_pruned)
     }
 }
 
@@ -316,48 +328,65 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_prune_until() {
+    fn setup_db(blocks: u64) -> BlockStore {
         let blocks_dir = tempfile::tempdir().unwrap();
         let db = make_db(&blocks_dir, "test_db");
         let store = BlockStore::new(db);
 
         let number_to_timestamp = |n| n * 100;
         // Add some blocks to the db for testing
-        (1..=100).for_each(|i| {
+        (1..=blocks).for_each(|i| {
             let block = make_block(i, number_to_timestamp(i));
             store.put_block(&block).unwrap();
         });
 
-        let cutoff_block = 42;
-        let cutoff_timestamp = number_to_timestamp(cutoff_block);
+        store
+    }
+
+    fn expect_first_block_height(store: &BlockStore, block_height: u64) {
+        let page = store
+            .get_blocks(0, None, &PageOptions::default())
+            .expect("Failed to get blocks");
+        assert!(page.blocks.len() > 0);
+        let header = page.blocks[0].header.as_ref().unwrap();
+        assert!(block_height == header.height.expect("Missing height").block_number);
+    }
+
+    #[test]
+    fn test_prune_until() {
+        let store = setup_db(100);
+
+        let stop_height = 42;
         let page_size = 10;
         let page_options = PageOptions {
             page_size: Some(page_size),
             ..PageOptions::default()
         };
+        let pruned = store
+            .prune_until(stop_height, Duration::zero(), None, &page_options)
+            .expect("Failed to prune blocks");
 
-        let mut pruned = 0u32;
-        loop {
-            let (count, done) = store
-                .prune_until(&page_options, |header| header.timestamp >= cutoff_timestamp)
-                .unwrap();
-            pruned += count;
-            assert!(count <= page_size as u32);
-            let expected_done = pruned as u64 == cutoff_block - 1;
-            assert_eq!(expected_done, done);
+        assert_eq!((stop_height - 1) as u32, pruned);
+        expect_first_block_height(&store, stop_height);
+    }
 
-            if done {
-                break;
-            }
-        }
+    #[test]
+    fn test_prune_until_cancellation() {
+        let store = setup_db(100);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        shutdown_tx.send(()).unwrap();
 
-        // Verify that first block after pruning is the cutoff block
-        let page = store
-            .get_blocks(0, None, &page_options)
-            .expect("Failed to get blocks");
-        assert!(page.blocks.len() > 0);
-        let header = page.blocks[0].header.as_ref().unwrap();
-        assert!(cutoff_block == header.height.expect("Missing height").block_number);
+        let stop_height = 42;
+        let pruned = store
+            .prune_until(
+                stop_height,
+                Duration::zero(),
+                Some(shutdown_rx),
+                &PageOptions::default(),
+            )
+            .expect("Failed to prune blocks");
+
+        assert_eq!(0, pruned);
+        expect_first_block_height(&store, 1);
     }
 }
