@@ -1,4 +1,4 @@
-use super::rpc_extensions::{AsMessagesResponse, AsSingleMessageResponse};
+use super::rpc_extensions::{authenticate_request, AsMessagesResponse, AsSingleMessageResponse};
 use crate::connectors::onchain_events::L1Client;
 use crate::core::error::HubError;
 use crate::core::util::get_farcaster_time;
@@ -59,12 +59,10 @@ use crate::storage::store::engine::{MempoolMessage, Senders, ShardEngine};
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
-use base64::Engine;
 use hex::ToHex;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
 
@@ -112,49 +110,6 @@ impl MyHubService {
             mempool_tx,
         };
         service
-    }
-
-    fn authenticate_user(&self, metadata_map: &MetadataMap) -> Result<(), Status> {
-        if self.allowed_users.is_empty() {
-            return Ok(());
-        }
-
-        // Check for Basic Auth
-        if let Some(auth) = metadata_map.get("authorization") {
-            let auth = auth.to_str().map_err(|_| {
-                Status::unauthenticated("authorization header is not a valid string")
-            })?;
-            let parts: Vec<&str> = auth.split_whitespace().collect();
-            if parts.len() != 2 {
-                return Err(Status::unauthenticated("invalid authorization header"));
-            }
-            if parts[0] != "Basic" {
-                return Err(Status::unauthenticated("invalid authorization header"));
-            }
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(parts[1])
-                .map_err(|_| {
-                    Status::unauthenticated("authorization header is not a valid base64 string")
-                })?;
-            let decoded = String::from_utf8(decoded).map_err(|_| {
-                Status::unauthenticated("authorization header is not a valid utf8 string")
-            })?;
-            let parts: Vec<&str> = decoded.split(":").collect();
-            if parts.len() != 2 {
-                return Err(Status::unauthenticated("invalid authorization header"));
-            }
-            if let Some(password) = self.allowed_users.get(parts[0]) {
-                if password == parts[1] {
-                    Ok(())
-                } else {
-                    Err(Status::unauthenticated("invalid username or password"))
-                }
-            } else {
-                Err(Status::unauthenticated("invalid username or password"))
-            }
-        } else {
-            Err(Status::unauthenticated("missing authorization header"))
-        }
     }
 
     async fn submit_message_internal(
@@ -442,7 +397,7 @@ impl HubService for MyHubService {
     ) -> Result<Response<proto::Message>, Status> {
         let start_time = std::time::Instant::now();
 
-        self.authenticate_user(&request.metadata())?;
+        authenticate_request(&request, &self.allowed_users)?;
 
         let hash = request.get_ref().hash.encode_hex::<String>();
         debug!(hash, "Received call to [submit_message] RPC");
@@ -611,7 +566,7 @@ impl HubService for MyHubService {
         &self,
         request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
-        self.authenticate_user(&request.metadata())?;
+        authenticate_request(&request, &self.allowed_users)?;
 
         info!("Received call to [subscribe] RPC");
         let (server_tx, client_rx) = mpsc::channel::<Result<HubEvent, Status>>(100);

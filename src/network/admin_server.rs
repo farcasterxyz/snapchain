@@ -1,76 +1,25 @@
-use crate::mempool::mempool::{MempoolMessageWithSource, MempoolSource};
+use crate::mempool::mempool::MempoolMessageWithSource;
+use crate::network::rpc_extensions::authenticate_request;
 use crate::proto::admin_service_server::AdminService;
-use crate::proto::{self, Empty, FarcasterNetwork, FnameTransfer, OnChainEvent};
-use crate::proto::{UserNameProof, ValidatorMessage};
+use crate::proto::{Empty, FarcasterNetwork};
 use crate::storage;
 use crate::storage::db::snapshot::clear_snapshots;
 use crate::storage::db::RocksDB;
-use crate::storage::store::engine::MempoolMessage;
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use rocksdb;
 use std::collections::HashMap;
+use std::io;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{io, path, process};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
-use tracing::{error, info, warn};
-
-pub struct DbManager {
-    db_dir: String,
-    admin_db_dir: String,
-    db: Option<rocksdb::TransactionDB>,
-}
-
-impl DbManager {
-    pub fn new(db_dir: &str) -> Self {
-        let admin_db_dir = path::Path::new(db_dir)
-            .join("admin")
-            .to_string_lossy()
-            .into_owned();
-
-        Self {
-            db_dir: db_dir.to_string(),
-            admin_db_dir,
-            db: None,
-        }
-    }
-
-    pub fn maybe_destroy_databases(&mut self) -> Result<(), AdminServiceError> {
-        let db = rocksdb::TransactionDB::open_default(&self.admin_db_dir)?;
-        if db.get(DB_DESTROY_KEY)?.is_some() {
-            db.delete(DB_DESTROY_KEY)?; // we're about to remove but do this anyway
-            drop(db);
-            warn!(db_dir = &self.db_dir, "destroying all databases");
-            std::fs::remove_dir_all(&self.db_dir)?;
-            let db = rocksdb::TransactionDB::open_default(&self.admin_db_dir)?;
-            self.db.replace(db);
-        } else {
-            self.db.replace(db);
-        }
-
-        Ok(())
-    }
-
-    fn schedule_destruction(&self) -> Result<(), Status> {
-        if let Some(ref db) = self.db {
-            db.put(DB_DESTROY_KEY, &[]).map_err(|err| {
-                Status::internal(format!(
-                    "failed to schedule destruction of databases: {}",
-                    err,
-                ))
-            })
-        } else {
-            Err(Status::internal("admin database is not open"))
-        }
-    }
-}
+use tracing::{error, info};
 
 pub struct MyAdminService {
-    db_manager: DbManager,
+    allowed_users: HashMap<String, String>,
     pub mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
     snapshot_config: storage::db::snapshot::Config,
     shard_stores: HashMap<u32, Stores>,
@@ -88,11 +37,9 @@ pub enum AdminServiceError {
     IoError(#[from] io::Error),
 }
 
-const DB_DESTROY_KEY: &[u8] = b"__destroy_all_databases_on_start__";
-
 impl MyAdminService {
     pub fn new(
-        db_manager: DbManager,
+        rpc_auth: String,
         mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
         shard_stores: HashMap<u32, Stores>,
         block_store: BlockStore,
@@ -100,8 +47,16 @@ impl MyAdminService {
         fc_network: FarcasterNetwork,
         statsd_client: StatsdClientWrapper,
     ) -> Self {
+        let mut allowed_users = HashMap::new();
+        for auth in rpc_auth.split(",") {
+            let parts: Vec<&str> = auth.split(":").collect();
+            if parts.len() == 2 {
+                allowed_users.insert(parts[0].to_string(), parts[1].to_string());
+            }
+        }
+
         Self {
-            db_manager,
+            allowed_users,
             mempool_tx,
             shard_stores,
             block_store,
@@ -109,6 +64,10 @@ impl MyAdminService {
             fc_network,
             statsd_client,
         }
+    }
+
+    pub fn enabled(&self) -> bool {
+        !self.allowed_users.is_empty()
     }
 
     async fn backup_and_upload(
@@ -141,103 +100,82 @@ impl MyAdminService {
 
 #[tonic::async_trait]
 impl AdminService for MyAdminService {
-    async fn terminate(
-        &self,
-        request: Request<proto::TerminateRequest>,
-    ) -> Result<Response<proto::TerminateResponse>, Status> {
-        let destroy_database = request.get_ref().destroy_database;
+    // This should probably go in a separate "DebugService" that's not mounted for production
 
-        if destroy_database {
-            if let Err(err) = self.db_manager.schedule_destruction() {
-                const TEXT: &str = "failed to schedule database destruction";
-                warn!(err = err.to_string(), TEXT);
-                return Err(Status::internal(format!("{}: {}", TEXT, err)));
-            }
-        }
-
-        tokio::spawn(async move {
-            warn!(destroy_database, "terminate scheduled");
-
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            process::exit(0);
-        });
-
-        let response = Response::new(proto::TerminateResponse {});
-        Ok(response)
-    }
-
-    async fn submit_on_chain_event(
-        &self,
-        request: Request<OnChainEvent>,
-    ) -> Result<Response<OnChainEvent>, Status> {
-        info!("Received call to [submit_on_chain_event] RPC");
-
-        let onchain_event = request.into_inner();
-
-        let fid = onchain_event.fid;
-        if fid == 0 {
-            return Err(Status::invalid_argument(
-                "no fid or invalid fid".to_string(),
-            ));
-        }
-
-        let result = self.mempool_tx.try_send((
-            MempoolMessage::ValidatorMessage(ValidatorMessage {
-                on_chain_event: Some(onchain_event.clone()),
-                fname_transfer: None,
-            }),
-            MempoolSource::RPC,
-        ));
-
-        match result {
-            Ok(()) => {
-                let response = Response::new(onchain_event);
-                Ok(response)
-            }
-            Err(err) => Err(Status::from_error(Box::new(err))),
-        }
-    }
-
-    async fn submit_user_name_proof(
-        &self,
-        request: Request<UserNameProof>,
-    ) -> Result<Response<UserNameProof>, Status> {
-        info!("Received call to [submit_user_name_proof] RPC");
-
-        let username_proof = request.into_inner();
-
-        let fid = username_proof.fid;
-        if fid == 0 {
-            return Err(Status::invalid_argument(
-                "no fid or invalid fid".to_string(),
-            ));
-        }
-
-        let result = self.mempool_tx.try_send((
-            MempoolMessage::ValidatorMessage(ValidatorMessage {
-                on_chain_event: None,
-                fname_transfer: Some(FnameTransfer {
-                    id: username_proof.fid,
-                    from_fid: 0, // Assume the username is being transfer from the "root" fid to the one in the username proof
-                    proof: Some(username_proof.clone()),
-                }),
-            }),
-            MempoolSource::RPC,
-        ));
-
-        match result {
-            Ok(()) => {
-                let response = Response::new(username_proof);
-                Ok(response)
-            }
-            Err(err) => Err(Status::from_error(Box::new(err))),
-        }
-    }
+    // async fn submit_on_chain_event(
+    //     &self,
+    //     request: Request<OnChainEvent>,
+    // ) -> Result<Response<OnChainEvent>, Status> {
+    //     info!("Received call to [submit_on_chain_event] RPC");
+    //
+    //     let onchain_event = request.into_inner();
+    //
+    //     let fid = onchain_event.fid;
+    //     if fid == 0 {
+    //         return Err(Status::invalid_argument(
+    //             "no fid or invalid fid".to_string(),
+    //         ));
+    //     }
+    //
+    //     let result = self.mempool_tx.try_send((
+    //         MempoolMessage::ValidatorMessage(ValidatorMessage {
+    //             on_chain_event: Some(onchain_event.clone()),
+    //             fname_transfer: None,
+    //         }),
+    //         MempoolSource::RPC,
+    //     ));
+    //
+    //     match result {
+    //         Ok(()) => {
+    //             let response = Response::new(onchain_event);
+    //             Ok(response)
+    //         }
+    //         Err(err) => Err(Status::from_error(Box::new(err))),
+    //     }
+    // }
+    //
+    // async fn submit_user_name_proof(
+    //     &self,
+    //     request: Request<UserNameProof>,
+    // ) -> Result<Response<UserNameProof>, Status> {
+    //     info!("Received call to [submit_user_name_proof] RPC");
+    //
+    //     let username_proof = request.into_inner();
+    //
+    //     let fid = username_proof.fid;
+    //     if fid == 0 {
+    //         return Err(Status::invalid_argument(
+    //             "no fid or invalid fid".to_string(),
+    //         ));
+    //     }
+    //
+    //     let result = self.mempool_tx.try_send((
+    //         MempoolMessage::ValidatorMessage(ValidatorMessage {
+    //             on_chain_event: None,
+    //             fname_transfer: Some(FnameTransfer {
+    //                 id: username_proof.fid,
+    //                 from_fid: 0, // Assume the username is being transfer from the "root" fid to the one in the username proof
+    //                 proof: Some(username_proof.clone()),
+    //             }),
+    //         }),
+    //         MempoolSource::RPC,
+    //     ));
+    //
+    //     match result {
+    //         Ok(()) => {
+    //             let response = Response::new(username_proof);
+    //             Ok(response)
+    //         }
+    //         Err(err) => Err(Status::from_error(Box::new(err))),
+    //     }
+    // }
 
     async fn upload_snapshot(
         &self,
-        _request: Request<Empty>,
+        request: Request<Empty>,
     ) -> std::result::Result<Response<Empty>, Status> {
+        authenticate_request(&request, &self.allowed_users)?;
+
         if std::fs::exists(self.snapshot_config.backup_dir.clone())? {
             return Err(Status::aborted("snapshot already in progress"));
         }
