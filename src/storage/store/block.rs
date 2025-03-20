@@ -1,4 +1,5 @@
 use super::super::constants::PAGE_SIZE_MAX;
+use super::shard;
 use crate::core::error::HubError;
 use crate::proto;
 use crate::proto::Block;
@@ -16,6 +17,9 @@ use tracing::{error, info};
 pub enum BlockStorageError {
     #[error(transparent)]
     RocksdbError(#[from] RocksdbError),
+
+    #[error("Block missing from storage")]
+    BlockMissing,
 
     #[error("Block missing header")]
     BlockMissingHeader,
@@ -241,6 +245,48 @@ impl BlockStore {
         )
     }
 
+    // Returns the next block height with a timestamp greater than or equal to
+    // the given timestamp for the specified shard index.
+    pub fn get_next_height_by_timestamp(
+        &self,
+        shard_index: u32,
+        timestamp: u64,
+    ) -> Result<Option<u64>, BlockStorageError> {
+        let timestamp_index_key = make_block_timestamp_index(shard_index, timestamp);
+        let mut block_key: Option<Vec<u8>> = None;
+        self.db
+            .for_each_iterator_by_prefix_paged(
+                Some(timestamp_index_key),
+                None,
+                &PageOptions::default(),
+                |_, index| {
+                    block_key = Some(index.to_vec());
+                    Ok(true) // Stop iterating, just need the first key
+                },
+            )
+            .map_err(|_| BlockStorageError::TooManyBlocksInResult)?; // TODO: Return the right error
+
+        block_key
+            .map(|block_key: Vec<u8>| {
+                let block_bytes = self
+                    .db
+                    .get(&block_key)?
+                    .ok_or(BlockStorageError::BlockMissing)?;
+                let block = Block::decode(block_bytes.as_slice())
+                    .map_err(|e| BlockStorageError::DecodeError(e))?;
+                let header = block
+                    .header
+                    .as_ref()
+                    .ok_or(BlockStorageError::BlockMissingHeader)?;
+                let height = header
+                    .height
+                    .as_ref()
+                    .ok_or(BlockStorageError::BlockMissingHeight)?;
+                Ok(height.block_number)
+            })
+            .transpose()
+    }
+
     // Prune one page of blocks as specified by page_options from height 0 until
     // but excluding stop_height. Returns the number of blocks pruned.
     fn prune_page(
@@ -352,6 +398,24 @@ mod tests {
         assert!(page.blocks.len() > 0);
         let header = page.blocks[0].header.as_ref().unwrap();
         assert!(block_height == header.height.expect("Missing height").block_number);
+    }
+
+    #[test]
+    fn test_get_next_height_by_timestamp() {
+        let store = setup_db(100);
+        let timestamp = 500;
+        let next_height = store
+            .get_next_height_by_timestamp(0, timestamp)
+            .expect("Failed to get next height by timestamp")
+            .expect("Expected a valid height");
+        assert_eq!(5, next_height);
+
+        let timestamp = 450;
+        let next_height = store
+            .get_next_height_by_timestamp(0, timestamp)
+            .expect("Failed to get next height by timestamp")
+            .expect("Expected a valid height");
+        assert_eq!(5, next_height);
     }
 
     #[test]
