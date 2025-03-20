@@ -109,12 +109,13 @@ fn get_block_page_by_prefix(
     })
 }
 
-pub fn get_last_block(db: &RocksDB) -> Result<Option<Block>, BlockStorageError> {
+// Returns last block if last is true, first block if false
+fn get_first_or_last_block(db: &RocksDB, last: bool) -> Result<Option<Block>, BlockStorageError> {
     let start_block_key = make_block_key(0);
     let block_page = get_block_page_by_prefix(
         db,
         &PageOptions {
-            reverse: true,
+            reverse: last,
             page_size: Some(1),
             page_token: None,
         },
@@ -130,7 +131,7 @@ pub fn get_last_block(db: &RocksDB) -> Result<Option<Block>, BlockStorageError> 
 }
 
 pub fn get_current_header(db: &RocksDB) -> Result<Option<proto::BlockHeader>, BlockStorageError> {
-    let last_block = get_last_block(db)?;
+    let last_block = get_first_or_last_block(db, true)?;
     match last_block {
         None => Ok(None),
         Some(block) => Ok(block.header),
@@ -188,8 +189,13 @@ impl BlockStore {
     }
 
     #[inline]
+    pub fn get_first_block(&self) -> Result<Option<Block>, BlockStorageError> {
+        get_first_or_last_block(&self.db, false)
+    }
+
+    #[inline]
     pub fn get_last_block(&self) -> Result<Option<Block>, BlockStorageError> {
-        get_last_block(&self.db)
+        get_first_or_last_block(&self.db, true)
     }
 
     #[inline]
@@ -205,6 +211,21 @@ impl BlockStore {
                 })?;
                 Ok(Some(block))
             }
+        }
+    }
+
+    #[inline]
+    pub fn min_block_number(&self) -> Result<u64, BlockStorageError> {
+        let first_block = self.get_first_block()?;
+        match first_block {
+            None => Ok(0),
+            Some(block) => match block.header {
+                None => Ok(0),
+                Some(header) => match header.height {
+                    None => Ok(0),
+                    Some(height) => Ok(height.block_number),
+                },
+            },
         }
     }
 
@@ -390,15 +411,6 @@ mod tests {
         store
     }
 
-    fn expect_first_block_height(store: &BlockStore, block_height: u64) {
-        let page = store
-            .get_blocks(0, None, &PageOptions::default())
-            .expect("Failed to get blocks");
-        assert!(page.blocks.len() > 0);
-        let header = page.blocks[0].header.as_ref().unwrap();
-        assert!(block_height == header.height.expect("Missing height").block_number);
-    }
-
     #[test]
     fn test_get_next_height_by_timestamp() {
         let store = setup_db(100);
@@ -432,7 +444,7 @@ mod tests {
             .expect("Failed to prune blocks");
 
         assert_eq!((stop_height - 1) as u32, pruned);
-        expect_first_block_height(&store, stop_height);
+        assert_eq!(stop_height, store.min_block_number().unwrap());
     }
 
     #[test]
@@ -452,6 +464,6 @@ mod tests {
             .expect("Failed to prune blocks");
 
         assert_eq!(0, pruned);
-        expect_first_block_height(&store, 1);
+        assert_eq!(1, store.min_block_number().unwrap());
     }
 }
