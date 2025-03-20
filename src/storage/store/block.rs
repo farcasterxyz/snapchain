@@ -1,5 +1,4 @@
 use super::super::constants::PAGE_SIZE_MAX;
-use super::shard;
 use crate::core::error::HubError;
 use crate::proto;
 use crate::proto::Block;
