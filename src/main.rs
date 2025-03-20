@@ -64,6 +64,7 @@ async fn start_servers(
     );
 
     let service = Arc::new(MyHubService::new(
+        app_config.rpc_auth.clone(),
         block_store.clone(),
         shard_stores.clone(),
         shard_senders,

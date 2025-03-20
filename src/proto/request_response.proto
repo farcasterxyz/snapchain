@@ -31,15 +31,6 @@ message SubscribeRequest {
   optional uint32 shard_index = 5;
 }
 
-message SubmitMessageRequest {
-  Message message = 1;
-  optional bool bypass_validation = 99;
-}
-
-message SubmitMessageResponse {
-  Message message = 1;
-}
-
 message DbStats {
   uint64 num_messages = 1;
   uint64 num_fid_registrations = 2;

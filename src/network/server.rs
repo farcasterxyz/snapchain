@@ -59,14 +59,17 @@ use crate::storage::store::engine::{MempoolMessage, Senders, ShardEngine};
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use base64::Engine;
 use hex::ToHex;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
 
 pub struct MyHubService {
+    allowed_users: HashMap<String, String>,
     block_store: BlockStore,
     shard_stores: HashMap<u32, Stores>,
     shard_senders: HashMap<u32, Senders>,
@@ -79,6 +82,7 @@ pub struct MyHubService {
 
 impl MyHubService {
     pub fn new(
+        rpc_auth: String,
         block_store: BlockStore,
         shard_stores: HashMap<u32, Stores>,
         shard_senders: HashMap<u32, Senders>,
@@ -88,7 +92,16 @@ impl MyHubService {
         mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
         l1_client: Option<Box<dyn L1Client>>,
     ) -> Self {
-        Self {
+        let mut allowed_users = HashMap::new();
+        for auth in rpc_auth.split(",") {
+            let parts: Vec<&str> = auth.split(":").collect();
+            if parts.len() == 2 {
+                allowed_users.insert(parts[0].to_string(), parts[1].to_string());
+            }
+        }
+
+        let service = Self {
+            allowed_users,
             block_store,
             shard_senders,
             shard_stores,
@@ -97,6 +110,50 @@ impl MyHubService {
             num_shards,
             l1_client,
             mempool_tx,
+        };
+        service
+    }
+
+    fn authenticate_user(&self, metadata_map: &MetadataMap) -> Result<(), Status> {
+        if self.allowed_users.is_empty() {
+            return Ok(());
+        }
+
+        // Check for Basic Auth
+        if let Some(auth) = metadata_map.get("authorization") {
+            let auth = auth.to_str().map_err(|_| {
+                Status::unauthenticated("authorization header is not a valid string")
+            })?;
+            let parts: Vec<&str> = auth.split_whitespace().collect();
+            if parts.len() != 2 {
+                return Err(Status::unauthenticated("invalid authorization header"));
+            }
+            if parts[0] != "Basic" {
+                return Err(Status::unauthenticated("invalid authorization header"));
+            }
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(parts[1])
+                .map_err(|_| {
+                    Status::unauthenticated("authorization header is not a valid base64 string")
+                })?;
+            let decoded = String::from_utf8(decoded).map_err(|_| {
+                Status::unauthenticated("authorization header is not a valid utf8 string")
+            })?;
+            let parts: Vec<&str> = decoded.split(":").collect();
+            if parts.len() != 2 {
+                return Err(Status::unauthenticated("invalid authorization header"));
+            }
+            if let Some(password) = self.allowed_users.get(parts[0]) {
+                if password == parts[1] {
+                    Ok(())
+                } else {
+                    Err(Status::unauthenticated("invalid username or password"))
+                }
+            } else {
+                Err(Status::unauthenticated("invalid username or password"))
+            }
+        } else {
+            Err(Status::unauthenticated("missing authorization header"))
         }
     }
 
@@ -379,51 +436,13 @@ impl MyHubService {
 
 #[tonic::async_trait]
 impl HubService for MyHubService {
-    async fn submit_message_with_options(
-        &self,
-        request: Request<proto::SubmitMessageRequest>,
-    ) -> Result<Response<proto::SubmitMessageResponse>, Status> {
-        let start_time = std::time::Instant::now();
-
-        let hash = request
-            .get_ref()
-            .message
-            .as_ref()
-            .map(|msg| msg.hash.encode_hex::<String>())
-            .unwrap_or_default();
-        debug!(%hash, "Received call to [submit_message_with_options] RPC");
-
-        let proto::SubmitMessageRequest {
-            message,
-            bypass_validation,
-        } = request.into_inner();
-
-        let message = match message {
-            Some(msg) => msg,
-            None => return Err(Status::invalid_argument("Message is required")),
-        };
-
-        let response_message = self
-            .submit_message_internal(message, bypass_validation.unwrap_or(false))
-            .await?;
-
-        let response = proto::SubmitMessageResponse {
-            message: Some(response_message),
-        };
-
-        self.statsd_client.time(
-            "rpc.submit_message_with_options.duration",
-            start_time.elapsed().as_millis() as u64,
-        );
-
-        Ok(Response::new(response))
-    }
-
     async fn submit_message(
         &self,
         request: Request<proto::Message>,
     ) -> Result<Response<proto::Message>, Status> {
         let start_time = std::time::Instant::now();
+
+        self.authenticate_user(&request.metadata())?;
 
         let hash = request.get_ref().hash.encode_hex::<String>();
         debug!(hash, "Received call to [submit_message] RPC");
@@ -592,6 +611,8 @@ impl HubService for MyHubService {
         &self,
         request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
+        self.authenticate_user(&request.metadata())?;
+
         info!("Received call to [subscribe] RPC");
         let (server_tx, client_rx) = mpsc::channel::<Result<HubEvent, Status>>(100);
         let events_txs = match request.get_ref().shard_index {

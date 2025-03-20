@@ -119,16 +119,11 @@ fn start_submit_messages(
 
                 match msg {
                     generate::NextMessage::Message(message) => {
-                        let response = client
-                            .submit_message_with_options(proto::SubmitMessageRequest {
-                                message: Some(message.clone()),
-                                bypass_validation: Some(true),
-                            })
-                            .await;
+                        let response = client.submit_message(message.clone()).await;
 
                         match response {
                             Ok(resp) => {
-                                let sent = resp.into_inner().message.unwrap();
+                                let sent = resp.into_inner();
                                 messages_tx.send(sent).await.unwrap();
                                 message_queue.pop_front(); // Remove message only if successfully sent
                             }
