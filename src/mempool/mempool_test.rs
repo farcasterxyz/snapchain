@@ -6,6 +6,7 @@ mod tests {
 
     use crate::{
         consensus::consensus::SystemMessage,
+        core::util::to_farcaster_time,
         mempool::mempool::{self, Mempool, MempoolMessagesRequest},
         network::gossip::{Config, SnapchainGossip},
         proto::{
@@ -177,7 +178,7 @@ mod tests {
         let cast = messages_factory::casts::create_cast_add(
             fid,
             "hello",
-            Some(onchain_event.block_timestamp as u32 - 1),
+            Some(to_farcaster_time(onchain_event.block_timestamp * 1000).unwrap() as u32 - 1),
             None,
         );
 
