@@ -312,12 +312,11 @@ impl BlockStore {
         throttle: Duration,
         cancel: Option<CancellationToken>,
     ) -> Result<u32, BlockStorageError> {
-        let stop_prefix = Some(make_block_key(stop_height));
         let total_pruned = self
             .db
             .delete_paginated(
-                None,
-                stop_prefix,
+                Some(make_block_key(0)),
+                Some(make_block_key(stop_height)),
                 page_options,
                 throttle,
                 cancel,

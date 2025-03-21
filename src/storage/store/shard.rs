@@ -327,12 +327,11 @@ impl ShardStore {
         throttle: Duration,
         cancel: Option<CancellationToken>,
     ) -> Result<u32, ShardStorageError> {
-        let stop_prefix = Some(make_shard_key(stop_height));
         let total_pruned = self
             .db
             .delete_paginated(
-                None,
-                stop_prefix,
+                Some(make_shard_key(0)),
+                Some(make_shard_key(stop_height)),
                 page_options,
                 throttle,
                 cancel,
