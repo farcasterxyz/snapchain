@@ -284,11 +284,15 @@ impl BlockStore {
     ) -> Result<Option<u64>, BlockStorageError> {
         let timestamp_index_key = make_block_timestamp_index(shard_index, timestamp);
         let mut block_key: Option<Vec<u8>> = None;
+        let page_options = PageOptions {
+            page_size: Some(1),
+            ..PageOptions::default()
+        };
         self.db
             .for_each_iterator_by_prefix_paged(
                 Some(timestamp_index_key),
                 None,
-                &PageOptions::default(),
+                &page_options,
                 |_, index| {
                     block_key = Some(index.to_vec());
                     Ok(true) // Stop iterating, just need the first key
