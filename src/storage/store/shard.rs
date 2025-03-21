@@ -7,8 +7,8 @@ use crate::storage::db::{PageOptions, RocksDB, RocksdbError};
 use prost::Message;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::watch;
 use tokio::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 static PAGE_SIZE: usize = 100;
@@ -325,7 +325,7 @@ impl ShardStore {
         stop_height: u64,
         page_options: &PageOptions,
         throttle: Duration,
-        shutdown_rx: Option<watch::Receiver<()>>,
+        cancel: Option<CancellationToken>,
     ) -> Result<u32, ShardStorageError> {
         let stop_prefix = Some(make_shard_key(stop_height));
         let total_pruned = self
@@ -335,7 +335,7 @@ impl ShardStore {
                 stop_prefix,
                 page_options,
                 throttle,
-                shutdown_rx,
+                cancel,
                 Some(|total_pruned: u32| {
                     info!("Pruning shards... pruned: {}", total_pruned);
                 }),

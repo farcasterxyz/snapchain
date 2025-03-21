@@ -7,8 +7,8 @@ use crate::storage::db::{PageOptions, RocksDB, RocksdbError};
 use prost::Message;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::watch;
 use tokio::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 // TODO(aditi): This code definitely needs unit tests
@@ -310,7 +310,7 @@ impl BlockStore {
         stop_height: u64,
         page_options: &PageOptions,
         throttle: Duration,
-        shutdown_rx: Option<watch::Receiver<()>>,
+        cancel: Option<CancellationToken>,
     ) -> Result<u32, BlockStorageError> {
         let stop_prefix = Some(make_block_key(stop_height));
         let total_pruned = self
@@ -320,7 +320,7 @@ impl BlockStore {
                 stop_prefix,
                 page_options,
                 throttle,
-                shutdown_rx,
+                cancel,
                 Some(|total_pruned: u32| {
                     info!("Pruning blocks... pruned: {}", total_pruned);
                 }),
@@ -416,8 +416,8 @@ mod tests {
     #[tokio::test]
     async fn test_prune_until_cancellation() {
         let store = setup_db(100);
-        let (shutdown_tx, shutdown_rx) = watch::channel(());
-        drop(shutdown_tx); // Simulate immediate cancellation
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // Simulate immediate cancellation
 
         let stop_height = 42;
         let pruned = store
@@ -425,7 +425,7 @@ mod tests {
                 stop_height,
                 &PageOptions::default(),
                 Duration::ZERO,
-                Some(shutdown_rx),
+                Some(cancel),
             )
             .await
             .expect("Failed to prune blocks");

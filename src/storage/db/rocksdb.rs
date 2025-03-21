@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use thiserror::Error;
 use tokio::select;
-use tokio::sync::watch;
 use tokio::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use walkdir::WalkDir;
 
@@ -613,23 +613,21 @@ impl RocksDB {
         stop_prefix: Option<Vec<u8>>,
         page_options: &PageOptions,
         throttle: Duration,
-        mut shutdown_rx: Option<watch::Receiver<()>>,
+        cancel: Option<CancellationToken>,
         progress_callback: Option<impl Fn(u32) + Send>,
     ) -> Result<u32, HubError> {
         let mut total_deleted = 0;
         loop {
             select! {
                 _ = tokio::time::sleep(throttle) => {}
-                change = async {
+                _ = async {
                     // TODO: couldn't figure out how to write this as map().unwrap_or(...)
-                    match shutdown_rx.as_mut() {
-                        Some(rx) => rx.changed().await,
+                    match cancel.as_ref() {
+                        Some(cancel) => cancel.cancelled().await,
                         None => pending().await, // never resolves
                     }
                 } => {
-                    if change.is_err() {
                         break;
-                    }
                 }
             }
 
