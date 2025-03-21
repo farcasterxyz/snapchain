@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2] - 2025-03-21
+
+### 🚀 Features
+
+- Add virtual shard id to fids in the merkle trie to make re-sharding easier (#313)
+- Switch event id to use block numbers instead of timestamps (#314)
+- Add a timestamp index for block heights (#315)
+- Add auth for rpc endpoints and cleanup admin rpc (#323)
+- Validate for message network (#325)
+
+### 🐛 Bug Fixes
+
+- Expedite processing of validator messages through mempool (#319)
+- Add retries for onchain events (#318)
+- Don't enforce block time validator is syncing (#317)
+- Higher channel sizes, and remove read node expiry
+
+### ⚙️ Miscellaneous Tasks
+
+- Add `dump_wal` utility (#297)
+- Add more logs for fname transfers (#322)
+- Perf improvements (#320)
+
 ## [0.1.4] - 2025-03-16
 
 ### 🚀 Features
