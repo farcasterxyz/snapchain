@@ -152,7 +152,7 @@ fn run_shard(
             let msg = msg.unwrap();
             match msg {
                 generate::NextMessage::Message(message) => {
-                    t.insert(&ctx, &db, &mut txn_batch, vec![&message.hash])?;
+                    t.insert(&ctx, &db, &mut txn_batch, vec![message.hash.clone()])?;
                 }
                 generate::NextMessage::OnChainEvent(_) => {
                     // Ignore for now

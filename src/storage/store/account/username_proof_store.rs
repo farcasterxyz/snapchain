@@ -23,17 +23,14 @@ pub struct UsernameProofStoreDef {
 }
 
 impl StoreDef for UsernameProofStoreDef {
-    #[inline]
     fn postfix(&self) -> u8 {
         UserPostfix::UsernameProofMessage.as_u8()
     }
 
-    #[inline]
     fn add_message_type(&self) -> u8 {
         MessageType::UsernameProof.into_u8()
     }
 
-    #[inline]
     fn make_add_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
         if message.data.is_none() {
             return Err(HubError {
@@ -66,22 +63,18 @@ impl StoreDef for UsernameProofStoreDef {
         ))
     }
 
-    #[inline]
     fn remove_type_supported(&self) -> bool {
         false
     }
 
-    #[inline]
     fn compact_state_message_type(&self) -> u8 {
         MessageType::None as u8
     }
 
-    #[inline]
     fn is_compact_state_type(&self, _message: &Message) -> bool {
         false
     }
 
-    #[inline]
     fn make_remove_key(&self, _message: &Message) -> Result<Vec<u8>, HubError> {
         Err(HubError {
             code: "bad_request.validation_failure".to_string(),
@@ -89,7 +82,6 @@ impl StoreDef for UsernameProofStoreDef {
         })
     }
 
-    #[inline]
     fn make_compact_state_add_key(&self, _message: &Message) -> Result<Vec<u8>, HubError> {
         Err(HubError {
             code: "bad_request.invalid_param".to_string(),
@@ -97,7 +89,6 @@ impl StoreDef for UsernameProofStoreDef {
         })
     }
 
-    #[inline]
     fn make_compact_state_prefix(&self, _fid: u64) -> Result<Vec<u8>, HubError> {
         Err(HubError {
             code: "bad_request.invalid_param".to_string(),
@@ -105,18 +96,13 @@ impl StoreDef for UsernameProofStoreDef {
         })
     }
 
-    #[inline]
     fn is_add_type(&self, message: &Message) -> bool {
-        if message.data.is_none() {
-            return false;
-        }
-        let data = message.data.as_ref().unwrap();
         message.signature_scheme == proto::SignatureScheme::Ed25519 as i32
-            && data.r#type == MessageType::UsernameProof.into_u8() as i32
-            && data.body.is_some()
+            && message.data.is_some()
+            && message.data.as_ref().unwrap().r#type == MessageType::UsernameProof.into_u8() as i32
+            && message.data.as_ref().unwrap().body.is_some()
     }
 
-    #[inline]
     fn build_secondary_indices(
         &self,
         txn: &mut RocksDbTransactionBatch,
@@ -153,7 +139,6 @@ impl StoreDef for UsernameProofStoreDef {
         }
     }
 
-    #[inline]
     fn delete_secondary_indices(
         &self,
         txn: &mut RocksDbTransactionBatch,
@@ -258,22 +243,18 @@ impl StoreDef for UsernameProofStoreDef {
         Ok(conflicts)
     }
 
-    #[inline]
     fn remove_message_type(&self) -> u8 {
         MessageType::None.into_u8()
     }
 
-    #[inline]
     fn is_remove_type(&self, _message: &Message) -> bool {
         false
     }
 
-    #[inline]
     fn get_prune_size_limit(&self) -> u32 {
         self.prune_size_limit
     }
 
-    #[inline]
     fn revoke_event_args(&self, message: &Message) -> HubEvent {
         let username_proof_body = match &message.data {
             Some(message_data) => match &message_data.body {
@@ -339,14 +320,12 @@ impl StoreDef for UsernameProofStoreDef {
         }
     }
 
-    #[inline]
     fn prune_event_args(&self, message: &Message) -> HubEvent {
         self.revoke_event_args(message)
     }
 }
 
 impl UsernameProofStoreDef {
-    #[inline]
     fn make_username_proof_by_name_key(name: &Vec<u8>) -> Vec<u8> {
         let mut key = Vec::with_capacity(1 + name.len());
 
@@ -356,7 +335,6 @@ impl UsernameProofStoreDef {
         key
     }
 
-    #[inline]
     fn make_username_proof_by_fid_key(fid: u64, name: &Vec<u8>) -> Vec<u8> {
         let mut key = Vec::with_capacity(1 + 4 + 1 + name.len());
 
