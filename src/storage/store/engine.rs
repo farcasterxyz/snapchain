@@ -1336,8 +1336,10 @@ impl ShardEngine {
     }
 
     pub fn get_min_height(&self) -> Height {
-        // Always return the genesis block, until we implement pruning
-        Height::new(self.shard_id, 1)
+        match self.stores.shard_store.min_block_number() {
+            Ok(block_num) => Height::new(self.shard_id, block_num),
+            Err(_) => Height::new(self.shard_id, 0),
+        }
     }
 
     pub fn get_confirmed_height(&self) -> Height {

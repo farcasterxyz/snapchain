@@ -286,8 +286,8 @@ impl BlockStore {
         self.db
             .get_next_by_index(timestamp_index_key)
             .map_err(|_| BlockStorageError::TooManyBlocksInResult)? // TODO: Return the right error
-            .map(|block_bytes| {
-                let block = Block::decode(block_bytes.as_slice())
+            .map(|bytes| {
+                let block = Block::decode(bytes.as_slice())
                     .map_err(|e| BlockStorageError::DecodeError(e))?;
                 let header = block
                     .header
@@ -322,7 +322,7 @@ impl BlockStore {
                 throttle,
                 shutdown_rx,
                 Some(|total_pruned: u32| {
-                    info!("Pruning blocks... blocks pruned: {}", total_pruned);
+                    info!("Pruning blocks... pruned: {}", total_pruned);
                 }),
             )
             .await
