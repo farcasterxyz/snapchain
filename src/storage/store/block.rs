@@ -283,29 +283,10 @@ impl BlockStore {
         timestamp: u64,
     ) -> Result<Option<u64>, BlockStorageError> {
         let timestamp_index_key = make_block_timestamp_index(shard_index, timestamp);
-        let mut block_key: Option<Vec<u8>> = None;
-        let page_options = PageOptions {
-            page_size: Some(1),
-            ..PageOptions::default()
-        };
         self.db
-            .for_each_iterator_by_prefix_paged(
-                Some(timestamp_index_key),
-                None,
-                &page_options,
-                |_, index| {
-                    block_key = Some(index.to_vec());
-                    Ok(true) // Stop iterating, just need the first key
-                },
-            )
-            .map_err(|_| BlockStorageError::TooManyBlocksInResult)?; // TODO: Return the right error
-
-        block_key
-            .map(|block_key| {
-                let block_bytes = self
-                    .db
-                    .get(&block_key)?
-                    .ok_or(BlockStorageError::BlockMissing)?;
+            .get_next_by_index(timestamp_index_key)
+            .map_err(|_| BlockStorageError::TooManyBlocksInResult)? // TODO: Return the right error
+            .map(|block_bytes| {
                 let block = Block::decode(block_bytes.as_slice())
                     .map_err(|e| BlockStorageError::DecodeError(e))?;
                 let header = block

@@ -556,6 +556,25 @@ impl RocksDB {
         Ok(count)
     }
 
+    pub fn get_next_by_index(&self, start_prefix: Vec<u8>) -> Result<Option<Vec<u8>>, HubError> {
+        let page_options = PageOptions {
+            page_size: Some(1),
+            ..PageOptions::default()
+        };
+        let mut primary_key: Option<Vec<u8>> = None;
+        self.for_each_iterator_by_prefix(Some(start_prefix), None, &page_options, |_, index| {
+            primary_key = Some(index.to_vec());
+            Ok(true) // Stop iterating after the first key
+        })?;
+        primary_key
+            .map(|primary_key| {
+                self.get(&primary_key)
+                    .map_err(|e| HubError::from(e))?
+                    .ok_or(HubError::not_found("No value found for the given key"))
+            })
+            .transpose()
+    }
+
     // Deletes keys in the given prefix range, respecting page_options.
     // Returns the number of keys deleted.
     pub fn delete_page(
