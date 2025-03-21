@@ -177,8 +177,8 @@ impl ReadNodeMempool {
                     Some(message_data) => {
                         let ts_hash = make_ts_hash(message_data.timestamp, &message.hash).unwrap();
                         match type_to_set_postfix(message_data.r#type()) {
-                            Err(err) => {
-                                error!("Error retrieving set postfix: {}", err.to_string());
+                            Err(_) => {
+                                // We hit this for link compact messages and it's expected. Return [false] so the message isn't filtered out
                                 false
                             }
                             Ok(set_postfix) => {
