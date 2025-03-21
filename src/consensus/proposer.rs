@@ -386,21 +386,21 @@ impl Proposer for BlockProposer {
         };
         let previous_block = self.engine.get_last_block();
         let genesis_height = Height::new(self.shard_id.shard_id(), 1);
-        let parent_hash = if height == genesis_height && previous_block.is_some() {
-            error!(
-                height = height.as_u64(),
-                round = round.as_i64(),
-                parent_hash = hex::encode(previous_block.unwrap().hash.clone()),
-                "Block unexpectedly has parent"
-            );
-            vec![0; 32]
-        } else if height == genesis_height {
-            // Genesis message
+        let parent_hash = if height == genesis_height {
+            if previous_block.is_some() {
+                error!(
+                    height = height.as_u64(),
+                    round = round.as_i64(),
+                    parent_hash = hex::encode(previous_block.unwrap().hash.clone()),
+                    "Block unexpectedly has parent. Replacing parent hash with genesis message."
+                );
+            }
             GENESIS_MESSAGE.as_bytes().to_vec()
         } else {
             match previous_block {
                 Some(block) => block.hash.clone(),
                 None => {
+                    // This should only be the case for the genesis block
                     error!(
                         height = height.as_u64(),
                         round = round.as_i64(),
