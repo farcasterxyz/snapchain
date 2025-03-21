@@ -1,4 +1,3 @@
-use chrono::Duration;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -139,7 +138,7 @@ async fn schedule_background_jobs(app_config: &snapchain::cfg::Config, block_sto
     let sched = JobScheduler::new().await.unwrap();
     if app_config.read_node {
         if let Some(block_retention) = app_config.read_node_block_retention {
-            let throttle = Duration::milliseconds(100); // TODO: make const or configurable
+            let throttle = tokio::time::Duration::from_millis(100); // TODO: make const or configurable
             let cutoff_timestamp =
                 util::get_farcaster_time().unwrap() - (block_retention.as_secs() as u64);
             let schedule = "1/5 * * * * *"; // TODO: fix this, currently every 5 seconds

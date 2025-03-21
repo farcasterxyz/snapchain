@@ -1,7 +1,7 @@
 use crate::storage::constants::PAGE_SIZE_MAX;
 use crate::storage::db::PageOptions;
 use crate::storage::store::BlockStore;
-use chrono::Duration;
+use tokio::time::Duration;
 use tokio_cron_scheduler::{Job, JobSchedulerError};
 use tracing::error;
 

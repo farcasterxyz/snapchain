@@ -4,11 +4,12 @@ use crate::proto;
 use crate::proto::Block;
 use crate::storage::constants::RootPrefix;
 use crate::storage::db::{PageOptions, RocksDB, RocksdbError};
-use chrono::Duration;
 use prost::Message;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::watch;
+use tokio::time;
+use tokio::time::Duration;
 use tracing::{error, info};
 
 // TODO(aditi): This code definitely needs unit tests
@@ -348,7 +349,7 @@ impl BlockStore {
     // Prune blocks with height less than stop_height. Returns the total number
     // of blocks pruned. Sleeps after each page for the throttle duration and
     // will stop if a shutdown is requested.
-    pub fn prune_until(
+    pub async fn prune_until(
         &self,
         stop_height: u64,
         throttle: Duration,
@@ -359,6 +360,7 @@ impl BlockStore {
         loop {
             if let Some(shutdown_rx) = &mut shutdown_rx {
                 if shutdown_rx.has_changed().is_err() {
+                    // TODO: is there a better async pattern to use here?
                     break; // Shutdown requested
                 }
             }
@@ -372,8 +374,8 @@ impl BlockStore {
             info!("Pruning blocks... blocks pruned: {}", total_pruned);
 
             // Sleep for the specified throttle duration
-            if throttle > Duration::zero() {
-                std::thread::sleep(throttle.to_std().unwrap());
+            if throttle > Duration::ZERO {
+                time::sleep(throttle.into()).await;
             }
         }
         info!("Pruning complete. blocks pruned: {}", total_pruned);
@@ -443,8 +445,8 @@ mod tests {
         assert_eq!(5, next_height);
     }
 
-    #[test]
-    fn test_prune_until() {
+    #[tokio::test]
+    async fn test_prune_until() {
         let store = setup_db(100);
 
         let stop_height = 42;
@@ -454,15 +456,16 @@ mod tests {
             ..PageOptions::default()
         };
         let pruned = store
-            .prune_until(stop_height, Duration::zero(), None, &page_options)
+            .prune_until(stop_height, Duration::ZERO, None, &page_options)
+            .await
             .expect("Failed to prune blocks");
 
         assert_eq!((stop_height - 1) as u32, pruned);
         assert_eq!(stop_height, store.min_block_number().unwrap());
     }
 
-    #[test]
-    fn test_prune_until_cancellation() {
+    #[tokio::test]
+    async fn test_prune_until_cancellation() {
         let store = setup_db(100);
         let (shutdown_tx, shutdown_rx) = watch::channel(());
         drop(shutdown_tx); // Simulate immediate cancellation
@@ -471,10 +474,11 @@ mod tests {
         let pruned = store
             .prune_until(
                 stop_height,
-                Duration::zero(),
+                Duration::ZERO,
                 Some(shutdown_rx),
                 &PageOptions::default(),
             )
+            .await
             .expect("Failed to prune blocks");
 
         assert_eq!(0, pruned);
