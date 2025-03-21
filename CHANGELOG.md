@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.2] - 2025-03-21
+## [0.2.0] - 2025-03-21
 
 ### 🚀 Features
 
@@ -11,13 +11,17 @@ All notable changes to this project will be documented in this file.
 - Add a timestamp index for block heights (#315)
 - Add auth for rpc endpoints and cleanup admin rpc (#323)
 - Validate for message network (#325)
+- Disable mempool publish from non-validators nodes until after backfill (#328)
+- Mainnet (#316)
+- Add genesis block message (#329)
 
 ### 🐛 Bug Fixes
 
 - Expedite processing of validator messages through mempool (#319)
 - Add retries for onchain events (#318)
 - Don't enforce block time validator is syncing (#317)
-- Higher channel sizes, and remove read node expiry
+- Higher channel sizes, and remove read node expiry (#326)
+- Fix mempool logging for link compact messages (#327)
 
 ### ⚙️ Miscellaneous Tasks
 

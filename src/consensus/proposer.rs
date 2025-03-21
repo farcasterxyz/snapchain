@@ -20,6 +20,8 @@ use tokio::{select, time};
 use tracing::{error, warn};
 
 const PROTOCOL_VERSION: u32 = 1;
+pub const GENESIS_MESSAGE: &str =
+    "It occurs to me that our survival may depend upon our talking to one another.";
 
 pub fn current_time() -> u64 {
     std::time::SystemTime::now()
@@ -383,9 +385,30 @@ impl Proposer for BlockProposer {
             shard_chunk_witnesses: shard_witnesses,
         };
         let previous_block = self.engine.get_last_block();
-        let parent_hash = match previous_block {
-            Some(block) => block.hash.clone(),
-            None => vec![0, 32],
+        let genesis_height = Height::new(self.shard_id.shard_id(), 1);
+        let parent_hash = if height == genesis_height {
+            if previous_block.is_some() {
+                error!(
+                    height = height.as_u64(),
+                    round = round.as_i64(),
+                    parent_hash = hex::encode(previous_block.unwrap().hash.clone()),
+                    "Block unexpectedly has parent. Replacing parent hash with genesis message."
+                );
+            }
+            GENESIS_MESSAGE.as_bytes().to_vec()
+        } else {
+            match previous_block {
+                Some(block) => block.hash.clone(),
+                None => {
+                    // This should only be the case for the genesis block
+                    error!(
+                        height = height.as_u64(),
+                        round = round.as_i64(),
+                        "Block unexpectedly missing parent"
+                    );
+                    vec![0; 32]
+                }
+            }
         };
         let witness_hash = blake3::hash(&shard_witness.encode_to_vec())
             .as_bytes()
