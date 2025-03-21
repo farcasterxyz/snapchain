@@ -410,6 +410,22 @@ mod tests {
 
         assert_eq!((stop_height - 1) as u32, pruned);
         assert_eq!(stop_height, store.min_block_number().unwrap());
+
+        // Check that get_blocks does not error after pruning
+        let blocks = store
+            .get_blocks(1, Some(stop_height), &PageOptions::default())
+            .expect("Failed to get blocks after pruning");
+        assert_eq!(0, blocks.blocks.len());
+
+        let blocks = store
+            .get_blocks(stop_height, Some(stop_height + 1), &PageOptions::default())
+            .expect("Failed to get blocks after pruning");
+        assert_eq!(1, blocks.blocks.len());
+
+        let blocks = store
+            .get_blocks(1, Some(stop_height + 1), &PageOptions::default())
+            .expect("Failed to get blocks after pruning");
+        assert_eq!(1, blocks.blocks.len());
     }
 
     #[tokio::test]
