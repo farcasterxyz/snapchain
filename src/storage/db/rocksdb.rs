@@ -626,7 +626,7 @@ impl RocksDB {
                         None => pending().await, // never resolves
                     }
                 } => {
-                    break;
+                    break; // Cancellation requested
                 }
             }
 
