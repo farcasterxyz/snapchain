@@ -39,7 +39,7 @@ You can start a new node or upgrade an existing node with the following commands
 mkdir snapchain
 cd snapchain
 docker compose down # If you have a previous version running
-wget https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/docker-compose.read.yml -O docker-compose.yml
+wget https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/docker-compose.mainnet.yml -O docker-compose.yml
 docker compose up  # append -d to run in the background
 ```
 
