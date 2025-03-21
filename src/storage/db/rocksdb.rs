@@ -621,13 +621,12 @@ impl RocksDB {
             select! {
                 _ = tokio::time::sleep(throttle) => {}
                 _ = async {
-                    // TODO: couldn't figure out how to write this as map().unwrap_or(...)
                     match cancel.as_ref() {
                         Some(cancel) => cancel.cancelled().await,
                         None => pending().await, // never resolves
                     }
                 } => {
-                        break;
+                    break;
                 }
             }
 
