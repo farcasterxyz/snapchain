@@ -4,6 +4,7 @@ use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
 use serial_test::serial;
 use snapchain::consensus::consensus::SystemMessage;
+use snapchain::consensus::proposer::GENESIS_MESSAGE;
 use snapchain::mempool::mempool::{
     self, Mempool, MempoolMessageWithSource, MempoolMessagesRequest, MempoolSource,
 };
@@ -13,7 +14,7 @@ use snapchain::network::server::MyHubService;
 use snapchain::node::snapchain_node::SnapchainNode;
 use snapchain::node::snapchain_read_node::SnapchainReadNode;
 use snapchain::proto::hub_service_server::HubServiceServer;
-use snapchain::proto::{self};
+use snapchain::proto::{self, Height};
 use snapchain::proto::{Block, FarcasterNetwork, IdRegisterEventType, SignerEventType};
 use snapchain::storage::db::{PageOptions, RocksDB};
 use snapchain::storage::store::engine::MempoolMessage;
@@ -274,6 +275,14 @@ impl NodeForTest {
                 chunks = chunks_count,
                 "decided block",
             );
+
+            if block.header.as_ref().unwrap().height.unwrap() == Height::new(0, 1) {
+                assert_eq!(
+                    block.header.as_ref().unwrap().parent_hash,
+                    GENESIS_MESSAGE.as_bytes().to_vec()
+                )
+            }
+
             assert_eq!(chunks_count, num_shards as usize);
         };
 

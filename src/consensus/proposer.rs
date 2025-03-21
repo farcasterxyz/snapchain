@@ -20,6 +20,8 @@ use tokio::{select, time};
 use tracing::{error, warn};
 
 const PROTOCOL_VERSION: u32 = 1;
+pub const GENESIS_MESSAGE: &str =
+    "It occurs to me that our survival may depend upon our talking to one another.";
 
 pub fn current_time() -> u64 {
     std::time::SystemTime::now()
@@ -394,9 +396,7 @@ impl Proposer for BlockProposer {
             vec![0; 32]
         } else if height == genesis_height {
             // Genesis message
-            "It occurs to me that our survival may depend upon our talking to one another."
-                .as_bytes()
-                .to_vec()
+            GENESIS_MESSAGE.as_bytes().to_vec()
         } else {
             match previous_block {
                 Some(block) => block.hash.clone(),
