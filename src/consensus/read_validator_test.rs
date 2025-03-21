@@ -3,19 +3,24 @@ mod tests {
 
     use std::collections::BTreeMap;
 
+    use libp2p::identity::ed25519::Keypair;
+
     use crate::consensus::read_validator::{Engine, ReadValidator};
-    use crate::proto::{self, Commits, Height, ShardChunk, ShardHash};
+    use crate::proto::{self, CommitSignature, Commits, Height, ShardChunk, ShardHash};
     use crate::storage::store::engine::ShardEngine;
     use crate::storage::store::test_helper::{
-        self, commit_event, default_storage_event, new_engine_with_options, EngineOptions,
-        FID_FOR_TEST,
+        self, commit_event, default_storage_event, new_engine_with_options, sign_chunk,
+        EngineOptions, FID_FOR_TEST,
     };
 
-    async fn setup(num_already_decided_blocks: u64) -> (ShardEngine, ShardEngine, ReadValidator) {
+    async fn setup(
+        num_already_decided_blocks: u64,
+    ) -> (ShardEngine, ShardEngine, ReadValidator, Keypair) {
+        let proposer_keypair = Keypair::generate();
         let (mut proposer_engine, _) = test_helper::new_engine();
         let (mut read_node_engine, _) = test_helper::new_engine();
         for _ in 0..num_already_decided_blocks {
-            let shard_chunk = commit_shard_chunk(&mut proposer_engine).await;
+            let shard_chunk = commit_shard_chunk(&mut proposer_engine, &proposer_keypair).await;
             read_node_engine.commit_shard_chunk(&shard_chunk);
         }
 
@@ -37,27 +42,20 @@ mod tests {
             statsd_client: test_helper::statsd_client(),
         };
 
-        (proposer_engine, read_node_engine, read_validator)
+        (
+            proposer_engine,
+            read_node_engine,
+            read_validator,
+            proposer_keypair,
+        )
     }
 
-    async fn commit_shard_chunk(engine: &mut ShardEngine) -> ShardChunk {
-        let mut shard_chunk = commit_event(engine, &default_storage_event(FID_FOR_TEST)).await;
-        shard_chunk.commits = Some(Commits {
-            height: shard_chunk.header.as_ref().unwrap().height,
-            round: 0,
-            value: Some(ShardHash {
-                shard_index: shard_chunk
-                    .header
-                    .as_ref()
-                    .unwrap()
-                    .height
-                    .unwrap()
-                    .shard_index,
-                hash: shard_chunk.hash.clone(),
-            }),
-            signatures: vec![],
-        });
-        shard_chunk
+    async fn commit_shard_chunk(
+        engine: &mut ShardEngine,
+        proposer_keypair: &Keypair,
+    ) -> ShardChunk {
+        let shard_chunk = commit_event(engine, &default_storage_event(FID_FOR_TEST)).await;
+        sign_chunk(proposer_keypair, shard_chunk).await
     }
 
     async fn process_decided_value(
@@ -72,8 +70,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_decided_value() {
-        let (mut proposer_engine, read_node_engine, mut read_validator) = setup(0).await;
-        let shard_chunk = commit_shard_chunk(&mut proposer_engine).await;
+        let (mut proposer_engine, read_node_engine, mut read_validator, proposer_keypair) =
+            setup(0).await;
+        let shard_chunk = commit_shard_chunk(&mut proposer_engine, &proposer_keypair).await;
         let num_processed = process_decided_value(&mut read_validator, &shard_chunk).await;
         assert_eq!(num_processed, 1);
         assert_eq!(
@@ -92,10 +91,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_buffered_values() {
-        let (mut proposer_engine, read_node_engine, mut read_validator) = setup(0).await;
-        let shard_chunk1 = commit_shard_chunk(&mut proposer_engine).await;
-        let shard_chunk2 = commit_shard_chunk(&mut proposer_engine).await;
-        let shard_chunk3 = commit_shard_chunk(&mut proposer_engine).await;
+        let (mut proposer_engine, read_node_engine, mut read_validator, proposer_keypair) =
+            setup(0).await;
+        let shard_chunk1 = commit_shard_chunk(&mut proposer_engine, &proposer_keypair).await;
+        let shard_chunk2 = commit_shard_chunk(&mut proposer_engine, &proposer_keypair).await;
+        let shard_chunk3 = commit_shard_chunk(&mut proposer_engine, &proposer_keypair).await;
         // Drop the new block if the buffer map is full
         let num_processed = process_decided_value(&mut read_validator, &shard_chunk2).await;
         assert_eq!(num_processed, 0);
@@ -132,7 +132,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_initialize() {
-        let (_proposer_engine, read_node_engine, mut read_validator) = setup(3).await;
+        let (_proposer_engine, read_node_engine, mut read_validator, _proposer_keypair) =
+            setup(3).await;
 
         read_validator.initialize_height();
         assert_eq!(
@@ -142,5 +143,59 @@ mod tests {
                 block_number: 3
             }
         );
+    }
+
+    #[tokio::test]
+    async fn test_ignore_no_signatures() {
+        let (mut proposer_engine, _read_node_engine, mut read_validator, proposer_keypair) =
+            setup(0).await;
+        let mut shard_chunk = commit_shard_chunk(&mut proposer_engine, &proposer_keypair).await;
+        // Remove signatures from chunk
+        shard_chunk.commits = Some(Commits {
+            height: shard_chunk.header.as_ref().unwrap().height,
+            round: 0,
+            value: Some(ShardHash {
+                shard_index: shard_chunk
+                    .header
+                    .as_ref()
+                    .unwrap()
+                    .height
+                    .unwrap()
+                    .shard_index,
+                hash: shard_chunk.hash.clone(),
+            }),
+            signatures: vec![],
+        });
+        let num_processed = process_decided_value(&mut read_validator, &shard_chunk).await;
+        assert_eq!(num_processed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_ignore_invalid_signatures() {
+        let (mut proposer_engine, _read_node_engine, mut read_validator, proposer_keypair) =
+            setup(0).await;
+        let mut shard_chunk = commit_shard_chunk(&mut proposer_engine, &proposer_keypair).await;
+        let signer = proposer_keypair.public().to_bytes().to_vec();
+        // Add invalid signatures to chunk
+        shard_chunk.commits = Some(Commits {
+            height: shard_chunk.header.as_ref().unwrap().height,
+            round: 0,
+            value: Some(ShardHash {
+                shard_index: shard_chunk
+                    .header
+                    .as_ref()
+                    .unwrap()
+                    .height
+                    .unwrap()
+                    .shard_index,
+                hash: shard_chunk.hash.clone(),
+            }),
+            signatures: vec![CommitSignature {
+                signature: vec![],
+                signer,
+            }],
+        });
+        let num_processed = process_decided_value(&mut read_validator, &shard_chunk).await;
+        assert_eq!(num_processed, 0);
     }
 }
