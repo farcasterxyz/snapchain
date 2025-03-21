@@ -7,6 +7,8 @@ use std::fs::{self};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use thiserror::Error;
+use tokio::sync::watch::Receiver;
+use tokio::time::Duration;
 use tracing::{info, warn};
 use walkdir::WalkDir;
 
@@ -576,6 +578,45 @@ impl RocksDB {
         let count = txn.len();
         self.commit(txn)?;
         Ok(count as u32)
+    }
+
+    // Deletes keys in the given prefix range, respecting page_options.
+    // This function will keep deleting pages until there are no more keys to delete,
+    // or until shutdown is requested via the shutdown_rx channel.
+    // The progress_callback function can be used to report progress.
+    // The throttle parameter can be used to control the rate of deletion.
+    // Returns the total number of keys deleted.
+    pub async fn delete_paginated(
+        &self,
+        start_prefix: Option<Vec<u8>>,
+        stop_prefix: Option<Vec<u8>>,
+        page_options: &PageOptions,
+        throttle: Duration,
+        mut shutdown_rx: Option<Receiver<()>>,
+        progress_callback: Option<impl Fn(u32) + Send>,
+    ) -> Result<u32, HubError> {
+        let mut total_deleted = 0;
+        loop {
+            if let Some(rx) = &mut shutdown_rx {
+                if rx.changed().await.is_err() {
+                    // TODO: is there a better async pattern to use here?
+                    break; // Shutdown requested
+                }
+            }
+
+            match self.delete_page(start_prefix.clone(), stop_prefix.clone(), page_options)? {
+                0 => break, // No more keys to delete
+                count => total_deleted += count,
+            }
+
+            if let Some(callback) = &progress_callback {
+                callback(total_deleted);
+            }
+
+            tokio::time::sleep(throttle).await;
+        }
+
+        Ok(total_deleted)
     }
 }
 

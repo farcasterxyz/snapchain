@@ -329,35 +329,24 @@ impl BlockStore {
         &self,
         stop_height: u64,
         throttle: Duration,
-        mut shutdown_rx: Option<watch::Receiver<()>>,
+        shutdown_rx: Option<watch::Receiver<()>>,
         page_options: &PageOptions,
     ) -> Result<u32, BlockStorageError> {
-        let mut total_pruned = 0u32;
         let stop_prefix = Some(make_block_key(stop_height));
-        loop {
-            if let Some(shutdown_rx) = &mut shutdown_rx {
-                if shutdown_rx.has_changed().is_err() {
-                    // TODO: is there a better async pattern to use here?
-                    break; // Shutdown requested
-                }
-            }
-
-            match self
-                .db
-                .delete_page(None, stop_prefix.clone(), &page_options)
-                .map_err(|_| BlockStorageError::TooManyBlocksInResult)? // TODO: Return the right error 
-                {
-                    0 => break, // No more blocks to prune
-                    count => total_pruned += count,
-                };
-
-            info!("Pruning blocks... blocks pruned: {}", total_pruned);
-
-            // Sleep for the specified throttle duration
-            if throttle > Duration::ZERO {
-                time::sleep(throttle.into()).await;
-            }
-        }
+        let total_pruned = self
+            .db
+            .delete_paginated(
+                None,
+                stop_prefix,
+                page_options,
+                throttle,
+                shutdown_rx,
+                Some(|total_pruned: u32| {
+                    info!("Pruning blocks... blocks pruned: {}", total_pruned);
+                }),
+            )
+            .await
+            .map_err(|_| BlockStorageError::TooManyBlocksInResult)?; // TODO: Return the right error
         info!("Pruning complete. blocks pruned: {}", total_pruned);
         Ok(total_pruned)
     }
