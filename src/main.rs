@@ -33,7 +33,6 @@ use tokio::select;
 use tokio::signal::ctrl_c;
 use tokio::sync::{broadcast, mpsc};
 use tokio_cron_scheduler::JobScheduler;
-use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -137,7 +136,6 @@ async fn schedule_background_jobs(
     app_config: &snapchain::cfg::Config,
     block_store: BlockStore,
     local_state_store: LocalStateStore,
-    cancel: CancellationToken,
 ) {
     let sched = JobScheduler::new().await.unwrap();
     let is_sync_complete = local_state_store.is_sync_complete().unwrap();
@@ -152,7 +150,6 @@ async fn schedule_background_jobs(
                 cutoff_timestamp,
                 throttle,
                 block_store.clone(),
-                cancel.clone(),
             )
             .unwrap();
             sched.add(job).await.unwrap();
@@ -309,15 +306,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
     let local_state_store = LocalStateStore::new(global_db);
-    let cancel = CancellationToken::new();
 
-    schedule_background_jobs(
-        &app_config,
-        block_store.clone(),
-        local_state_store.clone(),
-        cancel.clone(),
-    )
-    .await;
+    schedule_background_jobs(&app_config, block_store.clone(), local_state_store.clone()).await;
 
     if app_config.read_node {
         let node = SnapchainReadNode::create(
@@ -362,13 +352,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             select! {
                 _ = ctrl_c() => {
                     info!("Received Ctrl-C, shutting down");
-                    cancel.cancel();
                     node.stop();
                     return Ok(());
                 }
                 _ = shutdown_rx.recv() => {
                     error!("Received shutdown signal, shutting down");
-                    cancel.cancel();
                     node.stop();
                     return Ok(());
                 }

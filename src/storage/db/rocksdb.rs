@@ -1,16 +1,13 @@
 use crate::core::error::HubError;
 use crate::storage::db::multi_chunk_writer::MultiChunkWriter;
 use crate::storage::util::increment_vec_u8;
-use futures::future::pending;
 use rocksdb::{Options, TransactionDB, DB};
 use std::collections::HashMap;
 use std::fs::{self};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use thiserror::Error;
-use tokio::select;
 use tokio::time::Duration;
-use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use walkdir::WalkDir;
 
@@ -613,23 +610,10 @@ impl RocksDB {
         stop_prefix: Option<Vec<u8>>,
         page_options: &PageOptions,
         throttle: Duration,
-        cancel: Option<CancellationToken>,
         progress_callback: Option<impl Fn(u32) + Send>,
     ) -> Result<u32, HubError> {
         let mut total_deleted = 0;
         loop {
-            select! {
-                _ = tokio::time::sleep(throttle) => {}
-                _ = async {
-                    match cancel.as_ref() {
-                        Some(cancel) => cancel.cancelled().await,
-                        None => pending().await, // never resolves
-                    }
-                } => {
-                    break; // Cancellation requested
-                }
-            }
-
             match self.delete_page(start_prefix.clone(), stop_prefix.clone(), page_options)? {
                 0 => break, // No more keys to delete
                 count => total_deleted += count,
@@ -638,6 +622,7 @@ impl RocksDB {
             if let Some(callback) = &progress_callback {
                 callback(total_deleted);
             }
+            tokio::time::sleep(throttle).await;
         }
 
         Ok(total_deleted)

@@ -8,7 +8,6 @@ use prost::Message;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::time::Duration;
-use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 // TODO(aditi): This code definitely needs unit tests
@@ -310,7 +309,6 @@ impl BlockStore {
         stop_height: u64,
         page_options: &PageOptions,
         throttle: Duration,
-        cancel: Option<CancellationToken>,
     ) -> Result<u32, BlockStorageError> {
         let total_pruned = self
             .db
@@ -319,7 +317,6 @@ impl BlockStore {
                 Some(make_block_key(stop_height)),
                 page_options,
                 throttle,
-                cancel,
                 Some(|total_pruned: u32| {
                     info!("Pruning blocks... pruned: {}", total_pruned);
                 }),
@@ -404,7 +401,7 @@ mod tests {
             ..PageOptions::default()
         };
         let pruned = store
-            .prune_until(stop_height, &page_options, Duration::ZERO, None)
+            .prune_until(stop_height, &page_options, Duration::ZERO)
             .await
             .expect("Failed to prune blocks");
 
@@ -426,26 +423,5 @@ mod tests {
             .get_blocks(1, Some(stop_height + 1), &PageOptions::default())
             .expect("Failed to get blocks after pruning");
         assert_eq!(1, blocks.blocks.len());
-    }
-
-    #[tokio::test]
-    async fn test_prune_until_cancellation() {
-        let store = setup_db(100);
-        let cancel = CancellationToken::new();
-        cancel.cancel(); // Simulate immediate cancellation
-
-        let stop_height = 42;
-        let pruned = store
-            .prune_until(
-                stop_height,
-                &PageOptions::default(),
-                Duration::ZERO,
-                Some(cancel),
-            )
-            .await
-            .expect("Failed to prune blocks");
-
-        assert_eq!(0, pruned);
-        assert_eq!(1, store.min_block_number().unwrap());
     }
 }
