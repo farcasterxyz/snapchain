@@ -1,13 +1,15 @@
 use crate::core::error::HubError;
 use crate::storage::db::multi_chunk_writer::MultiChunkWriter;
 use crate::storage::util::increment_vec_u8;
+use futures::future::pending;
 use rocksdb::{Options, TransactionDB, DB};
 use std::collections::HashMap;
 use std::fs::{self};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use thiserror::Error;
-use tokio::sync::watch::Receiver;
+use tokio::select;
+use tokio::sync::watch;
 use tokio::time::Duration;
 use tracing::{info, warn};
 use walkdir::WalkDir;
@@ -611,15 +613,23 @@ impl RocksDB {
         stop_prefix: Option<Vec<u8>>,
         page_options: &PageOptions,
         throttle: Duration,
-        mut shutdown_rx: Option<Receiver<()>>,
+        mut shutdown_rx: Option<watch::Receiver<()>>,
         progress_callback: Option<impl Fn(u32) + Send>,
     ) -> Result<u32, HubError> {
         let mut total_deleted = 0;
         loop {
-            if let Some(rx) = &mut shutdown_rx {
-                if rx.changed().await.is_err() {
-                    // TODO: is there a better async pattern to use here?
-                    break; // Shutdown requested
+            select! {
+                _ = tokio::time::sleep(throttle) => {}
+                change = async {
+                    // TODO: couldn't figure out how to write this as map().unwrap_or(...)
+                    match shutdown_rx.as_mut() {
+                        Some(rx) => rx.changed().await,
+                        None => pending().await, // never resolves
+                    }
+                } => {
+                    if change.is_err() {
+                        break;
+                    }
                 }
             }
 
@@ -631,8 +641,6 @@ impl RocksDB {
             if let Some(callback) = &progress_callback {
                 callback(total_deleted);
             }
-
-            tokio::time::sleep(throttle).await;
         }
 
         Ok(total_deleted)
