@@ -310,6 +310,7 @@ impl NodeForTest {
             statsd_client.clone(),
             num_shards,
             FarcasterNetwork::Testnet,
+            false,
             Box::new(routing::EvenOddRouterForTest {}),
             mempool_tx.clone(),
             None,

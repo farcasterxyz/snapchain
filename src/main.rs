@@ -66,6 +66,7 @@ async fn start_servers(
         statsd_client.clone(),
         app_config.consensus.num_shards,
         app_config.fc_network,
+        app_config.read_node,
         Box::new(routing::ShardRouter {}),
         mempool_tx.clone(),
         l1_client,
