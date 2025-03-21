@@ -65,7 +65,6 @@ impl SnapchainNode {
             }
 
             let shard = SnapchainShard::new(shard_id);
-            let shard_validator_set = config.validator_set_for(shard_id);
             let ctx = SnapchainValidatorContext::new(keypair.clone());
 
             let db = RocksDB::open_shard_db(rocksdb_dir.clone().as_str(), shard_id);
@@ -92,10 +91,11 @@ impl SnapchainNode {
                 shard_decision_tx.clone(),
             );
 
+            let validator_sets = config.get_validator_set_config(shard_id);
             let shard_validator = ShardValidator::new(
                 validator_address.clone(),
                 shard.clone(),
-                shard_validator_set.clone(),
+                validator_sets,
                 None,
                 Some(shard_proposer),
                 local_state_store.clone(),
@@ -124,7 +124,6 @@ impl SnapchainNode {
         let block_shard = SnapchainShard::new(0);
 
         // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
-        let block_validator_set = config.validator_set_for(0);
         let engine = BlockEngine::new(block_store.clone(), statsd_client.clone());
         let block_proposer = BlockProposer::new(
             validator_address.clone(),
@@ -136,10 +135,11 @@ impl SnapchainNode {
             engine,
             statsd_client.clone(),
         );
+        let validator_sets = config.get_validator_set_config(0);
         let block_validator = ShardValidator::new(
             validator_address.clone(),
             block_shard.clone(),
-            block_validator_set.clone(),
+            validator_sets,
             Some(block_proposer),
             None,
             local_state_store,
