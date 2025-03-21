@@ -383,9 +383,32 @@ impl Proposer for BlockProposer {
             shard_chunk_witnesses: shard_witnesses,
         };
         let previous_block = self.engine.get_last_block();
-        let parent_hash = match previous_block {
-            Some(block) => block.hash.clone(),
-            None => vec![0, 32],
+        let genesis_height = Height::new(self.shard_id.shard_id(), 1);
+        let parent_hash = if height == genesis_height && previous_block.is_some() {
+            error!(
+                height = height.as_u64(),
+                round = round.as_i64(),
+                parent_hash = hex::encode(previous_block.unwrap().hash.clone()),
+                "Block unexpectedly has parent"
+            );
+            vec![0; 32]
+        } else if height == genesis_height {
+            // Genesis message
+            "It occurs to me that our survival may depend upon our talking to one another."
+                .as_bytes()
+                .to_vec()
+        } else {
+            match previous_block {
+                Some(block) => block.hash.clone(),
+                None => {
+                    error!(
+                        height = height.as_u64(),
+                        round = round.as_i64(),
+                        "Block unexpectedly missing parent"
+                    );
+                    vec![0; 32]
+                }
+            }
         };
         let witness_hash = blake3::hash(&shard_witness.encode_to_vec())
             .as_bytes()
