@@ -15,16 +15,4 @@ pub mod proto {
     tonic::include_proto!("_");
 }
 
-pub mod time {
-    use crate::core::types::FARCASTER_EPOCH;
-
-    pub fn current_time() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            - (FARCASTER_EPOCH / 1000)
-    }
-}
-
 pub mod background_jobs;
