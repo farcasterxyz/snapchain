@@ -39,9 +39,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            queue_size: 500,
+            queue_size: 5000,
             allow_unlimited_mempool_size: false,
-            capacity_per_shard: 1024,
+            capacity_per_shard: 100_000,
             rx_poll_interval: Duration::from_millis(1),
         }
     }

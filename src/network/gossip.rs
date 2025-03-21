@@ -219,7 +219,8 @@ impl SnapchainGossip {
         // Listen on all assigned port for this id
         swarm.listen_on(config.address.parse()?)?;
 
-        let (tx, rx) = mpsc::channel(100);
+        // ~5 seconds of buffer (assuming 1K msgs/pec)
+        let (tx, rx) = mpsc::channel(5000);
         Ok(SnapchainGossip {
             swarm,
             tx,

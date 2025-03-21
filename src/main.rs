@@ -35,8 +35,6 @@ use tonic::transport::Server;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-const READ_NODE_EXPIRES_AT: i64 = 1742515200000; // March 21 2025
-
 async fn start_servers(
     app_config: &snapchain::cfg::Config,
     mempool_tx: mpsc::Sender<(MempoolMessage, MempoolSource)>,
@@ -225,7 +223,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let keypair = app_config.consensus.keypair().clone();
 
-    let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
+    let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(1000);
     let (mempool_tx, mempool_rx) = mpsc::channel(app_config.mempool.queue_size as usize);
 
     let gossip_result = SnapchainGossip::create(
@@ -276,13 +274,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         };
 
     if app_config.read_node {
-        // Expire the read node build after 2 weeks
-        if chrono::Utc::now().timestamp_millis() > READ_NODE_EXPIRES_AT {
-            error!("Read node build has expired. Please update to the latest version.");
-            shutdown_tx.send(()).await.ok();
-            process::exit(1);
-        }
-
         let node = SnapchainReadNode::create(
             keypair.clone(),
             app_config.consensus.clone(),
