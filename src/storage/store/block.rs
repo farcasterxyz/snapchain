@@ -322,30 +322,6 @@ impl BlockStore {
             .transpose()
     }
 
-    // Prune one page of blocks as specified by page_options from height 0 until
-    // but excluding stop_height. Returns the number of blocks pruned.
-    fn prune_page(
-        &self,
-        stop_height: u64,
-        page_options: &PageOptions,
-    ) -> Result<u32, BlockStorageError> {
-        let mut txn = self.db.txn();
-
-        let stop_prefix = make_block_key(stop_height);
-        self.db
-            .for_each_iterator_by_prefix_paged(None, Some(stop_prefix), page_options, |key, _| {
-                txn.delete(key.to_vec());
-                Ok(false) // Continue iterating
-            })
-            .map_err(|_| BlockStorageError::TooManyBlocksInResult)?; // TODO: Return the right error
-
-        let count = txn.len() as u32;
-        self.db
-            .commit(txn)
-            .map_err(|e| BlockStorageError::from(e))?;
-        Ok(count)
-    }
-
     // Prune blocks with height less than stop_height. Returns the total number
     // of blocks pruned. Sleeps after each page for the throttle duration and
     // will stop if a shutdown is requested.
@@ -357,6 +333,7 @@ impl BlockStore {
         page_options: &PageOptions,
     ) -> Result<u32, BlockStorageError> {
         let mut total_pruned = 0u32;
+        let stop_prefix = Some(make_block_key(stop_height));
         loop {
             if let Some(shutdown_rx) = &mut shutdown_rx {
                 if shutdown_rx.has_changed().is_err() {
@@ -365,12 +342,15 @@ impl BlockStore {
                 }
             }
 
-            let count = self.prune_page(stop_height, page_options)?;
-            total_pruned += count;
+            match self
+                .db
+                .delete_page(None, stop_prefix.clone(), &page_options)
+                .map_err(|_| BlockStorageError::TooManyBlocksInResult)? // TODO: Return the right error 
+                {
+                    0 => break, // No more blocks to prune
+                    count => total_pruned += count,
+                };
 
-            if count == 0 {
-                break; // No more blocks to prune
-            }
             info!("Pruning blocks... blocks pruned: {}", total_pruned);
 
             // Sleep for the specified throttle duration

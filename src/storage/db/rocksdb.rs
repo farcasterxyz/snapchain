@@ -553,6 +553,30 @@ impl RocksDB {
 
         Ok(count)
     }
+
+    // Deletes keys in the given prefix range, respecting page_options.
+    // Returns the number of keys deleted.
+    pub fn delete_page(
+        &self,
+        start_prefix: Option<Vec<u8>>,
+        stop_prefix: Option<Vec<u8>>,
+        page_options: &PageOptions,
+    ) -> Result<u32, HubError> {
+        let mut txn = self.txn();
+        self.for_each_iterator_by_prefix_paged(
+            start_prefix,
+            stop_prefix,
+            page_options,
+            |key, _| {
+                txn.delete(key.to_vec());
+                Ok(false) // Continue iterating
+            },
+        )?;
+
+        let count = txn.len();
+        self.commit(txn)?;
+        Ok(count as u32)
+    }
 }
 
 #[cfg(test)]
