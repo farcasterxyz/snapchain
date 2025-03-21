@@ -28,7 +28,7 @@ pub fn job_block_pruning(
 
             // TODO: pass shutdown_rx
             stop_height.map(|stop_height| {
-                block_store.prune_until(stop_height, throttle, None, &page_options)
+                block_store.prune_until(stop_height, &page_options, throttle, None)
             });
         })
     })

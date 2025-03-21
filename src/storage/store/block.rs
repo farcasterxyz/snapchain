@@ -328,9 +328,9 @@ impl BlockStore {
     pub async fn prune_until(
         &self,
         stop_height: u64,
+        page_options: &PageOptions,
         throttle: Duration,
         shutdown_rx: Option<watch::Receiver<()>>,
-        page_options: &PageOptions,
     ) -> Result<u32, BlockStorageError> {
         let stop_prefix = Some(make_block_key(stop_height));
         let total_pruned = self
@@ -425,7 +425,7 @@ mod tests {
             ..PageOptions::default()
         };
         let pruned = store
-            .prune_until(stop_height, Duration::ZERO, None, &page_options)
+            .prune_until(stop_height, &page_options, Duration::ZERO, None)
             .await
             .expect("Failed to prune blocks");
 
@@ -443,9 +443,9 @@ mod tests {
         let pruned = store
             .prune_until(
                 stop_height,
+                &PageOptions::default(),
                 Duration::ZERO,
                 Some(shutdown_rx),
-                &PageOptions::default(),
             )
             .await
             .expect("Failed to prune blocks");
