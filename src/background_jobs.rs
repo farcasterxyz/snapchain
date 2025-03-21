@@ -29,35 +29,9 @@ pub fn job_block_pruning(
                     None
                 });
 
-            // TODO: pass shutdown_rx
             stop_height.map(|stop_height| {
                 block_store.prune_until(stop_height, &page_options, throttle, Some(cancel))
             });
         })
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::time::{sleep, Duration};
-    use tokio_cron_scheduler::JobScheduler;
-
-    #[tokio::test]
-    async fn test_job_block_pruning() {
-        let sched = JobScheduler::new().await.unwrap();
-        let schedule = "1/5 * * * * *"; // Every 5 seconds
-
-        let job = Job::new_async(schedule, move |_uuid, _l| {
-            Box::pin(async move {
-                println!("Running job...");
-            })
-        })
-        .unwrap();
-
-        sched.add(job).await.unwrap();
-        sched.start().await.unwrap();
-
-        sleep(Duration::from_secs(15)).await; // Let the job run a few times
-    }
 }
