@@ -7,6 +7,7 @@ use std::fs::{self};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use thiserror::Error;
+use tokio::time::Duration;
 use tracing::{info, warn};
 use walkdir::WalkDir;
 
@@ -553,11 +554,98 @@ impl RocksDB {
 
         Ok(count)
     }
+
+    // Returns finds the first key with the prefix index_prefix after start,
+    // using the value to index into the db, returning the value.
+    pub fn get_next_by_index(
+        &self,
+        index_prefix: Vec<u8>,
+        start: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, HubError> {
+        let page_options = PageOptions {
+            page_size: Some(1),
+            ..PageOptions::default()
+        };
+        let mut primary_key: Option<Vec<u8>> = None;
+        self.for_each_iterator_by_prefix(
+            Some(start),
+            Some(increment_vec_u8(&index_prefix)), // avoid overflowing to another index
+            &page_options,
+            |_, index| {
+                primary_key = Some(index.to_vec());
+                Ok(true) // Stop iterating after the first key
+            },
+        )?;
+        primary_key
+            .map(|primary_key| {
+                self.get(&primary_key)
+                    .map_err(|e| HubError::from(e))?
+                    .ok_or(HubError::not_found("No value found for the given key"))
+            })
+            .transpose()
+    }
+
+    // Deletes keys in the given prefix range, respecting page_options.
+    // Returns the number of keys deleted.
+    pub fn delete_page(
+        &self,
+        start_prefix: Option<Vec<u8>>,
+        stop_prefix: Option<Vec<u8>>,
+        page_options: &PageOptions,
+    ) -> Result<u32, HubError> {
+        let mut txn = self.txn();
+        self.for_each_iterator_by_prefix_paged(
+            start_prefix,
+            stop_prefix,
+            page_options,
+            |key, _| {
+                txn.delete(key.to_vec());
+                Ok(false) // Continue iterating
+            },
+        )?;
+
+        let count = txn.len();
+        self.commit(txn)?;
+        Ok(count as u32)
+    }
+
+    // Deletes keys in the given prefix range, respecting page_options.
+    // This function will keep deleting pages until there are no more keys to delete,
+    // or until shutdown is requested via the shutdown_rx channel.
+    // The progress_callback function can be used to report progress.
+    // The throttle parameter can be used to control the rate of deletion.
+    // Returns the total number of keys deleted.
+    pub async fn delete_paginated(
+        &self,
+        start_prefix: Option<Vec<u8>>,
+        stop_prefix: Option<Vec<u8>>,
+        page_options: &PageOptions,
+        throttle: Duration,
+        progress_callback: Option<impl Fn(u32) + Send>,
+    ) -> Result<u32, HubError> {
+        let mut total_deleted = 0;
+        loop {
+            match self.delete_page(start_prefix.clone(), stop_prefix.clone(), page_options)? {
+                0 => break, // No more keys to delete
+                count => total_deleted += count,
+            }
+
+            if let Some(callback) = &progress_callback {
+                callback(total_deleted);
+            }
+            tokio::time::sleep(throttle).await;
+        }
+
+        Ok(total_deleted)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
+    use crate::storage::{
+        db::{RocksDB, RocksDbTransactionBatch},
+        util::increment_vec_u8,
+    };
 
     #[test]
     fn test_merge_rocksdb_transaction() {
@@ -755,5 +843,56 @@ mod tests {
 
         // Cleanup
         db.destroy().unwrap();
+    }
+
+    #[test]
+    fn test_get_next_by_index() {
+        let tmp_path = tempfile::tempdir()
+            .unwrap()
+            .path()
+            .as_os_str()
+            .to_string_lossy()
+            .to_string();
+        let db = crate::storage::db::RocksDB::new(&tmp_path);
+        db.open().unwrap();
+
+        let key = b"key100";
+        let value = b"value1";
+
+        let index_prefix = b"index";
+        let index = b"index100";
+
+        db.put(key, value).expect("Failed to put key");
+        db.put(index, key).expect("Failed to put index");
+
+        // Get by exact index
+        let got = db
+            .get_next_by_index(index_prefix.to_vec(), index.to_vec())
+            .expect("Failed to get next by index")
+            .expect("No value found for the given key");
+        assert_eq!(got, value.to_vec());
+
+        // Get next index
+        let query = b"index099";
+        let got = db
+            .get_next_by_index(index_prefix.to_vec(), query.to_vec())
+            .expect("Failed to get next by index")
+            .expect("No value found for the given key");
+        assert_eq!(got, value.to_vec());
+
+        // Ensure lookup does not overflow to another index
+        let other_index = increment_vec_u8(&index_prefix.to_vec()); // "indey"
+        db.put(other_index.as_slice(), key)
+            .expect("Failed to put other index");
+
+        let query = b"index101";
+        let got = db
+            .get_next_by_index(index_prefix.to_vec(), query.to_vec())
+            .expect("Failed to get next by index");
+        assert!(got.is_none());
+
+        // Cleanup
+        db.destroy().unwrap();
+        db.open().unwrap();
     }
 }

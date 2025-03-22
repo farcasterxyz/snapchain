@@ -187,6 +187,7 @@ mod tests {
 
         let shard1_stores = Stores::new(
             db1,
+            1,
             merkle_trie::MerkleTrie::new(16).unwrap(),
             limits.clone(),
         );
@@ -194,6 +195,7 @@ mod tests {
 
         let shard2_stores = Stores::new(
             db2,
+            2,
             merkle_trie::MerkleTrie::new(16).unwrap(),
             limits.clone(),
         );

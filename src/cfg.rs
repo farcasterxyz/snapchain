@@ -7,6 +7,7 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct StatsdConfig {
@@ -45,6 +46,12 @@ pub struct Config {
     pub l1_rpc_url: String,
     pub fc_network: FarcasterNetwork,
     pub read_node: bool,
+    #[serde(
+        with = "humantime_serde",
+        skip_serializing_if = "Option::is_none",
+        default // TODO: for now defaults to None, but should be 1mo.
+    )]
+    pub read_node_block_retention: Option<Duration>,
 }
 
 impl Default for Config {
@@ -68,6 +75,7 @@ impl Default for Config {
             fc_network: FarcasterNetwork::Devnet,
             snapshot: storage::db::snapshot::Config::default(),
             read_node: false,
+            read_node_block_retention: None,
         }
     }
 }

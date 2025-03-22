@@ -162,13 +162,14 @@ impl StoreLimits {
 impl Stores {
     pub fn new(
         db: Arc<RocksDB>,
+        shard_id: u32,
         mut trie: merkle_trie::MerkleTrie,
         store_limits: StoreLimits,
     ) -> Stores {
         trie.initialize(&db).unwrap();
 
         let event_handler = StoreEventHandler::new();
-        let shard_store = ShardStore::new(db.clone());
+        let shard_store = ShardStore::new(db.clone(), shard_id);
         let cast_store = CastStore::new(db.clone(), event_handler.clone(), 100);
         let link_store = LinkStore::new(db.clone(), event_handler.clone(), 100);
         let reaction_store = ReactionStore::new(db.clone(), event_handler.clone(), 100);

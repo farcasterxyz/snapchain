@@ -7,13 +7,17 @@ use crate::storage::db::{PageOptions, RocksDB, RocksdbError};
 use prost::Message;
 use std::sync::Arc;
 use thiserror::Error;
-use tracing::error;
+use tokio::time::Duration;
+use tracing::{error, info};
 
 // TODO(aditi): This code definitely needs unit tests
 #[derive(Error, Debug)]
 pub enum BlockStorageError {
     #[error(transparent)]
     RocksdbError(#[from] RocksdbError),
+
+    #[error("Block missing from storage")]
+    BlockMissing,
 
     #[error("Block missing header")]
     BlockMissingHeader,
@@ -104,12 +108,23 @@ fn get_block_page_by_prefix(
     })
 }
 
-pub fn get_last_block(db: &RocksDB) -> Result<Option<Block>, BlockStorageError> {
+enum FirstOrLast {
+    First,
+    Last,
+}
+
+fn get_first_or_last_block(
+    db: &RocksDB,
+    first_or_last: FirstOrLast,
+) -> Result<Option<Block>, BlockStorageError> {
     let start_block_key = make_block_key(0);
     let block_page = get_block_page_by_prefix(
         db,
         &PageOptions {
-            reverse: true,
+            reverse: match first_or_last {
+                FirstOrLast::First => false,
+                FirstOrLast::Last => true,
+            },
             page_size: Some(1),
             page_token: None,
         },
@@ -125,7 +140,7 @@ pub fn get_last_block(db: &RocksDB) -> Result<Option<Block>, BlockStorageError> 
 }
 
 pub fn get_current_header(db: &RocksDB) -> Result<Option<proto::BlockHeader>, BlockStorageError> {
-    let last_block = get_last_block(db)?;
+    let last_block = get_first_or_last_block(db, FirstOrLast::Last)?;
     match last_block {
         None => Ok(None),
         Some(block) => Ok(block.header),
@@ -183,8 +198,13 @@ impl BlockStore {
     }
 
     #[inline]
+    pub fn get_first_block(&self) -> Result<Option<Block>, BlockStorageError> {
+        get_first_or_last_block(&self.db, FirstOrLast::First)
+    }
+
+    #[inline]
     pub fn get_last_block(&self) -> Result<Option<Block>, BlockStorageError> {
-        get_last_block(&self.db)
+        get_first_or_last_block(&self.db, FirstOrLast::Last)
     }
 
     #[inline]
@@ -200,6 +220,21 @@ impl BlockStore {
                 })?;
                 Ok(Some(block))
             }
+        }
+    }
+
+    #[inline]
+    pub fn min_block_number(&self) -> Result<u64, BlockStorageError> {
+        let first_block = self.get_first_block()?;
+        match first_block {
+            None => Err(BlockStorageError::BlockMissing),
+            Some(block) => match block.header {
+                None => Err(BlockStorageError::BlockMissingHeader),
+                Some(header) => match header.height {
+                    None => Err(BlockStorageError::BlockMissingHeight),
+                    Some(height) => Ok(height.block_number),
+                },
+            },
         }
     }
 
@@ -237,5 +272,156 @@ impl BlockStore {
             start_block_number,
             stop_block_number,
         )
+    }
+
+    // Returns the next block height with a timestamp greater than or equal to
+    // the given timestamp for the specified shard index.
+    pub fn get_next_height_by_timestamp(
+        &self,
+        timestamp: u64,
+    ) -> Result<Option<u64>, BlockStorageError> {
+        let shard_index = 0; // Block store uses shard index 0.
+        let timestamp_index_key = make_block_timestamp_index(shard_index, timestamp);
+        self.db
+            .get_next_by_index(vec![RootPrefix::BlockIndex as u8], timestamp_index_key)
+            .map_err(|_| BlockStorageError::TooManyBlocksInResult)? // TODO: Return the right error
+            .map(|bytes| {
+                let block = Block::decode(bytes.as_slice())
+                    .map_err(|e| BlockStorageError::DecodeError(e))?;
+                let header = block
+                    .header
+                    .as_ref()
+                    .ok_or(BlockStorageError::BlockMissingHeader)?;
+                let height = header
+                    .height
+                    .as_ref()
+                    .ok_or(BlockStorageError::BlockMissingHeight)?;
+                Ok(height.block_number)
+            })
+            .transpose()
+    }
+
+    // Prune blocks with height less than stop_height. Returns the total number
+    // of blocks pruned. Sleeps after each page for the throttle duration and
+    // will stop if a shutdown is requested.
+    pub async fn prune_until(
+        &self,
+        stop_height: u64,
+        page_options: &PageOptions,
+        throttle: Duration,
+    ) -> Result<u32, BlockStorageError> {
+        let total_pruned = self
+            .db
+            .delete_paginated(
+                Some(make_block_key(0)),
+                Some(make_block_key(stop_height)),
+                page_options,
+                throttle,
+                Some(|total_pruned: u32| {
+                    info!("Pruning blocks... pruned: {}", total_pruned);
+                }),
+            )
+            .await
+            .map_err(|_| BlockStorageError::TooManyBlocksInResult)?; // TODO: Return the right error
+        info!("Pruning complete. blocks pruned: {}", total_pruned);
+        Ok(total_pruned)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::{BlockHeader, Height};
+
+    fn make_db(dir: &tempfile::TempDir, filename: &str) -> Arc<RocksDB> {
+        let db_path = dir.path().join(filename);
+
+        let db = Arc::new(RocksDB::new(db_path.to_str().unwrap()));
+        db.open().unwrap();
+
+        db
+    }
+
+    fn make_block(block_number: u64, timestamp: u64) -> Block {
+        let header = BlockHeader {
+            height: Some(Height {
+                shard_index: 0,
+                block_number,
+            }),
+            timestamp,
+            ..BlockHeader::default()
+        };
+        Block {
+            header: Some(header),
+            ..Block::default()
+        }
+    }
+
+    fn setup_db(blocks: u64) -> BlockStore {
+        let blocks_dir = tempfile::tempdir().unwrap();
+        let db = make_db(&blocks_dir, "test_db");
+        let store = BlockStore::new(db);
+
+        let number_to_timestamp = |n| n * 100;
+        // Add some blocks to the db for testing
+        (1..=blocks).for_each(|i| {
+            let block = make_block(i, number_to_timestamp(i));
+            store.put_block(&block).unwrap();
+        });
+
+        store
+    }
+
+    #[test]
+    fn test_get_next_height_by_timestamp() {
+        let store = setup_db(100);
+        let timestamp = 500;
+        let next_height = store
+            .get_next_height_by_timestamp(timestamp)
+            .expect("Failed to get next height by timestamp")
+            .expect("Expected a valid height");
+        assert_eq!(5, next_height);
+
+        let timestamp = 450;
+        let next_height = store
+            .get_next_height_by_timestamp(timestamp)
+            .expect("Failed to get next height by timestamp")
+            .expect("Expected a valid height");
+        assert_eq!(5, next_height);
+    }
+
+    #[tokio::test]
+    async fn test_prune_until() {
+        let store = setup_db(100);
+
+        let stop_height = 42;
+        let page_size = 10;
+        let page_options = PageOptions {
+            page_size: Some(page_size),
+            ..PageOptions::default()
+        };
+        let pruned = store
+            .prune_until(stop_height, &page_options, Duration::ZERO)
+            .await
+            .expect("Failed to prune blocks");
+
+        assert_eq!((stop_height - 1) as u32, pruned);
+        assert_eq!(stop_height, store.min_block_number().unwrap());
+
+        // Check that get_blocks does not error after pruning
+        let blocks = store
+            .get_blocks(1, Some(stop_height), &PageOptions::default())
+            .expect("Failed to get blocks after pruning");
+        assert_eq!(0, blocks.blocks.len());
+
+        let blocks = store
+            .get_blocks(stop_height, Some(stop_height + 1), &PageOptions::default())
+            .expect("Failed to get blocks after pruning");
+        assert_eq!(1, blocks.blocks.len());
+
+        let blocks = store
+            .get_blocks(1, Some(stop_height + 1), &PageOptions::default())
+            .expect("Failed to get blocks after pruning");
+        assert_eq!(1, blocks.blocks.len());
     }
 }

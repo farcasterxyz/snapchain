@@ -30,7 +30,8 @@ use std::{fs, net};
 use tokio::net::TcpListener;
 use tokio::select;
 use tokio::signal::ctrl_c;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
+use tokio_cron_scheduler::JobScheduler;
 use tonic::transport::Server;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -128,6 +129,32 @@ async fn start_servers(
 
         http_shutdown_tx.send(()).await.ok();
     });
+}
+
+async fn schedule_background_jobs(
+    app_config: &snapchain::cfg::Config,
+    block_store: BlockStore,
+    shard_stores: HashMap<u32, Stores>,
+    sync_complete_rx: watch::Receiver<bool>,
+) {
+    let sched = JobScheduler::new().await.unwrap();
+    if app_config.read_node {
+        if let Some(block_retention) = app_config.read_node_block_retention {
+            let schedule = "0 0 0 * * * * *"; // midnight UTC every day
+            let job = snapchain::background_jobs::job_block_pruning(
+                schedule,
+                block_retention,
+                block_store.clone(),
+                shard_stores.clone(),
+                sync_complete_rx,
+            )
+            .unwrap();
+            sched.add(job).await.unwrap();
+        }
+    }
+    // Other background jobs can be added here
+
+    sched.start().await.unwrap();
 }
 
 fn is_dir_empty(path: &str) -> std::io::Result<bool> {
@@ -274,6 +301,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Err(_) => None,
         };
 
+    let (sync_complete_tx, sync_complete_rx) = watch::channel(false);
+
     if app_config.read_node {
         let node = SnapchainReadNode::create(
             keypair.clone(),
@@ -288,6 +317,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_config.trie_branching_factor,
             app_config.fc_network,
             registry,
+        )
+        .await;
+
+        schedule_background_jobs(
+            &app_config,
+            block_store.clone(),
+            node.shard_stores.clone(),
+            sync_complete_rx,
         )
         .await;
 
@@ -333,6 +370,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             // [num_shards] doesn't account for the block shard, so account for it manually
                             if shards_finished_syncing.len() as u32 == app_config.consensus.num_shards + 1 {
                                 info!("Initial sync completed for all shards");
+                                sync_complete_tx.send(true)?;
                                 gossip_tx.send(GossipEvent::SubscribeToDecidedValuesTopic()).await?
                             }
                         }
@@ -370,6 +408,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_config.trie_branching_factor,
             app_config.fc_network,
             registry,
+        )
+        .await;
+
+        schedule_background_jobs(
+            &app_config,
+            block_store.clone(),
+            node.shard_stores.clone(),
+            sync_complete_rx,
         )
         .await;
 
@@ -488,6 +534,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                         SystemMessage::ReadNodeFinishedInitialSync{shard_id: _} => {
                             // Ignore these for validator nodes
+                            sync_complete_tx.send(true)?; // TODO: is this necessary?
                         }
                     }
                 }

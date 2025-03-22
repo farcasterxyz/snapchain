@@ -184,7 +184,7 @@ impl ShardEngine {
         ShardEngine {
             shard_id,
             network,
-            stores: Stores::new(db.clone(), trie, store_limits),
+            stores: Stores::new(db.clone(), shard_id, trie, store_limits),
             senders: Senders::new(),
             db,
             statsd_client,
@@ -1335,6 +1335,14 @@ impl ShardEngine {
             })
     }
 
+    pub fn get_min_height(&self) -> Height {
+        match self.stores.shard_store.min_block_number() {
+            Ok(block_num) => Height::new(self.shard_id, block_num),
+            // In case of no blocks, return height 1
+            Err(_) => Height::new(self.shard_id, 1),
+        }
+    }
+
     pub fn get_confirmed_height(&self) -> Height {
         match self.stores.shard_store.max_block_number() {
             Ok(block_num) => Height::new(self.shard_id, block_num),
@@ -1551,6 +1559,15 @@ impl BlockEngine {
         match self.block_store.max_block_number() {
             Ok(block_num) => Height::new(shard_index, block_num),
             Err(_) => Height::new(shard_index, 0),
+        }
+    }
+
+    pub fn get_min_height(&self) -> Height {
+        let shard_index = 0;
+        match self.block_store.min_block_number() {
+            Ok(block_num) => Height::new(shard_index, block_num),
+            // In case of no blocks, return height 1
+            Err(_) => Height::new(shard_index, 1),
         }
     }
 }

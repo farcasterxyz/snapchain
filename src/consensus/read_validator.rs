@@ -32,8 +32,10 @@ impl ReadValidator {
     }
 
     pub fn get_min_height(&self) -> Height {
-        // Always return the genesis block, until we implement pruning
-        Height::new(self.shard_id, 1)
+        match &self.engine {
+            Engine::BlockEngine(engine) => engine.get_min_height(),
+            Engine::ShardEngine(engine) => engine.get_min_height(),
+        }
     }
 
     fn commit_decided_value(&mut self, value: &DecidedValue, height: Height) {
