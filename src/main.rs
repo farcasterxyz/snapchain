@@ -361,7 +361,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             // [num_shards] doesn't account for the block shard, so account for it manually
                             if shards_finished_syncing.len() as u32 == app_config.consensus.num_shards + 1 {
                                 info!("Initial sync completed for all shards");
-                                sync_complete_tx.send(());
+                                sync_complete_tx.send(())?;
                                 gossip_tx.send(GossipEvent::SubscribeToDecidedValuesTopic()).await?
                             }
                         }
@@ -517,7 +517,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                         SystemMessage::ReadNodeFinishedInitialSync{shard_id: _} => {
                             // Ignore these for validator nodes
-                            sync_complete_tx.send(()); // TODO: is this necessary?
+                            sync_complete_tx.send(())?; // TODO: is this necessary?
                         }
                     }
                 }
