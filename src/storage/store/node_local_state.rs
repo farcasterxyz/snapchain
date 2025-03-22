@@ -36,7 +36,6 @@ pub struct LocalStateStore {
 pub enum DataType {
     OnchainEvent = 1,
     FnameTransfer = 2,
-    SyncComplete = 3,
 }
 
 impl LocalStateStore {
@@ -62,13 +61,6 @@ impl LocalStateStore {
         key.extend_from_slice(&shard_index.to_be_bytes());
         key.extend_from_slice(&height.to_be_bytes());
         key
-    }
-
-    fn make_sync_complete_primary_key() -> Vec<u8> {
-        vec![
-            RootPrefix::NodeLocalState as u8,
-            DataType::SyncComplete as u8,
-        ]
     }
 
     pub fn put_proposal(&self, proposal: FullProposal) -> Result<(), LocalStateError> {
@@ -159,23 +151,6 @@ impl LocalStateStore {
         match self.db.get(&Self::make_fname_transfer_primary_key())? {
             Some(state) => Ok(Some(FnameState::decode(state.as_slice())?.last_fname_proof)),
             None => Ok(None),
-        }
-    }
-
-    pub fn set_sync_complete(&self, complete: bool) -> Result<(), LocalStateError> {
-        if complete {
-            Ok(self
-                .db
-                .put(&Self::make_sync_complete_primary_key(), &vec![1])?)
-        } else {
-            Ok(self.db.del(&Self::make_sync_complete_primary_key())?)
-        }
-    }
-
-    pub fn is_sync_complete(&self) -> Result<bool, LocalStateError> {
-        match self.db.get(&Self::make_sync_complete_primary_key())? {
-            Some(_) => Ok(true),
-            None => Ok(false),
         }
     }
 }

@@ -132,14 +132,9 @@ async fn start_servers(
     });
 }
 
-async fn schedule_background_jobs(
-    app_config: &snapchain::cfg::Config,
-    block_store: BlockStore,
-    local_state_store: LocalStateStore,
-) {
+async fn schedule_background_jobs(app_config: &snapchain::cfg::Config, block_store: BlockStore) {
     let sched = JobScheduler::new().await.unwrap();
-    let is_sync_complete = local_state_store.is_sync_complete().unwrap();
-    if app_config.read_node && is_sync_complete {
+    if app_config.read_node {
         if let Some(block_retention) = app_config.read_node_block_retention {
             let throttle = tokio::time::Duration::from_millis(100); // TODO: make const or configurable
             let cutoff_timestamp =
@@ -304,10 +299,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Err(_) => None,
         };
 
-    let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
-    let local_state_store = LocalStateStore::new(global_db);
-
-    schedule_background_jobs(&app_config, block_store.clone(), local_state_store.clone()).await;
+    schedule_background_jobs(&app_config, block_store.clone()).await;
 
     if app_config.read_node {
         let node = SnapchainReadNode::create(
@@ -368,7 +360,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             // [num_shards] doesn't account for the block shard, so account for it manually
                             if shards_finished_syncing.len() as u32 == app_config.consensus.num_shards + 1 {
                                 info!("Initial sync completed for all shards");
-                                local_state_store.set_sync_complete(true)?;
                                 gossip_tx.send(GossipEvent::SubscribeToDecidedValuesTopic()).await?
                             }
                         }
@@ -387,6 +378,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     } else {
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
+
+        let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
+        let local_state_store = LocalStateStore::new(global_db);
 
         let node = SnapchainNode::create(
             keypair.clone(),
