@@ -4,7 +4,6 @@ use hyper_util::rt::TokioIo;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::onchain_events::{L1Client, RealL1Client};
 use snapchain::consensus::consensus::SystemMessage;
-use snapchain::core::util;
 use snapchain::mempool::mempool::{Mempool, MempoolSource, ReadNodeMempool};
 use snapchain::mempool::routing;
 use snapchain::network::admin_server::MyAdminService;
@@ -136,14 +135,10 @@ async fn schedule_background_jobs(app_config: &snapchain::cfg::Config, block_sto
     let sched = JobScheduler::new().await.unwrap();
     if app_config.read_node {
         if let Some(block_retention) = app_config.read_node_block_retention {
-            let throttle = tokio::time::Duration::from_millis(100); // TODO: make const or configurable
-            let cutoff_timestamp =
-                util::get_farcaster_time().unwrap() - (block_retention.as_secs() as u64);
             let schedule = "0 0 0 * * * * *"; // midnight UTC every day
             let job = snapchain::background_jobs::job_block_pruning(
                 schedule,
-                cutoff_timestamp,
-                throttle,
+                block_retention,
                 block_store.clone(),
             )
             .unwrap();

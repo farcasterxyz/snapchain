@@ -1,3 +1,4 @@
+use crate::core::util;
 use crate::storage::constants::PAGE_SIZE_MAX;
 use crate::storage::db::PageOptions;
 use crate::storage::store::BlockStore;
@@ -7,8 +8,7 @@ use tracing::error;
 
 pub fn job_block_pruning(
     schedule: &str,
-    cutoff_timestamp: u64,
-    throttle: Duration,
+    block_retention: Duration,
     block_store: BlockStore,
 ) -> Result<Job, JobSchedulerError> {
     Job::new_async(schedule, move |_uuid, _l| {
@@ -19,6 +19,8 @@ pub fn job_block_pruning(
                 ..PageOptions::default()
             };
 
+            let cutoff_timestamp =
+                util::get_farcaster_time().unwrap() - (block_retention.as_secs() as u64);
             let stop_height = block_store
                 .get_next_height_by_timestamp(0, cutoff_timestamp)
                 .unwrap_or_else(|e| {
@@ -26,6 +28,7 @@ pub fn job_block_pruning(
                     None
                 });
 
+            let throttle = tokio::time::Duration::from_millis(100); // TODO: make const or configurable
             stop_height
                 .map(|stop_height| block_store.prune_until(stop_height, &page_options, throttle));
         })
