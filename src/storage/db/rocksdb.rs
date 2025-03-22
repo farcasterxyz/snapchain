@@ -862,7 +862,7 @@ mod tests {
             .get_next_by_index(query.to_vec())
             .expect("Failed to get next by index")
             .expect("No value found for the given key");
-        assert_eq!(got, key.to_vec());
+        assert_eq!(got, value.to_vec());
 
         // Cleanup
         db.destroy().unwrap();
