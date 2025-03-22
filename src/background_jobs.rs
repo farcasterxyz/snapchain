@@ -27,7 +27,7 @@ pub fn job_block_pruning(
         let cutoff_timestamp =
             util::get_farcaster_time().unwrap() - (block_retention.as_secs() as u64);
         let stop_height = block_store
-            .get_next_height_by_timestamp(0, cutoff_timestamp)
+            .get_next_height_by_timestamp(cutoff_timestamp)
             .unwrap_or_else(|e| {
                 error!("Error getting next height by timestamp: {}", e);
                 None
@@ -52,7 +52,7 @@ pub fn job_block_pruning(
         for (shard_id, stores) in shard_stores.iter() {
             let shard_store = &stores.shard_store;
             let stop_height = shard_store
-                .get_next_height_by_timestamp(0, cutoff_timestamp)
+                .get_next_height_by_timestamp(cutoff_timestamp)
                 .unwrap_or_else(|e| {
                     error!(
                         "Error getting next height by timestamp for shard {}: {}",

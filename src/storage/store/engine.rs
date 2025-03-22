@@ -184,7 +184,7 @@ impl ShardEngine {
         ShardEngine {
             shard_id,
             network,
-            stores: Stores::new(db.clone(), trie, store_limits),
+            stores: Stores::new(db.clone(), shard_id, trie, store_limits),
             senders: Senders::new(),
             db,
             statsd_client,

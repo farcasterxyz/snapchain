@@ -278,9 +278,9 @@ impl BlockStore {
     // the given timestamp for the specified shard index.
     pub fn get_next_height_by_timestamp(
         &self,
-        shard_index: u32,
         timestamp: u64,
     ) -> Result<Option<u64>, BlockStorageError> {
+        let shard_index = 0; // Block store uses shard index 0.
         let timestamp_index_key = make_block_timestamp_index(shard_index, timestamp);
         self.db
             .get_next_by_index(timestamp_index_key)
@@ -377,14 +377,14 @@ mod tests {
         let store = setup_db(100);
         let timestamp = 500;
         let next_height = store
-            .get_next_height_by_timestamp(0, timestamp)
+            .get_next_height_by_timestamp(timestamp)
             .expect("Failed to get next height by timestamp")
             .expect("Expected a valid height");
         assert_eq!(5, next_height);
 
         let timestamp = 450;
         let next_height = store
-            .get_next_height_by_timestamp(0, timestamp)
+            .get_next_height_by_timestamp(timestamp)
             .expect("Failed to get next height by timestamp")
             .expect("Expected a valid height");
         assert_eq!(5, next_height);

@@ -190,11 +190,12 @@ pub fn get_shard_chunks_in_range(
 #[derive(Default, Clone)]
 pub struct ShardStore {
     pub db: Arc<RocksDB>, // TODO: pub and Arc are temporary to allow trie to use
+    shard_id: u32,
 }
 
 impl ShardStore {
-    pub fn new(db: Arc<RocksDB>) -> ShardStore {
-        ShardStore { db }
+    pub fn new(db: Arc<RocksDB>, shard_id: u32) -> ShardStore {
+        ShardStore { db, shard_id }
     }
 
     pub fn put_shard_chunk(&self, shard_chunk: &ShardChunk) -> Result<(), ShardStorageError> {
@@ -293,10 +294,9 @@ impl ShardStore {
     // the given timestamp for the specified shard index.
     pub fn get_next_height_by_timestamp(
         &self,
-        shard_index: u32,
         timestamp: u64,
     ) -> Result<Option<u64>, ShardStorageError> {
-        let timestamp_index_key = make_block_timestamp_index(shard_index, timestamp);
+        let timestamp_index_key = make_block_timestamp_index(self.shard_id, timestamp);
         self.db
             .get_next_by_index(timestamp_index_key)
             .map_err(|_| ShardStorageError::TooManyShardsInResult)? // TODO: Return the right error
