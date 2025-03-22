@@ -240,7 +240,7 @@ mod tests {
     #[tokio::test]
     async fn test_mempool_eviction() {
         let (mut engine, _, mut mempool, mempool_tx, messages_request_tx, shard_decision_tx, _) =
-            setup(setup_config(9304));
+            setup(setup_config(9305));
         test_helper::register_user(
             1234,
             default_signer(),
