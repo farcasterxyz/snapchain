@@ -134,6 +134,7 @@ async fn start_servers(
 async fn schedule_background_jobs(
     app_config: &snapchain::cfg::Config,
     block_store: BlockStore,
+    shard_stores: HashMap<u32, Stores>,
     sync_complete_rx: watch::Receiver<bool>,
 ) {
     let sched = JobScheduler::new().await.unwrap();
@@ -144,6 +145,7 @@ async fn schedule_background_jobs(
                 schedule,
                 block_retention,
                 block_store.clone(),
+                shard_stores.clone(),
                 sync_complete_rx,
             )
             .unwrap();
@@ -300,7 +302,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         };
 
     let (sync_complete_tx, sync_complete_rx) = watch::channel(false);
-    schedule_background_jobs(&app_config, block_store.clone(), sync_complete_rx).await;
 
     if app_config.read_node {
         let node = SnapchainReadNode::create(
@@ -316,6 +317,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_config.trie_branching_factor,
             app_config.fc_network,
             registry,
+        )
+        .await;
+
+        schedule_background_jobs(
+            &app_config,
+            block_store.clone(),
+            node.shard_stores.clone(),
+            sync_complete_rx,
         )
         .await;
 
@@ -399,6 +408,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_config.trie_branching_factor,
             app_config.fc_network,
             registry,
+        )
+        .await;
+
+        schedule_background_jobs(
+            &app_config,
+            block_store.clone(),
+            node.shard_stores.clone(),
+            sync_complete_rx,
         )
         .await;
 
