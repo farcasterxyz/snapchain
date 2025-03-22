@@ -227,11 +227,11 @@ impl BlockStore {
     pub fn min_block_number(&self) -> Result<u64, BlockStorageError> {
         let first_block = self.get_first_block()?;
         match first_block {
-            None => Ok(0),
+            None => Err(BlockStorageError::BlockMissing),
             Some(block) => match block.header {
-                None => Ok(0),
+                None => Err(BlockStorageError::BlockMissingHeader),
                 Some(header) => match header.height {
-                    None => Ok(0),
+                    None => Err(BlockStorageError::BlockMissingHeight),
                     Some(height) => Ok(height.block_number),
                 },
             },

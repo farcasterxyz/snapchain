@@ -230,11 +230,11 @@ impl ShardStore {
     pub fn min_block_number(&self) -> Result<u64, ShardStorageError> {
         let first_shard_chunk = get_first_or_last_shard_chunk(&self.db, FirstOrLast::First)?;
         match first_shard_chunk {
-            None => Ok(0),
+            None => Err(ShardStorageError::ShardMissing),
             Some(shard_chunk) => match shard_chunk.header {
-                None => Ok(0),
+                None => Err(ShardStorageError::ShardMissingHeader),
                 Some(header) => match header.height {
-                    None => Ok(0),
+                    None => Err(ShardStorageError::ShardMissingHeight),
                     Some(height) => Ok(height.block_number),
                 },
             },

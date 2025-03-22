@@ -1337,9 +1337,9 @@ impl ShardEngine {
 
     pub fn get_min_height(&self) -> Height {
         match self.stores.shard_store.min_block_number() {
-            // max(1) to avoid returning 0, which handles the case where there are no blocks
-            Ok(block_num) => Height::new(self.shard_id, block_num.max(1)),
-            Err(_) => Height::new(self.shard_id, 0),
+            Ok(block_num) => Height::new(self.shard_id, block_num),
+            // In case of no blocks, return height 1
+            Err(_) => Height::new(self.shard_id, 1),
         }
     }
 
@@ -1565,9 +1565,9 @@ impl BlockEngine {
     pub fn get_min_height(&self) -> Height {
         let shard_index = 0;
         match self.block_store.min_block_number() {
-            // max(1) to avoid returning 0, which handles the case where there are no blocks
-            Ok(block_num) => Height::new(shard_index, block_num.max(1)),
-            Err(_) => Height::new(shard_index, 0),
+            Ok(block_num) => Height::new(shard_index, block_num),
+            // In case of no blocks, return height 1
+            Err(_) => Height::new(shard_index, 1),
         }
     }
 }
