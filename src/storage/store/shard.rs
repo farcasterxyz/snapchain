@@ -298,7 +298,7 @@ impl ShardStore {
     ) -> Result<Option<u64>, ShardStorageError> {
         let timestamp_index_key = make_block_timestamp_index(self.shard_id, timestamp);
         self.db
-            .get_next_by_index(timestamp_index_key)
+            .get_next_by_index(vec![RootPrefix::BlockIndex as u8], timestamp_index_key)
             .map_err(|_| ShardStorageError::TooManyShardsInResult)? // TODO: Return the right error
             .map(|bytes| {
                 let shard = ShardChunk::decode(bytes.as_slice())
@@ -333,12 +333,18 @@ impl ShardStore {
                 page_options,
                 throttle,
                 Some(|total_pruned: u32| {
-                    info!("Pruning shards... pruned: {}", total_pruned);
+                    info!(
+                        "Pruning shard {}... pruned: {}",
+                        self.shard_id, total_pruned
+                    );
                 }),
             )
             .await
             .map_err(|_| ShardStorageError::TooManyShardsInResult)?; // TODO: Return the right error
-        info!("Pruning complete. Shards pruned: {}", total_pruned);
+        info!(
+            "Pruning shard {} complete. pruned: {}",
+            self.shard_id, total_pruned
+        );
         Ok(total_pruned)
     }
 }

@@ -555,16 +555,27 @@ impl RocksDB {
         Ok(count)
     }
 
-    pub fn get_next_by_index(&self, start_prefix: Vec<u8>) -> Result<Option<Vec<u8>>, HubError> {
+    // Returns finds the first key with the prefix index_prefix after start,
+    // using the value to index into the db, returning the value.
+    pub fn get_next_by_index(
+        &self,
+        index_prefix: Vec<u8>,
+        start: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, HubError> {
         let page_options = PageOptions {
             page_size: Some(1),
             ..PageOptions::default()
         };
         let mut primary_key: Option<Vec<u8>> = None;
-        self.for_each_iterator_by_prefix(Some(start_prefix), None, &page_options, |_, index| {
-            primary_key = Some(index.to_vec());
-            Ok(true) // Stop iterating after the first key
-        })?;
+        self.for_each_iterator_by_prefix(
+            Some(start),
+            Some(increment_vec_u8(&index_prefix)), // avoid overflowing to another index
+            &page_options,
+            |_, index| {
+                primary_key = Some(index.to_vec());
+                Ok(true) // Stop iterating after the first key
+            },
+        )?;
         primary_key
             .map(|primary_key| {
                 self.get(&primary_key)
@@ -631,7 +642,10 @@ impl RocksDB {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
+    use crate::storage::{
+        db::{RocksDB, RocksDbTransactionBatch},
+        util::increment_vec_u8,
+    };
 
     #[test]
     fn test_merge_rocksdb_transaction() {
@@ -843,15 +857,17 @@ mod tests {
         db.open().unwrap();
 
         let key = b"key100";
-        let index = b"index100";
         let value = b"value1";
+
+        let index_prefix = b"index";
+        let index = b"index100";
 
         db.put(key, value).expect("Failed to put key");
         db.put(index, key).expect("Failed to put index");
 
         // Get by exact index
         let got = db
-            .get_next_by_index(index.to_vec())
+            .get_next_by_index(index_prefix.to_vec(), index.to_vec())
             .expect("Failed to get next by index")
             .expect("No value found for the given key");
         assert_eq!(got, value.to_vec());
@@ -859,10 +875,21 @@ mod tests {
         // Get next index
         let query = b"index099";
         let got = db
-            .get_next_by_index(query.to_vec())
+            .get_next_by_index(index_prefix.to_vec(), query.to_vec())
             .expect("Failed to get next by index")
             .expect("No value found for the given key");
         assert_eq!(got, value.to_vec());
+
+        // Ensure lookup does not overflow to another index
+        let other_index = increment_vec_u8(&index_prefix.to_vec()); // "indey"
+        db.put(other_index.as_slice(), key)
+            .expect("Failed to put other index");
+
+        let query = b"index101";
+        let got = db
+            .get_next_by_index(index_prefix.to_vec(), query.to_vec())
+            .expect("Failed to get next by index");
+        assert!(got.is_none());
 
         // Cleanup
         db.destroy().unwrap();

@@ -283,7 +283,7 @@ impl BlockStore {
         let shard_index = 0; // Block store uses shard index 0.
         let timestamp_index_key = make_block_timestamp_index(shard_index, timestamp);
         self.db
-            .get_next_by_index(timestamp_index_key)
+            .get_next_by_index(vec![RootPrefix::BlockIndex as u8], timestamp_index_key)
             .map_err(|_| BlockStorageError::TooManyBlocksInResult)? // TODO: Return the right error
             .map(|bytes| {
                 let block = Block::decode(bytes.as_slice())
