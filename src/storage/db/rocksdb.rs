@@ -830,4 +830,42 @@ mod tests {
         // Cleanup
         db.destroy().unwrap();
     }
+
+    #[test]
+    fn test_get_next_by_index() {
+        let tmp_path = tempfile::tempdir()
+            .unwrap()
+            .path()
+            .as_os_str()
+            .to_string_lossy()
+            .to_string();
+        let db = crate::storage::db::RocksDB::new(&tmp_path);
+        db.open().unwrap();
+
+        let key = b"key100";
+        let index = b"index100";
+        let value = b"value1";
+
+        db.put(key, value).expect("Failed to put key");
+        db.put(index, key).expect("Failed to put index");
+
+        // Get by exact index
+        let got = db
+            .get_next_by_index(index.to_vec())
+            .expect("Failed to get next by index")
+            .expect("No value found for the given key");
+        assert_eq!(got, value.to_vec());
+
+        // Get next index
+        let query = b"index099";
+        let got = db
+            .get_next_by_index(query.to_vec())
+            .expect("Failed to get next by index")
+            .expect("No value found for the given key");
+        assert_eq!(got, key.to_vec());
+
+        // Cleanup
+        db.destroy().unwrap();
+        db.open().unwrap();
+    }
 }
