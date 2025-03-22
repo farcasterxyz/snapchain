@@ -131,7 +131,11 @@ async fn start_servers(
     });
 }
 
-async fn schedule_background_jobs(app_config: &snapchain::cfg::Config, block_store: BlockStore) {
+async fn schedule_background_jobs(
+    app_config: &snapchain::cfg::Config,
+    block_store: BlockStore,
+    sync_complete_rx: broadcast::Receiver<()>,
+) {
     let sched = JobScheduler::new().await.unwrap();
     if app_config.read_node {
         if let Some(block_retention) = app_config.read_node_block_retention {
@@ -140,6 +144,7 @@ async fn schedule_background_jobs(app_config: &snapchain::cfg::Config, block_sto
                 schedule,
                 block_retention,
                 block_store.clone(),
+                sync_complete_rx,
             )
             .unwrap();
             sched.add(job).await.unwrap();
@@ -294,7 +299,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Err(_) => None,
         };
 
-    schedule_background_jobs(&app_config, block_store.clone()).await;
+    let (sync_complete_tx, sync_complete_rx) = broadcast::channel::<()>(1);
+    schedule_background_jobs(&app_config, block_store.clone(), sync_complete_rx).await;
 
     if app_config.read_node {
         let node = SnapchainReadNode::create(
@@ -355,6 +361,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             // [num_shards] doesn't account for the block shard, so account for it manually
                             if shards_finished_syncing.len() as u32 == app_config.consensus.num_shards + 1 {
                                 info!("Initial sync completed for all shards");
+                                sync_complete_tx.send(());
                                 gossip_tx.send(GossipEvent::SubscribeToDecidedValuesTopic()).await?
                             }
                         }
@@ -510,6 +517,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                         SystemMessage::ReadNodeFinishedInitialSync{shard_id: _} => {
                             // Ignore these for validator nodes
+                            sync_complete_tx.send(()); // TODO: is this necessary?
                         }
                     }
                 }
