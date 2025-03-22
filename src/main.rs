@@ -140,7 +140,7 @@ async fn schedule_background_jobs(
     let sched = JobScheduler::new().await.unwrap();
     if app_config.read_node {
         if let Some(block_retention) = app_config.read_node_block_retention {
-            let schedule = "0 0 0 * * * * *"; // midnight UTC every day
+            let schedule = "0 0 0 * * *"; // midnight UTC every day
             let job = snapchain::background_jobs::job_block_pruning(
                 schedule,
                 block_retention,
