@@ -35,8 +35,11 @@ pub fn job_block_pruning(
                 });
 
             let throttle = tokio::time::Duration::from_millis(100); // TODO: make const or configurable
-            stop_height
-                .map(|stop_height| block_store.prune_until(stop_height, &page_options, throttle));
+            stop_height.map(|stop_height| async move {
+                block_store
+                    .prune_until(stop_height, &page_options, throttle)
+                    .await
+            });
         })
     })
 }
