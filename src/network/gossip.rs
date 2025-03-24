@@ -2,7 +2,7 @@ use crate::consensus::consensus::{MalachiteEventShard, SystemMessage};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
-use crate::mempool::mempool::MempoolSource;
+use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::proto::read_node_message;
 use crate::storage::store::engine::MempoolMessage;
 use bytes::Bytes;
@@ -241,7 +241,7 @@ impl SnapchainGossip {
                             let event = MalachiteNetworkEvent::PeerConnected(MalachitePeerId::from_libp2p(&peer_id));
                             let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await;
                             if let Err(e) = res {
-                                warn!("Failed to send connection established message: {:?}", e);
+                                warn!("Failed to send connection established message: {}", e);
                             }
                         },
                         SwarmEvent::ConnectionClosed {peer_id, cause, ..} => {
@@ -249,7 +249,7 @@ impl SnapchainGossip {
                             let event = MalachiteNetworkEvent::PeerDisconnected(MalachitePeerId::from_libp2p(&peer_id));
                             let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await;
                             if let Err(e) = res {
-                                warn!("Failed to send connection closed message: {:?}", e);
+                                warn!("Failed to send connection closed message: {}", e);
                             }
                         },
                         SwarmEvent::Behaviour(SnapchainBehaviorEvent::Gossipsub(gossipsub::Event::Subscribed { peer_id, topic })) =>
@@ -260,7 +260,7 @@ impl SnapchainGossip {
                             info!(address = address.to_string(), "Local node is listening");
                             let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, MalachiteNetworkEvent::Listening(address))).await;
                             if let Err(e) = res {
-                                warn!("Failed to send Listening message: {:?}", e);
+                                warn!("Failed to send Listening message: {}", e);
                             }
                         },
                         SwarmEvent::Behaviour(SnapchainBehaviorEvent::Gossipsub(gossipsub::Event::Message {
@@ -271,7 +271,7 @@ impl SnapchainGossip {
                             if let Some(system_message) = Self::map_gossip_bytes_to_system_message(peer_id, message.data) {
                                 let res = self.system_tx.send(system_message).await;
                                 if let Err(e) = res {
-                                    warn!("Failed to send system block message: {:?}", e);
+                                    warn!("Failed to send system block message: {}", e);
                                 }
                             }
                         },
@@ -294,7 +294,7 @@ impl SnapchainGossip {
                                             if let Some(event) = event {
                                                 let res = self.system_tx.send(event).await;
                                                 if let Err(e) = res {
-                                                    warn!("Failed to send RPC request message: {:?}", e);
+                                                    warn!("Failed to send RPC request message: {}", e);
                                                 }
                                             }
                                         },
@@ -311,7 +311,7 @@ impl SnapchainGossip {
                                             if let Some(event) = event {
                                                 let res = self.system_tx.send(event).await;
                                                 if let Err(e) = res {
-                                                    warn!("Failed to send RPC request message: {:?}", e);
+                                                    warn!("Failed to send RPC request message: {}", e);
                                                 }
                                             }
                                         },
@@ -335,7 +335,7 @@ impl SnapchainGossip {
                                     let peer = peer_id.to_libp2p();
                                     let request_id = self.swarm.behaviour_mut().rpc.send_request(peer, Bytes::from(encoded_message.clone()));
                                     if let Err(e) = reply_tx.send(request_id) {
-                                        warn!("Failed to send RPC request: {:?}", e);
+                                        warn!("Failed to send RPC request: {}", e);
                                     }
                                 },
                                 GossipTopic::SyncReply(request_id) => {
@@ -346,7 +346,7 @@ impl SnapchainGossip {
 
                                     let result = self.swarm.behaviour_mut().rpc.send_response(channel, Bytes::from(encoded_message.clone()));
                                     if let Err(e) = result {
-                                        warn!("Failed to send RPC response: {:?}", e);
+                                        warn!("Failed to send RPC response: {}", e);
                                     }
                                 },
                             }
@@ -365,7 +365,7 @@ impl SnapchainGossip {
             .gossipsub
             .publish(publish_topic, message)
         {
-            warn!("Failed to publish gossip message: {:?} ({:?})", e, topic);
+            warn!("Failed to publish gossip message: {} ({:?})", e, topic);
         }
     }
 
@@ -449,7 +449,7 @@ impl SnapchainGossip {
                                 MempoolMessage::UserMessage(message)
                             }
                         };
-                        Some(SystemMessage::Mempool((
+                        Some(SystemMessage::Mempool(MempoolRequest::AddMessage(
                             mempool_message,
                             MempoolSource::Gossip,
                         )))
@@ -483,7 +483,7 @@ impl SnapchainGossip {
                     match snapchain_codec.decode(body.clone()) {
                         Ok(request) => request,
                         Err(e) => {
-                            warn!("Failed to decode sync request: {:?}", e);
+                            warn!("Failed to decode sync request: {}", e);
                             return None;
                         }
                     };
@@ -504,7 +504,7 @@ impl SnapchainGossip {
                     match snapchain_codec.decode(body.clone()) {
                         Ok(response) => response,
                         Err(e) => {
-                            warn!("Failed to decode sync response: {:?}", e);
+                            warn!("Failed to decode sync response: {}", e);
                             return None;
                         }
                     };
@@ -529,7 +529,7 @@ impl SnapchainGossip {
                 let topic = gossipsub::IdentTopic::new(DECIDED_VALUES);
                 let result = self.swarm.behaviour_mut().gossipsub.subscribe(&topic);
                 if let Err(e) = result {
-                    error!("Failed to subscribe to {} topic: {:?}", DECIDED_VALUES, e);
+                    error!("Failed to subscribe to {} topic: {}", DECIDED_VALUES, e);
                 }
                 None
             }
@@ -605,7 +605,7 @@ impl SnapchainGossip {
                         Some((vec![topic], encoded.to_vec()))
                     }
                     Err(e) => {
-                        warn!("Failed to encode sync request: {:?}", e);
+                        warn!("Failed to encode sync request: {}", e);
                         None
                     }
                 }
@@ -618,7 +618,7 @@ impl SnapchainGossip {
                         Some((vec![topic], encoded.to_vec()))
                     }
                     Err(e) => {
-                        warn!("Failed to encode sync reply: {:?}", e);
+                        warn!("Failed to encode sync reply: {}", e);
                         None
                     }
                 }
@@ -643,7 +643,7 @@ impl SnapchainGossip {
                         Some((topics, gossip_message.encode_to_vec()))
                     }
                     Err(e) => {
-                        warn!("Failed to encode status message: {:?}", e);
+                        warn!("Failed to encode status message: {}", e);
                         None
                     }
                 }

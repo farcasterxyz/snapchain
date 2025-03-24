@@ -117,7 +117,11 @@ pub enum MempoolSource {
     Local,
 }
 
-pub type MempoolMessageWithSource = (MempoolMessage, MempoolSource);
+#[derive(Debug)]
+pub enum MempoolRequest {
+    AddMessage(MempoolMessage, MempoolSource),
+    GetSize(oneshot::Sender<HashMap<u32, u64>>),
+}
 
 impl MempoolMessage {
     pub fn mempool_key(&self) -> MempoolKey {
@@ -138,14 +142,14 @@ pub struct ReadNodeMempool {
     shard_stores: HashMap<u32, Stores>,
     message_router: Box<dyn MessageRouter>,
     num_shards: u32,
-    mempool_rx: mpsc::Receiver<MempoolMessageWithSource>,
+    mempool_rx: mpsc::Receiver<MempoolRequest>,
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     statsd_client: StatsdClientWrapper,
 }
 
 impl ReadNodeMempool {
     pub fn new(
-        mempool_rx: mpsc::Receiver<MempoolMessageWithSource>,
+        mempool_rx: mpsc::Receiver<MempoolRequest>,
         num_shards: u32,
         shard_stores: HashMap<u32, Stores>,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
@@ -259,13 +263,23 @@ impl ReadNodeMempool {
     }
 
     pub async fn run(&mut self) {
-        while let Some((message, source)) = self.mempool_rx.recv().await {
-            self.statsd_client
-                .count("read_mempool.messages_received", 1);
-            if self.message_is_valid(&message) {
-                self.gossip_message(message, source).await;
-                self.statsd_client
-                    .count("read_mempool.messages_published", 1);
+        while let Some(message_request) = self.mempool_rx.recv().await {
+            match message_request {
+                MempoolRequest::AddMessage(message, source) => {
+                    self.statsd_client
+                        .count("read_mempool.messages_received", 1);
+                    if self.message_is_valid(&message) {
+                        self.gossip_message(message, source).await;
+                        self.statsd_client
+                            .count("read_mempool.messages_published", 1);
+                    }
+                }
+                MempoolRequest::GetSize(reply_to) => {
+                    // Read nodes don't have a local mempool, so the size is always 0
+                    if let Err(_) = reply_to.send(HashMap::new()) {
+                        error!("Unable to reply to message size request from mempool");
+                    }
+                }
             }
         }
         panic!("Mempool has exited");
@@ -284,7 +298,7 @@ pub struct Mempool {
 impl Mempool {
     pub fn new(
         config: Config,
-        mempool_rx: mpsc::Receiver<MempoolMessageWithSource>,
+        mempool_rx: mpsc::Receiver<MempoolRequest>,
         messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
         num_shards: u32,
         shard_stores: HashMap<u32, Stores>,
@@ -410,40 +424,49 @@ impl Mempool {
                 chunk = self.shard_decision_rx.recv() => {
                     match chunk {
                         Ok(chunk) => {
-                        let header = chunk.header.expect("Expects chunk to have a header");
-                        let height = header.height.expect("Expects header to have a height");
-                        if let Some(mempool) = self.messages.get_mut(&height.shard_index) {
-                            for transaction in chunk.transactions {
-                                for user_message in transaction.user_messages {
-                                    mempool.remove(&user_message.mempool_key());
-                                    self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
-                                }
-                                for system_message in transaction.system_messages {
-                                    mempool.remove(&system_message.mempool_key());
-                                    self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
+                            let header = chunk.header.expect("Expects chunk to have a header");
+                            let height = header.height.expect("Expects header to have a height");
+                            if let Some(mempool) = self.messages.get_mut(&height.shard_index) {
+                                for transaction in chunk.transactions {
+                                    for user_message in transaction.user_messages {
+                                        mempool.remove(&user_message.mempool_key());
+                                        self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
+                                    }
+                                    for system_message in transaction.system_messages {
+                                        mempool.remove(&system_message.mempool_key());
+                                        self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
+                                    }
                                 }
                             }
+                        },
+                        Err(broadcast::error::RecvError::Closed) => {
+                            panic!("Shard decision tx is closed.");
+                        },
+                        Err(broadcast::error::RecvError::Lagged(count)) => {
+                            error!(lag = count, "Shard decision rx is lagged");
                         }
-                    },
-                    Err(broadcast::error::RecvError::Closed) => {
-                        panic!("Shard decision tx is closed.");
-                    },
-                    Err(broadcast::error::RecvError::Lagged(count)) => {
-                        error!(lag = count, "Shard decision rx is lagged");
                     }
-                }
-
                 }
                 _ = poll_interval.tick() => {
                     // We want to pull in multiple messages per poll so that throughput is not blocked on the polling frequency. The number of messages we pull should be fixed and relatively small so that the mempool isn't always stuck here.
                     for _ in 0..256 {
                         if self.config.allow_unlimited_mempool_size || (self.messages.len() as u64) < self.config.capacity_per_shard {
                             match self.read_node_mempool.mempool_rx.try_recv() {
-                                Ok((message, source)) => {
+                                Ok(MempoolRequest::AddMessage(message, source)) => {
                                     self.insert(message, source).await;
-                                }, Err(mpsc::error::TryRecvError::Disconnected) => {
+                                }
+                                Ok(MempoolRequest::GetSize(reply_to)) => {
+                                    let mut sizes = HashMap::new();
+                                    for (shard_id, messages) in &self.messages {
+                                        sizes.insert(*shard_id, messages.len() as u64);
+                                    }
+                                    if let Err(_) = reply_to.send(sizes) {
+                                        error!("Unable to reply to message size request from mempool");
+                                    }
+                                }
+                                Err(mpsc::error::TryRecvError::Disconnected) => {
                                     panic!("Mempool tx is disconnected")
-                                },
+                                }
                                 Err(mpsc::error::TryRecvError::Empty) => {
                                     break;
                                 },

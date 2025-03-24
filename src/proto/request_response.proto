@@ -44,6 +44,7 @@ message ShardInfo {
   uint64 num_fid_registrations = 4;
   uint64 approx_size = 5;
   uint64 block_delay = 6;
+  uint64 mempool_size = 7;
 }
 
 message GetInfoRequest {

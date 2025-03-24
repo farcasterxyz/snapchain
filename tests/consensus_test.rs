@@ -6,7 +6,7 @@ use serial_test::serial;
 use snapchain::consensus::consensus::{SystemMessage, ValidatorSetConfig};
 use snapchain::consensus::proposer::GENESIS_MESSAGE;
 use snapchain::mempool::mempool::{
-    self, Mempool, MempoolMessageWithSource, MempoolMessagesRequest, MempoolSource,
+    self, Mempool, MempoolMessagesRequest, MempoolRequest, MempoolSource,
 };
 use snapchain::mempool::routing;
 use snapchain::network::gossip::SnapchainGossip;
@@ -40,7 +40,7 @@ struct NodeForTest {
     node: SnapchainNode,
     db: Arc<RocksDB>,
     block_store: BlockStore,
-    mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
+    mempool_tx: mpsc::Sender<MempoolRequest>,
     handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -500,11 +500,11 @@ impl TestNetwork {
     }
 }
 
-async fn register_fid(fid: u64, messages_tx: Sender<MempoolMessageWithSource>) -> SigningKey {
+async fn register_fid(fid: u64, messages_tx: Sender<MempoolRequest>) -> SigningKey {
     let signer = factory::signers::generate_signer();
     let address = factory::address::generate_random_address();
     messages_tx
-        .send((
+        .send(MempoolRequest::AddMessage(
             MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
                 on_chain_event: Some(factory::events_factory::create_rent_event(
                     fid, None, None, false,
@@ -516,7 +516,7 @@ async fn register_fid(fid: u64, messages_tx: Sender<MempoolMessageWithSource>) -
         .await
         .unwrap();
     messages_tx
-        .send((
+        .send(MempoolRequest::AddMessage(
             MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
                 on_chain_event: Some(factory::events_factory::create_signer_event(
                     fid,
@@ -531,7 +531,7 @@ async fn register_fid(fid: u64, messages_tx: Sender<MempoolMessageWithSource>) -
         .await
         .unwrap();
     messages_tx
-        .send((
+        .send(MempoolRequest::AddMessage(
             MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
                 on_chain_event: Some(factory::events_factory::create_id_register_event(
                     fid,
@@ -549,7 +549,7 @@ async fn register_fid(fid: u64, messages_tx: Sender<MempoolMessageWithSource>) -
     signer
 }
 
-async fn send_messages(messages_tx: mpsc::Sender<(MempoolMessage, MempoolSource)>) {
+async fn send_messages(messages_tx: mpsc::Sender<MempoolRequest>) {
     let mut i: i32 = 0;
     let prefix = vec![0, 0, 0, 0, 0, 0];
     let fid = 123;
@@ -568,7 +568,7 @@ async fn send_messages(messages_tx: mpsc::Sender<(MempoolMessage, MempoolSource)
             Some(&signer),
         ));
         messages_tx
-            .send((message, MempoolSource::Local))
+            .send(MempoolRequest::AddMessage(message, MempoolSource::Local))
             .await
             .unwrap();
         i += 1;

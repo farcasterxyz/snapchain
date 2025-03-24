@@ -33,8 +33,8 @@ mod tests {
     use tokio::sync::{broadcast, mpsc};
     use tonic::Request;
 
-    const SHARD1_FID: u64 = 121;
-    const SHARD2_FID: u64 = 122;
+    const SHARD1_FID: u64 = test_helper::SHARD1_FID;
+    const SHARD2_FID: u64 = test_helper::SHARD2_FID;
 
     const USER_NAME: &str = "user";
     const PASSWORD: &str = "password";
@@ -241,7 +241,7 @@ mod tests {
                 proto::FarcasterNetwork::Testnet,
                 false,
                 message_router,
-                mempool_tx,
+                mempool_tx.clone(),
                 Some(Box::new(MockL1Client {})),
             ),
         )
@@ -786,6 +786,7 @@ mod tests {
         assert_eq!(block_info.num_fid_registrations, 0);
         assert_eq!(block_info.num_messages, 0);
         assert_eq!(block_info.max_height, 0);
+        assert_eq!(block_info.mempool_size, 0);
 
         let shard1_info = info
             .shard_infos
@@ -796,6 +797,7 @@ mod tests {
         assert_eq!(shard1_info.num_fid_registrations, 1);
         assert_eq!(shard1_info.num_messages, 4); // 3 onchain events for registration + 1 cast add
         assert_eq!(shard1_info.max_height, 4); // Each message above was commited in a separate block
+        assert_eq!(block_info.mempool_size, 0);
 
         let shard2_info = info
             .shard_infos
@@ -806,5 +808,6 @@ mod tests {
         assert_eq!(shard2_info.num_fid_registrations, 0);
         assert_eq!(shard2_info.num_messages, 0);
         assert_eq!(shard2_info.max_height, 0);
+        assert_eq!(block_info.mempool_size, 0);
     }
 }

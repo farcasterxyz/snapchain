@@ -4,7 +4,7 @@ use hyper_util::rt::TokioIo;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::onchain_events::{L1Client, RealL1Client};
 use snapchain::consensus::consensus::SystemMessage;
-use snapchain::mempool::mempool::{Mempool, MempoolSource, ReadNodeMempool};
+use snapchain::mempool::mempool::{Mempool, MempoolRequest, ReadNodeMempool};
 use snapchain::mempool::routing;
 use snapchain::network::admin_server::MyAdminService;
 use snapchain::network::gossip::{GossipEvent, SnapchainGossip};
@@ -16,7 +16,7 @@ use snapchain::proto::admin_service_server::AdminServiceServer;
 use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::storage::db::snapshot::download_snapshots;
 use snapchain::storage::db::RocksDB;
-use snapchain::storage::store::engine::{MempoolMessage, Senders};
+use snapchain::storage::store::engine::Senders;
 use snapchain::storage::store::node_local_state::LocalStateStore;
 use snapchain::storage::store::stores::Stores;
 use snapchain::storage::store::BlockStore;
@@ -38,7 +38,7 @@ use tracing_subscriber::EnvFilter;
 
 async fn start_servers(
     app_config: &snapchain::cfg::Config,
-    mempool_tx: mpsc::Sender<(MempoolMessage, MempoolSource)>,
+    mempool_tx: mpsc::Sender<MempoolRequest>,
     shutdown_tx: mpsc::Sender<()>,
     statsd_client: StatsdClientWrapper,
     shard_stores: HashMap<u32, Stores>,

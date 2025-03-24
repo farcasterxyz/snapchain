@@ -1,4 +1,4 @@
-use crate::mempool::mempool::MempoolMessageWithSource;
+use crate::mempool::mempool::MempoolRequest;
 use crate::network::rpc_extensions::authenticate_request;
 use crate::proto::admin_service_server::AdminService;
 use crate::proto::{Empty, FarcasterNetwork};
@@ -20,7 +20,7 @@ use tracing::{error, info};
 
 pub struct MyAdminService {
     allowed_users: HashMap<String, String>,
-    pub mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
+    pub mempool_tx: mpsc::Sender<MempoolRequest>,
     snapshot_config: storage::db::snapshot::Config,
     shard_stores: HashMap<u32, Stores>,
     block_store: BlockStore,
@@ -40,7 +40,7 @@ pub enum AdminServiceError {
 impl MyAdminService {
     pub fn new(
         rpc_auth: String,
-        mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
+        mempool_tx: mpsc::Sender<MempoolRequest>,
         shard_stores: HashMap<u32, Stores>,
         block_store: BlockStore,
         snapshot_config: storage::db::snapshot::Config,

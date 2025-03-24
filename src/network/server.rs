@@ -4,7 +4,7 @@ use crate::core::error::HubError;
 use crate::core::util::get_farcaster_time;
 use crate::core::validations;
 use crate::core::validations::verification::VerificationAddressClaim;
-use crate::mempool::mempool::{MempoolMessageWithSource, MempoolSource};
+use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::mempool::routing;
 use crate::proto;
 use crate::proto::cast_add_body;
@@ -61,10 +61,14 @@ use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use hex::ToHex;
 use std::collections::HashMap;
-use tokio::sync::mpsc;
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
+
+const MEMPOOL_SIZE_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
 
 pub struct MyHubService {
     allowed_users: HashMap<String, String>,
@@ -75,7 +79,7 @@ pub struct MyHubService {
     message_router: Box<dyn routing::MessageRouter>,
     statsd_client: StatsdClientWrapper,
     l1_client: Option<Box<dyn L1Client>>,
-    mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
+    mempool_tx: mpsc::Sender<MempoolRequest>,
     network: proto::FarcasterNetwork,
     is_read_node: bool,
 }
@@ -91,7 +95,7 @@ impl MyHubService {
         network: proto::FarcasterNetwork,
         is_read_node: bool,
         message_router: Box<dyn routing::MessageRouter>,
-        mempool_tx: mpsc::Sender<MempoolMessageWithSource>,
+        mempool_tx: mpsc::Sender<MempoolRequest>,
         l1_client: Option<Box<dyn L1Client>>,
     ) -> Self {
         let mut allowed_users = HashMap::new();
@@ -214,7 +218,7 @@ impl MyHubService {
             }
         }
 
-        match self.mempool_tx.try_send((
+        match self.mempool_tx.try_send(MempoolRequest::AddMessage(
             MempoolMessage::UserMessage(message.clone()),
             MempoolSource::RPC,
         )) {
@@ -520,6 +524,18 @@ impl HubService for MyHubService {
         let mut total_num_messages = 0;
         let mut shard_infos = Vec::new();
 
+        let (size_req, size_res) = oneshot::channel();
+        let _ = self
+            .mempool_tx
+            .send(MempoolRequest::GetSize(size_req))
+            .await
+            .map_err(|err| {
+                error!(
+                    { err = err.to_string() },
+                    "[get_info] error sending mempool size request"
+                );
+            });
+
         let current_time = get_farcaster_time().unwrap_or(0);
         let block_info = proto::ShardInfo {
             shard_id: 0,
@@ -528,8 +544,24 @@ impl HubService for MyHubService {
             num_fid_registrations: 0,
             approx_size: self.block_store.db.approximate_size(),
             block_delay: current_time - self.block_store.max_block_timestamp().unwrap_or(0),
+            mempool_size: 0,
         };
         shard_infos.push(block_info);
+
+        let mempool_size = match timeout(MEMPOOL_SIZE_REQUEST_TIMEOUT, size_res).await {
+            Ok(Ok(size)) => size,
+            Ok(Err(err)) => {
+                error!(
+                    { err = err.to_string() },
+                    "[get_info] error receiving mempool size response"
+                );
+                HashMap::new()
+            }
+            Err(_) => {
+                error!("[get_info] timeout receiving mempool size response");
+                HashMap::new()
+            }
+        };
 
         for (shard_index, shard_store) in self.shard_stores.iter() {
             let shard_approx_size = shard_store.db.approximate_size();
@@ -556,6 +588,7 @@ impl HubService for MyHubService {
                 num_fid_registrations: shard_fid_registrations,
                 approx_size: shard_approx_size,
                 block_delay: current_time - max_block_time,
+                mempool_size: *mempool_size.get(shard_index).unwrap_or(&0),
             };
             shard_infos.push(info);
             total_num_messages += shard_num_messages;

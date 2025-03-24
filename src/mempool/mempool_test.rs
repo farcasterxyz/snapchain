@@ -27,26 +27,20 @@ mod tests {
 
     use std::time::Duration;
 
-    use crate::mempool::mempool::{MempoolMessageWithSource, MempoolSource};
+    use crate::mempool::mempool::{MempoolRequest, MempoolSource};
     use libp2p::identity::ed25519::Keypair;
+    use messages_factory::casts::create_cast_add;
 
     const HOST_FOR_TEST: &str = "127.0.0.1";
     const PORT_FOR_TEST: u32 = 9388;
 
-    fn setup_config(port: u32) -> Config {
-        Config::new(
-            format!("/ip4/{HOST_FOR_TEST}/udp/{port}/quic-v1"),
-            "".to_string(),
-        )
-    }
-
     fn setup(
-        config: Config,
+        config: Option<Config>,
     ) -> (
         ShardEngine,
-        SnapchainGossip,
+        Option<SnapchainGossip>,
         Mempool,
-        mpsc::Sender<MempoolMessageWithSource>,
+        mpsc::Sender<MempoolRequest>,
         mpsc::Sender<MempoolMessagesRequest>,
         broadcast::Sender<ShardChunk>,
         mpsc::Receiver<SystemMessage>,
@@ -67,7 +61,16 @@ mod tests {
         let mut shard_stores = HashMap::new();
         shard_stores.insert(1, engine.get_stores());
 
-        let gossip = SnapchainGossip::create(keypair.clone(), &config, system_tx, false).unwrap();
+        let gossip = match config {
+            Some(config) => {
+                Some(SnapchainGossip::create(keypair.clone(), &config, system_tx, false).unwrap())
+            }
+            None => None,
+        };
+        let gossip_tx = match &gossip {
+            Some(gossip) => gossip.tx.clone(),
+            None => mpsc::channel(100).0,
+        };
 
         let mempool = Mempool::new(
             mempool::Config::default(),
@@ -75,7 +78,7 @@ mod tests {
             messages_request_rx,
             1,
             shard_stores,
-            gossip.tx.clone(),
+            gossip_tx,
             shard_decision_rx,
             statsd_client,
         );
@@ -93,7 +96,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_user_message_is_invalid() {
-        let (mut engine, _, mut mempool, _, _, _, _) = setup(setup_config(9300));
+        let (mut engine, _, mut mempool, _, _, _, _) = setup(None);
         test_helper::register_user(
             1234,
             default_signer(),
@@ -101,7 +104,7 @@ mod tests {
             &mut engine,
         )
         .await;
-        let cast = messages_factory::casts::create_cast_add(1234, "hello", None, None);
+        let cast = create_cast_add(1234, "hello", None, None);
         let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast.clone()));
         assert!(valid);
         test_helper::commit_message(&mut engine, &cast).await;
@@ -111,7 +114,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_onchain_event_is_invalid() {
-        let (mut engine, _, mut mempool, _, _, _, _) = setup(setup_config(9301));
+        let (mut engine, _, mut mempool, _, _, _, _) = setup(None);
         let onchain_event = events_factory::create_rent_event(1234, Some(10), None, false);
         let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
             on_chain_event: Some(onchain_event.clone()),
@@ -128,7 +131,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_fname_transfer_is_invalid() {
-        let (mut engine, _, mut mempool, _, _, _, _) = setup(setup_config(9302));
+        let (mut engine, _, mut mempool, _, _, _, _) = setup(None);
         test_helper::register_user(
             1,
             default_signer(),
@@ -162,9 +165,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_mempool_size() {
+        let (_, _, mut mempool, mempool_tx, _request_tx, _decision_tx, _) = setup(None);
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let (req, res) = oneshot::channel();
+        mempool_tx.send(MempoolRequest::GetSize(req)).await.unwrap();
+        let size = res.await.unwrap();
+        assert_eq!(size.len(), 0);
+
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(create_cast_add(123, "hello", None, None)),
+                MempoolSource::Local,
+            ))
+            .await
+            .unwrap();
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(create_cast_add(435, "hello2", None, None)),
+                MempoolSource::Local,
+            ))
+            .await
+            .unwrap();
+
+        let (req, res) = oneshot::channel();
+        mempool_tx.send(MempoolRequest::GetSize(req)).await.unwrap();
+        let size = res.await.unwrap();
+        assert_eq!(size.len(), 1);
+        assert_eq!(size[&1], 2);
+    }
+
+    #[tokio::test]
     async fn test_mempool_prioritization() {
         let (_, _, mut mempool, mempool_tx, messages_request_tx, _shard_decision_tx, _) =
-            setup(setup_config(9304));
+            setup(None);
 
         // Spawn mempool task
         tokio::spawn(async move {
@@ -175,7 +212,7 @@ mod tests {
         // Cast has lower timestamp and arrives first, but onchain event is still processed first
         let onchain_event = events_factory::create_rent_event(fid, None, Some(1), false);
 
-        let cast = messages_factory::casts::create_cast_add(
+        let cast = create_cast_add(
             fid,
             "hello",
             Some(to_farcaster_time(onchain_event.block_timestamp * 1000).unwrap() as u32 - 1),
@@ -183,7 +220,7 @@ mod tests {
         );
 
         mempool_tx
-            .send((
+            .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast.clone()),
                 MempoolSource::Local,
             ))
@@ -191,7 +228,7 @@ mod tests {
             .unwrap();
 
         mempool_tx
-            .send((
+            .send(MempoolRequest::AddMessage(
                 MempoolMessage::ValidatorMessage(ValidatorMessage {
                     on_chain_event: Some(onchain_event),
                     fname_transfer: None,
@@ -240,7 +277,7 @@ mod tests {
     #[tokio::test]
     async fn test_mempool_eviction() {
         let (mut engine, _, mut mempool, mempool_tx, messages_request_tx, shard_decision_tx, _) =
-            setup(setup_config(9305));
+            setup(None);
         test_helper::register_user(
             1234,
             default_signer(),
@@ -256,17 +293,20 @@ mod tests {
 
         let fid = 1234;
 
-        let cast1 = messages_factory::casts::create_cast_add(fid, "hello", None, None);
-        let cast2 = messages_factory::casts::create_cast_add(fid, "world", None, None);
+        let cast1 = create_cast_add(fid, "hello", None, None);
+        let cast2 = create_cast_add(fid, "world", None, None);
 
         let _ = mempool_tx
-            .send((
+            .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast1.clone()),
                 MempoolSource::Local,
             ))
             .await;
         let _ = mempool_tx
-            .send((MempoolMessage::UserMessage(cast2), MempoolSource::Local))
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(cast2),
+                MempoolSource::Local,
+            ))
             .await;
 
         // Wait for cast processing
@@ -330,31 +370,24 @@ mod tests {
         let config1 = Config::new(node1_addr.clone(), node2_addr.clone());
         let config2 = Config::new(node2_addr.clone(), node1_addr.clone());
 
+        let (_, gossip1, mut mempool1, mempool_tx1, _mempool_requests_tx1, _shard_decision_tx1, _) =
+            setup(Some(config1));
         let (
             _,
-            mut gossip1,
-            mut mempool1,
-            mempool_tx1,
-            _mempool_requests_tx1,
-            _shard_decision_tx1,
-            _,
-        ) = setup(config1);
-        let (
-            _,
-            mut gossip2,
+            gossip2,
             mut mempool2,
             mempool_tx2,
             mempool_requests_tx2,
             _shard_decision_tx1,
             mut system_rx2,
-        ) = setup(config2);
+        ) = setup(Some(config2));
 
         // Spawn gossip tasks
         tokio::spawn(async move {
-            gossip1.start().await;
+            gossip1.unwrap().start().await;
         });
         tokio::spawn(async move {
-            gossip2.start().await;
+            gossip2.unwrap().start().await;
         });
 
         // Spawn mempool tasks
@@ -369,14 +402,12 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         // Create a test message
-        let cast: proto::Message =
-            messages_factory::casts::create_cast_add(1234, "hello", None, None);
-        let cast2: proto::Message =
-            messages_factory::casts::create_cast_add(3214, "hello 2", None, None);
+        let cast: proto::Message = create_cast_add(1234, "hello", None, None);
+        let cast2: proto::Message = create_cast_add(3214, "hello 2", None, None);
 
         // Add message to mempool 1
         mempool_tx1
-            .send((
+            .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast.clone()),
                 MempoolSource::Local,
             ))
@@ -385,13 +416,19 @@ mod tests {
 
         // Inserting the same message twice should not be re-broadcasted
         mempool_tx1
-            .send((MempoolMessage::UserMessage(cast), MempoolSource::Local))
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(cast),
+                MempoolSource::Local,
+            ))
             .await
             .unwrap();
 
         // Another message received via gossip should not be re-broadcasted
         mempool_tx1
-            .send((MempoolMessage::UserMessage(cast2), MempoolSource::Gossip))
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(cast2),
+                MempoolSource::Gossip,
+            ))
             .await
             .unwrap();
 
