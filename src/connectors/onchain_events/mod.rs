@@ -166,7 +166,7 @@ pub struct Subscriber {
     stop_block_number: Option<u64>,
     statsd_client: StatsdClientWrapper,
     local_state_store: LocalStateStore,
-    fid_retry_request_rx: mpsc::Receiver<uin64>,
+    fid_retry_request_rx: mpsc::Receiver<u64>,
 }
 
 // TODO(aditi): Wait for 1 confirmation before "committing" an onchain event.
@@ -176,7 +176,7 @@ impl Subscriber {
         mempool_tx: mpsc::Sender<MempoolRequest>,
         statsd_client: StatsdClientWrapper,
         local_state_store: LocalStateStore,
-        fid_retry_request_rx: mpsc::Receiver<uint64>,
+        fid_retry_request_rx: mpsc::Receiver<u64>,
     ) -> Result<Subscriber, SubscribeError> {
         if config.rpc_url.is_empty() {
             return Err(SubscribeError::EmptyRpcUrl);
@@ -677,7 +677,6 @@ impl Subscriber {
     }
 
     async fn sync_live_events(&mut self, start_block_number: u64) -> Result<(), SubscribeError> {
-        // Subscribe to new events starting from now.
         let filter = Filter::new()
             .address(vec![STORAGE_REGISTRY, KEY_REGISTRY, ID_REGISTRY])
             .from_block(start_block_number);
@@ -689,26 +688,50 @@ impl Subscriber {
 
         let subscription = self.provider.watch_logs(&filter).await?;
         let mut stream = subscription.into_stream();
-        while let Some(events) = stream.next().await {
-            for event in events {
-                let result = self.process_log(&event).await;
-                match result {
-                    Err(err) => {
-                        error!(
-                            "Error processing onchain event. Error: {:#?}. Event: {:#?}",
-                            err, event,
-                        )
-                    }
-                    Ok(()) => match event.block_number {
-                        None => {}
-                        Some(block_number) => {
-                            self.record_block_number(block_number);
+        loop {
+            tokio::select! {
+                 biased;
+
+                 retry_fid = self.fid_retry_request_rx.recv() => {
+                    match retry_fid {
+                        None => {
+                            // Ignore, this can happen if we don't run an admin server
+                        }, Some(retry_fid) => {
+                            if let Err(err) = self.retry_fid(retry_fid).await {
+                                error!(fid = retry_fid, "Unable to retry fid: {}", err.to_string())
+                            }
                         }
-                    },
-                }
+                    }
+                 }
+                 events = stream.next() => {
+                     match events {
+                         None => {
+                            // We want to trigger a retry here
+                             break;
+                         },
+                         Some(events) => {
+                             for event in events {
+                                 let result = self.process_log(&event).await;
+                                 match result {
+                                     Err(err) => {
+                                         error!(
+                                             "Error processing onchain event. Error: {:#?}. Event: {:#?}",
+                                             err, event,
+                                         )
+                                     }
+                                     Ok(()) => match event.block_number {
+                                         None => {}
+                                         Some(block_number) => {
+                                             self.record_block_number(block_number);
+                                         }
+                                     },
+                                 }
+                             }
+                         }
+                     }
+                 }
             }
         }
-
         Ok(())
     }
 
