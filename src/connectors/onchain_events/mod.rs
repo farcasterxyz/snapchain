@@ -515,37 +515,15 @@ impl Subscriber {
         }
     }
 
-    async fn get_logs(
-        &mut self,
-        address: Address,
-        start_block: u64,
-        stop_block: u64,
-    ) -> Result<(), SubscribeError> {
-        let filter = Filter::new()
-            .address(address)
-            .from_block(start_block)
-            .to_block(stop_block);
-        let event_kind = if address == STORAGE_REGISTRY {
-            "storage"
-        } else if address == ID_REGISTRY {
-            "id"
-        } else if address == KEY_REGISTRY {
-            "key"
-        } else {
-            panic!("Invalid registry")
-        };
-        info!(
-            event_kind,
-            start_block, stop_block, "Syncing historical events in range"
-        );
-        let events = self.provider.get_logs(&filter).await?;
+    async fn get_logs(&mut self, filter: &Filter, event_kind: &str) -> Result<(), SubscribeError> {
+        let events = self.provider.get_logs(filter).await?;
         for event in events {
             let result = self.process_log(&event).await;
             match result {
                 Err(err) => {
                     error!(
-                        "Error processing onchain event. Error: {:#?}. Event: {:#?}",
-                        err, event,
+                        event_kind,
+                        "Error processing onchain event. Error: {:#?}. Event: {:#?}", err, event,
                     )
                 }
                 Ok(()) => {}
@@ -556,38 +534,23 @@ impl Subscriber {
 
     async fn get_logs_with_retry(
         &mut self,
-        address: Address,
-        start_block: u64,
-        stop_block: u64,
+        filter: Filter,
+        event_kind: &str,
     ) -> Result<(), SubscribeError> {
         let mut retry_count = 0;
         loop {
-            match self.get_logs(address, start_block, stop_block).await {
+            match self.get_logs(&filter, event_kind).await {
                 Ok(_) => return Ok(()),
                 Err(err) => {
                     retry_count += 1;
-                    let registry_name = if address == STORAGE_REGISTRY {
-                        "Storage Registry"
-                    } else if address == ID_REGISTRY {
-                        "ID Registry"
-                    } else if address == KEY_REGISTRY {
-                        "Key Registry"
-                    } else {
-                        "Unknown Registry"
-                    };
 
                     if retry_count > 5 {
                         return Err(err);
                     }
 
                     error!(
-                        "Error getting logs for {}, blocks {}-{}: {}. Retry {} in {} seconds",
-                        registry_name,
-                        start_block,
-                        stop_block,
-                        err,
-                        retry_count,
-                        RETRY_TIMEOUT_SECONDS
+                        "Error getting logs for {}: {}. Retry {} in {} seconds",
+                        event_kind, err, retry_count, RETRY_TIMEOUT_SECONDS
                     );
 
                     tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_TIMEOUT_SECONDS))
@@ -607,12 +570,21 @@ impl Subscriber {
         loop {
             let stop_block = final_stop_block.min(start_block + batch_size);
 
-            self.get_logs_with_retry(STORAGE_REGISTRY, start_block, stop_block)
-                .await?;
-            self.get_logs_with_retry(ID_REGISTRY, start_block, stop_block)
-                .await?;
-            self.get_logs_with_retry(KEY_REGISTRY, start_block, stop_block)
-                .await?;
+            let storage_filter = Filter::new()
+                .address(STORAGE_REGISTRY)
+                .from_block(start_block)
+                .to_block(stop_block);
+            self.get_logs_with_retry(storage_filter, "storage").await?;
+            let id_filter = Filter::new()
+                .address(ID_REGISTRY)
+                .from_block(start_block)
+                .to_block(stop_block);
+            self.get_logs_with_retry(id_filter, "id").await?;
+            let key_filter = Filter::new()
+                .address(KEY_REGISTRY)
+                .from_block(start_block)
+                .to_block(stop_block);
+            self.get_logs_with_retry(key_filter, "key").await?;
 
             self.record_block_number(stop_block);
             start_block += batch_size;
@@ -735,43 +707,38 @@ impl Subscriber {
         Ok(())
     }
 
-    async fn get_filter_logs(&mut self, filter: Filter) -> Result<(), SubscribeError> {
-        let filter_id = self.provider.new_filter(&filter).await?;
-        let logs = self.provider.get_filter_logs(filter_id).await?;
-        for log in logs {
-            self.process_log(&log).await?
-        }
-
-        Ok(())
-    }
-
     pub async fn retry_fid(&mut self, fid: u64) -> Result<(), SubscribeError> {
+        info!(fid, "Retrying onchain events for fid");
         let filter = Filter::new()
             .address(vec![STORAGE_REGISTRY])
-            .event("Rent(uint256,uint256,uint256)")
+            .from_block(FIRST_BLOCK)
+            .events(vec!["Rent(address,uint256,uint256)"])
             .topic2(U256::from(fid));
-        self.get_filter_logs(filter).await?;
+        self.get_logs_with_retry(filter, "storage").await?;
 
         let filter = Filter::new()
             .address(vec![KEY_REGISTRY])
+            .from_block(FIRST_BLOCK)
             .events(vec![
                 "Add(uint256,uint32,bytes,bytes,uint8,bytes)",
                 "Remove(uint256,bytes,bytes)",
             ])
             .topic1(U256::from(fid));
-        self.get_filter_logs(filter).await?;
+        self.get_logs_with_retry(filter, "key").await?;
 
         let filter = Filter::new()
             .address(vec![ID_REGISTRY])
+            .from_block(FIRST_BLOCK)
             .events(vec!["Register(address,uint256,address)"])
             .topic2(U256::from(fid));
-        self.get_filter_logs(filter).await?;
+        self.get_logs_with_retry(filter, "id").await?;
 
         let filter = Filter::new()
             .address(vec![ID_REGISTRY])
+            .from_block(FIRST_BLOCK)
             .events(vec!["Transfer(address,address,uint256)"])
             .topic3(U256::from(fid));
-        self.get_filter_logs(filter).await?;
+        self.get_logs_with_retry(filter, "id").await?;
 
         Ok(())
     }
