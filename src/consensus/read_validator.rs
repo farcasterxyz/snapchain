@@ -135,12 +135,12 @@ impl ReadValidator {
     }
 
     pub fn process_decided_value(&mut self, value: DecidedValue) -> u64 {
+        let height = Self::get_decided_value_height(&value);
         let verified = Self::verify_signatures(&value);
         if !verified {
-            error!("Dropping decided block because its signatures are invalid");
+            error!(%height, last_height = %self.last_height, "Dropping decided block because its signatures are invalid");
             return 0;
         }
-        let height = Self::get_decided_value_height(&value);
         let num_committed_values = if height > self.last_height.increment() {
             if (self.buffered_blocks.len() as u32) < self.max_num_buffered_blocks {
                 self.buffered_blocks.insert(height, value);
