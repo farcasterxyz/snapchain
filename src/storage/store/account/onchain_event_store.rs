@@ -11,7 +11,6 @@ use crate::proto::{
 use crate::proto::{HubEvent, HubEventType, MergeOnChainEventBody};
 use crate::storage::constants::{OnChainEventPostfix, RootPrefix, PAGE_SIZE_MAX};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch, RocksdbError};
-use crate::storage::util::increment_vec_u8;
 use thiserror::Error;
 
 static PAGE_SIZE: usize = 1000;
@@ -257,31 +256,25 @@ pub fn get_onchain_events(
     event_type: OnChainEventType,
     fid: u64,
 ) -> Result<OnchainEventsPage, OnchainEventStorageError> {
-    let mut start_prefix = make_onchain_event_type_prefix(event_type);
-    start_prefix.extend(make_fid_key(fid));
-    let stop_prefix = increment_vec_u8(&start_prefix);
+    let mut prefix = make_onchain_event_type_prefix(event_type);
+    prefix.extend(make_fid_key(fid));
 
     let mut onchain_events = vec![];
     let mut last_key = vec![];
-    db.for_each_iterator_by_prefix_paged(
-        Some(start_prefix),
-        Some(stop_prefix),
-        page_options,
-        |key, value| {
-            let onchain_event = OnChainEvent::decode(value).map_err(|e| HubError::from(e))?;
-            onchain_events.push(onchain_event);
+    db.for_each_iterator_by_prefix_paged(prefix.clone(), page_options, |key, value| {
+        let onchain_event = OnChainEvent::decode(value).map_err(|e| HubError::from(e))?;
+        onchain_events.push(onchain_event);
 
-            if onchain_events.len() >= page_options.page_size.unwrap_or(PAGE_SIZE_MAX) {
-                last_key = key.to_vec();
-                return Ok(true); // Stop iterating
-            }
+        if onchain_events.len() >= page_options.page_size.unwrap_or(PAGE_SIZE_MAX) {
+            last_key = key.to_vec();
+            return Ok(true); // Stop iterating
+        }
 
-            Ok(false) // Continue iterating
-        },
-    )
+        Ok(false) // Continue iterating
+    })
     .map_err(|e| OnchainEventStorageError::HubError(e))?; // TODO: Return the right error
     let next_page_token = if last_key.len() > 0 {
-        Some(last_key)
+        Some(last_key[prefix.len()..].to_vec())
     } else {
         None
     };
