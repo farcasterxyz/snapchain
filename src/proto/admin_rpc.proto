@@ -5,8 +5,13 @@ import "username_proof.proto";
 
 message Empty {}
 
+message FidRequest {
+  uint64 fid = 1;
+}
+
 service AdminService {
 //  rpc SubmitOnChainEvent(OnChainEvent) returns (OnChainEvent);
 //  rpc SubmitUserNameProof(UserNameProof) returns (UserNameProof);
   rpc UploadSnapshot(Empty) returns (Empty);
+  rpc RetryOnchainEvents(FidRequest) returns (Empty)
 }

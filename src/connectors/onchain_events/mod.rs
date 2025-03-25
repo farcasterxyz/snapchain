@@ -1,3 +1,4 @@
+use alloy_primitives::U256;
 use alloy_primitives::{address, ruint::FromUintError, Address, FixedBytes};
 use alloy_provider::{Provider, ProviderBuilder, RootProvider};
 use alloy_rpc_types::{Filter, Log};
@@ -165,6 +166,7 @@ pub struct Subscriber {
     stop_block_number: Option<u64>,
     statsd_client: StatsdClientWrapper,
     local_state_store: LocalStateStore,
+    fid_retry_request_rx: mpsc::Receiver<uin64>,
 }
 
 // TODO(aditi): Wait for 1 confirmation before "committing" an onchain event.
@@ -174,6 +176,7 @@ impl Subscriber {
         mempool_tx: mpsc::Sender<MempoolRequest>,
         statsd_client: StatsdClientWrapper,
         local_state_store: LocalStateStore,
+        fid_retry_request_rx: mpsc::Receiver<uint64>,
     ) -> Result<Subscriber, SubscribeError> {
         if config.rpc_url.is_empty() {
             return Err(SubscribeError::EmptyRpcUrl);
@@ -189,6 +192,7 @@ impl Subscriber {
                 .map(|start_block| start_block.max(FIRST_BLOCK)),
             stop_block_number: config.stop_block_number,
             statsd_client,
+            fid_retry_request_rx,
         })
     }
 
@@ -704,6 +708,47 @@ impl Subscriber {
                 }
             }
         }
+
+        Ok(())
+    }
+
+    async fn get_filter_logs(&mut self, filter: Filter) -> Result<(), SubscribeError> {
+        let filter_id = self.provider.new_filter(&filter).await?;
+        let logs = self.provider.get_filter_logs(filter_id).await?;
+        for log in logs {
+            self.process_log(&log).await?
+        }
+
+        Ok(())
+    }
+
+    pub async fn retry_fid(&mut self, fid: u64) -> Result<(), SubscribeError> {
+        let filter = Filter::new()
+            .address(vec![STORAGE_REGISTRY])
+            .event("Rent(uint256,uint256,uint256)")
+            .topic2(U256::from(fid));
+        self.get_filter_logs(filter).await?;
+
+        let filter = Filter::new()
+            .address(vec![KEY_REGISTRY])
+            .events(vec![
+                "Add(uint256,uint32,bytes,bytes,uint8,bytes)",
+                "Remove(uint256,bytes,bytes)",
+            ])
+            .topic1(U256::from(fid));
+        self.get_filter_logs(filter).await?;
+
+        let filter = Filter::new()
+            .address(vec![ID_REGISTRY])
+            .events(vec!["Register(address,uint256,address)"])
+            .topic2(U256::from(fid));
+        self.get_filter_logs(filter).await?;
+
+        let filter = Filter::new()
+            .address(vec![ID_REGISTRY])
+            .events(vec!["Transfer(address,address,uint256)"])
+            .topic3(U256::from(fid));
+        self.get_filter_logs(filter).await?;
 
         Ok(())
     }
