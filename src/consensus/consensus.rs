@@ -111,7 +111,7 @@ impl Default for Config {
             block_time: Duration::from_millis(1000),
             max_messages_per_block: 1000,
             validator_addresses: None,
-            validator_sets: Some(vec![]),
+            validator_sets: None,
             consensus_start_delay: 2,
         }
     }
