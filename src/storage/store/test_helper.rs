@@ -28,7 +28,6 @@ use crate::storage::util::bytes_compare;
 #[allow(unused_imports)]
 use crate::utils::factory::{events_factory, username_factory};
 use hex::FromHex;
-use informalsystems_malachitebft_core_types::Round;
 use tonic::{Response, Status};
 use tracing_subscriber::EnvFilter;
 
