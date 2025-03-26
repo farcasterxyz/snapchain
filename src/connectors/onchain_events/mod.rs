@@ -557,7 +557,7 @@ impl Subscriber {
                     }
 
                     error!(
-                        "Error getting logs for {}: {}. Retry {} in {} seconds",
+                        "Error getting logs for {} event kind(s): {}. Retry {} in {} seconds",
                         event_kind, err, retry_count, RETRY_TIMEOUT_SECONDS
                     );
 
@@ -775,7 +775,7 @@ impl Subscriber {
             .address(vec![STORAGE_REGISTRY, KEY_REGISTRY, ID_REGISTRY])
             .from_block(start_block_number)
             .to_block(stop_block_number);
-        self.get_logs_with_retry(filter, "storage").await?;
+        self.get_logs_with_retry(filter, "all").await?;
         Ok(())
     }
 
