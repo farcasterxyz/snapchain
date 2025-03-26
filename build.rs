@@ -1,28 +1,26 @@
+use walkdir::WalkDir;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = tonic_build::configure();
-
-    // Custom type attributes required for malachite
     builder = builder
         .type_attribute("ShardHash", "#[derive(Eq, PartialOrd, Ord)]")
         .type_attribute("Height", "#[derive(Copy, Eq, PartialOrd, Ord)]")
-        // TODO: this generates a lot of code, perhaps choose specific structures
         .type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]");
-
-    // TODO: auto-discover proto files
-    builder.compile(
-        &[
-            "src/proto/admin_rpc.proto",
-            "src/proto/blocks.proto",
-            "src/proto/rpc.proto",
-            "src/proto/message.proto",
-            "src/proto/onchain_event.proto",
-            "src/proto/hub_event.proto",
-            "src/proto/username_proof.proto",
-            "src/proto/sync_trie.proto",
-            "src/proto/node_state.proto",
-        ],
-        &["src/proto"],
-    )?;
+    let proto_files: Vec<String> = WalkDir::new("src/proto")
+        .into_iter()
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            if entry.path().extension()? == "proto" {
+                Some(entry.path().to_str()?.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if proto_files.is_empty() {
+        return Err("No .proto files found in src/proto".into());
+    }
+    builder.compile(&proto_files, &["src/proto"])?;
 
     Ok(())
 }
