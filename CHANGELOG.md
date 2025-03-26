@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] - 2025-03-26
+
+### 🚀 Features
+
+- Configurable validator sets (#279)
+- Read node block pruning (#330)
+- Add mempool size to getInfo (#333)
+- Admin rpc to retry onchain events by fid and block range (#334)
+
+### 🐛 Bug Fixes
+
+- Auto reconnect to bootstrap peers if connection is lost (#335)
+
+### ⚙️ Miscellaneous Tasks
+
+- Change port to unique port in test_mempool_eviction (#332)
+
 ## [0.2.0] - 2025-03-21
 
 ### 🚀 Features
