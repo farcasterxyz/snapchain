@@ -2,7 +2,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
-use snapchain::connectors::onchain_events::{L1Client, RealL1Client};
+use snapchain::connectors::onchain_events::{L1Client, OnchainEventsRequest, RealL1Client};
 use snapchain::consensus::consensus::SystemMessage;
 use snapchain::mempool::mempool::{Mempool, MempoolRequest, ReadNodeMempool};
 use snapchain::mempool::routing;
@@ -40,7 +40,7 @@ async fn start_servers(
     app_config: &snapchain::cfg::Config,
     mempool_tx: mpsc::Sender<MempoolRequest>,
     shutdown_tx: mpsc::Sender<()>,
-    fid_retry_request_tx: mpsc::Sender<u64>,
+    onchain_events_request_tx: mpsc::Sender<OnchainEventsRequest>,
     statsd_client: StatsdClientWrapper,
     shard_stores: HashMap<u32, Stores>,
     shard_senders: HashMap<u32, Senders>,
@@ -53,7 +53,7 @@ async fn start_servers(
     let admin_service = MyAdminService::new(
         app_config.admin_rpc_auth.clone(),
         mempool_tx.clone(),
-        fid_retry_request_tx.clone(),
+        onchain_events_request_tx.clone(),
         shard_stores.clone(),
         block_store.clone(),
         app_config.snapshot.clone(),
@@ -305,7 +305,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let (sync_complete_tx, sync_complete_rx) = watch::channel(false);
 
-    let (fid_retry_request_tx, fid_retry_request_rx) = mpsc::channel(100);
+    let (onchain_events_request_tx, onchain_events_request_rx) = mpsc::channel(100);
 
     if app_config.read_node {
         let node = SnapchainReadNode::create(
@@ -345,7 +345,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             &app_config,
             mempool_tx,
             shutdown_tx,
-            fid_retry_request_tx,
+            onchain_events_request_tx,
             statsd_client,
             node.shard_stores.clone(),
             node.shard_senders.clone(),
@@ -456,7 +456,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     mempool_tx.clone(),
                     statsd_client.clone(),
                     local_state_store,
-                    fid_retry_request_rx,
+                    onchain_events_request_rx,
                 )?;
             tokio::spawn(async move {
                 let result = onchain_events_subscriber.run().await;
@@ -473,7 +473,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             &app_config,
             mempool_tx.clone(),
             shutdown_tx.clone(),
-            fid_retry_request_tx,
+            onchain_events_request_tx,
             statsd_client,
             node.shard_stores.clone(),
             node.shard_senders.clone(),

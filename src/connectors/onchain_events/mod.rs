@@ -78,6 +78,14 @@ impl Default for Config {
     }
 }
 
+pub enum OnchainEventsRequest {
+    RetryFid(u64),
+    RetryBlockRange {
+        start_block_number: u64,
+        stop_block_number: u64,
+    },
+}
+
 #[derive(Error, Debug)]
 pub enum SubscribeError {
     #[error(transparent)]
@@ -166,7 +174,7 @@ pub struct Subscriber {
     stop_block_number: Option<u64>,
     statsd_client: StatsdClientWrapper,
     local_state_store: LocalStateStore,
-    fid_retry_request_rx: mpsc::Receiver<u64>,
+    onchain_events_request_rx: mpsc::Receiver<OnchainEventsRequest>,
 }
 
 // TODO(aditi): Wait for 1 confirmation before "committing" an onchain event.
@@ -176,7 +184,7 @@ impl Subscriber {
         mempool_tx: mpsc::Sender<MempoolRequest>,
         statsd_client: StatsdClientWrapper,
         local_state_store: LocalStateStore,
-        fid_retry_request_rx: mpsc::Receiver<u64>,
+        onchain_events_request_rx: mpsc::Receiver<OnchainEventsRequest>,
     ) -> Result<Subscriber, SubscribeError> {
         if config.rpc_url.is_empty() {
             return Err(SubscribeError::EmptyRpcUrl);
@@ -192,7 +200,7 @@ impl Subscriber {
                 .map(|start_block| start_block.max(FIRST_BLOCK)),
             stop_block_number: config.stop_block_number,
             statsd_client,
-            fid_retry_request_rx,
+            onchain_events_request_rx,
         })
     }
 
@@ -664,13 +672,24 @@ impl Subscriber {
             tokio::select! {
                  biased;
 
-                 retry_fid = self.fid_retry_request_rx.recv() => {
-                    match retry_fid {
+                 request = self.onchain_events_request_rx.recv() => {
+                    match request {
                         None => {
                             // Ignore, this can happen if we don't run an admin server
-                        }, Some(retry_fid) => {
-                            if let Err(err) = self.retry_fid(retry_fid).await {
-                                error!(fid = retry_fid, "Unable to retry fid: {}", err.to_string())
+                        }, Some(request) => {
+                            match request {
+                                OnchainEventsRequest::RetryFid(retry_fid) =>  {
+                                    if let Err(err) = self.retry_fid(retry_fid).await {
+                                        error!(fid = retry_fid, "Unable to retry fid: {}", err.to_string())
+                                    }
+                                },
+                                OnchainEventsRequest::RetryBlockRange{start_block_number, stop_block_number} => {
+                                    if let Err(err) = self.retry_block_range(start_block_number, stop_block_number).await {
+                                        error!(start_block_number, stop_block_number, "Unable to retry block range: {}", err.to_string())
+                                    }
+
+
+                                }
                             }
                         }
                     }
@@ -740,6 +759,23 @@ impl Subscriber {
             .topic3(U256::from(fid));
         self.get_logs_with_retry(filter, "id").await?;
 
+        Ok(())
+    }
+
+    pub async fn retry_block_range(
+        &mut self,
+        start_block_number: u64,
+        stop_block_number: u64,
+    ) -> Result<(), SubscribeError> {
+        info!(
+            start_block_number,
+            stop_block_number, "Retrying onchain events in range"
+        );
+        let filter = Filter::new()
+            .address(vec![STORAGE_REGISTRY, KEY_REGISTRY, ID_REGISTRY])
+            .from_block(start_block_number)
+            .to_block(stop_block_number);
+        self.get_logs_with_retry(filter, "storage").await?;
         Ok(())
     }
 
