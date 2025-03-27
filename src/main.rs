@@ -148,10 +148,11 @@ async fn schedule_background_jobs(
     sync_complete_rx: watch::Receiver<bool>,
 ) {
     let sched = JobScheduler::new().await.unwrap();
+    let mut jobs = vec![];
     if app_config.read_node {
-        if let Some(block_retention) = app_config.read_node_block_retention {
+        if let Some(block_retention) = app_config.pruning.block_retention {
             let schedule = "0 0 0 * * *"; // midnight UTC every day
-            let job = snapchain::background_jobs::job_block_pruning(
+            let job = snapchain::jobs::block_pruning::block_pruning_job(
                 schedule,
                 block_retention,
                 block_store.clone(),
@@ -159,10 +160,21 @@ async fn schedule_background_jobs(
                 sync_complete_rx,
             )
             .unwrap();
-            sched.add(job).await.unwrap();
+            jobs.push(job);
         }
     }
-    // Other background jobs can be added here
+
+    let event_pruning_job = snapchain::jobs::event_pruning::event_pruning_job(
+        "0 0 2 * * *", // 2am UTC every day
+        app_config.pruning.event_retention,
+        shard_stores.clone(),
+    )
+    .unwrap();
+    jobs.push(event_pruning_job);
+
+    for job in jobs {
+        sched.add(job).await.unwrap();
+    }
 
     sched.start().await.unwrap();
 }

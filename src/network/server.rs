@@ -660,18 +660,17 @@ impl HubService for MyHubService {
             let mut page_token = None;
             for store in shard_stores {
                 loop {
-                    // TODO(aditi): We should stop pulling the raw db out of the shard store and create a new store type for events to house the db.
-                    let old_events = HubEvent::get_events(
-                        store.shard_store.db.clone(),
-                        start_id,
-                        None,
-                        Some(PageOptions {
-                            page_token: page_token.clone(),
-                            page_size: None,
-                            reverse: false,
-                        }),
-                    )
-                    .unwrap();
+                    let old_events = store
+                        .get_events(
+                            start_id,
+                            None,
+                            Some(PageOptions {
+                                page_token: page_token.clone(),
+                                page_size: None,
+                                reverse: false,
+                            }),
+                        )
+                        .unwrap();
 
                     for event in old_events.events {
                         if event_types.contains(&event.r#type) {

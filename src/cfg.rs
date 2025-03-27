@@ -27,6 +27,27 @@ impl Default for StatsdConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct PruningConfig {
+    #[serde(
+        with = "humantime_serde",
+        skip_serializing_if = "Option::is_none",
+        default // TODO: for now defaults to None, but should be 1mo.
+    )]
+    pub block_retention: Option<Duration>,
+    #[serde(with = "humantime_serde")]
+    pub event_retention: Duration,
+}
+
+impl Default for PruningConfig {
+    fn default() -> Self {
+        Self {
+            block_retention: None,
+            event_retention: Duration::from_secs(60 * 60 * 24 * 3), // 3 days
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     pub log_format: String,
     pub fnames: connectors::fname::Config,
@@ -46,12 +67,7 @@ pub struct Config {
     pub l1_rpc_url: String,
     pub fc_network: FarcasterNetwork,
     pub read_node: bool,
-    #[serde(
-        with = "humantime_serde",
-        skip_serializing_if = "Option::is_none",
-        default // TODO: for now defaults to None, but should be 1mo.
-    )]
-    pub read_node_block_retention: Option<Duration>,
+    pub pruning: PruningConfig,
 }
 
 impl Default for Config {
@@ -75,7 +91,7 @@ impl Default for Config {
             fc_network: FarcasterNetwork::Devnet,
             snapshot: storage::db::snapshot::Config::default(),
             read_node: false,
-            read_node_block_retention: None,
+            pruning: PruningConfig::default(),
         }
     }
 }

@@ -1,13 +1,13 @@
 use super::account::{
-    ReactionStore, ReactionStoreDef, UserDataStore, UserDataStoreDef, VerificationStore,
-    VerificationStoreDef,
+    EventsPage, ReactionStore, ReactionStoreDef, UserDataStore, UserDataStoreDef,
+    VerificationStore, VerificationStoreDef,
 };
 use crate::core::error::HubError;
 use crate::proto::MessageType;
 use crate::proto::{
     HubEvent, StorageLimit, StorageLimitsResponse, StorageUnitDetails, StorageUnitType, StoreType,
 };
-use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
+use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
     CastStore, CastStoreDef, IntoU8, LinkStore, OnchainEventStorageError, OnchainEventStore, Store,
     StoreEventHandler, UsernameProofStore, UsernameProofStoreDef,
@@ -16,7 +16,9 @@ use crate::storage::store::shard::ShardStore;
 use crate::storage::trie::merkle_trie;
 use crate::storage::trie::merkle_trie::TrieKey;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
+use tracing::info;
 
 #[derive(Error, Debug)]
 pub enum StoresError {
@@ -47,6 +49,7 @@ pub struct Stores {
     pub(crate) trie: merkle_trie::MerkleTrie,
     pub store_limits: StoreLimits,
     pub event_handler: Arc<StoreEventHandler>,
+    pub shard_id: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -178,6 +181,7 @@ impl Stores {
         let onchain_event_store = OnchainEventStore::new(db.clone(), event_handler.clone());
         let username_proof_store = UsernameProofStore::new(db.clone(), event_handler.clone(), 100);
         Stores {
+            shard_id,
             trie,
             shard_store,
             cast_store,
@@ -337,6 +341,31 @@ impl Stores {
                 })?,
         );
         Ok(revoke_events)
+    }
+
+    pub fn get_events(
+        &self,
+        start_id: u64,
+        stop_id: Option<u64>,
+        page_options: Option<PageOptions>,
+    ) -> Result<EventsPage, HubError> {
+        HubEvent::get_events(self.db.clone(), start_id, stop_id, page_options)
+    }
+
+    pub async fn prune_events_until(
+        &self,
+        stop_height: u64,
+        page_options: &PageOptions,
+        throttle: Duration,
+    ) -> Result<u32, HubError> {
+        let count =
+            HubEvent::prune_events_util(self.db.clone(), stop_height, page_options, throttle)
+                .await?;
+        info!(
+            "Pruning events complete for shard: {}. pruned: {}",
+            self.shard_id, count
+        );
+        Ok(count)
     }
 }
 

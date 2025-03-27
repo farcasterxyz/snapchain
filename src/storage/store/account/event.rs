@@ -6,6 +6,8 @@ use crate::storage::db::{PageOptions, RocksDB};
 use crate::storage::util::increment_vec_u8;
 use prost::Message as _;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tracing::info;
 
 const HEIGHT_BITS: u32 = 50;
 pub const SEQUENCE_BITS: u32 = 14; // Allows for 16384 events per block
@@ -168,5 +170,28 @@ impl HubEvent {
                 None
             },
         })
+    }
+
+    pub async fn prune_events_util(
+        db: Arc<RocksDB>,
+        stop_height: u64,
+        page_options: &PageOptions,
+        throttle: Duration,
+    ) -> Result<u32, HubError> {
+        let stop_event_id = HubEventIdGenerator::make_event_id(stop_height, 0);
+        let start_event_key = Self::make_event_key(0);
+        let stop_event_key = Self::make_event_key(stop_event_id);
+        let total_pruned = db
+            .delete_paginated(
+                Some(start_event_key),
+                Some(stop_event_key),
+                &page_options,
+                throttle,
+                Some(|total_pruned: u32| {
+                    info!("Pruning events... pruned: {}", total_pruned);
+                }),
+            )
+            .await?;
+        Ok(total_pruned)
     }
 }

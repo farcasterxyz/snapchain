@@ -31,7 +31,7 @@ pub enum ShardStorageError {
     TooManyShardsInResult,
 
     #[error("Hub error")]
-    HubError,
+    HubError(#[from] HubError),
 
     #[error("Error decoding shard chunk")]
     DecodeError(#[from] prost::DecodeError),
@@ -99,7 +99,7 @@ fn get_shard_page_by_prefix(
             Ok(false) // Continue iterating
         },
     )
-    .map_err(|_| ShardStorageError::HubError)?; // TODO: Return the right error
+    .map_err(|e| ShardStorageError::HubError(e))?;
 
     let next_page_token = if last_key.len() > 0 {
         Some(last_key)
@@ -334,13 +334,13 @@ impl ShardStore {
                 throttle,
                 Some(|total_pruned: u32| {
                     info!(
-                        "Pruning shard {}... pruned: {}",
+                        "Pruning shard blocks {}... pruned: {}",
                         self.shard_id, total_pruned
                     );
                 }),
             )
             .await
-            .map_err(|_| ShardStorageError::TooManyShardsInResult)?; // TODO: Return the right error
+            .map_err(|e| ShardStorageError::HubError(e))?;
         info!(
             "Pruning shard {} complete. pruned: {}",
             self.shard_id, total_pruned

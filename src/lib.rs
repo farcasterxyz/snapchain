@@ -2,6 +2,7 @@ pub mod cfg;
 pub mod connectors;
 pub mod consensus;
 pub mod core;
+pub mod jobs;
 pub mod mempool;
 pub mod network;
 pub mod node;
@@ -14,5 +15,3 @@ mod tests;
 pub mod proto {
     tonic::include_proto!("_");
 }
-
-pub mod background_jobs;

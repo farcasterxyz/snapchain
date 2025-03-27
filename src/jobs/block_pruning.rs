@@ -9,7 +9,9 @@ use tokio::time::Duration;
 use tokio_cron_scheduler::{Job, JobSchedulerError};
 use tracing::{error, info};
 
-pub fn job_block_pruning(
+const THROTTLE: Duration = Duration::from_millis(100);
+
+pub fn block_pruning_job(
     schedule: &str,
     block_retention: Duration,
     block_store: BlockStore,
@@ -42,14 +44,13 @@ pub fn job_block_pruning(
                 page_size: Some(PAGE_SIZE_MAX),
                 ..PageOptions::default()
             };
-            let throttle = tokio::time::Duration::from_millis(100); // TODO: make const or configurable
             if let Some(stop_height) = stop_height {
                 info!(
                     "Pruning blocks older than timestamp: {}, height: {}",
                     cutoff_timestamp, stop_height
                 );
                 block_store
-                    .prune_until(stop_height, &page_options, throttle)
+                    .prune_until(stop_height, &page_options, THROTTLE)
                     .await
                     .unwrap_or_else(|e| {
                         error!("Error pruning blocks: {}", e);
@@ -74,7 +75,7 @@ pub fn job_block_pruning(
                         shard_id, cutoff_timestamp, stop_height
                     );
                     shard_store
-                        .prune_until(stop_height, &page_options, throttle)
+                        .prune_until(stop_height, &page_options, THROTTLE)
                         .await
                         .unwrap_or_else(|e| {
                             error!("Error pruning shard {} blocks: {}", shard_id, e);
