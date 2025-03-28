@@ -438,6 +438,7 @@ impl SnapchainGossip {
 
     pub fn handle_contact_info(&mut self, contact_info: ContactInfo) {
         // TODO(aditi): Add validations and only dial if the peer is good
+        // TODO(aditi): We might want to persist peers and reconnect to them on restart
         let _ = Self::dial(&mut self.swarm, &contact_info.body.unwrap().gossip_address);
     }
 
