@@ -167,10 +167,12 @@ impl MyHubService {
             let result = readonly_engine.simulate_message(&message);
 
             if let Err(err) = result {
-                return Err(Status::invalid_argument(format!(
-                    "Invalid message: {}",
+                let error_message = if err.to_string().starts_with("bad_request") {
                     err.to_string()
-                )));
+                } else {
+                    format!("bad_request.invalid_message/{}", err.to_string())
+                };
+                return Err(Status::invalid_argument(error_message));
             }
 
             // We're doing the ens and address validations here for now because we don't want L1 interactions to be on the consensus critical path. Eventually this will move to the fname server.

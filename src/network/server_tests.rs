@@ -357,7 +357,10 @@ mod tests {
         let response = service.submit_message(request).await.unwrap_err();
 
         assert_eq!(response.code(), tonic::Code::InvalidArgument);
-        assert_eq!(response.message(), "Invalid message: missing fid");
+        assert_eq!(
+            response.message(),
+            "bad_request.invalid_message/missing fid"
+        );
 
         register_user(
             SHARD1_FID,
@@ -377,7 +380,7 @@ mod tests {
         assert_eq!(response.code(), tonic::Code::InvalidArgument);
         assert_eq!(
             response.message(),
-            "Invalid message: bad_request.duplicate/message has already been merged"
+            "bad_request.duplicate/message has already been merged"
         );
     }
 
@@ -410,7 +413,10 @@ mod tests {
             .unwrap_err();
         // Authenticated but no fid registration
         assert_eq!(response.code(), tonic::Code::InvalidArgument);
-        assert_eq!(response.message(), "Invalid message: missing fid");
+        assert_eq!(
+            response.message(),
+            "bad_request.invalid_message/missing fid"
+        );
     }
 
     #[tokio::test]
