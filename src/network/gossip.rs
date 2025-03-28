@@ -4,7 +4,7 @@ use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::proto::{
-    gossip_message, read_node_message, ContactInfo, ContactInfoContentBody, FarcasterNetwork,
+    gossip_message, read_node_message, ContactInfo, ContactInfoBody, FarcasterNetwork,
     GossipMessage,
 };
 use crate::storage::store::engine::MempoolMessage;
@@ -195,13 +195,6 @@ impl SnapchainGossip {
                 warn!("Failed to subscribe to topic: {:?}", e);
                 return Err(Box::new(e));
             }
-
-            let topic = gossipsub::IdentTopic::new(CONTACT_INFO);
-            let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
-            if let Err(e) = result {
-                warn!("Failed to subscribe to topic: {:?}", e);
-                return Err(Box::new(e));
-            }
         } else {
             // Create a Gossipsub topic
             let topic = gossipsub::IdentTopic::new(CONSENSUS_TOPIC);
@@ -218,6 +211,13 @@ impl SnapchainGossip {
                 warn!("Failed to subscribe to topic: {:?}", e);
                 return Err(Box::new(e));
             }
+        }
+
+        let topic = gossipsub::IdentTopic::new(CONTACT_INFO);
+        let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
+        if let Err(e) = result {
+            warn!("Failed to subscribe to topic: {:?}", e);
+            return Err(Box::new(e));
         }
 
         // Listen on all assigned port for this id
@@ -268,7 +268,8 @@ impl SnapchainGossip {
 
     pub fn publish_contact_info(&mut self) {
         let contact_info = ContactInfo {
-            body: Some(ContactInfoContentBody {
+            body: Some(ContactInfoBody {
+                peer_id: self.swarm.local_peer_id().to_bytes(),
                 gossip_address: self.address.clone(),
                 network: self.fc_network as i32,
                 snapchain_version: FARCASTER_VERSION.to_string(),
@@ -290,7 +291,7 @@ impl SnapchainGossip {
     pub async fn start(self: &mut Self) {
         let mut reconnect_timer = tokio::time::interval(Duration::from_secs(30));
 
-        let mut publish_contact_info_timer = tokio::time::interval(Duration::from_secs(300));
+        let mut publish_contact_info_timer = tokio::time::interval(Duration::from_secs(30));
 
         loop {
             tokio::select! {
@@ -304,7 +305,7 @@ impl SnapchainGossip {
                 gossip_event = self.swarm.select_next_some() => {
                     match gossip_event {
                         SwarmEvent::ConnectionEstablished {peer_id, ..} => {
-                            info!("Connection established with peer: {peer_id}");
+                            info!(total_peers = self.swarm.connected_peers().count(), "Connection established with peer: {peer_id}");
                             let event = MalachiteNetworkEvent::PeerConnected(MalachitePeerId::from_libp2p(&peer_id));
                             let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await;
                             if let Err(e) = res {
@@ -439,6 +440,17 @@ impl SnapchainGossip {
     pub fn handle_contact_info(&mut self, contact_info: ContactInfo) {
         // TODO(aditi): Add validations and only dial if the peer is good
         // TODO(aditi): We might want to persist peers and reconnect to them on restart
+        if self
+            .swarm
+            .connected_peers()
+            .find(|peer_id| {
+                PeerId::from_bytes(&contact_info.body.as_ref().unwrap().peer_id).unwrap()
+                    == **peer_id
+            })
+            .is_some()
+        {
+            return;
+        }
         let _ = Self::dial(&mut self.swarm, &contact_info.body.unwrap().gossip_address);
     }
 
