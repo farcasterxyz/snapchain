@@ -31,6 +31,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
+// TODO(aditi): Set up version schedule
 const FARCASTER_VERSION: &str = "2025.2.19";
 const DEFAULT_GOSSIP_PORT: u16 = 3382;
 const DEFAULT_GOSSIP_HOST: &str = "127.0.0.1";
@@ -97,7 +98,6 @@ pub enum GossipTopic {
     DecidedValues,
     ReadNodePeerStatuses,
     Mempool,
-    ContactInfo,
     SyncRequest(MalachitePeerId, oneshot::Sender<OutboundRequestId>),
     SyncReply(InboundRequestId),
 }
@@ -393,9 +393,6 @@ impl SnapchainGossip {
                     if let Some((gossip_topics, encoded_message)) = self.process_gossip_event(event) {
                         for gossip_topic in gossip_topics {
                             match gossip_topic {
-                                GossipTopic::ContactInfo => {
-                                    self.publish(encoded_message.clone(), CONTACT_INFO)
-                                }
                                 GossipTopic::Consensus => self.publish(encoded_message.clone(), CONSENSUS_TOPIC),
                                 GossipTopic::DecidedValues=> self.publish(encoded_message.clone(), DECIDED_VALUES),
                                 GossipTopic::ReadNodePeerStatuses => self.publish(encoded_message.clone(), READ_NODE_PEER_STATUSES),
