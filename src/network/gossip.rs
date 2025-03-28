@@ -298,6 +298,7 @@ impl SnapchainGossip {
                     self.check_and_reconnect_to_bootstrap_peers().await;
                 },
                 _ = publish_contact_info_timer.tick() => {
+                    info!("Publishing contact info");
                     self.publish_contact_info()
                 }
                 gossip_event = self.swarm.select_next_some() => {
@@ -448,6 +449,10 @@ impl SnapchainGossip {
         match proto::GossipMessage::decode(gossip_message.as_slice()) {
             Ok(gossip_message) => match gossip_message.gossip_message {
                 Some(gossip_message::GossipMessage::ContactInfoMessage(contact_info)) => {
+                    info!(
+                        peer_id = peer_id.to_string(),
+                        "Received contact info from peer"
+                    );
                     self.handle_contact_info(contact_info);
                     None
                 }
