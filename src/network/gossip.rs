@@ -3,7 +3,10 @@ use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
-use crate::proto::{gossip_message, read_node_message};
+use crate::proto::{
+    gossip_message, read_node_message, ContactInfo, ContactInfoContentBody, FarcasterNetwork,
+    GossipMessage,
+};
 use crate::storage::store::engine::MempoolMessage;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -28,6 +31,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
+const FARCASTER_VERSION: &str = "2025.2.19";
 const DEFAULT_GOSSIP_PORT: u16 = 3382;
 const DEFAULT_GOSSIP_HOST: &str = "127.0.0.1";
 const MAX_GOSSIP_MESSAGE_SIZE: usize = 1024 * 1024 * 10; // 10 mb
@@ -86,7 +90,6 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
     SyncReply(InboundRequestId, sync::Response<SnapchainValidatorContext>),
     BroadcastDecidedValue(proto::DecidedValue),
     SubscribeToDecidedValuesTopic(),
-    BroadcastContactInfo(proto::ContactInfo),
 }
 
 pub enum GossipTopic {
@@ -113,6 +116,8 @@ pub struct SnapchainGossip {
     sync_channels: HashMap<InboundRequestId, sync::ResponseChannel>,
     read_node: bool,
     bootstrap_addrs: Vec<String>,
+    address: String,
+    fc_network: FarcasterNetwork,
 }
 
 impl SnapchainGossip {
@@ -121,6 +126,7 @@ impl SnapchainGossip {
         config: &Config,
         system_tx: Sender<SystemMessage>,
         read_node: bool,
+        fc_network: FarcasterNetwork,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair.clone().into())
             .with_tokio()
@@ -189,6 +195,13 @@ impl SnapchainGossip {
                 warn!("Failed to subscribe to topic: {:?}", e);
                 return Err(Box::new(e));
             }
+
+            let topic = gossipsub::IdentTopic::new(CONTACT_INFO);
+            let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
+            if let Err(e) = result {
+                warn!("Failed to subscribe to topic: {:?}", e);
+                return Err(Box::new(e));
+            }
         } else {
             // Create a Gossipsub topic
             let topic = gossipsub::IdentTopic::new(CONSENSUS_TOPIC);
@@ -220,6 +233,8 @@ impl SnapchainGossip {
             sync_channels: HashMap::new(),
             read_node,
             bootstrap_addrs: config.bootstrap_addrs(),
+            address: config.address.clone(),
+            fc_network,
         })
     }
 
@@ -251,14 +266,40 @@ impl SnapchainGossip {
         }
     }
 
+    pub fn publish_contact_info(&mut self) {
+        let contact_info = ContactInfo {
+            body: Some(ContactInfoContentBody {
+                gossip_address: self.address.clone(),
+                network: self.fc_network as i32,
+                snapchain_version: FARCASTER_VERSION.to_string(),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
+            }),
+        };
+
+        let gossip_message = GossipMessage {
+            gossip_message: Some(gossip_message::GossipMessage::ContactInfoMessage(
+                contact_info,
+            )),
+        };
+        self.publish(gossip_message.encode_to_vec(), CONTACT_INFO);
+    }
+
     pub async fn start(self: &mut Self) {
         let mut reconnect_timer = tokio::time::interval(Duration::from_secs(30));
+
+        let mut publish_contact_info_timer = tokio::time::interval(Duration::from_secs(300));
 
         loop {
             tokio::select! {
                 _ = reconnect_timer.tick() => {
                     self.check_and_reconnect_to_bootstrap_peers().await;
                 },
+                _ = publish_contact_info_timer.tick() => {
+                    self.publish_contact_info()
+                }
                 gossip_event = self.swarm.select_next_some() => {
                     match gossip_event {
                         SwarmEvent::ConnectionEstablished {peer_id, ..} => {
@@ -293,7 +334,7 @@ impl SnapchainGossip {
                             message_id: _id,
                             message,
                         })) => {
-                            if let Some(system_message) = Self::map_gossip_bytes_to_system_message(peer_id, message.data) {
+                            if let Some(system_message) = self.map_gossip_bytes_to_system_message(peer_id, message.data) {
                                 let res = self.system_tx.send(system_message).await;
                                 if let Err(e) = res {
                                     warn!("Failed to send system block message: {}", e);
@@ -397,13 +438,22 @@ impl SnapchainGossip {
         }
     }
 
+    pub fn handle_contact_info(&mut self, contact_info: ContactInfo) {
+        // TODO(aditi): Add validations and only dial if the peer is good
+        let _ = Self::dial(&mut self.swarm, &contact_info.body.unwrap().gossip_address);
+    }
+
     pub fn map_gossip_bytes_to_system_message(
+        &mut self,
         peer_id: PeerId,
         gossip_message: Vec<u8>,
     ) -> Option<SystemMessage> {
         match proto::GossipMessage::decode(gossip_message.as_slice()) {
             Ok(gossip_message) => match gossip_message.gossip_message {
-                Some(gossip_message::GossipMessage::ContactInfoMessage(contact_info)) => None,
+                Some(gossip_message::GossipMessage::ContactInfoMessage(contact_info)) => {
+                    self.handle_contact_info(contact_info);
+                    None
+                }
 
                 Some(proto::gossip_message::GossipMessage::ReadNodeMessage(read_node_message)) => {
                     let read_node_message = read_node_message.read_node_message;
@@ -555,17 +605,6 @@ impl SnapchainGossip {
     ) -> Option<(Vec<GossipTopic>, Vec<u8>)> {
         let snapchain_codec = SnapchainCodec {};
         match event {
-            Some(GossipEvent::BroadcastContactInfo(contact_info)) => {
-                let gossip_message = proto::GossipMessage {
-                    gossip_message: Some(proto::gossip_message::GossipMessage::ContactInfoMessage(
-                        contact_info,
-                    )),
-                };
-                Some((
-                    vec![GossipTopic::ContactInfo],
-                    gossip_message.encode_to_vec(),
-                ))
-            }
             Some(GossipEvent::SubscribeToDecidedValuesTopic()) => {
                 let topic = gossipsub::IdentTopic::new(DECIDED_VALUES);
                 let result = self.swarm.behaviour_mut().gossipsub.subscribe(&topic);

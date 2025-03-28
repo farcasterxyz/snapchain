@@ -62,9 +62,16 @@ mod tests {
         shard_stores.insert(1, engine.get_stores());
 
         let gossip = match config {
-            Some(config) => {
-                Some(SnapchainGossip::create(keypair.clone(), &config, system_tx, false).unwrap())
-            }
+            Some(config) => Some(
+                SnapchainGossip::create(
+                    keypair.clone(),
+                    &config,
+                    system_tx,
+                    false,
+                    proto::FarcasterNetwork::Devnet,
+                )
+                .unwrap(),
+            ),
             None => None,
         };
         let gossip_tx = match &gossip {
