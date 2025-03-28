@@ -3,15 +3,16 @@ syntax = "proto3";
 import "message.proto";
 import "blocks.proto";
 
-message ContactInfoContentBody {
+message ContactInfoBody {
   string gossip_address = 1;
-  string snapchain_version = 2;
-  FarcasterNetwork network = 3;
-  uint64 timestamp = 4;
+  bytes peer_id = 2;
+  string snapchain_version = 3;
+  FarcasterNetwork network = 4;
+  uint64 timestamp = 5;
 }
 
 message ContactInfo {
-  ContactInfoContentBody body = 1;
+  ContactInfoBody body = 1;
 }
 
 message GossipMessage {
