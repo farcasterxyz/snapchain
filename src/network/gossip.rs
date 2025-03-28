@@ -47,6 +47,7 @@ const CONTACT_INFO: &str = "contact-info";
 pub struct Config {
     pub address: String,
     pub bootstrap_peers: String,
+    pub contact_info_advertisement_interval: Duration,
 }
 
 impl Default for Config {
@@ -57,15 +58,36 @@ impl Default for Config {
                 DEFAULT_GOSSIP_HOST, DEFAULT_GOSSIP_PORT
             ),
             bootstrap_peers: "".to_string(),
+            contact_info_advertisement_interval: Duration::from_secs(300),
         }
     }
 }
 
 impl Config {
     pub fn new(address: String, bootstrap_peers: String) -> Self {
+        Config::default()
+            .with_address(address)
+            .with_bootstrap_peers(bootstrap_peers)
+    }
+
+    fn with_address(self, address: String) -> Self {
+        Config { address, ..self }
+    }
+
+    fn with_bootstrap_peers(self, bootstrap_peers: String) -> Self {
         Config {
-            address,
             bootstrap_peers,
+            ..self
+        }
+    }
+
+    pub fn with_contact_info_advertisement_interval(
+        self,
+        contact_info_advertisement_interval: Duration,
+    ) -> Self {
+        Config {
+            contact_info_advertisement_interval,
+            ..self
         }
     }
 
@@ -118,6 +140,7 @@ pub struct SnapchainGossip {
     bootstrap_addrs: Vec<String>,
     address: String,
     fc_network: FarcasterNetwork,
+    contact_info_advertisement_interval: Duration,
 }
 
 impl SnapchainGossip {
@@ -235,6 +258,7 @@ impl SnapchainGossip {
             bootstrap_addrs: config.bootstrap_addrs(),
             address: config.address.clone(),
             fc_network,
+            contact_info_advertisement_interval: config.contact_info_advertisement_interval,
         })
     }
 
@@ -291,7 +315,8 @@ impl SnapchainGossip {
     pub async fn start(self: &mut Self) {
         let mut reconnect_timer = tokio::time::interval(Duration::from_secs(30));
 
-        let mut publish_contact_info_timer = tokio::time::interval(Duration::from_secs(30));
+        let mut publish_contact_info_timer =
+            tokio::time::interval(self.contact_info_advertisement_interval);
 
         loop {
             tokio::select! {
