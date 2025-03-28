@@ -20,8 +20,10 @@ use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_core_types::Round;
 use itertools::Itertools;
 use merkle_trie::TrieKey;
+use std::cmp::PartialEq;
 use std::collections::HashSet;
 use std::str;
+use std::string::ToString;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -35,11 +37,8 @@ pub enum EngineError {
     #[error(transparent)]
     TrieError(#[from] trie::errors::TrieError),
 
-    #[error("store error")]
-    StoreError {
-        inner: HubError, // TODO: move away from HubError when we can
-        hash: Vec<u8>,
-    },
+    #[error(transparent)]
+    StoreError(#[from] HubError),
 
     #[error("unsupported message type")]
     UnsupportedMessageType(MessageType),
@@ -60,6 +59,14 @@ pub enum EngineError {
     EngineMessageValidationError(#[from] MessageValidationError),
 }
 
+#[derive(Clone, Debug, PartialEq, strum_macros::Display)]
+pub enum ProposalSource {
+    Simulate,
+    Propose,
+    Validate,
+    Commit,
+}
+
 #[derive(Error, Debug, Clone)]
 pub enum MessageValidationError {
     #[error("message has no data")]
@@ -77,23 +84,11 @@ pub enum MessageValidationError {
     #[error("invalid message type")]
     InvalidMessageType(i32),
 
-    #[error("store error")]
-    StoreError { inner: HubError, hash: Vec<u8> },
+    #[error(transparent)]
+    StoreError(#[from] HubError),
 
     #[error("fname not registered for fid")]
     MissingFname,
-}
-
-impl MessageValidationError {
-    pub fn new_store_error(hash: Vec<u8>) -> impl FnOnce(HubError) -> Self {
-        move |inner: HubError| MessageValidationError::StoreError { inner, hash }
-    }
-}
-
-impl EngineError {
-    pub fn new_store_error(hash: Vec<u8>) -> impl FnOnce(HubError) -> Self {
-        move |inner: HubError| EngineError::StoreError { inner, hash }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -289,7 +284,7 @@ impl ShardEngine {
                 trie_ctx,
                 &snapchain_txn,
                 txn_batch,
-                "prepare_proposal".to_string(),
+                ProposalSource::Propose,
             )?;
             snapchain_txn.account_root = account_root;
             events.extend(txn_events);
@@ -468,7 +463,7 @@ impl ShardEngine {
         txn_batch: &mut RocksDbTransactionBatch,
         transactions: &[Transaction],
         shard_root: &[u8],
-        source: String,
+        source: ProposalSource,
     ) -> Result<Vec<HubEvent>, EngineError> {
         let now = std::time::Instant::now();
         let mut events = vec![];
@@ -478,7 +473,10 @@ impl ShardEngine {
             }
             Some(shard_chunk) => match self.stores.trie.root_hash() {
                 Err(err) => {
-                    warn!(source, "Unable to compute trie root hash {:#?}", err)
+                    warn!(
+                        source = source.to_string(),
+                        "Unable to compute trie root hash {:#?}", err
+                    )
                 }
                 Ok(root_hash) => {
                     let parent_shard_root = shard_chunk.header.unwrap().shard_root;
@@ -487,7 +485,7 @@ impl ShardEngine {
                             shard_id = self.shard_id,
                             our_shard_root = hex::encode(&root_hash),
                             parent_shard_root = hex::encode(parent_shard_root),
-                            source,
+                            source = source.to_string(),
                             "Parent shard root mismatch"
                         );
                     }
@@ -504,7 +502,7 @@ impl ShardEngine {
                     fid = snapchain_txn.fid,
                     new_account_root = hex::encode(&account_root),
                     tx_account_root = hex::encode(&snapchain_txn.account_root),
-                    source,
+                    source = source.to_string(),
                     summary = Self::txn_summary(snapchain_txn),
                     num_system_messages = snapchain_txn.system_messages.len(),
                     num_user_messages = snapchain_txn.user_messages.len(),
@@ -521,7 +519,7 @@ impl ShardEngine {
                 shard_id = self.shard_id,
                 new_shard_root = hex::encode(&root1),
                 tx_shard_root = hex::encode(shard_root),
-                source,
+                source = source.to_string(),
                 summary = Self::txns_summary(transactions),
                 num_txns = transactions.len(),
                 "Shard root mismatch"
@@ -539,7 +537,7 @@ impl ShardEngine {
         trie_ctx: &merkle_trie::Context,
         snapchain_txn: &Transaction,
         txn_batch: &mut RocksDbTransactionBatch,
-        source: String,
+        source: ProposalSource,
     ) -> Result<(Vec<u8>, Vec<HubEvent>, Vec<MessageValidationError>), EngineError> {
         let now = std::time::Instant::now();
         let total_user_messages = snapchain_txn.user_messages.len();
@@ -582,18 +580,22 @@ impl ShardEngine {
                         }
                     }
                     Err(err) => {
-                        warn!("Error merging onchain event: {:?}", err);
+                        if source != ProposalSource::Simulate {
+                            warn!("Error merging onchain event: {:?}", err);
+                        }
                     }
                 }
             }
             if let Some(fname_transfer) = &msg.fname_transfer {
                 match &fname_transfer.proof {
                     None => {
-                        warn!(
-                            fid = snapchain_txn.fid,
-                            id = fname_transfer.id,
-                            "Fname transfer has no proof"
-                        );
+                        if source != ProposalSource::Simulate {
+                            warn!(
+                                fid = snapchain_txn.fid,
+                                id = fname_transfer.id,
+                                "Fname transfer has no proof"
+                            );
+                        }
                     }
                     Some(proof) => {
                         match verification::validate_fname_transfer(fname_transfer) {
@@ -615,7 +617,9 @@ impl ShardEngine {
                                         system_messages_count += 1;
                                     }
                                     Err(err) => {
-                                        warn!("Error merging fname transfer: {:?}", err);
+                                        if source != ProposalSource::Simulate {
+                                            warn!("Error merging fname transfer: {:?}", err);
+                                        }
                                     }
                                 }
                                 // If the name was transfered from an existing fid, we need to make sure to revoke any existing username UserDataAdd
@@ -641,17 +645,21 @@ impl ShardEngine {
                                                 events.push(hub_event.clone());
                                             }
                                             Err(err) => {
-                                                warn!(
-                                                    "Error revoking existing username: {:?}",
-                                                    err
-                                                );
+                                                if source != ProposalSource::Simulate {
+                                                    warn!(
+                                                        "Error revoking existing username: {:?}",
+                                                        err
+                                                    );
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
                             Err(err) => {
-                                warn!("Error validating fname transfer: {:?}", err);
+                                if source != ProposalSource::Simulate {
+                                    warn!("Error validating fname transfer: {:?}", err);
+                                }
                             }
                         }
                     }
@@ -672,12 +680,14 @@ impl ShardEngine {
                     }
                 }
                 Err(err) => {
-                    warn!(
-                        fid = snapchain_txn.fid,
-                        key = hex::encode(key),
-                        "Error revoking signer: {:?}",
-                        err
-                    );
+                    if source != ProposalSource::Simulate {
+                        warn!(
+                            fid = snapchain_txn.fid,
+                            key = hex::encode(key),
+                            "Error revoking signer: {:?}",
+                            err
+                        );
+                    }
                 }
             }
         }
@@ -696,23 +706,27 @@ impl ShardEngine {
                             message_types.insert(msg.msg_type());
                         }
                         Err(err) => {
-                            warn!(
-                                fid = msg.fid(),
-                                hash = msg.hex_hash(),
-                                "Error merging message: {:?}",
-                                err
-                            );
+                            if source != ProposalSource::Simulate {
+                                warn!(
+                                    fid = msg.fid(),
+                                    hash = msg.hex_hash(),
+                                    "Error merging message: {:?}",
+                                    err
+                                );
+                            }
+                            validation_errors.push(err);
                         }
                     }
                 }
                 Err(err) => {
-                    println!("Error validating user message: {:?}", err);
-                    warn!(
-                        fid = snapchain_txn.fid,
-                        hash = msg.hex_hash(),
-                        "Error validating user message: {:?}",
-                        err
-                    );
+                    if source != ProposalSource::Simulate {
+                        warn!(
+                            fid = msg.fid(),
+                            hash = msg.hex_hash(),
+                            "Error validating user message: {:?}",
+                            err
+                        );
+                    }
                     validation_errors.push(err);
                 }
             }
@@ -730,12 +744,14 @@ impl ShardEngine {
                     }
                 }
                 Err(err) => {
-                    warn!(
-                        fid = fid,
-                        msg_type = msg_type.into_u8(),
-                        "Error pruning messages: {:?}",
-                        err
-                    );
+                    if source != ProposalSource::Simulate {
+                        warn!(
+                            fid = fid,
+                            msg_type = msg_type.into_u8(),
+                            "Error pruning messages: {:?}",
+                            err
+                        );
+                    }
                 }
             }
         }
@@ -758,7 +774,7 @@ impl ShardEngine {
             validation_errors = validation_errors.len(),
             new_account_root = hex::encode(&account_root),
             tx_account_root = hex::encode(&snapchain_txn.account_root),
-            source,
+            source = source.to_string(),
             "Replayed transaction"
         );
         let elapsed = now.elapsed();
@@ -786,31 +802,31 @@ impl ShardEngine {
                 .stores
                 .cast_store
                 .merge(msg, txn_batch)
-                .map_err(MessageValidationError::new_store_error(msg.hash.clone())),
+                .map_err(|e| MessageValidationError::StoreError(e)),
             MessageType::LinkAdd | MessageType::LinkRemove | MessageType::LinkCompactState => self
                 .stores
                 .link_store
                 .merge(msg, txn_batch)
-                .map_err(MessageValidationError::new_store_error(msg.hash.clone())),
+                .map_err(|e| MessageValidationError::StoreError(e)),
             MessageType::ReactionAdd | MessageType::ReactionRemove => self
                 .stores
                 .reaction_store
                 .merge(msg, txn_batch)
-                .map_err(MessageValidationError::new_store_error(msg.hash.clone())),
+                .map_err(|e| MessageValidationError::StoreError(e)),
             MessageType::UserDataAdd => self
                 .stores
                 .user_data_store
                 .merge(msg, txn_batch)
-                .map_err(MessageValidationError::new_store_error(msg.hash.clone())),
+                .map_err(|e| MessageValidationError::StoreError(e)),
             MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => self
                 .stores
                 .verification_store
                 .merge(msg, txn_batch)
-                .map_err(MessageValidationError::new_store_error(msg.hash.clone())),
+                .map_err(|e| MessageValidationError::StoreError(e)),
             MessageType::UsernameProof => {
                 let store = &self.stores.username_proof_store;
                 let result = store.merge(msg, txn_batch);
-                result.map_err(MessageValidationError::new_store_error(msg.hash.clone()))
+                result.map_err(|e| MessageValidationError::StoreError(e))
             }
             unhandled_type => {
                 return Err(MessageValidationError::InvalidMessageType(
@@ -839,27 +855,27 @@ impl ShardEngine {
                 .stores
                 .cast_store
                 .prune_messages(fid, current_count, max_count, txn_batch)
-                .map_err(EngineError::new_store_error(vec![])),
+                .map_err(|e| EngineError::StoreError(e)),
             MessageType::LinkAdd | MessageType::LinkRemove | MessageType::LinkCompactState => self
                 .stores
                 .link_store
                 .prune_messages(fid, current_count, max_count, txn_batch)
-                .map_err(EngineError::new_store_error(vec![])),
+                .map_err(|e| EngineError::StoreError(e)),
             MessageType::ReactionAdd | MessageType::ReactionRemove => self
                 .stores
                 .reaction_store
                 .prune_messages(fid, current_count, max_count, txn_batch)
-                .map_err(EngineError::new_store_error(vec![])),
+                .map_err(|e| EngineError::StoreError(e)),
             MessageType::UserDataAdd => self
                 .stores
                 .user_data_store
                 .prune_messages(fid, current_count, max_count, txn_batch)
-                .map_err(EngineError::new_store_error(vec![])),
+                .map_err(|e| EngineError::StoreError(e)),
             MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => self
                 .stores
                 .verification_store
                 .prune_messages(fid, current_count, max_count, txn_batch)
-                .map_err(EngineError::new_store_error(vec![])),
+                .map_err(|e| EngineError::StoreError(e)),
             unhandled_type => {
                 return Err(EngineError::UnsupportedMessageType(unhandled_type));
             }
@@ -1040,10 +1056,7 @@ impl ShardEngine {
                 &name.as_bytes().to_vec(),
                 UserNameType::UsernameTypeEnsL1 as u8,
             )
-            .map_err(|e| MessageValidationError::StoreError {
-                inner: e,
-                hash: vec![],
-            })?;
+            .map_err(|e| MessageValidationError::StoreError(e))?;
             match proof_message {
                 Some(message) => match message.data {
                     None => Ok(None),
@@ -1061,10 +1074,7 @@ impl ShardEngine {
             }
         } else {
             UserDataStore::get_username_proof(&self.stores.user_data_store, txn, name.as_bytes())
-                .map_err(|e| MessageValidationError::StoreError {
-                    inner: e,
-                    hash: vec![],
-                })
+                .map_err(|e| MessageValidationError::StoreError(e))
         }
     }
 
@@ -1123,7 +1133,7 @@ impl ShardEngine {
             &mut txn,
             transactions,
             shard_root,
-            "validate_state_change".to_string(),
+            ProposalSource::Validate,
         );
 
         match proposal_result {
@@ -1270,7 +1280,7 @@ impl ShardEngine {
                 &mut txn,
                 transactions,
                 shard_root,
-                "commit".to_string(),
+                ProposalSource::Commit,
             ) {
                 Err(err) => {
                     error!("State change commit failed: {}", err);
@@ -1298,16 +1308,15 @@ impl ShardEngine {
             &merkle_trie::Context::new(),
             &snapchain_txn,
             &mut txn,
-            "simulate_message".to_string(),
+            ProposalSource::Simulate,
         );
 
         match result {
             Ok((_, _, errors)) => {
                 self.stores.trie.reload(&self.db).map_err(|e| {
-                    MessageValidationError::StoreError {
-                        inner: HubError::invalid_internal_state(&*e.to_string()),
-                        hash: vec![],
-                    }
+                    MessageValidationError::StoreError(HubError::invalid_internal_state(
+                        &*e.to_string(),
+                    ))
                 })?;
                 if !errors.is_empty() {
                     return Err(errors[0].clone());
@@ -1317,10 +1326,9 @@ impl ShardEngine {
             }
             Err(err) => {
                 error!("Error simulating message: {:?}", err);
-                Err(MessageValidationError::StoreError {
-                    inner: HubError::invalid_internal_state(&*err.to_string()),
-                    hash: vec![],
-                })
+                Err(MessageValidationError::StoreError(
+                    HubError::invalid_internal_state(&*err.to_string()),
+                ))
             }
         }
     }

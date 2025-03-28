@@ -23,6 +23,7 @@ mod tests {
     use crate::storage::db::{self, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::engine::{Senders, ShardEngine};
     use crate::storage::store::stores::Stores;
+    use crate::storage::store::test_helper::register_user;
     use crate::storage::store::{test_helper, BlockStore};
     use crate::storage::trie::merkle_trie;
     use crate::utils::factory::{events_factory, messages_factory};
@@ -345,7 +346,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_submit_message_fails_with_error_for_invalid_messages() {
-        let (_stores, _senders, _, service) = make_server(None).await;
+        let (_stores, _senders, [mut engine1, _], service) = make_server(None).await;
 
         // Message with no fid registration
         let invalid_message = messages_factory::casts::create_cast_add(123, "test", None, None);
@@ -357,6 +358,27 @@ mod tests {
 
         assert_eq!(response.code(), tonic::Code::InvalidArgument);
         assert_eq!(response.message(), "Invalid message: missing fid");
+
+        register_user(
+            SHARD1_FID,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine1,
+        )
+        .await;
+        let valid_message =
+            messages_factory::casts::create_cast_add(SHARD1_FID, "test", None, None);
+        test_helper::commit_message(&mut engine1, &valid_message).await;
+
+        // Submitting a duplicate message should return an error
+        let mut request = Request::new(valid_message);
+        add_auth_header(&mut request, USER_NAME, PASSWORD);
+        let response = service.submit_message(request).await.unwrap_err();
+        assert_eq!(response.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            response.message(),
+            "Invalid message: bad_request.duplicate/message has already been merged"
+        );
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::core::util::{calculate_message_hash, from_farcaster_time};
+    use crate::core::util::{calculate_message_hash, from_farcaster_time, get_farcaster_time};
     use crate::proto::{self, ReactionType};
     use crate::proto::{FnameTransfer, ShardChunk, UserNameProof};
     use crate::proto::{HubEvent, ValidatorMessage};
@@ -1555,7 +1555,12 @@ mod tests {
     async fn test_simulate_message() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
 
-        let message = default_message("msg1");
+        let message = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "msg1",
+            Some(get_farcaster_time().unwrap() as u32),
+            Some(&test_helper::default_signer()),
+        );
 
         let result = engine.simulate_message(&message);
         assert_eq!(result.is_ok(), false);
@@ -1571,5 +1576,43 @@ mod tests {
 
         let result = engine.simulate_message(&message);
         assert_eq!(result.is_ok(), true);
+
+        commit_message(&mut engine, &message).await;
+        let remove_message = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &message.hash,
+            Some(message.data.unwrap().timestamp + 10),
+            Some(&test_helper::default_signer()),
+        );
+
+        commit_message(&mut engine, &remove_message).await;
+
+        // duplicates are returned as errors
+        let result = engine.simulate_message(&remove_message);
+        assert_eq!(result.is_err(), true);
+        assert_eq!(
+            result
+                .unwrap_err()
+                .to_string()
+                .starts_with("bad_request.duplicate"),
+            true
+        );
+
+        // conflicts are returned as errors
+        let remove_message2 = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &message.hash,
+            Some(remove_message.data.unwrap().timestamp - 1),
+            Some(&test_helper::default_signer()),
+        );
+        let result = engine.simulate_message(&remove_message2);
+        assert_eq!(result.is_err(), true);
+        assert_eq!(
+            result
+                .unwrap_err()
+                .to_string()
+                .starts_with("bad_request.conflict"),
+            true
+        );
     }
 }
