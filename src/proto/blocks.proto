@@ -210,14 +210,3 @@ message SyncResponse {
     SyncVoteSetResponse vote_set = 2;
   }
 }
-
-message GossipMessage {
-  oneof gossip_message {
-    ConsensusMessage consensus = 1;
-    FullProposal full_proposal = 2;
-    MempoolMessage mempool_message = 3;
-    StatusMessage status = 4;
-    ReadNodeMessage read_node_message = 5;
-  }
-}
-

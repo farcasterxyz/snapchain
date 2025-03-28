@@ -3,7 +3,7 @@ use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
-use crate::proto::read_node_message;
+use crate::proto::{gossip_message, read_node_message};
 use crate::storage::store::engine::MempoolMessage;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -36,6 +36,7 @@ const CONSENSUS_TOPIC: &str = "consensus";
 const MEMPOOL_TOPIC: &str = "mempool";
 const DECIDED_VALUES: &str = "decided-values";
 const READ_NODE_PEER_STATUSES: &str = "read-node-peers";
+const CONTACT_INFO: &str = "contact-info";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -85,6 +86,7 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
     SyncReply(InboundRequestId, sync::Response<SnapchainValidatorContext>),
     BroadcastDecidedValue(proto::DecidedValue),
     SubscribeToDecidedValuesTopic(),
+    BroadcastContactInfo(proto::ContactInfo),
 }
 
 pub enum GossipTopic {
@@ -92,6 +94,7 @@ pub enum GossipTopic {
     DecidedValues,
     ReadNodePeerStatuses,
     Mempool,
+    ContactInfo,
     SyncRequest(MalachitePeerId, oneshot::Sender<OutboundRequestId>),
     SyncReply(InboundRequestId),
 }
@@ -349,6 +352,9 @@ impl SnapchainGossip {
                     if let Some((gossip_topics, encoded_message)) = self.process_gossip_event(event) {
                         for gossip_topic in gossip_topics {
                             match gossip_topic {
+                                GossipTopic::ContactInfo => {
+                                    self.publish(encoded_message.clone(), CONTACT_INFO)
+                                }
                                 GossipTopic::Consensus => self.publish(encoded_message.clone(), CONSENSUS_TOPIC),
                                 GossipTopic::DecidedValues=> self.publish(encoded_message.clone(), DECIDED_VALUES),
                                 GossipTopic::ReadNodePeerStatuses => self.publish(encoded_message.clone(), READ_NODE_PEER_STATUSES),
@@ -397,6 +403,8 @@ impl SnapchainGossip {
     ) -> Option<SystemMessage> {
         match proto::GossipMessage::decode(gossip_message.as_slice()) {
             Ok(gossip_message) => match gossip_message.gossip_message {
+                Some(gossip_message::GossipMessage::ContactInfoMessage(contact_info)) => None,
+
                 Some(proto::gossip_message::GossipMessage::ReadNodeMessage(read_node_message)) => {
                     let read_node_message = read_node_message.read_node_message;
                     match read_node_message {
@@ -547,6 +555,17 @@ impl SnapchainGossip {
     ) -> Option<(Vec<GossipTopic>, Vec<u8>)> {
         let snapchain_codec = SnapchainCodec {};
         match event {
+            Some(GossipEvent::BroadcastContactInfo(contact_info)) => {
+                let gossip_message = proto::GossipMessage {
+                    gossip_message: Some(proto::gossip_message::GossipMessage::ContactInfoMessage(
+                        contact_info,
+                    )),
+                };
+                Some((
+                    vec![GossipTopic::ContactInfo],
+                    gossip_message.encode_to_vec(),
+                ))
+            }
             Some(GossipEvent::SubscribeToDecidedValuesTopic()) => {
                 let topic = gossipsub::IdentTopic::new(DECIDED_VALUES);
                 let result = self.swarm.behaviour_mut().gossipsub.subscribe(&topic);
