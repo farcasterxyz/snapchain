@@ -438,20 +438,26 @@ impl SnapchainGossip {
     }
 
     pub fn handle_contact_info(&mut self, contact_info: ContactInfo) {
-        // TODO(aditi): Add validations and only dial if the peer is good
         // TODO(aditi): We might want to persist peers and reconnect to them on restart
+        let contact_info_body = contact_info.body.unwrap();
         if self
             .swarm
             .connected_peers()
-            .find(|peer_id| {
-                PeerId::from_bytes(&contact_info.body.as_ref().unwrap().peer_id).unwrap()
-                    == **peer_id
-            })
+            .find(|peer_id| PeerId::from_bytes(&contact_info_body.peer_id).unwrap() == **peer_id)
             .is_some()
         {
             return;
         }
-        let _ = Self::dial(&mut self.swarm, &contact_info.body.unwrap().gossip_address);
+
+        if contact_info_body.network() != self.fc_network {
+            return;
+        }
+
+        if contact_info_body.snapchain_version != FARCASTER_VERSION {
+            return;
+        }
+
+        let _ = Self::dial(&mut self.swarm, &contact_info_body.gossip_address);
     }
 
     pub fn map_gossip_bytes_to_system_message(
