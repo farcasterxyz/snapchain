@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+import "message.proto";
+import "blocks.proto";
+
+enum GossipVersion {
+  GOSSIP_VERSION_V1 = 0;
+  GOSSIP_VERSION_V1_1 = 1;
+}
+
+message GossipAddressInfo {
+  string address = 1;
+  uint32 family = 2;
+  uint32 port = 3;
+  string dns_name = 4;
+}
+
+message ContactInfoContentBody {
+  GossipAddressInfo gossip_address = 1;
+  string snapchain_version = 2;
+  FarcasterNetwork network = 6;
+  uint64 timestamp = 8;
+}
+
+message ContactInfo {
+  ContactInfoContentBody body = 9;
+  bytes signature = 10; // Signature of the message digest
+  bytes signer = 11; // Public key of the peer that originated the contact info
+}
+
+message GossipMessage {
+  oneof gossip_message {
+    ConsensusMessage consensus = 1;
+    FullProposal full_proposal = 2;
+    MempoolMessage mempool_message = 3;
+    StatusMessage status = 4;
+    ReadNodeMessage read_node_message = 5;
+    ContactInfo contact_info_message = 6;
+  }
+}
