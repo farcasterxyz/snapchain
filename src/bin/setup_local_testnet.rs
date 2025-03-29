@@ -43,6 +43,9 @@ struct Args {
 
     #[arg(long, default_value = "2")]
     num_shards: u32,
+
+    #[arg(long, default_value = "4")]
+    num_nodes: u32,
 }
 
 fn parse_duration(arg: &str) -> Result<Duration, String> {
@@ -53,15 +56,14 @@ fn parse_duration(arg: &str) -> Result<Duration, String> {
 async fn main() {
     let args = Args::parse();
 
-    // Create 4 nodes by default
-    let nodes = 4;
+    let num_nodes = args.num_nodes;
 
     // create directory at the root of the project if it doesn't exist
     if !std::path::Path::new("nodes").exists() {
         std::fs::create_dir("nodes").expect("Failed to create nodes directory");
     }
 
-    let keypairs = (1..=nodes)
+    let keypairs = (1..=num_nodes)
         .map(|_| SecretKey::generate())
         .collect::<Vec<SecretKey>>();
     let all_public_keys = keypairs
@@ -79,7 +81,7 @@ async fn main() {
     let base_rpc_port = 3382;
     let base_http_port = 3482;
     let base_gossip_port = 50050;
-    for i in 1..=nodes {
+    for i in 1..=num_nodes {
         let id = i;
         let db_dir = format!("nodes/{id}/.rocks");
         let backup_dir = format!("nodes/{id}/.rocks.backup");
@@ -92,7 +94,7 @@ async fn main() {
                 std::fs::remove_dir_all(db_dir.clone()).expect("Failed to remove .rocks directory");
             }
         }
-        let secret_key = hex::encode(&keypairs[i - 1]);
+        let secret_key = hex::encode(&keypairs[i as usize - 1]);
         let rpc_port = base_rpc_port + i;
         let http_port = base_http_port + i;
         let gossip_port = base_gossip_port + i;
@@ -100,7 +102,7 @@ async fn main() {
         let rpc_address = format!("{host}:{rpc_port}");
         let http_address = format!("{host}:{http_port}");
         let gossip_multi_addr = format!("/ip4/{host}/udp/{gossip_port}/quic-v1");
-        let other_nodes_addresses = (1..=nodes)
+        let other_nodes_addresses = (1..=num_nodes)
             .filter(|&x| x != id)
             .map(|x| format!("/ip4/127.0.0.1/udp/{:?}/quic-v1", base_gossip_port + x))
             .collect::<Vec<String>>()
@@ -184,5 +186,5 @@ aws_secret_access_key = "{aws_secret_access_key}"
         .expect("Failed to write config file");
         // Print a message
     }
-    println!("Created configs for {nodes} nodes");
+    println!("Created configs for {num_nodes} nodes");
 }

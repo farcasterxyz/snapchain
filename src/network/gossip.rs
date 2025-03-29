@@ -3,7 +3,10 @@ use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
-use crate::proto::read_node_message;
+use crate::proto::{
+    gossip_message, read_node_message, ContactInfo, ContactInfoBody, FarcasterNetwork,
+    GossipMessage,
+};
 use crate::storage::store::engine::MempoolMessage;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -28,6 +31,8 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
+// TODO(aditi): Set up version schedule
+const FARCASTER_VERSION: &str = "2025.2.19";
 const DEFAULT_GOSSIP_PORT: u16 = 3382;
 const DEFAULT_GOSSIP_HOST: &str = "127.0.0.1";
 const MAX_GOSSIP_MESSAGE_SIZE: usize = 1024 * 1024 * 10; // 10 mb
@@ -36,11 +41,13 @@ const CONSENSUS_TOPIC: &str = "consensus";
 const MEMPOOL_TOPIC: &str = "mempool";
 const DECIDED_VALUES: &str = "decided-values";
 const READ_NODE_PEER_STATUSES: &str = "read-node-peers";
+const CONTACT_INFO: &str = "contact-info";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub address: String,
     pub bootstrap_peers: String,
+    pub contact_info_advertisement_interval: Duration,
 }
 
 impl Default for Config {
@@ -51,15 +58,36 @@ impl Default for Config {
                 DEFAULT_GOSSIP_HOST, DEFAULT_GOSSIP_PORT
             ),
             bootstrap_peers: "".to_string(),
+            contact_info_advertisement_interval: Duration::from_secs(300),
         }
     }
 }
 
 impl Config {
     pub fn new(address: String, bootstrap_peers: String) -> Self {
+        Config::default()
+            .with_address(address)
+            .with_bootstrap_peers(bootstrap_peers)
+    }
+
+    fn with_address(self, address: String) -> Self {
+        Config { address, ..self }
+    }
+
+    fn with_bootstrap_peers(self, bootstrap_peers: String) -> Self {
         Config {
-            address,
             bootstrap_peers,
+            ..self
+        }
+    }
+
+    pub fn with_contact_info_advertisement_interval(
+        self,
+        contact_info_advertisement_interval: Duration,
+    ) -> Self {
+        Config {
+            contact_info_advertisement_interval,
+            ..self
         }
     }
 
@@ -110,6 +138,9 @@ pub struct SnapchainGossip {
     sync_channels: HashMap<InboundRequestId, sync::ResponseChannel>,
     read_node: bool,
     bootstrap_addrs: Vec<String>,
+    address: String,
+    fc_network: FarcasterNetwork,
+    contact_info_advertisement_interval: Duration,
 }
 
 impl SnapchainGossip {
@@ -118,6 +149,7 @@ impl SnapchainGossip {
         config: &Config,
         system_tx: Sender<SystemMessage>,
         read_node: bool,
+        fc_network: FarcasterNetwork,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair.clone().into())
             .with_tokio()
@@ -204,6 +236,13 @@ impl SnapchainGossip {
             }
         }
 
+        let topic = gossipsub::IdentTopic::new(CONTACT_INFO);
+        let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
+        if let Err(e) = result {
+            warn!("Failed to subscribe to topic: {:?}", e);
+            return Err(Box::new(e));
+        }
+
         // Listen on all assigned port for this id
         swarm.listen_on(config.address.parse()?)?;
 
@@ -217,6 +256,9 @@ impl SnapchainGossip {
             sync_channels: HashMap::new(),
             read_node,
             bootstrap_addrs: config.bootstrap_addrs(),
+            address: config.address.clone(),
+            fc_network,
+            contact_info_advertisement_interval: config.contact_info_advertisement_interval,
         })
     }
 
@@ -248,18 +290,47 @@ impl SnapchainGossip {
         }
     }
 
+    pub fn publish_contact_info(&mut self) {
+        let contact_info = ContactInfo {
+            body: Some(ContactInfoBody {
+                peer_id: self.swarm.local_peer_id().to_bytes(),
+                gossip_address: self.address.clone(),
+                network: self.fc_network as i32,
+                snapchain_version: FARCASTER_VERSION.to_string(),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
+            }),
+        };
+
+        let gossip_message = GossipMessage {
+            gossip_message: Some(gossip_message::GossipMessage::ContactInfoMessage(
+                contact_info,
+            )),
+        };
+        self.publish(gossip_message.encode_to_vec(), CONTACT_INFO);
+    }
+
     pub async fn start(self: &mut Self) {
         let mut reconnect_timer = tokio::time::interval(Duration::from_secs(30));
+
+        let mut publish_contact_info_timer =
+            tokio::time::interval(self.contact_info_advertisement_interval);
 
         loop {
             tokio::select! {
                 _ = reconnect_timer.tick() => {
                     self.check_and_reconnect_to_bootstrap_peers().await;
                 },
+                _ = publish_contact_info_timer.tick() => {
+                    info!("Publishing contact info");
+                    self.publish_contact_info()
+                }
                 gossip_event = self.swarm.select_next_some() => {
                     match gossip_event {
                         SwarmEvent::ConnectionEstablished {peer_id, ..} => {
-                            info!("Connection established with peer: {peer_id}");
+                            info!(total_peers = self.swarm.connected_peers().count(), "Connection established with peer: {peer_id}");
                             let event = MalachiteNetworkEvent::PeerConnected(MalachitePeerId::from_libp2p(&peer_id));
                             let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await;
                             if let Err(e) = res {
@@ -290,7 +361,7 @@ impl SnapchainGossip {
                             message_id: _id,
                             message,
                         })) => {
-                            if let Some(system_message) = Self::map_gossip_bytes_to_system_message(peer_id, message.data) {
+                            if let Some(system_message) = self.map_gossip_bytes_to_system_message(peer_id, message.data) {
                                 let res = self.system_tx.send(system_message).await;
                                 if let Err(e) = res {
                                     warn!("Failed to send system block message: {}", e);
@@ -391,12 +462,45 @@ impl SnapchainGossip {
         }
     }
 
+    pub fn handle_contact_info(&mut self, contact_info: ContactInfo) {
+        // TODO(aditi): We might want to persist peers and reconnect to them on restart
+        let contact_info_body = contact_info.body.unwrap();
+        if self
+            .swarm
+            .connected_peers()
+            .find(|peer_id| PeerId::from_bytes(&contact_info_body.peer_id).unwrap() == **peer_id)
+            .is_some()
+        {
+            return;
+        }
+
+        if contact_info_body.network() != self.fc_network {
+            return;
+        }
+
+        if contact_info_body.snapchain_version != FARCASTER_VERSION {
+            return;
+        }
+
+        let _ = Self::dial(&mut self.swarm, &contact_info_body.gossip_address);
+    }
+
     pub fn map_gossip_bytes_to_system_message(
+        &mut self,
         peer_id: PeerId,
         gossip_message: Vec<u8>,
     ) -> Option<SystemMessage> {
         match proto::GossipMessage::decode(gossip_message.as_slice()) {
             Ok(gossip_message) => match gossip_message.gossip_message {
+                Some(gossip_message::GossipMessage::ContactInfoMessage(contact_info)) => {
+                    info!(
+                        peer_id = peer_id.to_string(),
+                        "Received contact info from peer"
+                    );
+                    self.handle_contact_info(contact_info);
+                    None
+                }
+
                 Some(proto::gossip_message::GossipMessage::ReadNodeMessage(read_node_message)) => {
                     let read_node_message = read_node_message.read_node_message;
                     match read_node_message {
