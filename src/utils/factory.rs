@@ -558,3 +558,46 @@ pub mod username_factory {
         }
     }
 }
+
+pub mod shard_chunk_factory {
+    use crate::proto;
+    use crate::proto::Height;
+    use crate::utils::factory::time;
+
+    pub fn create_shard_chunk(
+        shard_id: u32,
+        height: Option<u64>,
+        timestamp: Option<u64>,
+    ) -> proto::ShardChunk {
+        let height = height.unwrap_or_else(|| rand::random::<u64>());
+        let timestamp = timestamp.unwrap_or_else(|| time::current_timestamp() as u64);
+        proto::ShardChunk {
+            header: Some(proto::ShardHeader {
+                parent_hash: vec![],
+                timestamp,
+                height: Some(Height::new(shard_id, height)),
+                shard_root: vec![],
+            }),
+            hash: vec![],
+            commits: None,
+            transactions: vec![],
+        }
+    }
+}
+
+pub mod hub_events_factory {
+    use crate::proto;
+
+    pub fn create_merge_event(message: &proto::Message) -> proto::HubEvent {
+        proto::HubEvent {
+            id: rand::random::<u64>(),
+            r#type: proto::HubEventType::MergeMessage as i32,
+            body: Some(proto::hub_event::Body::MergeMessageBody(
+                proto::MergeMessageBody {
+                    message: Some(message.clone()),
+                    deleted_messages: vec![],
+                },
+            )),
+        }
+    }
+}
