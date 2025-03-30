@@ -509,7 +509,10 @@ impl SnapchainGossip {
                         peer_id = peer_id.to_string(),
                         "Received contact info from peer"
                     );
-                    self.handle_contact_info(contact_info);
+                    // Validators should just dial the bootstrap set since the validator set is fixed.
+                    if self.read_node {
+                        self.handle_contact_info(contact_info);
+                    }
                     None
                 }
 
