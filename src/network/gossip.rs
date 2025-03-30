@@ -22,6 +22,7 @@ use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::{
     gossipsub, noise, swarm::NetworkBehaviour, swarm::SwarmEvent, tcp, yamux, PeerId, Swarm,
 };
+use libp2p_connection_limits::ConnectionLimits;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -127,6 +128,7 @@ pub enum GossipTopic {
 pub struct SnapchainBehavior {
     pub gossipsub: gossipsub::Behaviour,
     pub rpc: sync::Behaviour,
+    pub connection_limits: libp2p_connection_limits::Behaviour,
 }
 
 pub struct SnapchainGossip {
@@ -201,7 +203,19 @@ impl SnapchainGossip {
 
                 let rpc = sync::Behaviour::new(sync::Config::default());
 
-                Ok(SnapchainBehavior { gossipsub, rpc })
+                let connection_limits = libp2p_connection_limits::Behaviour::new(
+                    ConnectionLimits::default()
+                        .with_max_established_incoming(Some(15))
+                        .with_max_established_outgoing(Some(15))
+                        .with_max_pending_incoming(Some(5))
+                        .with_max_pending_outgoing(Some(5)),
+                );
+
+                Ok(SnapchainBehavior {
+                    gossipsub,
+                    rpc,
+                    connection_limits,
+                })
             })?
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
             .build();
