@@ -31,11 +31,11 @@ async fn test_gossip_communication() {
     let node3_addr = format!("/ip4/{HOST_FOR_TEST}/udp/{node3_port}/quic-v1");
 
     let config1 = Config::new(node1_addr.clone(), node2_addr.clone())
-        .with_contact_info_advertisement_interval(Duration::from_millis(100));
+        .with_contact_info_interval(Duration::from_millis(100));
     let config2 = Config::new(node2_addr.clone(), node1_addr.clone())
-        .with_contact_info_advertisement_interval(Duration::from_millis(100));
+        .with_contact_info_interval(Duration::from_millis(100));
     let config3 = Config::new(node3_addr.clone(), node2_addr.clone())
-        .with_contact_info_advertisement_interval(Duration::from_millis(100));
+        .with_contact_info_interval(Duration::from_millis(100));
 
     // Create channels for system messages
     let (system_tx1, _) = mpsc::channel::<SystemMessage>(100);

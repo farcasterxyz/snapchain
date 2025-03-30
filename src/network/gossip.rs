@@ -1,6 +1,7 @@
 use crate::consensus::consensus::{MalachiteEventShard, SystemMessage};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
+use crate::consensus::proposer::PROTOCOL_VERSION;
 use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::proto::{
@@ -31,8 +32,6 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
-// TODO(aditi): Set up version schedule
-const FARCASTER_VERSION: &str = "2025.2.19";
 const DEFAULT_GOSSIP_PORT: u16 = 3382;
 const DEFAULT_GOSSIP_HOST: &str = "127.0.0.1";
 const MAX_GOSSIP_MESSAGE_SIZE: usize = 1024 * 1024 * 10; // 10 mb
@@ -46,19 +45,22 @@ const CONTACT_INFO: &str = "contact-info";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub address: String,
+    pub announce_address: String,
     pub bootstrap_peers: String,
-    pub contact_info_advertisement_interval: Duration,
+    pub contact_info_interval: Duration,
 }
 
 impl Default for Config {
     fn default() -> Self {
+        let address = format!(
+            "/ip4/{}/udp/{}/quic-v1",
+            DEFAULT_GOSSIP_HOST, DEFAULT_GOSSIP_PORT
+        );
         Config {
-            address: format!(
-                "/ip4/{}/udp/{}/quic-v1",
-                DEFAULT_GOSSIP_HOST, DEFAULT_GOSSIP_PORT
-            ),
+            address: address.clone(),
+            announce_address: address,
             bootstrap_peers: "".to_string(),
-            contact_info_advertisement_interval: Duration::from_secs(300),
+            contact_info_interval: Duration::from_secs(300),
         }
     }
 }
@@ -81,12 +83,9 @@ impl Config {
         }
     }
 
-    pub fn with_contact_info_advertisement_interval(
-        self,
-        contact_info_advertisement_interval: Duration,
-    ) -> Self {
+    pub fn with_contact_info_interval(self, contact_info_interval: Duration) -> Self {
         Config {
-            contact_info_advertisement_interval,
+            contact_info_interval,
             ..self
         }
     }
@@ -138,9 +137,9 @@ pub struct SnapchainGossip {
     sync_channels: HashMap<InboundRequestId, sync::ResponseChannel>,
     read_node: bool,
     bootstrap_addrs: Vec<String>,
-    address: String,
+    announce_address: String,
     fc_network: FarcasterNetwork,
-    contact_info_advertisement_interval: Duration,
+    contact_info_interval: Duration,
 }
 
 impl SnapchainGossip {
@@ -176,7 +175,7 @@ impl SnapchainGossip {
                     };
 
                     match message.topic.as_str() {
-                        MEMPOOL_TOPIC => {
+                        MEMPOOL_TOPIC | CONTACT_INFO => {
                             let mut s = DefaultHasher::new();
                             message.data.hash(&mut s);
                             gossipsub::MessageId::from(s.finish().to_string())
@@ -256,9 +255,9 @@ impl SnapchainGossip {
             sync_channels: HashMap::new(),
             read_node,
             bootstrap_addrs: config.bootstrap_addrs(),
-            address: config.address.clone(),
+            announce_address: config.announce_address.clone(),
             fc_network,
-            contact_info_advertisement_interval: config.contact_info_advertisement_interval,
+            contact_info_interval: config.contact_info_interval,
         })
     }
 
@@ -294,9 +293,9 @@ impl SnapchainGossip {
         let contact_info = ContactInfo {
             body: Some(ContactInfoBody {
                 peer_id: self.swarm.local_peer_id().to_bytes(),
-                gossip_address: self.address.clone(),
+                gossip_address: self.announce_address.clone(),
                 network: self.fc_network as i32,
-                snapchain_version: FARCASTER_VERSION.to_string(),
+                snapchain_version: PROTOCOL_VERSION.to_string(),
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
@@ -315,8 +314,7 @@ impl SnapchainGossip {
     pub async fn start(self: &mut Self) {
         let mut reconnect_timer = tokio::time::interval(Duration::from_secs(30));
 
-        let mut publish_contact_info_timer =
-            tokio::time::interval(self.contact_info_advertisement_interval);
+        let mut publish_contact_info_timer = tokio::time::interval(self.contact_info_interval);
 
         loop {
             tokio::select! {
@@ -478,7 +476,7 @@ impl SnapchainGossip {
             return;
         }
 
-        if contact_info_body.snapchain_version != FARCASTER_VERSION {
+        if contact_info_body.snapchain_version != PROTOCOL_VERSION.to_string() {
             return;
         }
 
