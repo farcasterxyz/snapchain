@@ -59,7 +59,7 @@ pub trait Proposer {
 }
 
 pub struct ProposedValues {
-    values_by_height: BTreeMap<(Height, Round), ShardHash>,
+    values_by_height: BTreeMap<Height, Vec<ShardHash>>,
     values: BTreeMap<ShardHash, FullProposal>,
 }
 
@@ -73,28 +73,34 @@ impl ProposedValues {
 
     fn add_proposed_value(&mut self, value: FullProposal) {
         let height = value.height();
-        let round = value.round();
         let shard_hash = value.shard_hash();
         self.values.insert(shard_hash.clone(), value);
-        self.values_by_height.insert((height, round), shard_hash);
+        match self.values_by_height.get_mut(&height) {
+            Some(hashes) => {
+                hashes.push(shard_hash);
+            }
+            None => {
+                self.values_by_height.insert(height, vec![shard_hash]);
+            }
+        }
     }
 
     fn get_by_shard_hash(&self, shard_hash: &ShardHash) -> Option<&FullProposal> {
         self.values.get(&shard_hash)
     }
 
-    fn decide(&mut self, height: Height, round: Round) {
-        while let Some(((entry_height, entry_round), entry_shard_hash)) =
-            self.values_by_height.pop_first()
-        {
-            if entry_height < height || (entry_height == height && entry_round < round) {
-                self.values.remove(&entry_shard_hash);
+    fn decide(&mut self, height: Height) {
+        while let Some((entry_height, entry_shard_hashes)) = self.values_by_height.pop_first() {
+            if entry_height <= height {
+                for entry_shard_hash in entry_shard_hashes {
+                    self.values.remove(&entry_shard_hash);
+                }
                 continue;
             }
 
             // Put it back in, we shouldn't have removed
             self.values_by_height
-                .insert((entry_height, entry_round), entry_shard_hash);
+                .insert(entry_height, entry_shard_hashes);
             break;
         }
     }
@@ -242,17 +248,16 @@ impl Proposer for ShardProposer {
     async fn decide(&mut self, commits: Commits) {
         let value = commits.value.clone().unwrap();
         let height = commits.height.unwrap();
-        let round = commits.round;
         if let Some(proposal) = self.proposed_chunks.get_by_shard_hash(&value) {
             let chunk = proposal.shard_chunk(commits).unwrap();
             self.publish_new_shard_chunk(&chunk.clone()).await;
             self.engine.commit_shard_chunk(&chunk);
-            self.proposed_chunks.decide(height, round.into());
+            self.proposed_chunks.decide(height);
         } else {
             panic!(
                 "Unable to find proposal for decided value. height {}, round {}, shard_hash {}",
                 height.to_string(),
-                round,
+                commits.round,
                 hex::encode(value.hash),
             )
         }
@@ -553,17 +558,16 @@ impl Proposer for BlockProposer {
     async fn decide(&mut self, commits: Commits) {
         let value = commits.value.clone().unwrap();
         let height = commits.height.unwrap();
-        let round = commits.round;
         if let Some(proposal) = self.proposed_blocks.get_by_shard_hash(&value) {
             let block = proposal.block(commits).unwrap();
             self.publish_new_block(block.clone()).await;
             self.engine.commit_block(&block);
-            self.proposed_blocks.decide(height, round.into());
+            self.proposed_blocks.decide(height);
         } else {
             panic!(
                 "Unable to find proposal for decided value. height {}, round {}, shard_hash {}",
                 height.to_string(),
-                round,
+                commits.round,
                 hex::encode(value.hash),
             )
         }
