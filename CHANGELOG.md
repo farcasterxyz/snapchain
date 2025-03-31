@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.2] - 2025-03-31
+
+### 🐛 Bug Fixes
+
+- Return store errors on simulate and avoid logging (#338)
+- Fix mempool size reported as 0 under load (#340)
+- Potential fix for shards not starting consensus (#342)
+- Stop tracking proposals that will never be used again (#341)
+
+### ⚙️ Miscellaneous Tasks
+
+- Add testnet configs (#339)
+
 ## [0.2.1] - 2025-03-26
 
 ### 🚀 Features
