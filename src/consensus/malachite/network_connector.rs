@@ -14,7 +14,7 @@ use libp2p::request_response;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, error, trace};
+use tracing::{debug, error, info, trace};
 
 pub type MalachiteNetworkActorMsg = Msg<SnapchainValidatorContext>;
 pub type MalachiteNetworkEvent = Event;
@@ -98,6 +98,7 @@ where
         match msg {
             Msg::Subscribe(subscriber) => {
                 subscriber.subscribe_to_port(output_port);
+                info!("consensus_trace: Subscribed to port");
             }
 
             Msg::Publish(msg) => match msg {
@@ -153,7 +154,8 @@ where
             }
 
             Msg::NewEvent(Event::Listening(addr)) => {
-                output_port.send(NetworkEvent::Listening(addr));
+                output_port.send(NetworkEvent::Listening(addr.clone()));
+                info!("consensus_trace: Sent listening on {addr}");
             }
 
             Msg::NewEvent(Event::PeerConnected(peer_id)) => {
