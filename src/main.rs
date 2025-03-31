@@ -38,6 +38,7 @@ use tracing_subscriber::EnvFilter;
 
 async fn start_servers(
     app_config: &snapchain::cfg::Config,
+    mut gossip: SnapchainGossip,
     mempool_tx: mpsc::Sender<MempoolRequest>,
     shutdown_tx: mpsc::Sender<()>,
     onchain_events_request_tx: mpsc::Sender<OnchainEventsRequest>,
@@ -130,6 +131,13 @@ async fn start_servers(
         }
 
         http_shutdown_tx.send(()).await.ok();
+    });
+
+    // Start gossip last
+    tokio::spawn(async move {
+        info!("Starting gossip");
+        gossip.start().await;
+        info!("Gossip Stopped");
     });
 }
 
@@ -268,7 +276,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let mut gossip = gossip_result?;
+    let gossip = gossip_result?;
     let local_peer_id = gossip.swarm.local_peer_id().clone();
     let read_or_validator = if app_config.read_node {
         "read"
@@ -283,12 +291,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let gossip_tx = gossip.tx.clone();
-
-    tokio::spawn(async move {
-        info!("Starting gossip");
-        gossip.start().await;
-        info!("Gossip Stopped");
-    });
 
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
@@ -343,6 +345,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         start_servers(
             &app_config,
+            gossip,
             mempool_tx,
             shutdown_tx,
             onchain_events_request_tx,
@@ -471,6 +474,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         start_servers(
             &app_config,
+            gossip,
             mempool_tx.clone(),
             shutdown_tx.clone(),
             onchain_events_request_tx,
