@@ -58,10 +58,56 @@ pub trait Proposer {
     fn get_proposed_value(&self, shard_hash: &ShardHash) -> Option<FullProposal>;
 }
 
+pub struct ProposedValues {
+    values_by_height: BTreeMap<(Height, Round), ShardHash>,
+    values: BTreeMap<ShardHash, FullProposal>,
+}
+
+impl ProposedValues {
+    fn new() -> Self {
+        ProposedValues {
+            values_by_height: BTreeMap::new(),
+            values: BTreeMap::new(),
+        }
+    }
+
+    fn add_proposed_value(&mut self, value: FullProposal) {
+        let height = value.height();
+        let round = value.round();
+        let shard_hash = value.shard_hash();
+        self.values.insert(shard_hash.clone(), value);
+        self.values_by_height.insert((height, round), shard_hash);
+    }
+
+    fn get_by_shard_hash(&self, shard_hash: &ShardHash) -> Option<&FullProposal> {
+        self.values.get(&shard_hash)
+    }
+
+    fn decide(&mut self, height: Height, round: Round) {
+        while let Some(((entry_height, entry_round), entry_shard_hash)) =
+            self.values_by_height.pop_first()
+        {
+            if entry_height < height || (entry_height == height && entry_round < round) {
+                self.values.remove(&entry_shard_hash);
+                continue;
+            }
+
+            // Put it back in, we shouldn't have removed
+            self.values_by_height
+                .insert((entry_height, entry_round), entry_shard_hash);
+            break;
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.values.len()
+    }
+}
+
 pub struct ShardProposer {
     shard_id: SnapchainShard,
     address: Address,
-    proposed_chunks: BTreeMap<ShardHash, FullProposal>,
+    proposed_chunks: ProposedValues,
     tx_decision: broadcast::Sender<ShardChunk>,
     engine: ShardEngine,
     statsd_client: StatsdClientWrapper,
@@ -78,7 +124,7 @@ impl ShardProposer {
         ShardProposer {
             shard_id,
             address,
-            proposed_chunks: BTreeMap::new(),
+            proposed_chunks: ProposedValues::new(),
             tx_decision,
             engine,
             statsd_client,
@@ -132,17 +178,13 @@ impl Proposer for ShardProposer {
             commits: None,
         };
 
-        let shard_hash = ShardHash {
-            hash: hash.clone(),
-            shard_index: height.shard_index as u32,
-        };
         let proposal = FullProposal {
             height: Some(height.clone()),
             round: round.as_i64(),
             proposed_value: Some(proto::full_proposal::ProposedValue::Shard(chunk)),
             proposer: self.address.to_vec(),
         };
-        self.proposed_chunks.insert(shard_hash, proposal.clone());
+        self.proposed_chunks.add_proposed_value(proposal.clone());
         proposal
     }
 
@@ -150,16 +192,16 @@ impl Proposer for ShardProposer {
         if let Some(proto::full_proposal::ProposedValue::Shard(chunk)) =
             full_proposal.proposed_value.clone()
         {
-            self.proposed_chunks
-                .insert(full_proposal.shard_hash(), full_proposal.clone());
             let header = chunk.header.as_ref().unwrap();
+            let height = header.height.unwrap();
+            self.proposed_chunks
+                .add_proposed_value(full_proposal.clone());
             let receive_delay = current_time().saturating_sub(header.timestamp);
             self.statsd_client.gauge_with_shard(
                 self.shard_id.shard_id(),
                 "proposer.receive_delay",
                 receive_delay,
             );
-            let height = header.height.unwrap();
 
             let confirmed_height = self.get_confirmed_height();
             if height != confirmed_height.increment() {
@@ -194,28 +236,30 @@ impl Proposer for ShardProposer {
     }
 
     fn get_proposed_value(&self, shard_hash: &ShardHash) -> Option<FullProposal> {
-        self.proposed_chunks.get(&shard_hash).cloned()
+        self.proposed_chunks.get_by_shard_hash(&shard_hash).cloned()
     }
 
     async fn decide(&mut self, commits: Commits) {
         let value = commits.value.clone().unwrap();
-        if let Some(proposal) = self.proposed_chunks.get(&value) {
+        let height = commits.height.unwrap();
+        let round = commits.round;
+        if let Some(proposal) = self.proposed_chunks.get_by_shard_hash(&value) {
             let chunk = proposal.shard_chunk(commits).unwrap();
             self.publish_new_shard_chunk(&chunk.clone()).await;
             self.engine.commit_shard_chunk(&chunk);
-            self.proposed_chunks.remove(&value);
+            self.proposed_chunks.decide(height, round.into());
         } else {
             panic!(
                 "Unable to find proposal for decided value. height {}, round {}, shard_hash {}",
-                commits.height.unwrap().to_string(),
-                commits.round,
+                height.to_string(),
+                round,
                 hex::encode(value.hash),
             )
         }
         self.statsd_client.gauge_with_shard(
             self.shard_id.shard_id(),
             "proposer.pending_blocks",
-            self.proposed_chunks.len() as u64,
+            self.proposed_chunks.count() as u64,
         );
     }
 
@@ -268,7 +312,7 @@ pub struct BlockProposer {
     #[allow(dead_code)] // TODO
     shard_id: SnapchainShard,
     address: Address,
-    proposed_blocks: BTreeMap<ShardHash, FullProposal>,
+    proposed_blocks: ProposedValues,
     shard_stores: HashMap<u32, Stores>,
     num_shards: u32,
     network: proto::FarcasterNetwork,
@@ -291,7 +335,7 @@ impl BlockProposer {
         BlockProposer {
             shard_id,
             address,
-            proposed_blocks: BTreeMap::new(),
+            proposed_blocks: ProposedValues::new(),
             shard_stores,
             num_shards,
             network,
@@ -432,11 +476,6 @@ impl Proposer for BlockProposer {
             commits: None,
         };
 
-        let shard_hash = ShardHash {
-            hash: hash.clone(),
-            shard_index: height.shard_index,
-        };
-
         let proposal = FullProposal {
             height: Some(height.clone()),
             round: round.as_i64(),
@@ -444,7 +483,7 @@ impl Proposer for BlockProposer {
             proposer: self.address.to_vec(),
         };
 
-        self.proposed_blocks.insert(shard_hash, proposal.clone());
+        self.proposed_blocks.add_proposed_value(proposal.clone());
         proposal
     }
 
@@ -502,27 +541,29 @@ impl Proposer for BlockProposer {
                 return Validity::Invalid;
             }
             self.proposed_blocks
-                .insert(full_proposal.shard_hash(), full_proposal.clone());
+                .add_proposed_value(full_proposal.clone());
         }
         Validity::Valid // TODO: Validate proposer signature?
     }
 
     fn get_proposed_value(&self, shard_hash: &ShardHash) -> Option<FullProposal> {
-        self.proposed_blocks.get(&shard_hash).cloned()
+        self.proposed_blocks.get_by_shard_hash(&shard_hash).cloned()
     }
 
     async fn decide(&mut self, commits: Commits) {
         let value = commits.value.clone().unwrap();
-        if let Some(proposal) = self.proposed_blocks.get(&value) {
+        let height = commits.height.unwrap();
+        let round = commits.round;
+        if let Some(proposal) = self.proposed_blocks.get_by_shard_hash(&value) {
             let block = proposal.block(commits).unwrap();
             self.publish_new_block(block.clone()).await;
             self.engine.commit_block(&block);
-            self.proposed_blocks.remove(&value);
+            self.proposed_blocks.decide(height, round.into());
         } else {
             panic!(
                 "Unable to find proposal for decided value. height {}, round {}, shard_hash {}",
-                commits.height.unwrap().to_string(),
-                commits.round,
+                height.to_string(),
+                round,
                 hex::encode(value.hash),
             )
         }
@@ -531,7 +572,7 @@ impl Proposer for BlockProposer {
         self.statsd_client.gauge_with_shard(
             self.shard_id.shard_id(),
             "proposer.pending_blocks",
-            self.proposed_blocks.len() as u64,
+            self.proposed_blocks.count() as u64,
         );
     }
 
