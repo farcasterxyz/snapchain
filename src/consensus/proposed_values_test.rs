@@ -70,14 +70,9 @@ mod tests {
             block_number: 2,
         });
 
-        // Only the values for the same height are cleaned up.
-        assert_eq!(
-            proposed_values
-                .get_by_shard_hash(&proposal1.shard_hash())
-                .unwrap()
-                .clone(),
-            proposal1
-        );
+        assert!(proposed_values
+            .get_by_shard_hash(&proposal1.shard_hash())
+            .is_none());
         assert!(proposed_values
             .get_by_shard_hash(&proposal2.shard_hash())
             .is_none());
@@ -91,6 +86,6 @@ mod tests {
                 .clone(),
             proposal4
         );
-        assert_eq!(proposed_values.count(), 2);
+        assert_eq!(proposed_values.count(), 1);
     }
 }

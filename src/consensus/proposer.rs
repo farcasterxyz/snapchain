@@ -90,9 +90,20 @@ impl ProposedValues {
     }
 
     pub fn decide(&mut self, height: Height) {
-        if let Some(shard_hashes) = self.values_by_height.remove(&height) {
-            for shard_hash in shard_hashes {
-                self.values.remove(&shard_hash);
+        let mut heights_to_remove = vec![];
+        for (entry_height, _) in &self.values_by_height {
+            if *entry_height <= height {
+                heights_to_remove.push(*entry_height);
+            } else {
+                break;
+            }
+        }
+
+        for height in heights_to_remove {
+            if let Some(shard_hashes) = self.values_by_height.remove(&height) {
+                for shard_hash in shard_hashes {
+                    self.values.remove(&shard_hash);
+                }
             }
         }
     }
