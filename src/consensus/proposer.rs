@@ -64,14 +64,14 @@ pub struct ProposedValues {
 }
 
 impl ProposedValues {
-    fn new() -> Self {
+    pub fn new() -> Self {
         ProposedValues {
             values_by_height: BTreeMap::new(),
             values: BTreeMap::new(),
         }
     }
 
-    fn add_proposed_value(&mut self, value: FullProposal) {
+    pub fn add_proposed_value(&mut self, value: FullProposal) {
         let height = value.height();
         let shard_hash = value.shard_hash();
         self.values.insert(shard_hash.clone(), value);
@@ -85,11 +85,11 @@ impl ProposedValues {
         }
     }
 
-    fn get_by_shard_hash(&self, shard_hash: &ShardHash) -> Option<&FullProposal> {
+    pub fn get_by_shard_hash(&self, shard_hash: &ShardHash) -> Option<&FullProposal> {
         self.values.get(&shard_hash)
     }
 
-    fn decide(&mut self, height: Height) {
+    pub fn decide(&mut self, height: Height) {
         while let Some((entry_height, entry_shard_hashes)) = self.values_by_height.pop_first() {
             if entry_height <= height {
                 for entry_shard_hash in entry_shard_hashes {
@@ -105,7 +105,7 @@ impl ProposedValues {
         }
     }
 
-    fn count(&self) -> usize {
+    pub fn count(&self) -> usize {
         self.values.len()
     }
 }
