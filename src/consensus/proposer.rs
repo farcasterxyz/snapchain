@@ -90,18 +90,10 @@ impl ProposedValues {
     }
 
     pub fn decide(&mut self, height: Height) {
-        while let Some((entry_height, entry_shard_hashes)) = self.values_by_height.pop_first() {
-            if entry_height <= height {
-                for entry_shard_hash in entry_shard_hashes {
-                    self.values.remove(&entry_shard_hash);
-                }
-                continue;
+        if let Some(shard_hashes) = self.values_by_height.remove(&height) {
+            for shard_hash in shard_hashes {
+                self.values.remove(&shard_hash);
             }
-
-            // Put it back in, we shouldn't have removed
-            self.values_by_height
-                .insert(entry_height, entry_shard_hashes);
-            break;
         }
     }
 
