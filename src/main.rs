@@ -26,6 +26,7 @@ use std::error::Error;
 use std::net::SocketAddr;
 use std::process;
 use std::sync::Arc;
+use std::time::Duration;
 use std::{fs, net};
 use tokio::net::TcpListener;
 use tokio::select;
@@ -380,7 +381,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             if shards_finished_syncing.len() as u32 == app_config.consensus.num_shards + 1 {
                                 info!("Initial sync completed for all shards");
                                 sync_complete_tx.send(true)?;
-                                gossip_tx.send(GossipEvent::SubscribeToDecidedValuesTopic()).await?
+
+                                let mut num_attempts = 0;
+                                while let Err(err) =
+                                gossip_tx.send(GossipEvent::SubscribeToDecidedValuesTopic()).await {
+                                    num_attempts += 1;
+                                    if num_attempts < 3 {
+                                        info!("Error sending sync complete message to gossip {}", err.to_string());
+                                        tokio::time::sleep(Duration::from_secs(1)).await;
+                                    } else {
+                                        Err(err)?
+                                    }
+                                }
                             }
                         }
                         SystemMessage::MalachiteNetwork(shard, event) => {
