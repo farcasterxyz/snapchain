@@ -191,9 +191,13 @@ mod tests {
     async fn test_ignore_invalid_signatures() {
         let (mut proposer_engine, _read_node_engine, mut read_validator, proposer_keypair) =
             setup(0).await;
-        let mut shard_chunk = commit_shard_chunk(&mut proposer_engine, &proposer_keypair).await;
+        let invalid_keypair = Keypair::generate();
+        let mut shard_chunk = commit_shard_chunk(&mut proposer_engine, &invalid_keypair).await;
+
+        // We sign with invalid_keypair but then replace the signer with the expected signer
+        // This causes the signature to be invalid
+        let signature = shard_chunk.commits.unwrap().signatures[0].signature.clone();
         let signer = proposer_keypair.public().to_bytes().to_vec();
-        // Add invalid signatures to chunk
         shard_chunk.commits = Some(Commits {
             height: shard_chunk.header.as_ref().unwrap().height,
             round: 0,
@@ -207,10 +211,7 @@ mod tests {
                     .shard_index,
                 hash: shard_chunk.hash.clone(),
             }),
-            signatures: vec![CommitSignature {
-                signature: vec![],
-                signer,
-            }],
+            signatures: vec![CommitSignature { signature, signer }],
         });
         let num_processed = process_decided_value(&mut read_validator, &shard_chunk).await;
         assert_eq!(num_processed, 0);
