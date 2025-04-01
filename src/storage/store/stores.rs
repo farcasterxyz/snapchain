@@ -7,6 +7,7 @@ use crate::proto::MessageType;
 use crate::proto::{
     HubEvent, StorageLimit, StorageLimitsResponse, StorageUnitDetails, StorageUnitType, StoreType,
 };
+use crate::storage::constants::PAGE_SIZE_MAX;
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
     CastStore, CastStoreDef, IntoU8, LinkStore, OnchainEventStorageError, OnchainEventStore, Store,
@@ -15,10 +16,11 @@ use crate::storage::store::account::{
 use crate::storage::store::shard::ShardStore;
 use crate::storage::trie::merkle_trie;
 use crate::storage::trie::merkle_trie::TrieKey;
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tracing::info;
+use tracing::{error, info};
 
 #[derive(Error, Debug)]
 pub enum StoresError {
@@ -50,6 +52,7 @@ pub struct Stores {
     pub store_limits: StoreLimits,
     pub event_handler: Arc<StoreEventHandler>,
     pub shard_id: u32,
+    pub statsd: StatsdClientWrapper,
 }
 
 #[derive(Clone, Debug)]
@@ -168,6 +171,7 @@ impl Stores {
         shard_id: u32,
         mut trie: merkle_trie::MerkleTrie,
         store_limits: StoreLimits,
+        statsd: StatsdClientWrapper,
     ) -> Stores {
         trie.initialize(&db).unwrap();
 
@@ -194,6 +198,7 @@ impl Stores {
             db: db.clone(),
             store_limits,
             event_handler,
+            statsd,
         }
     }
 
@@ -354,18 +359,50 @@ impl Stores {
 
     pub async fn prune_events_until(
         &self,
-        stop_height: u64,
-        page_options: &PageOptions,
+        timestamp: u64,
         throttle: Duration,
+        page_options: Option<PageOptions>,
     ) -> Result<u32, HubError> {
-        let count =
-            HubEvent::prune_events_util(self.db.clone(), stop_height, page_options, throttle)
-                .await?;
-        info!(
-            "Pruning events complete for shard: {}. pruned: {}",
-            self.shard_id, count
-        );
-        Ok(count)
+        let stop_height = self
+            .shard_store
+            .get_next_height_by_timestamp(timestamp)
+            .unwrap_or_else(|e| {
+                error!(
+                    "Error getting next height by timestamp for shard {}: {}",
+                    self.shard_id, e
+                );
+                None
+            });
+
+        let page_options = page_options.unwrap_or(PageOptions {
+            page_size: Some(PAGE_SIZE_MAX),
+            ..PageOptions::default()
+        });
+
+        if let Some(stop_height) = stop_height {
+            info!(
+                "Pruning events for shard {} older than timestamp: {}, height: {}",
+                self.shard_id, timestamp, stop_height
+            );
+            let start = std::time::Instant::now();
+            let count =
+                HubEvent::prune_events_util(self.db.clone(), stop_height, &page_options, throttle)
+                    .await?;
+            let elapsed = start.elapsed();
+            self.statsd
+                .count_with_shard(self.shard_id, "prune.events", count as u64);
+            self.statsd.time_with_shard(
+                self.shard_id,
+                "prune.events_time",
+                elapsed.as_millis() as u64,
+            );
+            Ok(count)
+        } else {
+            info!("No events to prune for shard {}", self.shard_id);
+            self.statsd
+                .count_with_shard(self.shard_id, "prune.events", 0);
+            Ok(0)
+        }
     }
 }
 

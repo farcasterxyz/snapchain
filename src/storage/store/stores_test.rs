@@ -2,7 +2,6 @@
 mod tests {
     use crate::core::util::get_farcaster_time;
     use crate::proto::ReactionType;
-    use crate::storage::db::PageOptions;
     use crate::storage::store::{stores, test_helper};
     use crate::storage::{db, trie};
     use crate::utils::factory::{hub_events_factory, messages_factory, shard_chunk_factory};
@@ -22,7 +21,7 @@ mod tests {
             legacy_limits: test_helper::limits::zero(),
         };
 
-        stores::Stores::new(Arc::new(db), 1, trie, limits)
+        stores::Stores::new(Arc::new(db), 1, trie, limits, test_helper::statsd_client())
     }
 
     #[tokio::test]
@@ -65,12 +64,23 @@ mod tests {
         let events = stores.get_events(0, None, None).unwrap();
         assert_eq!(events.events.len(), 10 * 3); // 10 chunks, 3 events each
 
+        // Stop at a timestamp just before block 8
+        let cutoff_timestamp = get_farcaster_time().unwrap() - (2 * one_day_in_seconds) - 10;
         let result = stores
-            .prune_events_until(8, &PageOptions::default(), Duration::from_secs(0))
+            .prune_events_until(cutoff_timestamp, Duration::from_secs(0), None)
             .await;
         assert_eq!(result.is_ok(), true);
         assert_eq!(result.unwrap(), 8 * 3); // 8 chunks pruned
         let events = stores.get_events(0, None, None).unwrap();
         assert_eq!(events.events.len(), 2 * 3); // 2 chunks, 3 events each
+
+        // Pruning again should not remove any events
+        let result = stores
+            .prune_events_until(cutoff_timestamp, Duration::from_secs(0), None)
+            .await;
+        assert_eq!(result.is_ok(), true);
+        assert_eq!(result.unwrap(), 0);
+        let events = stores.get_events(0, None, None).unwrap();
+        assert_eq!(events.events.len(), 2 * 3); // Same as before
     }
 }

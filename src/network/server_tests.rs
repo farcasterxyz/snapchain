@@ -191,6 +191,7 @@ mod tests {
             1,
             merkle_trie::MerkleTrie::new(16).unwrap(),
             limits.clone(),
+            test_helper::statsd_client(),
         );
         let shard1_senders = Senders::new();
 
@@ -199,6 +200,7 @@ mod tests {
             2,
             merkle_trie::MerkleTrie::new(16).unwrap(),
             limits.clone(),
+            test_helper::statsd_client(),
         );
         let shard2_senders = Senders::new();
         let stores = HashMap::from([(1, shard1_stores), (2, shard2_stores)]);
