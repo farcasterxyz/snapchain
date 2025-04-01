@@ -22,6 +22,8 @@ cd code
 cargo build
 EOF
 
+RUN apt-get update && apt-get install -y gdb heaptrack
+
 # Unfortunately, we can't prefetch creates without including the source code,
 # since the Cargo configuration references files in src.
 # This means we'll re-fetch all crates every time the source code changes,
@@ -30,7 +32,7 @@ COPY Cargo.toml build.rs ./
 COPY src ./src
 
 ENV RUST_BACKTRACE=full
-RUN cargo build --release --bins
+RUN cargo build --release --debug --bins
 
 ## Pre-generate some configurations we can use
 # TOOD: consider doing something different here
