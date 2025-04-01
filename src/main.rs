@@ -382,6 +382,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                                 if let Err(err) = sync_complete_tx.send(true)
                                 {
+                                    // This happens if there's no block retention threshold comfigured
                                     info!("Could not send sync complete message to jobs: {}", err.to_string());
                                 }
 
