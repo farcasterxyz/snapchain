@@ -3,11 +3,11 @@ mod tests {
 
     use std::time::Duration;
 
-    use crate::consensus::consensus::SystemMessage;
+    use crate::consensus::consensus::{Config, SystemMessage, ValidatorSetConfig};
     use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
     use crate::consensus::malachite::spawn_read_node::MalachiteReadNodeActors;
     use crate::consensus::read_validator::Engine;
-    use crate::core::types::SnapchainValidatorContext;
+    use crate::core::types::{Address, SnapchainValidatorContext};
     use crate::network::gossip::GossipEvent;
     use crate::proto::{self, Height, ShardChunk, StatusMessage};
     use crate::storage::store::engine::ShardEngine;
@@ -45,6 +45,16 @@ mod tests {
         let (system_tx, system_rx) = mpsc::channel(100);
         let shard_id = read_node_engine.shard_id();
 
+        let proposer_address = Address(proposer_keypair.public().to_bytes());
+
+        let validator_set_config = ValidatorSetConfig {
+            effective_at: 0,
+            validator_public_keys: vec![proposer_address.to_hex()],
+            shard_ids: vec![read_node_engine.shard_id()],
+        };
+
+        let config = Config::default().with(vec![shard_id], vec![validator_set_config]);
+
         let (read_node_engine_clone, _) = new_engine_with_options(EngineOptions {
             limits: None,
             db: Some(read_node_engine.db.clone()),
@@ -59,6 +69,7 @@ mod tests {
             SharedRegistry::global(),
             shard_id,
             test_helper::statsd_client(),
+            config,
         )
         .await
         .unwrap();

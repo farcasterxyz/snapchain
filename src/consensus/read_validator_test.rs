@@ -5,7 +5,10 @@ mod tests {
 
     use libp2p::identity::ed25519::Keypair;
 
+    use crate::consensus::consensus::ValidatorSetConfig;
     use crate::consensus::read_validator::{Engine, ReadValidator};
+    use crate::consensus::validator::StoredValidatorSet;
+    use crate::core::types::{Address, ShardId};
     use crate::proto::{self, CommitSignature, Commits, Height, ShardChunk, ShardHash};
     use crate::storage::store::engine::ShardEngine;
     use crate::storage::store::test_helper::{
@@ -30,6 +33,19 @@ mod tests {
             messages_request_tx: None,
         });
 
+        let proposer_address = Address(proposer_keypair.public().to_bytes());
+
+        let validator_set_config = ValidatorSetConfig {
+            effective_at: 0,
+            validator_public_keys: vec![proposer_address.to_hex()],
+            shard_ids: vec![read_node_engine.shard_id()],
+        };
+
+        let validator_set = vec![StoredValidatorSet::new(
+            ShardId::new(read_node_engine.shard_id()),
+            &validator_set_config,
+        )];
+
         let read_validator = ReadValidator {
             shard_id: read_node_engine.shard_id(),
             last_height: Height {
@@ -40,6 +56,7 @@ mod tests {
             max_num_buffered_blocks: 1,
             buffered_blocks: BTreeMap::new(),
             statsd_client: test_helper::statsd_client(),
+            validator_set,
         };
 
         (

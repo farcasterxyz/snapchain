@@ -20,7 +20,7 @@ pub enum ProposalSource {
     Sync,
 }
 
-struct StoredValidatorSet {
+pub struct StoredValidatorSet {
     pub effective_at: u64,
     pub validators: SnapchainValidatorSet,
     pub shard_ids: Vec<u32>,
