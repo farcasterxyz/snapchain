@@ -8,6 +8,7 @@ ARG MALACHITE_GIT_REF=13bca14cd209d985c3adf101a02924acde8723a5
 ARG ETH_SIGNATURE_VERIFIER_GIT_REPO_URL=https://github.com/CassOnMars/eth-signature-verifier.git
 ENV ETH_SIGNATURE_VERIFIER_GIT_REPO_URL=$ETH_SIGNATURE_VERIFIER_GIT_REPO_URL
 ENV RUST_BACKTRACE=1
+ENV RUSTFLAGS=-g 
 RUN echo "clear cache" # Invalidate cache to pick up latest eth-signature-verifier
 RUN <<EOF
 set -eu
@@ -32,7 +33,7 @@ COPY Cargo.toml build.rs ./
 COPY src ./src
 
 ENV RUST_BACKTRACE=full
-RUN cargo build --release --debug --bins
+RUN cargo build --release --bins
 
 ## Pre-generate some configurations we can use
 # TOOD: consider doing something different here
