@@ -49,39 +49,24 @@ pub fn block_pruning_job(
                     "Pruning blocks older than timestamp: {}, height: {}",
                     cutoff_timestamp, stop_height
                 );
-                block_store
+                let count = block_store
                     .prune_until(stop_height, &page_options, THROTTLE)
                     .await
                     .unwrap_or_else(|e| {
                         error!("Error pruning blocks: {}", e);
                         0
                     });
+                info!("Pruned {} blocks", count);
             }
 
             for (shard_id, stores) in shard_stores.iter() {
-                let shard_store = &stores.shard_store;
-                let stop_height = shard_store
-                    .get_next_height_by_timestamp(cutoff_timestamp)
+                stores
+                    .prune_shard_chunks_until(cutoff_timestamp, THROTTLE, None)
+                    .await
                     .unwrap_or_else(|e| {
-                        error!(
-                            "Error getting next height by timestamp for shard {}: {}",
-                            shard_id, e
-                        );
-                        None
+                        error!("Error pruning shard {} chunks: {}", shard_id, e);
+                        0
                     });
-                if let Some(stop_height) = stop_height {
-                    info!(
-                        "Pruning shard {} blocks older than timestamp: {}, height: {}",
-                        shard_id, cutoff_timestamp, stop_height
-                    );
-                    shard_store
-                        .prune_until(stop_height, &page_options, THROTTLE)
-                        .await
-                        .unwrap_or_else(|e| {
-                            error!("Error pruning shard {} blocks: {}", shard_id, e);
-                            0
-                        });
-                }
             }
         })
     })

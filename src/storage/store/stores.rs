@@ -357,14 +357,8 @@ impl Stores {
         HubEvent::get_events(self.db.clone(), start_id, stop_id, page_options)
     }
 
-    pub async fn prune_events_until(
-        &self,
-        timestamp: u64,
-        throttle: Duration,
-        page_options: Option<PageOptions>,
-    ) -> Result<u32, HubError> {
-        let stop_height = self
-            .shard_store
+    pub fn get_next_height_by_timestamp(&self, timestamp: u64) -> Option<u64> {
+        self.shard_store
             .get_next_height_by_timestamp(timestamp)
             .unwrap_or_else(|e| {
                 error!(
@@ -372,7 +366,16 @@ impl Stores {
                     self.shard_id, e
                 );
                 None
-            });
+            })
+    }
+
+    pub async fn prune_events_until(
+        &self,
+        timestamp: u64,
+        throttle: Duration,
+        page_options: Option<PageOptions>,
+    ) -> Result<u32, HubError> {
+        let stop_height = self.get_next_height_by_timestamp(timestamp);
 
         let page_options = page_options.unwrap_or(PageOptions {
             page_size: Some(PAGE_SIZE_MAX),
@@ -393,14 +396,67 @@ impl Stores {
                 .count_with_shard(self.shard_id, "prune.events", count as u64);
             self.statsd.time_with_shard(
                 self.shard_id,
-                "prune.events_time",
+                "prune.events_time_ms",
                 elapsed.as_millis() as u64,
+            );
+            info!(
+                "Pruning events complete for shard {}. Pruned {} events in {} seconds",
+                self.shard_id,
+                count,
+                elapsed.as_secs()
             );
             Ok(count)
         } else {
             info!("No events to prune for shard {}", self.shard_id);
             self.statsd
                 .count_with_shard(self.shard_id, "prune.events", 0);
+            Ok(0)
+        }
+    }
+
+    pub async fn prune_shard_chunks_until(
+        &self,
+        timestamp: u64,
+        throttle: Duration,
+        page_options: Option<PageOptions>,
+    ) -> Result<u32, HubError> {
+        let stop_height = self.get_next_height_by_timestamp(timestamp);
+        if let Some(stop_height) = stop_height {
+            info!(
+                "Pruning shard {} blocks older than timestamp: {}, height: {}",
+                self.shard_id, timestamp, stop_height
+            );
+            let page_options = page_options.unwrap_or(PageOptions {
+                page_size: Some(PAGE_SIZE_MAX),
+                ..PageOptions::default()
+            });
+
+            let start = std::time::Instant::now();
+            let count = self
+                .shard_store
+                .prune_until(stop_height, &page_options, throttle)
+                .await
+                .unwrap_or_else(|e| {
+                    error!("Error pruning shard {} blocks: {}", self.shard_id, e);
+                    0
+                });
+            let elapsed = start.elapsed();
+            self.statsd.time_with_shard(
+                self.shard_id,
+                "prune.chunks_time_ms",
+                elapsed.as_millis() as u64,
+            );
+            self.statsd
+                .count_with_shard(self.shard_id, "prune.shard_chunks", count as u64);
+            info!(
+                "Pruning shard chunks complete for shard {}. Pruned {} chunks in {} seconds",
+                self.shard_id,
+                count,
+                elapsed.as_secs()
+            );
+            Ok(count)
+        } else {
+            info!("No shard chunks to prune for shard {}", self.shard_id);
             Ok(0)
         }
     }
