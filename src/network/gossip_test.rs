@@ -48,7 +48,7 @@ async fn test_gossip_communication() {
         keypair1.clone(),
         &config1,
         system_tx1,
-        false,
+        true,
         FarcasterNetwork::Devnet,
         statsd_client(),
     )

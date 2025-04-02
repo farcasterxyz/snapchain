@@ -341,8 +341,10 @@ impl SnapchainGossip {
                     self.statsd_client.gauge("gossip.connected_peers", self.swarm.connected_peers().count() as u64);
                 },
                 _ = publish_contact_info_timer.tick() => {
-                    info!("Publishing contact info");
-                    self.publish_contact_info()
+                    if self.read_node {
+                        info!("Publishing contact info");
+                        self.publish_contact_info()
+                    }
                 }
                 gossip_event = self.swarm.select_next_some() => {
                     match gossip_event {
