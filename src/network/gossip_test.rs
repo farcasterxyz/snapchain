@@ -3,6 +3,7 @@ use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::network::gossip::{Config, GossipEvent, SnapchainGossip};
 use crate::proto::FarcasterNetwork;
 use crate::storage::store::engine::MempoolMessage;
+use crate::storage::store::test_helper::statsd_client;
 use crate::utils::factory::messages_factory;
 use libp2p::identity::ed25519::Keypair;
 use serial_test::serial;
@@ -49,6 +50,7 @@ async fn test_gossip_communication() {
         system_tx1,
         false,
         FarcasterNetwork::Devnet,
+        statsd_client(),
     )
     .unwrap();
     let mut gossip2 = SnapchainGossip::create(
@@ -57,6 +59,7 @@ async fn test_gossip_communication() {
         system_tx2,
         false,
         FarcasterNetwork::Devnet,
+        statsd_client(),
     )
     .unwrap();
 
@@ -66,6 +69,7 @@ async fn test_gossip_communication() {
         system_tx3,
         false,
         FarcasterNetwork::Devnet,
+        statsd_client(),
     )
     .unwrap();
 

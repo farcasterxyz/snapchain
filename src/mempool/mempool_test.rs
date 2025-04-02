@@ -69,6 +69,7 @@ mod tests {
                     system_tx,
                     false,
                     proto::FarcasterNetwork::Devnet,
+                    statsd_client.clone(),
                 )
                 .unwrap(),
             ),

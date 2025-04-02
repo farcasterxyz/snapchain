@@ -139,6 +139,7 @@ impl ReadNodeForTest {
             system_tx.clone(),
             false,
             fc_network,
+            statsd_client.clone(),
         )
         .unwrap();
         let gossip_tx = gossip.tx.clone();
@@ -239,6 +240,7 @@ impl NodeForTest {
             system_tx.clone(),
             false,
             fc_network,
+            statsd_client.clone(),
         )
         .unwrap();
         let gossip_tx = gossip.tx.clone();

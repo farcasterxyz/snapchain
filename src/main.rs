@@ -270,6 +270,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         system_tx.clone(),
         app_config.read_node,
         app_config.fc_network,
+        statsd_client.clone(),
     );
 
     if let Err(e) = gossip_result {

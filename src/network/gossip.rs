@@ -9,6 +9,7 @@ use crate::proto::{
     GossipMessage,
 };
 use crate::storage::store::engine::MempoolMessage;
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use bytes::Bytes;
 use futures::StreamExt;
 use informalsystems_malachitebft_codec::Codec;
@@ -142,6 +143,7 @@ pub struct SnapchainGossip {
     announce_address: String,
     fc_network: FarcasterNetwork,
     contact_info_interval: Duration,
+    statsd_client: StatsdClientWrapper,
 }
 
 impl SnapchainGossip {
@@ -151,6 +153,7 @@ impl SnapchainGossip {
         system_tx: Sender<SystemMessage>,
         read_node: bool,
         fc_network: FarcasterNetwork,
+        statsd_client: StatsdClientWrapper,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair.clone().into())
             .with_tokio()
@@ -272,6 +275,7 @@ impl SnapchainGossip {
             announce_address: config.announce_address.clone(),
             fc_network,
             contact_info_interval: config.contact_info_interval,
+            statsd_client,
         })
     }
 
@@ -334,6 +338,7 @@ impl SnapchainGossip {
             tokio::select! {
                 _ = reconnect_timer.tick() => {
                     self.check_and_reconnect_to_bootstrap_peers().await;
+                    self.statsd_client.gauge("gossip.connected_peers", self.swarm.connected_peers().count() as u64);
                 },
                 _ = publish_contact_info_timer.tick() => {
                     info!("Publishing contact info");
