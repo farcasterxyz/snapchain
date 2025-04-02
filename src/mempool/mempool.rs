@@ -61,7 +61,7 @@ impl RateLimits {
         self.rate_limits_by_fid.insert(fid, rate_limiter);
     }
 
-    fn clear_rate_limits_for_fid(&mut self, fid: u64) {
+    fn clear_rate_limiter_for_fid(&mut self, fid: u64) {
         self.rate_limits_by_fid.remove(&fid);
     }
 
@@ -512,7 +512,7 @@ impl Mempool {
                                             if onchain_event.r#type() == OnChainEventType::EventTypeStorageRent{
                                                 // If the user buys more storage, we should bump their rate limit
                                                 if let Some(rate_limits) = &mut self.rate_limits {
-                                                    rate_limits.clear_rate_limits_for_fid(onchain_event.fid);
+                                                    rate_limits.clear_rate_limiter_for_fid(onchain_event.fid);
                                                 }
 
                                             }
