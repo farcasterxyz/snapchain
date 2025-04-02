@@ -56,8 +56,9 @@ impl RateLimits {
             .iter()
             .map(|limits| limits.limit as u32)
             .sum();
-        let rate_limiter =
-            RateLimiter::direct(Quota::per_hour(NonZeroU32::new(allowance / 10).unwrap()));
+        let rate_limiter = RateLimiter::direct(Quota::per_hour(
+            NonZeroU32::new(100.max(allowance / 10)).unwrap(),
+        ));
         self.rate_limits_by_fid.insert(fid, rate_limiter);
     }
 
