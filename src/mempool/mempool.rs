@@ -1,3 +1,5 @@
+use governor::clock::QuantaClock;
+use governor::state::{InMemoryState, NotKeyed};
 use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
 use std::{
@@ -7,6 +9,7 @@ use std::{
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::core::util::farcaster_time_to_unix_seconds;
+use crate::proto::OnChainEventType;
 use crate::{
     core::types::SnapchainValidatorContext,
     network::gossip::GossipEvent,
@@ -26,7 +29,55 @@ use crate::{
 };
 
 use super::routing::{MessageRouter, ShardRouter};
+use governor::{Quota, RateLimiter};
+use std::num::NonZeroU32;
 use tracing::{error, warn};
+
+type DirectRateLimiter = RateLimiter<NotKeyed, InMemoryState, QuantaClock>;
+
+pub struct RateLimits {
+    shard_stores: HashMap<u32, Stores>,
+    rate_limits_by_fid: HashMap<u64, DirectRateLimiter>,
+}
+
+impl RateLimits {
+    fn new(shard_stores: HashMap<u32, Stores>) -> Self {
+        RateLimits {
+            shard_stores,
+            rate_limits_by_fid: HashMap::new(),
+        }
+    }
+
+    fn set_rate_limiter_for_fid(&mut self, shard_id: u32, fid: u64) {
+        let stores = self.shard_stores.get(&shard_id).unwrap();
+        let storage_limits = stores.get_storage_limits(fid).unwrap();
+        let allowance: u32 = storage_limits
+            .limits
+            .iter()
+            .map(|limits| limits.limit as u32)
+            .sum();
+        let rate_limiter =
+            RateLimiter::direct(Quota::per_hour(NonZeroU32::new(allowance / 10).unwrap()));
+        self.rate_limits_by_fid.insert(fid, rate_limiter);
+    }
+
+    fn clear_rate_limits_for_fid(&mut self, fid: u64) {
+        self.rate_limits_by_fid.remove(&fid);
+    }
+
+    fn get_rate_limiter_for_fid(&mut self, shard_id: u32, fid: u64) -> &DirectRateLimiter {
+        if self.rate_limits_by_fid.get(&fid).is_none() {
+            self.set_rate_limiter_for_fid(shard_id, fid);
+        }
+
+        self.rate_limits_by_fid.get(&fid).unwrap()
+    }
+
+    fn consume_for_fid(&mut self, shard_id: u32, fid: u64) -> bool {
+        let rate_limiter = self.get_rate_limiter_for_fid(shard_id, fid);
+        rate_limiter.check().is_ok()
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -34,6 +85,7 @@ pub struct Config {
     pub allow_unlimited_mempool_size: bool,
     pub capacity_per_shard: u64,
     pub rx_poll_interval: Duration,
+    pub enable_rate_limits: bool,
 }
 
 impl Default for Config {
@@ -43,6 +95,7 @@ impl Default for Config {
             allow_unlimited_mempool_size: false,
             capacity_per_shard: 100_000,
             rx_poll_interval: Duration::from_millis(1),
+            enable_rate_limits: true,
         }
     }
 }
@@ -293,6 +346,7 @@ pub struct Mempool {
     shard_decision_rx: broadcast::Receiver<ShardChunk>,
     statsd_client: StatsdClientWrapper,
     read_node_mempool: ReadNodeMempool,
+    rate_limits: Option<RateLimits>,
 }
 
 impl Mempool {
@@ -307,28 +361,40 @@ impl Mempool {
         statsd_client: StatsdClientWrapper,
     ) -> Self {
         Mempool {
-            config,
             messages: HashMap::new(),
             messages_request_rx,
             shard_decision_rx,
-            statsd_client: statsd_client.clone(),
+            rate_limits: if config.enable_rate_limits {
+                Some(RateLimits::new(shard_stores.clone()))
+            } else {
+                None
+            },
+            config,
             read_node_mempool: ReadNodeMempool::new(
                 mempool_rx,
                 num_shards,
                 shard_stores,
                 gossip_tx,
-                statsd_client,
+                statsd_client.clone(),
             ),
+            statsd_client,
         }
     }
 
-    fn message_already_exists(&mut self, message: &MempoolMessage) -> bool {
-        let fid = message.fid();
-        let shard = self
-            .read_node_mempool
-            .message_router
-            .route_fid(fid, self.read_node_mempool.num_shards);
+    fn message_exceeds_rate_limits(&mut self, shard_id: u32, message: &MempoolMessage) -> bool {
+        match message {
+            MempoolMessage::UserMessage(message) => {
+                if let Some(rate_limits) = &mut self.rate_limits {
+                    !rate_limits.consume_for_fid(shard_id, message.fid())
+                } else {
+                    false
+                }
+            }
+            MempoolMessage::ValidatorMessage(_) => false,
+        }
+    }
 
+    fn message_already_exists(&mut self, shard: u32, message: &MempoolMessage) -> bool {
         self.read_node_mempool
             .message_already_exists(shard, message)
     }
@@ -358,7 +424,14 @@ impl Mempool {
     }
 
     pub fn message_is_valid(&mut self, message: &MempoolMessage) -> bool {
-        if self.message_already_exists(message) {
+        let shard = self
+            .read_node_mempool
+            .message_router
+            .route_fid(message.fid(), self.read_node_mempool.num_shards);
+
+        if self.message_already_exists(shard, message)
+            || self.message_exceeds_rate_limits(shard, message)
+        {
             return false;
         }
         true
@@ -434,7 +507,17 @@ impl Mempool {
                                     }
                                     for system_message in transaction.system_messages {
                                         mempool.remove(&system_message.mempool_key());
-                                        self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
+                                        if let Some(onchain_event) = system_message.on_chain_event
+                                        {
+                                            if onchain_event.r#type() == OnChainEventType::EventTypeStorageRent{
+                                                // If the user buys more storage, we should bump their rate limit
+                                                if let Some(rate_limits) = &mut self.rate_limits {
+                                                    rate_limits.clear_rate_limits_for_fid(onchain_event.fid);
+                                                }
+
+                                            }
+                                        }
+                                       self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
                                     }
                                 }
                             }
