@@ -477,20 +477,32 @@ impl SnapchainGossip {
     pub fn handle_contact_info(&mut self, contact_info: ContactInfo) {
         // TODO(aditi): We might want to persist peers and reconnect to them on restart
         let contact_info_body = contact_info.body.unwrap();
-        if self
+        let contact_peer_id = PeerId::from_bytes(&contact_info_body.peer_id).unwrap();
+        if let Some(peer_id) = self
             .swarm
             .connected_peers()
-            .find(|peer_id| PeerId::from_bytes(&contact_info_body.peer_id).unwrap() == **peer_id)
-            .is_some()
+            .find(|peer_id| contact_peer_id == **peer_id)
         {
+            info!(
+                peer_id = peer_id.to_string(),
+                "Already connected to peer, so not dialing"
+            );
             return;
         }
 
         if contact_info_body.network() != self.fc_network {
+            info!(
+                peer_id = contact_peer_id.to_string(),
+                "Peer running on different network"
+            );
             return;
         }
 
         if contact_info_body.snapchain_version != PROTOCOL_VERSION.to_string() {
+            info!(
+                peer_id = contact_peer_id.to_string(),
+                "Peer running a different protocol version"
+            );
             return;
         }
 
