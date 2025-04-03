@@ -33,9 +33,31 @@ use super::routing::{MessageRouter, ShardRouter};
 use governor::{Quota, RateLimiter};
 use moka::sync::{Cache, CacheBuilder};
 use std::num::NonZeroU32;
+use thiserror::Error;
 use tracing::{error, warn};
 
 type DirectRateLimiter = RateLimiter<NotKeyed, InMemoryState, QuantaClock>;
+
+#[derive(Error, Debug)]
+pub enum RateLimitsError {
+    #[error("no storage")]
+    NoStorage,
+}
+
+pub struct RateLimitsConfig {
+    pub time_to_idle: Duration,
+    pub max_capacity: usize,
+}
+
+impl Default for RateLimitsConfig {
+    fn default() -> Self {
+        Self {
+            time_to_idle: Duration::from_secs(60 * 2 * 2),
+            // Make time to idle 2x the rate limit window so it's ok if out of sync
+            max_capacity: 10_000,
+        }
+    }
+}
 
 pub struct RateLimits {
     shard_stores: HashMap<u32, Stores>,
@@ -43,44 +65,48 @@ pub struct RateLimits {
 }
 
 impl RateLimits {
-    fn new(shard_stores: HashMap<u32, Stores>) -> Self {
+    pub fn new(shard_stores: HashMap<u32, Stores>, config: RateLimitsConfig) -> Self {
         RateLimits {
             shard_stores,
-            rate_limits_by_fid: CacheBuilder::new(10_000)
-                .time_to_idle(Duration::from_secs(60 * 60 * 2)) // Make time to idle 2x the rate limit window so it's ok if out of sync
+            rate_limits_by_fid: CacheBuilder::new(config.max_capacity)
+                .time_to_idle(config.time_to_idle)
                 .build(),
         }
-    }
-
-    fn set_rate_limiter_for_fid(&mut self, shard_id: u32, fid: u64) {
-        let stores = self.shard_stores.get(&shard_id).unwrap();
-        let storage_limits = stores.get_storage_limits(fid).unwrap();
-        let allowance: u32 = storage_limits
-            .limits
-            .iter()
-            .map(|limits| limits.limit as u32)
-            .sum();
-        let rate_limiter = RateLimiter::direct(Quota::per_hour(
-            NonZeroU32::new(100.max(allowance / 10)).unwrap(),
-        ));
-        self.rate_limits_by_fid.insert(fid, Arc::new(rate_limiter));
     }
 
     fn invalidate_rate_limiter_for_fid(&mut self, fid: u64) {
         self.rate_limits_by_fid.invalidate(&fid);
     }
 
-    fn get_rate_limiter_for_fid(&mut self, shard_id: u32, fid: u64) -> Arc<DirectRateLimiter> {
-        if self.rate_limits_by_fid.get(&fid).is_none() {
-            self.set_rate_limiter_for_fid(shard_id, fid);
-        }
-
-        self.rate_limits_by_fid.get(&fid).unwrap()
+    fn get_rate_limiter_for_fid(
+        &mut self,
+        shard_id: u32,
+        fid: u64,
+    ) -> Result<Arc<DirectRateLimiter>, Arc<Box<dyn std::error::Error + Send + Sync>>> {
+        self.rate_limits_by_fid.get_or_try_insert_with(fid, || {
+            let stores = self.shard_stores.get(&shard_id).unwrap();
+            let storage_limits = stores.get_storage_limits(fid).unwrap();
+            let storage_allowance: u32 = storage_limits
+                .limits
+                .iter()
+                .map(|limits| limits.limit as u32)
+                .sum();
+            if storage_allowance == 0 {
+                Err(Box::new(RateLimitsError::NoStorage))
+            } else {
+                Ok(Arc::new(RateLimiter::direct(Quota::per_hour(
+                    NonZeroU32::new(100.max(storage_allowance / 10)).unwrap(),
+                ))))
+            }
+        })
     }
 
-    fn consume_for_fid(&mut self, shard_id: u32, fid: u64) -> bool {
+    pub fn consume_for_fid(&mut self, shard_id: u32, fid: u64) -> bool {
         let rate_limiter = self.get_rate_limiter_for_fid(shard_id, fid);
-        rate_limiter.check().is_ok()
+        match rate_limiter {
+            Ok(rate_limiter) => rate_limiter.check().is_ok(),
+            Err(_) => false,
+        }
     }
 }
 
@@ -370,7 +396,10 @@ impl Mempool {
             messages_request_rx,
             shard_decision_rx,
             rate_limits: if config.enable_rate_limits {
-                Some(RateLimits::new(shard_stores.clone()))
+                Some(RateLimits::new(
+                    shard_stores.clone(),
+                    RateLimitsConfig::default(),
+                ))
             } else {
                 None
             },

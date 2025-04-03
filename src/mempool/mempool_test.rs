@@ -15,7 +15,7 @@ mod tests {
         },
         storage::store::{
             engine::{MempoolMessage, ShardEngine},
-            test_helper,
+            test_helper::{self, commit_event, default_storage_event, FID_FOR_TEST},
         },
         utils::{
             factory::{events_factory, messages_factory},
@@ -170,6 +170,36 @@ mod tests {
             fname_transfer: Some(fname_transfer),
         }));
         assert!(!valid)
+    }
+
+    #[tokio::test]
+    async fn test_rate_limits_applied() {
+        let (mut engine, _, mut mempool, _, _, _, _) = setup(None);
+
+        let id_register_event = events_factory::create_id_register_event(
+            FID_FOR_TEST,
+            proto::IdRegisterEventType::Register,
+            default_custody_address(),
+            None,
+        );
+        commit_event(&mut engine, &id_register_event).await;
+        let signer_event = events_factory::create_signer_event(
+            FID_FOR_TEST,
+            default_signer(),
+            proto::SignerEventType::Add,
+            None,
+        );
+        commit_event(&mut engine, &signer_event).await;
+
+        let cast = create_cast_add(FID_FOR_TEST, "hello", None, None);
+        let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast));
+        assert!(!valid);
+
+        commit_event(&mut engine, &default_storage_event(FID_FOR_TEST)).await;
+
+        let cast = create_cast_add(FID_FOR_TEST, "hello", None, None);
+        let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast));
+        assert!(valid);
     }
 
     #[tokio::test]
