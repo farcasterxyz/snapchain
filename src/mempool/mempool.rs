@@ -463,9 +463,12 @@ impl Mempool {
             .message_router
             .route_fid(message.fid(), self.read_node_mempool.num_shards);
 
-        if self.message_already_exists(shard, message)
-            || self.message_exceeds_rate_limits(shard, message)
-        {
+        if self.message_already_exists(shard, message) {
+            return false;
+        }
+        if self.message_exceeds_rate_limits(shard, message) {
+            self.statsd_client
+                .count_with_shard(shard, "mempool.rate_limit_hit", 1);
             return false;
         }
         true
