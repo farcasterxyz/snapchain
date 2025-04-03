@@ -7,7 +7,7 @@ mod tests {
 
     use crate::consensus::consensus::ValidatorSetConfig;
     use crate::consensus::read_validator::{Engine, ReadValidator};
-    use crate::consensus::validator::StoredValidatorSet;
+    use crate::consensus::validator::{StoredValidatorSet, StoredValidatorSets};
     use crate::core::types::{Address, ShardId};
     use crate::proto::{self, CommitSignature, Commits, Height, ShardChunk, ShardHash};
     use crate::storage::store::engine::ShardEngine;
@@ -41,7 +41,7 @@ mod tests {
             shard_ids: vec![read_node_engine.shard_id()],
         };
 
-        let validator_set = vec![StoredValidatorSet::new(
+        let validator_sets = vec![StoredValidatorSet::new(
             ShardId::new(read_node_engine.shard_id()),
             &validator_set_config,
         )];
@@ -56,7 +56,7 @@ mod tests {
             max_num_buffered_blocks: 1,
             buffered_blocks: BTreeMap::new(),
             statsd_client: test_helper::statsd_client(),
-            validator_set,
+            validator_sets: StoredValidatorSets::new(read_node_engine.shard_id(), validator_sets),
         };
 
         (

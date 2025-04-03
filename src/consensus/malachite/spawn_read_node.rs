@@ -9,7 +9,7 @@ use crate::consensus::malachite::network_connector::{
     MalachiteNetworkActorMsg, MalachiteNetworkEvent,
 };
 use crate::consensus::read_validator::{self, Engine};
-use crate::consensus::validator::StoredValidatorSet;
+use crate::consensus::validator::{StoredValidatorSet, StoredValidatorSets};
 use crate::core::types::{ShardId, SnapchainValidatorContext};
 use crate::network::gossip::GossipEvent;
 use crate::proto::{self, Height};
@@ -30,7 +30,7 @@ pub async fn spawn_read_host(
     config: Config,
 ) -> Result<ReadHostRef, ractor::SpawnErr> {
     let validator_set_config = config.get_validator_set_config(shard_id);
-    let validator_set = validator_set_config
+    let validator_sets = validator_set_config
         .iter()
         .map(|config| StoredValidatorSet::new(ShardId::new(shard_id), &config))
         .collect();
@@ -44,7 +44,7 @@ pub async fn spawn_read_host(
             },
             max_num_buffered_blocks: 100,
             buffered_blocks: BTreeMap::new(),
-            validator_set,
+            validator_sets: StoredValidatorSets::new(shard_id, validator_sets),
             statsd_client,
         },
         system_tx,
