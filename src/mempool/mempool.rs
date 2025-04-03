@@ -126,7 +126,7 @@ impl Default for Config {
             allow_unlimited_mempool_size: false,
             capacity_per_shard: 100_000,
             rx_poll_interval: Duration::from_millis(1),
-            enable_rate_limits: true,
+            enable_rate_limits: false,
         }
     }
 }
