@@ -75,7 +75,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_time_to_idle() {
-        // Make limits high so refresh rate is high enough that we can sent a message after the rate limit is hit in test.
+        // Make limits high so refresh rate is high enough that we can send a message after the rate limit is hit in test.
         let (mut engine, shard_stores) = setup(Limits {
             casts: 1000,
             links: 1000,
@@ -158,7 +158,7 @@ mod tests {
             }
         }
 
-        // It's hard to predict what exactly gets evited, the cache uses some variant of LRU not LRU exactly.
+        // It's hard to predict what exactly gets evicted when the max capacity is hit, the cache uses some variant of LRU not LRU exactly. Just assert that something is evicted here and the cache won't grow unboundedly.
         assert_eq!(positive_results, 1);
         assert_eq!(negative_results, 10);
     }
