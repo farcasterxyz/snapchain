@@ -74,7 +74,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_time_to_idle() {
+    async fn test_exceed_time_to_idle() {
         // Make limits high so refresh rate is high enough that we can send a message after the rate limit is hit in test.
         let (mut engine, shard_stores) = setup(Limits {
             casts: 1000,
@@ -197,14 +197,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_idle_eviction() {
+    async fn test_zero_storage_allowance() {
         let (mut engine, shard_stores) = setup(Limits {
-            casts: 1000,
-            links: 1000,
-            reactions: 1000,
-            user_data: 1000,
-            user_name_proofs: 1000,
-            verifications: 1000,
+            casts: 0,
+            links: 0,
+            reactions: 0,
+            user_data: 0,
+            user_name_proofs: 0,
+            verifications: 0,
         });
 
         register_user(
@@ -223,14 +223,7 @@ mod tests {
             },
         );
 
-        for _ in 0..600 {
-            assert!(rate_limits.consume_for_fid(engine.shard_id(), FID_FOR_TEST))
-        }
-
-        assert!(!rate_limits.consume_for_fid(engine.shard_id(), FID_FOR_TEST));
-
-        sleep(Duration::from_millis(1500)).await;
-
-        assert!(rate_limits.consume_for_fid(engine.shard_id(), FID_FOR_TEST));
+        // If allowance is 0, don't allow any messages. This more realistically happens when the user has no storage.
+        assert!(!rate_limits.consume_for_fid(engine.shard_id(), FID_FOR_TEST))
     }
 }
