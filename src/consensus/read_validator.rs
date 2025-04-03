@@ -5,7 +5,7 @@ use crate::proto::{self, DecidedValue, Height};
 use crate::storage::store::engine::{BlockEngine, ShardEngine};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use bytes::Bytes;
-use informalsystems_malachitebft_core_types::NilOrVal;
+use informalsystems_malachitebft_core_types::{NilOrVal, ThresholdParams};
 use informalsystems_malachitebft_sync::RawDecidedValue;
 use itertools::Itertools;
 use libp2p::identity::ed25519::PublicKey;
@@ -138,14 +138,19 @@ impl ReadValidator {
             .map(|validator| validator.public_key.to_bytes());
 
         if certificate.aggregated_signature.signatures.len() == 0
-            || certificate.aggregated_signature.signatures.len() != expected_pubkeys.len()
+            || ThresholdParams::default().quorum.is_met(
+                certificate.aggregated_signature.signatures.len() as u64,
+                expected_pubkeys.len() as u64,
+            )
         {
+            error!(%certificate.height, last_height = %self.last_height, "Block did not have quorum");
             return false;
         }
 
         for signature in certificate.aggregated_signature.signatures {
             let address_bytes = &signature.address.0;
             if !expected_pubkeys.contains(address_bytes) {
+                error!(%certificate.height, last_height = %self.last_height, "Block contained signatures from unexpected signers");
                 return false;
             }
 
@@ -158,6 +163,7 @@ impl ReadValidator {
 
             let public_key = PublicKey::try_from_bytes(address_bytes).unwrap();
             if !public_key.verify(&vote.to_sign_bytes(), &signature.signature.0) {
+                error!(%certificate.height, last_height = %self.last_height, "Block contained invalid signatures");
                 return false;
             }
         }
