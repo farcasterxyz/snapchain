@@ -126,12 +126,10 @@ impl ReadValidator {
             .iter()
             .map(|validator| validator.public_key.to_bytes());
 
-        if certificate.aggregated_signature.signatures.len() == 0
-            || ThresholdParams::default().quorum.is_met(
-                certificate.aggregated_signature.signatures.len() as u64,
-                expected_pubkeys.len() as u64,
-            )
-        {
+        if !ThresholdParams::default().quorum.is_met(
+            certificate.aggregated_signature.signatures.len() as u64,
+            expected_pubkeys.len() as u64,
+        ) {
             error!(%certificate.height, last_height = %self.last_height, "Block did not have quorum");
             return false;
         }
