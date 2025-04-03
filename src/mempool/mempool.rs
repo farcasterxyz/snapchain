@@ -2,6 +2,7 @@ use governor::clock::QuantaClock;
 use governor::state::{InMemoryState, NotKeyed};
 use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
+use std::sync::Arc;
 use std::{
     collections::{BTreeMap, HashMap},
     time::Duration,
@@ -30,6 +31,7 @@ use crate::{
 
 use super::routing::{MessageRouter, ShardRouter};
 use governor::{Quota, RateLimiter};
+use moka::sync::{Cache, CacheBuilder};
 use std::num::NonZeroU32;
 use tracing::{error, warn};
 
@@ -37,14 +39,16 @@ type DirectRateLimiter = RateLimiter<NotKeyed, InMemoryState, QuantaClock>;
 
 pub struct RateLimits {
     shard_stores: HashMap<u32, Stores>,
-    rate_limits_by_fid: HashMap<u64, DirectRateLimiter>,
+    rate_limits_by_fid: Cache<u64, Arc<DirectRateLimiter>>,
 }
 
 impl RateLimits {
     fn new(shard_stores: HashMap<u32, Stores>) -> Self {
         RateLimits {
             shard_stores,
-            rate_limits_by_fid: HashMap::new(),
+            rate_limits_by_fid: CacheBuilder::new(10_000)
+                .time_to_idle(Duration::from_secs(60 * 60 * 2)) // Make time to idle 2x the rate limit window so it's ok if out of sync
+                .build(),
         }
     }
 
@@ -59,14 +63,14 @@ impl RateLimits {
         let rate_limiter = RateLimiter::direct(Quota::per_hour(
             NonZeroU32::new(100.max(allowance / 10)).unwrap(),
         ));
-        self.rate_limits_by_fid.insert(fid, rate_limiter);
+        self.rate_limits_by_fid.insert(fid, Arc::new(rate_limiter));
     }
 
-    fn clear_rate_limiter_for_fid(&mut self, fid: u64) {
-        self.rate_limits_by_fid.remove(&fid);
+    fn invalidate_rate_limiter_for_fid(&mut self, fid: u64) {
+        self.rate_limits_by_fid.invalidate(&fid);
     }
 
-    fn get_rate_limiter_for_fid(&mut self, shard_id: u32, fid: u64) -> &DirectRateLimiter {
+    fn get_rate_limiter_for_fid(&mut self, shard_id: u32, fid: u64) -> Arc<DirectRateLimiter> {
         if self.rate_limits_by_fid.get(&fid).is_none() {
             self.set_rate_limiter_for_fid(shard_id, fid);
         }
@@ -513,7 +517,7 @@ impl Mempool {
                                             if onchain_event.r#type() == OnChainEventType::EventTypeStorageRent{
                                                 // If the user buys more storage, we should bump their rate limit
                                                 if let Some(rate_limits) = &mut self.rate_limits {
-                                                    rate_limits.clear_rate_limiter_for_fid(onchain_event.fid);
+                                                    rate_limits.invalidate_rate_limiter_for_fid(onchain_event.fid);
                                                 }
 
                                             }
