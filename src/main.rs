@@ -151,7 +151,7 @@ async fn schedule_background_jobs(
     let mut jobs = vec![];
     if app_config.read_node {
         if let Some(block_retention) = app_config.pruning.block_retention {
-            let schedule = "0 0 0 * * *"; // midnight UTC every day
+            let schedule = "0 0 10 * * *"; // 10am UTC every day
             let job = snapchain::jobs::block_pruning::block_pruning_job(
                 schedule,
                 block_retention,
@@ -165,7 +165,7 @@ async fn schedule_background_jobs(
     }
 
     let event_pruning_job = snapchain::jobs::event_pruning::event_pruning_job(
-        "0 0 2 * * *", // 2am UTC every day
+        "0 0 0 * * *", // midnight UTC every day
         app_config.pruning.event_retention,
         shard_stores.clone(),
     )
