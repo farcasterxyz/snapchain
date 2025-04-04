@@ -134,13 +134,6 @@ impl MyHubService {
             ));
         }
 
-        // Temporarily disallow public mempool access until after mainnet is caught up
-        if self.network == proto::FarcasterNetwork::Mainnet && self.is_read_node {
-            return Err(Status::permission_denied(
-                "non-validating nodes cannot submit to mempool until backfill is complete",
-            ));
-        }
-
         let dst_shard = self.message_router.route_fid(fid, self.num_shards);
 
         let stores = match self.shard_stores.get(&dst_shard) {
