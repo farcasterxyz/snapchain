@@ -81,7 +81,6 @@ pub struct MyHubService {
     l1_client: Option<Box<dyn L1Client>>,
     mempool_tx: mpsc::Sender<MempoolRequest>,
     network: proto::FarcasterNetwork,
-    is_read_node: bool,
 }
 
 impl MyHubService {
@@ -93,7 +92,6 @@ impl MyHubService {
         statsd_client: StatsdClientWrapper,
         num_shards: u32,
         network: proto::FarcasterNetwork,
-        is_read_node: bool,
         message_router: Box<dyn routing::MessageRouter>,
         mempool_tx: mpsc::Sender<MempoolRequest>,
         l1_client: Option<Box<dyn L1Client>>,
@@ -117,7 +115,6 @@ impl MyHubService {
             num_shards,
             l1_client,
             mempool_tx,
-            is_read_node,
         };
         service
     }
