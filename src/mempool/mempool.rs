@@ -54,7 +54,7 @@ impl Default for RateLimitsConfig {
         Self {
             time_to_idle: Duration::from_secs(60 * 2 * 2),
             // Make time to idle 2x the rate limit window so it's ok if out of sync
-            max_capacity: 10_000,
+            max_capacity: 1_000_000,
         }
     }
 }
@@ -94,6 +94,7 @@ impl RateLimits {
             if storage_allowance == 0 {
                 Err(Box::new(RateLimitsError::NoStorage))
             } else {
+                // If we update the quota, we should update [time_to_idle] accordingly
                 Ok(Arc::new(RateLimiter::direct(Quota::per_hour(
                     NonZeroU32::new(100.max(storage_allowance / 10)).unwrap(),
                 ))))

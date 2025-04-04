@@ -9,7 +9,7 @@ mod tests {
         storage::store::{
             engine::ShardEngine,
             stores::{Limits, StoreLimits, Stores},
-            test_helper::{self, register_user, EngineOptions, FID_FOR_TEST},
+            test_helper::{self, limits, register_user, EngineOptions, FID_FOR_TEST},
         },
     };
 
@@ -75,7 +75,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_exceed_time_to_idle() {
-        // Make limits high so refresh rate is high enough that we can send a message after the rate limit is hit in test.
         let (mut engine, shard_stores) = setup(Limits {
             casts: 1000,
             links: 1000,
@@ -96,7 +95,7 @@ mod tests {
         let mut rate_limits = RateLimits::new(
             shard_stores,
             RateLimitsConfig {
-                time_to_idle: Duration::from_millis(10),
+                time_to_idle: Duration::from_millis(10), // Time to idle is lower than the refresh rate on the rate limiter here since the limits are fairly small
                 max_capacity: 10,
             },
         );
@@ -198,14 +197,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_zero_storage_allowance() {
-        let (mut engine, shard_stores) = setup(Limits {
-            casts: 0,
-            links: 0,
-            reactions: 0,
-            user_data: 0,
-            user_name_proofs: 0,
-            verifications: 0,
-        });
+        let (mut engine, shard_stores) = setup(limits::zero());
 
         register_user(
             FID_FOR_TEST,
