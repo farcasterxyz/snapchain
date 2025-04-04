@@ -9,6 +9,7 @@ use prost::Message;
 use super::{cast, link, reaction, verification};
 
 const MAX_DATA_BYTES: usize = 2048;
+const MAX_DATA_BYTES_FOR_LINK_COMPACT: usize = 65536;
 const EMBEDS_V1_CUTOFF: u32 = 73612800;
 
 pub fn validate_message_type(message_type: i32) -> Result<(), ValidationError> {
@@ -24,9 +25,6 @@ pub fn validate_message(
     let message_data;
     if message.data_bytes.is_some() {
         data_bytes = message.data_bytes.as_ref().unwrap().clone();
-        if data_bytes.len() > MAX_DATA_BYTES {
-            return Err(ValidationError::InvalidDataLength);
-        }
         if data_bytes.len() == 0 {
             return Err(ValidationError::MissingData);
         }
@@ -44,6 +42,14 @@ pub fn validate_message(
         }
         data_bytes = message.data.as_ref().unwrap().encode_to_vec();
         message_data = message.data.as_ref().unwrap().clone();
+    }
+
+    if message_data.r#type() == MessageType::LinkCompactState
+        && data_bytes.len() > MAX_DATA_BYTES_FOR_LINK_COMPACT
+    {
+        return Err(ValidationError::InvalidDataLength);
+    } else if data_bytes.len() > MAX_DATA_BYTES {
+        return Err(ValidationError::InvalidDataLength);
     }
 
     let network = FarcasterNetwork::try_from(message_data.network)

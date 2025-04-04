@@ -415,7 +415,7 @@ mod tests {
         let link_compact_state = messages_factory::links::create_link_compact_state(
             FID_FOR_TEST,
             "follow",
-            target_fid,
+            vec![target_fid],
             Some(timestamp + 2),
             None,
         );

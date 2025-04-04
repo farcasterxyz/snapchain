@@ -2,11 +2,14 @@ mod tests {
     use crate::core::util::calculate_message_hash;
     use crate::core::validations::error::ValidationError;
     use crate::core::validations::message::validate_message;
-    use crate::proto;
     use crate::proto::FarcasterNetwork;
+    use crate::proto::{self};
     use crate::storage::store::test_helper;
+    use crate::utils::factory::messages_factory::links::create_link_compact_state;
+    use crate::utils::factory::messages_factory::user_data::create_user_data_add;
     use crate::utils::factory::{messages_factory, time};
     use ed25519_dalek::Signer;
+    use itertools::Itertools;
     use prost::Message;
 
     fn assert_validation_error(msg: &proto::Message, expected_error: ValidationError) {
@@ -44,8 +47,15 @@ mod tests {
         msg.data_bytes = Some(vec![]);
         assert_validation_error(&msg, ValidationError::MissingData);
 
-        // when data bytes is too large
-        msg.data_bytes = Some(vec![0; 2049]);
+        // when data is too large
+        let long_bio = "A".repeat(2000);
+        let mut msg = create_user_data_add(1234, proto::UserDataType::Bio, &long_bio, None, None);
+        msg.data_bytes = None;
+        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+
+        let target_fids = (200000..500000).into_iter().collect_vec();
+        let mut msg = create_link_compact_state(1234, "follow", target_fids, None, None);
+        msg.data_bytes = None;
         assert_validation_error(&msg, ValidationError::InvalidDataLength);
 
         // When valid

@@ -345,13 +345,13 @@ pub mod messages_factory {
         pub fn create_link_compact_state(
             fid: u64,
             link_type: &str,
-            target_fid: u64,
+            target_fids: Vec<u64>,
             timestamp: Option<u32>,
             private_key: Option<&SigningKey>,
         ) -> crate::proto::Message {
             let link_compact_state_body = LinkCompactStateBody {
                 r#type: link_type.to_string(),
-                target_fids: vec![target_fid],
+                target_fids,
             };
 
             create_message_with_data(
