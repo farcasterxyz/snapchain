@@ -34,7 +34,9 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio_cron_scheduler::JobScheduler;
 use tonic::transport::Server;
 use tracing::{error, info, warn};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{reload, EnvFilter, Layer};
 
 async fn start_servers(
     app_config: &snapchain::cfg::Config,
@@ -196,11 +198,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    snapchain::utils::tracing::set_default_log_level(env_filter.to_string());
+
+    let (reload_filter, reload_handle) = reload::Layer::new(env_filter);
+    snapchain::utils::tracing::set_reload_handle(reload_handle);
+
+    let fmt_layer = tracing_subscriber::fmt::layer();
     match app_config.log_format.as_str() {
-        "text" => tracing_subscriber::fmt().with_env_filter(env_filter).init(),
-        "json" => tracing_subscriber::fmt()
-            .json()
-            .with_env_filter(env_filter)
+        "text" => tracing_subscriber::registry()
+            .with(reload_filter)
+            .with(fmt_layer)
+            .init(),
+        "json" => tracing_subscriber::registry()
+            .with(reload_filter)
+            .with(fmt_layer.json())
             .init(),
         _ => {
             return Err(format!("Invalid log format: {}", app_config.log_format).into());
