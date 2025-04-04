@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.3] - 2025-04-04
+
+### 🚀 Features
+
+- Support peer autodiscovery  (#337)
+- Add a background job to prune events (#347)
+- Rate limits in mempool (#348)
+
+### 🐛 Bug Fixes
+
+- Remove all stale proposals on decide (#345)
+- Allow larger message size for link compact messages (#350)
+- Ensure pruning jobs don't run into each other (#351)
+
+### ⚙️ Miscellaneous Tasks
+
+- Enable submit to read nodes (#349)
+- Increase default mempool size (#352)
+
 ## [0.2.2] - 2025-03-31
 
 ### 🐛 Bug Fixes
