@@ -8,6 +8,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    const ONE_DAY_IN_SECONDS: u64 = 24 * 60 * 60;
+
     fn create_stores() -> stores::Stores {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("a.db");
@@ -24,10 +26,9 @@ mod tests {
         stores::Stores::new(Arc::new(db), 1, trie, limits, test_helper::statsd_client())
     }
 
-    #[tokio::test]
-    async fn test_event_pruning() {
-        let stores = create_stores();
-        let shard_id = 1;
+    pub fn create_events(stores: &stores::Stores) {
+        let mut current_time = get_farcaster_time().unwrap() - (11 * ONE_DAY_IN_SECONDS);
+
         let message = messages_factory::reactions::create_reaction_add(
             123,
             ReactionType::Like,
@@ -36,15 +37,12 @@ mod tests {
             None,
         );
 
-        let one_day_in_seconds = 24 * 60 * 60;
-        let mut current_time = get_farcaster_time().unwrap() - (11 * one_day_in_seconds);
-
         for i in 0..10 {
             let current_height = i;
-            current_time += one_day_in_seconds;
+            current_time += ONE_DAY_IN_SECONDS;
 
             let shard_chunk = shard_chunk_factory::create_shard_chunk(
-                shard_id,
+                stores.shard_id,
                 Some(current_height),
                 Some(current_time),
             );
@@ -60,12 +58,18 @@ mod tests {
             }
             stores.db.commit(txn).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn test_event_pruning() {
+        let stores = create_stores();
+        create_events(&stores);
 
         let events = stores.get_events(0, None, None).unwrap();
         assert_eq!(events.events.len(), 10 * 3); // 10 chunks, 3 events each
 
         // Stop at a timestamp just before block 8
-        let cutoff_timestamp = get_farcaster_time().unwrap() - (2 * one_day_in_seconds) - 10;
+        let cutoff_timestamp = get_farcaster_time().unwrap() - (2 * ONE_DAY_IN_SECONDS) - 10;
         let result = stores
             .prune_events_until(cutoff_timestamp, Duration::from_secs(0), None)
             .await;
@@ -127,5 +131,34 @@ mod tests {
                 .block_number,
             8
         );
+    }
+
+    #[tokio::test]
+    pub async fn test_does_not_allow_overlap() {
+        test_helper::enable_logging();
+        let stores = create_stores();
+
+        create_events(&stores);
+
+        let cutoff_timestamp = get_farcaster_time().unwrap() - (2 * ONE_DAY_IN_SECONDS) - 10;
+        let stores1 = stores.clone();
+        let stores2 = stores.clone();
+
+        let prune1 = tokio::spawn(async move {
+            stores1
+                .prune_events_until(cutoff_timestamp, Duration::from_secs(0), None)
+                .await
+        });
+        let prune2 = tokio::spawn(async move {
+            stores2
+                .prune_events_until(cutoff_timestamp, Duration::from_secs(0), None)
+                .await
+        });
+
+        let result1 = prune1.await.unwrap();
+        let result2 = prune2.await.unwrap();
+
+        assert_eq!(result1.is_ok() || result2.is_ok(), true); // At least one succeeded
+        assert_eq!(result1.is_err() || result2.is_err(), true); // At least one failed
     }
 }

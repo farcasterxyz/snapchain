@@ -20,6 +20,7 @@ use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::RwLock;
 use tracing::{error, info};
 
 #[derive(Error, Debug)]
@@ -53,6 +54,7 @@ pub struct Stores {
     pub event_handler: Arc<StoreEventHandler>,
     pub shard_id: u32,
     pub statsd: StatsdClientWrapper,
+    prune_lock: Arc<RwLock<bool>>,
 }
 
 #[derive(Clone, Debug)]
@@ -199,6 +201,7 @@ impl Stores {
             store_limits,
             event_handler,
             statsd,
+            prune_lock: Arc::new(RwLock::new(false)),
         }
     }
 
@@ -375,6 +378,17 @@ impl Stores {
         throttle: Duration,
         page_options: Option<PageOptions>,
     ) -> Result<u32, HubError> {
+        if *(self.prune_lock.read().await) {
+            info!(
+                "Prune lock is already held for shard {}. Skipping prune.",
+                self.shard_id
+            );
+            return Err(HubError::internal_db_error("pruning already running"));
+        }
+        {
+            let mut prune_lock = self.prune_lock.write().await;
+            *prune_lock = true;
+        }
         let stop_height = self.get_next_height_by_timestamp(timestamp);
 
         let page_options = page_options.unwrap_or(PageOptions {
@@ -382,36 +396,42 @@ impl Stores {
             ..PageOptions::default()
         });
 
-        if let Some(stop_height) = stop_height {
+        let start = std::time::Instant::now();
+        let count = if let Some(stop_height) = stop_height {
             info!(
                 "Pruning events for shard {} older than timestamp: {}, height: {}",
                 self.shard_id, timestamp, stop_height
             );
-            let start = std::time::Instant::now();
-            let count =
+            let result =
                 HubEvent::prune_events_util(self.db.clone(), stop_height, &page_options, throttle)
-                    .await?;
-            let elapsed = start.elapsed();
-            self.statsd
-                .count_with_shard(self.shard_id, "prune.events", count as u64);
-            self.statsd.time_with_shard(
-                self.shard_id,
-                "prune.events_time_ms",
-                elapsed.as_millis() as u64,
-            );
-            info!(
-                "Pruning events complete for shard {}. Pruned {} events in {} seconds",
-                self.shard_id,
-                count,
-                elapsed.as_secs()
-            );
-            Ok(count)
+                    .await;
+            if let Err(e) = &result {
+                error!("Error pruning events for shard {}: {}", self.shard_id, e);
+            }
+            result.unwrap_or(0)
         } else {
-            info!("No events to prune for shard {}", self.shard_id);
-            self.statsd
-                .count_with_shard(self.shard_id, "prune.events", 0);
-            Ok(0)
+            0
+        };
+
+        {
+            let mut prune_lock = self.prune_lock.write().await;
+            *prune_lock = false;
         }
+        let elapsed = start.elapsed();
+        info!(
+            "Pruning events complete for shard {}. Pruned {} events in {} seconds",
+            self.shard_id,
+            count,
+            elapsed.as_secs()
+        );
+        self.statsd
+            .count_with_shard(self.shard_id, "prune.events", count as u64);
+        self.statsd.time_with_shard(
+            self.shard_id,
+            "prune.events_time_ms",
+            elapsed.as_millis() as u64,
+        );
+        Ok(count)
     }
 
     pub async fn prune_shard_chunks_until(
@@ -420,8 +440,22 @@ impl Stores {
         throttle: Duration,
         page_options: Option<PageOptions>,
     ) -> Result<u32, HubError> {
+        if *(self.prune_lock.read().await) {
+            info!(
+                "Prune lock is already held for shard {}. Skipping prune.",
+                self.shard_id
+            );
+            return Err(HubError::internal_db_error("pruning already running"));
+        }
+        {
+            let mut prune_lock = self.prune_lock.write().await;
+            *prune_lock = true;
+        }
+
         let stop_height = self.get_next_height_by_timestamp(timestamp);
-        if let Some(stop_height) = stop_height {
+        let start = std::time::Instant::now();
+
+        let count = if let Some(stop_height) = stop_height {
             info!(
                 "Pruning shard {} blocks older than timestamp: {}, height: {}",
                 self.shard_id, timestamp, stop_height
@@ -430,35 +464,38 @@ impl Stores {
                 page_size: Some(PAGE_SIZE_MAX),
                 ..PageOptions::default()
             });
-
-            let start = std::time::Instant::now();
-            let count = self
-                .shard_store
+            self.shard_store
                 .prune_until(stop_height, &page_options, throttle)
                 .await
                 .unwrap_or_else(|e| {
                     error!("Error pruning shard {} blocks: {}", self.shard_id, e);
                     0
-                });
-            let elapsed = start.elapsed();
-            self.statsd.time_with_shard(
-                self.shard_id,
-                "prune.chunks_time_ms",
-                elapsed.as_millis() as u64,
-            );
-            self.statsd
-                .count_with_shard(self.shard_id, "prune.shard_chunks", count as u64);
-            info!(
-                "Pruning shard chunks complete for shard {}. Pruned {} chunks in {} seconds",
-                self.shard_id,
-                count,
-                elapsed.as_secs()
-            );
-            Ok(count)
+                })
         } else {
             info!("No shard chunks to prune for shard {}", self.shard_id);
-            Ok(0)
+            0
+        };
+
+        {
+            let mut prune_lock = self.prune_lock.write().await;
+            *prune_lock = false;
         }
+
+        let elapsed = start.elapsed();
+        self.statsd.time_with_shard(
+            self.shard_id,
+            "prune.chunks_time_ms",
+            elapsed.as_millis() as u64,
+        );
+        self.statsd
+            .count_with_shard(self.shard_id, "prune.shard_chunks", count as u64);
+        info!(
+            "Pruning shard chunks complete for shard {}. Pruned {} chunks in {} seconds",
+            self.shard_id,
+            count,
+            elapsed.as_secs()
+        );
+        Ok(count)
     }
 }
 
