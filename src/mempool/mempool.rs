@@ -1,5 +1,6 @@
 use governor::clock::QuantaClock;
 use governor::state::{InMemoryState, NotKeyed};
+use moka::policy::EvictionPolicy;
 use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
 use std::sync::Arc;
@@ -33,20 +34,13 @@ use super::routing::{MessageRouter, ShardRouter};
 use governor::{Quota, RateLimiter};
 use moka::sync::{Cache, CacheBuilder};
 use std::num::NonZeroU32;
-use thiserror::Error;
 use tracing::{error, warn};
 
 type DirectRateLimiter = RateLimiter<NotKeyed, InMemoryState, QuantaClock>;
 
-#[derive(Error, Debug)]
-pub enum RateLimitsError {
-    #[error("no storage")]
-    NoStorage,
-}
-
 pub struct RateLimitsConfig {
     pub time_to_idle: Duration,
-    pub max_capacity: usize,
+    pub max_capacity: u64,
 }
 
 impl Default for RateLimitsConfig {
@@ -62,14 +56,21 @@ impl Default for RateLimitsConfig {
 pub struct RateLimits {
     shard_stores: HashMap<u32, Stores>,
     rate_limits_by_fid: Cache<u64, Arc<DirectRateLimiter>>,
+    statsd_client: StatsdClientWrapper,
 }
 
 impl RateLimits {
-    pub fn new(shard_stores: HashMap<u32, Stores>, config: RateLimitsConfig) -> Self {
+    pub fn new(
+        shard_stores: HashMap<u32, Stores>,
+        config: RateLimitsConfig,
+        statsd_client: StatsdClientWrapper,
+    ) -> Self {
         RateLimits {
             shard_stores,
+            statsd_client,
             rate_limits_by_fid: CacheBuilder::new(config.max_capacity)
                 .time_to_idle(config.time_to_idle)
+                .eviction_policy(EvictionPolicy::lru())
                 .build(),
         }
     }
@@ -82,8 +83,8 @@ impl RateLimits {
         &mut self,
         shard_id: u32,
         fid: u64,
-    ) -> Result<Arc<DirectRateLimiter>, Arc<Box<dyn std::error::Error + Send + Sync>>> {
-        self.rate_limits_by_fid.get_or_try_insert_with(fid, || {
+    ) -> Option<Arc<DirectRateLimiter>> {
+        self.rate_limits_by_fid.optionally_get_with(fid, || {
             let stores = self.shard_stores.get(&shard_id).unwrap();
             let storage_limits = stores.get_storage_limits(fid).unwrap();
             let storage_allowance: u32 = storage_limits
@@ -92,10 +93,10 @@ impl RateLimits {
                 .map(|limits| limits.limit as u32)
                 .sum();
             if storage_allowance == 0 {
-                Err(Box::new(RateLimitsError::NoStorage))
+                None
             } else {
                 // If we update the quota, we should update [time_to_idle] accordingly
-                Ok(Arc::new(RateLimiter::direct(Quota::per_hour(
+                Some(Arc::new(RateLimiter::direct(Quota::per_hour(
                     NonZeroU32::new(100.max(storage_allowance / 10)).unwrap(),
                 ))))
             }
@@ -104,9 +105,13 @@ impl RateLimits {
 
     pub fn consume_for_fid(&mut self, shard_id: u32, fid: u64) -> bool {
         let rate_limiter = self.get_rate_limiter_for_fid(shard_id, fid);
+        self.statsd_client.gauge(
+            "mempool.rate_limiter_entries",
+            self.rate_limits_by_fid.entry_count(),
+        );
         match rate_limiter {
-            Ok(rate_limiter) => rate_limiter.check().is_ok(),
-            Err(_) => false,
+            Some(rate_limiter) => rate_limiter.check().is_ok(),
+            None => false,
         }
     }
 }
@@ -400,6 +405,7 @@ impl Mempool {
                 Some(RateLimits::new(
                     shard_stores.clone(),
                     RateLimitsConfig::default(),
+                    statsd_client.clone(),
                 ))
             } else {
                 None

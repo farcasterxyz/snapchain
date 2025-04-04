@@ -9,7 +9,9 @@ mod tests {
         storage::store::{
             engine::ShardEngine,
             stores::{Limits, StoreLimits, Stores},
-            test_helper::{self, limits, register_user, EngineOptions, FID_FOR_TEST},
+            test_helper::{
+                self, limits, register_user, statsd_client, EngineOptions, FID_FOR_TEST,
+            },
         },
     };
 
@@ -60,6 +62,7 @@ mod tests {
                 time_to_idle: Duration::from_secs(2),
                 max_capacity: 10,
             },
+            statsd_client(),
         );
 
         for _ in 0..6000 {
@@ -98,6 +101,7 @@ mod tests {
                 time_to_idle: Duration::from_millis(10), // Time to idle is lower than the refresh rate on the rate limiter here since the limits are fairly small
                 max_capacity: 10,
             },
+            statsd_client(),
         );
 
         for _ in 0..600 {
@@ -139,6 +143,7 @@ mod tests {
                 time_to_idle: Duration::from_secs(1),
                 max_capacity: 10,
             },
+            statsd_client(),
         );
 
         for fid in FID_FOR_TEST..FID_FOR_TEST + 11 {
@@ -147,19 +152,11 @@ mod tests {
             }
         }
 
-        let mut positive_results = 0;
-        let mut negative_results = 0;
-        for fid in FID_FOR_TEST..FID_FOR_TEST + 11 {
-            if rate_limits.consume_for_fid(engine.shard_id(), fid) {
-                positive_results += 1;
-            } else {
-                negative_results += 1;
-            }
+        // FID_FOR_TEST was LRU so it should be removed
+        assert!(rate_limits.consume_for_fid(engine.shard_id(), FID_FOR_TEST));
+        for fid in FID_FOR_TEST + 1..FID_FOR_TEST + 11 {
+            assert!(!rate_limits.consume_for_fid(engine.shard_id(), fid));
         }
-
-        // It's hard to predict what exactly gets evicted when the max capacity is hit, the cache uses some variant of LRU not LRU exactly. Just assert that something is evicted here and the cache won't grow unboundedly.
-        assert_eq!(positive_results, 1);
-        assert_eq!(negative_results, 10);
     }
 
     #[tokio::test]
@@ -187,6 +184,7 @@ mod tests {
                 time_to_idle: Duration::from_secs(1),
                 max_capacity: 10,
             },
+            statsd_client(),
         );
 
         // Min allowance is 100
@@ -213,6 +211,7 @@ mod tests {
                 time_to_idle: Duration::from_secs(1),
                 max_capacity: 10,
             },
+            statsd_client(),
         );
 
         // If allowance is 0, don't allow any messages. This more realistically happens when the user has no storage.
