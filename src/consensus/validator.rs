@@ -20,7 +20,31 @@ pub enum ProposalSource {
     Sync,
 }
 
-struct StoredValidatorSet {
+pub struct StoredValidatorSets {
+    shard_id: u32,
+    sets: Vec<StoredValidatorSet>,
+}
+
+impl StoredValidatorSets {
+    pub fn new(shard_id: u32, sets: Vec<StoredValidatorSet>) -> Self {
+        Self { shard_id, sets }
+    }
+
+    pub fn get_validator_set(&self, height: u64) -> SnapchainValidatorSet {
+        let mut result = &self.sets[0];
+        for config in &self.sets {
+            if config.shard_ids.contains(&self.shard_id)
+                && config.effective_at <= height
+                && config.effective_at > result.effective_at
+            {
+                result = config;
+            }
+        }
+        result.validators.clone()
+    }
+}
+
+pub struct StoredValidatorSet {
     pub effective_at: u64,
     pub validators: SnapchainValidatorSet,
     pub shard_ids: Vec<u32>,
@@ -52,7 +76,7 @@ pub struct ShardValidator {
     #[allow(dead_code)] // TODO
     address: Address,
 
-    validator_set: Vec<StoredValidatorSet>,
+    validator_sets: StoredValidatorSets,
     current_round: Round,
     proposal_source: ProposalSource,
     current_height: Option<Height>,
@@ -81,10 +105,13 @@ impl ShardValidator {
         ShardValidator {
             shard_id: shard.clone(),
             address: address.clone(),
-            validator_set: validator_set
-                .iter()
-                .map(|config| StoredValidatorSet::new(shard, &config))
-                .collect(),
+            validator_sets: StoredValidatorSets::new(
+                shard.shard_id(),
+                validator_set
+                    .iter()
+                    .map(|config| StoredValidatorSet::new(shard, &config))
+                    .collect(),
+            ),
             current_height: None,
             proposal_source: ProposalSource::Consensus,
             current_round: Round::new(0),
@@ -100,16 +127,7 @@ impl ShardValidator {
     }
 
     pub fn get_validator_set(&self, height: u64) -> SnapchainValidatorSet {
-        let mut result = &self.validator_set[0];
-        for config in &self.validator_set {
-            if config.shard_ids.contains(&self.shard_id.shard_id())
-                && config.effective_at <= height
-                && config.effective_at > result.effective_at
-            {
-                result = config;
-            }
-        }
-        result.validators.clone()
+        self.validator_sets.get_validator_set(height)
     }
 
     pub fn validator_count(&self, height: u64) -> usize {

@@ -87,6 +87,7 @@ impl SnapchainReadNode {
                 registry,
                 shard_id,
                 statsd_client.clone(),
+                config.clone(),
             )
             .await;
 
@@ -112,6 +113,7 @@ impl SnapchainReadNode {
             registry,
             block_shard.shard_id(),
             statsd_client.clone(),
+            config.clone(),
         )
         .await;
         if block_actor.is_err() {

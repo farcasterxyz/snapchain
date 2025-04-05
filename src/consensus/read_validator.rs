@@ -1,13 +1,18 @@
 use std::collections::BTreeMap;
 
-use crate::core::types::SnapchainValidatorContext;
+use crate::core::types::{SnapchainValidatorContext, Vote};
 use crate::proto::{self, DecidedValue, Height};
 use crate::storage::store::engine::{BlockEngine, ShardEngine};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use bytes::Bytes;
+use informalsystems_malachitebft_core_types::{NilOrVal, ThresholdParams};
 use informalsystems_malachitebft_sync::RawDecidedValue;
+use itertools::Itertools;
+use libp2p::identity::ed25519::PublicKey;
 use prost::Message;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
+
+use super::validator::StoredValidatorSets;
 
 pub enum Engine {
     ShardEngine(ShardEngine),
@@ -20,6 +25,7 @@ pub struct ReadValidator {
     pub max_num_buffered_blocks: u32,
     pub buffered_blocks: BTreeMap<Height, proto::DecidedValue>,
     pub statsd_client: StatsdClientWrapper,
+    pub validator_sets: StoredValidatorSets,
 }
 
 impl ReadValidator {
@@ -98,8 +104,67 @@ impl ReadValidator {
         }
     }
 
+    fn verify_signatures(&self, value: &proto::DecidedValue) -> bool {
+        let certificate = match value.value.as_ref().unwrap() {
+            proto::decided_value::Value::Shard(shard_chunk) => shard_chunk
+                .commits
+                .as_ref()
+                .unwrap()
+                .to_commit_certificate(),
+
+            proto::decided_value::Value::Block(block) => {
+                block.commits.as_ref().unwrap().to_commit_certificate()
+            }
+        };
+
+        let validator_set = self
+            .validator_sets
+            .get_validator_set(certificate.height.as_u64());
+
+        let mut expected_pubkeys = validator_set
+            .validators
+            .iter()
+            .map(|validator| validator.public_key.to_bytes());
+
+        if !ThresholdParams::default().quorum.is_met(
+            certificate.aggregated_signature.signatures.len() as u64,
+            expected_pubkeys.len() as u64,
+        ) {
+            error!(%certificate.height, last_height = %self.last_height, "Block did not have quorum");
+            return false;
+        }
+
+        for signature in certificate.aggregated_signature.signatures {
+            let address_bytes = &signature.address.0;
+            if !expected_pubkeys.contains(address_bytes) {
+                error!(%certificate.height, last_height = %self.last_height, "Block contained signatures from unexpected signers");
+                return false;
+            }
+
+            let vote = Vote::new_precommit(
+                certificate.height,
+                certificate.round,
+                NilOrVal::Val(certificate.value_id.clone()),
+                signature.address.clone(),
+            );
+
+            let public_key = PublicKey::try_from_bytes(address_bytes).unwrap();
+            if !public_key.verify(&vote.to_sign_bytes(), &signature.signature.0) {
+                error!(%certificate.height, last_height = %self.last_height, "Block contained invalid signatures");
+                return false;
+            }
+        }
+
+        true
+    }
+
     pub fn process_decided_value(&mut self, value: DecidedValue) -> u64 {
         let height = Self::get_decided_value_height(&value);
+        let verified = self.verify_signatures(&value);
+        if !verified {
+            error!(%height, last_height = %self.last_height, "Dropping decided block because its signatures are invalid");
+            return 0;
+        }
         let num_committed_values = if height > self.last_height.increment() {
             if (self.buffered_blocks.len() as u32) < self.max_num_buffered_blocks {
                 self.buffered_blocks.insert(height, value);
