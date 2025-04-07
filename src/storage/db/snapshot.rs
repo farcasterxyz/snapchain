@@ -26,6 +26,8 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 
 use tracing::{error, info};
 
+use super::RocksdbError;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
     pub endpoint_url: String,
@@ -108,6 +110,12 @@ pub enum SnapshotError {
 
     #[error("unable to convert file name to string")]
     UnableToParseFileName,
+
+    #[error("upload already in progress")]
+    UploadAlreadyInProgress,
+
+    #[error(transparent)]
+    RocksDbError(#[from] RocksdbError),
 }
 
 #[derive(Serialize, Deserialize)]

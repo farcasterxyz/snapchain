@@ -1,23 +1,20 @@
 use crate::connectors::onchain_events::OnchainEventsRequest;
+use crate::jobs::snapshot_upload::upload_snapshot;
 use crate::mempool::mempool::MempoolRequest;
 use crate::network::rpc_extensions::authenticate_request;
 use crate::proto::admin_service_server::AdminService;
 use crate::proto::{self, Empty, FarcasterNetwork, RetryOnchainEventsRequest};
 use crate::storage;
-use crate::storage::db::snapshot::clear_snapshots;
-use crate::storage::db::RocksDB;
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use rocksdb;
 use std::collections::HashMap;
 use std::io;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
-use tracing::{error, info};
+use tracing::error;
 
 pub struct MyAdminService {
     allowed_users: HashMap<String, String>,
@@ -72,33 +69,6 @@ impl MyAdminService {
 
     pub fn enabled(&self) -> bool {
         !self.allowed_users.is_empty()
-    }
-
-    async fn backup_and_upload(
-        fc_network: FarcasterNetwork,
-        snapshot_config: storage::db::snapshot::Config,
-        shard_id: u32,
-        db: Arc<RocksDB>,
-        now: i64,
-        statsd_client: StatsdClientWrapper,
-    ) -> Result<(), Status> {
-        // TODO(aditi): Eventually, we should upload a metadata file. For now, just clear all existing snapshots on s3 and only keep 1 snapshot per shard
-        clear_snapshots(fc_network, &snapshot_config, shard_id)
-            .await
-            .map_err(|err| Status::from_error(Box::new(err)))?;
-        let backup_dir = snapshot_config.backup_dir.clone();
-        let tar_gz_path = RocksDB::backup_db(db, &backup_dir, shard_id, now)
-            .map_err(|err| Status::from_error(Box::new(err)))?;
-        storage::db::snapshot::upload_to_s3(
-            fc_network,
-            tar_gz_path,
-            &snapshot_config,
-            shard_id,
-            &statsd_client,
-        )
-        .await
-        .map_err(|err| Status::from_error(Box::new(err)))?;
-        Ok(())
     }
 }
 
@@ -217,49 +187,16 @@ impl AdminService for MyAdminService {
         let block_store = self.block_store.clone();
         let statsd_client = self.statsd_client.clone();
         tokio::spawn(async move {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis();
-
-            if let Err(err) = Self::backup_and_upload(
+            if let Err(err) = upload_snapshot(
+                snapshot_config,
                 fc_network,
-                snapshot_config.clone(),
-                0,
-                block_store.db.clone(),
-                now as i64,
-                statsd_client.clone(),
+                block_store,
+                shard_stores,
+                statsd_client,
             )
             .await
             {
-                error!(
-                    shard = 0,
-                    "Unable to upload snapshot for shard {}",
-                    err.to_string()
-                )
-            }
-
-            for (shard, stores) in shard_stores.iter() {
-                if let Err(err) = Self::backup_and_upload(
-                    fc_network,
-                    snapshot_config.clone(),
-                    *shard,
-                    stores.db.clone(),
-                    now as i64,
-                    statsd_client.clone(),
-                )
-                .await
-                {
-                    error!(
-                        shard,
-                        "Unable to upload snapshot for shard {}",
-                        err.to_string()
-                    );
-                }
-            }
-
-            if let Err(err) = std::fs::remove_dir_all(snapshot_config.backup_dir.clone()) {
-                info!("Unable to remove snapshot directory: {}", err.to_string());
+                error!("Error uploading snapshot {}", err.to_string());
             }
         });
 
