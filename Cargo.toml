@@ -85,6 +85,11 @@ strum = "0.27.1"
 strum_macros = "0.27.1"
 governor = "0.10.0"
 moka = "0.12.10"
+solar-interface = "=0.1.1"
+solar-ast = "=0.1.1"
+solar-data-structures = "=0.1.1"
+solar-macros = "=0.1.1"
+solar-config = "=0.1.1"
 
 [build-dependencies]
 tonic-build = "0.9.2"
