@@ -58,6 +58,14 @@ impl Default for Config {
         }
     }
 }
+
+impl Config {
+    pub fn snapshot_upload_enabled(&self) -> bool {
+        !app_config.snapshot.aws_access_key_id.is_empty()
+            && !app_config.snapshot.aws_secret_access_key.is_empty()
+    }
+}
+
 fn snapshot_directory(network: FarcasterNetwork, shard_id: u32) -> String {
     return format!("{}/{}", network.as_str_name(), shard_id);
 }

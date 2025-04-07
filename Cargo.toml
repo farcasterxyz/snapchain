@@ -85,6 +85,7 @@ strum = "0.27.1"
 strum_macros = "0.27.1"
 governor = "0.10.0"
 moka = "0.12.10"
+// Foundry sets the version of solar-parse to 0.1.1 and these need to be consistent for compilation to succeed. Foundry doesn't have a cargo crate that we can use. 
 solar-interface = "=0.1.1"
 solar-ast = "=0.1.1"
 solar-data-structures = "=0.1.1"
