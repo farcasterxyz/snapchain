@@ -1,6 +1,6 @@
 use crate::proto::FarcasterNetwork;
 use crate::storage;
-use crate::storage::db::snapshot::{clear_snapshots, SnapshotError};
+use crate::storage::db::snapshot::{clear_old_snapshots, SnapshotError};
 use crate::storage::db::RocksDB;
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
@@ -19,8 +19,6 @@ async fn backup_and_upload(
     now: i64,
     statsd_client: StatsdClientWrapper,
 ) -> Result<(), SnapshotError> {
-    // TODO(aditi): Eventually, we should upload a metadata file. For now, just clear all existing snapshots on s3 and only keep 1 snapshot per shard
-    clear_snapshots(fc_network, &snapshot_config, shard_id).await?;
     let backup_dir = snapshot_config.backup_dir.clone();
     let tar_gz_path = RocksDB::backup_db(db, &backup_dir, shard_id, now)?;
     storage::db::snapshot::upload_to_s3(
@@ -31,6 +29,7 @@ async fn backup_and_upload(
         &statsd_client,
     )
     .await?;
+    clear_old_snapshots(fc_network, &snapshot_config, shard_id).await?;
     Ok(())
 }
 
