@@ -61,8 +61,7 @@ impl Default for Config {
 
 impl Config {
     pub fn snapshot_upload_enabled(&self) -> bool {
-        !app_config.snapshot.aws_access_key_id.is_empty()
-            && !app_config.snapshot.aws_secret_access_key.is_empty()
+        !self.aws_access_key_id.is_empty() && !self.aws_secret_access_key.is_empty()
     }
 }
 
