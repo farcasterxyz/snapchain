@@ -179,7 +179,10 @@ pub async fn clear_old_snapshots(
     let metadata = download_metadata(network, shard_id, snapshot_config).await?;
     let old_objects = objects
         .into_iter()
-        .filter(|object| !object.key().contains(&metadata.key_base))
+        .filter(|object| {
+            !object.key().contains(&metadata.key_base)
+                && !object.key().contains(&metadata_path(network, shard_id))
+        })
         .collect_vec();
     if old_objects.is_empty() {
         return Ok(());
