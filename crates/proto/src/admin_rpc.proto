@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+import "onchain_event.proto";
+import "username_proof.proto";
+
+message Empty {}
+
+message RetryBlockNumberRange {
+  uint64 start_block_number = 1;
+  uint64 stop_block_number = 2;
+}
+
+message RetryOnchainEventsRequest {
+  oneof kind {
+    uint64 fid = 1;
+    RetryBlockNumberRange block_range = 2;
+  }
+}
+
+service AdminService {
+//  rpc SubmitOnChainEvent(OnChainEvent) returns (OnChainEvent);
+//  rpc SubmitUserNameProof(UserNameProof) returns (UserNameProof);
+  rpc UploadSnapshot(Empty) returns (Empty);
+  rpc RetryOnchainEvents(RetryOnchainEventsRequest) returns (Empty);
+}

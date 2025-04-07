@@ -8,7 +8,13 @@ default-run = "snapchain"
 name = "snapchain"
 path = "src/lib.rs"
 
+[workspace]
+members = [
+    "crates/proto",
+]
+
 [dependencies]
+snapchain-proto = { path = "crates/proto" }
 tokio = { version = "1.40.0", features = ["full"] }
 tokio-stream = "0.1"
 serde = { version = "1.0", features = ["derive"] }

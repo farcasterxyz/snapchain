@@ -12,6 +12,5 @@ pub mod utils;
 
 mod tests;
 
-pub mod proto {
-    tonic::include_proto!("_");
-}
+// Re-export proto types from snapchain-proto crate
+pub use snapchain_proto::proto;
