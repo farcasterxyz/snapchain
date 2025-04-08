@@ -23,6 +23,11 @@ message ShardChunksResponse {
   repeated ShardChunk shard_chunks = 1;
 }
 
+message HubEventResponse {
+  HubEvent hub_event = 1;
+  uint64 block_number = 2;
+}
+
 message SubscribeRequest {
   repeated HubEventType event_types = 1;
   optional uint64 from_id = 2;

@@ -35,6 +35,7 @@ use crate::proto::UserNameProof;
 use crate::proto::UserNameType;
 use crate::proto::UsernameProofRequest;
 use crate::proto::UsernameProofsResponse;
+use crate::proto::HubEventResponse;
 use crate::proto::ValidationResponse;
 use crate::proto::VerificationAddAddressBody;
 use crate::proto::{Block, CastId, DbStats};
@@ -602,7 +603,7 @@ impl HubService for MyHubService {
         }))
     }
 
-    type SubscribeStream = ReceiverStream<Result<HubEvent, Status>>;
+    type SubscribeStream = ReceiverStream<Result<HubEventResponse, Status>>;
 
     async fn subscribe(
         &self,
@@ -611,7 +612,7 @@ impl HubService for MyHubService {
         authenticate_request(&request, &self.allowed_users)?;
 
         info!("Received call to [subscribe] RPC");
-        let (server_tx, client_rx) = mpsc::channel::<Result<HubEvent, Status>>(100);
+        let (server_tx, client_rx) = mpsc::channel::<Result<HubEventResponse, Status>>(100);
         let events_txs = match request.get_ref().shard_index {
             Some(shard_id) => match self.shard_senders.get(&(shard_id)) {
                 None => {
@@ -665,7 +666,8 @@ impl HubService for MyHubService {
                     for event in old_events.events {
                         if event_types.contains(&event.r#type) {
                             let event = Self::rewrite_hub_event(event);
-                            if let Err(_) = server_tx.send(Ok(event)).await {
+                            let response = HubEvent::create_hub_event_response(event);
+                            if let Err(_) = server_tx.send(Ok(response)).await {
                                 return;
                             }
                         }
@@ -692,7 +694,8 @@ impl HubService for MyHubService {
                             Ok(hub_event) => {
                                 if filtered_events.contains(&hub_event.r#type) {
                                     let hub_event = Self::rewrite_hub_event(hub_event);
-                                    match tx.send(Ok(hub_event)).await {
+                                    let response = HubEvent::create_hub_event_response(hub_event);
+                                    match tx.send(Ok(response)).await {
                                         Ok(_) => {}
                                         Err(_) => {
                                             // This means the client hung up

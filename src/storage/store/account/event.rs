@@ -1,5 +1,6 @@
 use crate::core::error::HubError;
 use crate::proto::HubEvent;
+use crate::proto::HubEventResponse;
 use crate::storage::constants::{RootPrefix, PAGE_SIZE_MAX};
 use crate::storage::db::RocksDbTransactionBatch;
 use crate::storage::db::{PageOptions, RocksDB};
@@ -193,5 +194,14 @@ impl HubEvent {
             )
             .await?;
         Ok(total_pruned)
+    }
+
+    pub fn create_hub_event_response(hub_event: HubEvent) -> HubEventResponse {
+        let (block_number, ) =
+            HubEventIdGenerator::extract_height_and_seq(hub_event.id);
+        HubEventResponse {
+            hub_event: Some(hub_event),
+            block_number,
+        }
     }
 }
