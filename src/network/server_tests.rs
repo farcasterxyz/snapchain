@@ -80,14 +80,13 @@ mod tests {
         num_events_expected: u64,
         event_types: Vec<i32>,
     ) -> tokio::task::JoinHandle<()> {
-        let mut request = Request::new(SubscribeRequest {
+        let request = Request::new(SubscribeRequest {
             event_types,
             from_id: None,
             shard_index: Some(shard_id),
             fid_partitions: None,
             fid_partition_index: None,
         });
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
         let mut listener = service.subscribe(request).await.unwrap();
 
         let mut num_events_seen = 0;
