@@ -94,8 +94,13 @@ mod tests {
 
         return tokio::spawn(async move {
             loop {
-                let event = timeout(Duration::from_millis(100), listener.get_mut().next()).await;
-                if event.is_ok() {
+                let event_response = timeout(Duration::from_millis(100), listener.get_mut().next()).await;
+                if let Ok(Some(Ok(hub_event_response))) = event_response {
+                    let hub_event = hub_event_response.hub_event.unwrap();
+                    let block_number = hub_event_response.block_number;
+
+                    assert!(block_number > 0);
+
                     num_events_seen += 1;
                     if num_events_seen == num_events_expected {
                         break;
