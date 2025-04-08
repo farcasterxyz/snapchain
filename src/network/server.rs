@@ -719,20 +719,24 @@ impl HubService for MyHubService {
         Ok(Response::new(ReceiverStream::new(client_rx)))
     }
 
-    async gn get_event(
+    async fn get_event(
         &self,
-        request: Request<EventRequest>
+        request: Request<EventRequest>,
     ) -> Result<Response<HubEventResponse>, Status> {
-
         authenticate_request(&request, &self.allowed_users)?;
         let request = request.into_inner();
         // Not sure this is the correct way to be handling the shard
-        let stores = self.get_stores_for_shard(request.shard_id)?;
+        let stores = self.get_stores_for_shard(request.shard_index)?;
+        let hub_event_result = stores.get_event(request.id);
 
-        let hub_event = HubEvent.get_event(&stores.db, request.event_id).await?;
-        let response = HubEvent::create_hub_event_response(hub_event);
-
-        OK(Response::new(response))
+        match hub_event_result {
+            Ok(Some(hub_event)) => {
+                let response = HubEvent::create_hub_event_response(hub_event);
+                Ok(Response::new(response))
+            }
+            Ok(None) => Err(Status::not_found("Event not found")),
+            Err(err) => Err(Status::internal(err.to_string())),
+        }
     }
 
     async fn get_cast(&self, request: Request<CastId>) -> Result<Response<proto::Message>, Status> {
