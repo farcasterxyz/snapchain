@@ -39,7 +39,7 @@ use crate::proto::HubEventResponse;
 use crate::proto::ValidationResponse;
 use crate::proto::VerificationAddAddressBody;
 use crate::proto::{Block, CastId, DbStats};
-use crate::proto::{BlocksRequest, ShardChunksRequest, ShardChunksResponse, SubscribeRequest};
+use crate::proto::{BlocksRequest, ShardChunksRequest, ShardChunksResponse, SubscribeRequest, EventRequest};
 use crate::proto::{FidRequest, FidTimestampRequest};
 use crate::proto::{GetInfoRequest, StorageLimitsResponse};
 use crate::proto::{
@@ -717,6 +717,22 @@ impl HubService for MyHubService {
         });
 
         Ok(Response::new(ReceiverStream::new(client_rx)))
+    }
+
+    async gn get_event(
+        &self,
+        request: Request<EventRequest>
+    ) -> Result<Response<HubEventResponse>, Status> {
+
+        authenticate_request(&request, &self.allowed_users)?;
+        let request = request.into_inner();
+        // Not sure this is the correct way to be handling the shard
+        let stores = self.get_stores_for_shard(request.shard_id)?;
+
+        let hub_event = HubEvent.get_event(&stores.db, request.event_id).await?;
+        let response = HubEvent::create_hub_event_response(hub_event);
+
+        OK(Response::new(response))
     }
 
     async fn get_cast(&self, request: Request<CastId>) -> Result<Response<proto::Message>, Status> {
