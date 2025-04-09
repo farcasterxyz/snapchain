@@ -292,6 +292,7 @@ impl UserDataStore {
                 },
             )),
             id: 0,
+            block_number: None,
         };
         let id = store
             .event_handler()

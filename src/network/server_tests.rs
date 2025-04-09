@@ -26,6 +26,7 @@ mod tests {
     use crate::storage::store::test_helper::register_user;
     use crate::storage::store::{test_helper, BlockStore};
     use crate::storage::trie::merkle_trie;
+    use crate::storage::store::account::SEQUENCE_BITS;
     use crate::utils::factory::{events_factory, messages_factory};
     use crate::utils::statsd_wrapper::StatsdClientWrapper;
     use futures::future;
@@ -97,7 +98,7 @@ mod tests {
                 let event = timeout(Duration::from_millis(100), listener.get_mut().next()).await;
                 if let Ok(Some(Ok(hub_event))) = event {
                     let block_number = hub_event.block_number;
-                    assert!(block_number > 0);
+                    assert!(block_number > Some(0));
                     num_events_seen += 1;
                     if num_events_seen == num_events_expected {
                         break;
@@ -119,6 +120,7 @@ mod tests {
                     r#type: HubEventType::MergeMessage as i32,
                     id: i,
                     body: None,
+                    block_number: None,
                 })
                 .unwrap();
         }
@@ -133,6 +135,7 @@ mod tests {
                     r#type: HubEventType::MergeMessage as i32,
                     id: i,
                     body: None,
+                    block_number: None,
                 },
             )
             .unwrap();
@@ -350,13 +353,12 @@ mod tests {
     #[tokio::test]
     async fn test_get_event_success() {
         let (stores, _, _, service) = make_server(None).await;
-
-        // Write an event to shard 1 with a known ID
         let event_id = 12345;
         let hub_event = HubEvent {
             r#type: HubEventType::MergeMessage as i32,
             id: event_id,
             body: None,
+            block_number: None,
         };
 
         let db = stores.get(&1u32).unwrap().shard_store.db.clone();
@@ -364,37 +366,33 @@ mod tests {
         HubEvent::put_event_transaction(&mut txn, &hub_event).unwrap();
         db.commit(txn).unwrap();
 
-        // Call the GetEvent RPC
         let mut request = Request::new(proto::EventRequest {
             id: event_id,
-            shard_index: 1, // Ensure shard_index matches the shard used in write_events_to_db
+            shard_index: 1,
         });
         add_auth_header(&mut request, USER_NAME, PASSWORD);
         let response = service.get_event(request).await.unwrap();
 
-        // Validate the response
         let hub_event_response = response.into_inner();
-        assert_eq!(hub_event_response.block_number, event_id >> SEQUENCE_BITS);
-        assert_eq!(hub_event_response.hub_event.unwrap(), hub_event);
+        assert_eq!(hub_event_response.block_number, Some(event_id >> SEQUENCE_BITS));
+        assert_eq!(hub_event_response.r#type, hub_event.r#type);
+        assert_eq!(hub_event_response.id, event_id);
     }
 
     #[tokio::test]
     async fn test_get_event_not_found() {
         let (stores, _, _, service) = make_server(None).await;
 
-        // Write an event to shard 1
         let event_id = 12345;
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 1).await;
 
-        // Call the GetEvent RPC with a non-existent event ID
         let mut request = Request::new(proto::EventRequest {
-            id: 99999, // Non-existent event ID
-            shard_index: 1, // Ensure shard_index matches the shard used in write_events_to_db
+            id: 99999, // Junk event ID
+            shard_index: 1,
         });
         add_auth_header(&mut request, USER_NAME, PASSWORD);
         let response = service.get_event(request).await;
 
-        // Validate the response
         assert!(response.is_err());
         let status = response.unwrap_err();
         assert_eq!(status.code(), tonic::Code::NotFound);
@@ -405,14 +403,12 @@ mod tests {
     async fn test_get_event_invalid_shard() {
         let (stores, _, _, service) = make_server(None).await;
 
-        // Write an event to shard 1
         let event_id = 12345;
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 1).await;
 
-        // Call the GetEvent RPC with an invalid shard index
         let mut request = Request::new(proto::EventRequest {
             id: event_id,
-            shard_index: 999, // Non-existent shard
+            shard_index: 999, // junk shard
         });
         add_auth_header(&mut request, USER_NAME, PASSWORD);
         let response = service.get_event(request).await;
@@ -428,19 +424,16 @@ mod tests {
     async fn test_get_event_missing_shard_index() {
         let (stores, _, _, service) = make_server(None).await;
 
-        // Write an event to shard 1
         let event_id = 12345;
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 1).await;
 
-        // Call the GetEvent RPC without a shard index
         let mut request = Request::new(proto::EventRequest {
             id: event_id,
-            shard_index: 0, // Default shard index
+            shard_index: 0,
         });
         add_auth_header(&mut request, USER_NAME, PASSWORD);
         let response = service.get_event(request).await;
 
-        // Validate the response
         assert!(response.is_err());
         let status = response.unwrap_err();
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
