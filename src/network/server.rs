@@ -35,7 +35,6 @@ use crate::proto::UserNameProof;
 use crate::proto::UserNameType;
 use crate::proto::UsernameProofRequest;
 use crate::proto::UsernameProofsResponse;
-use crate::proto::HubEventResponse;
 use crate::proto::ValidationResponse;
 use crate::proto::VerificationAddAddressBody;
 use crate::proto::{Block, CastId, DbStats};
@@ -603,7 +602,7 @@ impl HubService for MyHubService {
         }))
     }
 
-    type SubscribeStream = ReceiverStream<Result<HubEventResponse, Status>>;
+    type SubscribeStream = ReceiverStream<Result<HubEvent, Status>>;
 
     async fn subscribe(
         &self,
@@ -612,7 +611,7 @@ impl HubService for MyHubService {
         authenticate_request(&request, &self.allowed_users)?;
 
         info!("Received call to [subscribe] RPC");
-        let (server_tx, client_rx) = mpsc::channel::<Result<HubEventResponse, Status>>(100);
+        let (server_tx, client_rx) = mpsc::channel::<Result<HubEvent, Status>>(100);
         let events_txs = match request.get_ref().shard_index {
             Some(shard_id) => match self.shard_senders.get(&(shard_id)) {
                 None => {
@@ -722,7 +721,7 @@ impl HubService for MyHubService {
     async fn get_event(
         &self,
         request: Request<EventRequest>,
-    ) -> Result<Response<HubEventResponse>, Status> {
+    ) -> Result<Response<HubEvent>, Status> {
         authenticate_request(&request, &self.allowed_users)?;
         let request = request.into_inner();
         // Not sure this is the correct way to be handling the shard

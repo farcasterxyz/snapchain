@@ -23,8 +23,8 @@ service HubService {
   rpc GetFids(FidsRequest) returns (FidsResponse);
 
   // Events
-  rpc Subscribe(SubscribeRequest) returns (stream HubEventResponse);
-  rpc GetEvent(EventRequest) returns (HubEventResponse);
+  rpc Subscribe(SubscribeRequest) returns (stream HubEvent);
+  rpc GetEvent(EventRequest) returns (HubEvent);
 
 
   // Casts
