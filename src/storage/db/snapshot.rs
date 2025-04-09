@@ -16,6 +16,7 @@ use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_sdk_s3::Client;
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufReader, Read};
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
@@ -25,6 +26,8 @@ use tokio::io::AsyncReadExt;
 use tokio::io::{AsyncWriteExt, BufWriter};
 
 use tracing::{error, info};
+
+use super::RocksdbError;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
@@ -55,6 +58,13 @@ impl Default for Config {
         }
     }
 }
+
+impl Config {
+    pub fn snapshot_upload_enabled(&self) -> bool {
+        !self.aws_access_key_id.is_empty() && !self.aws_secret_access_key.is_empty()
+    }
+}
+
 fn snapshot_directory(network: FarcasterNetwork, shard_id: u32) -> String {
     return format!("{}/{}", network.as_str_name(), shard_id);
 }
@@ -108,6 +118,12 @@ pub enum SnapshotError {
 
     #[error("unable to convert file name to string")]
     UnableToParseFileName,
+
+    #[error("upload already in progress")]
+    UploadAlreadyInProgress,
+
+    #[error(transparent)]
+    RocksDbError(#[from] RocksdbError),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -159,19 +175,31 @@ async fn get_objects_under_key(
     }
 }
 
-pub async fn clear_snapshots(
+pub async fn clear_old_snapshots(
     network: FarcasterNetwork,
     snapshot_config: &Config,
     shard_id: u32,
 ) -> Result<(), SnapshotError> {
     let s3_client = create_s3_client(&snapshot_config).await;
     let snapshot_dir = snapshot_directory(network, shard_id);
-    info!("Clearing snapshots under {}", snapshot_dir.clone());
     let objects = get_objects_under_key(&s3_client, &snapshot_config, snapshot_dir.clone()).await?;
-    if objects.is_empty() {
+    let metadata = download_metadata(network, shard_id, snapshot_config).await?;
+    let old_objects = objects
+        .into_iter()
+        .filter(|object| {
+            !object.key().contains(&metadata.key_base)
+                && !object.key().contains(&metadata_path(network, shard_id))
+        })
+        .collect_vec();
+    if old_objects.is_empty() {
         return Ok(());
     } else {
-        let delete_request = Delete::builder().set_objects(Some(objects)).build()?;
+        info!(
+            num_objects = old_objects.len(),
+            "Clearing old snapshots under {}",
+            snapshot_dir.clone()
+        );
+        let delete_request = Delete::builder().set_objects(Some(old_objects)).build()?;
         let delete_result = s3_client
             .delete_objects()
             .bucket(snapshot_config.s3_bucket.clone())
@@ -198,6 +226,24 @@ fn metadata_path(network: FarcasterNetwork, shard_id: u32) -> String {
     )
 }
 
+async fn download_metadata(
+    network: FarcasterNetwork,
+    shard_id: u32,
+    snapshot_config: &Config,
+) -> Result<SnapshotMetadata, SnapshotError> {
+    let metadata_url = format!(
+        "{}/{}",
+        snapshot_config.snapshot_download_url,
+        metadata_path(network, shard_id)
+    );
+    info!("Retrieving metadata from {}", metadata_url);
+    let metadata = reqwest::get(metadata_url)
+        .await?
+        .json::<SnapshotMetadata>()
+        .await?;
+    Ok(metadata)
+}
+
 pub async fn download_snapshots(
     network: FarcasterNetwork,
     snapshot_config: &Config,
@@ -206,16 +252,8 @@ pub async fn download_snapshots(
 ) -> Result<(), SnapshotError> {
     let snapshot_dir = snapshot_config.snapshot_download_dir.clone();
     std::fs::create_dir_all(snapshot_dir.clone())?;
-    let metadata_url = format!(
-        "{}/{}",
-        snapshot_config.snapshot_download_url,
-        metadata_path(network, shard_id)
-    );
-    info!("Retrieving metadata from {}", metadata_url);
-    let metadata_json = reqwest::get(metadata_url)
-        .await?
-        .json::<SnapshotMetadata>()
-        .await?;
+
+    let metadata_json = download_metadata(network, shard_id, snapshot_config).await?;
     let base_path = metadata_json.key_base;
 
     let mut local_chunks = vec![];

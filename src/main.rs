@@ -145,6 +145,7 @@ async fn schedule_background_jobs(
     block_store: BlockStore,
     shard_stores: HashMap<u32, Stores>,
     sync_complete_rx: watch::Receiver<bool>,
+    statsd_client: StatsdClientWrapper,
 ) {
     let sched = JobScheduler::new().await.unwrap();
     let mut jobs = vec![];
@@ -170,6 +171,19 @@ async fn schedule_background_jobs(
     )
     .unwrap();
     jobs.push(event_pruning_job);
+
+    if app_config.snapshot.snapshot_upload_enabled() {
+        let snapshot_upload_job = snapchain::jobs::snapshot_upload::snapshot_upload_job(
+            "0 0 5 * * *", // 5 AM UTC every day
+            app_config.snapshot.clone(),
+            app_config.fc_network,
+            block_store,
+            shard_stores,
+            statsd_client,
+        )
+        .unwrap();
+        jobs.push(snapshot_upload_job);
+    }
 
     for job in jobs {
         sched.add(job).await.unwrap();
@@ -344,6 +358,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             block_store.clone(),
             node.shard_stores.clone(),
             sync_complete_rx,
+            statsd_client.clone(),
         )
         .await;
 
@@ -446,6 +461,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             block_store.clone(),
             node.shard_stores.clone(),
             sync_complete_rx,
+            statsd_client.clone(),
         )
         .await;
 

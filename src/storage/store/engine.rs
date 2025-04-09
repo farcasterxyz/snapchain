@@ -134,7 +134,7 @@ pub struct Senders {
 
 impl Senders {
     pub fn new() -> Senders {
-        let (events_tx, _events_rx) = broadcast::channel::<HubEvent>(100);
+        let (events_tx, _events_rx) = broadcast::channel::<HubEvent>(10_000); // About 10s of events with full blocks
         Senders { events_tx }
     }
 }
