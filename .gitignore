@@ -13,3 +13,6 @@ target/
 .rocks/
 nodes/
 Procfile
+
+# Intellij IDEA
+.idea
