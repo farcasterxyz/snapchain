@@ -28,6 +28,7 @@ EOF
 # which isn't ideal.
 COPY Cargo.toml build.rs ./
 COPY src ./src
+COPY crates ./crates
 
 ENV RUST_BACKTRACE=full
 RUN cargo build --release --bins
@@ -55,7 +56,7 @@ RUN <<EOF
 EOF
 
 WORKDIR /app
-COPY --from=builder /usr/src/app/src/proto /app/proto
+COPY --from=builder /usr/src/app/crates/proto/src /app/proto
 COPY --from=builder /usr/src/app/nodes /app/nodes
 COPY --from=builder \
   /usr/src/app/target/release/snapchain \
