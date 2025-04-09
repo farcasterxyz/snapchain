@@ -20,6 +20,7 @@ export default defineConfig({
         text: 'Guides',
         items: [
           { text: 'Running a node on AWS', link: '/guides/running-a-node' },
+          { text: 'Reading casts from Snapchain', link: '/guides/reading-casts' },
         ],
       },
     ],
