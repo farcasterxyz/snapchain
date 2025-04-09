@@ -308,11 +308,11 @@ pub struct ReactionRequest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReactionsByFidRequest {
     fid: u64,
-    #[serde(rename = "reactionType")]
+    #[serde(rename = "reactionType", alias = "reaction_type")]
     reaction_type: ReactionType,
-    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "pageSize", alias = "page_size", skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
-    #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "pageToken", alias = "page_token", skip_serializing_if = "Option::is_none")]
     page_token: Option<Vec<u8>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reverse: Option<bool>,
