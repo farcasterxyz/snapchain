@@ -608,8 +608,6 @@ impl HubService for MyHubService {
         &self,
         request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
-        authenticate_request(&request, &self.allowed_users)?;
-
         info!("Received call to [subscribe] RPC");
         let (server_tx, client_rx) = mpsc::channel::<Result<HubEvent, Status>>(100);
         let events_txs = match request.get_ref().shard_index {
