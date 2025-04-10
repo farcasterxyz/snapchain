@@ -5,14 +5,14 @@
 Get an proof for a username by the Farcaster username
 
 **Query Parameters**
-| Parameter | Description | Example |
-| --------- | ----------- | ------- |
-| name | The Farcaster username or ENS address | `name=adityapk` OR `name=dwr.eth` |
+| Parameter | Description                           | Example                           |
+| --------- | ------------------------------------- | --------------------------------- |
+| name      | The Farcaster username or ENS address | `name=adityapk` OR `name=dwr.eth` |
 
 **Example**
 
 ```bash
-curl http://127.0.0.1:2281/v1/userNameProofByName?name=adityapk
+curl http://127.0.0.1:3381/v1/userNameProofByName?name=adityapk
 ```
 
 **Response**
@@ -33,14 +33,14 @@ curl http://127.0.0.1:2281/v1/userNameProofByName?name=adityapk
 Get a list of proofs provided by an FID
 
 **Query Parameters**
-| Parameter | Description | Example |
-| --------- | ----------- | ------- |
-| fid | The FID being requested | `fid=2` |
+| Parameter | Description             | Example |
+| --------- | ----------------------- | ------- |
+| fid       | The FID being requested | `fid=2` |
 
 **Example**
 
 ```bash
-curl http://127.0.0.1:2281/v1/userNameProofsByFid?fid=2
+curl http://127.0.0.1:3381/v1/userNameProofsByFid?fid=2
 ```
 
 **Response**

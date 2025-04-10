@@ -2,17 +2,25 @@
 
 Events represent state changes, like a new message or contract event.
 
-Hubble emit events whenever it observes a state change. Since a hub may see messages in a different order than other hubs, events ordering is specific to each hub. Clients can subscribe to the hub using the [Events API](/reference/hubble/grpcapi/events) to get a live stream of changes to the hub.
+Snapchain nodes emit events whenever they observe a state change. Clients can subscribe to a node using the [Events API](../grpcapi/events.md) to get a live stream of changes.
 
-Hubble keeps event around for 3 days after which they are deleted to save space. To get older data, use the [GRPC](../grpcapi/grpcapi.md) or [HTTP](../httpapi/httpapi.md) APIs.
+Snapchain keeps events around for 3 days after which they are deleted to save space. To get older data, use the [GRPC](../grpcapi/grpcapi.md) or [HTTP](../httpapi/httpapi.md) APIs.
 
 ## HubEvent
 
-| Field | Type                                                                                                                                                                                                                                        | Label | Description |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- | ----------- |
-| type  | [HubEventType](#HubEventType)                                                                                                                                                                                                               |       |             |
-| id    | [uint64](#uint64)                                                                                                                                                                                                                           |       |             |
-| body  | [MergeMessageBody](#mergemessagebody), <br> [PruneMessageBody](#prunemessagebody), <br> [RevokeMessageBody](#revokemessagebody), <br>[MergeUserNameProofBody](#mergeusernameproofbody), <br>[MergeOnChainEventBody](#mergeonchaineventbody) | oneOf |             |
+| Field | Type                                                                                                                                                                                                                                        | Label | Description                                                       |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- | ----------------------------------------------------------------- |
+| type  | [HubEventType](#HubEventType)                                                                                                                                                                                                               |       | The type of event                                                 |
+| id    | [uint64](#uint64)                                                                                                                                                                                                                           |       | Unique identifier for the event that encodes block height ordering |
+| body  | [MergeMessageBody](#mergemessagebody), <br> [PruneMessageBody](#prunemessagebody), <br> [RevokeMessageBody](#revokemessagebody), <br>[MergeUserNameProofBody](#mergeusernameproofbody), <br>[MergeOnChainEventBody](#mergeonchaineventbody) | oneOf | The event payload                                                 |
+
+### Event ID Construction
+
+Event IDs are constructed to ensure chronological ordering by block. The ID combines:
+- The block height (when the event was created)
+- A sequence number within that block
+
+This design allows clients to determine which events occurred in the same block and their relative order, which is useful for processing events in chronological sequence.
 
 ## HubEventType
 
@@ -127,7 +135,7 @@ Hubble keeps event around for 3 days after which they are deleted to save space.
 
 | Field       | Type        | Label | Description                                             |
 | ----------- | ----------- | ----- | ------------------------------------------------------- |
-| migrated_at | [uint32](#) |       | The timestamp at which hubs were migrated to OP mainnet |
+| migrated_at | [uint32](#) |       | The timestamp at which nodes were migrated to OP mainnet |
 
 <a name="-SignerEventBody"></a>
 

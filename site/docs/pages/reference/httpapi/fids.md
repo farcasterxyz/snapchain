@@ -5,14 +5,14 @@
 Get a list of all the FIDs
 
 **Query Parameters**
-| Parameter | Description | Example |
-| --------- | ----------- | ------- |
-| | This endpoint accepts no parameters | |
+| Parameter | Description                         | Example |
+| --------- | ----------------------------------- | ------- |
+|           | This endpoint accepts no parameters |         |
 
 **Example**
 
 ```bash
-curl http://127.0.0.1:2281/v1/fids
+curl http://127.0.0.1:3381/v1/fids
 ```
 
 **Response**

@@ -1,6 +1,6 @@
 # HTTP API
 
-Hubble serves a HTTP API on port 2281 by default.
+Snapchain nodes serve a HTTP API on port 3381 by default.
 
 ## Using the API
 
@@ -11,13 +11,13 @@ The API can be called from any programming language or browser by making a norma
 Simply open the URL in a browser
 
 ```url
-http://127.0.0.1:2281/v1/castsByFid?fid=2
+http://127.0.0.1:3381/v1/castsByFid?fid=2
 ```
 
 **Call the API using curl**
 
 ```bash
-curl http://127.0.0.1:2281/v1/castsByFid?fid=2
+curl http://127.0.0.1:3381/v1/castsByFid?fid=2
 ```
 
 **Call the API via Javascript, using the axios library**
@@ -26,7 +26,7 @@ curl http://127.0.0.1:2281/v1/castsByFid?fid=2
 import axios from "axios";
 
 const fid = 2;
-const server = "http://127.0.0.1:2281";
+const server = "http://127.0.0.1:3381";
 
 try {
     const response = await axios.get(`${server}/v1/castsByFid?fid=${fid}`);
@@ -39,9 +39,30 @@ try {
 }
 ```
 
-**OpenAPI Spec**
+## Available Endpoints
 
-An OpenAPI spec is provided for the Hubble REST API. It can be viewed [here](https://redocly.github.io/redoc/?url=https://raw.githubusercontent.com/farcasterxyz/hub-monorepo/main/packages/hub-nodejs/spec.yaml).
+| Endpoint                    | Description                                           | Parameters                                               |
+|-----------------------------|-------------------------------------------------------|----------------------------------------------------------|
+| `/v1/info`                  | Get node information                                  | None                                                     |
+| `/v1/castById`              | Get a cast by ID                                      | `fid`, `hash`                                            |
+| `/v1/castsByFid`            | Get all casts by FID                                  | `fid`, `pageSize`, `pageToken`, `reverse`, `startTimestamp`, `stopTimestamp` |
+| `/v1/castsByMention`        | Get casts that mention a specific FID                 | `fid`, `pageSize`, `pageToken`, `reverse`                |
+| `/v1/castsByParent`         | Get cast replies to a parent cast or URL              | `fid`, `hash` OR `url`, `pageSize`, `pageToken`, `reverse` |
+| `/v1/reactionById`          | Get a specific reaction                               | `fid`, `reactionType`, `targetCastId` OR `targetUrl`    |
+| `/v1/reactionsByFid`        | Get reactions by FID                                  | `fid`, `reactionType`, `pageSize`, `pageToken`, `reverse` |
+| `/v1/reactionsByCast`       | Get reactions to a cast (deprecated)                  | `targetCastId` OR `targetUrl`, `reactionType`, `pageSize`, `pageToken`, `reverse` |
+| `/v1/reactionsByTarget`     | Get reactions to a target (cast or URL)               | `targetCastId` OR `targetUrl`, `reactionType`, `pageSize`, `pageToken`, `reverse` |
+| `/v1/linkById`              | Get a link by ID                                      | `fid`, `linkType`, `targetFid`                           |
+| `/v1/linksByFid`            | Get links created by an FID                           | `fid`, `linkType`, `pageSize`, `pageToken`, `reverse`    |
+| `/v1/linksByTargetFid`      | Get links targeting an FID                            | `targetFid`, `linkType`, `pageSize`, `pageToken`, `reverse` |
+| `/v1/userDataByFid`         | Get user data by FID                                  | `fid`, `pageSize`, `pageToken`, `reverse`                |
+| `/v1/storageLimitsByFid`    | Get storage limits for an FID                         | `fid`                                                    |
+| `/v1/usernameProofByName`   | Get username proof by name                            | `name`                                                   |
+| `/v1/usernameProofsByFid`   | Get username proofs by FID                            | `fid`, `pageSize`, `pageToken`, `reverse`                |
+| `/v1/validateMessage`       | Validate a message                                    | Message object                                           |
+| `/v1/verificationsByFid`    | Get verifications by FID                              | `fid`, `pageSize`, `pageToken`, `reverse`                |
+| `/v1/onChainSignersByFid`   | Get on-chain signers by FID                           | `fid`, `pageSize`, `pageToken`, `reverse`                |
+| `/v1/onChainEventsByFid`    | Get on-chain events by FID                            | `fid`, `eventType`, `pageSize`, `pageToken`, `reverse`   |
 
 ## Response encoding
 
@@ -77,10 +98,10 @@ Fetch all casts by FID `2`, fetching upto 3 casts per Page
 
 ```bash
 # Fetch first page
-http://127.0.0.1:2281/v1/castsByFid?fid=2&pageSize=3
+http://127.0.0.1:3381/v1/castsByFid?fid=2&pageSize=3
 
 # Fetch next page. The pageToken is from the previous response(`response.nextPageToken`)
-http://127.0.0.1:2281/v1/castsByFid?fid=2&pageSize=3&pageToken=AuzO1V0DtaItCwwa10X6YsfStlynsGWT
+http://127.0.0.1:3381/v1/castsByFid?fid=2&pageSize=3&pageToken=AuzO1V0DtaItCwwa10X6YsfStlynsGWT
 ```
 
 **Javascript Example**
@@ -89,7 +110,7 @@ http://127.0.0.1:2281/v1/castsByFid?fid=2&pageSize=3&pageToken=AuzO1V0DtaItCwwa1
 import axios from "axios";
 
 const fid = 2;
-const server = "http://127.0.0.1:2281";
+const server = "http://127.0.0.1:3381";
 
 let nextPageToken = "";
 do {
@@ -99,6 +120,21 @@ do {
 } while (nextPageToken !== "")
 ```
 
+## Timestamp Filtering
+
+Some endpoints support filtering by timestamp, allowing you to retrieve results within a specific time range:
+
+| Parameter      | Description                                       | Example                |
+| -------------- | ------------------------------------------------- | ---------------------- |
+| startTimestamp | Start of the time range (inclusive)               | `startTimestamp=1000`  |
+| stopTimestamp  | End of the time range (inclusive)                 | `stopTimestamp=2000`   |
+
+Example:
+```bash
+# Get casts from FID 2 between timestamps 1000 and 2000
+http://127.0.0.1:3381/v1/castsByFid?fid=2&startTimestamp=1000&stopTimestamp=2000
+```
+
 ## Handling Errors
 
 If there's an API error, the HTTP status code is set to `400` or `500` as appropriate. The response is a JSON object with `detail`, `errCode` and `metadata` fields set to identify and debug the errors.
@@ -106,7 +142,7 @@ If there's an API error, the HTTP status code is set to `400` or `500` as approp
 **Example**
 
 ```bash
-$ curl "http://127.0.0.1:2281/v1/castById?fid=invalid"
+$ curl "http://127.0.0.1:3381/v1/castById?fid=invalid"
 {
   "errCode": "bad_request.validation_failure",
   "presentable": false,
@@ -121,10 +157,6 @@ $ curl "http://127.0.0.1:2281/v1/castById?fid=invalid"
 }
 ```
 
-## CORS
-
-You can set a custom CORS header in the HTTP server by using the `--http-cors-origin` parameter when running your Hubble instance. Setting this to `*` will allow requests from any origin.
-
 ## Limitations
 
-The HTTP API currently does not support any of the Sync APIs that are available in the gRPC version. When Hubs sync with each other, they will use the gRPC APIs instead of the HTTP APIs.
+The HTTP API currently does not support any of the Sync APIs that are available in the gRPC version. When nodes sync with each other, they will use the gRPC APIs instead of the HTTP APIs.

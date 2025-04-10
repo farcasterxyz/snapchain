@@ -22,7 +22,7 @@ Get a reaction by its created FID and target Cast.
 **Example**
 
 ```bash
-curl http://127.0.0.1:2281/v1/reactionById?fid=2&reaction_type=1&target_fid=1795&target_hash=0x7363f449bfb0e7f01c5a1cc0054768ed5146abc0
+curl http://127.0.0.1:3381/v1/reactionById?fid=2&reaction_type=1&target_fid=1795&target_hash=0x7363f449bfb0e7f01c5a1cc0054768ed5146abc0
 ```
 
 **Response**
@@ -63,7 +63,7 @@ Get all reactions by an FID
 **Example**
 
 ```bash
-curl http://127.0.0.1:2281/v1/reactionsByFid?fid=2&reaction_type=1
+curl http://127.0.0.1:3381/v1/reactionsByFid?fid=2&reaction_type=1
 ```
 
 **Response**
@@ -110,7 +110,7 @@ Get all reactions to a cast
 **Example**
 
 ```bash
-curl http://127.0.0.1:2281/v1/reactionsByCast?target_fid=2&reaction_type=1&target_hash=0x7363f449bfb0e7f01c5a1cc0054768ed5146abc0
+curl http://127.0.0.1:3381/v1/reactionsByCast?target_fid=2&reaction_type=1&target_hash=0x7363f449bfb0e7f01c5a1cc0054768ed5146abc0
 ```
 
 **Response**
@@ -156,7 +156,7 @@ Get all reactions to cast's target URL
 **Example**
 
 ```bash
-curl http://127.0.0.1:2281/v1/reactionsByTarget?url=chain://eip155:1/erc721:0x39d89b649ffa044383333d297e325d42d31329b2
+curl http://127.0.0.1:3381/v1/reactionsByTarget?url=chain://eip155:1/erc721:0x39d89b649ffa044383333d297e325d42d31329b2
 ```
 
 **Response**

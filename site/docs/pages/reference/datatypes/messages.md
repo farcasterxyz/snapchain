@@ -216,7 +216,7 @@ Removes a Verification of any type
 
 ## 7. Frame Action
 
-Represents an action performed by a user on a frame. This message is not stored on the hubs and cannot be submitted,
+Represents an action performed by a user on a frame. This message is not stored on the nodes and cannot be submitted,
 only validated.
 
 ### 7.1 FrameActionBody

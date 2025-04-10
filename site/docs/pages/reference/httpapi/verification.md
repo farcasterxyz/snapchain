@@ -5,15 +5,15 @@
 Get a list of verifications provided by an FID
 
 **Query Parameters**
-| Parameter | Description | Example |
-| --------- | ----------- | ------- |
-| fid | The FID being requested | `fid=2` |
-| address | The optional ETH address to filter by | `address=0x91031dcfdea024b4d51e775486111d2b2a715871` |
+| Parameter | Description                           | Example                                              |
+| --------- | ------------------------------------- | ---------------------------------------------------- |
+| fid       | The FID being requested               | `fid=2`                                              |
+| address   | The optional ETH address to filter by | `address=0x91031dcfdea024b4d51e775486111d2b2a715871` |
 
 **Example**
 
 ```bash
-curl http://127.0.0.1:2281/v1/verificationsByFid?fid=2
+curl http://127.0.0.1:3381/v1/verificationsByFid?fid=2
 ```
 
 **Response**

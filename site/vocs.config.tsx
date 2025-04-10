@@ -13,7 +13,6 @@ export default defineConfig({
         text: 'Overview',
         items: [
           { text: 'What is Snapchain?', link: '/' },
-          { text: 'Getting Started', link: '/getting-started' },
         ],
       },
       {
@@ -44,8 +43,10 @@ export default defineConfig({
             { text: 'Message API', link: '/reference/grpcapi/message' },
             { text: 'Fid API', link: '/reference/grpcapi/fids' },
             { text: 'Storage API', link: '/reference/grpcapi/storagelimits' },
+            { text: 'Blocks API', link: '/reference/grpcapi/blocks' },
             { text: 'Onchain API', link: '/reference/grpcapi/onchain' },
             { text: 'Events API', link: '/reference/grpcapi/events' },
+            { text: 'Metadata API', link: '/reference/grpcapi/metadata' },
           ]},
           { text: 'Http API', items: [
             { text: 'Using HTTP APIs', link: '/reference/httpapi/httpapi' },

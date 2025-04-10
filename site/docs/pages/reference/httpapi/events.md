@@ -14,7 +14,7 @@ Get an event by its Id
 **Example**
 
 ```bash
-curl http://127.0.0.1:2281/v1/eventById?id=350909155450880
+curl http://127.0.0.1:3381/v1/eventById?id=350909155450880
 
 ```
 
@@ -52,7 +52,7 @@ Hubs prune events older than 3 days, so not all historical events can be fetched
 **Example**
 
 ```bash
-curl http://127.0.0.1:2281/v1/events?from_event_id=350909155450880
+curl http://127.0.0.1:3381/v1/events?from_event_id=350909155450880
 
 ```
 

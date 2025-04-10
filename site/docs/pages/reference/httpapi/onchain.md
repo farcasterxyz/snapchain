@@ -13,7 +13,7 @@ Get a list of account keys (signers) provided by an FID
 **Example**
 
 ```bash
-curl http://127.0.0.1:2281/v1/onChainSignersByFid?fid=6833
+curl http://127.0.0.1:3381/v1/onChainSignersByFid?fid=6833
 ```
 
 **Response**
@@ -65,7 +65,7 @@ The onChainEventsByFid API will accept the following values for the `event_type`
 **Example**
 
 ```bash
-curl http://127.0.0.1:2281/v1/onChainEventsByFid?fid=3&event_type=1
+curl http://127.0.0.1:3381/v1/onChainEventsByFid?fid=3&event_type=1
 ```
 
 **Response**
@@ -107,7 +107,7 @@ Get a list of on chain events for a given Address
 **Example**
 
 ```bash
-curl http://127.0.0.1:2281/v1/onChainIdRegistryEventByAddress?address=0x74232bf61e994655592747e20bdf6fa9b9476f79
+curl http://127.0.0.1:3381/v1/onChainIdRegistryEventByAddress?address=0x74232bf61e994655592747e20bdf6fa9b9476f79
 ```
 
 **Response**

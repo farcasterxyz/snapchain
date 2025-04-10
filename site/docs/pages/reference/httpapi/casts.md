@@ -13,7 +13,7 @@ Get a cast by its FID and Hash.
 **Example**
 
 ```bash
-curl http://127.0.0.1:2281/v1/castById?fid=2&hash=0xd2b1ddc6c88e865a33cb1a565e0058d757042974
+curl http://127.0.0.1:3381/v1/castById?fid=2&hash=0xd2b1ddc6c88e865a33cb1a565e0058d757042974
 ```
 
 **Response**
@@ -57,7 +57,7 @@ Fetch all casts for authored by an FID.
 **Example**
 
 ```bash
-curl http://127.0.0.1:2281/v1/castsByFid?fid=2
+curl http://127.0.0.1:3381/v1/castsByFid?fid=2
 ```
 
 **Response**
@@ -105,7 +105,7 @@ You can use either `?fid=...&hash=...` OR `?url=...` to query this endpoint
 **Example**
 
 ```bash
-curl http://127.0.0.1:2281/v1/castsByParent?fid=226&hash=0xa48dd46161d8e57725f5e26e34ec19c13ff7f3b9
+curl http://127.0.0.1:3381/v1/castsByParent?fid=226&hash=0xa48dd46161d8e57725f5e26e34ec19c13ff7f3b9
 ```
 
 **Response**
@@ -157,7 +157,7 @@ Use the `mentionsPositions` to extract the offset in the cast text where the FID
 **Example**
 
 ```bash
-curl http://127.0.0.1:2281/v1/castsByMention?fid=6833
+curl http://127.0.0.1:3381/v1/castsByMention?fid=6833
 ```
 
 **Response**

@@ -21,15 +21,15 @@ See [FIP-19](https://github.com/farcasterxyz/protocol/discussions/199) for more 
 Get UserData for a FID.
 
 **Query Parameters**
-| Parameter | Description | Example |
-| --------- | ----------- | ------- |
-| fid | The FID that's being requested | `fid=6833` |
-| user_data_type | The type of user data, either as a numerical value or type string. If this is omitted, all user data for the FID is returned| `user_data_type=1` OR `user_data_type=USER_DATA_TYPE_DISPLAY` |
+| Parameter      | Description                                                                                                                  | Example                                                       |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| fid            | The FID that's being requested                                                                                               | `fid=6833`                                                    |
+| user_data_type | The type of user data, either as a numerical value or type string. If this is omitted, all user data for the FID is returned | `user_data_type=1` OR `user_data_type=USER_DATA_TYPE_DISPLAY` |
 
 **Example**
 
 ```bash
-curl http://127.0.0.1:2281/v1/userDataByFid?fid=6833&user_data_type=1
+curl http://127.0.0.1:3381/v1/userDataByFid?fid=6833&user_data_type=1
 ```
 
 **Response**
