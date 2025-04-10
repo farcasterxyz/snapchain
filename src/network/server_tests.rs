@@ -98,7 +98,7 @@ mod tests {
                 let event = timeout(Duration::from_millis(100), listener.get_mut().next()).await;
                 if let Ok(Some(Ok(hub_event))) = event {
                     let block_number = hub_event.block_number;
-                    assert!(block_number > Some(0));
+                    assert!(block_number > 0);
                     num_events_seen += 1;
                     if num_events_seen == num_events_expected {
                         break;
@@ -120,7 +120,7 @@ mod tests {
                     r#type: HubEventType::MergeMessage as i32,
                     id: i,
                     body: None,
-                    block_number: None,
+                    block_number: 0,
                 })
                 .unwrap();
         }
@@ -135,7 +135,7 @@ mod tests {
                     r#type: HubEventType::MergeMessage as i32,
                     id: i,
                     body: None,
-                    block_number: None,
+                    block_number: 0,
                 },
             )
             .unwrap();
@@ -358,7 +358,7 @@ mod tests {
             r#type: HubEventType::MergeMessage as i32,
             id: event_id,
             body: None,
-            block_number: None,
+            block_number: 0,
         };
 
         let db = stores.get(&1u32).unwrap().shard_store.db.clone();
@@ -374,7 +374,7 @@ mod tests {
         let response = service.get_event(request).await.unwrap();
 
         let hub_event_response = response.into_inner();
-        assert_eq!(hub_event_response.block_number, Some(event_id >> SEQUENCE_BITS));
+        assert_eq!(hub_event_response.block_number, event_id >> SEQUENCE_BITS);
         assert_eq!(hub_event_response.r#type, hub_event.r#type);
         assert_eq!(hub_event_response.id, event_id);
     }

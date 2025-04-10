@@ -598,7 +598,7 @@ pub mod hub_events_factory {
                     deleted_messages: vec![],
                 },
             )),
-            block_number: None,
+            block_number: 0,
         }
     }
 }

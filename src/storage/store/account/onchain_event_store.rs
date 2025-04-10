@@ -387,7 +387,7 @@ impl OnchainEventStore {
                 },
             )),
             id: 0,
-            block_number: None,
+            block_number: 0,
         };
         let id = self
             .store_event_handler

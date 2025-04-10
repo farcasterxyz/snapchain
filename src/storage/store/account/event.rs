@@ -217,7 +217,7 @@ impl HubEvent {
     pub fn create_hub_event_response(hub_event: HubEvent) -> HubEvent {
         let (block_number, _) = HubEventIdGenerator::extract_height_and_seq(hub_event.id);
         HubEvent {
-            block_number: Some(block_number),
+            block_number,
             ..hub_event.clone()
         }
     }

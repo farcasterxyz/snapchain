@@ -220,7 +220,7 @@ pub trait StoreDef: Send + Sync {
                 message: Some(message.clone()),
             })),
             id: 0,
-            block_number: None,
+            block_number: 0,
         }
     }
 
@@ -233,7 +233,7 @@ pub trait StoreDef: Send + Sync {
                 deleted_messages: merge_conflicts,
             })),
             id: 0,
-            block_number: None,
+            block_number: 0,
         }
     }
 
@@ -245,7 +245,7 @@ pub trait StoreDef: Send + Sync {
                 message: Some(message.clone()),
             })),
             id: 0,
-            block_number: None,
+            block_number: 0,
         }
     }
 }
