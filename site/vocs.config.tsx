@@ -23,6 +23,7 @@ export default defineConfig({
           { text: 'Reading messages from Snapchain', link: '/guides/reading-messages' },
           { text: 'Writing messages to Snapchain', link: '/guides/writing-messages' },
           { text: 'Syncing to a DB', link: '/guides/syncing-to-db' },
+          { text: 'Migrating to Snapchain', link: '/guides/migrating-to-snapchain' },
         ],
       },
     ],
