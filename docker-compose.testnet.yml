@@ -4,9 +4,9 @@ services:
   snap_read:
     image: farcasterxyz/snapchain:latest
     pull_policy: always
-    #    build: # For testing
-    #      context: .
-    #      dockerfile: Dockerfile
+#    build: # For testing
+#      context: .
+#      dockerfile: Dockerfile
     init: true # Auto-reap zombie processes and forward process signals
     environment:
       RUST_BACKTRACE: "full"
@@ -48,7 +48,7 @@ services:
       - "3382:3382/udp"
       - "3383:3383/tcp"
     volumes:
-      - .rocks:/app/.rocks
+      - .rocks.testnet:/app/.rocks.testnet
     networks:
       - snapchain
 

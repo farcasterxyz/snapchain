@@ -84,8 +84,6 @@ mod tests {
             event_types,
             from_id: None,
             shard_index: Some(shard_id),
-            fid_partitions: None,
-            fid_partition_index: None,
         });
         let mut listener = service.subscribe(request).await.unwrap();
 

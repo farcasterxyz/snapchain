@@ -104,6 +104,12 @@ impl MyHubService {
             }
         }
 
+        if allowed_users.is_empty() {
+            info!("RPC server auth disabled");
+        } else {
+            info!("RPC server auth enabled with {} users", allowed_users.len());
+        }
+
         let service = Self {
             allowed_users,
             network,
@@ -608,13 +614,18 @@ impl HubService for MyHubService {
         &self,
         request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
-        info!("Received call to [subscribe] RPC");
+        info!(
+            "Received call to [subscribe] RPC for events: {:?} from: {:?} with shard: {:?}",
+            request.get_ref().event_types,
+            request.get_ref().from_id,
+            request.get_ref().shard_index
+        );
         let (server_tx, client_rx) = mpsc::channel::<Result<HubEvent, Status>>(100);
         let events_txs = match request.get_ref().shard_index {
             Some(shard_id) => match self.shard_senders.get(&(shard_id)) {
                 None => {
                     return Err(Status::from_error(Box::new(
-                        HubError::invalid_internal_state("Missing shard event tx"),
+                        HubError::invalid_internal_state("Invalid shard id"),
                     )))
                 }
                 Some(senders) => vec![senders.events_tx.clone()],
@@ -647,6 +658,10 @@ impl HubService for MyHubService {
 
             let mut page_token = None;
             for store in shard_stores {
+                info!(
+                    "[subscribe] Replaying old events for shard {}",
+                    store.shard_id
+                );
                 loop {
                     let old_events = store
                         .get_events(
@@ -676,6 +691,11 @@ impl HubService for MyHubService {
                 }
             }
 
+            info!(
+                "[subscribe] Streaming live events from {} shards",
+                events_txs.len()
+            );
+
             // TODO(aditi): It's possible that events show up between when we finish reading from the db and the subscription starts. We don't handle this case in the current hub code, but we may want to down the line.
             for event_tx in events_txs {
                 let mut inner_events: Vec<i32> = Vec::new();
@@ -694,6 +714,7 @@ impl HubService for MyHubService {
                                         Ok(_) => {}
                                         Err(_) => {
                                             // This means the client hung up
+                                            info!("[subscribe] Client hung up on RPC, stopping event stream");
                                             break;
                                         }
                                     }
