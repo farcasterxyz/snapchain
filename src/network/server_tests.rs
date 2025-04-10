@@ -395,8 +395,8 @@ mod tests {
 
         assert!(response.is_err());
         let status = response.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::NotFound);
-        assert_eq!(status.message(), "Event not found");
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(status.message(), "not_found/Event not found");
     }
 
     #[tokio::test]

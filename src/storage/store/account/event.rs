@@ -179,7 +179,7 @@ impl HubEvent {
         let key = Self::make_event_key(event_id);
         let buf = db.get(&key)?;
         if buf.is_none() {
-            return Ok(None); // Do we want to return none or an error?
+            return Err(HubError::not_found("Event not found"));
         }
 
         match HubEvent::decode(buf.unwrap().as_slice()) {
