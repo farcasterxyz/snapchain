@@ -20,7 +20,8 @@ export default defineConfig({
         text: 'Guides',
         items: [
           { text: 'Running a node on AWS', link: '/guides/running-a-node' },
-          { text: 'Reading casts from Snapchain', link: '/guides/reading-casts' },
+          { text: 'Reading messages from Snapchain', link: '/guides/reading-messages' },
+          { text: 'Writing messages to Snapchain', link: '/guides/writing-messages' },
           { text: 'Syncing to a DB', link: '/guides/syncing-to-db' },
         ],
       },
