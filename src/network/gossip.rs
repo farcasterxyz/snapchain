@@ -26,7 +26,7 @@ use libp2p::{
 use libp2p_connection_limits::ConnectionLimits;
 use prost::Message;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Duration;
 use tokio::io;
@@ -50,6 +50,7 @@ pub struct Config {
     pub announce_address: String,
     pub bootstrap_peers: String,
     pub contact_info_interval: Duration,
+    pub bootstrap_reconnect_interval: Duration,
 }
 
 impl Default for Config {
@@ -63,6 +64,7 @@ impl Default for Config {
             announce_address: address,
             bootstrap_peers: "".to_string(),
             contact_info_interval: Duration::from_secs(300),
+            bootstrap_reconnect_interval: Duration::from_secs(30),
         }
     }
 }
@@ -88,6 +90,13 @@ impl Config {
     pub fn with_contact_info_interval(self, contact_info_interval: Duration) -> Self {
         Config {
             contact_info_interval,
+            ..self
+        }
+    }
+
+    pub fn with_bootstrap_reconnect_interval(self, bootstrap_reconnect_interval: Duration) -> Self {
+        Config {
+            bootstrap_reconnect_interval,
             ..self
         }
     }
@@ -139,10 +148,12 @@ pub struct SnapchainGossip {
     system_tx: Sender<SystemMessage>,
     sync_channels: HashMap<InboundRequestId, sync::ResponseChannel>,
     read_node: bool,
-    bootstrap_addrs: Vec<String>,
+    bootstrap_addrs: HashSet<String>,
+    connected_bootstrap_addrs: HashSet<String>,
     announce_address: String,
     fc_network: FarcasterNetwork,
     contact_info_interval: Duration,
+    bootstrap_reconnect_interval: Duration,
     statsd_client: StatsdClientWrapper,
 }
 
@@ -271,11 +282,13 @@ impl SnapchainGossip {
             system_tx,
             sync_channels: HashMap::new(),
             read_node,
-            bootstrap_addrs: config.bootstrap_addrs(),
+            bootstrap_addrs: config.bootstrap_addrs().into_iter().collect(),
             announce_address: config.announce_address.clone(),
             fc_network,
             contact_info_interval: config.contact_info_interval,
+            bootstrap_reconnect_interval: config.bootstrap_reconnect_interval,
             statsd_client,
+            connected_bootstrap_addrs: HashSet::new(),
         })
     }
 
@@ -298,11 +311,13 @@ impl SnapchainGossip {
 
     pub async fn check_and_reconnect_to_bootstrap_peers(&mut self) {
         let connected_peers_count = self.swarm.connected_peers().count();
-        // If we have no connected peers, try to reconnect to bootstrap peers
-        if connected_peers_count == 0 && !self.bootstrap_addrs.is_empty() {
-            warn!("No connected peers. Attempting to reconnect to bootstrap peers...");
+        // Validators should stay connected to all bootstrap peers. Read nodes should only try to connect if they're not connected to anybody else.
+        if !self.read_node || (self.read_node && connected_peers_count == 0) {
             for addr in &self.bootstrap_addrs {
-                let _ = Self::dial(&mut self.swarm, &addr);
+                if !self.connected_bootstrap_addrs.contains(addr) {
+                    warn!("Attempting to reconnect to bootstrap peer: {}", addr);
+                    let _ = Self::dial(&mut self.swarm, &addr);
+                }
             }
         }
     }
@@ -330,7 +345,7 @@ impl SnapchainGossip {
     }
 
     pub async fn start(self: &mut Self) {
-        let mut reconnect_timer = tokio::time::interval(Duration::from_secs(30));
+        let mut reconnect_timer = tokio::time::interval(self.bootstrap_reconnect_interval);
 
         let mut publish_contact_info_timer = tokio::time::interval(self.contact_info_interval);
 
@@ -348,21 +363,36 @@ impl SnapchainGossip {
                 }
                 gossip_event = self.swarm.select_next_some() => {
                     match gossip_event {
-                        SwarmEvent::ConnectionEstablished {peer_id, ..} => {
+                        SwarmEvent::ConnectionEstablished {peer_id, endpoint, ..} => {
                             info!(total_peers = self.swarm.connected_peers().count(), "Connection established with peer: {peer_id}");
                             let event = MalachiteNetworkEvent::PeerConnected(MalachitePeerId::from_libp2p(&peer_id));
                             let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await;
                             if let Err(e) = res {
                                 warn!("Failed to send connection established message: {}", e);
-                            }
+                            };
+                            match endpoint {
+                                libp2p::core::ConnectedPoint::Dialer { address, ..} => {
+                                    if self.bootstrap_addrs.contains(&address.to_string()) {
+                                        self.connected_bootstrap_addrs.insert(address.to_string());
+                                    }
+
+                                },
+                                libp2p::core::ConnectedPoint::Listener { .. } => {},
+                            };
                         },
-                        SwarmEvent::ConnectionClosed {peer_id, cause, ..} => {
+                        SwarmEvent::ConnectionClosed {peer_id, cause, endpoint, ..} => {
                             info!("Connection closed with peer: {:?} due to: {:?}", peer_id, cause);
                             let event = MalachiteNetworkEvent::PeerDisconnected(MalachitePeerId::from_libp2p(&peer_id));
                             let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await;
                             if let Err(e) = res {
                                 warn!("Failed to send connection closed message: {}", e);
                             }
+                            match endpoint {
+                                libp2p::core::ConnectedPoint::Dialer { address, ..} => {
+                                    self.connected_bootstrap_addrs.remove(&address.to_string());
+                                },
+                                libp2p::core::ConnectedPoint::Listener { .. } => {},
+                            };
                         },
                         SwarmEvent::Behaviour(SnapchainBehaviorEvent::Gossipsub(gossipsub::Event::Subscribed { peer_id, topic })) =>
                             info!("Peer: {peer_id} subscribed to topic: {topic}"),
