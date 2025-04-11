@@ -13,3 +13,4 @@ target/
 .rocks/
 nodes/
 Procfile
+.vscode/

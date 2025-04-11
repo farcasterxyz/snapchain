@@ -1,0 +1,279 @@
+# Writing to snapchain 
+
+Create your Farcaster account programmatically and publish your first message. 
+
+The example shows you how to:
+
+- Make onchain transactions to create an account
+- Rent a storage unit so you can publish messages
+- Add signer key to sign messages
+- Acquire an fname for your account
+- Create, sign and publish messages
+
+This example can be checked out as a fully functional
+repository [here](https://github.com/farcasterxyz/hub-monorepo/tree/main/packages/hub-nodejs/examples/hello-world).
+
+### Requirements
+
+- Write access to a node(either your own, or a 3rd party one)
+- An ETH wallet with about ~10$ USD of ETH bridged to [Optimism](https://www.optimism.io/)
+- An ETH RPC URL for OP Mainnet (e.g. via [Alchemy](https://www.alchemy.com/), [Infura](https://www.infura.io/) or [QuickNode](https://www.quicknode.com/)).
+
+### Custody address vs signer
+In order to register an account and send messages, you need 2 pairs of keys: 
+- Custody: This is the ETH account which funds the initial id registration and storage. You need ~$10 USD in this account. You can use any ETH address as long as the $10 required is transferred via OP mainnet. The private key will be used to sign any signer requests and fname registrations. The person registering should always hold this private key.
+- Signer: This is a keypair registered with the key registry that's used to sign messages a user publishes to the Farcaster network. If an app is publishing on behalf of a user, the app will hold the private key for this keypair. 
+
+## 1. Set up constants
+
+```typescript
+import {
+  ID_GATEWAY_ADDRESS,
+  idGatewayABI,
+  KEY_GATEWAY_ADDRESS,
+  keyGatewayABI,
+  ID_REGISTRY_ADDRESS,
+  idRegistryABI,
+  FarcasterNetwork,
+} from '@farcaster/hub-web';
+import { zeroAddress } from 'viem';
+import { optimism } from 'viem/chains';
+import { generatePrivateKey, privateKeyToAccount, toAccount } from "viem/accounts";
+
+/**
+ * Populate the following constants with your own values
+ */
+const CUSTODY_PRIVATE_KEY = '<REQUIRED>'; // A private key corresponding with any ETH address.
+const OP_PROVIDER_URL = '<REQUIRED>'; // Alchemy or Infura url
+const RECOVERY_ADDRESS = zeroAddress; // Optional, using the default value means the account will not be recoverable later if the mnemonic is lost
+const SIGNER_PRIVATE_KEY: Hex = zeroAddress; // Optional, using the default means a new signer will be created each time
+
+// Note: crackle is the Farcaster team's mainnet node, which is password protected to prevent abuse. Use a 3rd party node 
+// provider like https://neynar.com/ Or, run your own mainnet node and broadcast to it permissionlessly.
+const HUB_URL = 'crackle.farcaster.xyz:3383'; // URL + Port of the node 
+const HUB_USERNAME = ''; // Username for auth, leave blank if not using TLS
+const HUB_PASS = ''; // Password for auth, leave blank if not using TLS
+const USE_SSL = false; // set to true if talking to a node that uses SSL (3rd party hosted nodes or nodes that require auth)
+const FC_NETWORK = FarcasterNetwork.MAINNET; // Network of the node
+
+const CHAIN = optimism;
+
+const IdGateway = {
+  abi: idGatewayABI,
+  address: ID_GATEWAY_ADDRESS,
+  chain: CHAIN,
+};
+const IdContract = {
+  abi: idRegistryABI,
+  address: ID_REGISTRY_ADDRESS,
+  chain: CHAIN,
+};
+const KeyContract = {
+  abi: keyGatewayABI,
+  address: KEY_GATEWAY_ADDRESS,
+  chain: CHAIN,
+};
+```
+
+## 2. Register and pay for storage
+
+Create a function to register an FID and pay for storage. This function will check if the account already has an FID
+and return early if so.
+
+If you don't have a funded account you can use, note the address and private key pair that's logged. Transfer funds to the address and use the same private key as the `CUSTODY_PRIVATE_KEY` for the next run of the script. 
+
+```typescript
+const getOrRegisterFid = async (): Promise<number> => {
+  const balance = await getBalance(walletClient, { address: account.address });
+  const existingFid = (await readContract(walletClient, {
+    ...IdContract,
+    functionName: "idOf",
+    args: [account.address],
+  })) as bigint;
+
+  console.log(`Using address: ${account.address} with balance: ${balance}, private key: ${accountPrivateKey}`);
+
+  if (balance === 0n && existingFid === 0n) {
+    throw new Error("No existing Fid and no funds to register an fid");
+  }
+
+  if (existingFid > 0n) {
+    return parseInt(existingFid.toString());
+  }
+
+  const price = await readContract(walletClient, {
+    ...IdGateway,
+    functionName: "price",
+  });
+
+  if (balance < price) {
+    throw new Error(`Insufficient balance to rent storage, required: ${price}, balance: ${balance}`);
+  }
+
+  const { request: registerRequest } = await simulateContract(walletClient, {
+    ...IdGateway,
+    functionName: "register",
+    args: [RECOVERY_ADDRESS],
+    value: price,
+  });
+  const registerTxHash = await writeContract(walletClient, registerRequest);
+  const registerTxReceipt = await waitForTransactionReceipt(walletClient, { hash: registerTxHash });
+
+  if (registerTxReceipt.logs[0]) {
+    // Now extract the FID from the logs
+    const registerLog = decodeEventLog({
+      abi: idRegistryABI,
+      data: registerTxReceipt.logs[0].data,
+      topics: registerTxReceipt.logs[0].topics,
+    });
+
+    const fid = parseInt(registerLog.args["id"]);
+    return fid;
+  } else {
+    throw new Error("Did not receive logs for registered fid");
+  }
+};
+
+const fid = await getOrRegisterFid();
+```
+
+## 3. Add a signer 
+Now, we will add a signer to the key registry. Every signer must have a signed metadata field from the fid of the app requesting it.
+In our case, we will use our own fid. Note, this requires you to sign a message with the private key of the address
+holding the fid. If this is not possible, register a separate fid for the app first and use that.
+
+```typescript
+
+const getOrRegisterSigner = async (fid: number) => {
+  if (SIGNER_PRIVATE_KEY !== zeroAddress) {
+    // If a private key is provided, we assume the signer is already in the key registry
+    const privateKeyBytes = fromHex(SIGNER_PRIVATE_KEY, "bytes");
+    const publicKeyBytes = ed25519.getPublicKey(privateKeyBytes);
+    return privateKeyBytes;
+  }
+
+  const privateKey = ed25519.utils.randomPrivateKey();
+  const publicKey = toHex(ed25519.getPublicKey(privateKey));
+
+  // To add a key, we need to sign the metadata with the fid of the app we're adding the key on behalf of
+  // We'll use our own fid and custody address for simplicity. This can also be a separate App specific fid.
+  const localAccount = toAccount(account);
+  const eip712signer = new ViemLocalEip712Signer(localAccount);
+  const metadata = await eip712signer.getSignedKeyRequestMetadata({
+    requestFid: BigInt(fid),
+    key: fromHex(publicKey, "bytes"),
+    deadline: BigInt(Math.floor(Date.now() / 1000) + 60 * 60), // 1 hour from now
+  });
+
+  const metadataHex = toHex(metadata.unwrapOr(new Uint8Array()));
+
+  const { request: signerAddRequest } = await simulateContract(walletClient, {
+    ...KeyContract,
+    functionName: "add",
+    args: [1, publicKey, 1, metadataHex], // keyType, publicKey, metadataType, metadata
+  });
+
+  const signerAddTxHash = await writeContract(walletClient, signerAddRequest);
+  await waitForTransactionReceipt(walletClient, { hash: signerAddTxHash });
+  await new Promise((resolve) => setTimeout(resolve, 30000));
+  return privateKey;
+};
+
+
+const signer = await getOrRegisterSigner(fid);
+```
+
+## 4. Register an fname
+
+Now that the onchain actions are complete, let's register an fname using the farcaster offchain fname registry.
+Registering an fname requires a signature from the custody address of the fid.
+
+```typescript
+const registerFname = async (fid: number) => {
+  try {
+    // First check if this fid already has an fname
+    const response = await axios.get(`https://fnames.farcaster.xyz/transfers/current?fid=${fid}`);
+    const fname = response.data.transfer.username;
+    return fname;
+  } catch (e) {
+    // No username, ignore and continue with registering
+  }
+
+  const fname = `fid-${fid}`;
+  const timestamp = Math.floor(Date.now() / 1000);
+  const localAccount = toAccount(account);
+  const signer = new ViemLocalEip712Signer(localAccount as LocalAccount<string>);
+  const userNameProofSignature = await signer.signUserNameProofClaim(
+    makeUserNameProofClaim({
+      name: fname,
+      timestamp: timestamp,
+      owner: account.address,
+    }),
+  );
+
+  try {
+    const response = await axios.post("https://fnames.farcaster.xyz/transfers", {
+      name: fname, // Name to register
+      from: 0, // Fid to transfer from (0 for a new registration)
+      to: fid, // Fid to transfer to (0 to unregister)
+      fid: fid, // Fid making the request (must match from or to)
+      owner: account.address, // Custody address of fid making the request
+      timestamp: timestamp, // Current timestamp in seconds
+      signature: bytesToHex(userNameProofSignature._unsafeUnwrap()), // EIP-712 signature signed by the current custody address of the fid
+    });
+    return fname;
+  } catch (e) {
+    // @ts-ignore
+    throw new Error(`Error registering fname: ${JSON.stringify(e.response.data)} (status: ${e.response.status})`);
+  }
+};
+
+const fname = await registerFname(fid);
+```
+
+Note that this only associated the name to our fid, we still need to set it as our username.
+
+## 5. Write to Snapchain 
+
+Finally, we're now ready to submit messages. First, we shall set the fname as our username. And then post a
+cast.
+
+```typescript
+const submitMessage = async (resultPromise: HubAsyncResult<Message>) => {
+  const result = await resultPromise;
+  if (result.isErr()) {
+    throw new Error(`Error creating message: ${result.error}`);
+  }
+  const messageSubmitResult = await hubClient.submitMessage(result.value, metadata);
+  if (messageSubmitResult.isErr()) {
+    throw new Error(`Error submitting message to node: ${messageSubmitResult.error}`);
+  }
+};
+
+const signer = new NobleEd25519Signer(signerPrivateKey);
+const dataOptions = {
+fid: fid,
+network: FC_NETWORK,
+};
+const userDataPfpBody = {
+type: UserDataType.USERNAME,
+value: fname,
+};
+await submitMessage(makeUserDataAdd(userDataPfpBody, dataOptions, signer));
+
+await submitMessage(
+makeCastAdd(
+    {
+    text: "Hello World!",
+    embeds: [],
+    embedsDeprecated: [],
+    mentions: [],
+    mentionsPositions: [],
+    type: CastType.CAST,
+    },
+    dataOptions,
+    signer,
+));
+```
+
+Now, you can view your profile on any farcaster client. To see it on Warpcast, visit `https://warpcast.com/@<fname>`

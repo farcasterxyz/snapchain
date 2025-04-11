@@ -1,0 +1,29 @@
+# Reading casts from Snapchain 
+
+#### Pre-requisites
+- Read only access to a node
+
+See [running a node](/guides/running-a-node) for more information on how to set up a node.
+
+To query all the casts for a particular FID, you can use the castsByFid HTTP endpoint:
+
+```bash
+# Default http port is 3381
+$ curl http://localhost:3381/v1/castsByFid\?fid\=1 \
+| jq ".messages[].data.castAddBody.text \
+| select( . != null)"
+"testing"
+"test"
+"another test"
+"another testy test"
+```
+
+This returns all the cast related messages for the fid. There are similar endpoints for reactions and follows. 
+
+If you have the snapchain installed from source, you can use grpcurl. This will use the grpc APIs
+
+```bash
+grpcurl -plaintext -proto src/proto/rpc.proto -import-path src/proto  -d '{"fid" : 1}' localhost:3383 HubService/GetAllCastMessagesByFid \
+| jq ".messages[].data.castAddBody.text \
+| select( . != null)"
+```
