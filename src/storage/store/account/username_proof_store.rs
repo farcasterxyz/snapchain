@@ -296,6 +296,7 @@ impl StoreDef for UsernameProofStoreDef {
                 },
             )),
             id: 0,
+            block_number: 0,
         }
     }
 
@@ -336,6 +337,7 @@ impl StoreDef for UsernameProofStoreDef {
                 },
             )),
             id: 0,
+            block_number: 0,
         }
     }
 

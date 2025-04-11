@@ -21,6 +21,7 @@ use crate::proto::FidsRequest;
 use crate::proto::FidsResponse;
 use crate::proto::GetInfoResponse;
 use crate::proto::HubEvent;
+use crate::storage::store::account::HubEventIdGenerator;
 use crate::proto::IdRegistryEventByAddressRequest;
 use crate::proto::LinksByTargetRequest;
 use crate::proto::MessageType;
@@ -38,7 +39,7 @@ use crate::proto::UsernameProofsResponse;
 use crate::proto::ValidationResponse;
 use crate::proto::VerificationAddAddressBody;
 use crate::proto::{Block, CastId, DbStats};
-use crate::proto::{BlocksRequest, ShardChunksRequest, ShardChunksResponse, SubscribeRequest};
+use crate::proto::{BlocksRequest, ShardChunksRequest, ShardChunksResponse, SubscribeRequest, EventRequest};
 use crate::proto::{FidRequest, FidTimestampRequest};
 use crate::proto::{GetInfoRequest, StorageLimitsResponse};
 use crate::proto::{
@@ -381,6 +382,9 @@ impl MyHubService {
     }
 
     fn rewrite_hub_event(mut hub_event: HubEvent) -> HubEvent {
+        let (block_number, _) = HubEventIdGenerator::extract_height_and_seq(hub_event.id);
+        hub_event.block_number = block_number;
+
         match &mut hub_event.body {
             Some(body) => {
                 match body {
@@ -733,6 +737,25 @@ impl HubService for MyHubService {
         });
 
         Ok(Response::new(ReceiverStream::new(client_rx)))
+    }
+
+    async fn get_event(
+        &self,
+        request: Request<EventRequest>,
+    ) -> Result<Response<HubEvent>, Status> {
+        authenticate_request(&request, &self.allowed_users)?;
+        let request = request.into_inner();
+        // Not sure this is the correct way to be handling the shard
+        let stores = self.get_stores_for_shard(request.shard_index)?;
+        let hub_event_result = stores.get_event(request.id);
+
+        match hub_event_result {
+            Ok(hub_event) => {
+                let response = Self::rewrite_hub_event(hub_event);
+                Ok(Response::new(response))
+            }
+            Err(err) => Err(Status::internal(err.to_string())),
+        }
     }
 
     async fn get_cast(&self, request: Request<CastId>) -> Result<Response<proto::Message>, Status> {

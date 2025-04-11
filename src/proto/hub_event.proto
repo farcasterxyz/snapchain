@@ -59,4 +59,5 @@ message HubEvent {
     //    MergeStorageAdminRegistryEventBody merge_storage_admin_registry_event_body = 10;
     MergeOnChainEventBody merge_on_chain_event_body = 11;
   };
+  uint64 block_number = 12;
 }

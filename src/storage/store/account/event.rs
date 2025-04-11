@@ -172,6 +172,25 @@ impl HubEvent {
         })
     }
 
+    pub fn get_event(
+        db: Arc<RocksDB>,
+        event_id: u64,
+    ) -> Result<HubEvent, HubError> {
+        let key = Self::make_event_key(event_id);
+        let buf = db.get(&key)?;
+        if buf.is_none() {
+            return Err(HubError::not_found("Event not found"));
+        }
+
+        match HubEvent::decode(buf.unwrap().as_slice()) {
+            Ok(event) => Ok(event),
+            Err(_) => Err(HubError {
+                code: "internal_error".to_string(),
+                message: "could not decode event".to_string(),
+            }),
+        }
+    }
+
     pub async fn prune_events_util(
         db: Arc<RocksDB>,
         stop_height: u64,
