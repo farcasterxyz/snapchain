@@ -21,7 +21,7 @@ use crate::proto::FidsRequest;
 use crate::proto::FidsResponse;
 use crate::proto::GetInfoResponse;
 use crate::proto::HubEvent;
-use create::storage::store::account::HubEventIdGenerator;
+use crate::storage::store::account::HubEventIdGenerator;
 use crate::proto::IdRegistryEventByAddressRequest;
 use crate::proto::LinksByTargetRequest;
 use crate::proto::MessageType;
@@ -731,11 +731,10 @@ impl HubService for MyHubService {
         let hub_event_result = stores.get_event(request.id);
 
         match hub_event_result {
-            Ok(Some(hub_event)) => {
+            Ok(hub_event) => {
                 let response = Self::rewrite_hub_event(hub_event);
                 Ok(Response::new(response))
             }
-            Ok(None) => Err(Status::not_found("Event not found")),
             Err(err) => Err(Status::internal(err.to_string())),
         }
     }

@@ -363,7 +363,7 @@ impl Stores {
     pub fn get_event(
         &self,
         event_id: u64,
-    ) -> Result<Option<HubEvent>, HubError> {
+    ) -> Result<HubEvent, HubError> {
         HubEvent::get_event(self.db.clone(), event_id)
     }
 

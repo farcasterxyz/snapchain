@@ -175,7 +175,7 @@ impl HubEvent {
     pub fn get_event(
         db: Arc<RocksDB>,
         event_id: u64,
-    ) -> Result<Option<HubEvent>, HubError> {
+    ) -> Result<HubEvent, HubError> {
         let key = Self::make_event_key(event_id);
         let buf = db.get(&key)?;
         if buf.is_none() {
@@ -183,7 +183,7 @@ impl HubEvent {
         }
 
         match HubEvent::decode(buf.unwrap().as_slice()) {
-            Ok(event) => Ok(Some(event)),
+            Ok(event) => Ok(event),
             Err(_) => Err(HubError {
                 code: "internal_error".to_string(),
                 message: "could not decode event".to_string(),
