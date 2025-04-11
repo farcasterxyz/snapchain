@@ -383,7 +383,6 @@ mod tests {
     async fn test_get_event_not_found() {
         let (stores, _, _, service) = make_server(None).await;
 
-        let event_id = 12345;
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 1).await;
 
         let mut request = Request::new(proto::EventRequest {
