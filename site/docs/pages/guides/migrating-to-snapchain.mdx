@@ -3,7 +3,7 @@
 Snapchain APIs are backwards compatible with Hub APIs. All read and write APIs should work out of the box. 
 
 ### Notable differences when building a client 
-- `submitMessage` requests must all contain `dataBytes` for Snapchain. The `hub-nodejs` builders handle this, but if you're not using those you will need to manually update this. 
+- `submitMessage` requests must all contain `dataBytes` for Snapchain. The `hub-nodejs` builders handle this in all versions `>=0.13.0`, but if you're not using those you will need to manually update this. 
 - `submitMessage` is best-effort. It's possible, but rare, that `submitMessage` succeeds but the submitted message fails to get included in a block. 
 
 ### Notable differences when running a node 

@@ -6,7 +6,7 @@ The example shows you how to:
 
 - Make onchain transactions to create an account
 - Rent a storage unit so you can publish messages
-- Add an account key to sign messages
+- Add signer key to sign messages
 - Acquire an fname for your account
 - Create, sign and publish messages
 
@@ -46,7 +46,7 @@ import { generatePrivateKey, privateKeyToAccount, toAccount } from "viem/account
 const CUSTODY_PRIVATE_KEY = '<REQUIRED>'; // A private key corresponding with any ETH address.
 const OP_PROVIDER_URL = '<REQUIRED>'; // Alchemy or Infura url
 const RECOVERY_ADDRESS = zeroAddress; // Optional, using the default value means the account will not be recoverable later if the mnemonic is lost
-const SIGNER_PRIVATE_KEY: Hex = zeroAddress; // Optional, using the default means a new account key will be created each time
+const SIGNER_PRIVATE_KEY: Hex = zeroAddress; // Optional, using the default means a new signer will be created each time
 
 // Note: crackle is the Farcaster team's mainnet node, which is password protected to prevent abuse. Use a 3rd party node 
 // provider like https://neynar.com/ Or, run your own mainnet node and broadcast to it permissionlessly.
