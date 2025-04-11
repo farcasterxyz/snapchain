@@ -50,6 +50,7 @@ pub struct Config {
     pub announce_address: String,
     pub bootstrap_peers: String,
     pub contact_info_interval: Duration,
+    pub bootstrap_reconnect_interval: Duration,
 }
 
 impl Default for Config {
@@ -63,6 +64,7 @@ impl Default for Config {
             announce_address: address,
             bootstrap_peers: "".to_string(),
             contact_info_interval: Duration::from_secs(300),
+            bootstrap_reconnect_interval: Duration::from_secs(30),
         }
     }
 }
@@ -88,6 +90,13 @@ impl Config {
     pub fn with_contact_info_interval(self, contact_info_interval: Duration) -> Self {
         Config {
             contact_info_interval,
+            ..self
+        }
+    }
+
+    pub fn with_bootstrap_reconnect_interval(self, bootstrap_reconnect_interval: Duration) -> Self {
+        Config {
+            bootstrap_reconnect_interval,
             ..self
         }
     }
@@ -144,6 +153,7 @@ pub struct SnapchainGossip {
     announce_address: String,
     fc_network: FarcasterNetwork,
     contact_info_interval: Duration,
+    bootstrap_reconnect_interval: Duration,
     statsd_client: StatsdClientWrapper,
 }
 
@@ -276,6 +286,7 @@ impl SnapchainGossip {
             announce_address: config.announce_address.clone(),
             fc_network,
             contact_info_interval: config.contact_info_interval,
+            bootstrap_reconnect_interval: config.bootstrap_reconnect_interval,
             statsd_client,
             connected_bootstrap_addrs: HashSet::new(),
         })
@@ -330,7 +341,7 @@ impl SnapchainGossip {
     }
 
     pub async fn start(self: &mut Self) {
-        let mut reconnect_timer = tokio::time::interval(Duration::from_secs(30));
+        let mut reconnect_timer = tokio::time::interval(self.bootstrap_reconnect_interval);
 
         let mut publish_contact_info_timer = tokio::time::interval(self.contact_info_interval);
 
@@ -375,7 +386,6 @@ impl SnapchainGossip {
                             match endpoint {
                                 libp2p::core::ConnectedPoint::Dialer { address, ..} => {
                                     self.connected_bootstrap_addrs.remove(&address.to_string());
-
                                 },
                                 libp2p::core::ConnectedPoint::Listener { .. } => {},
                             };
