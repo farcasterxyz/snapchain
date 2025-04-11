@@ -26,7 +26,7 @@ use libp2p::{
 use libp2p_connection_limits::ConnectionLimits;
 use prost::Message;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Duration;
 use tokio::io;
@@ -139,7 +139,8 @@ pub struct SnapchainGossip {
     system_tx: Sender<SystemMessage>,
     sync_channels: HashMap<InboundRequestId, sync::ResponseChannel>,
     read_node: bool,
-    bootstrap_addrs: Vec<String>,
+    bootstrap_addrs: HashSet<String>,
+    connected_bootstrap_addrs: HashSet<String>,
     announce_address: String,
     fc_network: FarcasterNetwork,
     contact_info_interval: Duration,
@@ -271,11 +272,12 @@ impl SnapchainGossip {
             system_tx,
             sync_channels: HashMap::new(),
             read_node,
-            bootstrap_addrs: config.bootstrap_addrs(),
+            bootstrap_addrs: config.bootstrap_addrs().into_iter().collect(),
             announce_address: config.announce_address.clone(),
             fc_network,
             contact_info_interval: config.contact_info_interval,
             statsd_client,
+            connected_bootstrap_addrs: HashSet::new(),
         })
     }
 
@@ -297,11 +299,9 @@ impl SnapchainGossip {
     }
 
     pub async fn check_and_reconnect_to_bootstrap_peers(&mut self) {
-        let connected_peers_count = self.swarm.connected_peers().count();
-        // If we have no connected peers, try to reconnect to bootstrap peers
-        if connected_peers_count == 0 && !self.bootstrap_addrs.is_empty() {
-            warn!("No connected peers. Attempting to reconnect to bootstrap peers...");
-            for addr in &self.bootstrap_addrs {
+        warn!("Attempting to reconnect to bootstrap peers...");
+        for addr in &self.bootstrap_addrs {
+            if !self.connected_bootstrap_addrs.contains(addr) {
                 let _ = Self::dial(&mut self.swarm, &addr);
             }
         }
@@ -348,21 +348,37 @@ impl SnapchainGossip {
                 }
                 gossip_event = self.swarm.select_next_some() => {
                     match gossip_event {
-                        SwarmEvent::ConnectionEstablished {peer_id, ..} => {
+                        SwarmEvent::ConnectionEstablished {peer_id, endpoint, ..} => {
                             info!(total_peers = self.swarm.connected_peers().count(), "Connection established with peer: {peer_id}");
                             let event = MalachiteNetworkEvent::PeerConnected(MalachitePeerId::from_libp2p(&peer_id));
                             let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await;
                             if let Err(e) = res {
                                 warn!("Failed to send connection established message: {}", e);
-                            }
+                            };
+                            match endpoint {
+                                libp2p::core::ConnectedPoint::Dialer { address, ..} => {
+                                    if self.bootstrap_addrs.contains(&address.to_string()) {
+                                        self.connected_bootstrap_addrs.insert(address.to_string());
+                                    }
+
+                                },
+                                libp2p::core::ConnectedPoint::Listener { .. } => {},
+                            };
                         },
-                        SwarmEvent::ConnectionClosed {peer_id, cause, ..} => {
+                        SwarmEvent::ConnectionClosed {peer_id, cause, endpoint, ..} => {
                             info!("Connection closed with peer: {:?} due to: {:?}", peer_id, cause);
                             let event = MalachiteNetworkEvent::PeerDisconnected(MalachitePeerId::from_libp2p(&peer_id));
                             let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await;
                             if let Err(e) = res {
                                 warn!("Failed to send connection closed message: {}", e);
                             }
+                            match endpoint {
+                                libp2p::core::ConnectedPoint::Dialer { address, ..} => {
+                                    self.connected_bootstrap_addrs.remove(&address.to_string());
+
+                                },
+                                libp2p::core::ConnectedPoint::Listener { .. } => {},
+                            };
                         },
                         SwarmEvent::Behaviour(SnapchainBehaviorEvent::Gossipsub(gossipsub::Event::Subscribed { peer_id, topic })) =>
                             info!("Peer: {peer_id} subscribed to topic: {topic}"),
