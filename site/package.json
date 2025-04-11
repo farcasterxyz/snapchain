@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vocs dev",
     "build": "vocs build",
-    "preview": "vocs preview"
+    "preview": "vocs preview",
+    "vercel-build": "vocs build"
   },
   "dependencies": {
     "react": "latest",
