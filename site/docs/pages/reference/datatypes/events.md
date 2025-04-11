@@ -4,7 +4,7 @@ Events represent state changes, like a new message or contract event.
 
 Snapchain nodes emit events whenever they observe a state change. Clients can subscribe to a node using the [Events API](../grpcapi/events.md) to get a live stream of changes.
 
-Snapchain keeps events around for 3 days after which they are deleted to save space. To get older data, use the [GRPC](../grpcapi/grpcapi.md) or [HTTP](../httpapi/httpapi.md) APIs.
+Snapchain keeps events around for 3 days after which they are deleted to save space. To get older data, use the [GRPC](../grpcapi/grpcapi.md) or [HTTP](../httpapi/httpapi.mdx) APIs.
 
 ## HubEvent
 
@@ -12,7 +12,7 @@ Snapchain keeps events around for 3 days after which they are deleted to save sp
 | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- | ----------------------------------------------------------------- |
 | type  | [HubEventType](#HubEventType)                                                                                                                                                                                                               |       | The type of event                                                 |
 | id    | [uint64](#uint64)                                                                                                                                                                                                                           |       | Unique identifier for the event that encodes block height ordering |
-| body  | [MergeMessageBody](#mergemessagebody), <br> [PruneMessageBody](#prunemessagebody), <br> [RevokeMessageBody](#revokemessagebody), <br>[MergeUserNameProofBody](#mergeusernameproofbody), <br>[MergeOnChainEventBody](#mergeonchaineventbody) | oneOf | The event payload                                                 |
+| body  | [MergeMessageBody](#mergemessagebody), <br /> [PruneMessageBody](#prunemessagebody), <br /> [RevokeMessageBody](#revokemessagebody), <br />[MergeUserNameProofBody](#mergeusernameproofbody), <br />[MergeOnChainEventBody](#mergeonchaineventbody) | oneOf | The event payload                                                 |
 
 ### Event ID Construction
 
@@ -91,7 +91,7 @@ This design allows clients to determine which events occurred in the same block 
 | transaction_hash | [bytes](#)                                                                                                                                                                                         |       | The transaction hash for the event   |
 | log_index        | [uint32](#)                                                                                                                                                                                        |       | The log index for the event          |
 | fid              | [uint64](#)                                                                                                                                                                                        |       | The fid the event is associated with |
-| body             | [SignerEventBody](#signereventbody), <br> [SignerMigratedEventBody](#signermigratedeventbody), <br> [IdRegisterEventBody](#idregistereventbody), <br>[StorageRentEventBody](#storagerenteventbody) | oneOf |                                      |
+| body             | [SignerEventBody](#signereventbody), <br /> [SignerMigratedEventBody](#signermigratedeventbody), <br /> [IdRegisterEventBody](#idregistereventbody), <br />[StorageRentEventBody](#storagerenteventbody) | oneOf |                                      |
 | tx_index         | [uint32](#)                                                                                                                                                                                        |       | The tx index for the event           |
 
 <a name="-OnChainEventType"></a>
