@@ -213,12 +213,4 @@ impl HubEvent {
             .await?;
         Ok(total_pruned)
     }
-
-    pub fn create_hub_event_response(hub_event: HubEvent) -> HubEvent {
-        let (block_number, _) = HubEventIdGenerator::extract_height_and_seq(hub_event.id);
-        HubEvent {
-            block_number,
-            ..hub_event.clone()
-        }
-    }
 }

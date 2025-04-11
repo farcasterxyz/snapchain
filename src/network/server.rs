@@ -21,6 +21,7 @@ use crate::proto::FidsRequest;
 use crate::proto::FidsResponse;
 use crate::proto::GetInfoResponse;
 use crate::proto::HubEvent;
+use create::storage::store::account::HubEventIdGenerator;
 use crate::proto::IdRegistryEventByAddressRequest;
 use crate::proto::LinksByTargetRequest;
 use crate::proto::MessageType;
@@ -375,6 +376,9 @@ impl MyHubService {
     }
 
     fn rewrite_hub_event(mut hub_event: HubEvent) -> HubEvent {
+        let (block_number, _) = HubEventIdGenerator::extract_height_and_seq(hub_event.id);
+        hub_event.block_number = block_number;
+
         match &mut hub_event.body {
             Some(body) => {
                 match body {
@@ -665,8 +669,7 @@ impl HubService for MyHubService {
                     for event in old_events.events {
                         if event_types.contains(&event.r#type) {
                             let event = Self::rewrite_hub_event(event);
-                            let response = HubEvent::create_hub_event_response(event);
-                            if let Err(_) = server_tx.send(Ok(response)).await {
+                            if let Err(_) = server_tx.send(Ok(event)).await {
                                 return;
                             }
                         }
@@ -693,8 +696,7 @@ impl HubService for MyHubService {
                             Ok(hub_event) => {
                                 if filtered_events.contains(&hub_event.r#type) {
                                     let hub_event = Self::rewrite_hub_event(hub_event);
-                                    let response = HubEvent::create_hub_event_response(hub_event);
-                                    match tx.send(Ok(response)).await {
+                                    match tx.send(Ok(hub_event)).await {
                                         Ok(_) => {}
                                         Err(_) => {
                                             // This means the client hung up
@@ -730,7 +732,7 @@ impl HubService for MyHubService {
 
         match hub_event_result {
             Ok(Some(hub_event)) => {
-                let response = HubEvent::create_hub_event_response(hub_event);
+                let response = Self::rewrite_hub_event(hub_event);
                 Ok(Response::new(response))
             }
             Ok(None) => Err(Status::not_found("Event not found")),
