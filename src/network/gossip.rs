@@ -310,10 +310,13 @@ impl SnapchainGossip {
     }
 
     pub async fn check_and_reconnect_to_bootstrap_peers(&mut self) {
-        warn!("Attempting to reconnect to bootstrap peers...");
-        for addr in &self.bootstrap_addrs {
-            if !self.connected_bootstrap_addrs.contains(addr) {
-                let _ = Self::dial(&mut self.swarm, &addr);
+        let connected_peers_count = self.swarm.connected_peers().count();
+        if !self.read_node || (self.read_node && connected_peers_count == 0) {
+            for addr in &self.bootstrap_addrs {
+                if !self.connected_bootstrap_addrs.contains(addr) {
+                    warn!("Attempting to reconnect to bootstrap peer: {}", addr);
+                    let _ = Self::dial(&mut self.swarm, &addr);
+                }
             }
         }
     }
