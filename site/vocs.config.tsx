@@ -65,4 +65,14 @@ export default defineConfig({
         ],
       },
     ],
+  socials: [
+    {
+      icon: 'github',
+      link: 'https://github.com/farcasterxyz/snapchain',
+    },
+    {
+      icon: 'x',
+      link: 'https://x.com/farcaster_xyz',
+    },
+  ],
 })
