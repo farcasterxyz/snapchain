@@ -38,8 +38,8 @@ services:
         num_shards = 2
 
         [snapshot]
-        endpoint_url = ""
-        load_db_from_snapshot=false
+        endpoint_url = "https://e1f9f185c6e63471dd39f96abd3413c4.r2.cloudflarestorage.com"
+        load_db_from_snapshot=true
         EOF
         exec $0 $@ # Now run the original command
     command: [ "./snapchain", "--config-path", "config.toml" ]
@@ -48,7 +48,7 @@ services:
       - "3382:3382/udp"
       - "3383:3383/tcp"
     volumes:
-      - .rocks:/app/.rocks
+      - .rocks.testnet:/app/.rocks.testnet
     networks:
       - snapchain
 

@@ -4,12 +4,13 @@ use informalsystems_malachitebft_sync::Metrics as SyncMetrics;
 use std::collections::BTreeMap;
 use tracing::Span;
 
-use crate::consensus::consensus::SystemMessage;
+use crate::consensus::consensus::{Config, SystemMessage};
 use crate::consensus::malachite::network_connector::{
     MalachiteNetworkActorMsg, MalachiteNetworkEvent,
 };
 use crate::consensus::read_validator::{self, Engine};
-use crate::core::types::SnapchainValidatorContext;
+use crate::consensus::validator::{StoredValidatorSet, StoredValidatorSets};
+use crate::core::types::{ShardId, SnapchainValidatorContext};
 use crate::network::gossip::GossipEvent;
 use crate::proto::{self, Height};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
@@ -26,7 +27,13 @@ pub async fn spawn_read_host(
     statsd_client: StatsdClientWrapper,
     engine: Engine,
     system_tx: mpsc::Sender<SystemMessage>,
+    config: Config,
 ) -> Result<ReadHostRef, ractor::SpawnErr> {
+    let validator_set_config = config.get_validator_set_config(shard_id);
+    let validator_sets = validator_set_config
+        .iter()
+        .map(|config| StoredValidatorSet::new(ShardId::new(shard_id), &config))
+        .collect();
     let state = ReadHostState {
         validator: read_validator::ReadValidator {
             shard_id,
@@ -37,6 +44,7 @@ pub async fn spawn_read_host(
             },
             max_num_buffered_blocks: 100,
             buffered_blocks: BTreeMap::new(),
+            validator_sets: StoredValidatorSets::new(shard_id, validator_sets),
             statsd_client,
         },
         system_tx,
@@ -82,6 +90,7 @@ impl MalachiteReadNodeActors {
         registry: &SharedRegistry,
         shard_id: u32,
         statsd_client: StatsdClientWrapper,
+        config: Config,
     ) -> Result<Self, ractor::SpawnErr> {
         let name = if shard_id == 0 {
             format!("Block")
@@ -91,7 +100,8 @@ impl MalachiteReadNodeActors {
         let span = tracing::info_span!("node", name = %name);
 
         let network_actor = spawn_network_actor(gossip_tx.clone(), local_peer_id).await?;
-        let host_actor = spawn_read_host(shard_id, statsd_client, engine, system_tx).await?;
+        let host_actor =
+            spawn_read_host(shard_id, statsd_client, engine, system_tx, config).await?;
         let sync_actor = spawn_read_sync_actor(
             ctx.clone(),
             network_actor.clone(),

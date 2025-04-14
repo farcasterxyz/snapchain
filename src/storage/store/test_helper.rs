@@ -1,3 +1,4 @@
+use crate::core::types::{Address, Vote};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::storage::db::{self, RocksDB};
 use crate::storage::store::engine::ShardEngine;
@@ -5,6 +6,8 @@ use crate::storage::store::stores::StoreLimits;
 use crate::storage::trie::merkle_trie;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use ed25519_dalek::{SecretKey, SigningKey};
+use informalsystems_malachitebft_core_types::{NilOrVal, Round};
+use libp2p::identity::ed25519::Keypair;
 use prost::Message;
 use std::sync::Arc;
 use tempfile;
@@ -13,7 +16,9 @@ use tokio::sync::mpsc;
 use crate::core::error::HubError;
 #[allow(unused_imports)] // Used by cfg(test)
 use crate::proto::{self, FnameTransfer};
-use crate::proto::{Height, ShardChunk, ShardHeader, Transaction};
+use crate::proto::{
+    CommitSignature, Commits, Height, ShardChunk, ShardHash, ShardHeader, Transaction,
+};
 use crate::proto::{MessagesResponse, OnChainEvent};
 use crate::storage::store::account::MessagesPage;
 use crate::storage::store::engine::{MempoolMessage, ShardStateChange};
@@ -23,7 +28,6 @@ use crate::storage::util::bytes_compare;
 #[allow(unused_imports)]
 use crate::utils::factory::{events_factory, username_factory};
 use hex::FromHex;
-use informalsystems_malachitebft_core_types::Round;
 use tonic::{Response, Status};
 use tracing_subscriber::EnvFilter;
 
@@ -163,6 +167,32 @@ pub async fn commit_event(engine: &mut ShardEngine, event: &OnChainEvent) -> Sha
     );
 
     validate_and_commit_state_change(engine, &state_change)
+}
+
+pub async fn sign_chunk(keypair: &Keypair, mut shard_chunk: ShardChunk) -> ShardChunk {
+    let header = shard_chunk.header.as_ref().unwrap();
+    let height = header.height.unwrap();
+    let hash = ShardHash {
+        hash: shard_chunk.hash.clone(),
+        shard_index: height.shard_index,
+    };
+    let round = Round::from(0u32);
+
+    let signer = keypair.public().to_bytes().to_vec();
+    let address = Address::from_vec(signer.clone());
+
+    let vote = Vote::new_precommit(height, round, NilOrVal::Val(hash.clone()), address);
+
+    let signature = keypair.sign(&vote.to_sign_bytes());
+
+    shard_chunk.commits = Some(Commits {
+        height: Some(height),
+        round: round.as_i64(),
+        value: Some(hash),
+        signatures: vec![CommitSignature { signature, signer }],
+    });
+
+    shard_chunk
 }
 
 #[cfg(test)]

@@ -87,7 +87,7 @@ impl Default for ReadParams {
     fn default() -> Self {
         Self {
             status_update_interval: Duration::from_secs(5),
-            request_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(1),
         }
     }
 }

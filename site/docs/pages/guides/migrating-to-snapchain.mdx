@@ -1,0 +1,11 @@
+# Migrating to Snapchain
+
+Snapchain APIs are backwards compatible with Hub APIs. All read and write APIs should work out of the box. 
+
+### Notable differences when building a client 
+- `submitMessage` requests must all contain `dataBytes` for Snapchain. The `hub-nodejs` builders handle this in all versions `>=0.13.0`, but if you're not using those you will need to manually update this. 
+- `submitMessage` is best-effort. It's possible, but rare, that `submitMessage` succeeds but the submitted message fails to get included in a block. 
+
+### Notable differences when running a node 
+- In order for a block to be processed by a node, all blocks before it must have been received and processed. If a node is missing messages, it will only be missing the last xx number of messages. You can use `blockDelay` to estimate how far behind the node is. This is different from hubs, where messages could be missing from any point in history and it was hard to measure how far out of sync a hub is. 
+- Nodes do not need to retain all messages. You can set `block_retention` to the time window that you want to keep messages for and thus reduce the amount of storage required to run a node. 
