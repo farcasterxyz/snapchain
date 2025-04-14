@@ -230,8 +230,10 @@ impl MyHubService {
                 return Err(Status::resource_exhausted("channel is full"));
             }
             Err(e) => {
-                self.statsd_client.count("rpc.submit_message.failure", 1);
-                println!("error sending: {:?}", e.to_string());
+                error!(
+                    "Error sending message to mempool channel: {:?}",
+                    e.to_string()
+                );
                 return Err(Status::internal("failed to submit message"));
             }
         }
@@ -420,14 +422,18 @@ impl HubService for MyHubService {
 
         let mut message = request.into_inner();
         message_bytes_decode(&mut message);
-        let response_message = self.submit_message_internal(message, false).await?;
+        let submit_message_result = self.submit_message_internal(message, false).await;
+
+        if submit_message_result.is_err() {
+            self.statsd_client.count("rpc.submit_message.failure", 1);
+        }
 
         self.statsd_client.time(
             "rpc.submit_message.duration",
             start_time.elapsed().as_millis() as u64,
         );
 
-        Ok(Response::new(response_message))
+        Ok(Response::new(submit_message_result?))
     }
 
     type GetBlocksStream = ReceiverStream<Result<Block, Status>>;
