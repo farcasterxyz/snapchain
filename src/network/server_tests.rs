@@ -357,7 +357,16 @@ mod tests {
         assert_eq!(response.code(), tonic::Code::InvalidArgument);
         assert_eq!(
             response.message(),
-            "bad_request.invalid_message/missing fid"
+            "bad_request.validation_failure/missing fid"
+        );
+        assert_eq!(
+            response
+                .metadata()
+                .get("x-err-code")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "bad_request.validation_failure"
         );
 
         register_user(
@@ -379,6 +388,15 @@ mod tests {
         assert_eq!(
             response.message(),
             "bad_request.duplicate/message has already been merged"
+        );
+        assert_eq!(
+            response
+                .metadata()
+                .get("x-err-code")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "bad_request.duplicate"
         );
     }
 
@@ -413,7 +431,7 @@ mod tests {
         assert_eq!(response.code(), tonic::Code::InvalidArgument);
         assert_eq!(
             response.message(),
-            "bad_request.invalid_message/missing fid"
+            "bad_request.validation_failure/missing fid"
         );
     }
 

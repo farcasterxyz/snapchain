@@ -49,22 +49,24 @@ use crate::storage::constants::OnChainEventPostfix;
 use crate::storage::constants::RootPrefix;
 use crate::storage::db::PageOptions;
 use crate::storage::db::RocksDbTransactionBatch;
-use crate::storage::store::account::message_bytes_decode;
 use crate::storage::store::account::MessagesPage;
 use crate::storage::store::account::UsernameProofStore;
+use crate::storage::store::account::{message_bytes_decode, IntoI32};
 use crate::storage::store::account::{
     CastStore, LinkStore, ReactionStore, UserDataStore, VerificationStore,
 };
-use crate::storage::store::engine::{MempoolMessage, Senders, ShardEngine};
+use crate::storage::store::engine::{MempoolMessage, MessageValidationError, Senders, ShardEngine};
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use hex::ToHex;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::metadata::AsciiMetadataValue;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
 
@@ -129,23 +131,17 @@ impl MyHubService {
         &self,
         message: proto::Message,
         bypass_validation: bool,
-    ) -> Result<proto::Message, Status> {
+    ) -> Result<proto::Message, HubError> {
         let fid = message.fid();
         if fid == 0 {
-            return Err(Status::invalid_argument(
-                "no fid or invalid fid".to_string(),
-            ));
+            return Err(HubError::invalid_parameter("fid cannot be 0"));
         }
 
         let dst_shard = self.message_router.route_fid(fid, self.num_shards);
 
         let stores = match self.shard_stores.get(&dst_shard) {
             Some(store) => store,
-            None => {
-                return Err(Status::invalid_argument(
-                    "no shard store for fid".to_string(),
-                ))
-            }
+            None => return Err(HubError::invalid_parameter("shard not found for fid")),
         };
 
         if !bypass_validation {
@@ -163,12 +159,13 @@ impl MyHubService {
             let result = readonly_engine.simulate_message(&message);
 
             if let Err(err) = result {
-                let error_message = if err.to_string().starts_with("bad_request") {
-                    err.to_string()
-                } else {
-                    format!("bad_request.invalid_message/{}", err.to_string())
+                return match err {
+                    MessageValidationError::StoreError(hub_error) => {
+                        // Forward hub errors as is, otherwise we end up wrapping them
+                        Err(hub_error)
+                    }
+                    _ => Err(HubError::validation_failure(&err.to_string())),
                 };
-                return Err(Status::invalid_argument(error_message));
             }
 
             // We're doing the ens and address validations here for now because we don't want L1 interactions to be on the consensus critical path. Eventually this will move to the fname server.
@@ -203,10 +200,13 @@ impl MyHubService {
                                     self.validate_contract_signature(claim, body).await?;
                                 }
                                 Err(err) => {
-                                    return Err(Status::invalid_argument(format!(
-                                        "Invalid message: {}",
-                                        err.to_string()
-                                    )))
+                                    return Err(HubError::validation_failure(
+                                        format!(
+                                            "could not create verification address claim: {}",
+                                            err.to_string()
+                                        )
+                                        .as_str(),
+                                    ))
                                 }
                             }
                         }
@@ -227,14 +227,14 @@ impl MyHubService {
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.statsd_client
                     .count("rpc.submit_message.channel_full", 1);
-                return Err(Status::resource_exhausted("channel is full"));
+                return Err(HubError::unavailable("mempool channel is full"));
             }
             Err(e) => {
                 error!(
                     "Error sending message to mempool channel: {:?}",
                     e.to_string()
                 );
-                return Err(Status::internal("failed to submit message"));
+                return Err(HubError::unavailable("mempool channel send error"));
             }
         }
 
@@ -259,20 +259,18 @@ impl MyHubService {
         &self,
         claim: VerificationAddressClaim,
         body: &VerificationAddAddressBody,
-    ) -> Result<(), Status> {
+    ) -> Result<(), HubError> {
         match &self.l1_client {
             None => {
                 // Fail validation, can be fixed with config change
-                Err(Status::invalid_argument(
-                    "unable to validate contract signature because there's no l1 client",
-                ))
+                Err(HubError::invalid_internal_state("L1 client not configured"))
             }
             Some(l1_client) => l1_client
                 .verify_contract_signature(claim, body)
                 .await
-                .or_else(|_| {
-                    Err(Status::invalid_argument(
-                        "could not verify contract signature",
+                .or_else(|e| {
+                    Err(HubError::validation_failure(
+                        format!("could not verify contract signature: {}", e.to_string()).as_str(),
                     ))
                 }),
         }
@@ -282,47 +280,49 @@ impl MyHubService {
         &self,
         fid: u64,
         proof: &UserNameProof,
-    ) -> Result<(), Status> {
+    ) -> Result<(), HubError> {
         match &self.l1_client {
             None => {
                 // Fail validation, can be fixed with config change
-                Err(Status::invalid_argument(
-                    "unable to validate ens name because there's no l1 client",
-                ))
+                Err(HubError::invalid_internal_state("L1 client not configured"))
             }
             Some(l1_client) => {
                 let name = std::str::from_utf8(&proof.name)
-                    .map_err(|err| Status::from_error(Box::new(err)))?;
+                    .map_err(|_| HubError::validation_failure("ENS name is not utf8"))?;
 
                 if !name.ends_with(".eth") {
-                    return Err(Status::invalid_argument(
-                        "invalid ens name, doesn't end with .eth",
+                    return Err(HubError::validation_failure(
+                        "ENS name does not end with .eth",
                     ));
                 }
 
                 let resolved_ens_address = l1_client
                     .resolve_ens_name(name.to_string())
                     .await
-                    .map_err(|err| Status::from_error(Box::new(err)))?
+                    .map_err(|err| {
+                        HubError::validation_failure(
+                            format!("ENS resolution error: {}", err.to_string()).as_str(),
+                        )
+                    })?
                     .to_vec();
 
                 if resolved_ens_address != proof.owner {
-                    return Err(Status::invalid_argument(
+                    return Err(HubError::validation_failure(
                         "invalid ens name, resolved address doesn't match proof owner address",
                     ));
                 }
 
                 let stores = self
                     .get_stores_for(fid)
-                    .map_err(|err| Status::from_error(Box::new(err)))?;
+                    .map_err(|_| HubError::internal_db_error("stores not found for fid"))?;
 
                 let id_register = stores
                     .onchain_event_store
                     .get_id_register_event_by_fid(fid)
-                    .map_err(|err| Status::from_error(Box::new(err)))?;
+                    .map_err(|_| HubError::internal_db_error("Could not fetch id registration"))?;
 
                 match id_register {
-                    None => return Err(Status::invalid_argument("missing id registration")),
+                    None => return Err(HubError::validation_failure("missing fid registration")),
                     Some(id_register) => {
                         match id_register.body {
                             Some(Body::IdRegisterEventBody(id_register)) => {
@@ -332,20 +332,21 @@ impl MyHubService {
                                         &stores.verification_store,
                                         fid,
                                         &resolved_ens_address,
-                                    )
-                                    .map_err(|err| Status::from_error(Box::new(err)))?;
+                                    )?;
 
                                     match verification {
-                                    None => Err(Status::invalid_argument(
-                                        "invalid ens proof, no matching custody address or verified addresses",
-                                    )),
+                                    None => Err(HubError::validation_failure("invalid ens proof, no matching custody address or verified addresses")),
                                     Some(_) => Ok(()),
                                 }
                                 } else {
                                     Ok(())
                                 }
                             }
-                            _ => return Err(Status::invalid_argument("missing id registration")),
+                            _ => {
+                                return Err(HubError::validation_failure(
+                                    "missing fid registration",
+                                ))
+                            }
                         }
                     }
                 }
@@ -353,32 +354,31 @@ impl MyHubService {
         }
     }
 
-    async fn validate_ens_username(&self, fid: u64, name: String) -> Result<(), Status> {
+    async fn validate_ens_username(&self, fid: u64, name: String) -> Result<(), HubError> {
         let stores = self
             .get_stores_for(fid)
-            .map_err(|err| Status::from_error(Box::new(err)))?;
+            .map_err(|_| HubError::invalid_parameter("stores not found for fid"))?;
         let proof_message = UsernameProofStore::get_username_proof(
             &stores.username_proof_store,
             &name.as_bytes().to_vec(),
             UserNameType::UsernameTypeEnsL1 as u8,
-        )
-        .map_err(|err| Status::from_error(Box::new(err)))?;
+        )?;
         match proof_message {
             Some(message) => match message.data {
-                None => Err(Status::invalid_argument("username proof missing data")),
+                None => Err(HubError::validation_failure("username proof missing data")),
                 Some(message_data) => match message_data.body {
                     Some(body) => match body {
                         proto::message_data::Body::UsernameProofBody(proof) => {
                             self.validate_ens_username_proof(fid, &proof).await
                         }
-                        _ => Err(Status::invalid_argument("username proof has wrong type")),
+                        _ => Err(HubError::validation_failure(
+                            "username proof has wrong type",
+                        )),
                     },
-                    None => Err(Status::invalid_argument("username proof missing body")),
+                    None => Err(HubError::validation_failure("username proof missing body")),
                 },
             },
-            None => Err(Status::invalid_argument(
-                "missing username proof for username",
-            )),
+            None => Err(HubError::validation_failure("username proof missing proof")),
         }
     }
 
@@ -422,18 +422,48 @@ impl HubService for MyHubService {
 
         let mut message = request.into_inner();
         message_bytes_decode(&mut message);
-        let submit_message_result = self.submit_message_internal(message, false).await;
-
-        if submit_message_result.is_err() {
-            self.statsd_client.count("rpc.submit_message.failure", 1);
-        }
+        let fid = message.fid();
+        let msg_type = message.msg_type().into_i32();
+        let result = self.submit_message_internal(message, false).await;
 
         self.statsd_client.time(
             "rpc.submit_message.duration",
             start_time.elapsed().as_millis() as u64,
         );
 
-        Ok(Response::new(submit_message_result?))
+        match result {
+            Ok(message) => {
+                self.statsd_client.count("rpc.submit_message.success", 1);
+                Ok(Response::new(message))
+            }
+            Err(err) => {
+                self.statsd_client.count("rpc.submit_message.failure", 1);
+                info!(
+                    hash = hash,
+                    fid = fid,
+                    errCode = err.code,
+                    msgType = msg_type,
+                    "submit_message failed: {}",
+                    err
+                );
+                let err_code = err.code.as_str();
+                let mut status = if err_code.starts_with("bad_request") {
+                    Status::invalid_argument(err.to_string())
+                } else if err_code == "not_found" {
+                    Status::not_found(err.to_string())
+                } else if err_code.starts_with("db") || err_code.starts_with("internal") {
+                    Status::internal(err.to_string())
+                } else if err_code.starts_with("unavailable") {
+                    Status::unavailable(err.to_string())
+                } else {
+                    Status::unknown(err.to_string())
+                };
+                if let Ok(err_str) = AsciiMetadataValue::from_str(&err_code) {
+                    status.metadata_mut().insert("x-err-code", err_str);
+                }
+                Err(status)
+            }
+        }
     }
 
     type GetBlocksStream = ReceiverStream<Result<Block, Status>>;

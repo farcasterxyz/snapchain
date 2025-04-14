@@ -16,6 +16,13 @@ impl HubError {
         }
     }
 
+    pub fn unavailable(error_message: &str) -> HubError {
+        HubError {
+            code: "unavailable".to_string(),
+            message: error_message.to_string(),
+        }
+    }
+
     pub fn invalid_parameter(error_message: &str) -> HubError {
         HubError {
             code: "bad_request.invalid_param".to_string(),
