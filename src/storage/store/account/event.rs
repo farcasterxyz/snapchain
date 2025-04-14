@@ -172,10 +172,7 @@ impl HubEvent {
         })
     }
 
-    pub fn get_event(
-        db: Arc<RocksDB>,
-        event_id: u64,
-    ) -> Result<HubEvent, HubError> {
+    pub fn get_event(db: Arc<RocksDB>, event_id: u64) -> Result<HubEvent, HubError> {
         let key = Self::make_event_key(event_id);
         let buf = db.get(&key)?;
         if buf.is_none() {

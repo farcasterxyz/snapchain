@@ -21,7 +21,6 @@ use crate::proto::FidsRequest;
 use crate::proto::FidsResponse;
 use crate::proto::GetInfoResponse;
 use crate::proto::HubEvent;
-use crate::storage::store::account::HubEventIdGenerator;
 use crate::proto::IdRegistryEventByAddressRequest;
 use crate::proto::LinksByTargetRequest;
 use crate::proto::MessageType;
@@ -39,7 +38,9 @@ use crate::proto::UsernameProofsResponse;
 use crate::proto::ValidationResponse;
 use crate::proto::VerificationAddAddressBody;
 use crate::proto::{Block, CastId, DbStats};
-use crate::proto::{BlocksRequest, ShardChunksRequest, ShardChunksResponse, SubscribeRequest, EventRequest};
+use crate::proto::{
+    BlocksRequest, EventRequest, ShardChunksRequest, ShardChunksResponse, SubscribeRequest,
+};
 use crate::proto::{FidRequest, FidTimestampRequest};
 use crate::proto::{GetInfoRequest, StorageLimitsResponse};
 use crate::proto::{
@@ -51,6 +52,7 @@ use crate::storage::constants::RootPrefix;
 use crate::storage::db::PageOptions;
 use crate::storage::db::RocksDbTransactionBatch;
 use crate::storage::store::account::message_bytes_decode;
+use crate::storage::store::account::HubEventIdGenerator;
 use crate::storage::store::account::MessagesPage;
 use crate::storage::store::account::UsernameProofStore;
 use crate::storage::store::account::{

@@ -21,12 +21,12 @@ mod tests {
     };
     use crate::proto::{FidRequest, SubscribeRequest};
     use crate::storage::db::{self, RocksDB, RocksDbTransactionBatch};
+    use crate::storage::store::account::SEQUENCE_BITS;
     use crate::storage::store::engine::{Senders, ShardEngine};
     use crate::storage::store::stores::Stores;
     use crate::storage::store::test_helper::register_user;
     use crate::storage::store::{test_helper, BlockStore};
     use crate::storage::trie::merkle_trie;
-    use crate::storage::store::account::SEQUENCE_BITS;
     use crate::utils::factory::{events_factory, messages_factory};
     use crate::utils::statsd_wrapper::StatsdClientWrapper;
     use futures::future;
@@ -349,7 +349,6 @@ mod tests {
         let _ = shard2_subscriber.await;
     }
 
-    
     #[tokio::test]
     async fn test_get_event_success() {
         let (stores, _, _, service) = make_server(None).await;
@@ -933,5 +932,4 @@ mod tests {
         assert_eq!(shard2_info.max_height, 0);
         assert_eq!(block_info.mempool_size, 0);
     }
-
 }

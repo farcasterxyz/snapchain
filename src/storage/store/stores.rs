@@ -360,10 +360,7 @@ impl Stores {
         HubEvent::get_events(self.db.clone(), start_id, stop_id, page_options)
     }
 
-    pub fn get_event(
-        &self,
-        event_id: u64,
-    ) -> Result<HubEvent, HubError> {
+    pub fn get_event(&self, event_id: u64) -> Result<HubEvent, HubError> {
         HubEvent::get_event(self.db.clone(), event_id)
     }
 
