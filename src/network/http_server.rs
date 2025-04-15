@@ -319,10 +319,9 @@ pub struct ReactionsByFidRequest {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReactionsByCastRequest {
-    #[serde(rename = "target_fid", skip_serializing_if = "Option::is_none")]
-    pub target_cast_id: Option<CastId>,
-    #[serde(rename = "target_hash", skip_serializing_if = "Option::is_none")]
-    pub target_url: Option<String>,
+    pub target_fid: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reaction_type: Option<ReactionType>,
     #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
@@ -335,6 +334,8 @@ pub struct ReactionsByCastRequest {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReactionsByTargetRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_cast_id: Option<CastId>,
     #[serde(rename = "url", skip_serializing_if = "Option::is_none")]
     pub target_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1162,7 +1163,7 @@ pub trait HubHttpService {
     ) -> Result<PagedResponse, ErrorResponse>;
     async fn get_reactions_by_cast(
         &self,
-        req: ReactionsByTargetRequest,
+        req: ReactionsByCastRequest,
     ) -> Result<PagedResponse, ErrorResponse>;
     async fn get_reactions_by_target(
         &self,
@@ -1409,30 +1410,22 @@ impl HubHttpService for HubHttpServiceImpl {
     /// GET /v1/reactionsByCast
     async fn get_reactions_by_cast(
         &self,
-        req: ReactionsByTargetRequest,
+        req: ReactionsByCastRequest,
     ) -> Result<PagedResponse, ErrorResponse> {
-        let service = &self.service;
-        let target = if req.target_cast_id.is_some() {
-            let cast_id = req.target_cast_id.unwrap();
-            let hash = hex::decode(cast_id.hash.replace("0x", ""));
-            if hash.is_err() {
-                return Err(ErrorResponse {
-                    error: hash.unwrap_err().to_string(),
-                    error_detail: None,
-                });
-            }
-            reactions_by_target_request::Target::TargetCastId(proto::CastId {
-                fid: cast_id.fid,
-                hash: hash.unwrap(),
-            })
-        } else if req.target_url.is_some() {
-            reactions_by_target_request::Target::TargetUrl(req.target_url.unwrap())
+        let hash = if let Some(hash_str) = req.target_hash.as_deref() {
+            hex::decode(hash_str.trim_start_matches("0x")).map_err(|e| ErrorResponse {
+                error: "Invalid hash".to_string(),
+                error_detail: Some(e.to_string()),
+            })?
         } else {
-            return Err(ErrorResponse {
-                error: "target not specified".to_string(),
-                error_detail: None,
-            });
+            Vec::new()
         };
+
+        let target = reactions_by_target_request::Target::TargetCastId(proto::CastId {
+            fid: req.target_fid,
+            hash,
+        });
+
         let grpc_req = tonic::Request::new(proto::ReactionsByTargetRequest {
             reaction_type: req.reaction_type.map(|r| r as i32),
             page_size: req.page_size,
@@ -1440,14 +1433,16 @@ impl HubHttpService for HubHttpServiceImpl {
             reverse: req.reverse,
             target: Some(target),
         });
-        let response =
-            service
-                .get_reactions_by_cast(grpc_req)
-                .await
-                .map_err(|e| ErrorResponse {
-                    error: "Failed to get reactions by cast".to_string(),
-                    error_detail: Some(e.to_string()),
-                })?;
+
+        let response = self
+            .service
+            .get_reactions_by_target(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get reactions by cast".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+
         let proto_resp = response.into_inner();
         map_proto_messages_response_to_json_paged_response(proto_resp)
     }
