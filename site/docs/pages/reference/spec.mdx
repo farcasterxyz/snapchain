@@ -1,0 +1,187 @@
+# Technical Design 
+
+## Abstract 
+
+Snapchain is a blockchain-like network for storing and syncing Farcaster's social data. It has stronger and faster consistency guarantees than the current [deltagraph](https://www.varunsrinivasan.com/2024/04/28/the-goldilocks-consensus-problem) system which is finding it hard to keep all the nodes in sync in near real-time. The tradeoff we make for the consistency improvements is a new consensus step that introduces more complexity and failure modes which must be addressed. 
+
+## Problem 
+
+A decentralized social network is one where two users can find each other and communicate, even under adverse conditions. Users must be able to run a node and use it to communicate with each other. Each node must reach consensus about a user’s state and stay in sync with other nodes. If Alice follows Bob at one node, it must make sure that she wasn’t already following Bob and then update this relationship on every other node. 
+
+Users generate a lot of transactions and expect real-time delivery. Twitter, for example, has 200M daily users and sees 10k TPS and is 
+ likely to see 1TB - 10TB/day in state growth. Existing decentralized networks can’t handle this kind of load with real-time delivery. It’s not because it’s impossible, but because they make tradeoffs to solve different user problems. Blockchains move money and are designed to prevent double spends, which makes sharding and pruning data difficult. Federated systems like email are shard-able but have weak decentralization and consistency, which makes apps harder to build.  See Appendix D for more details. 
+
+Farcaster has used a CRDT-based system called a [deltagraph](https://www.varunsrinivasan.com/2024/04/28/the-goldilocks-consensus-problem) to decentralize social data. By defining every transaction as a CRDT operation, consensus is reached immediately without coordination at the local node. The changes are then gossiped out to peers which can lazily update their own state. The network served 100k users doing 500 TPS with 2GB/day state growth in early 2024.  
+
+As the network grew to thousands of nodes, some of them get out of sync due to gossip failures. Since CRDTs are unordered, a node could only detect gossip failures by syncing manually with every other node and comparing all transactions. This becomes slow and eventually infeasible as the number of nodes and valid messages cross some threshold (see Appendix C). The lack of ordering also meant that the network cannot enforce global rate limits, and they must be localized to each node. The side effect of this is that a transaction that passes the limits on one node might be rejected by another. Without strict ordering, it's hard to guarantee both real-time delivery and strong consistency. 
+
+## Specification
+
+Snapchain introduces transaction ordering and blockchain-like semantics to Farcaster. A block production step is added which groups and orders user transactions. Syncing is much simpler since a node only needs to find and download missing blocks. Snapchain, like the deltagraph before it, relies on an external blockchain to handle account creation and fee collection.  
+
+Snapchain is different from most blockchains because its transactions are not turing complete, are account independent and pruned often. A transaction is a "post", "like" or other social operation which only affects a single account. This is important for scaling since it prevents the network from being used for non-social purposes and makes sharding by account easy. Older transactions are pruned to clear data from inactive users or negating transactions, such as when a user likes and unlikes the something. 
+
+The initial release of snapchain should support a TPS of [> 9000](https://youtu.be/-p_SWPZ1_ew?si=peDiLXEZ1csgFGPc&t=98) which would support 2 million daily users. 
+
+### 1.  Accounts
+
+Users create and manage accounts using an external blockchain. This incurs some fees during setup but is necessary for the strong security and consistency guarantees. Calling the registry contract onchain issues a unique account number or *farcaster id* to the wallet. Signed messages from this wallet are treated by Snapchain as authorized actions from the account. Accounts can be transferred between wallets at any time, though an address may only own one account at a time. 
+
+Accounts can acquire human-friendly ENS usernames by proving ownership with an onchain or offchain proof. All references to the account are made to the farcaster id, which in turn is mapped to the verified ENS username by clients. This lets users change their username without having to resign all data on the network.  This system can also be extended to non-ENS name systems if desired. 
+
+Accounts can issue "app keys" onchain which are keys with a narrower set of permissions. They can post messages on behalf of the account but cannot change ownership of the account or modify other app keys. They are used like auth tokens to delegate permissions to clients safely. It may be possible to implement app keys on Snapchain in future, avoiding onchain fees for modifying them. 
+
+<img width="600" alt="Screenshot 2024-12-05 at 3 18 28 PM" src="https://github.com/user-attachments/assets/994de19b-635a-4f96-9480-b3b275aa6888" />
+
+
+Account recovery is built into registry contract which lets the wallet nominate another address which also controls the farcaster id. This could be set to the user's primary wallet, an m-of-n social recovery multisig or institutional recovery wallet. User may also compose their own recovery systems by converting the wallet into a smart wallet which can implement custom recovery logic. 
+
+### 2. Transactions
+
+A *blockchain transaction* is a Farcaster specific transactions that happens on an external blockchain. An example is when Alice makes a transaction to the registry contract to get her farcaster id and set up her app keys. Snapchain nodes listen to and store blockchain transactions in their history.
+
+A *snapchain transaction* is a social action like making a new post. Alice says “Hello World” by making an *add-post* transaction, signing it with her app key and broadcasting it. Nodes verify that every transaction is correctly signed according to the specification. Common actions like deleting posts or following other users have their own transaction types. Snapchain transactions are self-authenticating and anyone trace the authenticity from the message to the app key to the wallet to the farcaster id. 
+
+<img width="380" alt="Screenshot 2024-12-05 at 3 27 53 PM" src="https://github.com/user-attachments/assets/ccaf88b3-0ffd-4020-8316-fbb05a9304eb" />
+
+
+### 3. Account State
+
+An account comes into existence when a blockchain transaction is made to create a new account in the registry. It's state is simply the set of blockchain and snapchain transactions that it generates. A deterministic state root can be computed by putting all the transaction ids into a merkle trie. Transactions made by one account cannot affect the state of another account. Enforcing this restriction makes Snapchain more scalable since account-level sharding becomes trivial to implement. 
+
+When a new transaction is accepted, it may be added to the state or it may replace a previous transaction in the state or it may delete a previous transaction entirely.In the example below, we see Alice’s account state changing as she creates an account, adds a post and then deletes it.
+
+<img width="620" alt="Screenshot 2024-12-05 at 4 38 42 PM" src="https://github.com/user-attachments/assets/17086c82-0fbc-453c-84e5-184ad8f084c9" />
+
+*Formal definition:  There exists a state (S) for an account (A) made up of transactions. S is a subset of all transactions made by a user (S ⊆ Ta).  A merge function M accepts an S and t and returns a new state S’ (* M:S×t→S′)*. Each T is idempotent but not associative or commutative.*
+
+## 4. Blocks
+
+Snapchain and blockchain transactions are sequenced into blocks. A block must have a signature from the block producer, a link to the previous block and a global state root. The global state root is the root of the global state trie, whose leaves are the roots of each account state trie. If the state of any account changes, the global state root also changes.
+
+<img width="620" alt="Screenshot 2024-12-05 at 5 09 01 PM" src="https://github.com/user-attachments/assets/9f027b90-4707-4535-b60e-0a180360fdb4" />
+
+Blocks are produced by a committee of block validators and tendermint is used to reach consensus. A leader is chosen to produce the block and at least two-thirds of other validators must sign off. Snapchain is byzantine tolerant and up to one-third of the network can be malicious without affecting block production. Validators are selected through a voting committee which is described in Appendix A. 
+
+Blocks are grouped into epochs that are K blocks in length. A special epoch block is published at the beginning which contains additional metadata used to re-configure chain parameters. These blocks must be preserved forever and cannot be pruned. One example of epoch metadata is the leader rotation schedule. Leaders must be rotated periodically or if they fail to produce a block. The schedule for the next K blocks is determined using a deterministic function and included in every epoch block. 
+
+Nodes get new blocks from their peers and update account states. After a week, non-epoch blocks can be pruned by nodes to free up disk space. Pruning permanently removes deleted posts and likes which is desirable feature for users. The week’s delay ensures that nodes that go offline even for a few days can catch up by streaming blocks from their peers. 
+
+Nodes that go offline for long periods (or that start from scratch) must use snapshot sync instead. The protocol will publish daily snapshots of the global state to a file server as a public good. The snapshot is tamper-proof since modifying transactions will invalidate block signatures and omitting transactions will invalidate the global root. Nodes can download the state snapshot and then stream blocks from their peers to catch up. 
+
+### 5. State Rent
+
+Decentralized networks can be flooded with transactions which consume disk space, bandwidth and compute. Blockchains control this by imposing a per-transaction fee, but this isn’t great for a social network. If users have to worry about fees for each post, they will post less frequently which is bad for the network. 
+
+Snapchain gives users practically unlimited transactions if they pay a yearly fee. Users must rent a storage unit on the external blockchain after creating an account. Each unit gives them a rate limit (500 tx/hour) and a storage limit (10,000 txns) for their account state. Users can buy multiple units to increase these limits but in practice 99% of users rarely need more than one. 
+
+Usage feels “unlimited” because when storage limits are exceeded a user’s oldest transaction is discarded instead of preventing the newer transaction from confirming. Each transaction type (post, like, follow) has its own set of limits and a newer post will push out the oldest post. This generally works well in a timeline based social network because older posts are rarely revisited and most users are comfortable with the ephemeral behavior. Those who want more permanence can pay for additional storage units or archive data elsewhere. 
+
+The benefits of this system are that users don’t really have to think about storage and can just keep using the network. One downside is that a single storage unit must have separate, fixed limits for each types and users with different usage patterns may feel that they are wasting storage. Another downside is that while expiring the oldest message is a reasonable decision for posts, it may not be the right tradeoff for something like a follow. Apps may need to implement safeguards to protect users from blowing away certain historical data when limits are exceeded.
+
+
+## 6. Sharding 
+
+Snapchain can be sharded into N segments using N+1 tendermint chains to improve scalability. Accounts are assigned to a chain using a deterministic function. In the example below, odd numbered accounts are assigned to one shard and even ones to the other. The N+1th chain is used to unite all the shards so that they appear as a single chain. Our approach to sharding is inspired by [NEAR’s Nightshade](https://pages.near.org/downloads/Nightshade.pdf).
+
+<img width="525" alt="Screenshot 2024-12-05 at 5 43 53 PM" src="https://github.com/user-attachments/assets/f3bf802a-64a7-4281-b43d-c7a0b0fb8200" />
+
+ A shard chain must have at least three validators and store all relevant account state. Validators may be automatically or manually rotated between shards through a validator schedule in the epoch block. Erasure coding is used to distribute account state from one shard across validators in other shards so that the data is still available even if all validators within a shard fail. 
+
+Block production is triggered when the previous block is finalized. Each shard chain bundles transactions into a block and computes a shard root, which is like the global root but limited to accounts in a shard. The N+1th shard chain waits for the N shards to be produced and then performs another tendermint step bundling them into a single block and computes a global state root across the shard roots. 
+
+<img width="1146" alt="Screenshot 2024-12-05 at 6 03 38 PM" src="https://github.com/user-attachments/assets/db9a1442-1731-4b4f-a0fb-6a57c46d1bc3" />
+
+### 7. Sync 
+
+Nodes rely on gossip as the primary mechanism for p2p communication. When a block is produced, the header is gossiped out on a topic and shards are sent out on separate topics. Gossip failures are reasonably easy to recover from due to ordering. If a block is skipped, a sequence jump will be detected and the node is aware that they missed a block. All nodes will expose rpc endpoints which can be used to fetch older blocks. 
+
+Validators also rely on gossip to manage the mempool and for inter-validator communication when consensus is being reached on the state of a block. All the tendermint consensus steps happen via gossip messages. Validators may also expose rpc endpoints for failure recovery. 
+
+### 8. Handling Failures
+Validators can fail in a variety of ways and we must define how the network behaves in each scenario. Let’s start with the honest malfunctions: 
+
+* Shard leader fails to produce a shard — after 5 seconds, consensus changes leadership according to the rotation. We can tolerate the failure of up to 1/3 of the validators. 
+* A shard is not produced in time for the block —  block production continues. If they fail to produce a shard for an entire epoch, the chain is halted. 
+* A block is not produced — after 5 seconds, consensus changes leadership according to the rotation. We can tolerate the failure of up to 1/3 of the block leaders.  
+* Blockchain (OP Mainnet) reorgs —  TBD, need to consider this in some detail and should also cover the simpler case of chain stalls. 
+
+If nodes are behaving maliciously, there are more attack scenarios that are possible: 
+ 
+* Block leader excludes shards or halts production — mitigated by rotating leaders, but governance action is needed to evict them permanently and solve the issue.  
+* Shard leader excludes a user’s transactions — mitigated by rotating shard leaders, but governance action is needed to evict them * permanently and solve the issue.  
+* Shard validator majority excludes a user’s transactions — if more than 2/3rd of a validators shards collude they can censor a user, and governance action is needed to resolve. 
+* Block validator majority excludes a shard — if more than 2/3rd of block validators collude they can censor a shard, and governance action is needed to resolve. 
+* Shard validator majority can reissue a shard before block finality —  TBD are malicious, they can reissue a shard for a block before it gets finalized. 
+* If > 2/3 majority of block validators and > 2/3 majority of one shard validators collude, they can reissue a block which would cause a network fork.  Requires a refork and restart of the network, 
+
+## 9. Open Questions
+
+- Should “app keys” be moved back onto Snapchain instead of being onchain? See discussion: https://warpcast.com/v/0x12ec1470
+- Should storage rent be paid by applications and not by users? See discussion: https://warpcast.com/v/0xde06c50b
+- Should snapchain have timestamp guarantees?
+- Should storage limits be fixed-size and in bytes, with apps implementing the “rolling” logic?  
+- Do we need some form of cross shard communication for usernames? Can we bring farcaster usernames into the Snapchain system? 
+- Should Validator keys be ECDSA or EDDSA?
+
+# Rationale 
+
+**What exactly is hard about sync today?**
+(See Appendix C) 
+
+**Why not fork a blockchain instead of designing a new one?**
+(See Appendix D) 
+
+**Why was tendermint chosen as the consensus algorithm?**
+It has been used in production systems for many years, has fast finality and good liveness guarantees. There are also well written implementations in Go and even one in Rust. 
+ 
+**Will validators be able to censor users?**
+Censorship will be challenging with as few as ten globally distributed validators. There is no direct economic gain or loss caused by censorship. Users being censored can amplify their message via others and censorship is provable by observing transactions in the mempool.  If all validators do collude, the voting committee described in Section A acts as a check and balance to change the validators set. If all the validators and voters collude, it may be possible to censor. 
+
+**Should we take a different approach that makes censorship even harder?**
+It is possible to design even more decentralized forms of governance and block production to make censorship less practical. The argument against this is that censorship is already reasonably impractical and most of these designs come with great cost to system complexity or user experience which makes the network less likely to be useful. It is also important to remember that Snapchain has been upgraded in the past as requirements have changed, and can be upgraded again in the future if necesary.  
+
+## Appendix
+
+### Appendix A: Consensus System
+
+1. A group of 15 voters are chosen through rough consensus from the Farcaster community. They must be technical enough to understand the tradeoffs of decentralization. 
+3. A group of 11 validators are chosen by the voters. A vote is called every 6 months and each validator must receive votes from a majority of participating voters. At least 80% of voters must participate. Ties are resolved with a majority vote between the two tied results. 
+4. Votes are cast and stored in a Github repository as public signatures from the users wallet. 
+5. Voters may call a vote to replace a malfunctioning node as long as there is sufficient proof. 
+6. Voters may call a vote at to replace a malicious or absentee voter with a majority vote.
+7. Voters must replace one of their number every 6 months through a majority vote. 
+
+### Appendix B: Extensions
+
+#### Partial Sync
+Apps may want to operate nodes that sync only a subset of the networks data because the cost of syncing everything is too expensive. This isn’t a huge concern today since the network fits easily onto cloud instances at under 200 GB. However, if this becomes a problem it will be possible to let some nodes sync specific accounts. The tradeoff is that they can’t contribute to block propagation on the network and will be relegated to being “edge nodes”.
+
+### Appendix C: Why is sync hard today?
+A question that’s come up a few times about Snapchain is some variant of “why is syncing hard today?”
+
+1. **There is no source of truth to sync from** - Messages can be added or removed from any node at any point in history due to the eventually consistent nature of CRDTs. Changes are gossiped out when they happen, but this could fail for a variety of reasons. The only way for a node to catch up 100% is to 1) sync with every other node and compare every message and 2) prevent messages from entering the network until this is completed. There are 4000 nodes x 150 million messages today with 100s of messages changing every second making this impossible.
+2. **Rate limits cause nodes to diverge** — rate limits are important to protect the network since we do not charge transaction fees. global rate limiting is impossible with crdts, so they are implemented per node. It is possible for a message to be temporarily rejected from a hub due to rate limits, but accepted by others.
+3. **Pruning complicates things**  — pruning means that when one message is received another, older message might be removed. this means that older state is constantly being modified by newer messages so its hard to be efficient about comparing message ids and hard to reason about why two nodes diverge.
+4. **Unidirectional sync is slow**. A node can be “ahead” of another node for some accounts state and “behind” it for another account. In order for these nodes to get into sync, both of them must pull data from the other node (bidirectional sync) before any state change happens. In practice, this is challenging to implementing and we rely on unidirectional sync which means that only some state converges.
+
+One class of solutions was “partial ordering” — the basic idea was that we would chain messages by having each message reference the previous one. The chains would either be per user or per app, instead of the total ordering that Snapchain proposes. The benefit of this approach is that we do not need a heavyweight consensus model since in the happy path each chain is typically only edited by one node at a time.
+
+One way to think about this is that it reduces the sync space. Our nodes today must compare the total set of messages which is 150M items. If you can have a chain per user, that’s down to 1M items. If you have a chain per app that’s probably closer to just ~1000 unique items to compare per sync.
+
+But there are still some unsolved problems:
+1. **Pruning is not possible** — because there is a chain, we cannot easily prune older state because the tombstones are necessary for sync to function.
+2. **Rate limits are still hard** — there’s no way to reach consensus across users or apps, so the limits would still be local and diverge.
+3. **Forking causes a lot of thrash** — a user or app can “fork” their chain by introducing a conflicting message at some point in history. This would invalidate all future messages, which causes a lot of sync thrash and is an easy way to DDOS the network.
+4. **There is still no source of truth** — a node still has to sync with every other node to converge because we are using CRDTs. We have reduced the search space from 4000 nodes * 150M items to 4000 nodes * 1000 app chains. But nodes will still be slightly out of sync with each other, and the problem will return as we add more nodes or items.
+5. **The migration path is messy** — since messages need to be chained to other messages, we have to update older messages to this new format. but the problem is that messages are signed, and unless the user comes online with their key the message cannot be upgraded. we cannot ensure that users return, so we must either deprecate older data after some cutoff or keep both sync models built into hubs for a really long time.
+
+### Appendix D: Why not fork a blockchain? 
+
+An alternative to building snapchain would be to fork an existing blockchain to have similar properties. We would modify the VM so that the set of opcodes is limited to social actions and modify the transaction model to mirror snapchains rate-limit + pruning approach to metering usage. There are two challenges with this approach: 
+
+1. **Sharding** - given our tx volume and data size, we're going to need sharding soon. snapchains can be sharded by account easily because transactions are independent across accounts. blockchains have much more complicated sharding systems and we haven't found any that work in production yet. so there's a lot of implementation risk and unnecessary complexity.
+
+2. **Pruning** - most chains we've looked at don't really have an easy way to bolt on pruning, or the ability to arbitrarily discard data from points in time cleanly. we would have to do a large refactor that touches most abstractions in the system.
+
+Blockchains are doing a lot of work in both these areas and it is quite possible that in 2-3 years our POV on this has changed. But if we are making a decision today about the best solution for a 5 year time horizon, Snapchain seems like a better bet.
