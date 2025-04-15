@@ -55,7 +55,7 @@ When a new transaction is accepted, it may be added to the state or it may repla
 
 *Formal definition:  There exists a state (S) for an account (A) made up of transactions. S is a subset of all transactions made by a user (S ⊆ Ta).  A merge function M accepts an S and t and returns a new state S’ (* M:S×t→S′)*. Each T is idempotent but not associative or commutative.*
 
-## 4. Blocks
+### 4. Blocks
 
 Snapchain and blockchain transactions are sequenced into blocks. A block must have a signature from the block producer, a link to the previous block and a global state root. The global state root is the root of the global state trie, whose leaves are the roots of each account state trie. If the state of any account changes, the global state root also changes.
 
@@ -79,8 +79,7 @@ Usage feels “unlimited” because when storage limits are exceeded a user’s 
 
 The benefits of this system are that users don’t really have to think about storage and can just keep using the network. One downside is that a single storage unit must have separate, fixed limits for each types and users with different usage patterns may feel that they are wasting storage. Another downside is that while expiring the oldest message is a reasonable decision for posts, it may not be the right tradeoff for something like a follow. Apps may need to implement safeguards to protect users from blowing away certain historical data when limits are exceeded.
 
-
-## 6. Sharding 
+### 6. Sharding 
 
 Snapchain can be sharded into N segments using N+1 tendermint chains to improve scalability. Accounts are assigned to a chain using a deterministic function. In the example below, odd numbered accounts are assigned to one shard and even ones to the other. The N+1th chain is used to unite all the shards so that they appear as a single chain. Our approach to sharding is inspired by [NEAR’s Nightshade](https://pages.near.org/downloads/Nightshade.pdf).
 
@@ -94,16 +93,16 @@ Block production is triggered when the previous block is finalized. Each shard c
 
 ### 7. Sync 
 
-Nodes rely on gossip as the primary mechanism for p2p communication. When a block is produced, the header is gossiped out on a topic and shards are sent out on separate topics. Gossip failures are reasonably easy to recover from due to ordering. If a block is skipped, a sequence jump will be detected and the node is aware that they missed a block. All nodes will expose rpc endpoints which can be used to fetch older blocks. 
+Nodes rely on gossip as the primary mechanism for p2p communication. When a block is produced, the block is gossiped out separately from the shards that compose it. Gossip failures are reasonably easy to recover from due to ordering. If a block is skipped, a sequence jump will be detected and the node is aware that they missed a block. All nodes will expose rpc endpoints which can be used to fetch older blocks. 
 
-Validators also rely on gossip to manage the mempool and for inter-validator communication when consensus is being reached on the state of a block. All the tendermint consensus steps happen via gossip messages. Validators may also expose rpc endpoints for failure recovery. 
+Validators also rely on gossip to manage the mempool and for inter-validator communication when consensus is being reached on the state of a block. All the tendermint consensus steps happen via gossip messages.  
 
 ### 8. Handling Failures
 Validators can fail in a variety of ways and we must define how the network behaves in each scenario. Let’s start with the honest malfunctions: 
 
-* Shard leader fails to produce a shard — after 5 seconds, consensus changes leadership according to the rotation. We can tolerate the failure of up to 1/3 of the validators. 
+* Shard leader fails to produce a shard — after 1 second, consensus changes leadership according to the rotation. We can tolerate the failure of up to 1/3 of the validators. 
 * A shard is not produced in time for the block —  block production continues. If they fail to produce a shard for an entire epoch, the chain is halted. 
-* A block is not produced — after 5 seconds, consensus changes leadership according to the rotation. We can tolerate the failure of up to 1/3 of the block leaders.  
+* A block is not produced — after 1 seconds, consensus changes leadership according to the rotation. We can tolerate the failure of up to 1/3 of the block leaders.  
 * Blockchain (OP Mainnet) reorgs —  TBD, need to consider this in some detail and should also cover the simpler case of chain stalls. 
 
 If nodes are behaving maliciously, there are more attack scenarios that are possible: 
@@ -115,16 +114,15 @@ If nodes are behaving maliciously, there are more attack scenarios that are poss
 * Shard validator majority can reissue a shard before block finality —  TBD are malicious, they can reissue a shard for a block before it gets finalized. 
 * If > 2/3 majority of block validators and > 2/3 majority of one shard validators collude, they can reissue a block which would cause a network fork.  Requires a refork and restart of the network, 
 
-## 9. Open Questions
+### 9. Open Questions
 
 - Should “app keys” be moved back onto Snapchain instead of being onchain? See discussion: https://warpcast.com/v/0x12ec1470
 - Should storage rent be paid by applications and not by users? See discussion: https://warpcast.com/v/0xde06c50b
-- Should snapchain have timestamp guarantees?
 - Should storage limits be fixed-size and in bytes, with apps implementing the “rolling” logic?  
 - Do we need some form of cross shard communication for usernames? Can we bring farcaster usernames into the Snapchain system? 
 - Should Validator keys be ECDSA or EDDSA?
 
-# Rationale 
+## Rationale 
 
 **What exactly is hard about sync today?**
 (See Appendix C) 
