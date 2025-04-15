@@ -214,39 +214,33 @@ pub trait StoreDef: Send + Sync {
 
     #[inline]
     fn revoke_event_args(&self, message: &Message) -> HubEvent {
-        HubEvent {
-            r#type: HubEventType::RevokeMessage as i32,
-            body: Some(hub_event::Body::RevokeMessageBody(RevokeMessageBody {
+        HubEvent::from(
+            HubEventType::RevokeMessage,
+            hub_event::Body::RevokeMessageBody(RevokeMessageBody {
                 message: Some(message.clone()),
-            })),
-            id: 0,
-            block_number: 0,
-        }
+            }),
+        )
     }
 
     #[inline]
     fn merge_event_args(&self, message: &Message, merge_conflicts: Vec<Message>) -> HubEvent {
-        HubEvent {
-            r#type: HubEventType::MergeMessage as i32,
-            body: Some(hub_event::Body::MergeMessageBody(MergeMessageBody {
+        HubEvent::from(
+            HubEventType::MergeMessage,
+            hub_event::Body::MergeMessageBody(MergeMessageBody {
                 message: Some(message.clone()),
                 deleted_messages: merge_conflicts,
-            })),
-            id: 0,
-            block_number: 0,
-        }
+            }),
+        )
     }
 
     #[inline]
     fn prune_event_args(&self, message: &Message) -> HubEvent {
-        HubEvent {
-            r#type: HubEventType::PruneMessage as i32,
-            body: Some(hub_event::Body::PruneMessageBody(PruneMessageBody {
+        HubEvent::from(
+            HubEventType::PruneMessage,
+            hub_event::Body::PruneMessageBody(PruneMessageBody {
                 message: Some(message.clone()),
-            })),
-            id: 0,
-            block_number: 0,
-        }
+            }),
+        )
     }
 }
 

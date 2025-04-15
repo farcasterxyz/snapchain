@@ -285,19 +285,15 @@ impl StoreDef for UsernameProofStoreDef {
             _ => None,
         };
 
-        HubEvent {
-            r#type: HubEventType::MergeUsernameProof as i32,
-            body: Some(proto::hub_event::Body::MergeUsernameProofBody(
-                MergeUserNameProofBody {
-                    username_proof: None,
-                    deleted_username_proof: username_proof_body,
-                    username_proof_message: None,
-                    deleted_username_proof_message: Some(message.clone()),
-                },
-            )),
-            id: 0,
-            block_number: 0,
-        }
+        HubEvent::from(
+            HubEventType::MergeUsernameProof,
+            proto::hub_event::Body::MergeUsernameProofBody(MergeUserNameProofBody {
+                username_proof: None,
+                deleted_username_proof: username_proof_body,
+                username_proof_message: None,
+                deleted_username_proof_message: Some(message.clone()),
+            }),
+        )
     }
 
     fn merge_event_args(&self, message: &Message, merge_conflicts: Vec<Message>) -> HubEvent {
@@ -326,19 +322,15 @@ impl StoreDef for UsernameProofStoreDef {
             (None, None)
         };
 
-        HubEvent {
-            r#type: HubEventType::MergeUsernameProof as i32,
-            body: Some(proto::hub_event::Body::MergeUsernameProofBody(
-                MergeUserNameProofBody {
-                    username_proof: username_proof_body,
-                    deleted_username_proof: deleted_proof_body,
-                    username_proof_message: Some(message.clone()),
-                    deleted_username_proof_message: deleted_message,
-                },
-            )),
-            id: 0,
-            block_number: 0,
-        }
+        HubEvent::from(
+            HubEventType::MergeUsernameProof,
+            proto::hub_event::Body::MergeUsernameProofBody(MergeUserNameProofBody {
+                username_proof: username_proof_body,
+                deleted_username_proof: deleted_proof_body,
+                username_proof_message: Some(message.clone()),
+                deleted_username_proof_message: deleted_message,
+            }),
+        )
     }
 
     #[inline]

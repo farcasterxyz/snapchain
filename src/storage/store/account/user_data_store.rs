@@ -281,19 +281,15 @@ impl UserDataStore {
             put_username_proof_transaction(txn, username_proof);
         }
 
-        let mut hub_event = HubEvent {
-            r#type: HubEventType::MergeUsernameProof as i32,
-            body: Some(proto::hub_event::Body::MergeUsernameProofBody(
-                MergeUserNameProofBody {
-                    username_proof: Some(username_proof.clone()),
-                    deleted_username_proof: existing_proof,
-                    username_proof_message: None,
-                    deleted_username_proof_message: None,
-                },
-            )),
-            id: 0,
-            block_number: 0,
-        };
+        let mut hub_event = HubEvent::from(
+            HubEventType::MergeUsernameProof,
+            proto::hub_event::Body::MergeUsernameProofBody(MergeUserNameProofBody {
+                username_proof: Some(username_proof.clone()),
+                deleted_username_proof: existing_proof,
+                username_proof_message: None,
+                deleted_username_proof_message: None,
+            }),
+        );
         let id = store
             .event_handler()
             .commit_transaction(txn, &mut hub_event)?;

@@ -720,7 +720,8 @@ impl ShardEngine {
                                     err
                                 );
                             }
-                            validation_errors.push(err);
+                            validation_errors.push(err.clone());
+                            events.push(HubEvent::from_validation_error(err, msg));
                         }
                     }
                 }
@@ -733,7 +734,8 @@ impl ShardEngine {
                             err
                         );
                     }
-                    validation_errors.push(err);
+                    validation_errors.push(err.clone());
+                    events.push(HubEvent::from_validation_error(err, msg));
                 }
             }
         }
@@ -996,6 +998,9 @@ impl ShardEngine {
                         )?;
                     }
                 }
+            }
+            Some(proto::hub_event::Body::MergeFailure(_)) => {
+                // Merge failures affect the trie. They are only for event subscribers
             }
             &None => {
                 // This should never happen

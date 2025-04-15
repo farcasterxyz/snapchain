@@ -118,6 +118,8 @@ mod tests {
                     id: i,
                     body: None,
                     block_number: 0,
+                    block_timestamp: 0,
+                    shard_id: 0,
                 })
                 .unwrap();
         }
@@ -133,6 +135,8 @@ mod tests {
                     id: i,
                     body: None,
                     block_number: 0,
+                    block_timestamp: 0,
+                    shard_id: 0,
                 },
             )
             .unwrap();
@@ -355,6 +359,8 @@ mod tests {
             id: event_id,
             body: None,
             block_number: 0,
+            block_timestamp: 0,
+            shard_id: 0,
         };
 
         let db = stores.get(&1u32).unwrap().shard_store.db.clone();

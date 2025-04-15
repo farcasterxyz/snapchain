@@ -1,5 +1,7 @@
+use crate::core::error::HubError;
 use crate::proto;
-use crate::proto::{consensus_message, ConsensusMessage, MessageType};
+use crate::proto::{consensus_message, ConsensusMessage, HubEvent, MessageType};
+use crate::storage::store::engine::MessageValidationError;
 
 impl proto::Message {
     pub fn is_type(&self, message_type: proto::MessageType) -> bool {
@@ -68,5 +70,35 @@ impl ConsensusMessage {
             }
         }
         Err("Could not determine shard id for ConsensusMessage".to_string())
+    }
+}
+
+impl proto::HubEvent {
+    pub fn from(event_type: proto::HubEventType, body: proto::hub_event::Body) -> Self {
+        proto::HubEvent {
+            r#type: event_type as i32,
+            body: Some(body),
+
+            // These are populated later
+            block_number: 0,
+            id: 0,
+            shard_id: 0,
+            block_timestamp: 0,
+        }
+    }
+
+    pub fn from_validation_error(err: MessageValidationError, message: &proto::Message) -> Self {
+        let merge_error = match err.clone() {
+            MessageValidationError::StoreError(hub_err) => hub_err,
+            _ => HubError::validation_failure(err.to_string().as_str()),
+        };
+        HubEvent::from(
+            proto::HubEventType::MergeFailure,
+            proto::hub_event::Body::MergeFailure(proto::MergeFailureBody {
+                message: Some(message.clone()),
+                code: merge_error.code,
+                reason: merge_error.message,
+            }),
+        )
     }
 }
