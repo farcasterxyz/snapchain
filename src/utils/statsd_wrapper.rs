@@ -35,7 +35,7 @@ impl StatsdClientWrapper {
         }
     }
 
-    pub fn count(&self, key: &str, value: u64) {
+    pub fn count(&self, key: &str, value: i64) {
         _ = self.client.count(key, value)
     }
 

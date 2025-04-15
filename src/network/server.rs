@@ -419,9 +419,13 @@ impl HubService for MyHubService {
         &self,
         request: Request<proto::Message>,
     ) -> Result<Response<proto::Message>, Status> {
+        self.statsd_client.count("rpc.submit_message_in_flight", 1);
         let start_time = std::time::Instant::now();
 
-        authenticate_request(&request, &self.allowed_users)?;
+        authenticate_request(&request, &self.allowed_users).map_err(|err| {
+            self.statsd_client.count("rpc.submit_message_in_flight", -1);
+            err
+        })?;
 
         let hash = request.get_ref().hash.encode_hex::<String>();
         debug!(hash, "Received call to [submit_message] RPC");
@@ -440,6 +444,7 @@ impl HubService for MyHubService {
         match result {
             Ok(message) => {
                 self.statsd_client.count("rpc.submit_message.success", 1);
+                self.statsd_client.count("rpc.submit_message_in_flight", -1);
                 Ok(Response::new(message))
             }
             Err(err) => {
@@ -467,6 +472,7 @@ impl HubService for MyHubService {
                 if let Ok(err_str) = AsciiMetadataValue::from_str(&err_code) {
                     status.metadata_mut().insert("x-err-code", err_str);
                 }
+                self.statsd_client.count("rpc.submit_message_in_flight", -1);
                 Err(status)
             }
         }
