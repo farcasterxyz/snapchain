@@ -136,7 +136,7 @@ impl Fetcher {
         }
     }
 
-    fn count(&self, key: &str, value: u64) {
+    fn count(&self, key: &str, value: i64) {
         self.statsd_client
             .count(format!("fnames.{}", key).as_str(), value);
     }

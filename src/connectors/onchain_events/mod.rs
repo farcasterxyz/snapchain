@@ -204,7 +204,7 @@ impl Subscriber {
         })
     }
 
-    fn count(&self, key: &str, value: u64) {
+    fn count(&self, key: &str, value: i64) {
         self.statsd_client
             .count(format!("onchain_events.{}", key).as_str(), value);
     }
