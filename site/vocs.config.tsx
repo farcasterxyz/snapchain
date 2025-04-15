@@ -33,7 +33,7 @@ export default defineConfig({
             { text: 'Events', link: '/reference/datatypes/events' },
           ]},
           { text: 'GRPC API', items: [
-            { text: 'using grpc apis', link: '/reference/grpcapi/grpcapi' },
+            { text: 'Using GRPC APIs', link: '/reference/grpcapi/grpcapi' },
             { text: 'Casts API', link: '/reference/grpcapi/casts' },
             { text: 'Reactions API', link: '/reference/grpcapi/reactions' },
             { text: 'Links API', link: '/reference/grpcapi/links' },
@@ -48,7 +48,7 @@ export default defineConfig({
             { text: 'Events API', link: '/reference/grpcapi/events' },
             { text: 'Metadata API', link: '/reference/grpcapi/metadata' },
           ]},
-          { text: 'Http API', items: [
+          { text: 'HTTP API', items: [
             { text: 'Using HTTP APIs', link: '/reference/httpapi/httpapi' },
             { text: 'Casts API', link: '/reference/httpapi/casts' },
             { text: 'Reactions API', link: '/reference/httpapi/reactions' },
