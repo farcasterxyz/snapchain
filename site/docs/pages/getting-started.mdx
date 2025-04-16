@@ -2,11 +2,21 @@
 
 ## Run a node 
 
+First, ensure [docker](https://www.docker.com/get-started/) is installed. Then run the following
+
 ``` bash
 mkdir snapchain
 cd snapchain
 wget https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/docker-compose.mainnet.yml -O docker-compose.yml
-sudo docker compose up # -d to run in background, if you set up rootless docker remove sudo
+docker compose up # -d to run in background, may need to run with sudo depending on your docker setup
 ```
+
+It will take a few hours for the node to sync. You can monitor it by running:
+
+``` bash
+curl localhost:3381/v1/info | jq
+```
+
+The node has caught up when `blockDelay` is close to 0 for all shards. It represents the number of seconds the node is behind the latest block.
 
 To learn more about Snapchain's architecture, read the [whitepaper](/whitepaper). To start building an app on Snapchain, take a look at the [guides](/guides/running-a-node).

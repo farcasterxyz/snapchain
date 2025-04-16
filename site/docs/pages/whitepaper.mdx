@@ -81,13 +81,13 @@ The benefits of this system are that users don’t really have to think about st
 
 ### 6. Sharding 
 
-Snapchain can be sharded into N segments using N+1 tendermint chains to improve scalability. Accounts are assigned to a chain using a deterministic function. In the example below, odd numbered accounts are assigned to one shard and even ones to the other. The N+1th chain is used to unite all the shards so that they appear as a single chain. Our approach to sharding is inspired by [NEAR’s Nightshade](https://pages.near.org/downloads/Nightshade.pdf).
+Snapchain can be sharded into N segments using N+1 tendermint chains to improve scalability. Accounts are assigned to a chain using a deterministic function. In the example below, odd numbered accounts are assigned to one shard and even ones to the other. The 0th chain is used to unite all the shards so that they appear as a single chain. Our approach to sharding is inspired by [NEAR’s Nightshade](https://pages.near.org/downloads/Nightshade.pdf).
 
 <img width="525" alt="Screenshot 2024-12-05 at 5 43 53 PM" src="https://github.com/user-attachments/assets/f3bf802a-64a7-4281-b43d-c7a0b0fb8200" />
 
  A shard chain must have at least three validators and store all relevant account state. Validators may be automatically or manually rotated between shards through a validator schedule in the epoch block. Erasure coding is used to distribute account state from one shard across validators in other shards so that the data is still available even if all validators within a shard fail. 
 
-Block production is triggered when the previous block is finalized. Each shard chain bundles transactions into a block and computes a shard root, which is like the global root but limited to accounts in a shard. The N+1th shard chain waits for the N shards to be produced and then performs another tendermint step bundling them into a single block and computes a global state root across the shard roots. 
+Block production is triggered when the previous block is finalized. Each shard chain bundles transactions into a block and computes a shard root, which is like the global root but limited to accounts in a shard. The 0th shard chain waits for the N shards to be produced and then performs another tendermint step bundling them into a single block and computes a global state root across the shard roots.
 
 <img width="1146" alt="Screenshot 2024-12-05 at 6 03 38 PM" src="https://github.com/user-attachments/assets/db9a1442-1731-4b4f-a0fb-6a57c46d1bc3" />
 
@@ -103,7 +103,6 @@ Validators can fail in a variety of ways and we must define how the network beha
 * Shard leader fails to produce a shard — after 1 second, consensus changes leadership according to the rotation. We can tolerate the failure of up to 1/3 of the validators. 
 * A shard is not produced in time for the block —  block production continues. If they fail to produce a shard for an entire epoch, the chain is halted. 
 * A block is not produced — after 1 seconds, consensus changes leadership according to the rotation. We can tolerate the failure of up to 1/3 of the block leaders.  
-* Blockchain (OP Mainnet) reorgs —  TBD, need to consider this in some detail and should also cover the simpler case of chain stalls. 
 
 If nodes are behaving maliciously, there are more attack scenarios that are possible: 
  
@@ -114,48 +113,10 @@ If nodes are behaving maliciously, there are more attack scenarios that are poss
 * Shard validator majority can reissue a shard before block finality —  TBD are malicious, they can reissue a shard for a block before it gets finalized. 
 * If > 2/3 majority of block validators and > 2/3 majority of one shard validators collude, they can reissue a block which would cause a network fork.  Requires a refork and restart of the network, 
 
-### 9. Open Questions
+## Frequently Asked Questions
 
-- Should “app keys” be moved back onto Snapchain instead of being onchain? See discussion: https://warpcast.com/v/0x12ec1470
-- Should storage rent be paid by applications and not by users? See discussion: https://warpcast.com/v/0xde06c50b
-- Should storage limits be fixed-size and in bytes, with apps implementing the “rolling” logic?  
-- Do we need some form of cross shard communication for usernames? Can we bring farcaster usernames into the Snapchain system? 
-- Should Validator keys be ECDSA or EDDSA?
+### What exactly is hard about sync today?
 
-## Rationale 
-
-**What exactly is hard about sync today?**
-(See Appendix C) 
-
-**Why not fork a blockchain instead of designing a new one?**
-(See Appendix D) 
-
-**Why was tendermint chosen as the consensus algorithm?**
-It has been used in production systems for many years, has fast finality and good liveness guarantees. There are also well written implementations in Go and even one in Rust. 
- 
-**Will validators be able to censor users?**
-Censorship will be challenging with as few as ten globally distributed validators. There is no direct economic gain or loss caused by censorship. Users being censored can amplify their message via others and censorship is provable by observing transactions in the mempool.  If all validators do collude, the voting committee described in Section A acts as a check and balance to change the validators set. If all the validators and voters collude, it may be possible to censor. 
-
-**Should we take a different approach that makes censorship even harder?**
-It is possible to design even more decentralized forms of governance and block production to make censorship less practical. The argument against this is that censorship is already reasonably impractical and most of these designs come with great cost to system complexity or user experience which makes the network less likely to be useful. It is also important to remember that Snapchain has been upgraded in the past as requirements have changed, and can be upgraded again in the future if necesary.  
-
-## Appendix
-
-### Appendix A: Consensus System
-
-1. A group of 15 voters are chosen through rough consensus from the Farcaster community. They must be technical enough to understand the tradeoffs of decentralization. 
-3. A group of 11 validators are chosen by the voters. A vote is called every 6 months and each validator must receive votes from a majority of participating voters. At least 80% of voters must participate. Ties are resolved with a majority vote between the two tied results. 
-4. Votes are cast and stored in a Github repository as public signatures from the users wallet. 
-5. Voters may call a vote to replace a malfunctioning node as long as there is sufficient proof. 
-6. Voters may call a vote at to replace a malicious or absentee voter with a majority vote.
-7. Voters must replace one of their number every 6 months through a majority vote. 
-
-### Appendix B: Extensions
-
-#### Partial Sync
-Apps may want to operate nodes that sync only a subset of the networks data because the cost of syncing everything is too expensive. This isn’t a huge concern today since the network fits easily onto cloud instances at under 200 GB. However, if this becomes a problem it will be possible to let some nodes sync specific accounts. The tradeoff is that they can’t contribute to block propagation on the network and will be relegated to being “edge nodes”.
-
-### Appendix C: Why is sync hard today?
 A question that’s come up a few times about Snapchain is some variant of “why is syncing hard today?”
 
 1. **There is no source of truth to sync from** - Messages can be added or removed from any node at any point in history due to the eventually consistent nature of CRDTs. Changes are gossiped out when they happen, but this could fail for a variety of reasons. The only way for a node to catch up 100% is to 1) sync with every other node and compare every message and 2) prevent messages from entering the network until this is completed. There are 4000 nodes x 150 million messages today with 100s of messages changing every second making this impossible.
@@ -174,12 +135,21 @@ But there are still some unsolved problems:
 4. **There is still no source of truth** — a node still has to sync with every other node to converge because we are using CRDTs. We have reduced the search space from 4000 nodes * 150M items to 4000 nodes * 1000 app chains. But nodes will still be slightly out of sync with each other, and the problem will return as we add more nodes or items.
 5. **The migration path is messy** — since messages need to be chained to other messages, we have to update older messages to this new format. but the problem is that messages are signed, and unless the user comes online with their key the message cannot be upgraded. we cannot ensure that users return, so we must either deprecate older data after some cutoff or keep both sync models built into hubs for a really long time.
 
-### Appendix D: Why not fork a blockchain? 
+### Why not fork a blockchain instead of designing a new one?
 
-An alternative to building snapchain would be to fork an existing blockchain to have similar properties. We would modify the VM so that the set of opcodes is limited to social actions and modify the transaction model to mirror snapchains rate-limit + pruning approach to metering usage. There are two challenges with this approach: 
+An alternative to building snapchain would be to fork an existing blockchain to have similar properties. We would modify the VM so that the set of opcodes is limited to social actions and modify the transaction model to mirror snapchains rate-limit + pruning approach to metering usage. There are two challenges with this approach:
 
 1. **Sharding** - given our tx volume and data size, we're going to need sharding soon. snapchains can be sharded by account easily because transactions are independent across accounts. blockchains have much more complicated sharding systems and we haven't found any that work in production yet. so there's a lot of implementation risk and unnecessary complexity.
 
 2. **Pruning** - most chains we've looked at don't really have an easy way to bolt on pruning, or the ability to arbitrarily discard data from points in time cleanly. we would have to do a large refactor that touches most abstractions in the system.
 
 Blockchains are doing a lot of work in both these areas and it is quite possible that in 2-3 years our POV on this has changed. But if we are making a decision today about the best solution for a 5 year time horizon, Snapchain seems like a better bet.
+
+### Why was tendermint chosen as the consensus algorithm?
+It has been used in production systems for many years, has fast finality and good liveness guarantees. There are also well written implementations in Go and even one in Rust.
+
+### Will validators be able to censor users?
+Censorship will be challenging with as few as ten globally distributed validators. There is no direct economic gain or loss caused by censorship. Users being censored can amplify their message via others and censorship is provable by observing transactions in the mempool.  If all validators do collude, the voting committee described in Section A acts as a check and balance to change the validators set. If all the validators and voters collude, it may be possible to censor.
+
+### Should we take a different approach that makes censorship even harder?
+It is possible to design even more decentralized forms of governance and block production to make censorship less practical. The argument against this is that censorship is already reasonably impractical and most of these designs come with great cost to system complexity or user experience which makes the network less likely to be useful. It is also important to remember that Snapchain has been upgraded in the past as requirements have changed, and can be upgraded again in the future if necesary.
