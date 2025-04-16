@@ -1,24 +1,31 @@
-# Migrating to Snapchain
+# Migrating to Snapchain from Hubble
 
-If you are currently running a hubble instance,
+Snapchain is designed to be a drop-in replacement for [Hubble](https://github.com/farcasterxyz/hub-monorepo). To migrate, follow these steps:  
 
-- first, start by also running a snapchain node. See instructions [here](/guides/running-a-node).
-- then, update your app to use `hub-nodejs` version `>=0.13.0` which supports snapchain
-- finally, snapchain apis are drop in replacements for hub apis, you just need to update the app to use the snapchain host and port
+1. Set up a Snapchain node ([instructions](/guides/running-a-node)). 
+2. Update your app to use `hub-nodejs` with a version `>=0.13.0` 
+3. Update the connection url to talk the new snapchain host and port. 
 
-### Notable differences when building a client
-- The default ports are different. The default HTTP port is `3381` and the default GRPC port is `3383`.
-- `submitMessage` requests must all contain `dataBytes` for Snapchain. The `hub-nodejs` builders handle this in all versions `>=0.13.0`, but if you're not using those you will need to manually update this like so:
+## Notable differences
+
+1. Ports have changed. The HTTP port is `3381` and gRPC is `3383`.
+2. `submitMessage` has a slightly different API and semantics, detailed below. 
+3. `HubEvent` ids no longer contain timestamps and calling `extractEventTimestamp` may return invalid data. 
+4. When calling `subscribe` or using shuttle, note that there are only 2 shards on snapchain and they are 1 indexed (shard 0 is chain metadata and does not have user data)
+5. `hub-web` is not fully supported and may not work in some cases. 
+
+
+#### submitMessage
+
+Messages once submitted must be included in blocks, similar to blockchain transactions. The `submitMessage` has two main differences from Hubble: 
+
+1. `submitMessage` requests must all contain `dataBytes` for Snapchain. The `hub-nodejs` builders handle this in all versions `>=0.13.0`, but if you're not using those you will need to manually update this like so:
     ```typescript
     if (message.dataBytes === undefined) {
         message.dataBytes = protobufs.MessageData.encode(message.data).finish();
         message.data = undefined;
     }
     ```
-- `submitMessage` is best-effort. It's possible, but rare, that `submitMessage` succeeds but the submitted message fails to get included in a block.
-- When calling `subscribe` or using shuttle, note that there are only 2 shards on snapchain and they are 1 indexed (shard 0 is chain metadata and does not have user data)
-- HubEvent ids don't contain timestamps, if you are using `extractEventTimestamp` it may return nonsensical values.
+2. `submitMessage` is best-effort. It's possible, but rare, that `submitMessage` succeeds but the submitted message fails to get included in a block.
 
-### Notable differences when running a node 
-- Calling `http://localhost:3381/v1/info` and monitoring `blockDelay` is the best way to check if your node is caught up. The `blockDelay` field represents the exact number of seconds the node is behind the latest block.
-- Nodes store all blocks by default currently. But you can modify the config to enable pruning of blocks to save space.
+

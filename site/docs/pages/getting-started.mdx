@@ -1,22 +1,126 @@
-# Getting started
+# Getting Started
 
-## Run a node 
+:::tip
+If your goal is to get started as quickly as possible, consider a managed service like [Neynar](https://neynar.com/) instead of running your own node.
+:::
 
-First, ensure [docker](https://www.docker.com/get-started/) is installed. Then run the following
+## Requirements
+
+- 16 GB of RAM
+- 4 CPU cores or vCPUs
+- 2 TB of free storage
+- A public IP address with ports 3381 - 3383 exposed
+
+## Sync a node
+
+The easiest way to run Snapchain is using [Docker](https://www.docker.com/get-started/). Once installed, run the following commands in a new folder
+
 
 ``` bash
-mkdir snapchain
-cd snapchain
-wget https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/docker-compose.mainnet.yml -O docker-compose.yml
+# Fetch the docker compose file from the repository
+curl -L https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/docker-compose.mainnet.yml -o docker-compose.yml
+
+# Start the container
 docker compose up # -d to run in background, may need to run with sudo depending on your docker setup
+```
+
+Check the the docker logs to ensure that the snapshot is being downloaded. 
+
+```bash
+sudo docker logs -f snapchain-snap_read-1
+
+2025-04-16T02:40:11.265909Z  INFO snapchain: Downloading snapshots
+2025-04-16T02:40:11.266021Z  INFO snapchain::storage::db::snapshot: Retrieving metadata from https://pub-d352dd8819104a778e20d08888c5a661.r2.dev/FARCASTER_NETWORK_MAINNET/1/latest.json
+2025-04-16T02:40:11.637368Z  INFO snapchain::storage::db::snapshot: Downloading zipped snapshot chunk chunk_0001.bin
+2025-04-16T02:40:12.952768Z  INFO snapchain::storage::db::snapshot: Downloading zipped snapshot chunk chunk_0002.bin
+2025-04-16T02:40:15.305951Z  INFO snapchain::storage::db::snapshot: Downloading zipped snapshot chunk chunk_0003.bin
+2025-04-16T02:40:17.742041Z  INFO snapchain::storage::db::snapshot: Downloading zipped snapshot chunk chunk_0004.bin
+2025-04-16T02:40:20.720477Z  INFO snapchain::storage::db::snapshot: Downloading zipped snapshot chunk chunk_0005.bin
+....
+```
+
+Snapshots are about 200 GB in size and may take a few hours to sync and decompress. Once complete, you should see logs like this: 
+
+```
+2025-04-16T08:20:01.749980Z  INFO node{name=Block}:sync{height.tip=[0] 1875918 height.sync=[0] 1875919}: informalsystems_malachitebft_sync::handle: Requesting sync value from peer height.sync=[0] 1875920 peer=12D3KooWCc28TYrrXFivwUshyZ8R5HqPMgx4f7AP54iCDLYr7kFR
+2025-04-16T08:20:01.752425Z  INFO Actor{id="0.7"}: snapchain::consensus::read_validator: Processed decided block height=[0] 1875920 hash="d7a6e107fed6e1e90d4888f4aa2bfb922d9e6950d83c621db0500b15e1caccfe"
 ```
 
 It will take a few hours for the node to sync. You can monitor it by running:
 
 ``` bash
 curl localhost:3381/v1/info | jq
+
+# if the nodes are in sync, the blockdelay values for shards should be in the single digits.
+
+{
+  "dbStats": {
+    "numMessages": 656823920,
+    "numFidRegistrations": 1049519,
+    "approxSize": 324437755099
+  },
+  "numShards": 2,
+  "shardInfos": [
+    {
+      "shardId": 0,
+      "maxHeight": 1932723,
+      "numMessages": 0,
+      "numFidRegistrations": 0,
+      "approxSize": 1114006028,
+      "blockDelay": 5,
+      "mempoolSize": 0
+    },
+    {
+      "shardId": 2,
+      "maxHeight": 1945363,
+      "numMessages": 326936052,
+      "numFidRegistrations": 523905,
+      "approxSize": 161319650355,
+      "blockDelay": 6,
+      "mempoolSize": 4294967295
+    },
+    {
+      "shardId": 1,
+      "maxHeight": 1966901,
+      "numMessages": 329887868,
+      "numFidRegistrations": 525614,
+      "approxSize": 163118104744,
+      "blockDelay": 5,
+      "mempoolSize": 4294967295
+    }
+  ]
+}
+
 ```
 
-The node has caught up when `blockDelay` is close to 0 for all shards. It represents the number of seconds the node is behind the latest block.
+## Query a node
 
-To learn more about Snapchain's architecture, read the [whitepaper](/whitepaper). To start building an app on Snapchain, take a look at the [guides](/guides/running-a-node).
+Once the node is in sync you can start querying it for the latest messages from a user. You'll need the user's account id to get their messages. If you don't have this handy, you can do a lookup by username from the public Farcaster name server. 
+
+```bash
+# Query for the id associated with the @farcaster account
+curl https://fnames.farcaster.xyz/transfers?name=farcaster
+
+{
+  "transfers": [
+    {
+      "id": 1,
+      "timestamp": 1628882891,
+      "username": "farcaster",
+      "owner": "0x877...06ed",
+      "from": 0,
+      "to": 1,
+      "user_signature": "0xa6fdd...471b",
+      "server_signature": "0xb718...c41b"
+    }
+  ]
+}
+```
+
+The `@farcaster` user's account id is 1, and so you can fetch the latest messages by querying the node over its [HTTP API](/reference/httpapi/httpapi):
+
+```
+curl http://localhost:3381/v1/castsByFid\?fid\=1 \
+ | jq ".messages[].data.castAddBody.text \
+ | select( . != null)"
+```

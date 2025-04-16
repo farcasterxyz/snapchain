@@ -1,26 +1,23 @@
-# Running a node on AWS
+# Run Snapchain on AWS
 
 :::tip
-Consider using [Neynar](https://neynar.com/) if you want to get set up quickly
+If your goal is to get started as quickly as possible, consider a managed service like [Neynar](https://neynar.com/) instead of running your own node.
 :::
 
-## Instance specs
-- 16 GB of RAM
-- 4 CPU cores or vCPUs
-- 2 TB of free storage
-- A public IP address with ports 3381 - 3383 exposed
+This guide will get you set up with a Snapchain node on an AWS EC2 instance and will cost roughly $100/month. You can run Snapchain on any server you like and costs may vary depending on provider.
 
-## Setting up an AWS instance
-### Launching an instance
+
+## Launch a new instance
 1. In AWS, go to EC2 > Instances > Launch Instances
-2. Give it a name and select Ubuntu Server 22.04 LTS (HVM), SSD Volume Type and 64-bit (x86). Choose m5.xlarge for instance type (~$70/mo).
+2. Give it a name and select Ubuntu Server 22.04 LTS (HVM), SSD Volume Type and 64-bit (x86). Choose m5.xlarge instance type .
 ![select-configuration](/images/select-configuration.png)
 3. In Key pair (login), select Create a new key pair , then select RSA and .pem format, and save it
 4. In Network settings, select Allow SSH traffic from Anywhere 
 5. In Configure storage, select 2 TB of gp3 storage. 
-6. Click Launch Instance on the righthand side menu.
+6. Click Launch Instance on the right-hand side menu.
 
-### Configure network firewall
+## Configure network firewall
+
 1. Go to EC2 → Instances and find your instance
 2. Click on the Instance ID
 3. Click on Security > Security groups > (Security Group ID) 
@@ -28,35 +25,23 @@ Consider using [Neynar](https://neynar.com/) if you want to get set up quickly
 ![inbound](/images/inbound.png)
 ![outbound](/images/outbound.png)
 
-### Connect to your instance
+## Connect to your instance
 1. Find your *.pem* file from earlier and run `chmod 400 key.pem`
 2. Go to EC2 → Instances, click on the Instance ID and copy the IPv4 Address
 3. Connect with `ssh ubuntu@<ipv4 address> -i key.pem`
 
-## Installing Snapchain 
-### Install dependencies 
-#### Docker
+## Start syncing a node
+
 ``` bash 
+# Install docker
 curl -fsSL https://get.docker.com -o get-docker.sh
 chmod +x get-docker.sh
 ./get-docker.sh
-```
 
-### Start a node
-``` bash
-mkdir snapchain
-cd snapchain
-wget https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/docker-compose.mainnet.yml -O docker-compose.yml
+# Start Snapchain
+mkdir snapchain && cd snapchain
+curl https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/docker-compose.mainnet.yml -o docker-compose.yml
 sudo docker compose up # -d to run in background, if you set up rootless docker remove sudo
 ```
 
-### Monitoring your node
-``` bash
-curl localhost:3381/v1/info | jq
-```
-When your node has caught up, `blockDelay` will be close to 0. It will take a few hours for your node to sync from scratch. 
-
-### Notes
-- Shard block numbers are independent, one can be ahead of the other and it's normal
-- Shard 0 doesn't hold user data so nothing material is missing. Shard 0 is for the purpose of holding metadata and coordinating between shards. 
-- Block time is 1s and a block is considered "final" with 1 confirmation, there are no re-orgs.
+Follow the remaining steps in (/getting-started) to validate and query your node.
