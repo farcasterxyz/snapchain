@@ -1000,7 +1000,7 @@ impl ShardEngine {
                 }
             }
             Some(proto::hub_event::Body::MergeFailure(_)) => {
-                // Merge failures affect the trie. They are only for event subscribers
+                // Merge failures don't affect the trie. They are only for event subscribers
             }
             &None => {
                 // This should never happen

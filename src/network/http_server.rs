@@ -233,6 +233,9 @@ pub struct InfoResponse {
     pub num_shards: u32,
     #[serde(rename = "shardInfos")]
     pub shard_infos: Vec<ShardInfo>,
+    pub version: String,
+    #[serde(rename = "peer_id")]
+    pub peer_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -571,6 +574,8 @@ fn map_get_info_response_to_json_info_response(
             approx_size: db_stats.approx_size,
         }),
         num_shards: info_response.num_shards,
+        peer_id: info_response.peer_id,
+        version: info_response.version,
         shard_infos: info_response
             .shard_infos
             .iter()

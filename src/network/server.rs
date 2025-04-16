@@ -86,6 +86,8 @@ pub struct MyHubService {
     l1_client: Option<Box<dyn L1Client>>,
     mempool_tx: mpsc::Sender<MempoolRequest>,
     network: proto::FarcasterNetwork,
+    version: String,
+    peer_id: String,
 }
 
 impl MyHubService {
@@ -100,6 +102,8 @@ impl MyHubService {
         message_router: Box<dyn routing::MessageRouter>,
         mempool_tx: mpsc::Sender<MempoolRequest>,
         l1_client: Option<Box<dyn L1Client>>,
+        version: String,
+        peer_id: String,
     ) -> Self {
         let mut allowed_users = HashMap::new();
         for auth in rpc_auth.split(",") {
@@ -126,6 +130,8 @@ impl MyHubService {
             num_shards,
             l1_client,
             mempool_tx,
+            version,
+            peer_id,
         };
         service
     }
@@ -385,9 +391,10 @@ impl MyHubService {
         }
     }
 
-    fn rewrite_hub_event(mut hub_event: HubEvent) -> HubEvent {
+    fn rewrite_hub_event(mut hub_event: HubEvent, shard_index: u32) -> HubEvent {
         let (block_number, _) = HubEventIdGenerator::extract_height_and_seq(hub_event.id);
         hub_event.block_number = block_number;
+        hub_event.shard_index = shard_index;
 
         match &mut hub_event.body {
             Some(body) => {
@@ -653,6 +660,8 @@ impl HubService for MyHubService {
             }),
             shard_infos,
             num_shards: self.num_shards,
+            version: self.version.clone(),
+            peer_id: self.peer_id.clone(),
         }))
     }
 
@@ -676,12 +685,12 @@ impl HubService for MyHubService {
                         HubError::invalid_internal_state("Invalid shard id"),
                     )))
                 }
-                Some(senders) => vec![senders.events_tx.clone()],
+                Some(senders) => vec![(shard_id, senders.events_tx.clone())],
             },
             None => self
                 .shard_senders
-                .values()
-                .map(|senders| senders.events_tx.clone())
+                .iter()
+                .map(|(shard_id, senders)| (*shard_id, senders.events_tx.clone()))
                 .collect(),
         };
 
@@ -725,7 +734,7 @@ impl HubService for MyHubService {
 
                     for event in old_events.events {
                         if event_types.contains(&event.r#type) {
-                            let event = Self::rewrite_hub_event(event);
+                            let event = Self::rewrite_hub_event(event, store.shard_id);
                             if let Err(_) = server_tx.send(Ok(event)).await {
                                 return;
                             }
@@ -745,7 +754,7 @@ impl HubService for MyHubService {
             );
 
             // TODO(aditi): It's possible that events show up between when we finish reading from the db and the subscription starts. We don't handle this case in the current hub code, but we may want to down the line.
-            for event_tx in events_txs {
+            for (shard_id, event_tx) in events_txs {
                 let mut inner_events: Vec<i32> = Vec::new();
                 inner_events.resize(event_types_filter.len(), 0);
                 inner_events.copy_from_slice(event_types_filter.as_slice());
@@ -757,7 +766,7 @@ impl HubService for MyHubService {
                         match event_rx.recv().await {
                             Ok(hub_event) => {
                                 if filtered_events.contains(&hub_event.r#type) {
-                                    let hub_event = Self::rewrite_hub_event(hub_event);
+                                    let hub_event = Self::rewrite_hub_event(hub_event, shard_id);
                                     match tx.send(Ok(hub_event)).await {
                                         Ok(_) => {}
                                         Err(_) => {
@@ -795,7 +804,7 @@ impl HubService for MyHubService {
 
         match hub_event_result {
             Ok(hub_event) => {
-                let response = Self::rewrite_hub_event(hub_event);
+                let response = Self::rewrite_hub_event(hub_event, stores.shard_id);
                 Ok(Response::new(response))
             }
             Err(err) => Err(Status::internal(err.to_string())),

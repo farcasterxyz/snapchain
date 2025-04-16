@@ -82,8 +82,7 @@ impl proto::HubEvent {
             // These are populated later
             block_number: 0,
             id: 0,
-            shard_id: 0,
-            block_timestamp: 0,
+            shard_index: 0,
         }
     }
 

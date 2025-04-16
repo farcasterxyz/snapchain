@@ -51,9 +51,11 @@ message GetInfoRequest {
 
 // Response Types for the Sync RPC Methods
 message GetInfoResponse {
+  string version = 1;
   DbStats db_stats = 5;
-  uint32 num_shards = 6;
-  repeated ShardInfo shard_infos = 7;
+  string peerId = 6;
+  uint32 num_shards = 8;
+  repeated ShardInfo shard_infos = 9;
 }
 
 message EventRequest {

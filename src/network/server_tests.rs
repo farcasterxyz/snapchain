@@ -96,6 +96,7 @@ mod tests {
                 if let Ok(Some(Ok(hub_event))) = event {
                     let block_number = hub_event.block_number;
                     assert!(block_number > 0);
+                    assert!(hub_event.shard_index > 0);
                     num_events_seen += 1;
                     if num_events_seen == num_events_expected {
                         break;
@@ -118,8 +119,7 @@ mod tests {
                     id: i,
                     body: None,
                     block_number: 0,
-                    block_timestamp: 0,
-                    shard_id: 0,
+                    shard_index: 0,
                 })
                 .unwrap();
         }
@@ -135,8 +135,7 @@ mod tests {
                     id: i,
                     body: None,
                     block_number: 0,
-                    block_timestamp: 0,
-                    shard_id: 0,
+                    shard_index: 0,
                 },
             )
             .unwrap();
@@ -250,6 +249,8 @@ mod tests {
                 message_router,
                 mempool_tx.clone(),
                 Some(Box::new(MockL1Client {})),
+                "0.1.2".to_string(),
+                "asddef".to_string(),
             ),
         )
     }
@@ -359,8 +360,7 @@ mod tests {
             id: event_id,
             body: None,
             block_number: 0,
-            block_timestamp: 0,
-            shard_id: 0,
+            shard_index: 0,
         };
 
         let db = stores.get(&1u32).unwrap().shard_store.db.clone();
@@ -377,6 +377,7 @@ mod tests {
 
         let hub_event_response = response.into_inner();
         assert_eq!(hub_event_response.block_number, event_id >> SEQUENCE_BITS);
+        assert_eq!(hub_event_response.shard_index, 1);
         assert_eq!(hub_event_response.r#type, hub_event.r#type);
         assert_eq!(hub_event_response.id, event_id);
     }
@@ -919,6 +920,8 @@ mod tests {
         let info = response.get_ref();
         assert_eq!(info.num_shards, 2);
         assert_eq!(info.shard_infos.len(), 3); // +1 for the block shard
+        assert_eq!(info.peer_id, "asddef");
+        assert_eq!(info.version, "0.1.2");
 
         let block_info = info
             .shard_infos

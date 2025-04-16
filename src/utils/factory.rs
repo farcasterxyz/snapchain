@@ -603,8 +603,7 @@ pub mod hub_events_factory {
                 },
             )),
             block_number: 0,
-            shard_id: 1,
-            block_timestamp: 0,
+            shard_index: 0,
         }
     }
 }

@@ -338,6 +338,8 @@ impl NodeForTest {
             Box::new(routing::EvenOddRouterForTest {}),
             mempool_tx.clone(),
             None,
+            "".to_string(),
+            "".to_string(),
         );
 
         let handle = tokio::spawn(async move {
