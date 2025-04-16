@@ -1338,11 +1338,11 @@ impl HubService for MyHubService {
         let name = req.name.clone();
         let name_bytes = name.as_slice();
         let name_str = std::str::from_utf8(&name).unwrap_or("");
-        
+
         // Check if this is an .eth name (look in username_proof_store) or fname (look in user_data_store)
         if name_str.ends_with(".eth") {
             let user_name_type = UserNameType::UsernameTypeEnsL1 as u8;
-            
+
             // Look for ENS username proofs in the username_proof_store
             let proof_opt = self.shard_stores.iter().find_map(|(_shard_entry, stores)| {
                 match UsernameProofStore::get_username_proof(
@@ -1351,7 +1351,8 @@ impl HubService for MyHubService {
                     user_name_type,
                 ) {
                     Ok(Some(message)) => message.data.and_then(|data| {
-                        if let Some(message_data::Body::UsernameProofBody(user_name_proof)) = data.body
+                        if let Some(message_data::Body::UsernameProofBody(user_name_proof)) =
+                            data.body
                         {
                             Some(user_name_proof)
                         } else {
@@ -1361,11 +1362,13 @@ impl HubService for MyHubService {
                     _ => None,
                 }
             });
-            
+
             if let Some(proof_message) = proof_opt {
                 Ok(Response::new(proof_message))
             } else {
-                Err(Status::not_found("ENS username proof not found".to_string()))
+                Err(Status::not_found(
+                    "ENS username proof not found".to_string(),
+                ))
             }
         } else {
             // Look for fname proofs in the user_data_store
@@ -1379,7 +1382,7 @@ impl HubService for MyHubService {
                     _ => None,
                 }
             });
-            
+
             if let Some(proof_message) = proof_opt {
                 Ok(Response::new(proof_message))
             } else {
