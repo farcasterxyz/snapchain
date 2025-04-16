@@ -113,6 +113,25 @@ If nodes are behaving maliciously, there are more attack scenarios that are poss
 * Shard validator majority can reissue a shard before block finality —  TBD are malicious, they can reissue a shard for a block before it gets finalized. 
 * If > 2/3 majority of block validators and > 2/3 majority of one shard validators collude, they can reissue a block which would cause a network fork.  Requires a refork and restart of the network, 
 
+### 9. Upgrade process
+
+New node versions are released frequently, and nodes are expected to be kept upto date. There are two kinds of version upgrades:
+
+**Non-consensus breaking upgrades**
+
+These are the most common kind, usually containing bug fixes or performance improvements. They are backwards compatible and there is no need to coordinate with other nodes. Nodes can be upgraded at any time and will continue to work with older nodes. These changes are denoted with a patch version bump (e.g. 0.1.0 -> 0.1.1).
+
+**Consensus breaking upgrades**
+
+These are less common and usually contain breaking changes to the protocol. The changes are not backwards compatible, and a node may halt if it's not upgraded. These changes are denoted with a minor version bump (e.g. 0.1.0 -> 0.2.0).
+
+Each block contains a version number for the protocol in its header. When a consensus breaking change is required, a new minor version is released with a PROTOCOL_VERSION bump and a timestamp after which it will take effect. All nodes must upgrade to the latest minor version before this time. All blocks produced on or after this timestamp will have this newer version. Nodes will not accept blocks with an unexpected version number and old nodes will detect they are out of date and self terminate.
+
+**Accidental breaking changes**
+
+It's also possible a bug or non-deterministic behaviour causes a breaking changes. E.g. a consensus breaking change is made without a corresponding protocol version bump. In this case, the nodes will proceed as normal until they encounter a blocks with the breaking change. At which point, the merkle roots will not match and the nodes that are not upgraded will halt. If this happens to validators, then block production will halt until a new version is released with a fix.
+
+
 ## Frequently Asked Questions
 
 ### What exactly is hard about sync today?
