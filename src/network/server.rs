@@ -1348,9 +1348,7 @@ impl HubService for MyHubService {
         request: Request<UsernameProofRequest>,
     ) -> Result<Response<UserNameProof>, Status> {
         let req = request.into_inner();
-        let name = req.name.clone();
-        let name_bytes = name.as_slice();
-        let name_str = std::str::from_utf8(&name).unwrap_or("");
+        let name_str = std::str::from_utf8(&req.name).unwrap_or("");
 
         // Check if this is an .eth name (look in username_proof_store) or fname (look in user_data_store)
         if name_str.ends_with(".eth") {
@@ -1360,7 +1358,7 @@ impl HubService for MyHubService {
             let proof_opt = self.shard_stores.iter().find_map(|(_shard_entry, stores)| {
                 match UsernameProofStore::get_username_proof(
                     &stores.username_proof_store,
-                    &name,
+                    &req.name,
                     user_name_type,
                 ) {
                     Ok(Some(message)) => message.data.and_then(|data| {
@@ -1389,7 +1387,7 @@ impl HubService for MyHubService {
                 match UserDataStore::get_username_proof(
                     &stores.user_data_store,
                     &mut RocksDbTransactionBatch::new(),
-                    name_bytes,
+                    &req.name,
                 ) {
                     Ok(Some(user_name_proof)) => Some(user_name_proof),
                     _ => None,

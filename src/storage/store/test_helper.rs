@@ -339,10 +339,11 @@ pub async fn register_fname(
     username: &String,
     timestamp: Option<u64>,
     engine: &mut ShardEngine,
+    owner: Vec<u8>,
 ) {
-    let fname_transfer = username_factory::create_transfer(fid, username, timestamp, None);
+    let fname_transfer = username_factory::create_transfer(fid, username, timestamp, None, owner);
     let state_change = engine.propose_state_change(
-        1,
+        engine.shard_id(),
         vec![MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
             on_chain_event: None,
             fname_transfer: Some(fname_transfer),
