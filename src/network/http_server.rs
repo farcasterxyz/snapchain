@@ -297,11 +297,12 @@ pub struct CastsByParentRequest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReactionRequest {
     fid: u64,
-    #[serde(rename = "target_fid", skip_serializing_if = "Option::is_none")]
-    target_cast_id: Option<CastId>,
-    // I think this is actually a different type not just a rename - worth digging into more
-    #[serde(rename = "target_hash", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     target_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_fid: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_hash: Option<String>,
     reaction_type: ReactionType,
 }
 
@@ -1346,18 +1347,19 @@ impl HubHttpService for HubHttpServiceImpl {
 
     async fn get_reaction_by_id(&self, req: ReactionRequest) -> Result<Message, ErrorResponse> {
         let service = &self.service;
-        let target = if req.target_cast_id.is_some() {
-            let cast_id = req.target_cast_id.unwrap();
-            let hash = hex::decode(cast_id.hash.replace("0x", ""));
-            if hash.is_err() {
-                return Err(ErrorResponse {
-                    error: hash.unwrap_err().to_string(),
-                    error_detail: None,
-                });
-            }
+        let target = if req.target_fid.is_some() {
+            let hash = if let Some(hash_str) = req.target_hash.as_deref() {
+                hex::decode(hash_str.trim_start_matches("0x")).map_err(|e| ErrorResponse {
+                    error: "Invalid hash".to_string(),
+                    error_detail: Some(e.to_string()),
+                })?
+            } else {
+                Vec::new()
+            };
+
             reaction_request::Target::TargetCastId(proto::CastId {
-                fid: cast_id.fid,
-                hash: hash.unwrap(),
+                fid: req.target_fid.expect("target fid not specified"),
+                hash,
             })
         } else if req.target_url.is_some() {
             reaction_request::Target::TargetUrl(req.target_url.unwrap())
