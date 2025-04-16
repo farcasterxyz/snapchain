@@ -72,10 +72,10 @@ pub enum MessageValidationError {
     #[error("message has no data")]
     NoMessageData,
 
-    #[error("missing fid")]
+    #[error("unknown fid")]
     MissingFid,
 
-    #[error("missing signer")]
+    #[error("invalid signer")]
     MissingSigner,
 
     #[error(transparent)]
@@ -87,7 +87,7 @@ pub enum MessageValidationError {
     #[error(transparent)]
     StoreError(#[from] HubError),
 
-    #[error("fname not registered for fid")]
+    #[error("fname is not registered for fid")]
     MissingFname,
 }
 

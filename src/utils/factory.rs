@@ -205,6 +205,10 @@ pub mod messages_factory {
         time::farcaster_time()
     }
 
+    pub fn generate_random_message_hash() -> Vec<u8> {
+        (0..20).map(|_| rand::random::<u8>()).collect()
+    }
+
     pub fn create_message_with_data(
         fid: u64,
         msg_type: MessageType,

@@ -456,7 +456,7 @@ mod tests {
         assert_eq!(response.code(), tonic::Code::InvalidArgument);
         assert_eq!(
             response.message(),
-            "bad_request.validation_failure/missing fid"
+            "bad_request.validation_failure/unknown fid"
         );
         assert_eq!(
             response
@@ -530,7 +530,7 @@ mod tests {
         assert_eq!(response.code(), tonic::Code::InvalidArgument);
         assert_eq!(
             response.message(),
-            "bad_request.validation_failure/missing fid"
+            "bad_request.validation_failure/unknown fid"
         );
     }
 

@@ -10,7 +10,7 @@ pub enum ValidationError {
     InvalidHashScheme,
     #[error("Message data invalid")]
     InvalidData,
-    #[error("Message data too large")]
+    #[error("Invalid data length")]
     InvalidDataLength,
     #[error("Unrecognized signature scheme")]
     InvalidSignatureScheme,

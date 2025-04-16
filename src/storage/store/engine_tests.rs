@@ -8,7 +8,8 @@ mod tests {
     use crate::storage::db::{PageOptions, RocksDbTransactionBatch};
     use crate::storage::store::account::HubEventIdGenerator;
     use crate::storage::store::engine::{MempoolMessage, ShardEngine};
-    use crate::storage::store::test_helper::{self, FID3_FOR_TEST};
+    use crate::storage::store::stores::StoreLimits;
+    use crate::storage::store::test_helper::{self, EngineOptions, FID3_FOR_TEST};
     use crate::storage::store::test_helper::{
         commit_message, message_exists_in_trie, register_user, FID2_FOR_TEST, FID_FOR_TEST,
     };
@@ -116,7 +117,12 @@ mod tests {
         assert_event_id(event, None, event_seq);
     }
 
-    async fn assert_commit_fails(engine: &mut ShardEngine, msg: &proto::Message) -> ShardChunk {
+    async fn assert_commit_fails(
+        engine: &mut ShardEngine,
+        msg: &proto::Message,
+        error_code: &str,
+        error_message: &str,
+    ) -> ShardChunk {
         let state_change =
             engine.propose_state_change(1, vec![MempoolMessage::UserMessage(msg.clone())]);
 
@@ -131,7 +137,34 @@ mod tests {
         );
         // We don't fail the transaction for reject messages, they are just not included in the trie
         assert!(!message_exists_in_trie(engine, msg));
+
+        assert_eq!(state_change.events.len(), 1);
+        assert_failure_event(
+            state_change.events[0].clone(),
+            msg,
+            error_code,
+            error_message,
+        );
+
         chunk
+    }
+
+    fn assert_failure_event(
+        event: HubEvent,
+        msg: &proto::Message,
+        error_code: &str,
+        error_message: &str,
+    ) {
+        assert_eq!(event.r#type, proto::HubEventType::MergeFailure as i32);
+        let (err_code, err_msg) = match event.body {
+            Some(proto::hub_event::Body::MergeFailure(body)) => {
+                assert_eq!(&body.message.unwrap(), msg);
+                (body.code, body.reason)
+            }
+            _ => panic!("Unexpected event type: {:?}", event.body),
+        };
+        assert_eq!(err_code, error_code);
+        assert_eq!(err_msg, error_message);
     }
 
     #[tokio::test]
@@ -205,15 +238,13 @@ mod tests {
         // Modify the message so the hash is no longer correct
         message.data.as_mut().unwrap().timestamp = current_timestamp + 1;
 
-        assert_commit_fails(&mut engine, &message).await;
-
-        assert_eq!(
-            engine
-                .validate_user_message(&message, &mut RocksDbTransactionBatch::new())
-                .unwrap_err()
-                .to_string(),
-            "Invalid message hash"
-        );
+        assert_commit_fails(
+            &mut engine,
+            &message,
+            "bad_request.validation_failure",
+            "Invalid message hash",
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -232,15 +263,13 @@ mod tests {
         message.data.as_mut().unwrap().timestamp = current_timestamp + 1;
         message.hash = calculate_message_hash(&message.data.as_ref().unwrap().encode_to_vec());
 
-        assert_commit_fails(&mut engine, &message).await;
-
-        assert_eq!(
-            engine
-                .validate_user_message(&message, &mut RocksDbTransactionBatch::new())
-                .unwrap_err()
-                .to_string(),
-            "Invalid message signature"
-        );
+        assert_commit_fails(
+            &mut engine,
+            &message,
+            "bad_request.validation_failure",
+            "Invalid message signature",
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -953,7 +982,13 @@ mod tests {
         cast_add.hash = calculate_message_hash(&cast_add.data.as_ref().unwrap().encode_to_vec());
         cast_add.signature = signer.sign(&cast_add.hash).to_bytes().to_vec();
 
-        assert_commit_fails(&mut engine, &cast_add).await;
+        assert_commit_fails(
+            &mut engine,
+            &cast_add,
+            "bad_request.validation_failure",
+            "Invalid network",
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1216,7 +1251,13 @@ mod tests {
             Some(timestamp + 5),
             Some(&signer),
         );
-        assert_commit_fails(&mut engine, &post_revoke_message).await;
+        assert_commit_fails(
+            &mut engine,
+            &post_revoke_message,
+            "bad_request.validation_failure",
+            "invalid signer",
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1401,7 +1442,13 @@ mod tests {
             ),
         )
         .await;
-        assert_commit_fails(&mut engine, &default_message("msg1")).await;
+        assert_commit_fails(
+            &mut engine,
+            &default_message("msg1"),
+            "bad_request.validation_failure",
+            "unknown fid",
+        )
+        .await;
         let messages = engine.get_casts_by_fid(FID_FOR_TEST).unwrap();
         assert_eq!(0, messages.messages.len());
         let id_register = events_factory::create_id_register_event(
@@ -1434,7 +1481,13 @@ mod tests {
             ),
         )
         .await;
-        assert_commit_fails(&mut engine, &default_message("msg1")).await;
+        assert_commit_fails(
+            &mut engine,
+            &default_message("msg1"),
+            "bad_request.validation_failure",
+            "invalid signer",
+        )
+        .await;
         let messages = engine.get_casts_by_fid(FID_FOR_TEST).unwrap();
         assert_eq!(0, messages.messages.len());
         test_helper::commit_event(
@@ -1450,6 +1503,62 @@ mod tests {
         commit_message(&mut engine, &default_message("msg1")).await;
         let messages = engine.get_casts_by_fid(FID_FOR_TEST).unwrap();
         assert_eq!(1, messages.messages.len());
+    }
+
+    #[tokio::test]
+    async fn test_merge_failure_event() {
+        let single_message_limit = StoreLimits {
+            limits: test_helper::limits::one(),
+            legacy_limits: test_helper::limits::zero(),
+        };
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            limits: Some(single_message_limit),
+            db: None,
+            messages_request_tx: None,
+        });
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let timestamp = time::farcaster_time();
+        let hash = messages_factory::generate_random_message_hash();
+        let remove_message = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &hash,
+            Some(timestamp),
+            Some(&test_helper::default_signer()),
+        );
+        commit_message(&mut engine, &remove_message).await;
+
+        // We can't use assert_commit_fails here, because it checks against existence in the trie, and duplicate will exist already
+        let state_change = engine
+            .propose_state_change(1, vec![MempoolMessage::UserMessage(remove_message.clone())]);
+        assert_eq!(state_change.events.len(), 1);
+        assert_failure_event(
+            state_change.events[0].clone(),
+            &remove_message,
+            "bad_request.duplicate",
+            "message has already been merged",
+        );
+
+        let conflicting_message = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &hash,
+            Some(timestamp - 1),
+            Some(&test_helper::default_signer()),
+        );
+
+        assert_commit_fails(
+            &mut engine,
+            &conflicting_message,
+            "bad_request.conflict",
+            "message conflicts with a more recent remove",
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1480,7 +1589,13 @@ mod tests {
                 None,
                 None,
             );
-            assert_commit_fails(&mut engine, &msg).await;
+            assert_commit_fails(
+                &mut engine,
+                &msg,
+                "bad_request.validation_failure",
+                "fname is not registered for fid",
+            )
+            .await;
         }
 
         let fname = &"acp".to_string();
@@ -1516,7 +1631,13 @@ mod tests {
                 None,
                 None,
             );
-            assert_commit_fails(&mut engine, &msg).await;
+            assert_commit_fails(
+                &mut engine,
+                &msg,
+                "bad_request.validation_failure",
+                "fname is not registered for fid",
+            )
+            .await;
         }
 
         // When fname is registered and owned by the same fid, message is merged
@@ -1564,7 +1685,7 @@ mod tests {
 
         let result = engine.simulate_message(&message);
         assert_eq!(result.is_ok(), false);
-        assert_eq!(result.unwrap_err().to_string(), "missing fid");
+        assert_eq!(result.unwrap_err().to_string(), "unknown fid");
 
         register_user(
             FID_FOR_TEST,

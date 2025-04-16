@@ -56,6 +56,17 @@ pub mod limits {
         }
     }
 
+    pub fn one() -> Limits {
+        Limits {
+            casts: 1,
+            links: 1,
+            reactions: 1,
+            user_data: 1,
+            user_name_proofs: 1,
+            verifications: 1,
+        }
+    }
+
     pub fn test() -> Limits {
         Limits {
             casts: 4,
