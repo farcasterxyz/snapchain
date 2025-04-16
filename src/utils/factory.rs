@@ -529,11 +529,12 @@ pub mod username_factory {
         username_type: crate::proto::UserNameType,
         name: &String,
         timestamp: Option<u64>,
+        owner: Vec<u8>,
     ) -> UserNameProof {
         UserNameProof {
             timestamp: timestamp.unwrap_or_else(|| time::current_timestamp() as u64),
             name: name.as_bytes().to_vec(),
-            owner: rand::random::<[u8; 32]>().to_vec(),
+            owner,
             signature: rand::random::<[u8; 32]>().to_vec(),
             fid,
             r#type: username_type as i32,
@@ -545,6 +546,7 @@ pub mod username_factory {
         name: &String,
         timestamp: Option<u64>,
         from_fid: Option<u64>,
+        owner: Vec<u8>,
     ) -> FnameTransfer {
         FnameTransfer {
             id: rand::random::<u64>(),
@@ -554,6 +556,7 @@ pub mod username_factory {
                 crate::proto::UserNameType::UsernameTypeFname,
                 name,
                 timestamp,
+                owner,
             )),
         }
     }

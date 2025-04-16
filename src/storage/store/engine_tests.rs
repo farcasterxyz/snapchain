@@ -8,7 +8,7 @@ mod tests {
     use crate::storage::db::{PageOptions, RocksDbTransactionBatch};
     use crate::storage::store::account::HubEventIdGenerator;
     use crate::storage::store::engine::{MempoolMessage, ShardEngine};
-    use crate::storage::store::test_helper::{self, FID3_FOR_TEST};
+    use crate::storage::store::test_helper::{self, default_custody_address, FID3_FOR_TEST};
     use crate::storage::store::test_helper::{
         commit_message, message_exists_in_trie, register_user, FID2_FOR_TEST, FID_FOR_TEST,
     };
@@ -1328,7 +1328,14 @@ mod tests {
         .await;
 
         let fname = &"farcaster".to_string();
-        test_helper::register_fname(FID_FOR_TEST, fname, None, &mut engine).await;
+        test_helper::register_fname(
+            FID_FOR_TEST,
+            fname,
+            None,
+            &mut engine,
+            default_custody_address(),
+        )
+        .await;
 
         let fid_username_msg = messages_factory::user_data::create_user_data_add(
             FID_FOR_TEST,
@@ -1354,6 +1361,7 @@ mod tests {
             fname,
             Some(time::current_timestamp() as u64 + 10),
             Some(FID_FOR_TEST),
+            test_helper::default_custody_address(),
         );
         let state_change = engine.propose_state_change(
             1,
