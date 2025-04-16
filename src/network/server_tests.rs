@@ -882,7 +882,7 @@ mod tests {
         let configured_limits = engine1.get_stores().store_limits;
         assert_eq!(
             casts_limit.limit as u32,
-            (configured_limits.limits.casts * 2) + (configured_limits.legacy_limits.casts)
+            (configured_limits.limits_2024.casts * 2) + (configured_limits.limits_legacy.casts)
         );
         assert_eq!(casts_limit.used, 2); // Cast remove counts as 1
         assert_eq!(casts_limit.name, "CASTS");

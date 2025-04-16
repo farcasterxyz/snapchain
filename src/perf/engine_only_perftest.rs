@@ -40,8 +40,9 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     let (mut engine, _tmpdir) = test_helper::new_engine_with_options(test_helper::EngineOptions {
         limits: Some(StoreLimits {
-            limits: test_helper::limits::unlimited(),
-            legacy_limits: test_helper::limits::unlimited(),
+            limits_2025: test_helper::limits::unlimited(),
+            limits_2024: test_helper::limits::unlimited(),
+            limits_legacy: test_helper::limits::unlimited(),
         }),
         db: None,
         messages_request_tx: Some(messages_request_tx),

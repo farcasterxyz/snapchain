@@ -105,8 +105,9 @@ pub mod limits {
     #[cfg(test)]
     pub fn test_store_limits() -> crate::storage::store::stores::StoreLimits {
         crate::storage::store::stores::StoreLimits {
-            limits: test(),
-            legacy_limits: legacy(),
+            limits_2025: test(),
+            limits_2024: one(),
+            limits_legacy: legacy(),
         }
     }
 }
@@ -140,8 +141,9 @@ pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile
     };
 
     let test_limits = options.limits.unwrap_or(StoreLimits {
-        limits: limits::test(),
-        legacy_limits: limits::zero(),
+        limits_2025: limits::test(),
+        limits_2024: limits::test(),
+        limits_legacy: limits::zero(),
     });
 
     (

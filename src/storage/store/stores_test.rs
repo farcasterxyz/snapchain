@@ -19,8 +19,9 @@ mod tests {
 
         let trie = trie::merkle_trie::MerkleTrie::new(16).unwrap();
         let limits = stores::StoreLimits {
-            limits: test_helper::limits::test(),
-            legacy_limits: test_helper::limits::zero(),
+            limits_2025: test_helper::limits::test(),
+            limits_2024: test_helper::limits::test(),
+            limits_legacy: test_helper::limits::zero(),
         };
 
         stores::Stores::new(Arc::new(db), 1, trie, limits, test_helper::statsd_client())

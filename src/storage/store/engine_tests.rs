@@ -1508,8 +1508,9 @@ mod tests {
     #[tokio::test]
     async fn test_merge_failure_event() {
         let single_message_limit = StoreLimits {
-            limits: test_helper::limits::one(),
-            legacy_limits: test_helper::limits::zero(),
+            limits_2025: test_helper::limits::one(),
+            limits_2024: test_helper::limits::one(),
+            limits_legacy: test_helper::limits::zero(),
         };
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             limits: Some(single_message_limit),
