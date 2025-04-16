@@ -1471,7 +1471,7 @@ impl HubService for MyHubService {
                 Ok(None) => {}
                 Err(e) => {
                     // Log the error but continue, to try to get all proofs we can
-                    debug!("Error getting username proof from user_data_store: {:?}", e);
+                    error!("Error getting username proof from user_data_store: {:?}", e);
                 }
             }
         }
