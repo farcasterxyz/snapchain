@@ -3,10 +3,44 @@
 ### Pre-requisites
 - Read access to a Snapchain node
 
+See [running a node](/guides/running-a-node) for more information on how to set up a node.
+
 While some applications can be written by directly querying Hubble, most serious applications need to access the data
 in a more structured way.
 
 [Shuttle](https://github.com/farcasterxyz/hub-monorepo/tree/main/packages/shuttle) is a package
-that can be used to mirror Hubble's data to a Postgres DB for convenient access to the underlying data.
+that can be used to mirror Snapchain's data to a Postgres DB for convenient access to the underlying data.
+
+## Quickstart
+``` bash
+git clone git@github.com:farcasterxyz/hub-monorepo.git
+
+# Ensure you have node 21 installed, use nvm to install it
+nvm install 21
+
+# If necessary, build packages/core dependency
+( cd packages/core && yarn install && yarn build; )
+
+# If necessary, build packages/hub-nodejs dependency
+( cd packages/hub-nodejs && yarn install && yarn build; )
+
+# Do remainder within the packages/shuttle directory
+cd packages/shuttle
+yarn install && yarn build
+
+# Start the db dependencies
+docker compose up postgres redis
+
+# To perform reconciliation/backfill, start the worker (can run multiple processes to speed this up)
+POSTGRES_URL=postgres://shuttle:password@0.0.0.0:6541 REDIS_URL=0.0.0.0:16379 HUB_HOST=<host>:<port> HUB_SSL=false yarn start worker
+
+# Kick off the backfill process (configure with MAX_FID=100 or BACKFILL_FIDS=1,2,3)
+POSTGRES_URL=postgres://shuttle:password@0.0.0.0:6541 REDIS_URL=0.0.0.0:16379 HUB_HOST=<host>:<port> HUB_SSL=false yarn start backfill
+
+# Start the app and sync messages from the event stream
+POSTGRES_URL=postgres://shuttle:password@0.0.0.0:6541 REDIS_URL=0.0.0.0:16379 HUB_HOST=<host>:<port> HUB_SSL=false yarn start start
+```
+
+This package is fully re-used from Hubble because the Snapchain APIs are backwards compatible with Hubble. 
 
 Check out the [documentation](https://github.com/farcasterxyz/hub-monorepo/blob/main/packages/shuttle/README.md) for more information.

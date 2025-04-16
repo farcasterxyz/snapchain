@@ -13,6 +13,7 @@ export default defineConfig({
         text: 'Overview',
         items: [
           { text: 'What is Snapchain?', link: '/' },
+          { text: 'Getting started', link: '/getting-started' },
           { text: 'Whitepaper', link: '/whitepaper' },
         ],
       },

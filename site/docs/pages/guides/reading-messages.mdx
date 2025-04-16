@@ -5,7 +5,15 @@
 
 See [running a node](/guides/running-a-node) for more information on how to set up a node.
 
-To query all the casts for a particular FID, you can use the castsByFid HTTP endpoint:
+## Querying for a user's FID
+```
+curl http://127.0.0.1:3381/v1/userNameProofByName?name=<username>
+```
+Look at the `fid` field for the FID associated with the username. 
+
+## Querying for the user's casts
+
+To query all the casts for a particular FID, you can use the [castsByFid](/reference/httpapi/casts#castsbyfid) HTTP endpoint:
 
 ```bash
 # Default http port is 3381
@@ -18,9 +26,9 @@ $ curl http://localhost:3381/v1/castsByFid\?fid\=1 \
 "another testy test"
 ```
 
-This returns all the cast related messages for the fid. There are similar endpoints for reactions and follows. 
+This returns all the cast related messages for the FID. There are similar endpoints for reactions and follows. 
 
-If you have the snapchain installed from source, you can use grpcurl. This will use the grpc APIs
+If you have Snapchain installed from source, you can use the [GetAllCastMessagesByFid](/reference/grpcapi/casts#api) GRPC API.
 
 ```bash
 grpcurl -plaintext -proto src/proto/rpc.proto -import-path src/proto  -d '{"fid" : 1}' localhost:3383 HubService/GetAllCastMessagesByFid \

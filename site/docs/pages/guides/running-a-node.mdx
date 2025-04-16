@@ -1,5 +1,9 @@
 # Running a node on AWS
 
+:::tip
+Consider using [Neynar](https://neynar.com/) if you want to get set up quickly
+:::
+
 ## Instance specs
 - 16 GB of RAM
 - 4 CPU cores or vCPUs
@@ -50,7 +54,7 @@ sudo docker compose up # -d to run in background, if you set up rootless docker 
 ``` bash
 curl localhost:3381/v1/info | jq
 ```
-When your node has caught up, `blockDelay` will be close to 0.
+When your node has caught up, `blockDelay` will be close to 0. It will take a few hours for your node to sync from scratch. 
 
 ### Notes
 - Shard block numbers are independent, one can be ahead of the other and it's normal
