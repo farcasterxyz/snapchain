@@ -507,7 +507,7 @@ pub mod messages_factory {
                 timestamp,
                 name: name.as_bytes().to_vec(),
                 owner,
-                signature: signature.encode_to_vec(),
+                signature: signature.as_bytes().to_vec(),
                 fid,
                 r#type: username_type as i32,
             };
