@@ -79,9 +79,8 @@ async fn start_servers(
         VERSION.unwrap_or("unknown").to_string(),
         gossip.swarm.local_peer_id().to_string(),
     ));
-    let grpc_service = service.clone();
     let grpc_shutdown_tx = shutdown_tx.clone();
-    let hub_service = HubServiceServer::from_arc(grpc_service.clone())
+    let hub_service = HubServiceServer::from_arc(service.clone())
         .accept_compressed(CompressionEncoding::Gzip)
         .send_compressed(CompressionEncoding::Gzip);
     tokio::spawn(async move {
