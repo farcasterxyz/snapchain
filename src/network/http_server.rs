@@ -1755,6 +1755,7 @@ impl HubHttpService for HubHttpServiceImpl {
         });
     }
 
+    // POST /v1/submitMessage
     async fn submit_message(
         &self,
         req: proto::Message,
