@@ -1,13 +1,16 @@
 use base64::prelude::*;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
+use hyper::header::HeaderValue;
 use hyper::{body::Bytes, Method};
-use hyper::{Request, Response, StatusCode};
+use hyper::{HeaderMap, Request, Response, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::convert::Infallible;
 use std::future::Future;
+use std::str::FromStr;
 use std::sync::Arc;
 use tonic::async_trait;
+use tonic::metadata::MetadataValue;
 
 use crate::proto::{
     self, embed, hub_service_server::HubService, link_body::Target, message_data::Body, CastType,
@@ -1201,6 +1204,11 @@ pub trait HubHttpService {
         &self,
         req: proto::Message,
     ) -> Result<ValidationResult, ErrorResponse>;
+    async fn submit_message(
+        &self,
+        req: proto::Message,
+        headers: HeaderMap<HeaderValue>,
+    ) -> Result<Message, ErrorResponse>;
     async fn get_verifications_by_fid(
         &self,
         req: FidRequest,
@@ -1747,6 +1755,41 @@ impl HubHttpService for HubHttpServiceImpl {
         });
     }
 
+    async fn submit_message(
+        &self,
+        req: proto::Message,
+        headers: HeaderMap<HeaderValue>,
+    ) -> Result<Message, ErrorResponse> {
+        let service = &self.service;
+        let mut grpc_req = tonic::Request::new(req);
+
+        if let Some(auth) = headers.get("authorization") {
+            match auth.to_str() {
+                Err(err) => {
+                    return Err(ErrorResponse {
+                        error: "Invalid auth header".to_string(),
+                        error_detail: Some(err.to_string()),
+                    })
+                }
+                Ok(auth) => {
+                    grpc_req
+                        .metadata_mut()
+                        .append("authorization", MetadataValue::from_str(auth).unwrap());
+                }
+            }
+        };
+
+        let response = service
+            .submit_message(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to submit message".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+        let proto_resp = response.into_inner();
+        map_proto_message_to_json_message(proto_resp)
+    }
+
     /// GET /v1/verificationsByFid
     async fn get_verifications_by_fid(
         &self,
@@ -2105,8 +2148,17 @@ impl Router {
                 .await
             }
             (&Method::GET, "/v1/validateMessage") => {
-                self.handle_protobuf_request::<ValidationResult, _>(req, |service, req| {
-                    Box::pin(async move { service.validate_message(req).await })
+                self.handle_protobuf_request::<ValidationResult, _>(
+                    req,
+                    |service, _headers, req| {
+                        Box::pin(async move { service.validate_message(req).await })
+                    },
+                )
+                .await
+            }
+            (&Method::POST, "/v1/submitMessage") => {
+                self.handle_protobuf_request::<Message, _>(req, |service, headers, req| {
+                    Box::pin(async move { service.submit_message(req, headers).await })
                 })
                 .await
             }
@@ -2143,7 +2195,7 @@ impl Router {
     async fn handle_protobuf_request<Resp, F>(
         &self,
         req: Request<hyper::body::Incoming>,
-        handler: impl FnOnce(Arc<HubHttpServiceImpl>, proto::Message) -> F,
+        handler: impl FnOnce(Arc<HubHttpServiceImpl>, HeaderMap<HeaderValue>, proto::Message) -> F,
     ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible>
     where
         Resp: Serialize,
@@ -2179,6 +2231,8 @@ impl Router {
             }
         }
 
+        let headers = req.headers().clone();
+
         // Parse request
         let req_obj = match self.parse_protobuf_request(req).await {
             Ok(req) => req,
@@ -2191,7 +2245,7 @@ impl Router {
         };
 
         // Handle request
-        match handler(self.service.clone(), req_obj).await {
+        match handler(self.service.clone(), headers, req_obj).await {
             Ok(resp) => Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "application/json")
