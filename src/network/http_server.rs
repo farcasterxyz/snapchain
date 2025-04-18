@@ -252,7 +252,10 @@ pub struct IdRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct InfoRequest {} // Doesn't take dbstats not sure if issue
+pub struct InfoRequest {
+    #[serde(rename = "dbstats")]
+    db_stats: Option<bool>,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InfoResponse {
@@ -271,8 +274,8 @@ pub struct InfoResponse {
 pub struct DbStats {
     #[serde(rename = "numMessages")]
     pub num_messages: u64,
-    #[serde(rename = "numFidRegistrations")]
-    pub num_fid_registrations: u64,
+    #[serde(rename = "numFidEvents")]
+    pub num_fid_events: u64,
     #[serde(rename = "approxSize")]
     pub approx_size: u64,
 }
@@ -635,12 +638,12 @@ pub struct HubHttpServiceImpl {
 }
 
 fn map_get_info_response_to_json_info_response(
-    info_response: proto::GetInfoResponse,
+    info_response: proto::HubInfoResponse,
 ) -> Result<InfoResponse, ErrorResponse> {
     Ok(InfoResponse {
         db_stats: info_response.db_stats.map(|db_stats| DbStats {
             num_messages: db_stats.num_messages,
-            num_fid_registrations: db_stats.num_fid_registrations,
+            num_fid_events: db_stats.num_fid_events,
             approx_size: db_stats.approx_size,
         }),
         num_shards: info_response.num_shards,
@@ -1279,11 +1282,13 @@ pub trait HubHttpService {
 
 #[async_trait]
 impl HubHttpService for HubHttpServiceImpl {
-    async fn get_info(&self, _request: InfoRequest) -> Result<InfoResponse, ErrorResponse> {
+    async fn get_info(&self, request: InfoRequest) -> Result<InfoResponse, ErrorResponse> {
         let response = self
             .service
-            .get_info(tonic::Request::<proto::GetInfoRequest>::new(
-                proto::GetInfoRequest {},
+            .get_info(tonic::Request::<proto::HubInfoRequest>::new(
+                proto::HubInfoRequest {
+                    db_stats: request.db_stats.unwrap_or(false),
+                },
             ))
             .await
             .map_err(|e| ErrorResponse {

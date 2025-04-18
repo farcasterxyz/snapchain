@@ -924,7 +924,7 @@ mod tests {
         .await;
 
         let response = service
-            .get_info(Request::new(proto::GetInfoRequest {}))
+            .get_info(Request::new(proto::HubInfoRequest { db_stats: true }))
             .await
             .unwrap();
         let info = response.get_ref();

@@ -19,8 +19,8 @@ use crate::proto::reactions_by_target_request;
 use crate::proto::CastsByParentRequest;
 use crate::proto::FidsRequest;
 use crate::proto::FidsResponse;
-use crate::proto::GetInfoResponse;
 use crate::proto::HubEvent;
+use crate::proto::HubInfoResponse;
 use crate::proto::IdRegistryEventByAddressRequest;
 use crate::proto::LinksByTargetRequest;
 use crate::proto::MessageType;
@@ -42,7 +42,7 @@ use crate::proto::{
     BlocksRequest, EventRequest, ShardChunksRequest, ShardChunksResponse, SubscribeRequest,
 };
 use crate::proto::{FidRequest, FidTimestampRequest};
-use crate::proto::{GetInfoRequest, StorageLimitsResponse};
+use crate::proto::{HubInfoRequest, StorageLimitsResponse};
 use crate::proto::{
     LinkRequest, LinksByFidRequest, Message, MessagesResponse, ReactionRequest,
     ReactionsByFidRequest, UserDataRequest, VerificationRequest,
@@ -570,8 +570,8 @@ impl HubService for MyHubService {
 
     async fn get_info(
         &self,
-        _request: Request<GetInfoRequest>,
-    ) -> Result<Response<GetInfoResponse>, Status> {
+        request: Request<HubInfoRequest>,
+    ) -> Result<Response<HubInfoResponse>, Status> {
         let mut total_fid_registrations = 0;
         let mut total_approx_size = 0;
         let mut total_num_messages = 0;
@@ -651,13 +651,23 @@ impl HubService for MyHubService {
             total_fid_registrations += shard_fid_registrations;
             total_approx_size += shard_approx_size;
         }
-
-        Ok(Response::new(GetInfoResponse {
-            db_stats: Some(DbStats {
-                num_fid_registrations: total_fid_registrations,
+        let db_stats = if request.into_inner().db_stats {
+            Some(DbStats {
+                num_fid_events: total_fid_registrations,
+                num_fname_events: 0, // TODO(implement this)
                 num_messages: total_num_messages,
                 approx_size: total_approx_size,
-            }),
+            })
+        } else {
+            None
+        };
+
+        Ok(Response::new(HubInfoResponse {
+            db_stats,
+            hub_operator_fid: 0, // TODO(aditi): Need to store this and return
+            is_syncing: false,
+            nickname: "Snapchain Node".to_string(), // TODO(aditi): Make this configurable
+            root_hash: "".to_string(),              // TODO(aditi): This is per-shard in snapchain
             shard_infos,
             num_shards: self.num_shards,
             version: self.version.clone(),
