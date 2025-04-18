@@ -63,6 +63,7 @@ use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use hex::ToHex;
+use tokio::sync::oneshot::error::TryRecvError;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
@@ -72,6 +73,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
+use std::sync::{Arc, Mutex};
 
 const MEMPOOL_SIZE_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
 
@@ -85,6 +87,7 @@ pub struct MyHubService {
     statsd_client: StatsdClientWrapper,
     l1_client: Option<Box<dyn L1Client>>,
     mempool_tx: mpsc::Sender<MempoolRequest>,
+    api_rx: Arc<Mutex<oneshot::Receiver<(bool, HubError)>>>,
     network: proto::FarcasterNetwork,
     version: String,
     peer_id: String,
@@ -101,6 +104,7 @@ impl MyHubService {
         network: proto::FarcasterNetwork,
         message_router: Box<dyn routing::MessageRouter>,
         mempool_tx: mpsc::Sender<MempoolRequest>,
+        api_rx: Arc<Mutex<oneshot::Receiver<(bool, HubError)>>>,
         l1_client: Option<Box<dyn L1Client>>,
         version: String,
         peer_id: String,
@@ -130,6 +134,7 @@ impl MyHubService {
             num_shards,
             l1_client,
             mempool_tx,
+            api_rx,
             version,
             peer_id,
         };
@@ -186,7 +191,7 @@ impl MyHubService {
                                 self.validate_ens_username(fid, user_data.value.to_string())
                                     .await?;
                             }
-                        };
+                        }
                     }
                     Some(proto::message_data::Body::UsernameProofBody(proof)) => {
                         if proof.r#type() == UserNameType::UsernameTypeEnsL1 {
@@ -244,6 +249,26 @@ impl MyHubService {
                     e.to_string()
                 );
                 return Err(HubError::unavailable("mempool channel send error"));
+            }
+        }
+
+        match self.api_rx.lock().unwrap().try_recv() {
+            Ok((inserted, hub_err)) => {
+                if !inserted {
+                    error!("Error inserting message into mempool: {:?}", hub_err.message);
+                    return Err(hub_err);
+                }
+                self.statsd_client.count("rpc.mempool_insert_message.success", 1);
+                debug!("message inserted into mempool");
+            }
+            Err(TryRecvError::Empty) => {
+                self.statsd_client.count("rpc.mempool_insert_message.channel_empty", 1);
+                debug!("mempool channel is yet to send message insertion status");
+                // maybe do not return an error here?
+                return Err(HubError::unavailable("API channel is empty"));
+            }
+            Err(TryRecvError::Closed) => {
+                panic!("mempool<->API channel is closed");
             }
         }
 
