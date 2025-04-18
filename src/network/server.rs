@@ -701,11 +701,12 @@ impl HubService for MyHubService {
             None => self.shard_stores.values().cloned().collect(),
         };
 
-        let start_id = request.get_ref().from_id.unwrap_or(0);
-        let events = request.into_inner().event_types;
+        let request = request.into_inner();
+        let events = request.event_types;
         let mut inner_events: Vec<i32> = Vec::new();
         inner_events.resize(events.len(), 0);
         inner_events.copy_from_slice(events.as_slice());
+        let from_id = request.from_id;
 
         tokio::spawn(async move {
             let event_types = inner_events;
@@ -713,37 +714,40 @@ impl HubService for MyHubService {
             event_types_filter.resize(event_types.len(), 0);
             event_types_filter.copy_from_slice(event_types.as_slice());
 
-            let mut page_token = None;
-            for store in shard_stores {
-                info!(
-                    "[subscribe] Replaying old events for shard {}",
-                    store.shard_id
-                );
-                loop {
-                    let old_events = store
-                        .get_events(
-                            start_id,
-                            None,
-                            Some(PageOptions {
-                                page_token: page_token.clone(),
-                                page_size: None,
-                                reverse: false,
-                            }),
-                        )
-                        .unwrap();
+            // If [from_id] is not specified, start from the latest events
+            if let Some(start_id) = from_id {
+                let mut page_token = None;
+                for store in shard_stores {
+                    info!(
+                        "[subscribe] Replaying old events for shard {}",
+                        store.shard_id
+                    );
+                    loop {
+                        let old_events = store
+                            .get_events(
+                                start_id,
+                                None,
+                                Some(PageOptions {
+                                    page_token: page_token.clone(),
+                                    page_size: None,
+                                    reverse: false,
+                                }),
+                            )
+                            .unwrap();
 
-                    for event in old_events.events {
-                        if event_types.contains(&event.r#type) {
-                            let event = Self::rewrite_hub_event(event, store.shard_id);
-                            if let Err(_) = server_tx.send(Ok(event)).await {
-                                return;
+                        for event in old_events.events {
+                            if event_types.contains(&event.r#type) {
+                                let event = Self::rewrite_hub_event(event, store.shard_id);
+                                if let Err(_) = server_tx.send(Ok(event)).await {
+                                    return;
+                                }
                             }
                         }
-                    }
 
-                    page_token = old_events.next_page_token;
-                    if page_token.is_none() {
-                        break;
+                        page_token = old_events.next_page_token;
+                        if page_token.is_none() {
+                            break;
+                        }
                     }
                 }
             }
