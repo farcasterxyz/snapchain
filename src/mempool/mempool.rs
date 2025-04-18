@@ -10,6 +10,7 @@ use std::{
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use crate::core::error::HubError;
 use crate::core::util::farcaster_time_to_unix_seconds;
 use crate::proto::OnChainEventType;
 use crate::{
@@ -381,6 +382,7 @@ pub struct Mempool {
     messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
     messages: HashMap<u32, BTreeMap<MempoolKey, MempoolMessage>>,
     shard_decision_rx: broadcast::Receiver<ShardChunk>,
+    api_tx: Option<oneshot::Sender<(bool, HubError)>>,
     statsd_client: StatsdClientWrapper,
     read_node_mempool: ReadNodeMempool,
     rate_limits: Option<RateLimits>,
@@ -395,12 +397,14 @@ impl Mempool {
         shard_stores: HashMap<u32, Stores>,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         shard_decision_rx: broadcast::Receiver<ShardChunk>,
+        api_tx: oneshot::Sender<(bool, HubError)>,
         statsd_client: StatsdClientWrapper,
     ) -> Self {
         Mempool {
             messages: HashMap::new(),
             messages_request_rx,
             shard_decision_rx,
+            api_tx: Some(api_tx),
             rate_limits: if config.enable_rate_limits {
                 Some(RateLimits::new(
                     shard_stores.clone(),
@@ -450,7 +454,8 @@ impl Mempool {
                     match shard_messages.pop_first() {
                         None => break,
                         Some((_, next_message)) => {
-                            if self.message_is_valid(&next_message) {
+                            let (message_is_valid, _) = self.message_is_valid(&next_message);
+                            if message_is_valid {
                                 messages.push(next_message);
                             }
                         }
@@ -464,21 +469,27 @@ impl Mempool {
         }
     }
 
-    pub fn message_is_valid(&mut self, message: &MempoolMessage) -> bool {
+    pub fn message_is_valid(&mut self, message: &MempoolMessage) -> (bool, HubError) {
         let shard = self
             .read_node_mempool
             .message_router
             .route_fid(message.fid(), self.read_node_mempool.num_shards);
 
-        if self.message_already_exists(shard, message) {
-            return false;
-        }
-        if self.message_exceeds_rate_limits(shard, message) {
-            self.statsd_client
-                .count_with_shard(shard, "mempool.rate_limit_hit", 1);
-            return false;
-        }
-        true
+            if self.message_already_exists(shard, message) {
+                return (false, HubError::invalid_internal_state("message already exists"));
+            }
+            if self.message_exceeds_rate_limits(shard, message) {
+                self.statsd_client
+                    .count_with_shard(shard, "mempool.rate_limit_hit", 1);
+                return (false, HubError::invalid_internal_state("rate limit exceeded"));
+            }
+        (
+            true,
+            HubError {
+                code: String::new(),
+                message: String::new()
+            }
+        )
     }
 
     async fn insert(&mut self, message: MempoolMessage, source: MempoolSource) {
@@ -499,7 +510,8 @@ impl Mempool {
         }
 
         // TODO(aditi): Maybe we don't need to run validations here?
-        if self.message_is_valid(&message) {
+        let (message_is_valid, hub_err) = self.message_is_valid(&message);
+        if message_is_valid {
             match self.messages.get_mut(&shard_id) {
                 None => {
                     let mut messages = BTreeMap::new();
@@ -522,8 +534,18 @@ impl Mempool {
                 .count_with_shard(shard_id, "mempool.insert.success", 1);
 
             self.read_node_mempool.gossip_message(message, source).await;
+            if let Some(tx) = self.api_tx.take() {
+                if tx.send((true, hub_err)).is_err() {
+                    error!("Unable to forward mempool insertion success status to server");
+                }
+            }
         } else {
             self.statsd_client.count("mempool.insert.failure", 1);
+            if let Some(tx) = self.api_tx.take() {
+                if tx.send((false, hub_err)).is_err() {
+                    error!("Unable to forward mempool insertion failure status to server");
+                }
+            }
         }
     }
 

@@ -5,7 +5,7 @@ mod tests {
     use foundry_common::ens::EnsError;
     use prost::Message;
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::time::timeout;
 
@@ -223,6 +223,7 @@ mod tests {
         let (mempool_tx, mempool_rx) = mpsc::channel(1000);
         let (gossip_tx, _gossip_rx) = mpsc::channel(1000);
         let (_shard_decision_tx, shard_decision_rx) = broadcast::channel(1000);
+        let (api_tx, api_rx) = oneshot::channel();
         let mut mempool = Mempool::new(
             mempool::Config::default(),
             mempool_rx,
@@ -231,6 +232,7 @@ mod tests {
             stores.clone(),
             gossip_tx,
             shard_decision_rx,
+            api_tx,
             statsd_client.clone(),
         );
         tokio::spawn(async move { mempool.run().await });
@@ -249,6 +251,7 @@ mod tests {
                 proto::FarcasterNetwork::Testnet,
                 message_router,
                 mempool_tx.clone(),
+                Arc::new(Mutex::new(api_rx)),
                 Some(Box::new(MockL1Client {})),
                 "0.1.2".to_string(),
                 "asddef".to_string(),

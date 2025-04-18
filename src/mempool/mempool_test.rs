@@ -56,6 +56,7 @@ mod tests {
         let (mempool_tx, mempool_rx) = mpsc::channel(100);
         let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
+        let (api_tx, api_rx) = oneshot::channel();
         let (engine, _) = test_helper::new_engine();
         let mut shard_senders = HashMap::new();
         shard_senders.insert(1, engine.get_senders());
@@ -91,6 +92,7 @@ mod tests {
             shard_stores,
             gossip_tx,
             shard_decision_rx,
+            api_tx,
             statsd_client,
         );
 
