@@ -78,12 +78,13 @@ mod tests {
     async fn subscribe_and_listen(
         service: &MyHubService,
         shard_id: u32,
+        from_id: Option<u64>,
         num_events_expected: u64,
         event_types: Vec<i32>,
     ) -> tokio::task::JoinHandle<()> {
         let request = Request::new(SubscribeRequest {
             event_types,
-            from_id: None,
+            from_id,
             shard_index: Some(shard_id),
         });
         let mut listener = service.subscribe(request).await.unwrap();
@@ -94,8 +95,6 @@ mod tests {
             loop {
                 let event = timeout(Duration::from_millis(100), listener.get_mut().next()).await;
                 if let Ok(Some(Ok(hub_event))) = event {
-                    let block_number = hub_event.block_number;
-                    assert!(block_number > 0);
                     assert!(hub_event.shard_index > 0);
                     num_events_seen += 1;
                     if num_events_seen == num_events_expected {
@@ -118,8 +117,8 @@ mod tests {
                     r#type: HubEventType::MergeMessage as i32,
                     id: i,
                     body: None,
-                    block_number: 0,
-                    shard_index: 0,
+                    block_number: 1,
+                    shard_index: 1,
                 })
                 .unwrap();
         }
@@ -134,8 +133,8 @@ mod tests {
                     r#type: HubEventType::MergeMessage as i32,
                     id: i,
                     body: None,
-                    block_number: 0,
-                    shard_index: 0,
+                    block_number: 1,
+                    shard_index: 1,
                 },
             )
             .unwrap();
@@ -278,6 +277,7 @@ mod tests {
         let shard1_subscriber = subscribe_and_listen(
             &service,
             1,
+            Some(0),
             num_shard1_events + num_shard1_pre_existing_events,
             vec![HubEventType::MergeMessage as i32],
         )
@@ -285,6 +285,7 @@ mod tests {
         let shard2_subscriber = subscribe_and_listen(
             &service,
             2,
+            Some(0),
             num_shard2_events + num_shard2_pre_existing_events,
             vec![HubEventType::MergeMessage as i32],
         )
@@ -330,12 +331,19 @@ mod tests {
         let shard1_subscriber = subscribe_and_listen(
             &service,
             1,
+            Some(0),
             num_shard1_events + num_shard1_pre_existing_events,
             vec![HubEventType::MergeMessage as i32],
         )
         .await;
-        let shard2_subscriber =
-            subscribe_and_listen(&service, 2, 0, vec![HubEventType::PruneMessage as i32]).await;
+        let shard2_subscriber = subscribe_and_listen(
+            &service,
+            2,
+            Some(0),
+            0,
+            vec![HubEventType::PruneMessage as i32],
+        )
+        .await;
 
         // Allow time for rpc handler to subscribe to event rx channels
         tokio::time::sleep(Duration::from_secs(1)).await;
