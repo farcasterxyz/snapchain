@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.6] - 2025-04-18
+
+### 🚀 Features
+
+- Add submitMessage http endpoint (#386)
+
+### 🐛 Bug Fixes
+
+- Start subscribe rpc from latest event if from_id is not specified (#389)
+
+### 📚 Documentation
+
+- Make readability improvements (#378)
+
 ## [0.2.5] - 2025-04-16
 
 ### 🚀 Features
