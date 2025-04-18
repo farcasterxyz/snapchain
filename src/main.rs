@@ -32,6 +32,7 @@ use tokio::select;
 use tokio::signal::ctrl_c;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_cron_scheduler::JobScheduler;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::Server;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -78,11 +79,13 @@ async fn start_servers(
         VERSION.unwrap_or("unknown").to_string(),
         gossip.swarm.local_peer_id().to_string(),
     ));
-    let grpc_service = service.clone();
     let grpc_shutdown_tx = shutdown_tx.clone();
+    let hub_service = HubServiceServer::from_arc(service.clone())
+        .accept_compressed(CompressionEncoding::Gzip)
+        .send_compressed(CompressionEncoding::Gzip);
     tokio::spawn(async move {
         info!(grpc_addr = grpc_addr, "GrpcService listening",);
-        let mut server = Server::builder().add_service(HubServiceServer::from_arc(grpc_service));
+        let mut server = Server::builder().add_service(hub_service);
 
         if admin_service.enabled() {
             let admin_service = AdminServiceServer::new(admin_service);
