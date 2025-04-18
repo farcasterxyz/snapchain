@@ -141,6 +141,7 @@ impl ReadNodeForTest {
             fc_network,
             statsd_client.clone(),
         )
+        .await
         .unwrap();
         let gossip_tx = gossip.tx.clone();
 
@@ -224,7 +225,9 @@ impl NodeForTest {
             true,
         );
 
-        let config = snapchain::network::gossip::Config::new(gossip_address, bootstrap_address);
+        let config =
+            snapchain::network::gossip::Config::new(gossip_address.clone(), bootstrap_address)
+                .with_announce_address(gossip_address);
 
         let mut consensus_config = snapchain::consensus::consensus::Config::default();
         consensus_config =
@@ -242,6 +245,7 @@ impl NodeForTest {
             fc_network,
             statsd_client.clone(),
         )
+        .await
         .unwrap();
         let gossip_tx = gossip.tx.clone();
 

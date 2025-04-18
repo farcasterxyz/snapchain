@@ -84,6 +84,7 @@ async fn test_gossip_communication() {
         FarcasterNetwork::Devnet,
         statsd_client(),
     )
+    .await
     .unwrap();
     let mut gossip2 = SnapchainGossip::create(
         keypair2.clone(),
@@ -93,6 +94,7 @@ async fn test_gossip_communication() {
         FarcasterNetwork::Devnet,
         statsd_client(),
     )
+    .await
     .unwrap();
 
     let mut gossip3 = SnapchainGossip::create(
@@ -103,6 +105,7 @@ async fn test_gossip_communication() {
         FarcasterNetwork::Devnet,
         statsd_client(),
     )
+    .await
     .unwrap();
 
     let gossip_tx1 = gossip1.tx.clone();
@@ -157,7 +160,11 @@ async fn test_bootstrap_peer_reconnection() {
 
     // Node1 will try to connect to Node2
     let config1 = Config::new(node1_addr.clone(), node2_addr.clone())
-        .with_bootstrap_reconnect_interval(Duration::from_secs(1));
+        .with_bootstrap_reconnect_interval(Duration::from_secs(1))
+        .with_announce_address(node1_addr.clone());
+
+    let config2 = Config::new(node2_addr.clone(), node1_addr.clone())
+        .with_announce_address(node2_addr.clone());
 
     // Create channels for system messages
     let (system_tx1, _) = mpsc::channel::<SystemMessage>(100);
@@ -166,12 +173,13 @@ async fn test_bootstrap_peer_reconnection() {
     // Start node2 first
     let mut gossip2 = SnapchainGossip::create(
         keypair2.clone(),
-        &Config::new(node2_addr.clone(), node1_addr.clone()),
+        &config2,
         system_tx2,
         false,
         FarcasterNetwork::Devnet,
         statsd_client(),
     )
+    .await
     .unwrap();
 
     let node2_handle = tokio::spawn(async move {
@@ -187,6 +195,7 @@ async fn test_bootstrap_peer_reconnection() {
         FarcasterNetwork::Devnet,
         statsd_client(),
     )
+    .await
     .unwrap();
 
     let gossip_tx1 = gossip1.tx.clone();
@@ -213,6 +222,7 @@ async fn test_bootstrap_peer_reconnection() {
         FarcasterNetwork::Devnet,
         statsd_client(),
     )
+    .await
     .unwrap();
 
     tokio::spawn(async move {
