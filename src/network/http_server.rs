@@ -19,7 +19,7 @@ use crate::proto::{
 };
 use crate::proto::{
     casts_by_parent_request, link_request, links_by_target_request, on_chain_event,
-    reaction_request, reactions_by_target_request, LinksByFidRequest, Protocol,
+    reaction_request, reactions_by_target_request, Protocol,
 };
 use crate::storage::store::account::message_decode;
 
@@ -407,6 +407,19 @@ pub struct LinkRequest {
     link_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     target_fid: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LinksByFidRequest {
+    fid: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    link_type: Option<String>,
+    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    page_size: Option<u32>,
+    #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
+    page_token: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reverse: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
