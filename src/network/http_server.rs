@@ -436,7 +436,7 @@ pub struct UserNameProof {
     #[serde(with = "serdebase64")]
     pub signature: Vec<u8>,
     pub fid: u64,
-    pub r#type: i32,
+    pub r#type: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -757,6 +757,16 @@ fn map_proto_username_proof_body_to_json_username_proof_body(
         signature: username_proof_body.signature,
         fid: username_proof_body.fid,
     })
+}
+
+fn map_username_proof_enum_to_string(username_proof_int: i32) -> Result<String, ErrorResponse> {
+    Ok(UserNameType::try_from(username_proof_int)
+        .map_err(|_| ErrorResponse {
+            error: "Invalid username proof type".to_string(),
+            error_detail: None,
+        })?
+        .as_str_name()
+        .to_owned())
 }
 
 fn map_proto_verification_add_body_to_json_verification_add_body(
@@ -1692,7 +1702,7 @@ impl HubHttpService for HubHttpServiceImpl {
             owner: format!("0x{}", hex::encode(&proof.owner)),
             signature: proof.signature,
             fid: proof.fid,
-            r#type: proof.r#type,
+            r#type: map_username_proof_enum_to_string(proof.r#type).expect("Invalid type"),
         })
     }
 
@@ -1726,7 +1736,7 @@ impl HubHttpService for HubHttpServiceImpl {
                     owner: format!("0x{}", hex::encode(&p.owner)),
                     signature: p.signature.clone(),
                     fid: p.fid,
-                    r#type: p.r#type,
+                    r#type: map_username_proof_enum_to_string(p.r#type).expect("Invalid type"),
                 })
                 .collect(),
         })
