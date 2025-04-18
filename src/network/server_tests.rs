@@ -95,6 +95,8 @@ mod tests {
             loop {
                 let event = timeout(Duration::from_millis(100), listener.get_mut().next()).await;
                 if let Ok(Some(Ok(hub_event))) = event {
+                    let block_number = hub_event.block_number;
+                    assert!(block_number > 0);
                     assert!(hub_event.shard_index > 0);
                     num_events_seen += 1;
                     if num_events_seen == num_events_expected {
