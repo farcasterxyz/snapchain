@@ -32,7 +32,8 @@ message SubscribeRequest {
 
 message DbStats {
   uint64 num_messages = 1;
-  uint64 num_fid_registrations = 2;
+  uint64 num_fid_events = 2;
+  uint64 num_fname_events = 3;
   uint64 approx_size = 4;
 }
 
@@ -46,14 +47,19 @@ message ShardInfo {
   uint64 mempool_size = 7;
 }
 
-message GetInfoRequest {
+message HubInfoRequest {
+  bool db_stats = 1;
 }
 
 // Response Types for the Sync RPC Methods
-message GetInfoResponse {
+message HubInfoResponse {
   string version = 1;
+  bool is_syncing = 2;
+  string nickname = 3;
+  string root_hash = 4;
   DbStats db_stats = 5;
   string peerId = 6;
+  uint64 hub_operator_fid = 7;
   uint32 num_shards = 8;
   repeated ShardInfo shard_infos = 9;
 }

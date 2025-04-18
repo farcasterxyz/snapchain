@@ -19,7 +19,7 @@ service HubService {
   rpc GetBlocks(BlocksRequest) returns (stream Block);
   rpc GetShardChunks(ShardChunksRequest) returns (ShardChunksResponse);
 
-  rpc GetInfo(GetInfoRequest) returns (GetInfoResponse);
+  rpc GetInfo(HubInfoRequest) returns (HubInfoResponse);
   rpc GetFids(FidsRequest) returns (FidsResponse);
 
   // Events
