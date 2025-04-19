@@ -235,7 +235,9 @@ pub struct ReadNodeMempool {
     num_shards: u32,
     mempool_rx: mpsc::Receiver<MempoolRequest>,
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+    api_tx: Option<oneshot::Sender<(bool, HubError)>>,
     statsd_client: StatsdClientWrapper,
+    rate_limits: Option<RateLimits>,
 }
 
 impl ReadNodeMempool {
@@ -244,7 +246,9 @@ impl ReadNodeMempool {
         num_shards: u32,
         shard_stores: HashMap<u32, Stores>,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+        api_tx: Option<oneshot::Sender<(bool, HubError)>>,
         statsd_client: StatsdClientWrapper,
+        rate_limits: Option<RateLimits>,
     ) -> Self {
         ReadNodeMempool {
             shard_stores,
@@ -252,7 +256,9 @@ impl ReadNodeMempool {
             mempool_rx,
             message_router: Box::new(ShardRouter {}),
             gossip_tx,
+            api_tx,
             statsd_client,
+            rate_limits,
         }
     }
 
@@ -325,6 +331,19 @@ impl ReadNodeMempool {
         }
     }
 
+    fn message_exceeds_rate_limits(&mut self, shard_id: u32, message: &MempoolMessage) -> bool {
+        match message {
+            MempoolMessage::UserMessage(message) => {
+                if let Some(rate_limits) = &mut self.rate_limits {
+                    !rate_limits.consume_for_fid(shard_id, message.fid())
+                } else {
+                    false
+                }
+            }
+            MempoolMessage::ValidatorMessage(_) => false,
+        }
+    }
+
     async fn gossip_message(&self, message: MempoolMessage, source: MempoolSource) {
         match message {
             MempoolMessage::UserMessage(_) => {
@@ -344,13 +363,24 @@ impl ReadNodeMempool {
         }
     }
 
-    fn message_is_valid(&mut self, message: &MempoolMessage) -> bool {
+    fn message_is_valid(&mut self, message: &MempoolMessage) -> (bool, HubError) {
         let fid = message.fid();
         let shard = self.message_router.route_fid(fid, self.num_shards);
         if self.message_already_exists(shard, message) {
-            return false;
+            return (false, HubError::invalid_internal_state("message already exists"));
         }
-        true
+        if self.message_exceeds_rate_limits(shard, message) {
+            self.statsd_client
+                .count_with_shard(shard, "mempool.rate_limit_hit", 1);
+            return (false, HubError::invalid_internal_state("rate limit exceeded"));
+        }
+        (
+            true,
+            HubError {
+                code: String::new(),
+                message: String::new()
+            }
+        )
     }
 
     pub async fn run(&mut self) {
@@ -359,10 +389,22 @@ impl ReadNodeMempool {
                 MempoolRequest::AddMessage(message, source) => {
                     self.statsd_client
                         .count("read_mempool.messages_received", 1);
-                    if self.message_is_valid(&message) {
+                    let (message_is_valid, hub_err) = self.message_is_valid(&message);
+                    if message_is_valid {
                         self.gossip_message(message, source).await;
                         self.statsd_client
                             .count("read_mempool.messages_published", 1);
+                        if let Some(tx) = self.api_tx.take() {
+                            if tx.send((true, hub_err)).is_err() {
+                                error!("Unable to forward read_mempool message publish success status to server");
+                            }
+                        }
+                    } else {
+                        if let Some(tx) = self.api_tx.take() {
+                            if tx.send((false, hub_err)).is_err() {
+                                error!("Unable to forward read_mempool message publish failure status to server");
+                            }
+                        }
                     }
                 }
                 MempoolRequest::GetSize(reply_to) => {
@@ -382,10 +424,8 @@ pub struct Mempool {
     messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
     messages: HashMap<u32, BTreeMap<MempoolKey, MempoolMessage>>,
     shard_decision_rx: broadcast::Receiver<ShardChunk>,
-    api_tx: Option<oneshot::Sender<(bool, HubError)>>,
     statsd_client: StatsdClientWrapper,
     read_node_mempool: ReadNodeMempool,
-    rate_limits: Option<RateLimits>,
 }
 
 impl Mempool {
@@ -404,24 +444,24 @@ impl Mempool {
             messages: HashMap::new(),
             messages_request_rx,
             shard_decision_rx,
-            api_tx: Some(api_tx),
-            rate_limits: if config.enable_rate_limits {
-                Some(RateLimits::new(
-                    shard_stores.clone(),
-                    RateLimitsConfig::default(),
-                    statsd_client.clone(),
-                ))
-            } else {
-                None
-            },
-            config,
             read_node_mempool: ReadNodeMempool::new(
                 mempool_rx,
                 num_shards,
-                shard_stores,
+                shard_stores.clone(),
                 gossip_tx,
+                Some(api_tx),
                 statsd_client.clone(),
+                if config.enable_rate_limits {
+                    Some(RateLimits::new(
+                        shard_stores.clone(),
+                        RateLimitsConfig::default(),
+                        statsd_client.clone(),
+                    ))
+                } else {
+                    None
+                },
             ),
+            config,
             statsd_client,
         }
     }
@@ -429,7 +469,7 @@ impl Mempool {
     fn message_exceeds_rate_limits(&mut self, shard_id: u32, message: &MempoolMessage) -> bool {
         match message {
             MempoolMessage::UserMessage(message) => {
-                if let Some(rate_limits) = &mut self.rate_limits {
+                if let Some(rate_limits) = &mut self.read_node_mempool.rate_limits {
                     !rate_limits.consume_for_fid(shard_id, message.fid())
                 } else {
                     false
@@ -534,14 +574,14 @@ impl Mempool {
                 .count_with_shard(shard_id, "mempool.insert.success", 1);
 
             self.read_node_mempool.gossip_message(message, source).await;
-            if let Some(tx) = self.api_tx.take() {
+            if let Some(tx) = self.read_node_mempool.api_tx.take() {
                 if tx.send((true, hub_err)).is_err() {
                     error!("Unable to forward mempool insertion success status to server");
                 }
             }
         } else {
             self.statsd_client.count("mempool.insert.failure", 1);
-            if let Some(tx) = self.api_tx.take() {
+            if let Some(tx) = self.read_node_mempool.api_tx.take() {
                 if tx.send((false, hub_err)).is_err() {
                     error!("Unable to forward mempool insertion failure status to server");
                 }
@@ -577,7 +617,7 @@ impl Mempool {
                                         {
                                             if onchain_event.r#type() == OnChainEventType::EventTypeStorageRent{
                                                 // If the user buys more storage, we should bump their rate limit
-                                                if let Some(rate_limits) = &mut self.rate_limits {
+                                                if let Some(rate_limits) = &mut self.read_node_mempool.rate_limits {
                                                     rate_limits.invalidate_rate_limiter_for_fid(onchain_event.fid);
                                                 }
 

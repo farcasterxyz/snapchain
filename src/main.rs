@@ -5,7 +5,7 @@ use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::onchain_events::{L1Client, OnchainEventsRequest, RealL1Client};
 use snapchain::consensus::consensus::SystemMessage;
 use snapchain::core::error::HubError;
-use snapchain::mempool::mempool::{Mempool, MempoolRequest, ReadNodeMempool};
+use snapchain::mempool::mempool::{Mempool, MempoolRequest, RateLimits, RateLimitsConfig, ReadNodeMempool};
 use snapchain::mempool::routing;
 use snapchain::network::admin_server::MyAdminService;
 use snapchain::network::gossip::{GossipEvent, SnapchainGossip};
@@ -370,12 +370,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .await;
 
+        let rate_limits = if app_config.mempool.enable_rate_limits {
+            Some(RateLimits::new(
+                node.shard_stores.clone(),
+                RateLimitsConfig::default(),
+                statsd_client.clone(),
+            ))
+        } else { None };
         let mut mempool = ReadNodeMempool::new(
             mempool_rx,
             app_config.consensus.num_shards,
             node.shard_stores.clone(),
             gossip_tx.clone(),
+            Some(api_tx),
             statsd_client.clone(),
+            rate_limits,
         );
         tokio::spawn(async move { mempool.run().await });
 
