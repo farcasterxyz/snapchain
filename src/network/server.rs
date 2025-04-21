@@ -37,7 +37,7 @@ use crate::proto::UsernameProofRequest;
 use crate::proto::UsernameProofsResponse;
 use crate::proto::ValidationResponse;
 use crate::proto::VerificationAddAddressBody;
-use crate::proto::{self, Height};
+use crate::proto::{self};
 use crate::proto::{Block, CastId, DbStats};
 use crate::proto::{
     BlocksRequest, EventRequest, EventsRequest, EventsResponse, ShardChunksRequest,
@@ -415,7 +415,7 @@ impl MyHubService {
         }
     }
 
-    fn rewrite_hub_event(mut hub_event: HubEvent, shard_index: u32) -> HubEvent {
+    fn rewrite_hub_event(hub_event: &mut HubEvent, shard_index: u32) {
         let (block_number, _) = HubEventIdGenerator::extract_height_and_seq(hub_event.id);
         hub_event.block_number = block_number;
         hub_event.shard_index = shard_index;
@@ -440,7 +440,6 @@ impl MyHubService {
             }
             None => {}
         };
-        hub_event
     }
 }
 
@@ -787,9 +786,11 @@ impl HubService for MyHubService {
                             )
                             .unwrap();
 
-                        for event in old_events.events {
+                        for mut event in old_events.events {
                             if event_types.contains(&event.r#type) {
-                                let event = Self::rewrite_hub_event(event, store.shard_id);
+                                Self::rewrite_hub_event(&mut event, store.shard_id);
+                                store.populate_event_produced_at(&mut event);
+
                                 if let Err(_) = server_tx.send(Ok(event)).await {
                                     return;
                                 }
@@ -820,9 +821,9 @@ impl HubService for MyHubService {
                     let mut event_rx = event_tx.subscribe();
                     loop {
                         match event_rx.recv().await {
-                            Ok(hub_event) => {
+                            Ok(mut hub_event) => {
                                 if filtered_events.contains(&hub_event.r#type) {
-                                    let hub_event = Self::rewrite_hub_event(hub_event, shard_id);
+                                    Self::rewrite_hub_event(&mut hub_event, shard_id);
                                     match tx.send(Ok(hub_event)).await {
                                         Ok(_) => {}
                                         Err(_) => {
@@ -858,9 +859,10 @@ impl HubService for MyHubService {
         let hub_event_result = stores.get_event(request.id);
 
         match hub_event_result {
-            Ok(hub_event) => {
-                let response = Self::rewrite_hub_event(hub_event, stores.shard_id);
-                Ok(Response::new(response))
+            Ok(mut hub_event) => {
+                Self::rewrite_hub_event(&mut hub_event, stores.shard_id);
+                stores.populate_event_produced_at(&mut hub_event);
+                Ok(Response::new(hub_event))
             }
             Err(err) => Err(Status::internal(err.to_string())),
         }
