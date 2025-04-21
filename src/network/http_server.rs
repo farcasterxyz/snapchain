@@ -546,22 +546,22 @@ pub struct UserNameProof {
 pub struct UsernameProofsResponse {
     pub proofs: Vec<UserNameProof>,
 }
-
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum OnChainEventType {
-    EventTypeNone = 0,
-    EventTypeSigner = 1,
-    EventTypeSignerMigrated = 2,
-    EventTypeIdRegister = 3,
-    EventTypeStorageRent = 4,
+    EVENT_TYPE_NONE = 0,
+    EVENT_TYPE_SIGNER = 1,
+    EVENT_TYPE_SIGNER_MIGRATED = 2,
+    EVENT_TYPE_ID_REGISTER = 3,
+    EVENT_TYPE_STORAGE_RENT = 4,
 }
-
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum SignerEventType {
-    None = 0,
-    Add = 1,
-    Remove = 2,
-    AdminReset = 3,
+    SIGNER_EVENT_TYPE_NONE = 0,
+    SIGNER_EVENT_TYPE_ADD = 1,
+    SIGNER_EVENT_TYPE_REMOVE = 2,
+    SIGNER_EVENT_TYPE_ADMIN_RESET = 3,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -579,11 +579,11 @@ pub struct SignerEventBody {
     #[serde(rename = "keyType")]
     pub key_type: u32,
     #[serde(rename = "eventType")]
-    pub event_type: String,
+    pub event_type: SignerEventType,
     #[serde(with = "serdebase64")]
     pub metadata: Vec<u8>,
     #[serde(rename = "metadataType")]
-    pub metadata_type: String,
+    pub metadata_type: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -611,7 +611,7 @@ pub struct StorageRentEventBody {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OnChainEvent {
-    pub r#type: String,
+    pub r#type: OnChainEventType,
     #[serde(rename = "chainId")]
     pub chain_id: u32,
     #[serde(rename = "blockNumber")]
@@ -1958,25 +1958,17 @@ impl HubHttpService for HubHttpServiceImpl {
                         None => {}
                         Some(on_chain_event::Body::SignerEventBody(body)) => {
                             let event_type = match body.event_type {
-                                1 => "ADD",
-                                2 => "REMOVE",
-                                3 => "ADMIN_RESET",
-                                _ => "NONE",
-                            }
-                            .to_string();
-                            let metadata_type = match body.metadata_type {
-                                1 => "NONE",
-                                2 => "URL",
-                                3 => "TEXT",
-                                _ => "NONE",
-                            }
-                            .to_string();
+                                1 => SignerEventType::SIGNER_EVENT_TYPE_ADD,
+                                2 => SignerEventType::SIGNER_EVENT_TYPE_REMOVE,
+                                3 => SignerEventType::SIGNER_EVENT_TYPE_ADMIN_RESET,
+                                _ => SignerEventType::SIGNER_EVENT_TYPE_NONE,
+                            };
                             signer_event_body = Some(SignerEventBody {
                                 key: body.key.clone(),
                                 key_type: body.key_type,
-                                event_type,
+                                event_type: event_type,
                                 metadata: body.metadata.clone(),
-                                metadata_type,
+                                metadata_type: body.metadata_type,
                             });
                         }
                         Some(on_chain_event::Body::SignerMigratedEventBody(body)) => {
@@ -2007,11 +1999,11 @@ impl HubHttpService for HubHttpServiceImpl {
                     }
                     return OnChainEvent {
                         r#type: match e.r#type {
-                            1 => "SIGNER".to_string(),
-                            2 => "SIGNER_MIGRATED".to_string(),
-                            3 => "ID_REGISTER".to_string(),
-                            4 => "STORAGE_RENT".to_string(),
-                            _ => "NONE".to_string(),
+                            1 => OnChainEventType::EVENT_TYPE_SIGNER,
+                            2 => OnChainEventType::EVENT_TYPE_SIGNER_MIGRATED,
+                            3 => OnChainEventType::EVENT_TYPE_ID_REGISTER,
+                            4 => OnChainEventType::EVENT_TYPE_STORAGE_RENT,
+                            _ => OnChainEventType::EVENT_TYPE_NONE,
                         },
                         chain_id: e.chain_id,
                         block_number: e.block_number,
@@ -2071,14 +2063,15 @@ impl HubHttpService for HubHttpServiceImpl {
                             signer_event_body = Some(SignerEventBody {
                                 key: body.key.clone(),
                                 key_type: body.key_type,
+                                // This is being done for backwards compatability with hubs
                                 event_type: match body.event_type {
-                                    1 => "ADD".to_string(),
-                                    2 => "REMOVE".to_string(),
-                                    3 => "ADMIN_RESET".to_string(),
-                                    _ => "NONE".to_string(),
+                                    1 => SignerEventType::SIGNER_EVENT_TYPE_ADD,
+                                    2 => SignerEventType::SIGNER_EVENT_TYPE_REMOVE,
+                                    3 => SignerEventType::SIGNER_EVENT_TYPE_ADMIN_RESET,
+                                    _ => SignerEventType::SIGNER_EVENT_TYPE_NONE,
                                 },
                                 metadata: body.metadata.clone(),
-                                metadata_type: body.metadata_type.to_string(),
+                                metadata_type: body.metadata_type,
                             });
                         }
                         Some(on_chain_event::Body::SignerMigratedEventBody(body)) => {
@@ -2108,13 +2101,13 @@ impl HubHttpService for HubHttpServiceImpl {
                         }
                     }
                     return OnChainEvent {
-                        r#type: match e.r#type {
-                            1 => "SIGNER".to_string(),
-                            2 => "SIGNER_MIGRATED".to_string(),
-                            3 => "ID_REGISTER".to_string(),
-                            4 => "STORAGE_RENT".to_string(),
-                            _ => "NONE".to_string(),
-                        },
+                        r#type: (match e.r#type {
+                            1 => OnChainEventType::EVENT_TYPE_SIGNER,
+                            2 => OnChainEventType::EVENT_TYPE_SIGNER_MIGRATED,
+                            3 => OnChainEventType::EVENT_TYPE_ID_REGISTER,
+                            4 => OnChainEventType::EVENT_TYPE_STORAGE_RENT,
+                            _ => OnChainEventType::EVENT_TYPE_NONE,
+                        }),
                         chain_id: e.chain_id,
                         block_number: e.block_number,
                         block_hash: e.block_hash.clone(),
