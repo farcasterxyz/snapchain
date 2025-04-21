@@ -25,9 +25,9 @@ use snapchain::utils::factory::{self, messages_factory};
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time;
 use tonic::transport::Server;
 use tracing::{error, info};
@@ -314,6 +314,7 @@ impl NodeForTest {
         let grpc_addr = format!("0.0.0.0:{}", grpc_port);
         let addr = grpc_addr.clone();
         let (mempool_tx, mempool_rx) = mpsc::channel(100);
+        let (api_tx, api_rx) = oneshot::channel();
         let mut mempool = Mempool::new(
             mempool::Config::default(),
             mempool_rx,
@@ -322,6 +323,7 @@ impl NodeForTest {
             node.shard_stores.clone(),
             gossip_tx,
             shard_decision_rx,
+            api_tx,
             statsd_client.clone(),
         );
         let handle = tokio::spawn(async move { mempool.run().await });
@@ -337,6 +339,7 @@ impl NodeForTest {
             FarcasterNetwork::Testnet,
             Box::new(routing::EvenOddRouterForTest {}),
             mempool_tx.clone(),
+            Arc::new(Mutex::new(api_rx)),
             None,
             "".to_string(),
             "".to_string(),

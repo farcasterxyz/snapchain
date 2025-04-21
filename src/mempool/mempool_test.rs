@@ -15,7 +15,7 @@ mod tests {
         },
         storage::store::{
             engine::{MempoolMessage, ShardEngine},
-            test_helper::{self, commit_event, default_storage_event, FID_FOR_TEST},
+            test_helper::{self, commit_event, default_storage_event, EngineOptions, FID_FOR_TEST},
         },
         utils::{
             factory::{events_factory, messages_factory},
@@ -36,6 +36,7 @@ mod tests {
 
     fn setup(
         config: Option<Config>,
+        engine_options: Option<EngineOptions>,
         enable_rate_limits: bool,
     ) -> (
         ShardEngine,
@@ -56,8 +57,11 @@ mod tests {
         let (mempool_tx, mempool_rx) = mpsc::channel(100);
         let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
-        let (api_tx, api_rx) = oneshot::channel();
-        let (engine, _) = test_helper::new_engine();
+        let (api_tx, _api_rx) = oneshot::channel();
+        let (engine, _) = match engine_options {
+            Some(engine_options) => test_helper::new_engine_with_options(engine_options),
+            None => test_helper::new_engine(),
+        };
         let mut shard_senders = HashMap::new();
         shard_senders.insert(1, engine.get_senders());
         let mut shard_stores = HashMap::new();
@@ -109,7 +113,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_user_message_is_invalid() {
-        let (mut engine, _, mut mempool, _, _, _, _) = setup(None, false);
+        let (mut engine, _, mut mempool, _, _, _, _) = setup(None, None, false);
         test_helper::register_user(
             1234,
             default_signer(),
@@ -118,24 +122,25 @@ mod tests {
         )
         .await;
         let cast = create_cast_add(1234, "hello", None, None);
-        let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast.clone()));
+        let (valid, _) = mempool.message_is_valid(&MempoolMessage::UserMessage(cast.clone()));
         assert!(valid);
         test_helper::commit_message(&mut engine, &cast).await;
-        let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast.clone()));
-        assert!(!valid)
+        let (valid, hub_err) = mempool.message_is_valid(&MempoolMessage::UserMessage(cast.clone()));
+        assert!(!valid);
+        assert_eq!(hub_err.message, "message already exists".to_string())
     }
 
     #[tokio::test]
     async fn test_duplicate_onchain_event_is_invalid() {
-        let (mut engine, _, mut mempool, _, _, _, _) = setup(None, false);
+        let (mut engine, _, mut mempool, _, _, _, _) = setup(None, None, false);
         let onchain_event = events_factory::create_rent_event(1234, Some(10), None, false);
-        let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
+        let (valid, _) = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
             on_chain_event: Some(onchain_event.clone()),
             fname_transfer: None,
         }));
         assert!(valid);
         test_helper::commit_event(&mut engine, &onchain_event).await;
-        let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
+        let (valid, _) = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
             on_chain_event: Some(onchain_event.clone()),
             fname_transfer: None,
         }));
@@ -144,7 +149,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_fname_transfer_is_invalid() {
-        let (mut engine, _, mut mempool, _, _, _, _) = setup(None, false);
+        let (mut engine, _, mut mempool, _, _, _, _) = setup(None, None, false);
         test_helper::register_user(
             1,
             default_signer(),
@@ -164,13 +169,13 @@ mod tests {
                 r#type: UserNameType::UsernameTypeEnsL1 as i32,
             }),
         };
-        let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
+        let (valid, _) = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
             on_chain_event: None,
             fname_transfer: Some(fname_transfer.clone()),
         }));
         assert!(valid);
         test_helper::commit_fname_transfer(&mut engine, &fname_transfer).await;
-        let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
+        let (valid, _) = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
             on_chain_event: None,
             fname_transfer: Some(fname_transfer),
         }));
@@ -179,7 +184,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limits_applied() {
-        let (mut engine, _, mut mempool, _, _, _, _) = setup(None, true);
+        let (mut engine, _, mut mempool, _, _, _, _) = setup(None, None, true);
 
         let id_register_event = events_factory::create_id_register_event(
             FID_FOR_TEST,
@@ -197,19 +202,19 @@ mod tests {
         commit_event(&mut engine, &signer_event).await;
 
         let cast = create_cast_add(FID_FOR_TEST, "hello", None, None);
-        let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast));
+        let (valid, _) = mempool.message_is_valid(&MempoolMessage::UserMessage(cast));
         assert!(!valid);
 
         commit_event(&mut engine, &default_storage_event(FID_FOR_TEST)).await;
 
         let cast = create_cast_add(FID_FOR_TEST, "hello", None, None);
-        let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast));
+        let (valid, _) = mempool.message_is_valid(&MempoolMessage::UserMessage(cast));
         assert!(valid);
     }
 
     #[tokio::test]
     async fn test_mempool_size() {
-        let (_, _, mut mempool, mempool_tx, _request_tx, _decision_tx, _) = setup(None, false);
+        let (_, _, mut mempool, mempool_tx, _request_tx, _decision_tx, _) = setup(None, None, false);
         tokio::spawn(async move {
             mempool.run().await;
         });
@@ -244,7 +249,7 @@ mod tests {
     #[tokio::test]
     async fn test_mempool_prioritization() {
         let (_, _, mut mempool, mempool_tx, messages_request_tx, _shard_decision_tx, _) =
-            setup(None, false);
+            setup(None, None, false);
 
         // Spawn mempool task
         tokio::spawn(async move {
@@ -320,7 +325,7 @@ mod tests {
     #[tokio::test]
     async fn test_mempool_eviction() {
         let (mut engine, _, mut mempool, mempool_tx, messages_request_tx, shard_decision_tx, _) =
-            setup(None, false);
+            setup(None, None, false);
         test_helper::register_user(
             1234,
             default_signer(),
@@ -414,7 +419,7 @@ mod tests {
         let config2 = Config::new(node2_addr.clone(), node1_addr.clone());
 
         let (_, gossip1, mut mempool1, mempool_tx1, _mempool_requests_tx1, _shard_decision_tx1, _) =
-            setup(Some(config1), false);
+            setup(Some(config1), None, false);
         let (
             _,
             gossip2,
@@ -423,7 +428,7 @@ mod tests {
             mempool_requests_tx2,
             _shard_decision_tx1,
             mut system_rx2,
-        ) = setup(Some(config2), false);
+        ) = setup(Some(config2), None, false);
 
         // Spawn gossip tasks
         tokio::spawn(async move {
@@ -508,5 +513,36 @@ mod tests {
         let result = mempool_retrieval_rx.await.unwrap();
         assert_eq!(result.len(), 1); // Only the first cast should be received
         assert_eq!(result[0].fid(), 1234);
+    }
+
+    #[tokio::test]
+    async fn test_rate_limits_exceeded() {
+        let limits = test_helper::limits::test_store_limits();
+        let engine_options = test_helper::EngineOptions {
+            limits: Some(limits.clone()),
+            db: None,
+            messages_request_tx: None,
+        };
+        let (mut engine, _, mut mempool, _, _, _, _) = setup(None, Some(engine_options), true);
+        test_helper::register_user(
+            FID_FOR_TEST,
+            default_signer(),
+            default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        // rate limiter quota defaults to 100 because test store limits' storage allowance = 19 (<100)
+        for i in 0..100 {
+            let cast_msg = create_cast_add(FID_FOR_TEST, format!("hello{}", i).as_str(), None, None);
+            let (valid, _) = mempool.message_is_valid(&MempoolMessage::UserMessage(cast_msg.clone()));
+            assert!(valid);
+            test_helper::commit_message(&mut engine, &cast_msg).await;
+            
+        }
+        let cast = create_cast_add(FID_FOR_TEST, "hello", None, None);
+        let (valid, hub_err) = mempool.message_is_valid(&MempoolMessage::UserMessage(cast.clone()));
+        assert!(!valid);
+        assert_eq!(hub_err.message, "rate limit exceeded".to_string())
     }
 }
