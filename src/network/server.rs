@@ -63,7 +63,7 @@ use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use hex::ToHex;
-use tokio::sync::oneshot::error::TryRecvError;
+use tokio::select;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
@@ -252,8 +252,10 @@ impl MyHubService {
             }
         }
 
-        match self.api_rx.lock().unwrap().try_recv() {
-            Ok((inserted, hub_err)) => {
+        select! {
+            Ok((inserted, hub_err)) = async {
+                self.api_rx.lock().unwrap().try_recv()
+            } => {
                 if !inserted {
                     error!("Error inserting message into mempool: {:?}", hub_err.message);
                     return Err(hub_err);
@@ -261,14 +263,10 @@ impl MyHubService {
                 self.statsd_client.count("rpc.mempool_insert_message.success", 1);
                 debug!("message inserted into mempool");
             }
-            Err(TryRecvError::Empty) => {
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
                 self.statsd_client.count("rpc.mempool_insert_message.channel_empty", 1);
                 debug!("mempool channel is yet to send message insertion status");
-                // maybe do not return an error here?
-                return Err(HubError::unavailable("API channel is empty"));
-            }
-            Err(TryRecvError::Closed) => {
-                panic!("mempool<->API channel is closed");
+                return Err(HubError::unavailable("mempool channel empty"));
             }
         }
 
