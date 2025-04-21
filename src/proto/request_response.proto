@@ -271,3 +271,16 @@ message TrieNodeMetadataResponse {
   string hash = 3;
   repeated TrieNodeMetadataResponse children = 4;
 }
+
+message EventsRequest {
+  uint64 start_id = 1;
+  optional uint64 stop_id = 2;
+  optional uint32 page_size = 3;
+  optional bytes page_token = 4;
+  optional bool reverse = 5;
+}
+
+message EventsResponse {
+  repeated HubEvent events = 1;
+  optional bytes next_page_token = 2;
+}
