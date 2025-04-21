@@ -759,16 +759,6 @@ fn map_proto_username_proof_body_to_json_username_proof_body(
     })
 }
 
-fn map_username_proof_enum_to_string(username_proof_int: i32) -> Result<String, ErrorResponse> {
-    Ok(UserNameType::try_from(username_proof_int)
-        .map_err(|_| ErrorResponse {
-            error: "Invalid username proof type".to_string(),
-            error_detail: None,
-        })?
-        .as_str_name()
-        .to_owned())
-}
-
 fn map_proto_verification_add_body_to_json_verification_add_body(
     verification_add_address_body: proto::VerificationAddAddressBody,
 ) -> Result<VerificationAddAddressBody, ErrorResponse> {
@@ -1694,6 +1684,7 @@ impl HubHttpService for HubHttpServiceImpl {
                 error_detail: Some(e.to_string()),
             })?;
         let proof = response.into_inner();
+        let proof_type = proof.r#type().as_str_name().to_owned();
         Ok(UserNameProof {
             timestamp: proof.timestamp,
             name: std::str::from_utf8(&proof.name.as_slice())
@@ -1702,7 +1693,7 @@ impl HubHttpService for HubHttpServiceImpl {
             owner: format!("0x{}", hex::encode(&proof.owner)),
             signature: proof.signature,
             fid: proof.fid,
-            r#type: map_username_proof_enum_to_string(proof.r#type).expect("Invalid type"),
+            r#type: proof_type,
         })
     }
 
@@ -1736,7 +1727,7 @@ impl HubHttpService for HubHttpServiceImpl {
                     owner: format!("0x{}", hex::encode(&p.owner)),
                     signature: p.signature.clone(),
                     fid: p.fid,
-                    r#type: map_username_proof_enum_to_string(p.r#type).expect("Invalid type"),
+                    r#type: p.r#type().as_str_name().to_owned(),
                 })
                 .collect(),
         })
