@@ -6,7 +6,6 @@ use crate::core::validations;
 use crate::core::validations::verification::VerificationAddressClaim;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::mempool::routing;
-use crate::proto;
 use crate::proto::cast_add_body;
 use crate::proto::casts_by_parent_request;
 use crate::proto::hub_service_server::HubService;
@@ -38,6 +37,7 @@ use crate::proto::UsernameProofRequest;
 use crate::proto::UsernameProofsResponse;
 use crate::proto::ValidationResponse;
 use crate::proto::VerificationAddAddressBody;
+use crate::proto::{self, Height};
 use crate::proto::{Block, CastId, DbStats};
 use crate::proto::{
     BlocksRequest, EventRequest, EventsRequest, EventsResponse, ShardChunksRequest,
