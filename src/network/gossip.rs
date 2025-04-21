@@ -48,7 +48,7 @@ const CONTACT_INFO: &str = "contact-info";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub address: String,
-    pub announce_address: Option<String>,
+    pub announce_address: String,
     pub bootstrap_peers: String,
     pub contact_info_interval: Duration,
     pub bootstrap_reconnect_interval: Duration,
@@ -62,7 +62,7 @@ impl Default for Config {
         );
         Config {
             address: address.clone(),
-            announce_address: None,
+            announce_address: "".to_string(),
             bootstrap_peers: "".to_string(),
             contact_info_interval: Duration::from_secs(300),
             bootstrap_reconnect_interval: Duration::from_secs(30),
@@ -104,7 +104,7 @@ impl Config {
 
     pub fn with_announce_address(self, announce_address: String) -> Self {
         Config {
-            announce_address: Some(announce_address),
+            announce_address,
             ..self
         }
     }
@@ -283,6 +283,8 @@ impl SnapchainGossip {
 
         let announce_address = Self::get_announce_address(config).await;
 
+        info!("Using {} as announce address", announce_address);
+
         // ~5 seconds of buffer (assuming 1K msgs/pec)
         let (tx, rx) = mpsc::channel(5000);
         Ok(SnapchainGossip {
@@ -303,8 +305,8 @@ impl SnapchainGossip {
     }
 
     async fn get_announce_address(config: &Config) -> String {
-        if let Some(address) = &config.announce_address {
-            return address.clone();
+        if config.announce_address.len() > 0 {
+            return config.announce_address.clone();
         }
 
         // If no config-defined announce IP exists, detect the public IP.
@@ -313,7 +315,12 @@ impl SnapchainGossip {
 
         match public_ip {
             Ok(address) => format!("/ip4/{}/udp/{}/quic-v1", address, DEFAULT_GOSSIP_PORT),
-            Err(_) => config.address.clone(),
+            Err(error) => {
+                warn!("Detecting public IP failed with error: {}", error);
+
+                // Fallback to address.
+                config.address.clone()
+            }
         }
     }
 
