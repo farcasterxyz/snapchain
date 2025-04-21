@@ -18,8 +18,7 @@ use crate::proto::{
     UserDataType, UserNameType,
 };
 use crate::proto::{
-    casts_by_parent_request, link_request, links_by_target_request, on_chain_event,
-    reaction_request, reactions_by_target_request, LinksByFidRequest, Protocol,
+    casts_by_parent_request, hub_event, link_request, links_by_target_request, on_chain_event, reaction_request, reactions_by_target_request, LinksByFidRequest, Protocol,
 };
 use crate::storage::store::account::message_decode;
 
@@ -603,6 +602,137 @@ pub struct OnChainEventResponse {
 pub struct OnChainEventRequest {
     fid: u64,
     event_type: OnChainEventType,
+    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    page_size: Option<u32>,
+    #[serde(
+        with = "serdebase64opt",
+        rename = "pageToken",
+        skip_serializing_if = "Option::is_none"
+    )]
+    page_token: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reverse: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum HubEventType {
+    EventTypeNone = 0,
+    EventTypeMergeMessage = 1,
+    EventTypePruneMessage = 2,
+    EventTypeRevokeMessage = 3,
+    EventTypeMergeUsernameProof = 6,
+    EventTypeMergeOnChainEvent = 9,
+    EventTypeMergeFailure = 10,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MergeMessageBody {
+    pub message: Message,
+    #[serde(rename = "deletedMessages")]
+    pub deleted_messages: Vec<Message>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MergeFailureBody {
+    pub message: Message,
+    pub code: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PruneMessageBody {
+    pub message: Message,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RevokeMessageBody {
+    pub message: Message,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MergeOnChainEventBody {
+    #[serde(rename = "onChainEvent")]
+    pub on_chain_event: OnChainEvent,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MergeUsernameProofBody {
+    #[serde(
+        rename = "usernameProof",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub username_proof: Option<UsernameProofBody>,
+    #[serde(
+        rename = "deletedUsernameProof",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub deleted_username_proof: Option<UsernameProofBody>,
+    #[serde(
+        rename = "usernameProofMessage",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub username_proof_message: Option<Message>,
+    #[serde(
+        rename = "deletedUsernameProofMessage",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub deleted_username_proof_message: Option<Message>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HubEvent {
+    #[serde(rename = "type")]
+    pub hub_event_type: String,
+    pub id: u64,
+    #[serde(
+        rename = "mergeMessageBody",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub merge_message_body: Option<MergeMessageBody>,
+    #[serde(
+        rename = "pruneMessageBody",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub prune_message_body: Option<PruneMessageBody>,
+    #[serde(
+        rename = "revokeMessageBody",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub revoke_message_body: Option<RevokeMessageBody>,
+    #[serde(
+        rename = "mergeUsernameProofBody",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub merge_username_proof_body: Option<MergeUsernameProofBody>,
+    #[serde(
+        rename = "mergeOnChainEventBody",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub merge_on_chain_event_body: Option<MergeOnChainEventBody>,
+    #[serde(
+        rename = "mergeFailureBody",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub merge_failure_body: Option<MergeFailureBody>,
+    #[serde(rename = "blockNumber")]
+    pub block_number: u64,
+    #[serde(rename = "shardIndex")]
+    pub shard_index: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EventsResponse {
+    pub events: Vec<HubEvent>,
+    #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EventsRequest {
+    #[serde(rename = "startId")]
+    start_id: u64,
+    #[serde(rename = "stopId", skip_serializing_if = "Option::is_none")]
+    stop_id: Option<u64>,
     #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
     #[serde(
@@ -1208,6 +1338,160 @@ fn map_proto_messages_response_to_json_paged_response(
     })
 }
 
+fn map_proto_on_chain_event_to_json_on_chain_event(onchain_event: proto::OnChainEvent) -> Result<OnChainEvent, ErrorResponse> {
+    let mut signer_event_body: Option<SignerEventBody> = None;
+    let mut signer_migrated_event_body: Option<SignerMigratedEventBody> = None;
+    let mut id_register_event_body: Option<IdRegisterEventBody> = None;
+    let mut storage_rent_event_body: Option<StorageRentEventBody> = None;
+    match &onchain_event.body {
+        None => {}
+        Some(on_chain_event::Body::SignerEventBody(body)) => {
+            signer_event_body = Some(SignerEventBody {
+                key: body.key.clone(),
+                key_type: body.key_type,
+                event_type: match body.event_type {
+                    1 => SignerEventType::Add,
+                    2 => SignerEventType::Remove,
+                    3 => SignerEventType::AdminReset,
+                    _ => SignerEventType::None,
+                },
+                metadata: body.metadata.clone(),
+                metadata_type: body.metadata_type,
+            });
+        }
+        Some(on_chain_event::Body::SignerMigratedEventBody(body)) => {
+            signer_migrated_event_body = Some(SignerMigratedEventBody {
+                migrated_at: body.migrated_at,
+            });
+        }
+        Some(on_chain_event::Body::IdRegisterEventBody(body)) => {
+            id_register_event_body = Some(IdRegisterEventBody {
+                to: body.to.clone(),
+                event_type: match body.event_type {
+                    1 => IdRegisterEventType::Register,
+                    2 => IdRegisterEventType::Transfer,
+                    3 => IdRegisterEventType::ChangeRecovery,
+                    _ => IdRegisterEventType::None,
+                },
+                from: body.from.clone(),
+                recovery_address: body.recovery_address.clone(),
+            });
+        }
+        Some(on_chain_event::Body::StorageRentEventBody(body)) => {
+            storage_rent_event_body = Some(StorageRentEventBody {
+                payer: body.payer.clone(),
+                units: body.units,
+                expiry: body.expiry,
+            });
+        }
+    }
+    Ok(OnChainEvent {
+        r#type: match onchain_event.r#type {
+            1 => OnChainEventType::EventTypeSigner,
+            2 => OnChainEventType::EventTypeSignerMigrated,
+            3 => OnChainEventType::EventTypeIdRegister,
+            4 => OnChainEventType::EventTypeStorageRent,
+            _ => OnChainEventType::EventTypeNone,
+        },
+        chain_id: onchain_event.chain_id,
+        block_number: onchain_event.block_number,
+        block_hash: onchain_event.block_hash.clone(),
+        block_timestamp: onchain_event.block_timestamp,
+        transaction_hash: onchain_event.transaction_hash.clone(),
+        log_index: onchain_event.log_index,
+        fid: onchain_event.fid,
+        tx_index: onchain_event.tx_index,
+        version: onchain_event.version,
+        signer_event_body,
+        signer_migrated_event_body,
+        id_register_event_body,
+        storage_rent_event_body,
+    })
+}
+
+fn map_proto_events_response_to_json_events_response(
+    hub_event: proto::HubEvent,
+) -> Result<HubEvent, ErrorResponse> {
+    let mut merge_message_body: Option<MergeMessageBody> = None;
+    let mut prune_message_body: Option<PruneMessageBody> = None;
+    let mut revoke_message_body: Option<RevokeMessageBody> = None;
+    let mut merge_username_proof_body: Option<MergeUsernameProofBody> = None;
+    let mut merge_on_chain_event_body: Option<MergeOnChainEventBody> = None;
+    let mut merge_failure_body: Option<MergeFailureBody> = None;
+    match &hub_event.body {
+        None => {}
+        Some(hub_event::Body::MergeMessageBody(body)) => {
+            merge_message_body = body.message.clone().map(|msg| MergeMessageBody {
+                message: map_proto_message_to_json_message(msg.clone()).unwrap(),
+                deleted_messages: body
+                .deleted_messages
+                .iter()
+                .map(|m| map_proto_message_to_json_message(m.clone()).unwrap())
+                .collect(),
+            });
+        }
+        Some(hub_event::Body::PruneMessageBody(body)) => {
+            prune_message_body = body.message.clone().map(|msg| PruneMessageBody {
+                message: map_proto_message_to_json_message(msg).unwrap()
+            })
+        }
+        Some(hub_event::Body::RevokeMessageBody(body)) => {
+            revoke_message_body = body.message.clone().map(|msg| RevokeMessageBody {
+                message: map_proto_message_to_json_message(msg).unwrap()
+            })
+        }
+        Some(hub_event::Body::MergeUsernameProofBody(body)) => {
+            let username_proof_body = body.username_proof.clone()
+                .map(|u| map_proto_username_proof_body_to_json_username_proof_body(u).unwrap());
+            let username_proof_message = body.username_proof_message.clone()
+                .map(|msg| map_proto_message_to_json_message(msg).unwrap());
+            let deleted_username_proof_body = body.deleted_username_proof.clone()
+                .map(|u| map_proto_username_proof_body_to_json_username_proof_body(u).unwrap());
+            let deleted_username_proof_message = body.deleted_username_proof_message.clone()
+            .map(|msg| map_proto_message_to_json_message(msg).unwrap());
+
+            merge_username_proof_body =  Some(MergeUsernameProofBody {
+                username_proof: username_proof_body,
+                username_proof_message,
+                deleted_username_proof: deleted_username_proof_body,
+                deleted_username_proof_message,
+            });
+        }
+        Some(hub_event::Body::MergeOnChainEventBody(body)) => {
+            merge_on_chain_event_body = body.on_chain_event.clone().map(|e| MergeOnChainEventBody {
+                on_chain_event: map_proto_on_chain_event_to_json_on_chain_event(e).unwrap()
+            });
+        }
+        Some(hub_event::Body::MergeFailure(body)) => {
+            merge_failure_body = body.message.clone().map(|msg| MergeFailureBody {
+                message: map_proto_message_to_json_message(msg).unwrap(),
+                code: body.code.clone(),
+                reason: body.reason.clone(),
+            });
+            
+        }
+    }
+
+    Ok(HubEvent {
+        hub_event_type: proto::HubEventType::try_from(hub_event.r#type)
+            .map_err(|_| ErrorResponse {
+                error: "Invalid hub event type".to_string(),
+                error_detail: None,
+            })?
+            .as_str_name()
+            .to_owned(),
+        id: hub_event.id,
+        merge_message_body,
+        prune_message_body,
+        revoke_message_body,
+        merge_username_proof_body,
+        merge_on_chain_event_body,
+        merge_failure_body,
+        block_number: hub_event.block_number,
+        shard_index: hub_event.shard_index,
+    })
+}
+
 // Service trait for type-safe request handling
 #[async_trait]
 pub trait HubHttpService {
@@ -1275,6 +1559,10 @@ pub trait HubHttpService {
         &self,
         req: OnChainEventRequest,
     ) -> Result<OnChainEventResponse, ErrorResponse>;
+    async fn get_events(
+        &self,
+        req: EventsRequest,
+    ) -> Result<EventsResponse, ErrorResponse>;
 }
 
 #[async_trait]
@@ -1892,76 +2180,7 @@ impl HubHttpService for HubHttpServiceImpl {
             events: onchain_event_response
                 .events
                 .iter()
-                .map(|e| {
-                    let mut signer_event_body: Option<SignerEventBody> = None;
-                    let mut signer_migrated_event_body: Option<SignerMigratedEventBody> = None;
-                    let mut id_register_event_body: Option<IdRegisterEventBody> = None;
-                    let mut storage_rent_event_body: Option<StorageRentEventBody> = None;
-                    match &e.body {
-                        None => {}
-                        Some(on_chain_event::Body::SignerEventBody(body)) => {
-                            signer_event_body = Some(SignerEventBody {
-                                key: body.key.clone(),
-                                key_type: body.key_type,
-                                event_type: match body.event_type {
-                                    1 => SignerEventType::Add,
-                                    2 => SignerEventType::Remove,
-                                    3 => SignerEventType::AdminReset,
-                                    _ => SignerEventType::None,
-                                },
-                                metadata: body.metadata.clone(),
-                                metadata_type: body.metadata_type,
-                            });
-                        }
-                        Some(on_chain_event::Body::SignerMigratedEventBody(body)) => {
-                            signer_migrated_event_body = Some(SignerMigratedEventBody {
-                                migrated_at: body.migrated_at,
-                            });
-                        }
-                        Some(on_chain_event::Body::IdRegisterEventBody(body)) => {
-                            id_register_event_body = Some(IdRegisterEventBody {
-                                to: body.to.clone(),
-                                event_type: match body.event_type {
-                                    1 => IdRegisterEventType::Register,
-                                    2 => IdRegisterEventType::Transfer,
-                                    3 => IdRegisterEventType::ChangeRecovery,
-                                    _ => IdRegisterEventType::None,
-                                },
-                                from: body.from.clone(),
-                                recovery_address: body.recovery_address.clone(),
-                            });
-                        }
-                        Some(on_chain_event::Body::StorageRentEventBody(body)) => {
-                            storage_rent_event_body = Some(StorageRentEventBody {
-                                payer: body.payer.clone(),
-                                units: body.units,
-                                expiry: body.expiry,
-                            });
-                        }
-                    }
-                    return OnChainEvent {
-                        r#type: match e.r#type {
-                            1 => OnChainEventType::EventTypeSigner,
-                            2 => OnChainEventType::EventTypeSignerMigrated,
-                            3 => OnChainEventType::EventTypeIdRegister,
-                            4 => OnChainEventType::EventTypeStorageRent,
-                            _ => OnChainEventType::EventTypeNone,
-                        },
-                        chain_id: e.chain_id,
-                        block_number: e.block_number,
-                        block_hash: e.block_hash.clone(),
-                        block_timestamp: e.block_timestamp,
-                        transaction_hash: e.transaction_hash.clone(),
-                        log_index: e.log_index,
-                        fid: e.fid,
-                        tx_index: e.tx_index,
-                        version: e.version,
-                        signer_event_body: signer_event_body,
-                        signer_migrated_event_body: signer_migrated_event_body,
-                        id_register_event_body: id_register_event_body,
-                        storage_rent_event_body: storage_rent_event_body,
-                    };
-                })
+                .map(|e| map_proto_on_chain_event_to_json_on_chain_event(e.clone()).unwrap())
                 .collect(),
             next_page_token: onchain_event_response
                 .next_page_token
@@ -1994,78 +2213,39 @@ impl HubHttpService for HubHttpServiceImpl {
             events: onchain_event_response
                 .events
                 .iter()
-                .map(|e| {
-                    let mut signer_event_body: Option<SignerEventBody> = None;
-                    let mut signer_migrated_event_body: Option<SignerMigratedEventBody> = None;
-                    let mut id_register_event_body: Option<IdRegisterEventBody> = None;
-                    let mut storage_rent_event_body: Option<StorageRentEventBody> = None;
-                    match &e.body {
-                        None => {}
-                        Some(on_chain_event::Body::SignerEventBody(body)) => {
-                            signer_event_body = Some(SignerEventBody {
-                                key: body.key.clone(),
-                                key_type: body.key_type,
-                                event_type: match body.event_type {
-                                    1 => SignerEventType::Add,
-                                    2 => SignerEventType::Remove,
-                                    3 => SignerEventType::AdminReset,
-                                    _ => SignerEventType::None,
-                                },
-                                metadata: body.metadata.clone(),
-                                metadata_type: body.metadata_type,
-                            });
-                        }
-                        Some(on_chain_event::Body::SignerMigratedEventBody(body)) => {
-                            signer_migrated_event_body = Some(SignerMigratedEventBody {
-                                migrated_at: body.migrated_at,
-                            });
-                        }
-                        Some(on_chain_event::Body::IdRegisterEventBody(body)) => {
-                            id_register_event_body = Some(IdRegisterEventBody {
-                                to: body.to.clone(),
-                                event_type: match body.event_type {
-                                    1 => IdRegisterEventType::Register,
-                                    2 => IdRegisterEventType::Transfer,
-                                    3 => IdRegisterEventType::ChangeRecovery,
-                                    _ => IdRegisterEventType::None,
-                                },
-                                from: body.from.clone(),
-                                recovery_address: body.recovery_address.clone(),
-                            });
-                        }
-                        Some(on_chain_event::Body::StorageRentEventBody(body)) => {
-                            storage_rent_event_body = Some(StorageRentEventBody {
-                                payer: body.payer.clone(),
-                                units: body.units,
-                                expiry: body.expiry,
-                            });
-                        }
-                    }
-                    return OnChainEvent {
-                        r#type: match e.r#type {
-                            1 => OnChainEventType::EventTypeSigner,
-                            2 => OnChainEventType::EventTypeSignerMigrated,
-                            3 => OnChainEventType::EventTypeIdRegister,
-                            4 => OnChainEventType::EventTypeStorageRent,
-                            _ => OnChainEventType::EventTypeNone,
-                        },
-                        chain_id: e.chain_id,
-                        block_number: e.block_number,
-                        block_hash: e.block_hash.clone(),
-                        block_timestamp: e.block_timestamp,
-                        transaction_hash: e.transaction_hash.clone(),
-                        log_index: e.log_index,
-                        fid: e.fid,
-                        tx_index: e.tx_index,
-                        version: e.version,
-                        signer_event_body: signer_event_body,
-                        signer_migrated_event_body: signer_migrated_event_body,
-                        id_register_event_body: id_register_event_body,
-                        storage_rent_event_body: storage_rent_event_body,
-                    };
-                })
+                .map(|e| map_proto_on_chain_event_to_json_on_chain_event(e.clone()).unwrap())
                 .collect(),
             next_page_token: onchain_event_response
+                .next_page_token
+                .map(|t| BASE64_STANDARD.encode(t)),
+        })
+    }
+
+    async fn get_events(&self, req: EventsRequest) -> Result<EventsResponse, ErrorResponse> {
+        let service = &self.service;
+
+        let grpc_req = tonic::Request::new(proto::EventsRequest {
+            start_id: req.start_id,
+            stop_id: req.stop_id,
+            page_size: req.page_size,
+            page_token: req.page_token,
+            reverse: req.reverse,
+        });
+        let response = service
+            .get_events(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get events".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+        let events_response = response.into_inner();
+        Ok(EventsResponse {
+            events: events_response
+                .events
+                .iter()
+                .map(|e| map_proto_events_response_to_json_events_response(e.clone()).unwrap())
+                .collect(),
+            next_page_token: events_response
                 .next_page_token
                 .map(|t| BASE64_STANDARD.encode(t)),
         })
@@ -2236,6 +2416,15 @@ impl Router {
                     req,
                     |service, req| {
                         Box::pin(async move { service.get_on_chain_events_by_fid(req).await })
+                    },
+                )
+                .await
+            }
+            (&Method::GET, "/v1/events") => {
+                self.handle_request::<EventsRequest, EventsResponse, _>(
+                    req,
+                    |service, req| {
+                        Box::pin(async move { service.get_events(req).await })
                     },
                 )
                 .await
