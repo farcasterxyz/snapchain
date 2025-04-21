@@ -429,24 +429,19 @@ impl OnchainEventStore {
         &self,
         page_options: &PageOptions,
     ) -> Result<(Vec<u64>, Option<Vec<u8>>), OnchainEventStorageError> {
-        let mut onchain_events = vec![];
-        let mut next_page_token = None;
-        loop {
-            let onchain_events_page = get_onchain_events(
-                &self.db,
-                page_options,
-                OnChainEventType::EventTypeIdRegister,
-                None,
-            )?;
-            onchain_events.extend(onchain_events_page.onchain_events);
-            if onchain_events_page.next_page_token.is_none() {
-                break;
-            } else {
-                next_page_token = onchain_events_page.next_page_token
-            }
-        }
+        let onchain_events_page = get_onchain_events(
+            &self.db,
+            page_options,
+            OnChainEventType::EventTypeIdRegister,
+            None,
+        )?;
 
-        let fids = onchain_events.iter().map(|event| event.fid).collect();
+        let fids = onchain_events_page
+            .onchain_events
+            .iter()
+            .map(|event| event.fid)
+            .collect();
+        let next_page_token = onchain_events_page.next_page_token;
 
         Ok((fids, next_page_token))
     }
