@@ -416,7 +416,11 @@ pub struct LinksByFidRequest {
     link_type: Option<String>,
     #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
-    #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        with = "serdebase64opt",
+        rename = "pageToken",
+        skip_serializing_if = "Option::is_none"
+    )]
     page_token: Option<Vec<u8>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reverse: Option<bool>,
