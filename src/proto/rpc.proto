@@ -25,6 +25,7 @@ service HubService {
   // Events
   rpc Subscribe(SubscribeRequest) returns (stream HubEvent);
   rpc GetEvent(EventRequest) returns (HubEvent);
+  rpc GetEvents(EventsRequest) returns (EventsResponse);
 
 
   // Casts
