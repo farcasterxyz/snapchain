@@ -574,8 +574,8 @@ pub enum IdRegisterEventType {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SignerEventBody {
-    #[serde(with = "serdebase64")]
-    pub key: Vec<u8>, // Hex or base?
+    #[serde(with = "serdehex")]
+    pub key: Vec<u8>,
     #[serde(rename = "keyType")]
     pub key_type: u32,
     #[serde(rename = "eventType")]
