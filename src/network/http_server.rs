@@ -301,6 +301,7 @@ pub struct FidRequest {
     #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
     #[serde(
+        default,
         with = "serdebase64opt",
         rename = "pageToken",
         skip_serializing_if = "Option::is_none"
@@ -325,6 +326,7 @@ pub struct CastsByParentRequest {
     #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
     #[serde(
+        default,
         with = "serdebase64opt",
         rename = "pageToken",
         skip_serializing_if = "Option::is_none"
@@ -353,6 +355,7 @@ pub struct ReactionsByFidRequest {
     #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
     #[serde(
+        default,
         with = "serdebase64opt",
         rename = "pageToken",
         skip_serializing_if = "Option::is_none"
@@ -372,6 +375,7 @@ pub struct ReactionsByCastRequest {
     #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
     #[serde(
+        default,
         with = "serdebase64opt",
         rename = "pageToken",
         skip_serializing_if = "Option::is_none"
@@ -392,6 +396,7 @@ pub struct ReactionsByTargetRequest {
     #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
     #[serde(
+        default,
         with = "serdebase64opt",
         rename = "pageToken",
         skip_serializing_if = "Option::is_none"
@@ -417,6 +422,7 @@ pub struct LinksByFidRequest {
     #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
     #[serde(
+        default,
         with = "serdebase64opt",
         rename = "pageToken",
         skip_serializing_if = "Option::is_none"
@@ -435,6 +441,7 @@ pub struct LinksByTargetRequest {
     #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
     #[serde(
+        default,
         with = "serdebase64opt",
         rename = "pageToken",
         skip_serializing_if = "Option::is_none"
@@ -623,6 +630,7 @@ pub struct OnChainEventRequest {
     #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
     #[serde(
+        default,
         with = "serdebase64opt",
         rename = "pageToken",
         skip_serializing_if = "Option::is_none"
