@@ -1076,4 +1076,45 @@ mod tests {
         assert_eq!(proof.name, ens_username.as_bytes().to_vec());
         assert_eq!(proof.r#type, UserNameType::UsernameTypeEnsL1 as i32);
     }
+
+    #[tokio::test]
+    async fn test_get_fids() {
+        let (_, _, [mut engine1, _], service) = make_server(None).await;
+
+        test_helper::register_user(
+            SHARD1_FID,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine1,
+        )
+        .await;
+        test_helper::register_user(
+            SHARD2_FID,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine1,
+        )
+        .await;
+
+        let response = service
+            .get_fids(Request::new(proto::FidsRequest {
+                page_size: None,
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap();
+        let fids_response = response.get_ref();
+
+        let fids = &fids_response.fids;
+
+        assert_eq!(fids.len(), 2);
+
+        assert_eq!(*fids, vec![SHARD1_FID, SHARD2_FID]);
+
+        assert_eq!(
+            fids_response.next_page_token,
+            vec![91, 110, 117, 108, 108, 44, 110, 117, 108, 108, 93].into()
+        );
+    }
 }

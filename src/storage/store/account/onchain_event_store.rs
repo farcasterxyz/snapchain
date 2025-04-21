@@ -172,7 +172,7 @@ fn build_secondary_indices_for_signer(
                     reverse: false,
                 },
                 OnChainEventType::EventTypeSigner,
-                onchain_event.fid,
+                Some(onchain_event.fid),
             )?;
 
             let onchain_event = events_page.onchain_events.into_iter().find(|event| {
@@ -255,10 +255,14 @@ pub fn get_onchain_events(
     db: &RocksDB,
     page_options: &PageOptions,
     event_type: OnChainEventType,
-    fid: u64,
+    fid: Option<u64>,
 ) -> Result<OnchainEventsPage, OnchainEventStorageError> {
     let mut start_prefix = make_onchain_event_type_prefix(event_type);
-    start_prefix.extend(make_fid_key(fid));
+
+    if let Some(fid) = &fid {
+        start_prefix.extend(make_fid_key(*fid));
+    }
+
     let stop_prefix = increment_vec_u8(&start_prefix);
 
     let mut onchain_events = vec![];
@@ -408,7 +412,7 @@ impl OnchainEventStore {
                     reverse: false,
                 },
                 event_type,
-                fid,
+                Some(fid),
             )?;
             onchain_events.extend(onchain_events_page.onchain_events);
             if onchain_events_page.next_page_token.is_none() {
@@ -419,6 +423,32 @@ impl OnchainEventStore {
         }
 
         Ok(onchain_events)
+    }
+
+    pub fn get_fids(
+        &self,
+        page_options: &PageOptions,
+    ) -> Result<(Vec<u64>, Option<Vec<u8>>), OnchainEventStorageError> {
+        let mut onchain_events = vec![];
+        let mut next_page_token = None;
+        loop {
+            let onchain_events_page = get_onchain_events(
+                &self.db,
+                page_options,
+                OnChainEventType::EventTypeIdRegister,
+                None,
+            )?;
+            onchain_events.extend(onchain_events_page.onchain_events);
+            if onchain_events_page.next_page_token.is_none() {
+                break;
+            } else {
+                next_page_token = onchain_events_page.next_page_token
+            }
+        }
+
+        let fids = onchain_events.iter().map(|event| event.fid).collect();
+
+        Ok((fids, next_page_token))
     }
 
     #[inline]

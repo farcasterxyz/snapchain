@@ -317,6 +317,27 @@ pub struct ShardInfo {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GetFidsRequest {
+    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+    #[serde(
+        with = "serdebase64opt",
+        rename = "pageToken",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub page_token: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reverse: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GetFidsResponse {
+    pub fids: Vec<u64>,
+    #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FidRequest {
     pub fid: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1542,6 +1563,7 @@ fn map_proto_hub_event_to_json_hub_event(
 #[async_trait]
 pub trait HubHttpService {
     async fn get_info(&self, req: InfoRequest) -> Result<InfoResponse, ErrorResponse>;
+    async fn get_fids(&self, req: GetFidsRequest) -> Result<GetFidsResponse, ErrorResponse>;
     async fn get_cast_by_id(&self, req: IdRequest) -> Result<Message, ErrorResponse>;
     async fn get_casts_by_fid(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse>;
     async fn get_casts_by_mention(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse>;
@@ -1623,6 +1645,29 @@ impl HubHttpService for HubHttpServiceImpl {
             })?;
         let proto = response.into_inner();
         map_get_info_response_to_json_info_response(proto)
+    }
+
+    async fn get_fids(&self, request: GetFidsRequest) -> Result<GetFidsResponse, ErrorResponse> {
+        let response = self
+            .service
+            .get_fids(tonic::Request::<proto::FidsRequest>::new(
+                proto::FidsRequest {
+                    page_size: request.page_size,
+                    page_token: request.page_token,
+                    reverse: request.reverse,
+                },
+            ))
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get fids".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+        let proto = response.into_inner();
+
+        Ok(GetFidsResponse {
+            fids: proto.fids,
+            next_page_token: proto.next_page_token.map(|t| BASE64_STANDARD.encode(t)),
+        })
     }
 
     async fn get_cast_by_id(&self, req: IdRequest) -> Result<Message, ErrorResponse> {
@@ -2314,6 +2359,12 @@ impl Router {
             (&Method::GET, "/v1/info") => {
                 self.handle_request::<InfoRequest, InfoResponse, _>(req, |service, req| {
                     Box::pin(async move { service.get_info(req).await })
+                })
+                .await
+            }
+            (&Method::GET, "/v1/fids") => {
+                self.handle_request::<GetFidsRequest, GetFidsResponse, _>(req, |service, req| {
+                    Box::pin(async move { service.get_fids(req).await })
                 })
                 .await
             }

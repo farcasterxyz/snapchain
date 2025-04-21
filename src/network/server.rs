@@ -667,6 +667,62 @@ impl HubService for MyHubService {
         }))
     }
 
+    async fn get_fids(
+        &self,
+        request: Request<FidsRequest>,
+    ) -> Result<Response<proto::FidsResponse>, Status> {
+        let inner_request = request.into_inner();
+
+        let num_shards = self.shard_stores.len();
+
+        let per_shard_tokens: Vec<Option<Vec<u8>>> =
+            if let Some(token_bytes) = inner_request.page_token {
+                serde_json::from_slice(&token_bytes)
+                    .map_err(|e| Status::invalid_argument(format!("Invalid page token: {}", e)))?
+            } else {
+                vec![None; num_shards]
+            };
+
+        if per_shard_tokens.len() != num_shards {
+            return Err(Status::invalid_argument(
+                "Page token does not match number of shards".to_string(),
+            ));
+        }
+
+        let fids_per_shard: Vec<(Vec<u64>, Option<Vec<u8>>)> = self
+            .shard_stores
+            .iter()
+            .zip(per_shard_tokens.into_iter())
+            .map(|(shard_entry, shard_token)| {
+                let page_options = PageOptions {
+                    page_size: inner_request.page_size.map(|s| s as usize),
+                    page_token: shard_token,
+                    reverse: inner_request.reverse.unwrap_or(false),
+                };
+                let event_store = &shard_entry.1.onchain_event_store;
+
+                event_store
+                    .get_fids(&page_options)
+                    .unwrap_or((vec![], None))
+            })
+            .collect();
+
+        let fids: Vec<u64> = fids_per_shard
+            .iter()
+            .flat_map(|tuple| tuple.0.clone())
+            .collect();
+        let next_page_tokens: Vec<Option<Vec<u8>>> =
+            fids_per_shard.into_iter().map(|tuple| tuple.1).collect();
+
+        let next_page_token = serde_json::to_vec(&next_page_tokens)
+            .map_err(|e| Status::internal(format!("Failed to serialize next_page_token: {}", e)))?;
+
+        Ok(Response::new(FidsResponse {
+            fids,
+            next_page_token: Some(next_page_token),
+        }))
+    }
+
     type SubscribeStream = ReceiverStream<Result<HubEvent, Status>>;
 
     async fn subscribe(
@@ -1666,10 +1722,6 @@ impl HubService for MyHubService {
         &self,
         _: Request<IdRegistryEventByAddressRequest>,
     ) -> Result<Response<OnChainEvent>, Status> {
-        Err(Status::internal("method not supported".to_string()))
-    }
-
-    async fn get_fids(&self, _: Request<FidsRequest>) -> Result<Response<FidsResponse>, Status> {
         Err(Status::internal("method not supported".to_string()))
     }
 
