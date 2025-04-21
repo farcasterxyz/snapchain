@@ -83,6 +83,7 @@ impl proto::HubEvent {
             block_number: 0,
             id: 0,
             shard_index: 0,
+            produced_at: 0,
         }
     }
 
