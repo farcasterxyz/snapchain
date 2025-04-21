@@ -17,7 +17,8 @@ mod tests {
     use crate::network::server::MyHubService;
     use crate::proto::hub_service_server::HubService;
     use crate::proto::{
-        self, HubEvent, HubEventType, UserNameProof, UserNameType, VerificationAddAddressBody,
+        self, HubEvent, HubEventType, UserNameProof, UserNameType, UsernameProofRequest,
+        VerificationAddAddressBody,
     };
     use crate::proto::{FidRequest, SubscribeRequest};
     use crate::storage::db::{self, RocksDB, RocksDbTransactionBatch};
@@ -965,5 +966,50 @@ mod tests {
         assert_eq!(shard2_info.num_messages, 0);
         assert_eq!(shard2_info.max_height, 0);
         assert_eq!(block_info.mempool_size, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_username_proof_ens() {
+        let (_, _, [mut engine1, _], service) = make_server(None).await;
+        let fid = SHARD1_FID;
+        let signer = test_helper::default_signer();
+        let owner = hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap();
+
+        // Register the user
+        test_helper::register_user(fid, signer.clone(), owner.clone(), &mut engine1).await;
+
+        // Create an ENS username proof
+        let ens_username = "test.eth";
+
+        // Create a username proof message and store it
+        let proof_message = messages_factory::username_proof::create_username_proof(
+            fid,
+            UserNameType::UsernameTypeEnsL1,
+            ens_username.to_string(),
+            owner.clone(),
+            "signature".to_string(),
+            messages_factory::farcaster_time() as u64,
+            None,
+        );
+
+        // Commit the message to engine1
+        test_helper::commit_message(&mut engine1, &proof_message).await;
+
+        // Test get_username_proof for ENS name
+        let request = Request::new(UsernameProofRequest {
+            name: ens_username.as_bytes().to_vec(),
+        });
+
+        let response = service.get_username_proof(request).await;
+        assert!(
+            response.is_ok(),
+            "Failed to get ENS username proof: {:?}",
+            response.err()
+        );
+
+        let proof = response.unwrap().into_inner();
+        assert_eq!(proof.fid, fid);
+        assert_eq!(proof.name, ens_username.as_bytes().to_vec());
+        assert_eq!(proof.r#type, UserNameType::UsernameTypeEnsL1 as i32);
     }
 }

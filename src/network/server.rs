@@ -1399,31 +1399,57 @@ impl HubService for MyHubService {
         request: Request<UsernameProofRequest>,
     ) -> Result<Response<UserNameProof>, Status> {
         let req = request.into_inner();
-        let name = req.name;
-        let user_name_type = UserNameType::UsernameTypeEnsL1 as u8;
+        let name_str = std::str::from_utf8(&req.name).unwrap_or("");
 
-        let proof_opt = self.shard_stores.iter().find_map(|(_shard_entry, stores)| {
-            match UsernameProofStore::get_username_proof(
-                &stores.username_proof_store,
-                &name,
-                user_name_type,
-            ) {
-                Ok(Some(message)) => message.data.and_then(|data| {
-                    if let Some(message_data::Body::UsernameProofBody(user_name_proof)) = data.body
-                    {
-                        Some(user_name_proof)
-                    } else {
-                        None
-                    }
-                }),
-                _ => None,
+        // Check if this is an .eth name (look in username_proof_store) or fname (look in user_data_store)
+        if name_str.ends_with(".eth") {
+            let user_name_type = UserNameType::UsernameTypeEnsL1 as u8;
+
+            // Look for ENS username proofs in the username_proof_store
+            let proof_opt = self.shard_stores.iter().find_map(|(_shard_entry, stores)| {
+                match UsernameProofStore::get_username_proof(
+                    &stores.username_proof_store,
+                    &req.name,
+                    user_name_type,
+                ) {
+                    Ok(Some(message)) => message.data.and_then(|data| {
+                        if let Some(message_data::Body::UsernameProofBody(user_name_proof)) =
+                            data.body
+                        {
+                            Some(user_name_proof)
+                        } else {
+                            None
+                        }
+                    }),
+                    _ => None,
+                }
+            });
+
+            if let Some(proof_message) = proof_opt {
+                Ok(Response::new(proof_message))
+            } else {
+                Err(Status::not_found(
+                    "ENS username proof not found".to_string(),
+                ))
             }
-        });
-
-        if let Some(proof_message) = proof_opt {
-            Ok(Response::new(proof_message))
         } else {
-            Err(Status::not_found("Username proof not found".to_string()))
+            // Look for fname proofs in the user_data_store
+            let proof_opt = self.shard_stores.iter().find_map(|(_shard_entry, stores)| {
+                match UserDataStore::get_username_proof(
+                    &stores.user_data_store,
+                    &mut RocksDbTransactionBatch::new(),
+                    &req.name,
+                ) {
+                    Ok(Some(user_name_proof)) => Some(user_name_proof),
+                    _ => None,
+                }
+            });
+
+            if let Some(proof_message) = proof_opt {
+                Ok(Response::new(proof_message))
+            } else {
+                Err(Status::not_found("Username proof not found".to_string()))
+            }
         }
     }
 
@@ -1434,7 +1460,10 @@ impl HubService for MyHubService {
         let req = request.into_inner();
         let fid = req.fid;
 
-        let shard_results: Vec<Result<Vec<UserNameProof>, Status>> = self
+        let mut combined_proofs = Vec::new();
+
+        // First, get proofs from username_proof_store (for ENS names)
+        let ens_shard_results: Vec<Result<Vec<UserNameProof>, Status>> = self
             .shard_stores
             .iter()
             .map(|(_shard_id, stores)| {
@@ -1478,10 +1507,24 @@ impl HubService for MyHubService {
             })
             .collect();
 
-        let mut combined_proofs = Vec::new();
-        for shard_result in shard_results {
+        // Aggregate ENS proofs
+        for shard_result in ens_shard_results {
             let proofs = shard_result?;
             combined_proofs.extend(proofs);
+        }
+
+        // Now get proofs from user_data_store (for fnames)
+        for (_shard_id, stores) in &self.shard_stores {
+            match UserDataStore::get_username_proof_by_fid(&stores.user_data_store, fid) {
+                Ok(Some(proof)) => {
+                    combined_proofs.push(proof);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    // Log the error but continue, to try to get all proofs we can
+                    error!("Error getting username proof from user_data_store: {:?}", e);
+                }
+            }
         }
 
         let response = UsernameProofsResponse {

@@ -25,6 +25,7 @@ use libp2p::{
 };
 use libp2p_connection_limits::ConnectionLimits;
 use prost::Message;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -61,7 +62,7 @@ impl Default for Config {
         );
         Config {
             address: address.clone(),
-            announce_address: address,
+            announce_address: "".to_string(),
             bootstrap_peers: "".to_string(),
             contact_info_interval: Duration::from_secs(300),
             bootstrap_reconnect_interval: Duration::from_secs(30),
@@ -97,6 +98,13 @@ impl Config {
     pub fn with_bootstrap_reconnect_interval(self, bootstrap_reconnect_interval: Duration) -> Self {
         Config {
             bootstrap_reconnect_interval,
+            ..self
+        }
+    }
+
+    pub fn with_announce_address(self, announce_address: String) -> Self {
+        Config {
+            announce_address,
             ..self
         }
     }
@@ -158,7 +166,7 @@ pub struct SnapchainGossip {
 }
 
 impl SnapchainGossip {
-    pub fn create(
+    pub async fn create(
         keypair: Keypair,
         config: &Config,
         system_tx: Sender<SystemMessage>,
@@ -273,6 +281,10 @@ impl SnapchainGossip {
         // Listen on all assigned port for this id
         swarm.listen_on(config.address.parse()?)?;
 
+        let announce_address = Self::get_announce_address(config).await;
+
+        info!("Using {} as announce address", announce_address);
+
         // ~5 seconds of buffer (assuming 1K msgs/pec)
         let (tx, rx) = mpsc::channel(5000);
         Ok(SnapchainGossip {
@@ -283,13 +295,43 @@ impl SnapchainGossip {
             sync_channels: HashMap::new(),
             read_node,
             bootstrap_addrs: config.bootstrap_addrs().into_iter().collect(),
-            announce_address: config.announce_address.clone(),
+            announce_address,
             fc_network,
             contact_info_interval: config.contact_info_interval,
             bootstrap_reconnect_interval: config.bootstrap_reconnect_interval,
             statsd_client,
             connected_bootstrap_addrs: HashSet::new(),
         })
+    }
+
+    async fn get_announce_address(config: &Config) -> String {
+        if config.announce_address.len() > 0 {
+            return config.announce_address.clone();
+        }
+
+        // If no config-defined announce IP exists, detect the public IP.
+        // Falling back to the address also defined in the config
+        let public_ip = Self::get_public_ip().await;
+
+        match public_ip {
+            Ok(address) => format!("/ip4/{}/udp/{}/quic-v1", address, DEFAULT_GOSSIP_PORT),
+            Err(error) => {
+                warn!("Detecting public IP failed with error: {}", error);
+
+                // Fallback to address.
+                config.address.clone()
+            }
+        }
+    }
+
+    async fn get_public_ip() -> Result<String, reqwest::Error> {
+        let client = Client::builder().timeout(Duration::from_secs(3)).build()?;
+        client
+            .get("https://api.ipify.org")
+            .send()
+            .await?
+            .text()
+            .await
     }
 
     fn dial(

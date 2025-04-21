@@ -300,7 +300,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         app_config.read_node,
         app_config.fc_network,
         statsd_client.clone(),
-    );
+    )
+    .await;
 
     if let Err(e) = gossip_result {
         error!(error = ?e, "Failed to create SnapchainGossip");
