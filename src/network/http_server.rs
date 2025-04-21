@@ -70,6 +70,27 @@ mod serdebase64opt {
     }
 }
 
+mod serdehex {
+    use hex;
+    use serde::Deserialize;
+    use serde::{de::Error, Deserializer, Serializer};
+    /// Serialize a byte vector to a "0x"‑prefixed hex string.
+    pub fn serialize<S: Serializer>(v: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+        // hex::encode turns &[u8] → lowercase hex (no prefix)
+        let mut prefixed = String::with_capacity(v.len() * 2 + 2);
+        prefixed.push_str("0x");
+        prefixed.push_str(&hex::encode(v));
+        s.serialize_str(&prefixed)
+    }
+    /// Deserialize from either a "0x"‑prefixed or raw hex string into Vec<u8>.
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        // strip optional "0x"
+        let hex_str = s.strip_prefix("0x").unwrap_or(&s);
+        hex::decode(hex_str).map_err(D::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Message {
     pub data: MessageData,
@@ -553,14 +574,16 @@ pub enum IdRegisterEventType {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SignerEventBody {
-    pub key: Vec<u8>,
+    #[serde(with = "serdebase64")]
+    pub key: Vec<u8>, // Hex or base?
     #[serde(rename = "keyType")]
     pub key_type: u32,
     #[serde(rename = "eventType")]
-    pub event_type: SignerEventType,
+    pub event_type: String,
+    #[serde(with = "serdebase64")]
     pub metadata: Vec<u8>,
     #[serde(rename = "metadataType")]
-    pub metadata_type: u32,
+    pub metadata_type: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -588,16 +611,16 @@ pub struct StorageRentEventBody {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OnChainEvent {
-    pub r#type: OnChainEventType,
+    pub r#type: String,
     #[serde(rename = "chainId")]
     pub chain_id: u32,
     #[serde(rename = "blockNumber")]
     pub block_number: u32,
-    #[serde(rename = "blockHash")]
+    #[serde(with = "serdehex", rename = "blockHash")]
     pub block_hash: Vec<u8>,
     #[serde(rename = "blockTimestamp")]
     pub block_timestamp: u64,
-    #[serde(rename = "transactionHash")]
+    #[serde(with = "serdehex", rename = "transactionHash")]
     pub transaction_hash: Vec<u8>,
     #[serde(rename = "logIndex")]
     pub log_index: u32,
@@ -1934,17 +1957,26 @@ impl HubHttpService for HubHttpServiceImpl {
                     match &e.body {
                         None => {}
                         Some(on_chain_event::Body::SignerEventBody(body)) => {
+                            let event_type = match body.event_type {
+                                1 => "ADD",
+                                2 => "REMOVE",
+                                3 => "ADMIN_RESET",
+                                _ => "NONE",
+                            }
+                            .to_string();
+                            let metadata_type = match body.metadata_type {
+                                1 => "NONE",
+                                2 => "URL",
+                                3 => "TEXT",
+                                _ => "NONE",
+                            }
+                            .to_string();
                             signer_event_body = Some(SignerEventBody {
                                 key: body.key.clone(),
                                 key_type: body.key_type,
-                                event_type: match body.event_type {
-                                    1 => SignerEventType::Add,
-                                    2 => SignerEventType::Remove,
-                                    3 => SignerEventType::AdminReset,
-                                    _ => SignerEventType::None,
-                                },
+                                event_type,
                                 metadata: body.metadata.clone(),
-                                metadata_type: body.metadata_type,
+                                metadata_type,
                             });
                         }
                         Some(on_chain_event::Body::SignerMigratedEventBody(body)) => {
@@ -1975,11 +2007,11 @@ impl HubHttpService for HubHttpServiceImpl {
                     }
                     return OnChainEvent {
                         r#type: match e.r#type {
-                            1 => OnChainEventType::EventTypeSigner,
-                            2 => OnChainEventType::EventTypeSignerMigrated,
-                            3 => OnChainEventType::EventTypeIdRegister,
-                            4 => OnChainEventType::EventTypeStorageRent,
-                            _ => OnChainEventType::EventTypeNone,
+                            1 => "SIGNER".to_string(),
+                            2 => "SIGNER_MIGRATED".to_string(),
+                            3 => "ID_REGISTER".to_string(),
+                            4 => "STORAGE_RENT".to_string(),
+                            _ => "NONE".to_string(),
                         },
                         chain_id: e.chain_id,
                         block_number: e.block_number,
@@ -2040,13 +2072,13 @@ impl HubHttpService for HubHttpServiceImpl {
                                 key: body.key.clone(),
                                 key_type: body.key_type,
                                 event_type: match body.event_type {
-                                    1 => SignerEventType::Add,
-                                    2 => SignerEventType::Remove,
-                                    3 => SignerEventType::AdminReset,
-                                    _ => SignerEventType::None,
+                                    1 => "ADD".to_string(),
+                                    2 => "REMOVE".to_string(),
+                                    3 => "ADMIN_RESET".to_string(),
+                                    _ => "NONE".to_string(),
                                 },
                                 metadata: body.metadata.clone(),
-                                metadata_type: body.metadata_type,
+                                metadata_type: body.metadata_type.to_string(),
                             });
                         }
                         Some(on_chain_event::Body::SignerMigratedEventBody(body)) => {
@@ -2077,11 +2109,11 @@ impl HubHttpService for HubHttpServiceImpl {
                     }
                     return OnChainEvent {
                         r#type: match e.r#type {
-                            1 => OnChainEventType::EventTypeSigner,
-                            2 => OnChainEventType::EventTypeSignerMigrated,
-                            3 => OnChainEventType::EventTypeIdRegister,
-                            4 => OnChainEventType::EventTypeStorageRent,
-                            _ => OnChainEventType::EventTypeNone,
+                            1 => "SIGNER".to_string(),
+                            2 => "SIGNER_MIGRATED".to_string(),
+                            3 => "ID_REGISTER".to_string(),
+                            4 => "STORAGE_RENT".to_string(),
+                            _ => "NONE".to_string(),
                         },
                         chain_id: e.chain_id,
                         block_number: e.block_number,
