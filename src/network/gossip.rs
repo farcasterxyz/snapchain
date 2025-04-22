@@ -52,6 +52,7 @@ pub struct Config {
     pub bootstrap_peers: String,
     pub contact_info_interval: Duration,
     pub bootstrap_reconnect_interval: Duration,
+    pub enable_autodiscovery: bool,
 }
 
 impl Default for Config {
@@ -66,6 +67,7 @@ impl Default for Config {
             bootstrap_peers: "".to_string(),
             contact_info_interval: Duration::from_secs(300),
             bootstrap_reconnect_interval: Duration::from_secs(30),
+            enable_autodiscovery: false,
         }
     }
 }
@@ -156,6 +158,7 @@ pub struct SnapchainGossip {
     system_tx: Sender<SystemMessage>,
     sync_channels: HashMap<InboundRequestId, sync::ResponseChannel>,
     read_node: bool,
+    enable_autodiscovery: bool,
     bootstrap_addrs: HashSet<String>,
     connected_bootstrap_addrs: HashSet<String>,
     announce_address: String,
@@ -302,6 +305,7 @@ impl SnapchainGossip {
             bootstrap_reconnect_interval: config.bootstrap_reconnect_interval,
             statsd_client,
             connected_bootstrap_addrs: HashSet::new(),
+            enable_autodiscovery: config.enable_autodiscovery,
         })
     }
 
@@ -586,7 +590,9 @@ impl SnapchainGossip {
             return;
         }
 
-        let _ = Self::dial(&mut self.swarm, &contact_info_body.gossip_address);
+        if self.enable_autodiscovery {
+            let _ = Self::dial(&mut self.swarm, &contact_info_body.gossip_address);
+        }
     }
 
     pub fn map_gossip_bytes_to_system_message(
