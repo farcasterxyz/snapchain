@@ -225,12 +225,13 @@ impl SnapchainGossip {
 
                 let rpc = sync::Behaviour::new(sync::Config::default());
 
+                // TODO(aditi): Connection limits are set high so that we don't keep kicking off read nodes for now
                 let connection_limits = libp2p_connection_limits::Behaviour::new(
                     ConnectionLimits::default()
-                        .with_max_established_incoming(Some(15))
-                        .with_max_established_outgoing(Some(15))
-                        .with_max_pending_incoming(Some(5))
-                        .with_max_pending_outgoing(Some(5)),
+                        // .with_max_pending_incoming(Some(5))
+                        // .with_max_pending_outgoing(Some(5)),
+                        .with_max_established_incoming(Some(100))
+                        .with_max_established_outgoing(Some(100)),
                 );
 
                 Ok(SnapchainBehavior {
