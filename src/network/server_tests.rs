@@ -454,6 +454,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_events() {
+        let (stores, _, _, service) = make_server(None).await;
+
+        // Write some test events to the DB
+        write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 10).await;
+
+        // Test getting first page
+        let mut request = Request::new(proto::EventsRequest {
+            start_id: 0,
+            stop_id: None,
+            page_size: Some(3),
+            page_token: None,
+            reverse: None,
+        });
+        add_auth_header(&mut request, USER_NAME, PASSWORD);
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 3);
+        let next_page_token = response.get_ref().next_page_token.clone();
+
+        // Test getting second page
+        let mut request = Request::new(proto::EventsRequest {
+            start_id: 0,
+            stop_id: None,
+            page_size: Some(3),
+            page_token: next_page_token,
+            reverse: None,
+        });
+        add_auth_header(&mut request, USER_NAME, PASSWORD);
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 3);
+        let next_page_token = response.get_ref().next_page_token.clone();
+
+        // Test getting third page
+        let mut request = Request::new(proto::EventsRequest {
+            start_id: 0,
+            stop_id: None,
+            page_size: Some(3),
+            page_token: next_page_token,
+            reverse: None,
+        });
+        add_auth_header(&mut request, USER_NAME, PASSWORD);
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 3);
+        let next_page_token = response.get_ref().next_page_token.clone();
+
+        // Test getting final page
+        let mut request = Request::new(proto::EventsRequest {
+            start_id: 0,
+            stop_id: None,
+            page_size: Some(3),
+            page_token: next_page_token,
+            reverse: None,
+        });
+        add_auth_header(&mut request, USER_NAME, PASSWORD);
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 1); // Last page has remaining event
+
+        // Test reverse pagination
+        let mut request = Request::new(proto::EventsRequest {
+            start_id: 0,
+            stop_id: None,
+            page_size: Some(3),
+            page_token: None,
+            reverse: Some(true),
+        });
+        add_auth_header(&mut request, USER_NAME, PASSWORD);
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 3);
+        assert!(events[0].id > events[1].id); // Verify reverse order
+
+        // Test with start_id and stop_id with pagination
+        let mut request = Request::new(proto::EventsRequest {
+            start_id: 2,
+            stop_id: Some(8),
+            page_size: Some(7),
+            page_token: None,
+            reverse: None,
+        });
+        add_auth_header(&mut request, USER_NAME, PASSWORD);
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 6);
+        assert!(events[0].id >= 2 && events[events.len()-1].id <= 8);
+    }
+
+    #[tokio::test]
     async fn test_submit_message_fails_with_error_for_invalid_messages() {
         let (_stores, _senders, [mut engine1, _], service) = make_server(None).await;
 

@@ -1465,7 +1465,7 @@ fn map_proto_on_chain_event_to_json_on_chain_event(onchain_event: proto::OnChain
     })
 }
 
-fn map_proto_events_response_to_json_events_response(
+fn map_proto_hub_event_to_json_hub_event(
     hub_event: proto::HubEvent,
 ) -> Result<HubEvent, ErrorResponse> {
     let mut merge_message_body: Option<MergeMessageBody> = None;
@@ -2300,7 +2300,7 @@ impl HubHttpService for HubHttpServiceImpl {
             events: events_response
                 .events
                 .iter()
-                .map(|e| map_proto_events_response_to_json_events_response(e.clone()).unwrap())
+                .map(|e| map_proto_hub_event_to_json_hub_event(e.clone()).unwrap())
                 .collect(),
             next_page_token: events_response
                 .next_page_token
