@@ -69,6 +69,27 @@ mod serdebase64opt {
     }
 }
 
+mod serdehex {
+    use hex;
+    use serde::Deserialize;
+    use serde::{de::Error, Deserializer, Serializer};
+    /// Serialize a byte vector to a "0x"‑prefixed hex string.
+    pub fn serialize<S: Serializer>(v: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+        // hex::encode turns &[u8] → lowercase hex (no prefix)
+        let mut prefixed = String::with_capacity(v.len() * 2 + 2);
+        prefixed.push_str("0x");
+        prefixed.push_str(&hex::encode(v));
+        s.serialize_str(&prefixed)
+    }
+    /// Deserialize from either a "0x"‑prefixed or raw hex string into Vec<u8>.
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        // strip optional "0x"
+        let hex_str = s.strip_prefix("0x").unwrap_or(&s);
+        hex::decode(hex_str).map_err(D::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Message {
     pub data: MessageData,
@@ -524,22 +545,22 @@ pub struct UserNameProof {
 pub struct UsernameProofsResponse {
     pub proofs: Vec<UserNameProof>,
 }
-
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum OnChainEventType {
-    EventTypeNone = 0,
-    EventTypeSigner = 1,
-    EventTypeSignerMigrated = 2,
-    EventTypeIdRegister = 3,
-    EventTypeStorageRent = 4,
+    EVENT_TYPE_NONE = 0,
+    EVENT_TYPE_SIGNER = 1,
+    EVENT_TYPE_SIGNER_MIGRATED = 2,
+    EVENT_TYPE_ID_REGISTER = 3,
+    EVENT_TYPE_STORAGE_RENT = 4,
 }
-
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum SignerEventType {
-    None = 0,
-    Add = 1,
-    Remove = 2,
-    AdminReset = 3,
+    SIGNER_EVENT_TYPE_NONE = 0,
+    SIGNER_EVENT_TYPE_ADD = 1,
+    SIGNER_EVENT_TYPE_REMOVE = 2,
+    SIGNER_EVENT_TYPE_ADMIN_RESET = 3,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -552,11 +573,13 @@ pub enum IdRegisterEventType {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SignerEventBody {
+    #[serde(with = "serdehex")]
     pub key: Vec<u8>,
     #[serde(rename = "keyType")]
     pub key_type: u32,
     #[serde(rename = "eventType")]
     pub event_type: SignerEventType,
+    #[serde(with = "serdebase64")]
     pub metadata: Vec<u8>,
     #[serde(rename = "metadataType")]
     pub metadata_type: u32,
@@ -592,11 +615,11 @@ pub struct OnChainEvent {
     pub chain_id: u32,
     #[serde(rename = "blockNumber")]
     pub block_number: u32,
-    #[serde(rename = "blockHash")]
+    #[serde(with = "serdehex", rename = "blockHash")]
     pub block_hash: Vec<u8>,
     #[serde(rename = "blockTimestamp")]
     pub block_timestamp: u64,
-    #[serde(rename = "transactionHash")]
+    #[serde(with = "serdehex", rename = "transactionHash")]
     pub transaction_hash: Vec<u8>,
     #[serde(rename = "logIndex")]
     pub log_index: u32,
@@ -1383,10 +1406,10 @@ fn map_proto_on_chain_event_to_json_on_chain_event(onchain_event: proto::OnChain
                 key: body.key.clone(),
                 key_type: body.key_type,
                 event_type: match body.event_type {
-                    1 => SignerEventType::Add,
-                    2 => SignerEventType::Remove,
-                    3 => SignerEventType::AdminReset,
-                    _ => SignerEventType::None,
+                    1 => SignerEventType::SIGNER_EVENT_TYPE_ADD,
+                    2 => SignerEventType::SIGNER_EVENT_TYPE_REMOVE,
+                    3 => SignerEventType::SIGNER_EVENT_TYPE_ADMIN_RESET,
+                    _ => SignerEventType::SIGNER_EVENT_TYPE_NONE,
                 },
                 metadata: body.metadata.clone(),
                 metadata_type: body.metadata_type,
@@ -1420,11 +1443,11 @@ fn map_proto_on_chain_event_to_json_on_chain_event(onchain_event: proto::OnChain
     }
     Ok(OnChainEvent {
         r#type: match onchain_event.r#type {
-            1 => OnChainEventType::EventTypeSigner,
-            2 => OnChainEventType::EventTypeSignerMigrated,
-            3 => OnChainEventType::EventTypeIdRegister,
-            4 => OnChainEventType::EventTypeStorageRent,
-            _ => OnChainEventType::EventTypeNone,
+            1 => OnChainEventType::EVENT_TYPE_SIGNER,
+            2 => OnChainEventType::EVENT_TYPE_SIGNER_MIGRATED,
+            3 => OnChainEventType::EVENT_TYPE_ID_REGISTER,
+            4 => OnChainEventType::EVENT_TYPE_STORAGE_RENT,
+            _ => OnChainEventType::EVENT_TYPE_NONE,
         },
         chain_id: onchain_event.chain_id,
         block_number: onchain_event.block_number,

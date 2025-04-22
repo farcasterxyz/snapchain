@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.7] - 2025-04-22
+
+### 🚀 Features
+
+- Use public IP as announce address (#402)
+
+### 🐛 Bug Fixes
+
+- Parse pageToken as strings for http api (#398)
+- Add `struct` for `LinksByFidRequest` in `http_server` (#399)
+- Have username proof apis return proofs for fnames (#375)
+- Allow http urls to be missing query parameters for optional fields (#408)
+
+### 🚜 Refactor
+
+- Change `UserNameProof` type to string (#400)
+- Change expected return types for `SignerEventBody` (#410)
+
 ## [0.2.6] - 2025-04-18
 
 ### 🚀 Features
