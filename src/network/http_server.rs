@@ -1258,9 +1258,12 @@ fn map_proto_messages_response_to_json_paged_response(
             .iter()
             .map(|m| map_proto_message_to_json_message(m.clone()).unwrap())
             .collect(),
-        next_page_token: messages_response
-            .next_page_token
-            .map(|t| BASE64_STANDARD.encode(t)),
+        next_page_token: Some(
+            messages_response
+                .next_page_token
+                .map(|t| BASE64_STANDARD.encode(t))
+                .unwrap_or_else(|| "".to_string()),
+        ),
     })
 }
 
