@@ -672,13 +672,13 @@ pub struct OnChainEventRequest {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum HubEventType {
-    EventTypeNone = 0,
-    EventTypeMergeMessage = 1,
-    EventTypePruneMessage = 2,
-    EventTypeRevokeMessage = 3,
-    EventTypeMergeUsernameProof = 6,
-    EventTypeMergeOnChainEvent = 9,
-    EventTypeMergeFailure = 10,
+    HUB_EVENT_TYPE_NONE = 0,
+    HUB_EVENT_TYPE_MERGE_MESSAGE = 1,
+    HUB_EVENT_TYPE_PRUNE_MESSAGE = 2,
+    HUB_EVENT_TYPE_REVOKE_MESSAGE = 3,
+    HUB_EVENT_TYPE_MERGE_USERNAME_PROOF = 6,
+    HUB_EVENT_TYPE_MERGE_ON_CHAIN_EVENT = 9,
+    HUB_EVENT_TYPE_MERGE_FAILURE = 10,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1478,7 +1478,7 @@ fn map_proto_hub_event_to_json_hub_event(
         None => {}
         Some(hub_event::Body::MergeMessageBody(body)) => {
             merge_message_body = body.message.clone().map(|msg| MergeMessageBody {
-                message: map_proto_message_to_json_message(msg.clone()).unwrap(),
+                message: map_proto_message_to_json_message(msg).unwrap(),
                 deleted_messages: body
                 .deleted_messages
                 .iter()
@@ -1524,7 +1524,6 @@ fn map_proto_hub_event_to_json_hub_event(
                 code: body.code.clone(),
                 reason: body.reason.clone(),
             });
-            
         }
     }
 
