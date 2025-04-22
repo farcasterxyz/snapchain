@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.8] - 2025-04-22
+
+### 🐛 Bug Fixes
+
+- Increase gossip connection limits  (#413)
+- Stop dialing discovered peers by default (#419)
+
 ## [0.2.7] - 2025-04-22
 
 ### 🚀 Features
