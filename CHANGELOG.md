@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.9] - 2025-04-22
+
+### 🐛 Bug Fixes
+
+- Reduce read node sync timeout (#422)
+
 ## [0.2.8] - 2025-04-22
 
 ### 🐛 Bug Fixes
