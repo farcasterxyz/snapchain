@@ -2,6 +2,7 @@ use informalsystems_malachitebft_config::ValueSyncConfig;
 use informalsystems_malachitebft_engine::network::NetworkRef;
 use informalsystems_malachitebft_sync::Metrics as SyncMetrics;
 use std::collections::BTreeMap;
+use std::time::Duration;
 use tracing::Span;
 
 use crate::consensus::consensus::{Config, SystemMessage};
