@@ -285,6 +285,7 @@ impl Host {
             }
 
             HostMsg::GetDecidedValue { height, reply_to } => {
+                info!(height = height.as_u64(), "Get decided value");
                 let proposal = state.shard_validator.get_decided_value(height).await;
                 let decided_value = match proposal {
                     Some((commits, proposal)) => match proposal {
