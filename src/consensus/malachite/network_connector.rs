@@ -145,6 +145,13 @@ where
             Msg::OutgoingResponse(request_id, response) => {
                 let request_id = inbound_requests.remove(&request_id);
                 if let Some(request_id) = request_id {
+                    if let sync::Response::ValueResponse(response) = &response {
+                        info!(
+                            request_id = request_id.to_string(),
+                            height = response.height.as_u64(),
+                            "Sending sync reply"
+                        );
+                    }
                     gossip_tx
                         .send(GossipEvent::SyncReply(request_id, response))
                         .await?;
@@ -284,7 +291,7 @@ where
                             peer_id = peer.to_string(),
                             request_id = request_id.to_string(),
                             height = response.height.to_string(),
-                            "Sending value sync response"
+                            "Received value sync response"
                         );
                     }
 
