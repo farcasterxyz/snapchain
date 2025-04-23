@@ -67,7 +67,7 @@ where
         args: NetworkConnectorArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         Ok(NetworkConnectorState {
-            output_port: OutputPort::default(),
+            output_port: OutputPort::with_capacity(100),
             gossip_tx: args.gossip_tx.clone(),
             inbound_requests: HashMap::new(),
             peer_id: args.peer_id,
