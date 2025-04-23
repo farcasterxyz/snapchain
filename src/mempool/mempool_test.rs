@@ -7,7 +7,7 @@ mod tests {
     use crate::{
         consensus::consensus::SystemMessage,
         core::util::to_farcaster_time,
-        mempool::mempool::{self, Mempool, MempoolMessagesRequest},
+        mempool::mempool::{self, Mempool, MempoolInclusionStatus, MempoolMessagesRequest},
         network::gossip::{Config, SnapchainGossip},
         proto::{
             self, FnameTransfer, Height, ShardChunk, ShardHeader, Transaction, UserNameProof,
@@ -42,7 +42,7 @@ mod tests {
         ShardEngine,
         Option<SnapchainGossip>,
         Mempool,
-        mpsc::Sender<MempoolRequest>,
+        mpsc::Sender<(MempoolRequest, Option<oneshot::Sender<MempoolInclusionStatus>>)>,
         mpsc::Sender<MempoolMessagesRequest>,
         broadcast::Sender<ShardChunk>,
         mpsc::Receiver<SystemMessage>,
@@ -57,7 +57,6 @@ mod tests {
         let (mempool_tx, mempool_rx) = mpsc::channel(100);
         let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
-        let (api_tx, _api_rx) = oneshot::channel();
         let (engine, _) = match engine_options {
             Some(engine_options) => test_helper::new_engine_with_options(engine_options),
             None => test_helper::new_engine(),
@@ -96,7 +95,6 @@ mod tests {
             shard_stores,
             gossip_tx,
             shard_decision_rx,
-            api_tx,
             statsd_client,
         );
 
@@ -220,27 +218,27 @@ mod tests {
         });
 
         let (req, res) = oneshot::channel();
-        mempool_tx.send(MempoolRequest::GetSize(req)).await.unwrap();
+        mempool_tx.send((MempoolRequest::GetSize(req), None)).await.unwrap();
         let size = res.await.unwrap();
         assert_eq!(size.len(), 0);
 
         mempool_tx
-            .send(MempoolRequest::AddMessage(
+            .send((MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(create_cast_add(123, "hello", None, None)),
                 MempoolSource::Local,
-            ))
+            ), None))
             .await
             .unwrap();
         mempool_tx
-            .send(MempoolRequest::AddMessage(
+            .send((MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(create_cast_add(435, "hello2", None, None)),
                 MempoolSource::Local,
-            ))
+            ), None))
             .await
             .unwrap();
 
         let (req, res) = oneshot::channel();
-        mempool_tx.send(MempoolRequest::GetSize(req)).await.unwrap();
+        mempool_tx.send((MempoolRequest::GetSize(req), None)).await.unwrap();
         let size = res.await.unwrap();
         assert_eq!(size.len(), 1);
         assert_eq!(size[&1], 2);
@@ -268,21 +266,21 @@ mod tests {
         );
 
         mempool_tx
-            .send(MempoolRequest::AddMessage(
+            .send((MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast.clone()),
                 MempoolSource::Local,
-            ))
+            ), None))
             .await
             .unwrap();
 
         mempool_tx
-            .send(MempoolRequest::AddMessage(
+            .send((MempoolRequest::AddMessage(
                 MempoolMessage::ValidatorMessage(ValidatorMessage {
                     on_chain_event: Some(onchain_event),
                     fname_transfer: None,
                 }),
                 MempoolSource::Local,
-            ))
+            ), None))
             .await
             .unwrap();
 
@@ -345,16 +343,16 @@ mod tests {
         let cast2 = create_cast_add(fid, "world", None, None);
 
         let _ = mempool_tx
-            .send(MempoolRequest::AddMessage(
+            .send((MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast1.clone()),
                 MempoolSource::Local,
-            ))
+            ), None))
             .await;
         let _ = mempool_tx
-            .send(MempoolRequest::AddMessage(
+            .send((MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast2),
                 MempoolSource::Local,
-            ))
+            ), None))
             .await;
 
         // Wait for cast processing
@@ -455,28 +453,28 @@ mod tests {
 
         // Add message to mempool 1
         mempool_tx1
-            .send(MempoolRequest::AddMessage(
+            .send((MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast.clone()),
                 MempoolSource::Local,
-            ))
+            ), None))
             .await
             .unwrap();
 
         // Inserting the same message twice should not be re-broadcasted
         mempool_tx1
-            .send(MempoolRequest::AddMessage(
+            .send((MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast),
                 MempoolSource::Local,
-            ))
+            ), None))
             .await
             .unwrap();
 
         // Another message received via gossip should not be re-broadcasted
         mempool_tx1
-            .send(MempoolRequest::AddMessage(
+            .send((MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast2),
                 MempoolSource::Gossip,
-            ))
+            ), None))
             .await
             .unwrap();
 
@@ -488,7 +486,7 @@ mod tests {
         while let Ok(msg) = system_rx2.try_recv() {
             if let SystemMessage::Mempool(mempool_message) = msg {
                 // Manually forward to the mempool
-                mempool_tx2.send(mempool_message).await.unwrap();
+                mempool_tx2.send((mempool_message, None)).await.unwrap();
                 received_messages += 1;
             }
         }

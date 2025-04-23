@@ -9,10 +9,10 @@ use foundry_common::ens::EnsError;
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info};
 
-use crate::mempool::mempool::{MempoolRequest, MempoolSource};
+use crate::mempool::mempool::{MempoolInclusionStatus, MempoolRequest, MempoolSource};
 use crate::{
     core::validations::{
         self,
@@ -169,7 +169,7 @@ impl L1Client for RealL1Client {
 
 pub struct Subscriber {
     provider: RootProvider<Http<Client>>,
-    mempool_tx: mpsc::Sender<MempoolRequest>,
+    mempool_tx: mpsc::Sender<(MempoolRequest, Option<oneshot::Sender<MempoolInclusionStatus>>)>,
     start_block_number: Option<u64>,
     stop_block_number: Option<u64>,
     statsd_client: StatsdClientWrapper,
@@ -181,7 +181,7 @@ pub struct Subscriber {
 impl Subscriber {
     pub fn new(
         config: &Config,
-        mempool_tx: mpsc::Sender<MempoolRequest>,
+        mempool_tx: mpsc::Sender<(MempoolRequest, Option<oneshot::Sender<MempoolInclusionStatus>>)>,
         statsd_client: StatsdClientWrapper,
         local_state_store: LocalStateStore,
         onchain_events_request_rx: mpsc::Receiver<OnchainEventsRequest>,
@@ -274,13 +274,18 @@ impl Subscriber {
         self.gauge("latest_block_number", block_number as u64);
         if let Err(err) = self
             .mempool_tx
-            .send(MempoolRequest::AddMessage(
-                MempoolMessage::ValidatorMessage(ValidatorMessage {
-                    on_chain_event: Some(event.clone()),
-                    fname_transfer: None,
-                }),
-                MempoolSource::Local,
-            ))
+            .send(
+                (
+                    MempoolRequest::AddMessage(
+                        MempoolMessage::ValidatorMessage(ValidatorMessage {
+                            on_chain_event: Some(event.clone()),
+                            fname_transfer: None,
+                        }),
+                        MempoolSource::Local,
+                    ),
+                    None
+                )
+            )
             .await
         {
             error!(

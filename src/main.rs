@@ -5,7 +5,7 @@ use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::onchain_events::{L1Client, OnchainEventsRequest, RealL1Client};
 use snapchain::consensus::consensus::SystemMessage;
 use snapchain::core::error::HubError;
-use snapchain::mempool::mempool::{Mempool, MempoolRequest, RateLimits, RateLimitsConfig, ReadNodeMempool};
+use snapchain::mempool::mempool::{Mempool, MempoolInclusionStatus, MempoolRequest, RateLimits, RateLimitsConfig, ReadNodeMempool};
 use snapchain::mempool::routing;
 use snapchain::network::admin_server::MyAdminService;
 use snapchain::network::gossip::{GossipEvent, SnapchainGossip};
@@ -42,10 +42,9 @@ const VERSION: Option<&str> = option_env!("CARGO_PKG_VERSION");
 async fn start_servers(
     app_config: &snapchain::cfg::Config,
     mut gossip: SnapchainGossip,
-    mempool_tx: mpsc::Sender<MempoolRequest>,
+    mempool_tx: mpsc::Sender<(MempoolRequest, Option<oneshot::Sender<MempoolInclusionStatus>>)>,
     shutdown_tx: mpsc::Sender<()>,
     onchain_events_request_tx: mpsc::Sender<OnchainEventsRequest>,
-    api_rx: oneshot::Receiver<(bool, HubError)>,
     statsd_client: StatsdClientWrapper,
     shard_stores: HashMap<u32, Stores>,
     shard_senders: HashMap<u32, Senders>,
@@ -76,7 +75,6 @@ async fn start_servers(
         app_config.fc_network,
         Box::new(routing::ShardRouter {}),
         mempool_tx.clone(),
-        Arc::new(Mutex::new(api_rx)),
         l1_client,
         VERSION.unwrap_or("unknown").to_string(),
         gossip.swarm.local_peer_id().to_string(),
@@ -295,7 +293,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(1000);
     let (mempool_tx, mempool_rx) = mpsc::channel(app_config.mempool.queue_size as usize);
-    let (api_tx, api_rx) = oneshot::channel();
 
     let gossip_result = SnapchainGossip::create(
         keypair.clone(),
@@ -382,7 +379,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_config.consensus.num_shards,
             node.shard_stores.clone(),
             gossip_tx.clone(),
-            Some(api_tx),
             statsd_client.clone(),
             rate_limits,
         );
@@ -394,7 +390,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             mempool_tx,
             shutdown_tx,
             onchain_events_request_tx,
-            api_rx,
             statsd_client,
             node.shard_stores.clone(),
             node.shard_senders.clone(),
@@ -491,7 +486,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.shard_stores.clone(),
             gossip_tx.clone(),
             shard_decision_rx,
-            api_tx,
             statsd_client.clone(),
         );
         tokio::spawn(async move { mempool.run().await });
@@ -535,7 +529,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             mempool_tx.clone(),
             shutdown_tx.clone(),
             onchain_events_request_tx,
-            api_rx,
             statsd_client,
             node.shard_stores.clone(),
             node.shard_senders.clone(),
@@ -593,7 +586,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             node.dispatch(shard, event);
                         },
                         SystemMessage::Mempool(msg) => {
-                            let res = mempool_tx.try_send(msg);
+                            let res = mempool_tx.try_send((msg, None));
                             if let Err(e) = res {
                                 warn!("Failed to add to local mempool: {:?}", e);
                             }

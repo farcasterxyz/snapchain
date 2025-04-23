@@ -1,6 +1,6 @@
 use crate::connectors::onchain_events::OnchainEventsRequest;
 use crate::jobs::snapshot_upload::upload_snapshot;
-use crate::mempool::mempool::MempoolRequest;
+use crate::mempool::mempool::{MempoolInclusionStatus, MempoolRequest};
 use crate::network::rpc_extensions::authenticate_request;
 use crate::proto::admin_service_server::AdminService;
 use crate::proto::{self, Empty, FarcasterNetwork, RetryOnchainEventsRequest};
@@ -12,13 +12,13 @@ use rocksdb;
 use std::collections::HashMap;
 use std::io;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 use tracing::error;
 
 pub struct MyAdminService {
     allowed_users: HashMap<String, String>,
-    pub mempool_tx: mpsc::Sender<MempoolRequest>,
+    pub mempool_tx: mpsc::Sender<(MempoolRequest, Option<oneshot::Sender<MempoolInclusionStatus>>)>,
     onchain_events_request_tx: mpsc::Sender<OnchainEventsRequest>,
     snapshot_config: storage::db::snapshot::Config,
     shard_stores: HashMap<u32, Stores>,
@@ -39,7 +39,7 @@ pub enum AdminServiceError {
 impl MyAdminService {
     pub fn new(
         rpc_auth: String,
-        mempool_tx: mpsc::Sender<MempoolRequest>,
+        mempool_tx: mpsc::Sender<(MempoolRequest, Option<oneshot::Sender<MempoolInclusionStatus>>)>,
         onchain_events_request_tx: mpsc::Sender<OnchainEventsRequest>,
         shard_stores: HashMap<u32, Stores>,
         block_store: BlockStore,

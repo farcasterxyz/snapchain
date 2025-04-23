@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, oneshot},
     time::{sleep, Duration},
 };
 use tracing::{debug, error, info, warn};
 
-use crate::mempool::mempool::{MempoolRequest, MempoolSource};
+use crate::mempool::mempool::{MempoolInclusionStatus, MempoolRequest, MempoolSource};
 use crate::{
     proto::{FnameTransfer, UserNameProof, UserNameType, ValidatorMessage},
     storage::store::{engine::MempoolMessage, node_local_state::LocalStateStore},
@@ -86,7 +86,7 @@ enum FetchError {
 pub struct Fetcher {
     position: u64,
     cfg: Config,
-    mempool_tx: mpsc::Sender<MempoolRequest>,
+    mempool_tx: mpsc::Sender<(MempoolRequest, Option<oneshot::Sender<MempoolInclusionStatus>>)>,
     statsd_client: StatsdClientWrapper,
     local_state_store: LocalStateStore,
 }
@@ -94,7 +94,7 @@ pub struct Fetcher {
 impl Fetcher {
     pub fn new(
         cfg: Config,
-        mempool_tx: mpsc::Sender<MempoolRequest>,
+        mempool_tx: mpsc::Sender<(MempoolRequest, Option<oneshot::Sender<MempoolInclusionStatus>>)>,
         statsd_client: StatsdClientWrapper,
         local_state_store: LocalStateStore,
     ) -> Self {
@@ -193,17 +193,22 @@ impl Fetcher {
                 self.gauge("latest_transfer_id", t.id);
                 if let Err(err) = self
                     .mempool_tx
-                    .send(MempoolRequest::AddMessage(
-                        MempoolMessage::ValidatorMessage(ValidatorMessage {
-                            on_chain_event: None,
-                            fname_transfer: Some(FnameTransfer {
-                                id: t.id,
-                                from_fid: t.from,
-                                proof: Some(username_proof),
-                            }),
-                        }),
-                        MempoolSource::Local,
-                    ))
+                    .send(
+                        (
+                            MempoolRequest::AddMessage(
+                                MempoolMessage::ValidatorMessage(ValidatorMessage {
+                                    on_chain_event: None,
+                                    fname_transfer: Some(FnameTransfer {
+                                        id: t.id,
+                                        from_fid: t.from,
+                                        proof: Some(username_proof),
+                                    }),
+                                }),
+                                MempoolSource::Local,
+                            ),
+                            None
+                        )
+                    )
                     .await
                 {
                     error!(

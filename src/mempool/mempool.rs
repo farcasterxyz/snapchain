@@ -229,24 +229,27 @@ pub struct MempoolMessagesRequest {
     pub max_messages_per_block: u32,
 }
 
+pub struct MempoolInclusionStatus {
+    pub inserted: bool,
+    pub error: HubError
+}
+
 pub struct ReadNodeMempool {
     shard_stores: HashMap<u32, Stores>,
     message_router: Box<dyn MessageRouter>,
     num_shards: u32,
-    mempool_rx: mpsc::Receiver<MempoolRequest>,
+    mempool_rx: mpsc::Receiver<(MempoolRequest, Option<oneshot::Sender<MempoolInclusionStatus>>)>,
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
-    api_tx: Option<oneshot::Sender<(bool, HubError)>>,
     statsd_client: StatsdClientWrapper,
     rate_limits: Option<RateLimits>,
 }
 
 impl ReadNodeMempool {
     pub fn new(
-        mempool_rx: mpsc::Receiver<MempoolRequest>,
+        mempool_rx: mpsc::Receiver<(MempoolRequest, Option<oneshot::Sender<MempoolInclusionStatus>>)>,
         num_shards: u32,
         shard_stores: HashMap<u32, Stores>,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
-        api_tx: Option<oneshot::Sender<(bool, HubError)>>,
         statsd_client: StatsdClientWrapper,
         rate_limits: Option<RateLimits>,
     ) -> Self {
@@ -256,7 +259,6 @@ impl ReadNodeMempool {
             mempool_rx,
             message_router: Box::new(ShardRouter {}),
             gossip_tx,
-            api_tx,
             statsd_client,
             rate_limits,
         }
@@ -384,7 +386,7 @@ impl ReadNodeMempool {
     }
 
     pub async fn run(&mut self) {
-        while let Some(message_request) = self.mempool_rx.recv().await {
+        while let Some((message_request, mut server_tx)) = self.mempool_rx.recv().await {
             match message_request {
                 MempoolRequest::AddMessage(message, source) => {
                     self.statsd_client
@@ -394,16 +396,22 @@ impl ReadNodeMempool {
                         self.gossip_message(message, source).await;
                         self.statsd_client
                             .count("read_mempool.messages_published", 1);
-                        if let Some(tx) = self.api_tx.take() {
-                            if tx.send((true, hub_err)).is_err() {
+                        if let Some(tx) = server_tx.take() {
+                            if tx.send(MempoolInclusionStatus {
+                                inserted: true,
+                                error: hub_err,
+                            }).is_err() {
                                 error!("Unable to forward read_mempool message publish success status to server");
                             }
                         }
-                    } else {
-                        if let Some(tx) = self.api_tx.take() {
-                            if tx.send((false, hub_err)).is_err() {
-                                error!("Unable to forward read_mempool message publish failure status to server");
+                    } else if let Some(tx) = server_tx.take() {
+                        if tx.send(
+                            MempoolInclusionStatus {
+                                inserted: false,
+                                error: hub_err,
                             }
+                        ).is_err() {
+                            error!("Unable to forward read_mempool message publish failure status to server");
                         }
                     }
                 }
@@ -431,13 +439,12 @@ pub struct Mempool {
 impl Mempool {
     pub fn new(
         config: Config,
-        mempool_rx: mpsc::Receiver<MempoolRequest>,
+        mempool_rx: mpsc::Receiver<(MempoolRequest, Option<oneshot::Sender<MempoolInclusionStatus>>)>,
         messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
         num_shards: u32,
         shard_stores: HashMap<u32, Stores>,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         shard_decision_rx: broadcast::Receiver<ShardChunk>,
-        api_tx: oneshot::Sender<(bool, HubError)>,
         statsd_client: StatsdClientWrapper,
     ) -> Self {
         Mempool {
@@ -449,7 +456,6 @@ impl Mempool {
                 num_shards,
                 shard_stores.clone(),
                 gossip_tx,
-                Some(api_tx),
                 statsd_client.clone(),
                 if config.enable_rate_limits {
                     Some(RateLimits::new(
@@ -532,7 +538,7 @@ impl Mempool {
         )
     }
 
-    async fn insert(&mut self, message: MempoolMessage, source: MempoolSource) {
+    async fn insert(&mut self, message: MempoolMessage, source: MempoolSource, mut server_tx: Option<oneshot::Sender<MempoolInclusionStatus>>) {
         let fid = message.fid();
         let shard_id = self
             .read_node_mempool
@@ -574,15 +580,25 @@ impl Mempool {
                 .count_with_shard(shard_id, "mempool.insert.success", 1);
 
             self.read_node_mempool.gossip_message(message, source).await;
-            if let Some(tx) = self.read_node_mempool.api_tx.take() {
-                if tx.send((true, hub_err)).is_err() {
+            if let Some(tx) = server_tx.take() {
+                if tx.send(
+                    MempoolInclusionStatus {
+                        inserted: true,
+                        error: hub_err,
+                    }
+                ).is_err() {
                     error!("Unable to forward mempool insertion success status to server");
                 }
             }
         } else {
             self.statsd_client.count("mempool.insert.failure", 1);
-            if let Some(tx) = self.read_node_mempool.api_tx.take() {
-                if tx.send((false, hub_err)).is_err() {
+            if let Some(tx) = server_tx.take() {
+                if tx.send(
+                    MempoolInclusionStatus {
+                        inserted: false,
+                        error: hub_err,
+                    }
+                ).is_err() {
                     error!("Unable to forward mempool insertion failure status to server");
                 }
             }
@@ -641,10 +657,10 @@ impl Mempool {
                     for _ in 0..256 {
                         if self.config.allow_unlimited_mempool_size || (self.messages.len() as u64) < self.config.capacity_per_shard {
                             match self.read_node_mempool.mempool_rx.try_recv() {
-                                Ok(MempoolRequest::AddMessage(message, source)) => {
-                                    self.insert(message, source).await;
+                                Ok((MempoolRequest::AddMessage(message, source), server_tx)) => {
+                                    self.insert(message, source, server_tx).await;
                                 }
-                                Ok(MempoolRequest::GetSize(reply_to)) => {
+                                Ok((MempoolRequest::GetSize(reply_to), _)) => {
                                     let mut sizes = HashMap::new();
                                     for (shard_id, messages) in &self.messages {
                                         sizes.insert(*shard_id, messages.len() as u64);
