@@ -4,7 +4,7 @@ use crate::core::error::HubError;
 use crate::core::util::get_farcaster_time;
 use crate::core::validations;
 use crate::core::validations::verification::VerificationAddressClaim;
-use crate::mempool::mempool::{MempoolRequest, MempoolSource};
+use crate::mempool::mempool::{MempoolInclusionStatus, MempoolRequest, MempoolSource};
 use crate::mempool::routing;
 use crate::proto;
 use crate::proto::cast_add_body;
@@ -63,7 +63,6 @@ use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use hex::ToHex;
-use tokio::select;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
@@ -73,7 +72,6 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
-use std::sync::{Arc, Mutex};
 
 const MEMPOOL_SIZE_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
 
@@ -86,8 +84,7 @@ pub struct MyHubService {
     message_router: Box<dyn routing::MessageRouter>,
     statsd_client: StatsdClientWrapper,
     l1_client: Option<Box<dyn L1Client>>,
-    mempool_tx: mpsc::Sender<MempoolRequest>,
-    api_rx: Arc<Mutex<oneshot::Receiver<(bool, HubError)>>>,
+    mempool_tx: mpsc::Sender<(MempoolRequest, Option<oneshot::Sender<MempoolInclusionStatus>>)>,
     network: proto::FarcasterNetwork,
     version: String,
     peer_id: String,
@@ -103,8 +100,7 @@ impl MyHubService {
         num_shards: u32,
         network: proto::FarcasterNetwork,
         message_router: Box<dyn routing::MessageRouter>,
-        mempool_tx: mpsc::Sender<MempoolRequest>,
-        api_rx: Arc<Mutex<oneshot::Receiver<(bool, HubError)>>>,
+        mempool_tx: mpsc::Sender<(MempoolRequest, Option<oneshot::Sender<MempoolInclusionStatus>>)>,
         l1_client: Option<Box<dyn L1Client>>,
         version: String,
         peer_id: String,
@@ -134,7 +130,6 @@ impl MyHubService {
             num_shards,
             l1_client,
             mempool_tx,
-            api_rx,
             version,
             peer_id,
         };
@@ -145,6 +140,7 @@ impl MyHubService {
         &self,
         message: proto::Message,
         bypass_validation: bool,
+        max_wait: Duration,
     ) -> Result<proto::Message, HubError> {
         let fid = message.fid();
         if fid == 0 {
@@ -230,10 +226,11 @@ impl MyHubService {
             }
         }
 
-        match self.mempool_tx.try_send(MempoolRequest::AddMessage(
+        let (server_tx, server_rx) = oneshot::channel();
+        match self.mempool_tx.try_send((MempoolRequest::AddMessage(
             MempoolMessage::UserMessage(message.clone()),
             MempoolSource::RPC,
-        )) {
+        ), Some(server_tx))) {
             Ok(_) => {
                 self.statsd_client.count("rpc.submit_message.success", 1);
                 debug!("successfully submitted message");
@@ -252,21 +249,24 @@ impl MyHubService {
             }
         }
 
-        select! {
-            Ok((inserted, hub_err)) = async {
-                self.api_rx.lock().unwrap().try_recv()
-            } => {
-                if !inserted {
-                    error!("Error inserting message into mempool: {:?}", hub_err.message);
-                    return Err(hub_err);
+        match timeout(max_wait, server_rx).await {
+            Ok(Ok(status)) => {
+                if !status.inserted {
+                    error!("Error inserting message into mempool: {:?}", status.error.message);
+                    return Err(status.error);
                 }
                 self.statsd_client.count("rpc.mempool_insert_message.success", 1);
                 debug!("message inserted into mempool");
             }
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                self.statsd_client.count("rpc.mempool_insert_message.channel_empty", 1);
-                debug!("mempool channel is yet to send message insertion status");
-                return Err(HubError::unavailable("mempool channel empty"));
+            Ok(Err(e)) => {
+                error!(
+                    "Error receiving message from mempool channel: {:?}",
+                    e.to_string()
+                );
+                return Err(HubError::unavailable("mempool channel receive error"));
+            }
+            Err(_) => {
+                error!("Did not receive messages from mempool in time");
             }
         }
 
@@ -464,7 +464,9 @@ impl HubService for MyHubService {
         message_bytes_decode(&mut message);
         let fid = message.fid();
         let msg_type = message.msg_type().into_i32();
-        let result = self.submit_message_internal(message, false).await;
+        // Maximum time to wait for message validation and propagation before returning to client
+        let max_wait = Duration::from_millis(100);
+        let result = self.submit_message_internal(message, false, max_wait).await;
 
         self.statsd_client.time(
             "rpc.submit_message.duration",
@@ -603,7 +605,7 @@ impl HubService for MyHubService {
         let (size_req, size_res) = oneshot::channel();
         let _ = self
             .mempool_tx
-            .send(MempoolRequest::GetSize(size_req))
+            .send((MempoolRequest::GetSize(size_req), None))
             .await
             .map_err(|err| {
                 error!(
