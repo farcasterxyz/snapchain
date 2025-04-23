@@ -424,7 +424,14 @@ impl SnapchainGossip {
                                     }
 
                                 },
-                                libp2p::core::ConnectedPoint::Listener { .. } => {},
+                                libp2p::core::ConnectedPoint::Listener { .. } => {
+                                    // There's no reason for a read node to be dialed by another peer. If this happens, disconnect the dialer because it is a bad peer
+                                    if self.read_node {
+                                        info!(peer_id = peer_id.to_string(), "Disconnecting peer that dialed read node");
+                                        // Error is not an issue here
+                                        let _ = self.swarm.disconnect_peer_id(peer_id);
+                                    }
+                                },
                             };
                         },
                         SwarmEvent::ConnectionClosed {peer_id, cause, endpoint, ..} => {
