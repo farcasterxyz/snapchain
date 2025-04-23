@@ -25,6 +25,7 @@ use libp2p::{
 };
 use libp2p_connection_limits::ConnectionLimits;
 use prost::Message;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -51,6 +52,7 @@ pub struct Config {
     pub bootstrap_peers: String,
     pub contact_info_interval: Duration,
     pub bootstrap_reconnect_interval: Duration,
+    pub enable_autodiscovery: bool,
 }
 
 impl Default for Config {
@@ -61,10 +63,11 @@ impl Default for Config {
         );
         Config {
             address: address.clone(),
-            announce_address: address,
+            announce_address: "".to_string(),
             bootstrap_peers: "".to_string(),
             contact_info_interval: Duration::from_secs(300),
             bootstrap_reconnect_interval: Duration::from_secs(30),
+            enable_autodiscovery: false,
         }
     }
 }
@@ -97,6 +100,13 @@ impl Config {
     pub fn with_bootstrap_reconnect_interval(self, bootstrap_reconnect_interval: Duration) -> Self {
         Config {
             bootstrap_reconnect_interval,
+            ..self
+        }
+    }
+
+    pub fn with_announce_address(self, announce_address: String) -> Self {
+        Config {
+            announce_address,
             ..self
         }
     }
@@ -148,6 +158,7 @@ pub struct SnapchainGossip {
     system_tx: Sender<SystemMessage>,
     sync_channels: HashMap<InboundRequestId, sync::ResponseChannel>,
     read_node: bool,
+    enable_autodiscovery: bool,
     bootstrap_addrs: HashSet<String>,
     connected_bootstrap_addrs: HashSet<String>,
     announce_address: String,
@@ -158,7 +169,7 @@ pub struct SnapchainGossip {
 }
 
 impl SnapchainGossip {
-    pub fn create(
+    pub async fn create(
         keypair: Keypair,
         config: &Config,
         system_tx: Sender<SystemMessage>,
@@ -217,12 +228,13 @@ impl SnapchainGossip {
 
                 let rpc = sync::Behaviour::new(sync::Config::default());
 
+                // TODO(aditi): Connection limits are set high so that we don't keep kicking off read nodes for now
                 let connection_limits = libp2p_connection_limits::Behaviour::new(
                     ConnectionLimits::default()
-                        .with_max_established_incoming(Some(15))
-                        .with_max_established_outgoing(Some(15))
-                        .with_max_pending_incoming(Some(5))
-                        .with_max_pending_outgoing(Some(5)),
+                        // .with_max_pending_incoming(Some(5))
+                        // .with_max_pending_outgoing(Some(5)),
+                        .with_max_established_incoming(Some(100))
+                        .with_max_established_outgoing(Some(100)),
                 );
 
                 Ok(SnapchainBehavior {
@@ -273,6 +285,10 @@ impl SnapchainGossip {
         // Listen on all assigned port for this id
         swarm.listen_on(config.address.parse()?)?;
 
+        let announce_address = Self::get_announce_address(config).await;
+
+        info!("Using {} as announce address", announce_address);
+
         // ~5 seconds of buffer (assuming 1K msgs/pec)
         let (tx, rx) = mpsc::channel(5000);
         Ok(SnapchainGossip {
@@ -283,13 +299,44 @@ impl SnapchainGossip {
             sync_channels: HashMap::new(),
             read_node,
             bootstrap_addrs: config.bootstrap_addrs().into_iter().collect(),
-            announce_address: config.announce_address.clone(),
+            announce_address,
             fc_network,
             contact_info_interval: config.contact_info_interval,
             bootstrap_reconnect_interval: config.bootstrap_reconnect_interval,
             statsd_client,
             connected_bootstrap_addrs: HashSet::new(),
+            enable_autodiscovery: config.enable_autodiscovery,
         })
+    }
+
+    async fn get_announce_address(config: &Config) -> String {
+        if config.announce_address.len() > 0 {
+            return config.announce_address.clone();
+        }
+
+        // If no config-defined announce IP exists, detect the public IP.
+        // Falling back to the address also defined in the config
+        let public_ip = Self::get_public_ip().await;
+
+        match public_ip {
+            Ok(address) => format!("/ip4/{}/udp/{}/quic-v1", address, DEFAULT_GOSSIP_PORT),
+            Err(error) => {
+                warn!("Detecting public IP failed with error: {}", error);
+
+                // Fallback to address.
+                config.address.clone()
+            }
+        }
+    }
+
+    async fn get_public_ip() -> Result<String, reqwest::Error> {
+        let client = Client::builder().timeout(Duration::from_secs(3)).build()?;
+        client
+            .get("https://api.ipify.org")
+            .send()
+            .await?
+            .text()
+            .await
     }
 
     fn dial(
@@ -311,8 +358,9 @@ impl SnapchainGossip {
 
     pub async fn check_and_reconnect_to_bootstrap_peers(&mut self) {
         let connected_peers_count = self.swarm.connected_peers().count();
-        // Validators should stay connected to all bootstrap peers. Read nodes should only try to connect if they're not connected to anybody else.
-        if !self.read_node || (self.read_node && connected_peers_count == 0) {
+        // Validators should stay connected to all bootstrap peers. Read nodes should only try to connect if they're connected to too few peers
+        if !self.read_node || (self.read_node && connected_peers_count < self.bootstrap_addrs.len())
+        {
             for addr in &self.bootstrap_addrs {
                 if !self.connected_bootstrap_addrs.contains(addr) {
                     warn!("Attempting to reconnect to bootstrap peer: {}", addr);
@@ -543,7 +591,9 @@ impl SnapchainGossip {
             return;
         }
 
-        let _ = Self::dial(&mut self.swarm, &contact_info_body.gossip_address);
+        if self.enable_autodiscovery {
+            let _ = Self::dial(&mut self.swarm, &contact_info_body.gossip_address);
+        }
     }
 
     pub fn map_gossip_bytes_to_system_message(

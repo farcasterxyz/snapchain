@@ -19,7 +19,7 @@ use crate::proto::{
 };
 use crate::proto::{
     casts_by_parent_request, link_request, links_by_target_request, on_chain_event,
-    reaction_request, reactions_by_target_request, LinksByFidRequest, Protocol,
+    reaction_request, reactions_by_target_request, Protocol,
 };
 use crate::storage::store::account::message_decode;
 
@@ -41,6 +41,53 @@ mod serdebase64 {
         BASE64_STANDARD
             .decode(base64.as_bytes())
             .map_err(|e| serde::de::Error::custom(e))
+    }
+}
+
+mod serdebase64opt {
+    use base64::prelude::*;
+
+    use serde::{Deserialize, Serialize};
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+        let default = vec![];
+        let v = v.as_ref().unwrap_or(&default);
+        let base64 = BASE64_STANDARD.encode(v);
+        String::serialize(&base64, s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
+        let base64 = String::deserialize(d)?.replace(" ", "+");
+        if base64.len() == 0 {
+            Ok(None)
+        } else {
+            let decoded = BASE64_STANDARD
+                .decode(base64.as_bytes())
+                .map_err(|e| serde::de::Error::custom(e))?;
+            Ok(Some(decoded))
+        }
+    }
+}
+
+mod serdehex {
+    use hex;
+    use serde::Deserialize;
+    use serde::{de::Error, Deserializer, Serializer};
+    /// Serialize a byte vector to a "0x"‑prefixed hex string.
+    pub fn serialize<S: Serializer>(v: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+        // hex::encode turns &[u8] → lowercase hex (no prefix)
+        let mut prefixed = String::with_capacity(v.len() * 2 + 2);
+        prefixed.push_str("0x");
+        prefixed.push_str(&hex::encode(v));
+        s.serialize_str(&prefixed)
+    }
+    /// Deserialize from either a "0x"‑prefixed or raw hex string into Vec<u8>.
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        // strip optional "0x"
+        let hex_str = s.strip_prefix("0x").unwrap_or(&s);
+        hex::decode(hex_str).map_err(D::Error::custom)
     }
 }
 
@@ -272,42 +319,60 @@ pub struct ShardInfo {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FidRequest {
     pub fid: u64,
-    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
-    #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        rename = "pageToken",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub page_token: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
-    #[serde(rename = "startTimestamp", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "startTimestamp",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub start_timestamp: Option<u64>,
-    #[serde(rename = "stopTimestamp", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "stopTimestamp",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub stop_timestamp: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CastsByParentRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fid: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
-    #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        rename = "pageToken",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub page_token: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReactionRequest {
     fid: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     target_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     target_fid: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     target_hash: Option<String>,
     reaction_type: ReactionType,
 }
@@ -316,42 +381,57 @@ pub struct ReactionRequest {
 pub struct ReactionsByFidRequest {
     fid: u64,
     reaction_type: ReactionType,
-    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
-    #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        rename = "pageToken",
+        skip_serializing_if = "Option::is_none"
+    )]
     page_token: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     reverse: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReactionsByCastRequest {
     pub target_fid: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reaction_type: Option<ReactionType>,
-    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
-    #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        rename = "pageToken",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub page_token: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReactionsByTargetRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_cast_id: Option<CastId>,
-    #[serde(rename = "url", skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "url", skip_serializing_if = "Option::is_none")]
     pub target_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reaction_type: Option<ReactionType>,
-    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
-    #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        rename = "pageToken",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub page_token: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
 }
 
@@ -359,21 +439,44 @@ pub struct ReactionsByTargetRequest {
 pub struct LinkRequest {
     fid: u64,
     link_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     target_fid: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct LinksByTargetRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    target_fid: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+pub struct LinksByFidRequest {
+    fid: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     link_type: Option<String>,
-    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
-    #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        rename = "pageToken",
+        skip_serializing_if = "Option::is_none"
+    )]
     page_token: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reverse: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LinksByTargetRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_fid: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    link_type: Option<String>,
+    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    page_size: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        rename = "pageToken",
+        skip_serializing_if = "Option::is_none"
+    )]
+    page_token: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     reverse: Option<bool>,
 }
 
@@ -436,29 +539,29 @@ pub struct UserNameProof {
     #[serde(with = "serdebase64")]
     pub signature: Vec<u8>,
     pub fid: u64,
-    pub r#type: i32,
+    pub r#type: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UsernameProofsResponse {
     pub proofs: Vec<UserNameProof>,
 }
-
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum OnChainEventType {
-    EventTypeNone = 0,
-    EventTypeSigner = 1,
-    EventTypeSignerMigrated = 2,
-    EventTypeIdRegister = 3,
-    EventTypeStorageRent = 4,
+    EVENT_TYPE_NONE = 0,
+    EVENT_TYPE_SIGNER = 1,
+    EVENT_TYPE_SIGNER_MIGRATED = 2,
+    EVENT_TYPE_ID_REGISTER = 3,
+    EVENT_TYPE_STORAGE_RENT = 4,
 }
-
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum SignerEventType {
-    None = 0,
-    Add = 1,
-    Remove = 2,
-    AdminReset = 3,
+    SIGNER_EVENT_TYPE_NONE = 0,
+    SIGNER_EVENT_TYPE_ADD = 1,
+    SIGNER_EVENT_TYPE_REMOVE = 2,
+    SIGNER_EVENT_TYPE_ADMIN_RESET = 3,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -471,11 +574,13 @@ pub enum IdRegisterEventType {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SignerEventBody {
+    #[serde(with = "serdehex")]
     pub key: Vec<u8>,
     #[serde(rename = "keyType")]
     pub key_type: u32,
     #[serde(rename = "eventType")]
     pub event_type: SignerEventType,
+    #[serde(with = "serdebase64")]
     pub metadata: Vec<u8>,
     #[serde(rename = "metadataType")]
     pub metadata_type: u32,
@@ -511,11 +616,11 @@ pub struct OnChainEvent {
     pub chain_id: u32,
     #[serde(rename = "blockNumber")]
     pub block_number: u32,
-    #[serde(rename = "blockHash")]
+    #[serde(with = "serdehex", rename = "blockHash")]
     pub block_hash: Vec<u8>,
     #[serde(rename = "blockTimestamp")]
     pub block_timestamp: u64,
-    #[serde(rename = "transactionHash")]
+    #[serde(with = "serdehex", rename = "transactionHash")]
     pub transaction_hash: Vec<u8>,
     #[serde(rename = "logIndex")]
     pub log_index: u32,
@@ -553,11 +658,16 @@ pub struct OnChainEventResponse {
 pub struct OnChainEventRequest {
     fid: u64,
     event_type: OnChainEventType,
-    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
-    #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        rename = "pageToken",
+        skip_serializing_if = "Option::is_none"
+    )]
     page_token: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     reverse: Option<bool>,
 }
 
@@ -1684,6 +1794,7 @@ impl HubHttpService for HubHttpServiceImpl {
                 error_detail: Some(e.to_string()),
             })?;
         let proof = response.into_inner();
+        let proof_type = proof.r#type().as_str_name().to_owned();
         Ok(UserNameProof {
             timestamp: proof.timestamp,
             name: std::str::from_utf8(&proof.name.as_slice())
@@ -1692,7 +1803,7 @@ impl HubHttpService for HubHttpServiceImpl {
             owner: format!("0x{}", hex::encode(&proof.owner)),
             signature: proof.signature,
             fid: proof.fid,
-            r#type: proof.r#type,
+            r#type: proof_type,
         })
     }
 
@@ -1726,7 +1837,7 @@ impl HubHttpService for HubHttpServiceImpl {
                     owner: format!("0x{}", hex::encode(&p.owner)),
                     signature: p.signature.clone(),
                     fid: p.fid,
-                    r#type: p.r#type,
+                    r#type: p.r#type().as_str_name().to_owned(),
                 })
                 .collect(),
         })
@@ -1846,15 +1957,16 @@ impl HubHttpService for HubHttpServiceImpl {
                     match &e.body {
                         None => {}
                         Some(on_chain_event::Body::SignerEventBody(body)) => {
+                            let event_type = match body.event_type {
+                                1 => SignerEventType::SIGNER_EVENT_TYPE_ADD,
+                                2 => SignerEventType::SIGNER_EVENT_TYPE_REMOVE,
+                                3 => SignerEventType::SIGNER_EVENT_TYPE_ADMIN_RESET,
+                                _ => SignerEventType::SIGNER_EVENT_TYPE_NONE,
+                            };
                             signer_event_body = Some(SignerEventBody {
                                 key: body.key.clone(),
                                 key_type: body.key_type,
-                                event_type: match body.event_type {
-                                    1 => SignerEventType::Add,
-                                    2 => SignerEventType::Remove,
-                                    3 => SignerEventType::AdminReset,
-                                    _ => SignerEventType::None,
-                                },
+                                event_type: event_type,
                                 metadata: body.metadata.clone(),
                                 metadata_type: body.metadata_type,
                             });
@@ -1887,11 +1999,11 @@ impl HubHttpService for HubHttpServiceImpl {
                     }
                     return OnChainEvent {
                         r#type: match e.r#type {
-                            1 => OnChainEventType::EventTypeSigner,
-                            2 => OnChainEventType::EventTypeSignerMigrated,
-                            3 => OnChainEventType::EventTypeIdRegister,
-                            4 => OnChainEventType::EventTypeStorageRent,
-                            _ => OnChainEventType::EventTypeNone,
+                            1 => OnChainEventType::EVENT_TYPE_SIGNER,
+                            2 => OnChainEventType::EVENT_TYPE_SIGNER_MIGRATED,
+                            3 => OnChainEventType::EVENT_TYPE_ID_REGISTER,
+                            4 => OnChainEventType::EVENT_TYPE_STORAGE_RENT,
+                            _ => OnChainEventType::EVENT_TYPE_NONE,
                         },
                         chain_id: e.chain_id,
                         block_number: e.block_number,
@@ -1951,11 +2063,12 @@ impl HubHttpService for HubHttpServiceImpl {
                             signer_event_body = Some(SignerEventBody {
                                 key: body.key.clone(),
                                 key_type: body.key_type,
+                                // This is being done for backwards compatability with hubs
                                 event_type: match body.event_type {
-                                    1 => SignerEventType::Add,
-                                    2 => SignerEventType::Remove,
-                                    3 => SignerEventType::AdminReset,
-                                    _ => SignerEventType::None,
+                                    1 => SignerEventType::SIGNER_EVENT_TYPE_ADD,
+                                    2 => SignerEventType::SIGNER_EVENT_TYPE_REMOVE,
+                                    3 => SignerEventType::SIGNER_EVENT_TYPE_ADMIN_RESET,
+                                    _ => SignerEventType::SIGNER_EVENT_TYPE_NONE,
                                 },
                                 metadata: body.metadata.clone(),
                                 metadata_type: body.metadata_type,
@@ -1988,13 +2101,13 @@ impl HubHttpService for HubHttpServiceImpl {
                         }
                     }
                     return OnChainEvent {
-                        r#type: match e.r#type {
-                            1 => OnChainEventType::EventTypeSigner,
-                            2 => OnChainEventType::EventTypeSignerMigrated,
-                            3 => OnChainEventType::EventTypeIdRegister,
-                            4 => OnChainEventType::EventTypeStorageRent,
-                            _ => OnChainEventType::EventTypeNone,
-                        },
+                        r#type: (match e.r#type {
+                            1 => OnChainEventType::EVENT_TYPE_SIGNER,
+                            2 => OnChainEventType::EVENT_TYPE_SIGNER_MIGRATED,
+                            3 => OnChainEventType::EVENT_TYPE_ID_REGISTER,
+                            4 => OnChainEventType::EVENT_TYPE_STORAGE_RENT,
+                            _ => OnChainEventType::EVENT_TYPE_NONE,
+                        }),
                         chain_id: e.chain_id,
                         block_number: e.block_number,
                         block_hash: e.block_hash.clone(),

@@ -67,7 +67,7 @@ where
         args: NetworkConnectorArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         Ok(NetworkConnectorState {
-            output_port: OutputPort::default(),
+            output_port: OutputPort::with_capacity(100),
             gossip_tx: args.gossip_tx.clone(),
             inbound_requests: HashMap::new(),
             peer_id: args.peer_id,
@@ -247,6 +247,15 @@ where
                             }
                         };
 
+                    if let sync::Request::ValueRequest(request) = &request {
+                        info!(
+                            peer_id = peer.to_string(),
+                            request_id = request_id.to_string(),
+                            height = request.height.to_string(),
+                            "Received value sync request"
+                        );
+                    }
+
                     inbound_requests.insert(sync::InboundRequestId::new(request_id), request_id);
 
                     output_port.send(NetworkEvent::Request(
@@ -269,6 +278,15 @@ where
                                 return Ok(());
                             }
                         };
+
+                    if let sync::Response::ValueResponse(response) = &response {
+                        info!(
+                            peer_id = peer.to_string(),
+                            request_id = request_id.to_string(),
+                            height = response.height.to_string(),
+                            "Sending value sync response"
+                        );
+                    }
 
                     output_port.send(NetworkEvent::Response(
                         sync::OutboundRequestId::new(request_id),

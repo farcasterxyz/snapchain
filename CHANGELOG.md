@@ -2,6 +2,49 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.10] - 2025-04-23
+
+### 🐛 Bug Fixes
+
+- Increase output port capacity so we don't lose messages (#426)
+- Increase sync timeout and let read nodes connect to more validators (#429)
+
+### ⚙️ Miscellaneous Tasks
+
+- Add logging for sync (#428)
+- Add more logging for sync (#430)
+
+## [0.2.9] - 2025-04-22
+
+### 🐛 Bug Fixes
+
+- Reduce read node sync timeout (#422)
+
+## [0.2.8] - 2025-04-22
+
+### 🐛 Bug Fixes
+
+- Increase gossip connection limits  (#413)
+- Stop dialing discovered peers by default (#419)
+
+## [0.2.7] - 2025-04-22
+
+### 🚀 Features
+
+- Use public IP as announce address (#402)
+
+### 🐛 Bug Fixes
+
+- Parse pageToken as strings for http api (#398)
+- Add `struct` for `LinksByFidRequest` in `http_server` (#399)
+- Have username proof apis return proofs for fnames (#375)
+- Allow http urls to be missing query parameters for optional fields (#408)
+
+### 🚜 Refactor
+
+- Change `UserNameProof` type to string (#400)
+- Change expected return types for `SignerEventBody` (#410)
+
 ## [0.2.6] - 2025-04-18
 
 ### 🚀 Features

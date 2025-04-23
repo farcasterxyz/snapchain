@@ -4,7 +4,6 @@ use hyper_util::rt::TokioIo;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::onchain_events::{L1Client, OnchainEventsRequest, RealL1Client};
 use snapchain::consensus::consensus::SystemMessage;
-use snapchain::core::error::HubError;
 use snapchain::mempool::mempool::{Mempool, MempoolInclusionStatus, MempoolRequest, RateLimits, RateLimitsConfig, ReadNodeMempool};
 use snapchain::mempool::routing;
 use snapchain::network::admin_server::MyAdminService;
@@ -301,7 +300,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         app_config.read_node,
         app_config.fc_network,
         statsd_client.clone(),
-    );
+    )
+    .await;
 
     if let Err(e) = gossip_result {
         error!(error = ?e, "Failed to create SnapchainGossip");
