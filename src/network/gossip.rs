@@ -213,7 +213,7 @@ impl SnapchainGossip {
 
                 // Set a custom gossipsub configuration
                 let gossipsub_config = gossipsub::ConfigBuilder::default()
-                    .heartbeat_interval(Duration::from_secs(10)) // This is set to aid debugging by not cluttering the log space
+                    .heartbeat_interval(Duration::from_millis(500)) // This might need to be lowered to 1/3 of the time
                     .validation_mode(gossipsub::ValidationMode::Strict) // This sets the kind of message validation. The default is Strict (enforce message signing)
                     .message_id_fn(message_id_fn) // content-address mempool messages
                     .max_transmit_size(MAX_GOSSIP_MESSAGE_SIZE) // maximum message size that can be transmitted
