@@ -27,6 +27,7 @@ use crate::proto::MessageType;
 use crate::proto::OnChainEvent;
 use crate::proto::OnChainEventRequest;
 use crate::proto::OnChainEventResponse;
+use crate::proto::ReactionType;
 use crate::proto::ReactionsByTargetRequest;
 use crate::proto::SignerRequest;
 use crate::proto::TrieNodeMetadataRequest;
@@ -1269,9 +1270,7 @@ impl HubService for MyHubService {
     ) -> Result<Response<MessagesResponse>, Status> {
         let req = request.into_inner();
 
-        let reaction_type = req
-            .reaction_type
-            .ok_or_else(|| Status::invalid_argument("reaction_type is required".to_string()))?;
+        let reaction_type = req.reaction_type.unwrap_or(ReactionType::None.into()); // Use enum vs 0?
 
         let target = match req.target {
             Some(reactions_by_target_request::Target::TargetCastId(cast_id)) => {
