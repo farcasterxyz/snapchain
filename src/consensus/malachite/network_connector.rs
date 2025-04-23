@@ -251,7 +251,7 @@ where
                         info!(
                             peer_id = peer.to_string(),
                             request_id = request_id.to_string(),
-                            height = request.height.as_u64(),
+                            height = request.height.to_string(),
                             "Received value sync request"
                         );
                     }
@@ -283,7 +283,7 @@ where
                         info!(
                             peer_id = peer.to_string(),
                             request_id = request_id.to_string(),
-                            height = response.height.as_u64(),
+                            height = response.height.to_string(),
                             "Sending value sync response"
                         );
                     }
