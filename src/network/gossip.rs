@@ -217,6 +217,8 @@ impl SnapchainGossip {
                     .validation_mode(gossipsub::ValidationMode::Strict) // This sets the kind of message validation. The default is Strict (enforce message signing)
                     .message_id_fn(message_id_fn) // content-address mempool messages
                     .max_transmit_size(MAX_GOSSIP_MESSAGE_SIZE) // maximum message size that can be transmitted
+                    .mesh_n(10) // Try setting D to a higher value to see if it helps with slow sync (nodes will consume more bandwidth)
+                    .mesh_n_high(20) // 2x D, which is the recommended value
                     .build()
                     .map_err(|msg| io::Error::new(io::ErrorKind::Other, msg))?; // Temporary hack because `build` does not return a proper `std::error::Error`.
 
@@ -226,7 +228,9 @@ impl SnapchainGossip {
                     gossipsub_config,
                 )?;
 
-                let rpc = sync::Behaviour::new(sync::Config::default());
+                let rpc = sync::Behaviour::new(
+                    sync::Config::default().with_request_timeout(Duration::from_secs(5)),
+                );
 
                 // TODO(aditi): Connection limits are set high so that we don't keep kicking off read nodes for now
                 let connection_limits = libp2p_connection_limits::Behaviour::new(
@@ -453,6 +457,9 @@ impl SnapchainGossip {
                                 warn!("Failed to send Listening message: {}", e);
                             }
                         },
+                        SwarmEvent::OutgoingConnectionError {connection_id: _, peer_id, error} => {
+                            warn!("Failed to dial peer: {:?} due to: {:?}", peer_id, error);
+                        },
                         SwarmEvent::Behaviour(SnapchainBehaviorEvent::Gossipsub(gossipsub::Event::Message {
                             propagation_source: peer_id,
                             message_id: _id,
@@ -507,6 +514,12 @@ impl SnapchainGossip {
                                         },
                                     }
                                 },
+                                sync::Event::OutboundFailure {peer, connection_id: _, error, request_id: _} => {
+                                    warn!("Failed to send RPC request to peer: {:?} due to: {:?}", peer, error);
+                                }
+                                sync::Event::InboundFailure {peer, connection_id: _, error, request_id: _} => {
+                                    warn!("Failed to send RPC response to peer: {:?} due to: {:?}", peer, error);
+                                }
                                 _ => {}
                             }
                         }
@@ -606,6 +619,7 @@ impl SnapchainGossip {
                 Some(gossip_message::GossipMessage::ContactInfoMessage(contact_info)) => {
                     info!(
                         peer_id = peer_id.to_string(),
+                        ip = contact_info.body.as_ref().unwrap().gossip_address,
                         "Received contact info from peer"
                     );
                     // Validators should just dial the bootstrap set since the validator set is fixed.
