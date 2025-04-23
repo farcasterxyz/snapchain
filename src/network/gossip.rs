@@ -358,8 +358,9 @@ impl SnapchainGossip {
 
     pub async fn check_and_reconnect_to_bootstrap_peers(&mut self) {
         let connected_peers_count = self.swarm.connected_peers().count();
-        // Validators should stay connected to all bootstrap peers. Read nodes should only try to connect if they're not connected to anybody else.
-        if !self.read_node || (self.read_node && connected_peers_count == 0) {
+        // Validators should stay connected to all bootstrap peers. Read nodes should only try to connect if they're connected to too few peers
+        if !self.read_node || (self.read_node && connected_peers_count < self.bootstrap_addrs.len())
+        {
             for addr in &self.bootstrap_addrs {
                 if !self.connected_bootstrap_addrs.contains(addr) {
                     warn!("Attempting to reconnect to bootstrap peer: {}", addr);

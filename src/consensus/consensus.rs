@@ -53,6 +53,7 @@ pub struct Config {
 
     // Number of seconds to wait before kicking off start height
     pub consensus_start_delay: u32,
+    pub sync_request_timeout: Duration,
 }
 
 impl Config {
@@ -76,6 +77,7 @@ impl Config {
             validator_addresses: None,
             validator_sets: Some(validator_sets.clone()),
             consensus_start_delay: self.consensus_start_delay,
+            sync_request_timeout: self.sync_request_timeout,
         }
     }
 
@@ -113,6 +115,7 @@ impl Default for Config {
             validator_addresses: None,
             validator_sets: None,
             consensus_start_delay: 2,
+            sync_request_timeout: Duration::from_secs(2),
         }
     }
 }
