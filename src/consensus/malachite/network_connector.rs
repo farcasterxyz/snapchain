@@ -13,6 +13,7 @@ use informalsystems_malachitebft_sync::{self as sync, RawMessage};
 use libp2p::request_response;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
+use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, trace};
 
@@ -26,7 +27,8 @@ pub struct MalachiteNetworkConnector<Codec> {
 pub struct NetworkConnectorState {
     peer_id: MalachitePeerId,
     output_port: OutputPort<NetworkEvent<SnapchainValidatorContext>>,
-    inbound_requests: HashMap<sync::InboundRequestId, request_response::InboundRequestId>,
+    inbound_requests:
+        HashMap<sync::InboundRequestId, (Instant, request_response::InboundRequestId)>,
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
 }
 
@@ -143,12 +145,14 @@ where
             }
 
             Msg::OutgoingResponse(request_id, response) => {
-                let request_id = inbound_requests.remove(&request_id);
-                if let Some(request_id) = request_id {
+                let request_info = inbound_requests.remove(&request_id);
+                if let Some((start_time, request_id)) = request_info {
+                    let time_elapsed = Instant::elapsed(&start_time).as_millis();
                     if let sync::Response::ValueResponse(response) = &response {
                         info!(
                             request_id = request_id.to_string(),
                             height = response.height.as_u64(),
+                            time_elapsed,
                             "Sending sync reply"
                         );
                     }
@@ -245,6 +249,7 @@ where
                     peer,
                     body,
                 } => {
+                    let start_time = Instant::now();
                     let request: sync::Request<SnapchainValidatorContext> =
                         match self.codec.decode(body) {
                             Ok(request) => request,
@@ -263,7 +268,10 @@ where
                         );
                     }
 
-                    inbound_requests.insert(sync::InboundRequestId::new(request_id), request_id);
+                    inbound_requests.insert(
+                        sync::InboundRequestId::new(request_id),
+                        (start_time, request_id),
+                    );
 
                     output_port.send(NetworkEvent::Request(
                         sync::InboundRequestId::new(request_id),

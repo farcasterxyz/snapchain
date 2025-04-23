@@ -1,5 +1,7 @@
 //! Implementation of a host actor for bridiging consensus and the application via a set of channels.
 
+use std::time::Instant;
+
 use crate::consensus::validator::{ProposalSource, ShardValidator};
 use crate::core::types::SnapchainValidatorContext;
 use crate::network::gossip::GossipEvent;
@@ -295,7 +297,11 @@ impl Host {
             }
 
             HostMsg::GetDecidedValue { height, reply_to } => {
-                info!(height = height.as_u64(), "Get decided value");
+                let start_time = Instant::now();
+                info!(
+                    height = height.as_u64(),
+                    "Started get decided value in host"
+                );
                 let proposal = state.shard_validator.get_decided_value(height).await;
                 let decided_value = match proposal {
                     Some((commits, proposal)) => match proposal {
@@ -310,6 +316,11 @@ impl Host {
                     },
                     None => None,
                 };
+                let time_elapsed = Instant::elapsed(&start_time).as_millis();
+                info!(
+                    height = height.as_u64(),
+                    time_elapsed, "Finished get decided value in host"
+                );
                 reply_to.send(decided_value)?;
             }
 
