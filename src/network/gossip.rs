@@ -213,7 +213,7 @@ impl SnapchainGossip {
 
                 // Set a custom gossipsub configuration
                 let gossipsub_config = gossipsub::ConfigBuilder::default()
-                    .heartbeat_interval(Duration::from_millis(500)) // This might need to be lowered to 1/3 of the time
+                    .heartbeat_interval(Duration::from_millis(500)) // This might need to be lowered to 1/3 of the block time
                     .validation_mode(gossipsub::ValidationMode::Strict) // This sets the kind of message validation. The default is Strict (enforce message signing)
                     .message_id_fn(message_id_fn) // content-address mempool messages
                     .max_transmit_size(MAX_GOSSIP_MESSAGE_SIZE) // maximum message size that can be transmitted
@@ -572,9 +572,19 @@ impl SnapchainGossip {
         }
     }
 
-    pub fn handle_contact_info(&mut self, contact_info: ContactInfo) {
+    pub fn handle_contact_info(&mut self, contact_info: ContactInfo, peer_id: PeerId) {
         // TODO(aditi): We might want to persist peers and reconnect to them on restart
+        if contact_info.body.is_none() {
+            warn!("Received empty contact info from peer: {}", peer_id);
+            return;
+        }
         let contact_info_body = contact_info.body.unwrap();
+        info!(
+            peer_id = peer_id.to_string(),
+            ip = contact_info_body.gossip_address,
+            "Received contact info from peer"
+        );
+
         let contact_peer_id = PeerId::from_bytes(&contact_info_body.peer_id).unwrap();
         if let Some(peer_id) = self
             .swarm
@@ -617,14 +627,9 @@ impl SnapchainGossip {
         match proto::GossipMessage::decode(gossip_message.as_slice()) {
             Ok(gossip_message) => match gossip_message.gossip_message {
                 Some(gossip_message::GossipMessage::ContactInfoMessage(contact_info)) => {
-                    info!(
-                        peer_id = peer_id.to_string(),
-                        ip = contact_info.body.as_ref().unwrap().gossip_address,
-                        "Received contact info from peer"
-                    );
                     // Validators should just dial the bootstrap set since the validator set is fixed.
                     if self.read_node {
-                        self.handle_contact_info(contact_info);
+                        self.handle_contact_info(contact_info, peer_id);
                     }
                     None
                 }
