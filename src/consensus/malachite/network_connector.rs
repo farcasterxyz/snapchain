@@ -247,6 +247,15 @@ where
                             }
                         };
 
+                    if let sync::Request::ValueRequest(request) = &request {
+                        info!(
+                            peer_id = peer.to_string(),
+                            request_id = request_id.to_string(),
+                            height = request.height.as_u64(),
+                            "Received value sync request"
+                        );
+                    }
+
                     inbound_requests.insert(sync::InboundRequestId::new(request_id), request_id);
 
                     output_port.send(NetworkEvent::Request(
@@ -269,6 +278,15 @@ where
                                 return Ok(());
                             }
                         };
+
+                    if let sync::Response::ValueResponse(response) = &response {
+                        info!(
+                            peer_id = peer.to_string(),
+                            request_id = request_id.to_string(),
+                            height = response.height.as_u64(),
+                            "Sending value sync response"
+                        );
+                    }
 
                     output_port.send(NetworkEvent::Response(
                         sync::OutboundRequestId::new(request_id),
