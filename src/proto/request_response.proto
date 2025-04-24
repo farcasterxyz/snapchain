@@ -83,6 +83,7 @@ message FidsRequest {
   optional uint32 page_size = 1;
   optional bytes page_token = 2;
   optional bool reverse = 3;
+  uint32 shard_id = 4;
 }
 
 message FidsResponse {

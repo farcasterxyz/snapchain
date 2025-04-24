@@ -318,6 +318,8 @@ pub struct ShardInfo {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetFidsRequest {
+    #[serde(rename = "shardId")]
+    pub shard_id: u32,
     #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
     #[serde(
@@ -1652,6 +1654,7 @@ impl HubHttpService for HubHttpServiceImpl {
             .service
             .get_fids(tonic::Request::<proto::FidsRequest>::new(
                 proto::FidsRequest {
+                    shard_id: request.shard_id,
                     page_size: request.page_size,
                     page_token: request.page_token,
                     reverse: request.reverse,
