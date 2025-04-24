@@ -643,6 +643,8 @@ impl SnapchainGossip {
         if contact_info_body.protocol_version != PROTOCOL_VERSION.to_string() {
             info!(
                 peer_id = contact_peer_id.to_string(),
+                peer_version = contact_info_body.protocol_version,
+                our_version = PROTOCOL_VERSION,
                 "Peer running a different protocol version"
             );
             return;
