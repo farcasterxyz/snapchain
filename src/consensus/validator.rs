@@ -20,6 +20,7 @@ pub enum ProposalSource {
     Sync,
 }
 
+#[derive(Clone)]
 pub struct StoredValidatorSets {
     shard_id: u32,
     sets: Vec<StoredValidatorSet>,
@@ -44,6 +45,7 @@ impl StoredValidatorSets {
     }
 }
 
+#[derive(Clone)]
 pub struct StoredValidatorSet {
     pub effective_at: u64,
     pub validators: SnapchainValidatorSet,
@@ -70,6 +72,7 @@ impl StoredValidatorSet {
         }
     }
 }
+#[derive(Clone)]
 pub struct ShardValidator {
     pub(crate) shard_id: SnapchainShard,
 

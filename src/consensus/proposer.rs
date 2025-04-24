@@ -58,6 +58,7 @@ pub trait Proposer {
     fn get_proposed_value(&self, shard_hash: &ShardHash) -> Option<FullProposal>;
 }
 
+#[derive(Clone)]
 pub struct ProposedValues {
     values_by_height: BTreeMap<Height, Vec<ShardHash>>,
     values: BTreeMap<ShardHash, FullProposal>,
@@ -113,6 +114,7 @@ impl ProposedValues {
     }
 }
 
+#[derive(Clone)]
 pub struct ShardProposer {
     shard_id: SnapchainShard,
     address: Address,
@@ -316,6 +318,7 @@ pub enum BlockProposerError {
     BlockStorageError(#[from] BlockStorageError),
 }
 
+#[derive(Clone)]
 pub struct BlockProposer {
     #[allow(dead_code)] // TODO
     shard_id: SnapchainShard,
