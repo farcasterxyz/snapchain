@@ -393,13 +393,22 @@ impl SnapchainGossip {
         num_timeouts > 3
     }
 
-    fn maybe_disconnect_slow_peer(&mut self, peer_id: PeerId) {
+    fn maybe_disconnect_slow_peer(&mut self, peer_id: PeerId, source: &str) {
         if self.is_peer_slow(&peer_id) && !self.bootstrap_peer_ids.contains(&peer_id) {
+            let is_connected = self.swarm.is_connected(&peer_id);
             info!(
                 peer_id = peer_id.to_string(),
+                source = source,
+                is_connected = is_connected,
                 "Disconnecting peer due to too many timeouts"
             );
-            let _ = self.swarm.disconnect_peer_id(peer_id);
+            let res = self.swarm.disconnect_peer_id(peer_id);
+            if let Err(_) = res {
+                warn!(
+                    peer_id = peer_id.to_string(),
+                    "Failed to disconnect peer {}", peer_id
+                );
+            }
         }
     }
 
@@ -458,10 +467,14 @@ impl SnapchainGossip {
                                         self.connected_bootstrap_addrs.insert(address.to_string());
                                         self.bootstrap_peer_ids.insert(peer_id);
                                     }
-
+                                    self.maybe_disconnect_slow_peer(peer_id, "connection dialed");
                                 },
-                                libp2p::core::ConnectedPoint::Listener { .. } => {
-                                    self.maybe_disconnect_slow_peer(peer_id);
+                                libp2p::core::ConnectedPoint::Listener { send_back_addr, .. } => {
+                                    if self.bootstrap_addrs.contains(&send_back_addr.to_string()) {
+                                        self.connected_bootstrap_addrs.insert(send_back_addr.to_string());
+                                        self.bootstrap_peer_ids.insert(peer_id);
+                                    }
+                                    self.maybe_disconnect_slow_peer(peer_id, "connection received");
                                 },
                             };
                         },
@@ -476,7 +489,9 @@ impl SnapchainGossip {
                                 libp2p::core::ConnectedPoint::Dialer { address, ..} => {
                                     self.connected_bootstrap_addrs.remove(&address.to_string());
                                 },
-                                libp2p::core::ConnectedPoint::Listener { .. } => {},
+                                libp2p::core::ConnectedPoint::Listener { send_back_addr, .. } => {
+                                    self.connected_bootstrap_addrs.remove(&send_back_addr.to_string());
+                                },
                             };
                         },
                         SwarmEvent::Behaviour(SnapchainBehaviorEvent::Gossipsub(gossipsub::Event::Subscribed { peer_id, topic })) =>
@@ -914,7 +929,7 @@ impl SnapchainGossip {
                 let peer_id = peer_id.to_libp2p();
                 let num_timeouts = self.slow_peers.get(&peer_id).unwrap_or(0);
                 self.slow_peers.insert(peer_id, num_timeouts + 1);
-                self.maybe_disconnect_slow_peer(peer_id);
+                self.maybe_disconnect_slow_peer(peer_id, "sync timeout");
                 None
             }
             Some(GossipEvent::SyncReply(request_id, response)) => {
