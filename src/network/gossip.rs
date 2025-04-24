@@ -40,6 +40,8 @@ use tracing::{debug, error, info, warn};
 const DEFAULT_GOSSIP_PORT: u16 = 3382;
 const DEFAULT_GOSSIP_HOST: &str = "127.0.0.1";
 const MAX_GOSSIP_MESSAGE_SIZE: usize = 1024 * 1024 * 10; // 10 mb
+const MAX_CACHED_PEERS: u64 = 2000;
+const CACHED_PEER_TTL: Duration = Duration::from_secs(60 * 60);
 
 const CONSENSUS_TOPIC: &str = "consensus";
 const MEMPOOL_TOPIC: &str = "mempool";
@@ -297,8 +299,8 @@ impl SnapchainGossip {
 
         info!("Using {} as announce address", announce_address);
 
-        let peer_cache = CacheBuilder::new(100)
-            .time_to_live(Duration::from_secs(60 * 60))
+        let peer_cache = CacheBuilder::new(MAX_CACHED_PEERS)
+            .time_to_live(CACHED_PEER_TTL)
             .eviction_policy(EvictionPolicy::lru())
             .build();
 
