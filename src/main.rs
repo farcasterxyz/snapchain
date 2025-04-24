@@ -4,6 +4,7 @@ use hyper_util::rt::TokioIo;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::onchain_events::{L1Client, OnchainEventsRequest, RealL1Client};
 use snapchain::consensus::consensus::SystemMessage;
+use snapchain::consensus::proposer::SNAPCHAIN_VERSION;
 use snapchain::mempool::mempool::{Mempool, MempoolRequest, ReadNodeMempool};
 use snapchain::mempool::routing;
 use snapchain::network::admin_server::MyAdminService;
@@ -35,8 +36,6 @@ use tokio_cron_scheduler::JobScheduler;
 use tonic::transport::Server;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
-
-const VERSION: Option<&str> = option_env!("CARGO_PKG_VERSION");
 
 async fn start_servers(
     app_config: &snapchain::cfg::Config,
@@ -75,7 +74,7 @@ async fn start_servers(
         Box::new(routing::ShardRouter {}),
         mempool_tx.clone(),
         l1_client,
-        VERSION.unwrap_or("unknown").to_string(),
+        SNAPCHAIN_VERSION.unwrap_or("unknown").to_string(),
         gossip.swarm.local_peer_id().to_string(),
     ));
     let grpc_service = service.clone();

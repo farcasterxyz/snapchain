@@ -1,7 +1,7 @@
 use crate::consensus::consensus::{MalachiteEventShard, SystemMessage};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
-use crate::consensus::proposer::PROTOCOL_VERSION;
+use crate::consensus::proposer::{PROTOCOL_VERSION, SNAPCHAIN_VERSION};
 use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::proto::{
@@ -46,7 +46,6 @@ const MEMPOOL_TOPIC: &str = "mempool";
 const DECIDED_VALUES: &str = "decided-values";
 const READ_NODE_PEER_STATUSES: &str = "read-node-peers";
 const CONTACT_INFO: &str = "contact-info";
-const SNAPCHAIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -70,7 +69,7 @@ impl Default for Config {
             bootstrap_peers: "".to_string(),
             contact_info_interval: Duration::from_secs(300),
             bootstrap_reconnect_interval: Duration::from_secs(30),
-            enable_autodiscovery: false,
+            enable_autodiscovery: true,
         }
     }
 }
@@ -385,15 +384,14 @@ impl SnapchainGossip {
         }
     }
 
-    pub fn update_slow_peers(&mut self, peer_id: &PeerId) {
-        let num_timeouts = self.slow_peers.get(peer_id).unwrap_or(0);
-        if num_timeouts <= 3 {
-            self.swarm
-                .behaviour_mut()
-                .gossipsub
-                .remove_blacklisted_peer(peer_id);
-        } else {
-            self.swarm.behaviour_mut().gossipsub.blacklist_peer(peer_id);
+    fn is_peer_slow(&self, peer_id: &PeerId) -> bool {
+        let num_timeouts = self.slow_peers.get(&peer_id).unwrap_or(0);
+        num_timeouts > 3
+    }
+
+    fn maybe_disconnect_slow_peer(&mut self, peer_id: PeerId) {
+        if self.is_peer_slow(&peer_id) {
+            let _ = self.swarm.disconnect_peer_id(peer_id);
         }
     }
 
@@ -404,7 +402,7 @@ impl SnapchainGossip {
                 gossip_address: self.announce_address.clone(),
                 network: self.fc_network as i32,
                 protocol_version: PROTOCOL_VERSION.to_string(),
-                snapchain_version: SNAPCHAIN_VERSION.to_string(),
+                snapchain_version: SNAPCHAIN_VERSION.unwrap_or("").to_string(),
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
@@ -453,7 +451,9 @@ impl SnapchainGossip {
                                     }
 
                                 },
-                                libp2p::core::ConnectedPoint::Listener { .. } => {},
+                                libp2p::core::ConnectedPoint::Listener { .. } => {
+                                    self.maybe_disconnect_slow_peer(peer_id);
+                                },
                             };
                         },
                         SwarmEvent::ConnectionClosed {peer_id, cause, endpoint, ..} => {
@@ -639,7 +639,10 @@ impl SnapchainGossip {
             return;
         }
 
-        self.update_slow_peers(&peer_id);
+        if self.is_peer_slow(&peer_id) {
+            info!(peer_id = peer_id.to_string(), "Peer is slow, not dialing");
+            return;
+        };
 
         if self.enable_autodiscovery {
             let _ = Self::dial(&mut self.swarm, &contact_info_body.gossip_address);
@@ -900,7 +903,7 @@ impl SnapchainGossip {
                 let peer_id = peer_id.to_libp2p();
                 let num_timeouts = self.slow_peers.get(&peer_id).unwrap_or(0);
                 self.slow_peers.insert(peer_id, num_timeouts + 1);
-                self.update_slow_peers(&peer_id);
+                self.maybe_disconnect_slow_peer(peer_id);
                 None
             }
             Some(GossipEvent::SyncReply(request_id, response)) => {
