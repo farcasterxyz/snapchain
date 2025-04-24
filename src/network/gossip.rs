@@ -165,6 +165,7 @@ pub struct SnapchainGossip {
     read_node: bool,
     enable_autodiscovery: bool,
     bootstrap_addrs: HashSet<String>,
+    bootstrap_peer_ids: HashSet<PeerId>,
     connected_bootstrap_addrs: HashSet<String>,
     announce_address: String,
     fc_network: FarcasterNetwork,
@@ -322,6 +323,7 @@ impl SnapchainGossip {
             connected_bootstrap_addrs: HashSet::new(),
             enable_autodiscovery: config.enable_autodiscovery,
             slow_peers: peer_cache,
+            bootstrap_peer_ids: HashSet::new(),
         })
     }
 
@@ -392,7 +394,11 @@ impl SnapchainGossip {
     }
 
     fn maybe_disconnect_slow_peer(&mut self, peer_id: PeerId) {
-        if self.is_peer_slow(&peer_id) {
+        if self.is_peer_slow(&peer_id) && !self.bootstrap_peer_ids.contains(&peer_id) {
+            info!(
+                peer_id = peer_id.to_string(),
+                "Disconnecting peer due to too many timeouts"
+            );
             let _ = self.swarm.disconnect_peer_id(peer_id);
         }
     }
@@ -450,6 +456,7 @@ impl SnapchainGossip {
                                 libp2p::core::ConnectedPoint::Dialer { address, ..} => {
                                     if self.bootstrap_addrs.contains(&address.to_string()) {
                                         self.connected_bootstrap_addrs.insert(address.to_string());
+                                        self.bootstrap_peer_ids.insert(peer_id);
                                     }
 
                                 },
