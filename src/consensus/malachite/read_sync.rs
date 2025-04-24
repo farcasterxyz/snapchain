@@ -410,6 +410,9 @@ impl ReadSync {
                             )
                             .await?;
 
+                            // Remove this peer from the peers list until we get a status update (will be automatically added back at that point)
+                            state.sync.peers.remove(&inflight.peer_id);
+
                             state
                                 .gossip_tx
                                 .send(GossipEvent::SyncTimeout(inflight.peer_id))
