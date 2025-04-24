@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use prost::Message;
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use rand::SeedableRng;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -20,6 +21,7 @@ use informalsystems_malachitebft_engine::util::ticker::ticker;
 use informalsystems_malachitebft_engine::util::timers::{TimeoutElapsed, TimerScheduler};
 
 use crate::core::types::SnapchainValidatorContext;
+use crate::network::gossip::GossipEvent;
 use crate::proto::{self, Height};
 
 use super::read_host::{ReadHostMsg, ReadHostRef};
@@ -106,6 +108,8 @@ pub struct State {
     ticker: JoinHandle<()>,
 
     initial_sync_completed: bool,
+
+    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
 }
 
 impl State {
@@ -164,9 +168,10 @@ impl ReadSync {
         params: ReadParams,
         metrics: sync::Metrics,
         span: tracing::Span,
+        gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     ) -> Result<SyncRef, ractor::SpawnErr> {
         let actor = Self::new(ctx, gossip, host, params, metrics, span);
-        let (actor_ref, _) = Actor::spawn(None, actor, ()).await?;
+        let (actor_ref, _) = Actor::spawn(None, actor, gossip_tx).await?;
         Ok(actor_ref)
     }
 
@@ -404,6 +409,11 @@ impl ReadSync {
                                 ),
                             )
                             .await?;
+
+                            state
+                                .gossip_tx
+                                .send(GossipEvent::SyncTimeout(inflight.peer_id))
+                                .await?;
                         } else {
                             debug!(%request_id, "Timeout for unknown request");
                         }
@@ -420,12 +430,12 @@ impl ReadSync {
 impl Actor for ReadSync {
     type Msg = Msg;
     type State = State;
-    type Arguments = ();
+    type Arguments = mpsc::Sender<GossipEvent<SnapchainValidatorContext>>;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _args: Self::Arguments,
+        args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         self.gossip
             .cast(NetworkMsg::Subscribe(Box::new(myself.clone())))?;
@@ -444,6 +454,7 @@ impl Actor for ReadSync {
             inflight: HashMap::new(),
             ticker,
             initial_sync_completed: false,
+            gossip_tx: args,
         })
     }
 

@@ -24,6 +24,8 @@ use libp2p::{
     gossipsub, noise, swarm::NetworkBehaviour, swarm::SwarmEvent, tcp, yamux, PeerId, Swarm,
 };
 use libp2p_connection_limits::ConnectionLimits;
+use moka::policy::EvictionPolicy;
+use moka::sync::{Cache, CacheBuilder};
 use prost::Message;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -44,6 +46,7 @@ const MEMPOOL_TOPIC: &str = "mempool";
 const DECIDED_VALUES: &str = "decided-values";
 const READ_NODE_PEER_STATUSES: &str = "read-node-peers";
 const CONTACT_INFO: &str = "contact-info";
+const SNAPCHAIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -133,6 +136,7 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
     SyncReply(InboundRequestId, sync::Response<SnapchainValidatorContext>),
     BroadcastDecidedValue(proto::DecidedValue),
     SubscribeToDecidedValuesTopic(),
+    SyncTimeout(MalachitePeerId),
 }
 
 pub enum GossipTopic {
@@ -166,6 +170,7 @@ pub struct SnapchainGossip {
     contact_info_interval: Duration,
     bootstrap_reconnect_interval: Duration,
     statsd_client: StatsdClientWrapper,
+    slow_peers: Cache<PeerId, u64>,
 }
 
 impl SnapchainGossip {
@@ -293,6 +298,11 @@ impl SnapchainGossip {
 
         info!("Using {} as announce address", announce_address);
 
+        let peer_cache = CacheBuilder::new(100)
+            .time_to_live(Duration::from_secs(60 * 60))
+            .eviction_policy(EvictionPolicy::lru())
+            .build();
+
         // ~5 seconds of buffer (assuming 1K msgs/pec)
         let (tx, rx) = mpsc::channel(5000);
         Ok(SnapchainGossip {
@@ -310,6 +320,7 @@ impl SnapchainGossip {
             statsd_client,
             connected_bootstrap_addrs: HashSet::new(),
             enable_autodiscovery: config.enable_autodiscovery,
+            slow_peers: peer_cache,
         })
     }
 
@@ -374,13 +385,26 @@ impl SnapchainGossip {
         }
     }
 
+    pub fn update_slow_peers(&mut self, peer_id: &PeerId) {
+        let num_timeouts = self.slow_peers.get(peer_id).unwrap_or(0);
+        if num_timeouts <= 3 {
+            self.swarm
+                .behaviour_mut()
+                .gossipsub
+                .remove_blacklisted_peer(peer_id);
+        } else {
+            self.swarm.behaviour_mut().gossipsub.blacklist_peer(peer_id);
+        }
+    }
+
     pub fn publish_contact_info(&mut self) {
         let contact_info = ContactInfo {
             body: Some(ContactInfoBody {
                 peer_id: self.swarm.local_peer_id().to_bytes(),
                 gossip_address: self.announce_address.clone(),
                 network: self.fc_network as i32,
-                snapchain_version: PROTOCOL_VERSION.to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                snapchain_version: SNAPCHAIN_VERSION.to_string(),
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
@@ -582,6 +606,7 @@ impl SnapchainGossip {
         info!(
             peer_id = peer_id.to_string(),
             ip = contact_info_body.gossip_address,
+            snapchain_version = contact_info_body.snapchain_version,
             "Received contact info from peer"
         );
 
@@ -613,6 +638,8 @@ impl SnapchainGossip {
             );
             return;
         }
+
+        self.update_slow_peers(&peer_id);
 
         if self.enable_autodiscovery {
             let _ = Self::dial(&mut self.swarm, &contact_info_body.gossip_address);
@@ -868,6 +895,13 @@ impl SnapchainGossip {
                         None
                     }
                 }
+            }
+            Some(GossipEvent::SyncTimeout(peer_id)) => {
+                let peer_id = peer_id.to_libp2p();
+                let num_timeouts = self.slow_peers.get(&peer_id).unwrap_or(0);
+                self.slow_peers.insert(peer_id, num_timeouts + 1);
+                self.update_slow_peers(&peer_id);
+                None
             }
             Some(GossipEvent::SyncReply(request_id, response)) => {
                 let encoded = snapchain_codec.encode(&response);
