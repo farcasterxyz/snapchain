@@ -73,6 +73,7 @@ pub fn get_fname_proof_by_fid(db: &RocksDB, fid: u64) -> Result<Option<UserNameP
 pub fn put_username_proof_transaction(
     txn: &mut RocksDbTransactionBatch,
     username_proof: &UserNameProof,
+    existing_fid: Option<u64>,
 ) {
     let buf = username_proof.encode_to_vec();
 
@@ -81,6 +82,12 @@ pub fn put_username_proof_transaction(
 
     let secondary_key = make_fname_username_proof_by_fid_key(username_proof.fid);
     txn.put(secondary_key, primary_key);
+
+    // If a username is being transferred, remove the existing secondary key.
+    if let Some(existing_fid) = existing_fid {
+        let secondary_key = make_fname_username_proof_by_fid_key(existing_fid);
+        txn.delete(secondary_key);
+    }
 }
 
 #[inline]
