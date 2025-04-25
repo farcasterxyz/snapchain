@@ -19,6 +19,7 @@ use tokio::time::Instant;
 use tokio::{select, time};
 use tracing::{error, warn};
 
+pub const SNAPCHAIN_VERSION: Option<&str> = option_env!("CARGO_PKG_VERSION");
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const GENESIS_MESSAGE: &str =
     "It occurs to me that our survival may depend upon our talking to one another.";

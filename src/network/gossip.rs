@@ -1,7 +1,7 @@
 use crate::consensus::consensus::{MalachiteEventShard, SystemMessage};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
-use crate::consensus::proposer::PROTOCOL_VERSION;
+use crate::consensus::proposer::{PROTOCOL_VERSION, SNAPCHAIN_VERSION};
 use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::proto::{
@@ -24,6 +24,8 @@ use libp2p::{
     gossipsub, noise, swarm::NetworkBehaviour, swarm::SwarmEvent, tcp, yamux, PeerId, Swarm,
 };
 use libp2p_connection_limits::ConnectionLimits;
+use moka::policy::EvictionPolicy;
+use moka::sync::{Cache, CacheBuilder};
 use prost::Message;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -38,6 +40,8 @@ use tracing::{debug, error, info, warn};
 const DEFAULT_GOSSIP_PORT: u16 = 3382;
 const DEFAULT_GOSSIP_HOST: &str = "127.0.0.1";
 const MAX_GOSSIP_MESSAGE_SIZE: usize = 1024 * 1024 * 10; // 10 mb
+const MAX_CACHED_PEERS: u64 = 2000;
+const CACHED_PEER_TTL: Duration = Duration::from_secs(60 * 60);
 
 const CONSENSUS_TOPIC: &str = "consensus";
 const MEMPOOL_TOPIC: &str = "mempool";
@@ -67,7 +71,7 @@ impl Default for Config {
             bootstrap_peers: "".to_string(),
             contact_info_interval: Duration::from_secs(300),
             bootstrap_reconnect_interval: Duration::from_secs(30),
-            enable_autodiscovery: false,
+            enable_autodiscovery: true,
         }
     }
 }
@@ -133,6 +137,7 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
     SyncReply(InboundRequestId, sync::Response<SnapchainValidatorContext>),
     BroadcastDecidedValue(proto::DecidedValue),
     SubscribeToDecidedValuesTopic(),
+    SyncTimeout(MalachitePeerId),
 }
 
 pub enum GossipTopic {
@@ -160,12 +165,14 @@ pub struct SnapchainGossip {
     read_node: bool,
     enable_autodiscovery: bool,
     bootstrap_addrs: HashSet<String>,
+    bootstrap_peer_ids: HashSet<PeerId>,
     connected_bootstrap_addrs: HashSet<String>,
     announce_address: String,
     fc_network: FarcasterNetwork,
     contact_info_interval: Duration,
     bootstrap_reconnect_interval: Duration,
     statsd_client: StatsdClientWrapper,
+    slow_peers: Cache<PeerId, u64>,
 }
 
 impl SnapchainGossip {
@@ -293,6 +300,11 @@ impl SnapchainGossip {
 
         info!("Using {} as announce address", announce_address);
 
+        let peer_cache = CacheBuilder::new(MAX_CACHED_PEERS)
+            .time_to_live(CACHED_PEER_TTL)
+            .eviction_policy(EvictionPolicy::lru())
+            .build();
+
         // ~5 seconds of buffer (assuming 1K msgs/pec)
         let (tx, rx) = mpsc::channel(5000);
         Ok(SnapchainGossip {
@@ -310,6 +322,8 @@ impl SnapchainGossip {
             statsd_client,
             connected_bootstrap_addrs: HashSet::new(),
             enable_autodiscovery: config.enable_autodiscovery,
+            slow_peers: peer_cache,
+            bootstrap_peer_ids: HashSet::new(),
         })
     }
 
@@ -374,13 +388,38 @@ impl SnapchainGossip {
         }
     }
 
+    fn is_peer_slow(&self, peer_id: &PeerId) -> bool {
+        let num_timeouts = self.slow_peers.get(&peer_id).unwrap_or(0);
+        num_timeouts > 3
+    }
+
+    fn maybe_disconnect_slow_peer(&mut self, peer_id: PeerId, source: &str) {
+        if self.is_peer_slow(&peer_id) && !self.bootstrap_peer_ids.contains(&peer_id) {
+            let is_connected = self.swarm.is_connected(&peer_id);
+            info!(
+                peer_id = peer_id.to_string(),
+                source = source,
+                is_connected = is_connected,
+                "Disconnecting peer due to too many timeouts"
+            );
+            let res = self.swarm.disconnect_peer_id(peer_id);
+            if let Err(_) = res {
+                warn!(
+                    peer_id = peer_id.to_string(),
+                    "Failed to disconnect peer {}", peer_id
+                );
+            }
+        }
+    }
+
     pub fn publish_contact_info(&mut self) {
         let contact_info = ContactInfo {
             body: Some(ContactInfoBody {
                 peer_id: self.swarm.local_peer_id().to_bytes(),
                 gossip_address: self.announce_address.clone(),
                 network: self.fc_network as i32,
-                snapchain_version: PROTOCOL_VERSION.to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                snapchain_version: SNAPCHAIN_VERSION.unwrap_or("").to_string(),
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
@@ -426,10 +465,17 @@ impl SnapchainGossip {
                                 libp2p::core::ConnectedPoint::Dialer { address, ..} => {
                                     if self.bootstrap_addrs.contains(&address.to_string()) {
                                         self.connected_bootstrap_addrs.insert(address.to_string());
+                                        self.bootstrap_peer_ids.insert(peer_id);
                                     }
-
+                                    self.maybe_disconnect_slow_peer(peer_id, "connection dialed");
                                 },
-                                libp2p::core::ConnectedPoint::Listener { .. } => {},
+                                libp2p::core::ConnectedPoint::Listener { send_back_addr, .. } => {
+                                    if self.bootstrap_addrs.contains(&send_back_addr.to_string()) {
+                                        self.connected_bootstrap_addrs.insert(send_back_addr.to_string());
+                                        self.bootstrap_peer_ids.insert(peer_id);
+                                    }
+                                    self.maybe_disconnect_slow_peer(peer_id, "connection received");
+                                },
                             };
                         },
                         SwarmEvent::ConnectionClosed {peer_id, cause, endpoint, ..} => {
@@ -443,7 +489,9 @@ impl SnapchainGossip {
                                 libp2p::core::ConnectedPoint::Dialer { address, ..} => {
                                     self.connected_bootstrap_addrs.remove(&address.to_string());
                                 },
-                                libp2p::core::ConnectedPoint::Listener { .. } => {},
+                                libp2p::core::ConnectedPoint::Listener { send_back_addr, .. } => {
+                                    self.connected_bootstrap_addrs.remove(&send_back_addr.to_string());
+                                },
                             };
                         },
                         SwarmEvent::Behaviour(SnapchainBehaviorEvent::Gossipsub(gossipsub::Event::Subscribed { peer_id, topic })) =>
@@ -582,6 +630,7 @@ impl SnapchainGossip {
         info!(
             peer_id = peer_id.to_string(),
             ip = contact_info_body.gossip_address,
+            snapchain_version = contact_info_body.snapchain_version,
             "Received contact info from peer"
         );
 
@@ -606,13 +655,20 @@ impl SnapchainGossip {
             return;
         }
 
-        if contact_info_body.snapchain_version != PROTOCOL_VERSION.to_string() {
+        if contact_info_body.protocol_version != PROTOCOL_VERSION.to_string() {
             info!(
                 peer_id = contact_peer_id.to_string(),
+                peer_version = contact_info_body.protocol_version,
+                our_version = PROTOCOL_VERSION,
                 "Peer running a different protocol version"
             );
             return;
         }
+
+        if self.is_peer_slow(&peer_id) {
+            info!(peer_id = peer_id.to_string(), "Peer is slow, not dialing");
+            return;
+        };
 
         if self.enable_autodiscovery {
             let _ = Self::dial(&mut self.swarm, &contact_info_body.gossip_address);
@@ -868,6 +924,13 @@ impl SnapchainGossip {
                         None
                     }
                 }
+            }
+            Some(GossipEvent::SyncTimeout(peer_id)) => {
+                let peer_id = peer_id.to_libp2p();
+                let num_timeouts = self.slow_peers.get(&peer_id).unwrap_or(0);
+                self.slow_peers.insert(peer_id, num_timeouts + 1);
+                self.maybe_disconnect_slow_peer(peer_id, "sync timeout");
+                None
             }
             Some(GossipEvent::SyncReply(request_id, response)) => {
                 let encoded = snapchain_codec.encode(&response);

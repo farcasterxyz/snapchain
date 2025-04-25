@@ -60,6 +60,7 @@ pub async fn spawn_read_sync_actor(
     config: ValueSyncConfig,
     registry: &SharedRegistry,
     span: Span,
+    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
 ) -> Result<ReadSyncRef, ractor::SpawnErr> {
     let params = ReadParams {
         status_update_interval: config.status_update_interval,
@@ -68,7 +69,7 @@ pub async fn spawn_read_sync_actor(
 
     let metrics = SyncMetrics::register(registry);
 
-    let actor_ref = ReadSync::spawn(ctx, network, host, params, metrics, span).await?;
+    let actor_ref = ReadSync::spawn(ctx, network, host, params, metrics, span, gossip_tx).await?;
 
     Ok(actor_ref)
 }
@@ -113,6 +114,7 @@ impl MalachiteReadNodeActors {
             sync_config,
             registry,
             span.clone(),
+            gossip_tx.clone(),
         )
         .await?;
 
