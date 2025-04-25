@@ -16,7 +16,8 @@ use snapchain::node::snapchain_read_node::SnapchainReadNode;
 use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::proto::{self, Height};
 use snapchain::proto::{Block, FarcasterNetwork, IdRegisterEventType, SignerEventType};
-use snapchain::storage::db::{PageOptions, RocksDB};
+use snapchain::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
+use snapchain::storage::store::account::UserDataStore;
 use snapchain::storage::store::engine::MempoolMessage;
 use snapchain::storage::store::node_local_state::LocalStateStore;
 use snapchain::storage::store::stores::Stores;
@@ -37,7 +38,7 @@ const HOST_FOR_TEST: &str = "127.0.0.1";
 const BASE_PORT_FOR_TEST: u32 = 9482;
 
 struct NodeForTest {
-    node: SnapchainNode,
+    pub node: SnapchainNode,
     db: Arc<RocksDB>,
     block_store: BlockStore,
     mempool_tx: mpsc::Sender<MempoolRequest>,
@@ -570,6 +571,19 @@ async fn register_fid(fid: u64, messages_tx: Sender<MempoolRequest>) -> SigningK
     signer
 }
 
+async fn transfer_fname(transfer: proto::FnameTransfer, messages_tx: Sender<MempoolRequest>) {
+    messages_tx
+        .send(MempoolRequest::AddMessage(
+            MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
+                on_chain_event: None,
+                fname_transfer: Some(transfer),
+            }),
+            MempoolSource::Local,
+        ))
+        .await
+        .unwrap();
+}
+
 async fn send_messages(messages_tx: mpsc::Sender<MempoolRequest>) {
     let mut i: i32 = 0;
     let prefix = vec![0, 0, 0, 0, 0, 0];
@@ -768,5 +782,95 @@ async fn test_read_node() {
     for read_node in network.read_nodes.iter() {
         // TODO: The actual number successfully sync'd varies. Figure out why and add a stricter check on exact number of blocks
         wait_for_read_node_blocks(read_node, 1).await;
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_cross_shard_interactions() {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .try_init();
+
+    let num_shards = 2;
+    let mut network = TestNetwork::create(3, num_shards, 3380).await;
+    network.start_validators().await;
+
+    let messages_tx = network.nodes[0].mempool_tx.clone();
+
+    register_fid(20270, messages_tx.clone()).await;
+    register_fid(211428, messages_tx.clone()).await;
+
+    let fname = "erica";
+
+    transfer_fname(
+        proto::FnameTransfer {
+            id: 43782,
+            from_fid: 0,
+            proof: Some(proto::UserNameProof {
+                timestamp: 1741384226,
+                name: fname.as_bytes().to_vec(),
+                fid: 211428,
+                owner: hex::decode("2b4d92e7626c5fc56cb4641f6f758563de1f6bdc").unwrap(),
+
+                signature: hex::decode("050b42fdda7b0a7309a1fb8a2cbc9a5f4bbf241aec74f53191f9665d9b9f572d4f452ac807911af7b6980219482d6f7fda7f99f23ab19c961b4701b9934fa2f91b").unwrap(),
+                r#type: proto::UserNameType::UsernameTypeFname as i32,
+            }),
+        },
+        messages_tx.clone(),
+    )
+    .await;
+
+    transfer_fname(
+        proto::FnameTransfer {
+            id: 829595,
+            from_fid: 211428,
+            proof: Some(proto::UserNameProof {
+                timestamp: 1741384226,
+                name: fname.as_bytes().to_vec(),
+                fid: 20270,
+                owner: hex::decode("92ce59c18a97646e9a7e011653d8417d3a08bb2b").unwrap(),
+                signature: hex::decode("00c3601c515edffe208e7128f47f89c2fb7b8e0beaaf615158305ddf02818a71679a8e7062503be59a19d241bd0b47396a3c294cfafd0d5478db1ae8249463bd1c").unwrap(),
+                r#type: proto::UserNameType::UsernameTypeFname as i32,
+            }),
+        },
+        messages_tx.clone(),
+    )
+    .await;
+
+    tokio::time::sleep(time::Duration::from_millis(200)).await;
+
+    network.produce_blocks(1).await;
+
+    for i in 0..network.nodes.len() {
+        assert!(
+            network.nodes[i].num_blocks().await > 0,
+            "Node {} should have confirmed blocks",
+            i
+        );
+
+        let node = &network.nodes[i].node;
+        node.shard_stores.iter().for_each(|(_, stores)| {
+            let proof1 = UserDataStore::get_username_proof(
+                &stores.user_data_store,
+                &mut RocksDbTransactionBatch::new(),
+                &fname.as_bytes().to_vec(),
+            )
+            .unwrap()
+            .unwrap();
+
+            assert_eq!(proof1.fid, 20270);
+
+            let proof2 = UserDataStore::get_username_proof(
+                &stores.user_data_store,
+                &mut RocksDbTransactionBatch::new(),
+                &fname.as_bytes().to_vec(),
+            )
+            .unwrap()
+            .unwrap();
+
+            assert_eq!(proof2.fid, 20270);
+        });
     }
 }
