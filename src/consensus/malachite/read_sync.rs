@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -108,6 +108,8 @@ pub struct State {
     ticker: JoinHandle<()>,
 
     initial_sync_completed: bool,
+
+    connected_peers: HashSet<PeerId>,
 
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
 }
@@ -297,6 +299,12 @@ impl ReadSync {
                 if state.sync.peers.remove(&peer_id).is_some() {
                     debug!(%peer_id, "Removed disconnected peer");
                 }
+                state.connected_peers.remove(&peer_id);
+            }
+
+            Msg::NetworkEvent(NetworkEvent::PeerConnected(peer_id)) => {
+                info!(%peer_id, "Connected to peer");
+                state.connected_peers.insert(peer_id);
             }
 
             Msg::NetworkEvent(NetworkEvent::Status(peer_id, status)) => {
@@ -307,8 +315,13 @@ impl ReadSync {
                     history_min_height: status.history_min_height,
                 };
 
-                self.process_input(&myself, state, sync::Input::Status(status))
-                    .await?;
+                // Only process status messages for directly connected peers. Otherwise we try to sync with peers we're not connected to and it causes timeouts
+                if state.connected_peers.contains(&peer_id) {
+                    self.process_input(&myself, state, sync::Input::Status(status))
+                        .await?;
+                } else {
+                    info!(%peer_id, height=status.height.to_string(), "Ignoring status from non-connected peer");
+                }
             }
 
             Msg::NetworkEvent(NetworkEvent::Request(request_id, from, request)) => {
@@ -410,9 +423,6 @@ impl ReadSync {
                             )
                             .await?;
 
-                            // Remove this peer from the peers list until we get a status update (will be automatically added back at that point)
-                            state.sync.peers.remove(&inflight.peer_id);
-
                             state
                                 .gossip_tx
                                 .send(GossipEvent::SyncTimeout(inflight.peer_id))
@@ -455,6 +465,7 @@ impl Actor for ReadSync {
             sync: sync::State::new(rng),
             timers: Timers::new(Box::new(myself.clone())),
             inflight: HashMap::new(),
+            connected_peers: HashSet::new(),
             ticker,
             initial_sync_completed: false,
             gossip_tx: args,
