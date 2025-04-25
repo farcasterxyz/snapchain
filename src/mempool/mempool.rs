@@ -504,6 +504,34 @@ impl Mempool {
             .message_router
             .route_fid(fid, self.read_node_mempool.num_shards);
 
+        self.insert_into_shard(shard_id, message.clone(), source.clone())
+            .await;
+
+        // Fname transfers are mirrored to both the sender and receiver shard.
+        match message {
+            MempoolMessage::ValidatorMessage(ref inner_message) => {
+                if let Some(fname_transfer) = &inner_message.fname_transfer {
+                    let mirror_shard_id = self
+                        .read_node_mempool
+                        .message_router
+                        .route_fid(fname_transfer.from_fid, self.read_node_mempool.num_shards);
+
+                    if mirror_shard_id != shard_id {
+                        self.insert_into_shard(mirror_shard_id, message, source)
+                            .await;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn insert_into_shard(
+        &mut self,
+        shard_id: u32,
+        message: MempoolMessage,
+        source: MempoolSource,
+    ) {
         match self.messages.get_mut(&shard_id) {
             Some(shard_messages) => {
                 if shard_messages.contains_key(&message.mempool_key()) {
