@@ -508,21 +508,18 @@ impl Mempool {
             .await;
 
         // Fname transfers are mirrored to both the sender and receiver shard.
-        match message {
-            MempoolMessage::ValidatorMessage(ref inner_message) => {
-                if let Some(fname_transfer) = &inner_message.fname_transfer {
-                    let mirror_shard_id = self
-                        .read_node_mempool
-                        .message_router
-                        .route_fid(fname_transfer.from_fid, self.read_node_mempool.num_shards);
+        if let MempoolMessage::ValidatorMessage(inner_message) = &message {
+            if let Some(fname_transfer) = &inner_message.fname_transfer {
+                let mirror_shard_id = self
+                    .read_node_mempool
+                    .message_router
+                    .route_fid(fname_transfer.from_fid, self.read_node_mempool.num_shards);
 
-                    if mirror_shard_id != shard_id {
-                        self.insert_into_shard(mirror_shard_id, message, source)
-                            .await;
-                    }
+                if mirror_shard_id != shard_id {
+                    self.insert_into_shard(mirror_shard_id, message, source)
+                        .await;
                 }
             }
-            _ => {}
         }
     }
 
