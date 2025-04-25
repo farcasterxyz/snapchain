@@ -276,15 +276,26 @@ impl Host {
                 let delay = state
                     .shard_validator
                     .next_height_delay(state.consensus_block_time);
-                tokio::time::sleep(delay).await;
                 let next_height = certificate.height.increment();
                 let validator_set = state
                     .shard_validator
                     .get_validator_set(next_height.as_u64());
-                consensus_ref.cast(ConsensusMsg::StartHeight(next_height, validator_set))?;
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    if let Err(err) =
+                        consensus_ref.cast(ConsensusMsg::StartHeight(next_height, validator_set))
+                    {
+                        error!(
+                            next_height = next_height.as_u64(),
+                            "Unable to start next height: {}",
+                            err.to_string()
+                        );
+                    };
+                });
             }
 
             HostMsg::GetDecidedValue { height, reply_to } => {
+                info!(height = height.as_u64(), "Get decided value");
                 let proposal = state.shard_validator.get_decided_value(height).await;
                 let decided_value = match proposal {
                     Some((commits, proposal)) => match proposal {

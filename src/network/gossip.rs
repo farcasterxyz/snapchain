@@ -52,6 +52,7 @@ pub struct Config {
     pub bootstrap_peers: String,
     pub contact_info_interval: Duration,
     pub bootstrap_reconnect_interval: Duration,
+    pub enable_autodiscovery: bool,
 }
 
 impl Default for Config {
@@ -66,6 +67,7 @@ impl Default for Config {
             bootstrap_peers: "".to_string(),
             contact_info_interval: Duration::from_secs(300),
             bootstrap_reconnect_interval: Duration::from_secs(30),
+            enable_autodiscovery: false,
         }
     }
 }
@@ -156,6 +158,7 @@ pub struct SnapchainGossip {
     system_tx: Sender<SystemMessage>,
     sync_channels: HashMap<InboundRequestId, sync::ResponseChannel>,
     read_node: bool,
+    enable_autodiscovery: bool,
     bootstrap_addrs: HashSet<String>,
     connected_bootstrap_addrs: HashSet<String>,
     announce_address: String,
@@ -210,10 +213,12 @@ impl SnapchainGossip {
 
                 // Set a custom gossipsub configuration
                 let gossipsub_config = gossipsub::ConfigBuilder::default()
-                    .heartbeat_interval(Duration::from_secs(10)) // This is set to aid debugging by not cluttering the log space
+                    .heartbeat_interval(Duration::from_millis(500)) // This might need to be lowered to 1/3 of the block time
                     .validation_mode(gossipsub::ValidationMode::Strict) // This sets the kind of message validation. The default is Strict (enforce message signing)
                     .message_id_fn(message_id_fn) // content-address mempool messages
                     .max_transmit_size(MAX_GOSSIP_MESSAGE_SIZE) // maximum message size that can be transmitted
+                    .mesh_n(10) // Try setting D to a higher value to see if it helps with slow sync (nodes will consume more bandwidth)
+                    .mesh_n_high(20) // 2x D, which is the recommended value
                     .build()
                     .map_err(|msg| io::Error::new(io::ErrorKind::Other, msg))?; // Temporary hack because `build` does not return a proper `std::error::Error`.
 
@@ -223,14 +228,17 @@ impl SnapchainGossip {
                     gossipsub_config,
                 )?;
 
-                let rpc = sync::Behaviour::new(sync::Config::default());
+                let rpc = sync::Behaviour::new(
+                    sync::Config::default().with_request_timeout(Duration::from_secs(5)),
+                );
 
+                // TODO(aditi): Connection limits are set high so that we don't keep kicking off read nodes for now
                 let connection_limits = libp2p_connection_limits::Behaviour::new(
                     ConnectionLimits::default()
-                        .with_max_established_incoming(Some(15))
-                        .with_max_established_outgoing(Some(15))
-                        .with_max_pending_incoming(Some(5))
-                        .with_max_pending_outgoing(Some(5)),
+                        // .with_max_pending_incoming(Some(5))
+                        // .with_max_pending_outgoing(Some(5)),
+                        .with_max_established_incoming(Some(100))
+                        .with_max_established_outgoing(Some(100)),
                 );
 
                 Ok(SnapchainBehavior {
@@ -301,6 +309,7 @@ impl SnapchainGossip {
             bootstrap_reconnect_interval: config.bootstrap_reconnect_interval,
             statsd_client,
             connected_bootstrap_addrs: HashSet::new(),
+            enable_autodiscovery: config.enable_autodiscovery,
         })
     }
 
@@ -353,8 +362,9 @@ impl SnapchainGossip {
 
     pub async fn check_and_reconnect_to_bootstrap_peers(&mut self) {
         let connected_peers_count = self.swarm.connected_peers().count();
-        // Validators should stay connected to all bootstrap peers. Read nodes should only try to connect if they're not connected to anybody else.
-        if !self.read_node || (self.read_node && connected_peers_count == 0) {
+        // Validators should stay connected to all bootstrap peers. Read nodes should only try to connect if they're connected to too few peers
+        if !self.read_node || (self.read_node && connected_peers_count < self.bootstrap_addrs.len())
+        {
             for addr in &self.bootstrap_addrs {
                 if !self.connected_bootstrap_addrs.contains(addr) {
                     warn!("Attempting to reconnect to bootstrap peer: {}", addr);
@@ -447,6 +457,9 @@ impl SnapchainGossip {
                                 warn!("Failed to send Listening message: {}", e);
                             }
                         },
+                        SwarmEvent::OutgoingConnectionError {connection_id: _, peer_id, error} => {
+                            warn!("Failed to dial peer: {:?} due to: {:?}", peer_id, error);
+                        },
                         SwarmEvent::Behaviour(SnapchainBehaviorEvent::Gossipsub(gossipsub::Event::Message {
                             propagation_source: peer_id,
                             message_id: _id,
@@ -501,6 +514,12 @@ impl SnapchainGossip {
                                         },
                                     }
                                 },
+                                sync::Event::OutboundFailure {peer, connection_id: _, error, request_id: _} => {
+                                    warn!("Failed to send RPC request to peer: {:?} due to: {:?}", peer, error);
+                                }
+                                sync::Event::InboundFailure {peer, connection_id: _, error, request_id: _} => {
+                                    warn!("Failed to send RPC response to peer: {:?} due to: {:?}", peer, error);
+                                }
                                 _ => {}
                             }
                         }
@@ -553,9 +572,19 @@ impl SnapchainGossip {
         }
     }
 
-    pub fn handle_contact_info(&mut self, contact_info: ContactInfo) {
+    pub fn handle_contact_info(&mut self, contact_info: ContactInfo, peer_id: PeerId) {
         // TODO(aditi): We might want to persist peers and reconnect to them on restart
+        if contact_info.body.is_none() {
+            warn!("Received empty contact info from peer: {}", peer_id);
+            return;
+        }
         let contact_info_body = contact_info.body.unwrap();
+        info!(
+            peer_id = peer_id.to_string(),
+            ip = contact_info_body.gossip_address,
+            "Received contact info from peer"
+        );
+
         let contact_peer_id = PeerId::from_bytes(&contact_info_body.peer_id).unwrap();
         if let Some(peer_id) = self
             .swarm
@@ -585,7 +614,9 @@ impl SnapchainGossip {
             return;
         }
 
-        let _ = Self::dial(&mut self.swarm, &contact_info_body.gossip_address);
+        if self.enable_autodiscovery {
+            let _ = Self::dial(&mut self.swarm, &contact_info_body.gossip_address);
+        }
     }
 
     pub fn map_gossip_bytes_to_system_message(
@@ -596,13 +627,9 @@ impl SnapchainGossip {
         match proto::GossipMessage::decode(gossip_message.as_slice()) {
             Ok(gossip_message) => match gossip_message.gossip_message {
                 Some(gossip_message::GossipMessage::ContactInfoMessage(contact_info)) => {
-                    info!(
-                        peer_id = peer_id.to_string(),
-                        "Received contact info from peer"
-                    );
                     // Validators should just dial the bootstrap set since the validator set is fixed.
                     if self.read_node {
-                        self.handle_contact_info(contact_info);
+                        self.handle_contact_info(contact_info, peer_id);
                     }
                     None
                 }

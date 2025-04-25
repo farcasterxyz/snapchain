@@ -99,6 +99,10 @@ impl MalachiteReadNodeActors {
         };
         let span = tracing::info_span!("node", name = %name);
 
+        let sync_config = ValueSyncConfig {
+            request_timeout: config.sync_request_timeout,
+            ..ValueSyncConfig::default()
+        };
         let network_actor = spawn_network_actor(gossip_tx.clone(), local_peer_id).await?;
         let host_actor =
             spawn_read_host(shard_id, statsd_client, engine, system_tx, config).await?;
@@ -106,7 +110,7 @@ impl MalachiteReadNodeActors {
             ctx.clone(),
             network_actor.clone(),
             host_actor.clone(),
-            ValueSyncConfig::default(),
+            sync_config,
             registry,
             span.clone(),
         )
