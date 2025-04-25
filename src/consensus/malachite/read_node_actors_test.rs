@@ -267,6 +267,11 @@ mod tests {
         ) = setup(0).await;
 
         let peer = PeerId::from_libp2p(&libp2p::PeerId::random());
+
+        actors
+            .cast_network_event(MalachiteNetworkEvent::PeerConnected(peer))
+            .unwrap();
+
         actors
             .cast_network_event(MalachiteNetworkEvent::Message(
                 Channel::Sync,
