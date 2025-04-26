@@ -461,87 +461,59 @@ mod tests {
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 10).await;
 
         // Test getting first page
-        let mut request = Request::new(proto::EventsRequest {
+        let request = Request::new(proto::EventsRequest {
             start_id: 0,
+            shard_index: None,
             stop_id: None,
             page_size: Some(3),
             page_token: None,
             reverse: None,
         });
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
         let response = service.get_events(request).await.unwrap();
         let events = response.get_ref().events.clone();
         assert_eq!(events.len(), 3);
         let next_page_token = response.get_ref().next_page_token.clone();
 
         // Test getting second page
-        let mut request = Request::new(proto::EventsRequest {
+        let request = Request::new(proto::EventsRequest {
             start_id: 0,
+            shard_index: None,
             stop_id: None,
             page_size: Some(3),
             page_token: next_page_token,
             reverse: None,
         });
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
         let response = service.get_events(request).await.unwrap();
         let events = response.get_ref().events.clone();
         assert_eq!(events.len(), 3);
-        let next_page_token = response.get_ref().next_page_token.clone();
 
-        // Test getting third page
-        let mut request = Request::new(proto::EventsRequest {
+        // Test getting from only one shard
+        let request = Request::new(proto::EventsRequest {
             start_id: 0,
-            stop_id: None,
-            page_size: Some(3),
-            page_token: next_page_token,
-            reverse: None,
-        });
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
-        let response = service.get_events(request).await.unwrap();
-        let events = response.get_ref().events.clone();
-        assert_eq!(events.len(), 3);
-        let next_page_token = response.get_ref().next_page_token.clone();
-
-        // Test getting final page
-        let mut request = Request::new(proto::EventsRequest {
-            start_id: 0,
-            stop_id: None,
-            page_size: Some(3),
-            page_token: next_page_token,
-            reverse: None,
-        });
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
-        let response = service.get_events(request).await.unwrap();
-        let events = response.get_ref().events.clone();
-        assert_eq!(events.len(), 1); // Last page has remaining event
-
-        // Test reverse pagination
-        let mut request = Request::new(proto::EventsRequest {
-            start_id: 0,
+            shard_index: Some(2),
             stop_id: None,
             page_size: Some(3),
             page_token: None,
-            reverse: Some(true),
+            reverse: None,
         });
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
         let response = service.get_events(request).await.unwrap();
         let events = response.get_ref().events.clone();
-        assert_eq!(events.len(), 3);
-        assert!(events[0].id > events[1].id); // Verify reverse order
+        assert_eq!(events.len(), 0); // No events in shard 2
 
-        // Test with start_id and stop_id with pagination
-        let mut request = Request::new(proto::EventsRequest {
+        // Test with start_id and stop_id with reverse pagination, on shard 1
+        let request = Request::new(proto::EventsRequest {
             start_id: 2,
+            shard_index: Some(1),
             stop_id: Some(8),
             page_size: Some(7),
             page_token: None,
-            reverse: None,
+            reverse: Some(true),
         });
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
         let response = service.get_events(request).await.unwrap();
         let events = response.get_ref().events.clone();
         assert_eq!(events.len(), 6);
-        assert!(events[0].id >= 2 && events[events.len()-1].id <= 8);
+        assert_eq!(events[0].id, 7);
+        assert_eq!(events[events.len() - 1].id, 2);
     }
 
     #[tokio::test]

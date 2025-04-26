@@ -40,7 +40,8 @@ use crate::proto::ValidationResponse;
 use crate::proto::VerificationAddAddressBody;
 use crate::proto::{Block, CastId, DbStats};
 use crate::proto::{
-    BlocksRequest, EventRequest, EventsRequest, EventsResponse, ShardChunksRequest, ShardChunksResponse, SubscribeRequest,
+    BlocksRequest, EventRequest, EventsRequest, EventsResponse, ShardChunksRequest,
+    ShardChunksResponse, SubscribeRequest,
 };
 use crate::proto::{FidRequest, FidTimestampRequest};
 use crate::proto::{GetInfoRequest, StorageLimitsResponse};
@@ -52,13 +53,13 @@ use crate::storage::constants::OnChainEventPostfix;
 use crate::storage::constants::RootPrefix;
 use crate::storage::db::PageOptions;
 use crate::storage::db::RocksDbTransactionBatch;
-use crate::storage::store::account::{EventsPage, HubEventIdGenerator};
 use crate::storage::store::account::MessagesPage;
 use crate::storage::store::account::UsernameProofStore;
 use crate::storage::store::account::{message_bytes_decode, IntoI32};
 use crate::storage::store::account::{
     CastStore, LinkStore, ReactionStore, UserDataStore, VerificationStore,
 };
+use crate::storage::store::account::{EventsPage, HubEventIdGenerator};
 use crate::storage::store::engine::{MempoolMessage, MessageValidationError, Senders, ShardEngine};
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
@@ -818,43 +819,57 @@ impl HubService for MyHubService {
 
     async fn get_events(
         &self,
-        request: Request<EventsRequest>
+        request: Request<EventsRequest>,
     ) -> Result<Response<EventsResponse>, Status> {
         let req = request.into_inner();
 
-        let num_shards = self.shard_stores.len();
+        let num_shards;
+        let shard_stores;
+        match req.shard_index {
+            None => {
+                num_shards = self.num_shards;
+                shard_stores = self.shard_stores.values().collect::<Vec<_>>();
+            }
+            Some(index) => {
+                num_shards = 1;
+                shard_stores = match self.shard_stores.get(&index) {
+                    Some(store) => {
+                        vec![store]
+                    }
+                    None => return Err(Status::invalid_argument("Shard not found".to_string())),
+                };
+            }
+        }
         let per_shard_tokens: Vec<Option<Vec<u8>>> = if let Some(token_bytes) = req.page_token {
             serde_json::from_slice(&token_bytes)
                 .map_err(|e| Status::invalid_argument(format!("Invalid page token: {}", e)))?
         } else {
-            vec![None; num_shards]
+            vec![None; num_shards as usize]
         };
-        if per_shard_tokens.len() != num_shards {
+        if per_shard_tokens.len() != num_shards as usize {
             return Err(Status::invalid_argument(
                 "Page token does not match number of shards".to_string(),
             ));
         }
-        let pages: Vec<EventsPage> = self
-            .shard_stores
+        let pages: Vec<EventsPage> = shard_stores
             .iter()
             .zip(per_shard_tokens.into_iter())
-            .map(|(shard_entry, shard_token)| {
+            .map(|(store, shard_token)| {
                 let page_options = PageOptions {
                     page_size: req.page_size.map(|s| s as usize),
                     page_token: shard_token,
                     reverse: req.reverse.unwrap_or(false),
                 };
-                return shard_entry.1.get_events(req.start_id, req.stop_id, Some(page_options))
+                return store
+                    .get_events(req.start_id, req.stop_id, Some(page_options))
                     .unwrap_or(EventsPage {
                         events: vec![],
                         next_page_token: None,
                     });
             })
             .collect();
-        let combined_events: Vec<HubEvent> = pages
-            .iter()
-            .flat_map(|page| page.events.clone())
-            .collect();
+        let combined_events: Vec<HubEvent> =
+            pages.iter().flat_map(|page| page.events.clone()).collect();
         let next_page_tokens: Vec<Option<Vec<u8>>> =
             pages.into_iter().map(|page| page.next_page_token).collect();
         let new_page_token = serde_json::to_vec(&next_page_tokens)

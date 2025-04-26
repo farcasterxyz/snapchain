@@ -18,7 +18,8 @@ use crate::proto::{
     UserDataType, UserNameType,
 };
 use crate::proto::{
-    casts_by_parent_request, hub_event, link_request, links_by_target_request, on_chain_event, reaction_request, reactions_by_target_request, Protocol,
+    casts_by_parent_request, hub_event, link_request, links_by_target_request, on_chain_event,
+    reaction_request, reactions_by_target_request, Protocol,
 };
 use crate::storage::store::account::message_decode;
 
@@ -593,9 +594,11 @@ pub struct SignerMigratedEventBody {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IdRegisterEventBody {
+    #[serde(with = "serdehex")]
     pub to: Vec<u8>,
     #[serde(rename = "eventType")]
     pub event_type: IdRegisterEventType,
+    #[serde(with = "serdehex")]
     pub from: Vec<u8>,
     #[serde(rename = "recoveryAddress")]
     pub recovery_address: Vec<u8>,
@@ -603,6 +606,7 @@ pub struct IdRegisterEventBody {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StorageRentEventBody {
+    #[serde(with = "serdehex")]
     pub payer: Vec<u8>,
     pub units: u32,
     pub expiry: u32,
@@ -670,6 +674,7 @@ pub struct OnChainEventRequest {
     reverse: Option<bool>,
 }
 
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum HubEventType {
     HUB_EVENT_TYPE_NONE = 0,
@@ -713,10 +718,7 @@ pub struct MergeOnChainEventBody {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MergeUsernameProofBody {
-    #[serde(
-        rename = "usernameProof",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "usernameProof", skip_serializing_if = "Option::is_none")]
     pub username_proof: Option<UsernameProofBody>,
     #[serde(
         rename = "deletedUsernameProof",
@@ -740,20 +742,11 @@ pub struct HubEvent {
     #[serde(rename = "type")]
     pub hub_event_type: String,
     pub id: u64,
-    #[serde(
-        rename = "mergeMessageBody",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "mergeMessageBody", skip_serializing_if = "Option::is_none")]
     pub merge_message_body: Option<MergeMessageBody>,
-    #[serde(
-        rename = "pruneMessageBody",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "pruneMessageBody", skip_serializing_if = "Option::is_none")]
     pub prune_message_body: Option<PruneMessageBody>,
-    #[serde(
-        rename = "revokeMessageBody",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "revokeMessageBody", skip_serializing_if = "Option::is_none")]
     pub revoke_message_body: Option<RevokeMessageBody>,
     #[serde(
         rename = "mergeUsernameProofBody",
@@ -765,10 +758,7 @@ pub struct HubEvent {
         skip_serializing_if = "Option::is_none"
     )]
     pub merge_on_chain_event_body: Option<MergeOnChainEventBody>,
-    #[serde(
-        rename = "mergeFailureBody",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "mergeFailureBody", skip_serializing_if = "Option::is_none")]
     pub merge_failure_body: Option<MergeFailureBody>,
     #[serde(rename = "blockNumber")]
     pub block_number: u64,
@@ -779,25 +769,33 @@ pub struct HubEvent {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EventsResponse {
     pub events: Vec<HubEvent>,
-    #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
-    pub next_page_token: Option<String>,
+    // TODO: What's the best way to support next page token with multiple shards?
+    // #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
+    // pub next_page_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EventsRequest {
-    #[serde(rename = "startId")]
+    #[serde(default, rename = "from_event_id")] // To keep it consistent with hubble
     start_id: u64,
-    #[serde(rename = "stopId", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "shardIndex",
+        skip_serializing_if = "Option::is_none"
+    )]
+    shard_index: Option<u32>,
+    #[serde(default, rename = "stopId", skip_serializing_if = "Option::is_none")]
     stop_id: Option<u64>,
-    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
     #[serde(
+        default,
         with = "serdebase64opt",
         rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     page_token: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     reverse: Option<bool>,
 }
 
@@ -1397,7 +1395,9 @@ fn map_proto_messages_response_to_json_paged_response(
     })
 }
 
-fn map_proto_on_chain_event_to_json_on_chain_event(onchain_event: proto::OnChainEvent) -> Result<OnChainEvent, ErrorResponse> {
+fn map_proto_on_chain_event_to_json_on_chain_event(
+    onchain_event: proto::OnChainEvent,
+) -> Result<OnChainEvent, ErrorResponse> {
     let mut signer_event_body: Option<SignerEventBody> = None;
     let mut signer_migrated_event_body: Option<SignerMigratedEventBody> = None;
     let mut id_register_event_body: Option<IdRegisterEventBody> = None;
@@ -1483,33 +1483,41 @@ fn map_proto_hub_event_to_json_hub_event(
             merge_message_body = body.message.clone().map(|msg| MergeMessageBody {
                 message: map_proto_message_to_json_message(msg).unwrap(),
                 deleted_messages: body
-                .deleted_messages
-                .iter()
-                .map(|m| map_proto_message_to_json_message(m.clone()).unwrap())
-                .collect(),
+                    .deleted_messages
+                    .iter()
+                    .map(|m| map_proto_message_to_json_message(m.clone()).unwrap())
+                    .collect(),
             });
         }
         Some(hub_event::Body::PruneMessageBody(body)) => {
             prune_message_body = body.message.clone().map(|msg| PruneMessageBody {
-                message: map_proto_message_to_json_message(msg).unwrap()
+                message: map_proto_message_to_json_message(msg).unwrap(),
             })
         }
         Some(hub_event::Body::RevokeMessageBody(body)) => {
             revoke_message_body = body.message.clone().map(|msg| RevokeMessageBody {
-                message: map_proto_message_to_json_message(msg).unwrap()
+                message: map_proto_message_to_json_message(msg).unwrap(),
             })
         }
         Some(hub_event::Body::MergeUsernameProofBody(body)) => {
-            let username_proof_body = body.username_proof.clone()
+            let username_proof_body = body
+                .username_proof
+                .clone()
                 .map(|u| map_proto_username_proof_body_to_json_username_proof_body(u).unwrap());
-            let username_proof_message = body.username_proof_message.clone()
+            let username_proof_message = body
+                .username_proof_message
+                .clone()
                 .map(|msg| map_proto_message_to_json_message(msg).unwrap());
-            let deleted_username_proof_body = body.deleted_username_proof.clone()
+            let deleted_username_proof_body = body
+                .deleted_username_proof
+                .clone()
                 .map(|u| map_proto_username_proof_body_to_json_username_proof_body(u).unwrap());
-            let deleted_username_proof_message = body.deleted_username_proof_message.clone()
-            .map(|msg| map_proto_message_to_json_message(msg).unwrap());
+            let deleted_username_proof_message = body
+                .deleted_username_proof_message
+                .clone()
+                .map(|msg| map_proto_message_to_json_message(msg).unwrap());
 
-            merge_username_proof_body =  Some(MergeUsernameProofBody {
+            merge_username_proof_body = Some(MergeUsernameProofBody {
                 username_proof: username_proof_body,
                 username_proof_message,
                 deleted_username_proof: deleted_username_proof_body,
@@ -1517,9 +1525,10 @@ fn map_proto_hub_event_to_json_hub_event(
             });
         }
         Some(hub_event::Body::MergeOnChainEventBody(body)) => {
-            merge_on_chain_event_body = body.on_chain_event.clone().map(|e| MergeOnChainEventBody {
-                on_chain_event: map_proto_on_chain_event_to_json_on_chain_event(e).unwrap()
-            });
+            merge_on_chain_event_body =
+                body.on_chain_event.clone().map(|e| MergeOnChainEventBody {
+                    on_chain_event: map_proto_on_chain_event_to_json_on_chain_event(e).unwrap(),
+                });
         }
         Some(hub_event::Body::MergeFailure(body)) => {
             merge_failure_body = body.message.clone().map(|msg| MergeFailureBody {
@@ -1617,10 +1626,7 @@ pub trait HubHttpService {
         &self,
         req: OnChainEventRequest,
     ) -> Result<OnChainEventResponse, ErrorResponse>;
-    async fn get_events(
-        &self,
-        req: EventsRequest,
-    ) -> Result<EventsResponse, ErrorResponse>;
+    async fn get_events(&self, req: EventsRequest) -> Result<EventsResponse, ErrorResponse>;
 }
 
 #[async_trait]
@@ -2285,6 +2291,7 @@ impl HubHttpService for HubHttpServiceImpl {
 
         let grpc_req = tonic::Request::new(proto::EventsRequest {
             start_id: req.start_id,
+            shard_index: req.shard_index,
             stop_id: req.stop_id,
             page_size: req.page_size,
             page_token: req.page_token,
@@ -2304,9 +2311,6 @@ impl HubHttpService for HubHttpServiceImpl {
                 .iter()
                 .map(|e| map_proto_hub_event_to_json_hub_event(e.clone()).unwrap())
                 .collect(),
-            next_page_token: events_response
-                .next_page_token
-                .map(|t| BASE64_STANDARD.encode(t)),
         })
     }
 }
@@ -2480,12 +2484,9 @@ impl Router {
                 .await
             }
             (&Method::GET, "/v1/events") => {
-                self.handle_request::<EventsRequest, EventsResponse, _>(
-                    req,
-                    |service, req| {
-                        Box::pin(async move { service.get_events(req).await })
-                    },
-                )
+                self.handle_request::<EventsRequest, EventsResponse, _>(req, |service, req| {
+                    Box::pin(async move { service.get_events(req).await })
+                })
                 .await
             }
             _ => Ok(Response::builder()
