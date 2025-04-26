@@ -319,28 +319,19 @@ pub struct ShardInfo {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FidRequest {
     pub fid: u64,
-    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
     #[serde(
         default,
         with = "serdebase64opt",
-        rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     pub page_token: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
-    #[serde(
-        default,
-        rename = "startTimestamp",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_timestamp: Option<u64>,
-    #[serde(
-        default,
-        rename = "stopTimestamp",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_timestamp: Option<u64>,
 }
 
@@ -352,12 +343,11 @@ pub struct CastsByParentRequest {
     pub hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
     #[serde(
         default,
         with = "serdebase64opt",
-        rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     pub page_token: Option<Vec<u8>>,
@@ -381,12 +371,11 @@ pub struct ReactionRequest {
 pub struct ReactionsByFidRequest {
     fid: u64,
     reaction_type: ReactionType,
-    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
     #[serde(
         default,
         with = "serdebase64opt",
-        rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     page_token: Option<Vec<u8>>,
@@ -401,12 +390,11 @@ pub struct ReactionsByCastRequest {
     pub target_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reaction_type: Option<ReactionType>,
-    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
     #[serde(
         default,
         with = "serdebase64opt",
-        rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     pub page_token: Option<Vec<u8>>,
@@ -422,12 +410,11 @@ pub struct ReactionsByTargetRequest {
     pub target_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reaction_type: Option<ReactionType>,
-    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
     #[serde(
         default,
         with = "serdebase64opt",
-        rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     pub page_token: Option<Vec<u8>>,
@@ -448,12 +435,11 @@ pub struct LinksByFidRequest {
     fid: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     link_type: Option<String>,
-    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
     #[serde(
         default,
         with = "serdebase64opt",
-        rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     page_token: Option<Vec<u8>>,
@@ -467,12 +453,11 @@ pub struct LinksByTargetRequest {
     target_fid: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     link_type: Option<String>,
-    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
     #[serde(
         default,
         with = "serdebase64opt",
-        rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     page_token: Option<Vec<u8>>,
@@ -600,7 +585,7 @@ pub struct IdRegisterEventBody {
     pub event_type: IdRegisterEventType,
     #[serde(with = "serdehex")]
     pub from: Vec<u8>,
-    #[serde(rename = "recoveryAddress")]
+    #[serde(with = "serdehex", rename = "recoveryAddress")]
     pub recovery_address: Vec<u8>,
 }
 
@@ -666,7 +651,6 @@ pub struct OnChainEventRequest {
     #[serde(
         default,
         with = "serdebase64opt",
-        rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     page_token: Option<Vec<u8>>,
@@ -778,20 +762,15 @@ pub struct EventsResponse {
 pub struct EventsRequest {
     #[serde(default, rename = "from_event_id")] // To keep it consistent with hubble
     start_id: u64,
-    #[serde(
-        default,
-        rename = "shardIndex",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     shard_index: Option<u32>,
-    #[serde(default, rename = "stopId", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     stop_id: Option<u64>,
-    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
     #[serde(
         default,
         with = "serdebase64opt",
-        rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     page_token: Option<Vec<u8>>,
