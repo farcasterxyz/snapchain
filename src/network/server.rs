@@ -802,7 +802,6 @@ impl HubService for MyHubService {
         &self,
         request: Request<EventRequest>,
     ) -> Result<Response<HubEvent>, Status> {
-        authenticate_request(&request, &self.allowed_users)?;
         let request = request.into_inner();
         // Not sure this is the correct way to be handling the shard
         let stores = self.get_stores_for_shard(request.shard_index)?;
@@ -860,12 +859,20 @@ impl HubService for MyHubService {
                     page_token: shard_token,
                     reverse: req.reverse.unwrap_or(false),
                 };
-                return store
+                let raw_result = store
                     .get_events(req.start_id, req.stop_id, Some(page_options))
                     .unwrap_or(EventsPage {
                         events: vec![],
                         next_page_token: None,
                     });
+                EventsPage {
+                    events: raw_result
+                        .events
+                        .into_iter()
+                        .map(|event| Self::rewrite_hub_event(event, store.shard_id))
+                        .collect(),
+                    next_page_token: raw_result.next_page_token,
+                }
             })
             .collect();
         let combined_events: Vec<HubEvent> =

@@ -514,6 +514,7 @@ mod tests {
         assert_eq!(events.len(), 6);
         assert_eq!(events[0].id, 7);
         assert_eq!(events[events.len() - 1].id, 2);
+        assert!(events[0].shard_index > 0);
     }
 
     #[tokio::test]
