@@ -1,3 +1,4 @@
+use crate::consensus::proposer::current_time;
 use crate::core::types::{Address, Vote};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::storage::db::{self, RocksDB};
@@ -241,6 +242,32 @@ pub async fn commit_message(engine: &mut ShardEngine, msg: &proto::Message) -> S
 }
 
 #[cfg(test)]
+pub async fn commit_messages(engine: &mut ShardEngine, msgs: Vec<proto::Message>) -> ShardChunk {
+    use itertools::Itertools;
+
+    let state_change = engine.propose_state_change(
+        1,
+        msgs.iter()
+            .map(|msg| MempoolMessage::UserMessage(msg.clone()))
+            .collect_vec(),
+    );
+
+    if state_change.transactions.is_empty() {
+        panic!("Failed to propose message");
+    }
+
+    let chunk = validate_and_commit_state_change(engine, &state_change);
+    assert_eq!(
+        state_change.new_state_root,
+        chunk.header.as_ref().unwrap().shard_root
+    );
+    for msg in msgs {
+        assert!(engine.trie_key_exists(trie_ctx(), &TrieKey::for_message(&msg)));
+    }
+    chunk
+}
+
+#[cfg(test)]
 pub fn trie_ctx() -> &'static mut merkle_trie::Context<'static> {
     Box::leak(Box::new(merkle_trie::Context::new()))
 }
@@ -290,6 +317,7 @@ pub fn state_change_to_shard_chunk(
         shard_index,
         block_number,
     });
+    chunk.header.as_mut().unwrap().timestamp = current_time();
     chunk.transactions = change.transactions.clone();
     chunk
 }

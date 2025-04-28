@@ -6,8 +6,8 @@ mod tests {
     use prost::Message;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::time::Duration;
-    use tokio::time::timeout;
+    use std::time::{Duration, Instant};
+    use tokio::time::{sleep, timeout};
 
     use crate::connectors::onchain_events::L1Client;
     use crate::core::validations::{self, verification::VerificationAddressClaim};
@@ -201,7 +201,7 @@ mod tests {
             limits.clone(),
             test_helper::statsd_client(),
         );
-        let shard1_senders = Senders::new();
+        let shard1_senders = engine1.get_senders();
 
         let shard2_stores = Stores::new(
             db2,
@@ -210,7 +210,7 @@ mod tests {
             limits.clone(),
             test_helper::statsd_client(),
         );
-        let shard2_senders = Senders::new();
+        let shard2_senders = engine2.get_senders();
         let stores = HashMap::from([(1, shard1_stores), (2, shard2_stores)]);
         let senders = HashMap::from([(1, shard1_senders), (2, shard2_senders)]);
         let num_shards = senders.len() as u32;
@@ -611,6 +611,65 @@ mod tests {
             response.message(),
             "bad_request.validation_failure/unknown fid"
         );
+    }
+
+    #[tokio::test]
+    async fn test_event_timestamp() {
+        let (_stores, _senders, [mut engine1, _], service) = make_server(None).await;
+
+        test_helper::register_user(
+            SHARD1_FID,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine1,
+        )
+        .await;
+        let cast_add = messages_factory::casts::create_cast_add(SHARD1_FID, "test", None, None);
+        let cast_add2 = messages_factory::casts::create_cast_add(SHARD1_FID, "test2", None, None);
+
+        test_helper::commit_messages(&mut engine1, vec![cast_add, cast_add2]).await;
+
+        sleep(Duration::from_secs(1)).await;
+
+        let cast_add3 = messages_factory::casts::create_cast_add(SHARD1_FID, "test3", None, None);
+
+        test_helper::commit_message(&mut engine1, &cast_add3).await;
+
+        let request = Request::new(SubscribeRequest {
+            event_types: vec![HubEventType::MergeMessage as i32],
+            from_id: Some(0),
+            shard_index: Some(1),
+        });
+        let mut listener = service.subscribe(request).await.unwrap();
+
+        let mut events = vec![];
+        let start_time = Instant::now();
+        loop {
+            if start_time.elapsed() > Duration::from_secs(2) {
+                break;
+            }
+
+            let event = timeout(Duration::from_millis(100), listener.get_mut().next()).await;
+            if let Ok(Some(Ok(hub_event))) = event {
+                assert_ne!(hub_event.produced_at, 0);
+                events.push(hub_event);
+            }
+        }
+
+        let cast_add4 = messages_factory::casts::create_cast_add(SHARD1_FID, "test4", None, None);
+
+        test_helper::commit_message(&mut engine1, &cast_add4).await;
+
+        let event = timeout(Duration::from_millis(100), listener.get_mut().next()).await;
+        if let Ok(Some(Ok(hub_event))) = event {
+            assert_ne!(hub_event.produced_at, 0);
+            events.push(hub_event);
+        }
+
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0].produced_at, events[1].produced_at);
+        assert_ne!(events[1].produced_at, events[2].produced_at);
+        assert_ne!(events[2].produced_at, events[3].produced_at);
     }
 
     #[tokio::test]
