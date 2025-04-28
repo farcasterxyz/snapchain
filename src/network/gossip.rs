@@ -714,6 +714,7 @@ impl SnapchainGossip {
                         Some(SystemMessage::Mempool(MempoolRequest::AddMessage(
                             mempool_message,
                             MempoolSource::Gossip,
+                            None,
                         )))
                     } else {
                         warn!("Unknown mempool message from peer: {}", peer_id);

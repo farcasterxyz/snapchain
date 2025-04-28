@@ -28,7 +28,7 @@ async fn wait_for_message(
                 match received {
                     Some(SystemMessage::Mempool(msg))  => {
                         match msg {
-                            MempoolRequest::AddMessage(MempoolMessage::UserMessage(actual_message), source) => {
+                            MempoolRequest::AddMessage(MempoolMessage::UserMessage(actual_message), source, _) => {
                                 receive_counts += 1;
                                 assert_eq!(actual_message.hash, expected_message.hash);
                                 assert_eq!(actual_message.data.is_some(), true);

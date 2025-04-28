@@ -91,6 +91,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                 .send(MempoolRequest::AddMessage(
                     MempoolMessage::UserMessage(msg.clone()),
                     MempoolSource::Gossip,
+                    None,
                 ))
                 .await
                 .unwrap();

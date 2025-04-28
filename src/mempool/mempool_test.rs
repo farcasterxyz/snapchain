@@ -117,10 +117,10 @@ mod tests {
         )
         .await;
         let cast = create_cast_add(1234, "hello", None, None);
-        let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast.clone()));
+        let (valid, _) = mempool.message_is_valid(&MempoolMessage::UserMessage(cast.clone()));
         assert!(valid);
         test_helper::commit_message(&mut engine, &cast).await;
-        let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast.clone()));
+        let (valid, _) = mempool.message_is_valid(&MempoolMessage::UserMessage(cast.clone()));
         assert!(!valid)
     }
 
@@ -128,16 +128,18 @@ mod tests {
     async fn test_duplicate_onchain_event_is_invalid() {
         let (mut engine, _, mut mempool, _, _, _, _) = setup(None, false).await;
         let onchain_event = events_factory::create_rent_event(1234, Some(10), None, false);
-        let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
-            on_chain_event: Some(onchain_event.clone()),
-            fname_transfer: None,
-        }));
+        let (valid, _) =
+            mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
+                on_chain_event: Some(onchain_event.clone()),
+                fname_transfer: None,
+            }));
         assert!(valid);
         test_helper::commit_event(&mut engine, &onchain_event).await;
-        let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
-            on_chain_event: Some(onchain_event.clone()),
-            fname_transfer: None,
-        }));
+        let (valid, _) =
+            mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
+                on_chain_event: Some(onchain_event.clone()),
+                fname_transfer: None,
+            }));
         assert!(!valid)
     }
 
@@ -163,16 +165,18 @@ mod tests {
                 r#type: UserNameType::UsernameTypeEnsL1 as i32,
             }),
         };
-        let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
-            on_chain_event: None,
-            fname_transfer: Some(fname_transfer.clone()),
-        }));
+        let (valid, _) =
+            mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
+                on_chain_event: None,
+                fname_transfer: Some(fname_transfer.clone()),
+            }));
         assert!(valid);
         test_helper::commit_fname_transfer(&mut engine, &fname_transfer).await;
-        let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
-            on_chain_event: None,
-            fname_transfer: Some(fname_transfer),
-        }));
+        let (valid, _) =
+            mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
+                on_chain_event: None,
+                fname_transfer: Some(fname_transfer),
+            }));
         assert!(!valid)
     }
 
@@ -196,13 +200,13 @@ mod tests {
         commit_event(&mut engine, &signer_event).await;
 
         let cast = create_cast_add(FID_FOR_TEST, "hello", None, None);
-        let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast));
+        let (valid, _) = mempool.message_is_valid(&MempoolMessage::UserMessage(cast));
         assert!(!valid);
 
         commit_event(&mut engine, &default_storage_event(FID_FOR_TEST)).await;
 
         let cast = create_cast_add(FID_FOR_TEST, "hello", None, None);
-        let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast));
+        let (valid, _) = mempool.message_is_valid(&MempoolMessage::UserMessage(cast));
         assert!(valid);
     }
 
@@ -223,6 +227,7 @@ mod tests {
             .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(create_cast_add(123, "hello", None, None)),
                 MempoolSource::Local,
+                None,
             ))
             .await
             .unwrap();
@@ -230,6 +235,7 @@ mod tests {
             .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(create_cast_add(435, "hello2", None, None)),
                 MempoolSource::Local,
+                None,
             ))
             .await
             .unwrap();
@@ -266,6 +272,7 @@ mod tests {
             .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast.clone()),
                 MempoolSource::Local,
+                None,
             ))
             .await
             .unwrap();
@@ -277,6 +284,7 @@ mod tests {
                     fname_transfer: None,
                 }),
                 MempoolSource::Local,
+                None,
             ))
             .await
             .unwrap();
@@ -343,12 +351,14 @@ mod tests {
             .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast1.clone()),
                 MempoolSource::Local,
+                None,
             ))
             .await;
         let _ = mempool_tx
             .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast2),
                 MempoolSource::Local,
+                None,
             ))
             .await;
 
@@ -453,6 +463,7 @@ mod tests {
             .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast.clone()),
                 MempoolSource::Local,
+                None,
             ))
             .await
             .unwrap();
@@ -462,6 +473,7 @@ mod tests {
             .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast),
                 MempoolSource::Local,
+                None,
             ))
             .await
             .unwrap();
@@ -471,6 +483,7 @@ mod tests {
             .send(MempoolRequest::AddMessage(
                 MempoolMessage::UserMessage(cast2),
                 MempoolSource::Gossip,
+                None,
             ))
             .await
             .unwrap();
