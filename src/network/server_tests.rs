@@ -17,12 +17,12 @@ mod tests {
     use crate::network::server::MyHubService;
     use crate::proto::hub_service_server::HubService;
     use crate::proto::{
-        self, HubEvent, HubEventType, UserNameProof, UserNameType, UsernameProofRequest,
-        VerificationAddAddressBody,
+        self, EventRequest, HubEvent, HubEventType, UserNameProof, UserNameType,
+        UsernameProofRequest, VerificationAddAddressBody,
     };
     use crate::proto::{FidRequest, SubscribeRequest};
     use crate::storage::db::{self, RocksDB, RocksDbTransactionBatch};
-    use crate::storage::store::account::SEQUENCE_BITS;
+    use crate::storage::store::account::{HubEventIdGenerator, SEQUENCE_BITS};
     use crate::storage::store::engine::{Senders, ShardEngine};
     use crate::storage::store::stores::Stores;
     use crate::storage::store::test_helper::register_user;
@@ -627,13 +627,14 @@ mod tests {
         let cast_add = messages_factory::casts::create_cast_add(SHARD1_FID, "test", None, None);
         let cast_add2 = messages_factory::casts::create_cast_add(SHARD1_FID, "test2", None, None);
 
-        test_helper::commit_messages(&mut engine1, vec![cast_add, cast_add2]).await;
+        let shard_chunk1 =
+            test_helper::commit_messages(&mut engine1, vec![cast_add, cast_add2]).await;
 
         sleep(Duration::from_secs(1)).await;
 
         let cast_add3 = messages_factory::casts::create_cast_add(SHARD1_FID, "test3", None, None);
 
-        test_helper::commit_message(&mut engine1, &cast_add3).await;
+        let shard_chunk2 = test_helper::commit_message(&mut engine1, &cast_add3).await;
 
         let request = Request::new(SubscribeRequest {
             event_types: vec![HubEventType::MergeMessage as i32],
@@ -658,7 +659,7 @@ mod tests {
 
         let cast_add4 = messages_factory::casts::create_cast_add(SHARD1_FID, "test4", None, None);
 
-        test_helper::commit_message(&mut engine1, &cast_add4).await;
+        let shard_chunk3 = test_helper::commit_message(&mut engine1, &cast_add4).await;
 
         let event = timeout(Duration::from_millis(100), listener.get_mut().next()).await;
         if let Ok(Some(Ok(hub_event))) = event {
@@ -667,9 +668,38 @@ mod tests {
         }
 
         assert_eq!(events.len(), 4);
-        assert_eq!(events[0].produced_at, events[1].produced_at);
-        assert_ne!(events[1].produced_at, events[2].produced_at);
-        assert_ne!(events[2].produced_at, events[3].produced_at);
+        assert_eq!(
+            events[0].produced_at,
+            shard_chunk1.header.as_ref().unwrap().timestamp
+        );
+        assert_eq!(
+            events[1].produced_at,
+            shard_chunk1.header.as_ref().unwrap().timestamp
+        );
+        assert_eq!(
+            events[2].produced_at,
+            shard_chunk2.header.unwrap().timestamp
+        );
+
+        let mut req = Request::new(EventRequest {
+            shard_index: 1,
+            id: HubEventIdGenerator::make_event_id(
+                shard_chunk3
+                    .header
+                    .as_ref()
+                    .unwrap()
+                    .height
+                    .unwrap()
+                    .block_number,
+                0,
+            ),
+        });
+        add_auth_header(&mut req, USER_NAME, PASSWORD);
+        let res = service.get_event(req).await.unwrap();
+        assert_eq!(
+            res.into_inner().produced_at,
+            shard_chunk3.header.unwrap().timestamp
+        );
     }
 
     #[tokio::test]

@@ -900,6 +900,7 @@ impl HubService for MyHubService {
                 if let Ok(Some(chunk)) = chunk {
                     hub_event.produced_at = chunk.header.as_ref().unwrap().timestamp
                 }
+
                 Ok(Response::new(hub_event))
             }
             Err(err) => Err(Status::internal(err.to_string())),
