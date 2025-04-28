@@ -3,7 +3,7 @@ use super::account::{
     VerificationStore, VerificationStoreDef,
 };
 use crate::core::error::HubError;
-use crate::proto::{Height, MessageType};
+use crate::proto::MessageType;
 use crate::proto::{
     HubEvent, StorageLimit, StorageLimitsResponse, StorageUnitDetails, StorageUnitType, StoreType,
 };
@@ -349,20 +349,6 @@ impl Stores {
                 })?,
         );
         Ok(revoke_events)
-    }
-
-    pub fn populate_event_produced_at(&self, event: &mut HubEvent) {
-        let chunk = self.shard_store.get_chunk_by_height(
-            Height {
-                shard_index: self.shard_id,
-                block_number: event.block_number,
-            }
-            .as_u64(),
-        );
-
-        if let Ok(Some(chunk)) = chunk {
-            event.produced_at = chunk.header.unwrap().timestamp;
-        }
     }
 
     pub fn get_events(

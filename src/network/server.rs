@@ -6,8 +6,6 @@ use crate::core::validations;
 use crate::core::validations::verification::VerificationAddressClaim;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::mempool::routing;
-use crate::proto::cast_add_body;
-use crate::proto::casts_by_parent_request;
 use crate::proto::hub_service_server::HubService;
 use crate::proto::link_body;
 use crate::proto::links_by_target_request;
@@ -38,6 +36,8 @@ use crate::proto::UsernameProofsResponse;
 use crate::proto::ValidationResponse;
 use crate::proto::VerificationAddAddressBody;
 use crate::proto::{self};
+use crate::proto::{cast_add_body, Height};
+use crate::proto::{casts_by_parent_request, ShardChunk};
 use crate::proto::{Block, CastId, DbStats};
 use crate::proto::{
     BlocksRequest, EventRequest, EventsRequest, EventsResponse, ShardChunksRequest,
@@ -773,6 +773,7 @@ impl HubService for MyHubService {
                         "[subscribe] Replaying old events for shard {}",
                         store.shard_id
                     );
+                    let mut last_chunk: Option<ShardChunk> = None;
                     loop {
                         let old_events = store
                             .get_events(
@@ -789,7 +790,34 @@ impl HubService for MyHubService {
                         for mut event in old_events.events {
                             if event_types.contains(&event.r#type) {
                                 Self::rewrite_hub_event(&mut event, store.shard_id);
-                                store.populate_event_produced_at(&mut event);
+
+                                if last_chunk
+                                    .as_ref()
+                                    .map(|chunk| {
+                                        return event.block_number
+                                            != chunk
+                                                .header
+                                                .as_ref()
+                                                .unwrap()
+                                                .height
+                                                .unwrap()
+                                                .block_number;
+                                    })
+                                    .unwrap_or(true)
+                                {
+                                    let chunk = store.shard_store.get_chunk_by_height(
+                                        Height {
+                                            shard_index: store.shard_id,
+                                            block_number: event.block_number,
+                                        }
+                                        .as_u64(),
+                                    );
+                                    last_chunk = chunk.unwrap_or(None);
+                                }
+
+                                if let Some(chunk) = &last_chunk {
+                                    event.produced_at = chunk.header.as_ref().unwrap().timestamp;
+                                }
 
                                 if let Err(_) = server_tx.send(Ok(event)).await {
                                     return;
@@ -861,7 +889,17 @@ impl HubService for MyHubService {
         match hub_event_result {
             Ok(mut hub_event) => {
                 Self::rewrite_hub_event(&mut hub_event, stores.shard_id);
-                stores.populate_event_produced_at(&mut hub_event);
+
+                let chunk = stores.shard_store.get_chunk_by_height(
+                    Height {
+                        shard_index: stores.shard_id,
+                        block_number: hub_event.block_number,
+                    }
+                    .as_u64(),
+                );
+                if let Ok(Some(chunk)) = chunk {
+                    hub_event.produced_at = chunk.header.as_ref().unwrap().timestamp
+                }
                 Ok(Response::new(hub_event))
             }
             Err(err) => Err(Status::internal(err.to_string())),

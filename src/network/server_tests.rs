@@ -122,6 +122,7 @@ mod tests {
                     body: None,
                     block_number: 1,
                     shard_index: 1,
+                    produced_at: 0,
                 })
                 .unwrap();
         }
@@ -138,6 +139,7 @@ mod tests {
                     body: None,
                     block_number: 1,
                     shard_index: 1,
+                    produced_at: 0,
                 },
             )
             .unwrap();
@@ -372,6 +374,7 @@ mod tests {
             body: None,
             block_number: 0,
             shard_index: 0,
+            produced_at: 0,
         };
 
         let db = stores.get(&1u32).unwrap().shard_store.db.clone();
