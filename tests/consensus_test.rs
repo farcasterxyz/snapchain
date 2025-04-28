@@ -533,6 +533,7 @@ async fn register_fid(fid: u64, messages_tx: Sender<MempoolRequest>) -> SigningK
                 fname_transfer: None,
             }),
             MempoolSource::Local,
+            None,
         ))
         .await
         .unwrap();
@@ -548,6 +549,7 @@ async fn register_fid(fid: u64, messages_tx: Sender<MempoolRequest>) -> SigningK
                 fname_transfer: None,
             }),
             MempoolSource::Local,
+            None,
         ))
         .await
         .unwrap();
@@ -563,6 +565,7 @@ async fn register_fid(fid: u64, messages_tx: Sender<MempoolRequest>) -> SigningK
                 fname_transfer: None,
             }),
             MempoolSource::Local,
+            None,
         ))
         .await
         .unwrap();
@@ -589,7 +592,11 @@ async fn send_messages(messages_tx: mpsc::Sender<MempoolRequest>) {
             Some(&signer),
         ));
         messages_tx
-            .send(MempoolRequest::AddMessage(message, MempoolSource::Local))
+            .send(MempoolRequest::AddMessage(
+                message,
+                MempoolSource::Local,
+                None,
+            ))
             .await
             .unwrap();
         i += 1;

@@ -227,9 +227,12 @@ impl MyHubService {
             }
         }
 
+        let (tx, rx) = oneshot::channel();
+
         match self.mempool_tx.try_send(MempoolRequest::AddMessage(
             MempoolMessage::UserMessage(message.clone()),
             MempoolSource::RPC,
+            Some(tx),
         )) {
             Ok(_) => {
                 self.statsd_client.count("rpc.submit_message.success", 1);
@@ -246,6 +249,23 @@ impl MyHubService {
                     e.to_string()
                 );
                 return Err(HubError::unavailable("mempool channel send error"));
+            }
+        }
+
+        let result = rx.await;
+
+        match result {
+            Ok((_, error)) => {
+                if let Some(hub_error) = error {
+                    return Err(hub_error);
+                }
+            }
+            Err(e) => {
+                error!(
+                    "Error receiving message from mempool channel: {:?}",
+                    e.to_string()
+                );
+                return Err(HubError::unavailable("Error adding to mempool"));
             }
         }
 

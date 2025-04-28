@@ -24,7 +24,7 @@ async fn wait_for_message(system_rx: &mut mpsc::Receiver<SystemMessage>, message
                 match received {
                     Some(SystemMessage::Mempool(msg))  => {
                         match msg {
-                            MempoolRequest::AddMessage(MempoolMessage::UserMessage(data), source) => {
+                            MempoolRequest::AddMessage(MempoolMessage::UserMessage(data), source, _) => {
                                 receive_counts += 1;
                                 assert_eq!(data, message);
                                 assert_eq!(source, MempoolSource::Gossip);
