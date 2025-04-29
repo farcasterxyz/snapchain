@@ -799,11 +799,6 @@ async fn test_read_node() {
 #[tokio::test]
 #[serial]
 async fn test_cross_shard_interactions() {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .try_init();
-
     let num_shards = 2;
     let mut network = TestNetwork::create(3, num_shards, 3380).await;
     network.start_validators().await;
