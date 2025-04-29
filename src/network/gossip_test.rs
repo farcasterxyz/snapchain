@@ -1,11 +1,12 @@
 use crate::consensus::consensus::SystemMessage;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::network::gossip::{Config, GossipEvent, SnapchainGossip};
-use crate::proto::{FarcasterNetwork, Message};
+use crate::proto::{FarcasterNetwork, Message, MessageData};
 use crate::storage::store::engine::MempoolMessage;
 use crate::storage::store::test_helper::statsd_client;
 use crate::utils::factory::messages_factory;
 use libp2p::identity::ed25519::Keypair;
+use prost::Message as _;
 use serial_test::serial;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -14,7 +15,10 @@ use tokio::{select, time};
 const HOST_FOR_TEST: &str = "127.0.0.1";
 const BASE_PORT_FOR_TEST: u32 = 9382;
 
-async fn wait_for_message(system_rx: &mut mpsc::Receiver<SystemMessage>, message: Message) -> u32 {
+async fn wait_for_message(
+    system_rx: &mut mpsc::Receiver<SystemMessage>,
+    expected_message: Message,
+) -> u32 {
     let deadline = time::Instant::now() + Duration::from_secs(2);
     let mut receive_counts = 0;
     loop {
@@ -24,9 +28,19 @@ async fn wait_for_message(system_rx: &mut mpsc::Receiver<SystemMessage>, message
                 match received {
                     Some(SystemMessage::Mempool(msg))  => {
                         match msg {
-                            MempoolRequest::AddMessage(MempoolMessage::UserMessage(data), source) => {
+                            MempoolRequest::AddMessage(MempoolMessage::UserMessage(actual_message), source) => {
                                 receive_counts += 1;
-                                assert_eq!(data, message);
+                                assert_eq!(actual_message.hash, expected_message.hash);
+                                assert_eq!(actual_message.data.is_some(), true);
+                                match &expected_message.data {
+                                    Some(msg_data) => {
+                                        assert_eq!(msg_data, &actual_message.data.unwrap());
+                                    },
+                                    None => {
+                                        let msg_data = MessageData::decode(actual_message.data_bytes.as_ref().unwrap().as_slice()).unwrap();
+                                        assert_eq!(msg_data, actual_message.data.unwrap());
+                                    }
+                                }
                                 assert_eq!(source, MempoolSource::Gossip);
                             },
                             _ => {
@@ -125,7 +139,11 @@ async fn test_gossip_communication() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Create a test message
-    let cast_add = messages_factory::casts::create_cast_add(123, "test", None, None);
+    let mut cast_add = messages_factory::casts::create_cast_add(123, "test", None, None);
+    // Set data to None, so we can test that gossip populates data from data_bytes
+    cast_add.data_bytes = Some(cast_add.data.unwrap().encode_to_vec());
+    cast_add.data = None;
+
     let mempool_msg = MempoolMessage::UserMessage(cast_add.clone());
     // Send message from node1 to node2
     gossip_tx1

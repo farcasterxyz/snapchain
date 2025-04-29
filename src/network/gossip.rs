@@ -8,6 +8,7 @@ use crate::proto::{
     gossip_message, read_node_message, ContactInfo, ContactInfoBody, FarcasterNetwork,
     GossipMessage,
 };
+use crate::storage::store::account::message_bytes_decode;
 use crate::storage::store::engine::MempoolMessage;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use bytes::Bytes;
@@ -705,7 +706,9 @@ impl SnapchainGossip {
                     if let Some(mempool_message_proto) = message.mempool_message {
                         let mempool_message = match mempool_message_proto {
                             proto::mempool_message::MempoolMessage::UserMessage(message) => {
-                                MempoolMessage::UserMessage(message)
+                                let mut message_with_data = message.clone();
+                                message_bytes_decode(&mut message_with_data);
+                                MempoolMessage::UserMessage(message_with_data)
                             }
                         };
                         Some(SystemMessage::Mempool(MempoolRequest::AddMessage(
