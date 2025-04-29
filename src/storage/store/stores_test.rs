@@ -50,7 +50,7 @@ mod tests {
             stores.event_handler.set_current_height(current_height);
             let mut txn = db::RocksDbTransactionBatch::new();
             for _ in 0..3 {
-                let mut event = hub_events_factory::create_merge_event(&message);
+                let mut event = hub_events_factory::create_merge_event(&message, vec![]);
                 stores
                     .event_handler
                     .commit_transaction(&mut txn, &mut event)

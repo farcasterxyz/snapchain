@@ -594,15 +594,90 @@ pub mod shard_chunk_factory {
 
 pub mod hub_events_factory {
     use crate::proto;
+    use prost::Message;
 
-    pub fn create_merge_event(message: &proto::Message) -> proto::HubEvent {
+    pub fn create_merge_event(
+        message: &proto::Message,
+        deleted_messages: Vec<proto::Message>,
+    ) -> proto::HubEvent {
+        let mut message_with_data_bytes = message.clone();
+        message_with_data_bytes.data_bytes =
+            Some(message_with_data_bytes.data.unwrap().encode_to_vec());
+        message_with_data_bytes.data = None;
+        let mut deleted_messages_with_data_bytes = vec![];
+        for deleted_message in deleted_messages {
+            let mut event = deleted_message.clone();
+            event.data_bytes = Some(event.data.unwrap().encode_to_vec());
+            event.data = None;
+            deleted_messages_with_data_bytes.push(event);
+        }
         proto::HubEvent {
             id: rand::random::<u64>(),
             r#type: proto::HubEventType::MergeMessage as i32,
             body: Some(proto::hub_event::Body::MergeMessageBody(
                 proto::MergeMessageBody {
-                    message: Some(message.clone()),
-                    deleted_messages: vec![],
+                    message: Some(message_with_data_bytes),
+                    deleted_messages: deleted_messages_with_data_bytes,
+                },
+            )),
+            block_number: 0,
+            shard_index: 0,
+        }
+    }
+
+    pub fn create_prune_event(message: &proto::Message) -> proto::HubEvent {
+        let mut message_with_data_bytes = message.clone();
+        message_with_data_bytes.data_bytes =
+            Some(message_with_data_bytes.data.unwrap().encode_to_vec());
+        message_with_data_bytes.data = None;
+        proto::HubEvent {
+            id: rand::random::<u64>(),
+            r#type: proto::HubEventType::PruneMessage as i32,
+            body: Some(proto::hub_event::Body::PruneMessageBody(
+                proto::PruneMessageBody {
+                    message: Some(message_with_data_bytes),
+                },
+            )),
+            block_number: 0,
+            shard_index: 0,
+        }
+    }
+
+    pub fn create_revoke_event(message: &proto::Message) -> proto::HubEvent {
+        let mut message_with_data_bytes = message.clone();
+        message_with_data_bytes.data_bytes =
+            Some(message_with_data_bytes.data.unwrap().encode_to_vec());
+        message_with_data_bytes.data = None;
+        proto::HubEvent {
+            id: rand::random::<u64>(),
+            r#type: proto::HubEventType::RevokeMessage as i32,
+            body: Some(proto::hub_event::Body::RevokeMessageBody(
+                proto::RevokeMessageBody {
+                    message: Some(message_with_data_bytes),
+                },
+            )),
+            block_number: 0,
+            shard_index: 0,
+        }
+    }
+
+    pub fn create_merge_failure_event(
+        message: &proto::Message,
+        code: &str,
+        reason: &str,
+    ) -> proto::HubEvent {
+        let mut message_with_data_bytes = message.clone();
+        message_with_data_bytes.data_bytes =
+            Some(message_with_data_bytes.data.unwrap().encode_to_vec());
+        message_with_data_bytes.data = None;
+        proto::HubEvent {
+            id: rand::random::<u64>(),
+            r#type: proto::HubEventType::MergeFailure as i32,
+            body: Some(proto::hub_event::Body::MergeFailure(
+                proto::MergeFailureBody {
+                    message: Some(message_with_data_bytes),
+                    code: code.to_string(),
+                    reason: reason.to_string(),
                 },
             )),
             block_number: 0,

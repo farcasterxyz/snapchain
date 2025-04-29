@@ -15,6 +15,7 @@ mod tests {
     use crate::mempool::routing;
     use crate::mempool::routing::MessageRouter;
     use crate::network::server::MyHubService;
+    use crate::proto::hub_event::Body;
     use crate::proto::hub_service_server::HubService;
     use crate::proto::{
         self, HubEvent, HubEventType, UserNameProof, UserNameType, UsernameProofRequest,
@@ -28,7 +29,7 @@ mod tests {
     use crate::storage::store::test_helper::register_user;
     use crate::storage::store::{test_helper, BlockStore};
     use crate::storage::trie::merkle_trie;
-    use crate::utils::factory::{events_factory, messages_factory};
+    use crate::utils::factory::{events_factory, hub_events_factory, messages_factory};
     use crate::utils::statsd_wrapper::StatsdClientWrapper;
     use futures::future;
     use futures::StreamExt;
@@ -515,6 +516,74 @@ mod tests {
         assert_eq!(events[0].id, 7);
         assert_eq!(events[events.len() - 1].id, 2);
         assert!(events[0].shard_index > 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_events_populates_data() {
+        let (stores, _, _, service) = make_server(None).await;
+
+        // Create events with only data bytes
+        let events = vec![
+            hub_events_factory::create_merge_event(
+                &messages_factory::casts::create_cast_add(1, "test", None, None),
+                vec![messages_factory::casts::create_cast_add(
+                    1, "test 2", None, None,
+                )],
+            ),
+            hub_events_factory::create_prune_event(&messages_factory::casts::create_cast_add(
+                1, "test 3", None, None,
+            )),
+            hub_events_factory::create_revoke_event(&messages_factory::casts::create_cast_add(
+                1, "test 4", None, None,
+            )),
+            hub_events_factory::create_merge_failure_event(
+                &messages_factory::casts::create_cast_add(1, "test 5", None, None),
+                "bad_request.conflict",
+                "conflict",
+            ),
+        ];
+
+        let db = stores.get(&1u32).unwrap().shard_store.db.clone();
+        for event in events {
+            let mut txn = RocksDbTransactionBatch::new();
+            HubEvent::put_event_transaction(&mut txn, &event).unwrap();
+            db.commit(txn).unwrap();
+        }
+
+        // When fetching events, data should be populated
+        let request = Request::new(proto::EventsRequest {
+            start_id: 0,
+            shard_index: None,
+            stop_id: None,
+            page_size: None,
+            page_token: None,
+            reverse: None,
+        });
+        let response = service.get_events(request).await.unwrap();
+        let actual_events = response.get_ref().events.clone();
+        assert_eq!(actual_events.len(), 4);
+
+        for event in actual_events {
+            match event.body.unwrap() {
+                Body::MergeMessageBody(merge) => {
+                    assert_eq!(merge.message.unwrap().data.is_some(), true);
+                    assert_eq!(merge.deleted_messages.len(), 1);
+                    assert_eq!(merge.deleted_messages[0].data.is_some(), true);
+                }
+                Body::PruneMessageBody(prune) => {
+                    assert_eq!(prune.message.unwrap().data.is_some(), true);
+                }
+                Body::RevokeMessageBody(revoke) => {
+                    assert_eq!(revoke.message.unwrap().data.is_some(), true);
+                }
+                Body::MergeFailure(failure) => {
+                    assert_eq!(failure.message.unwrap().data.is_some(), true);
+                }
+                _ => {
+                    panic!("Unexpected event type");
+                }
+            }
+        }
     }
 
     #[tokio::test]

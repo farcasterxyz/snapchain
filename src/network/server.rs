@@ -401,8 +401,9 @@ impl MyHubService {
         match &mut hub_event.body {
             Some(body) => {
                 match body {
+                    // For events with messages that don't have data populated, populate it before we send to the client
                     proto::hub_event::Body::MergeMessageBody(merge_message_body) => {
-                        match &merge_message_body.message {
+                        match &mut merge_message_body.message {
                             None => {}
                             Some(message) => {
                                 if message.msg_type() == MessageType::LinkCompactState {
@@ -410,10 +411,43 @@ impl MyHubService {
                                     // result in an unbounded message size:
                                     merge_message_body.deleted_messages = vec![]
                                 }
+                                message_bytes_decode(message);
+                                for deleted_message in &mut merge_message_body.deleted_messages {
+                                    message_bytes_decode(deleted_message);
+                                }
                             }
                         }
                     }
-                    _ => {}
+                    proto::hub_event::Body::PruneMessageBody(prune_message_body) => {
+                        if let Some(message) = &mut prune_message_body.message {
+                            message_bytes_decode(message);
+                        }
+                    }
+                    proto::hub_event::Body::RevokeMessageBody(revoke_message_body) => {
+                        if let Some(message) = &mut revoke_message_body.message {
+                            message_bytes_decode(message);
+                        }
+                    }
+                    proto::hub_event::Body::MergeUsernameProofBody(merge_user_name_proof_body) => {
+                        if let Some(message) =
+                            &mut merge_user_name_proof_body.username_proof_message
+                        {
+                            message_bytes_decode(message);
+                        }
+                        if let Some(message) =
+                            &mut merge_user_name_proof_body.deleted_username_proof_message
+                        {
+                            message_bytes_decode(message);
+                        }
+                    }
+                    proto::hub_event::Body::MergeOnChainEventBody(_) => {
+                        // No-op. Nothing to decode
+                    }
+                    proto::hub_event::Body::MergeFailure(merge_failure_body) => {
+                        if let Some(message) = &mut merge_failure_body.message {
+                            message_bytes_decode(message);
+                        }
+                    }
                 }
             }
             None => {}
