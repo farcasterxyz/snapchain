@@ -318,17 +318,16 @@ pub struct ShardInfo {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetFidsRequest {
-    #[serde(rename = "shardId")]
     pub shard_id: u32,
-    #[serde(rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
     #[serde(
+        default,
         with = "serdebase64opt",
-        rename = "pageToken",
         skip_serializing_if = "Option::is_none"
     )]
     pub page_token: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
 }
 
