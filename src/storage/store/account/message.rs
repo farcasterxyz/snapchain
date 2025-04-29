@@ -296,10 +296,11 @@ pub fn message_encode(message: &MessageProto) -> Vec<u8> {
 
 #[inline]
 pub fn message_bytes_decode(msg: &mut MessageProto) {
-    if msg.data.is_none() && msg.data_bytes.is_some() && msg.data_bytes.as_ref().unwrap().len() > 0
-    {
+    if msg.data_bytes.is_some() && msg.data_bytes.as_ref().unwrap().len() > 0 {
         if let Ok(msg_data) = MessageData::decode(msg.data_bytes.as_ref().unwrap().as_slice()) {
             msg.data = Some(msg_data);
+        } else {
+            msg.data = None;
         }
     }
 }
