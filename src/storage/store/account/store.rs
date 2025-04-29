@@ -113,10 +113,7 @@ pub trait StoreDef: Send + Sync {
                     });
                 }
                 if remove_compare == 0 {
-                    return Err(HubError {
-                        code: "bad_request.duplicate".to_string(),
-                        message: "message has already been merged".to_string(),
-                    });
+                    return Err(HubError::duplicate("message has already been merged"));
                 }
 
                 // If the existing remove has a lower order than the new message, retrieve the full

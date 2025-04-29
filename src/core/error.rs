@@ -51,10 +51,10 @@ impl HubError {
         }
     }
 
-    pub fn duplicate() -> HubError {
+    pub fn duplicate(error_message: &str) -> HubError {
         HubError {
             code: "bad_request.duplicate".to_string(),
-            message: "message has already been merged".to_string(),
+            message: error_message.to_string(),
         }
     }
 

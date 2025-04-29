@@ -213,7 +213,7 @@ pub enum MempoolRequest {
     AddMessage(
         MempoolMessage,
         MempoolSource,
-        Option<oneshot::Sender<Result<bool, HubError>>>,
+        Option<oneshot::Sender<Result<(), HubError>>>,
     ),
     GetSize(oneshot::Sender<HashMap<u32, u64>>),
 }
@@ -348,13 +348,13 @@ impl ReadNodeMempool {
         }
     }
 
-    fn message_is_valid(&mut self, message: &MempoolMessage) -> Result<bool, HubError> {
+    fn message_is_valid(&mut self, message: &MempoolMessage) -> Result<(), HubError> {
         let fid = message.fid();
         let shard = self.message_router.route_fid(fid, self.num_shards);
         if self.message_already_exists(shard, message) {
-            return Err(HubError::duplicate());
+            return Err(HubError::duplicate("message has already been merged"));
         }
-        Ok(true)
+        Ok(())
     }
 
     pub async fn run(&mut self) {
@@ -476,28 +476,28 @@ impl Mempool {
         }
     }
 
-    pub fn message_is_valid(&mut self, message: &MempoolMessage) -> Result<bool, HubError> {
+    pub fn message_is_valid(&mut self, message: &MempoolMessage) -> Result<(), HubError> {
         let shard = self
             .read_node_mempool
             .message_router
             .route_fid(message.fid(), self.read_node_mempool.num_shards);
 
         if self.message_already_exists(shard, message) {
-            return Err(HubError::duplicate());
+            return Err(HubError::duplicate("message has already been merged"));
         }
         if self.message_exceeds_rate_limits(shard, message) {
             self.statsd_client
                 .count_with_shard(shard, "mempool.rate_limit_hit", 1);
             return Err(HubError::rate_limited("Rate limit exceeded"));
         }
-        Ok(true)
+        Ok(())
     }
 
     async fn insert(
         &mut self,
         message: MempoolMessage,
         source: MempoolSource,
-    ) -> Result<bool, HubError> {
+    ) -> Result<(), HubError> {
         let fid = message.fid();
         let shard_id = self
             .read_node_mempool
@@ -508,9 +508,7 @@ impl Mempool {
             Some(shard_messages) => {
                 if shard_messages.contains_key(&message.mempool_key()) {
                     // Exit early if the message already exists in the mempool
-                    return Err(HubError::validation_failure(
-                        "Message already in the mempool",
-                    ));
+                    return Err(HubError::duplicate("message already in the mempool"));
                 }
             }
             None => {}
