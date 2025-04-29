@@ -518,4 +518,42 @@ mod tests {
         assert_eq!(result.len(), 1); // Only the first cast should be received
         assert_eq!(result[0].fid(), 1234);
     }
+
+    #[tokio::test]
+    async fn test_mempool_error() {
+        let (mut engine, _, mut mempool, mempool_tx, _request_tx, _decision_tx, _) =
+            setup(None, false).await;
+
+        test_helper::register_user(
+            1234,
+            default_signer(),
+            default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let message = create_cast_add(1234, "hello", None, None);
+
+        test_helper::commit_message(&mut engine, &message.clone()).await;
+
+        let (req, res) = oneshot::channel();
+
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(message),
+                MempoolSource::Local,
+                Some(req),
+            ))
+            .await
+            .unwrap();
+
+        let result = res.await.unwrap();
+
+        let error = result.unwrap_err();
+        assert_eq!(error.code, "bad_request.duplicate");
+    }
 }
