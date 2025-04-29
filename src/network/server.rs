@@ -75,6 +75,7 @@ use tonic::metadata::AsciiMetadataValue;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
 
+const MEMPOOL_ADD_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 const MEMPOOL_SIZE_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
 
 pub struct MyHubService {
@@ -252,24 +253,25 @@ impl MyHubService {
             }
         }
 
-        let result = rx.await;
-
-        match result {
-            Ok((_, error)) => {
-                if let Some(hub_error) = error {
-                    return Err(hub_error);
-                }
-            }
-            Err(e) => {
+        let result = match timeout(MEMPOOL_ADD_REQUEST_TIMEOUT, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(err)) => {
                 error!(
                     "Error receiving message from mempool channel: {:?}",
-                    e.to_string()
+                    err.to_string()
                 );
                 return Err(HubError::unavailable("Error adding to mempool"));
             }
-        }
+            Err(_) => {
+                error!("Timeout receiving message from mempool channel",);
+                return Err(HubError::unavailable("Error adding to mempool"));
+            }
+        };
 
-        Ok(message)
+        return match result {
+            Ok(_) => Ok(message),
+            Err(hub_error) => Err(hub_error),
+        };
     }
 
     fn get_stores_for_shard(&self, shard_id: u32) -> Result<&Stores, Status> {

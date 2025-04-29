@@ -50,6 +50,20 @@ impl HubError {
             message: error_message.to_string(),
         }
     }
+
+    pub fn duplicate() -> HubError {
+        HubError {
+            code: "bad_request.duplicate".to_string(),
+            message: "message has already been merged".to_string(),
+        }
+    }
+
+    pub fn rate_limited(error_message: &str) -> HubError {
+        HubError {
+            code: "bad_request.rate_limited".to_string(),
+            message: error_message.to_string(),
+        }
+    }
 }
 
 impl Error for HubError {}
