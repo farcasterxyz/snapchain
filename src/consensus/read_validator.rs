@@ -12,6 +12,7 @@ use libp2p::identity::ed25519::PublicKey;
 use prost::Message;
 use tracing::{debug, error, info, warn};
 
+use super::proposer::get_current_version;
 use super::validator::StoredValidatorSets;
 
 pub enum Engine {
@@ -44,7 +45,22 @@ impl ReadValidator {
         }
     }
 
+    fn check_version(value: &DecidedValue) {
+        let proposal = value.value.as_ref().unwrap();
+        match proposal {
+            proto::decided_value::Value::Block(block) => {
+                let header = block.header.as_ref().unwrap();
+                if header.version > get_current_version() as u32 {
+                    // Maybe we want to upgrade this to a panic
+                    error!("Node should be upgraded now, received a block with version too high. Version {}.", header.version)
+                }
+            }
+            proto::decided_value::Value::Shard(_) => {}
+        }
+    }
+
     fn commit_decided_value(&mut self, value: &DecidedValue, height: Height) {
+        Self::check_version(value);
         match &mut self.engine {
             Engine::ShardEngine(shard_engine) => match &value.value {
                 Some(proto::decided_value::Value::Shard(shard_chunk)) => {
