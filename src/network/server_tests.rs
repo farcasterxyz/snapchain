@@ -17,8 +17,8 @@ mod tests {
     use crate::network::server::MyHubService;
     use crate::proto::hub_service_server::HubService;
     use crate::proto::{
-        self, EventRequest, HubEvent, HubEventType, UserNameProof, UserNameType,
-        UsernameProofRequest, VerificationAddAddressBody,
+        self, EventRequest, EventsRequest, HubEvent, HubEventType, ShardChunk, UserNameProof,
+        UserNameType, UsernameProofRequest, VerificationAddAddressBody,
     };
     use crate::proto::{FidRequest, SubscribeRequest};
     use crate::storage::db::{self, RocksDB, RocksDbTransactionBatch};
@@ -626,15 +626,16 @@ mod tests {
         .await;
         let cast_add = messages_factory::casts::create_cast_add(SHARD1_FID, "test", None, None);
         let cast_add2 = messages_factory::casts::create_cast_add(SHARD1_FID, "test2", None, None);
+        let mut shard_chunks = vec![];
 
-        let shard_chunk1 =
-            test_helper::commit_messages(&mut engine1, vec![cast_add, cast_add2]).await;
+        shard_chunks
+            .push(test_helper::commit_messages(&mut engine1, vec![cast_add, cast_add2]).await);
 
         sleep(Duration::from_secs(1)).await;
 
         let cast_add3 = messages_factory::casts::create_cast_add(SHARD1_FID, "test3", None, None);
 
-        let shard_chunk2 = test_helper::commit_message(&mut engine1, &cast_add3).await;
+        shard_chunks.push(test_helper::commit_message(&mut engine1, &cast_add3).await);
 
         let request = Request::new(SubscribeRequest {
             event_types: vec![HubEventType::MergeMessage as i32],
@@ -659,7 +660,7 @@ mod tests {
 
         let cast_add4 = messages_factory::casts::create_cast_add(SHARD1_FID, "test4", None, None);
 
-        let shard_chunk3 = test_helper::commit_message(&mut engine1, &cast_add4).await;
+        shard_chunks.push(test_helper::commit_message(&mut engine1, &cast_add4).await);
 
         let event = timeout(Duration::from_millis(100), listener.get_mut().next()).await;
         if let Ok(Some(Ok(hub_event))) = event {
@@ -667,21 +668,43 @@ mod tests {
             events.push(hub_event);
         }
 
-        assert_eq!(events.len(), 4);
-        assert_eq!(
-            events[0].timestamp,
-            shard_chunk1.header.as_ref().unwrap().timestamp
-        );
-        assert_eq!(
-            events[1].timestamp,
-            shard_chunk1.header.as_ref().unwrap().timestamp
-        );
-        assert_eq!(events[2].timestamp, shard_chunk2.header.unwrap().timestamp);
+        let assert_events = |events: &Vec<HubEvent>, shard_chunks: &Vec<ShardChunk>| {
+            assert_eq!(events.len(), 4);
+            assert_eq!(shard_chunks.len(), 3);
+            assert_eq!(
+                events[0].timestamp,
+                shard_chunks[0].header.as_ref().unwrap().timestamp
+            );
+            assert_eq!(
+                events[1].timestamp,
+                shard_chunks[0].header.as_ref().unwrap().timestamp
+            );
+            assert_eq!(
+                events[2].timestamp,
+                shard_chunks[1].header.as_ref().unwrap().timestamp
+            );
+            assert_eq!(
+                events[3].timestamp,
+                shard_chunks[2].header.as_ref().unwrap().timestamp
+            );
+        };
+        assert_events(&events, &shard_chunks);
 
-        let mut req = Request::new(EventRequest {
+        let req = Request::new(EventsRequest {
+            start_id: events[0].id,
+            stop_id: None,
+            shard_index: Some(1),
+            page_size: None,
+            page_token: None,
+            reverse: None,
+        });
+        let res = service.get_events(req).await.unwrap();
+        assert_events(&res.into_inner().events, &shard_chunks);
+
+        let req = Request::new(EventRequest {
             shard_index: 1,
             id: HubEventIdGenerator::make_event_id(
-                shard_chunk3
+                shard_chunks[2]
                     .header
                     .as_ref()
                     .unwrap()
@@ -691,11 +714,10 @@ mod tests {
                 0,
             ),
         });
-        add_auth_header(&mut req, USER_NAME, PASSWORD);
         let res = service.get_event(req).await.unwrap();
         assert_eq!(
             res.into_inner().timestamp,
-            shard_chunk3.header.unwrap().timestamp
+            shard_chunks[2].header.as_ref().unwrap().timestamp
         );
     }
 
