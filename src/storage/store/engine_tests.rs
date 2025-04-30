@@ -343,6 +343,7 @@ mod tests {
         let mut events = HubEvent::get_events(engine.db.clone(), 0, None, None).unwrap();
         assert_eq!(initial_events_count + 1, events.events.len());
         let mut generated_event = event_rx.recv().await.unwrap();
+        // Timestamp is populated on the generated event but it's not stored in the db. Set to 0 for both so that the equality assertion doesn't fail.
         generated_event.timestamp = 0;
         events.events.get_mut(0).unwrap().timestamp = 0;
         assert_eq!(generated_event, events.events[initial_events_count]);
@@ -883,6 +884,7 @@ mod tests {
         let mut events = HubEvent::get_events(engine.db.clone(), 0, None, None).unwrap();
         assert_eq!(1, events.events.len());
         let mut received_event = event_rx.recv().await.unwrap();
+        // Timestamp is populated on the received event but it's not stored in the db. Set to 0 for both so that the equality assertion doesn't fail.
         received_event.timestamp = 0;
         events.events.get_mut(0).unwrap().timestamp = 0;
         assert_eq!(received_event, events.events[0]);
