@@ -69,5 +69,5 @@ message HubEvent {
   };
   uint64 block_number = 12;
   uint32 shard_index = 14;
-  uint64 produced_at = 15; 
+  uint64 timestamp = 15; 
 }

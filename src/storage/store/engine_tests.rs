@@ -343,8 +343,8 @@ mod tests {
         let mut events = HubEvent::get_events(engine.db.clone(), 0, None, None).unwrap();
         assert_eq!(initial_events_count + 1, events.events.len());
         let mut generated_event = event_rx.recv().await.unwrap();
-        generated_event.produced_at = 0;
-        events.events.get_mut(0).unwrap().produced_at = 0;
+        generated_event.timestamp = 0;
+        events.events.get_mut(0).unwrap().timestamp = 0;
         assert_eq!(generated_event, events.events[initial_events_count]);
 
         assert_merge_event(&generated_event, &msg1, 0);
@@ -883,8 +883,8 @@ mod tests {
         let mut events = HubEvent::get_events(engine.db.clone(), 0, None, None).unwrap();
         assert_eq!(1, events.events.len());
         let mut received_event = event_rx.recv().await.unwrap();
-        received_event.produced_at = 0;
-        events.events.get_mut(0).unwrap().produced_at = 0;
+        received_event.timestamp = 0;
+        events.events.get_mut(0).unwrap().timestamp = 0;
         assert_eq!(received_event, events.events[0]);
         assert!(event_rx.try_recv().is_err()); // only 1 event
 

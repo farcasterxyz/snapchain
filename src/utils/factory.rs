@@ -607,7 +607,7 @@ pub mod hub_events_factory {
             )),
             block_number: 0,
             shard_index: 0,
-            produced_at: 0,
+            timestamp: 0,
         }
     }
 }

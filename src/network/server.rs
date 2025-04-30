@@ -415,10 +415,17 @@ impl MyHubService {
         }
     }
 
-    fn rewrite_hub_event(mut hub_event: HubEvent, shard_index: u32) -> HubEvent {
+    fn rewrite_hub_event(
+        mut hub_event: HubEvent,
+        shard_index: u32,
+        timestamp: Option<u64>,
+    ) -> HubEvent {
         let (block_number, _) = HubEventIdGenerator::extract_height_and_seq(hub_event.id);
         hub_event.block_number = block_number;
         hub_event.shard_index = shard_index;
+        if let Some(timestamp) = timestamp {
+            hub_event.timestamp = timestamp;
+        }
 
         match &mut hub_event.body {
             Some(body) => {
@@ -790,8 +797,6 @@ impl HubService for MyHubService {
 
                         for event in old_events.events {
                             if event_types.contains(&event.r#type) {
-                                let mut event = Self::rewrite_hub_event(event, store.shard_id);
-
                                 if last_chunk
                                     .as_ref()
                                     .map(|chunk| {
@@ -815,10 +820,13 @@ impl HubService for MyHubService {
                                     );
                                     last_chunk = chunk.unwrap_or(None);
                                 }
-
-                                if let Some(chunk) = &last_chunk {
-                                    event.produced_at = chunk.header.as_ref().unwrap().timestamp;
-                                }
+                                let event = Self::rewrite_hub_event(
+                                    event,
+                                    store.shard_id,
+                                    last_chunk
+                                        .as_ref()
+                                        .map(|chunk| chunk.header.as_ref().unwrap().timestamp),
+                                );
 
                                 if let Err(_) = server_tx.send(Ok(event)).await {
                                     return;
@@ -852,7 +860,8 @@ impl HubService for MyHubService {
                         match event_rx.recv().await {
                             Ok(hub_event) => {
                                 if filtered_events.contains(&hub_event.r#type) {
-                                    let hub_event = Self::rewrite_hub_event(hub_event, shard_id);
+                                    let hub_event =
+                                        Self::rewrite_hub_event(hub_event, shard_id, None);
                                     match tx.send(Ok(hub_event)).await {
                                         Ok(_) => {}
                                         Err(_) => {
@@ -889,8 +898,6 @@ impl HubService for MyHubService {
 
         match hub_event_result {
             Ok(hub_event) => {
-                let mut hub_event = Self::rewrite_hub_event(hub_event, stores.shard_id);
-
                 let chunk = stores.shard_store.get_chunk_by_height(
                     Height {
                         shard_index: stores.shard_id,
@@ -898,9 +905,14 @@ impl HubService for MyHubService {
                     }
                     .as_u64(),
                 );
-                if let Ok(Some(chunk)) = chunk {
-                    hub_event.produced_at = chunk.header.as_ref().unwrap().timestamp
-                }
+                let hub_event = Self::rewrite_hub_event(
+                    hub_event,
+                    stores.shard_id,
+                    chunk
+                        .unwrap_or(None)
+                        .as_ref()
+                        .map(|chunk| chunk.header.as_ref().unwrap().timestamp),
+                );
 
                 Ok(Response::new(hub_event))
             }

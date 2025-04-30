@@ -1185,7 +1185,7 @@ impl ShardEngine {
         let now = std::time::Instant::now();
         self.db.commit(txn).unwrap();
         for mut event in events {
-            event.produced_at = shard_chunk.header.as_ref().unwrap().timestamp;
+            event.timestamp = shard_chunk.header.as_ref().unwrap().timestamp;
             // An error here just means there are no active receivers, which is fine and will happen if there are no active subscribe rpcs
             let _ = self.senders.events_tx.send(event);
         }

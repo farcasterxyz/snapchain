@@ -122,7 +122,7 @@ mod tests {
                     body: None,
                     block_number: 1,
                     shard_index: 1,
-                    produced_at: 0,
+                    timestamp: 0,
                 })
                 .unwrap();
         }
@@ -139,7 +139,7 @@ mod tests {
                     body: None,
                     block_number: 1,
                     shard_index: 1,
-                    produced_at: 0,
+                    timestamp: 0,
                 },
             )
             .unwrap();
@@ -374,7 +374,7 @@ mod tests {
             body: None,
             block_number: 0,
             shard_index: 0,
-            produced_at: 0,
+            timestamp: 0,
         };
 
         let db = stores.get(&1u32).unwrap().shard_store.db.clone();
@@ -652,7 +652,7 @@ mod tests {
 
             let event = timeout(Duration::from_millis(100), listener.get_mut().next()).await;
             if let Ok(Some(Ok(hub_event))) = event {
-                assert_ne!(hub_event.produced_at, 0);
+                assert_ne!(hub_event.timestamp, 0);
                 events.push(hub_event);
             }
         }
@@ -663,23 +663,20 @@ mod tests {
 
         let event = timeout(Duration::from_millis(100), listener.get_mut().next()).await;
         if let Ok(Some(Ok(hub_event))) = event {
-            assert_ne!(hub_event.produced_at, 0);
+            assert_ne!(hub_event.timestamp, 0);
             events.push(hub_event);
         }
 
         assert_eq!(events.len(), 4);
         assert_eq!(
-            events[0].produced_at,
+            events[0].timestamp,
             shard_chunk1.header.as_ref().unwrap().timestamp
         );
         assert_eq!(
-            events[1].produced_at,
+            events[1].timestamp,
             shard_chunk1.header.as_ref().unwrap().timestamp
         );
-        assert_eq!(
-            events[2].produced_at,
-            shard_chunk2.header.unwrap().timestamp
-        );
+        assert_eq!(events[2].timestamp, shard_chunk2.header.unwrap().timestamp);
 
         let mut req = Request::new(EventRequest {
             shard_index: 1,
@@ -697,7 +694,7 @@ mod tests {
         add_auth_header(&mut req, USER_NAME, PASSWORD);
         let res = service.get_event(req).await.unwrap();
         assert_eq!(
-            res.into_inner().produced_at,
+            res.into_inner().timestamp,
             shard_chunk3.header.unwrap().timestamp
         );
     }
