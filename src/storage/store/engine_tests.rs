@@ -576,6 +576,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_validate_ethereum_address_with_verification() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+
+        // Register a user
+        test_helper::register_user(
+            FID3_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        // Add Ethereum verification
+        let eth_address = "91031dcfdea024b4d51e775486111d2b2a715871";
+        let verification_add = messages_factory::verifications::create_verification_add(
+            FID3_FOR_TEST,
+            0, // Protocol::Ethereum
+            hex::decode(eth_address).unwrap(),
+            hex::decode("b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c").unwrap(),
+            hex::decode("d74860c4bbf574d5ad60f03a478a30f990e05ac723e138a5c860cdb3095f4296").unwrap(),
+            Some(timestamp),
+            None,
+        );
+
+        commit_message(&mut engine, &verification_add).await;
+
+        // Verify the verification was added
+        let verification_result = engine.get_verifications_by_fid(FID3_FOR_TEST);
+        assert_eq!(1, verification_result.unwrap().messages.len());
+
+        // Now validate the Ethereum address verification
+        let eth_address_bytes = hex::decode(eth_address).unwrap();
+        let result = engine.validate_fid_has_verification(
+            FID3_FOR_TEST,
+            proto::Protocol::Ethereum,
+            &eth_address_bytes,
+        );
+        assert!(result.is_ok(), "Ethereum address validation should succeed");
+
+        // Validate with wrong FID should fail
+        let wrong_fid = FID3_FOR_TEST + 1;
+        let wrong_fid_result = engine.validate_fid_has_verification(
+            wrong_fid,
+            proto::Protocol::Ethereum,
+            &eth_address_bytes,
+        );
+        assert!(
+            wrong_fid_result.is_err(),
+            "Validation with wrong FID should fail"
+        );
+        assert_eq!(
+            wrong_fid_result.unwrap_err().to_string(),
+            "address is not part of any verification",
+            "Should fail with correct error message"
+        );
+
+        // Validate with wrong protocol (Solana) should fail
+        let wrong_protocol_result = engine.validate_fid_has_verification(
+            FID3_FOR_TEST,
+            proto::Protocol::Solana,
+            &eth_address_bytes,
+        );
+        assert!(
+            wrong_protocol_result.is_err(),
+            "Validation with wrong protocol should fail"
+        );
+        assert_eq!(
+            wrong_protocol_result.unwrap_err().to_string(),
+            "address is not part of any verification",
+            "Should fail with correct error message"
+        );
+    }
+
+    #[tokio::test]
     async fn test_commit_username_proof_messages() {
         let timestamp = messages_factory::farcaster_time();
         let (mut engine, _tmpdir) = test_helper::new_engine();
