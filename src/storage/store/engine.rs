@@ -5,11 +5,12 @@ use crate::core::types::Height;
 use crate::core::validations;
 use crate::core::validations::verification;
 use crate::mempool::mempool::MempoolMessagesRequest;
-use crate::proto::UserNameProof;
+use crate::proto::message_data::Body;
 use crate::proto::UserNameType;
 use crate::proto::{self, Block, MessageType, ShardChunk, Transaction};
 use crate::proto::{FarcasterNetwork, HubEvent};
 use crate::proto::{OnChainEvent, OnChainEventType};
+use crate::proto::{Protocol, UserNameProof};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{CastStore, MessagesPage};
 use crate::storage::store::stores::{StoreLimits, Stores};
@@ -17,6 +18,8 @@ use crate::storage::store::BlockStore;
 use crate::storage::trie;
 use crate::storage::trie::merkle_trie;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use alloy_primitives::hex::FromHex;
+use alloy_primitives::Address;
 use informalsystems_malachitebft_core_types::Round;
 use itertools::Itertools;
 use merkle_trie::TrieKey;
@@ -89,6 +92,15 @@ pub enum MessageValidationError {
 
     #[error("fname is not registered for fid")]
     MissingFname,
+
+    #[error("invalid ethereum address")]
+    InvalidEthereumAddress,
+
+    #[error("invalid solana address")]
+    InvalidSolanaAddress,
+
+    #[error("address is not part of any verification")]
+    AddressNotPartOfVerification,
 }
 
 #[derive(Clone, Debug)]
@@ -700,6 +712,7 @@ impl ShardEngine {
 
         for msg in &snapchain_txn.user_messages {
             // Errors are validated based on the shard root
+            // CHECK HERE for
             match self.validate_user_message(msg, txn_batch) {
                 Ok(()) => {
                     let result = self.merge_message(msg, txn_batch);
@@ -1024,6 +1037,7 @@ impl ShardEngine {
             .as_ref()
             .ok_or(MessageValidationError::NoMessageData)?;
 
+        // THIS: does the message validation
         validations::message::validate_message(message, self.network)?;
 
         // Check that the user has a custody address
@@ -1045,6 +1059,12 @@ impl ShardEngine {
             Some(proto::message_data::Body::UserDataBody(user_data)) => {
                 if user_data.r#type == proto::UserDataType::Username as i32 {
                     self.validate_username(message_data.fid, &user_data.value, txn_batch)?;
+                }
+                if user_data.r#type == proto::UserDataType::UserDataPrimaryAddressEthereum as i32 {
+                    self.validate_ethereum_address(message_data.fid, &user_data.value)?;
+                }
+                if user_data.r#type == proto::UserDataType::UserDataPrimaryAddressSolana as i32 {
+                    self.validate_solana_address(message_data.fid, &user_data.value)?;
                 }
             }
             _ => {}
@@ -1089,6 +1109,35 @@ impl ShardEngine {
         }
     }
 
+    fn validate_ethereum_address(
+        &self,
+        fid: u64,
+        address: &str,
+    ) -> Result<(), MessageValidationError> {
+        if address.is_empty() {
+            return Ok(());
+        }
+        // Decode Ethereum address into bytes
+        let address_instance: Address = Address::from_hex(address)
+            .map_err(|_| MessageValidationError::InvalidEthereumAddress)?;
+        self.validate_fid_has_verification(fid, Protocol::Ethereum, address_instance.as_ref())?;
+        Ok(())
+    }
+
+    fn validate_solana_address(
+        &self,
+        fid: u64,
+        address: &str,
+    ) -> Result<(), MessageValidationError> {
+        if address.is_empty() {
+            return Ok(());
+        }
+        let address_instance: Address =
+            Address::from_hex(address).map_err(|_| MessageValidationError::InvalidSolanaAddress)?;
+        self.validate_fid_has_verification(fid, Protocol::Solana, address_instance.as_ref())?;
+        Ok(())
+    }
+
     fn validate_username(
         &self,
         fid: u64,
@@ -1101,6 +1150,8 @@ impl ShardEngine {
         }
         let name = name.to_string();
         // TODO: validate fname string
+
+        // self.get_verifications_by_fid()
 
         let proof = self.get_username_proof(name.clone(), txn)?;
         match proof {
@@ -1439,6 +1490,49 @@ impl ShardEngine {
             fid,
             user_data_type,
         )
+    }
+
+    pub fn validate_fid_has_verification(
+        &self,
+        fid: u64,
+        protocol: Protocol,
+        address: &[u8],
+    ) -> Result<(), MessageValidationError> {
+        let mut page_options = PageOptions::default();
+        loop {
+            let page_result = self
+                .stores
+                .verification_store
+                .get_adds_by_fid::<fn(&proto::Message) -> bool>(fid, &page_options, None);
+
+            if page_result.is_err() {
+                return Err(MessageValidationError::StoreError(
+                    HubError::invalid_internal_state("Unable to get verifications by fid"),
+                ));
+            }
+            let page = page_result.unwrap();
+            for msg in page.messages {
+                if let Some(msg_data) = msg.data {
+                    if let Some(Body::VerificationAddAddressBody(verification)) = msg_data.body {
+                        if verification.protocol != protocol as i32 {
+                            continue;
+                        }
+                        if verification.address == address {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            match page.next_page_token {
+                Some(next_page_token) => {
+                    page_options.page_token = Some(next_page_token);
+                }
+                None => {
+                    break;
+                }
+            }
+        }
+        Err(MessageValidationError::AddressNotPartOfVerification)
     }
 
     pub fn get_verifications_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
