@@ -8,6 +8,8 @@ use crate::storage::util::{blake3_20, bytes_compare};
 
 use super::{cast, link, reaction, verification};
 use crate::version::version::{EngineVersion, ProtocolFeature};
+use alloy_primitives::hex::FromHex;
+use alloy_primitives::Address;
 use ed25519_dalek::{Signature, VerifyingKey};
 use fancy_regex::Regex;
 use prost::Message;
@@ -362,6 +364,41 @@ fn validate_longitude(value: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
+pub fn validate_user_data_primary_address_ethereum(input: &String) -> Result<(), ValidationError> {
+    // Empty string is allowed for unsetting the primary address
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    if !input.starts_with("0x") || input.len() != 42 {
+        return Err(ValidationError::InvalidDataLength);
+    }
+
+    let parsed = Address::from_hex(input).map_err(|_| ValidationError::InvalidData)?;
+
+    let checksummed = parsed.to_checksum(None);
+    if checksummed != *input {
+        return Err(ValidationError::InvalidData);
+    }
+    Ok(())
+}
+
+pub fn validate_user_data_primary_address_solana(input: &String) -> Result<(), ValidationError> {
+    // Empty string is allowed for unsetting the primary address
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    // validate the address is base58
+    let decoded = bs58::decode(input)
+        .into_vec()
+        .map_err(|_| ValidationError::InvalidData)?;
+    if decoded.len() != 32 {
+        return Err(ValidationError::InvalidDataLength);
+    }
+    Ok(())
+}
+
 pub fn validate_user_location(location: &str) -> Result<(), ValidationError> {
     if location.is_empty() {
         return Ok(());
@@ -446,6 +483,12 @@ pub fn validate_user_data_add_body(
         }
         UserDataType::Github => {
             validate_github_username(&body.value)?;
+        }
+        UserDataType::UserDataPrimaryAddressEthereum => {
+            validate_user_data_primary_address_ethereum(&body.value)?;
+        }
+        UserDataType::UserDataPrimaryAddressSolana => {
+            validate_user_data_primary_address_solana(&body.value)?;
         }
         UserDataType::None => return Err(ValidationError::InvalidData),
     }

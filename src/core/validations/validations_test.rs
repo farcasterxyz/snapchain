@@ -1,8 +1,12 @@
 mod tests {
     use crate::core::validations::error::ValidationError;
+    use crate::core::validations::message::{
+        validate_user_data_add_body, validate_user_data_primary_address_ethereum,
+        validate_user_data_primary_address_solana,
+    };
     use crate::core::validations::verification::{validate_add_address, validate_fname_transfer};
     use crate::proto;
-    use proto::{FnameTransfer, UserNameProof};
+    use proto::{FnameTransfer, UserDataBody, UserDataType, UserNameProof};
 
     #[test]
     fn test_validate_add_address_valid_eoa() {
@@ -152,5 +156,137 @@ mod tests {
         let result = validate_fname_transfer(transfer);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), ValidationError::InvalidSignature);
+    }
+
+    // Tests for primary address validation
+
+    #[test]
+    fn test_validate_ethereum_address_valid() {
+        let address = String::from("0xd5596099ec95b32ddC3F22814785a253f6a09D56");
+        let result = validate_user_data_primary_address_ethereum(&address);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_ethereum_address_wrong_checksum() {
+        let address = String::from("0xd5596099ec95b32ddc3f22814785a253f6a09d56"); // lowercase
+        let result = validate_user_data_primary_address_ethereum(&address);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), ValidationError::InvalidData);
+    }
+
+    #[test]
+    fn test_validate_ethereum_address_wrong_length() {
+        let address = String::from("0x123"); // too short
+        let result = validate_user_data_primary_address_ethereum(&address);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), ValidationError::InvalidDataLength);
+    }
+
+    #[test]
+    fn test_validate_ethereum_address_missing_prefix() {
+        let address = String::from("d5596099ec95b32ddC3F22814785a253f6a09D56"); // missing 0x
+        let result = validate_user_data_primary_address_ethereum(&address);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), ValidationError::InvalidDataLength);
+    }
+
+    #[test]
+    fn test_validate_solana_address_valid() {
+        let address = String::from("4TciSRW38RGNiTSKmQamQvxUg4epWKBirBvG8LCh3ahZ");
+        let result = validate_user_data_primary_address_solana(&address);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_solana_address_invalid_base58() {
+        let address = String::from("4TciSRW38RGNiTSKmQamQvxUg4epWKBirBvG8LCh3ah!"); // invalid char !
+        let result = validate_user_data_primary_address_solana(&address);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), ValidationError::InvalidData);
+    }
+
+    #[test]
+    fn test_validate_solana_address_wrong_length() {
+        let address = String::from("4TciSRW38"); // too short
+        let result = validate_user_data_primary_address_solana(&address);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), ValidationError::InvalidDataLength);
+    }
+
+    #[test]
+    fn test_validate_ethereum_address_empty() {
+        let address = String::from(""); // empty is allowed
+        let result = validate_user_data_primary_address_ethereum(&address);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_solana_address_empty() {
+        let address = String::from(""); // empty is allowed
+        let result = validate_user_data_primary_address_solana(&address);
+        assert!(result.is_ok());
+    }
+
+    // User data body validation tests
+
+    #[test]
+    fn test_validate_user_data_primary_address_ethereum_body_valid() {
+        let user_data_body = UserDataBody {
+            r#type: UserDataType::UserDataPrimaryAddressEthereum as i32,
+            value: "0xd5596099ec95b32ddC3F22814785a253f6a09D56".to_string(),
+        };
+        let result = validate_user_data_add_body(&user_data_body);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_user_data_primary_address_ethereum_body_invalid() {
+        let user_data_body = UserDataBody {
+            r#type: UserDataType::UserDataPrimaryAddressEthereum as i32,
+            value: "0x123".to_string(), // Invalid address
+        };
+        let result = validate_user_data_add_body(&user_data_body);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_user_data_primary_address_ethereum_body_empty() {
+        let user_data_body = UserDataBody {
+            r#type: UserDataType::UserDataPrimaryAddressEthereum as i32,
+            value: "".to_string(), // Empty is allowed to unset
+        };
+        let result = validate_user_data_add_body(&user_data_body);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_user_data_primary_address_solana_body_valid() {
+        let user_data_body = UserDataBody {
+            r#type: UserDataType::UserDataPrimaryAddressSolana as i32,
+            value: "4TciSRW38RGNiTSKmQamQvxUg4epWKBirBvG8LCh3ahZ".to_string(),
+        };
+        let result = validate_user_data_add_body(&user_data_body);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_user_data_primary_address_solana_body_invalid() {
+        let user_data_body = UserDataBody {
+            r#type: UserDataType::UserDataPrimaryAddressSolana as i32,
+            value: "4TciSRW38".to_string(), // Invalid address
+        };
+        let result = validate_user_data_add_body(&user_data_body);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_user_data_primary_address_solana_body_empty() {
+        let user_data_body = UserDataBody {
+            r#type: UserDataType::UserDataPrimaryAddressSolana as i32,
+            value: "".to_string(), // Empty is allowed to unset
+        };
+        let result = validate_user_data_add_body(&user_data_body);
+        assert!(result.is_ok());
     }
 }
