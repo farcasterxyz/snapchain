@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.13] - 2025-05-01
+
+### 🚀 Features
+
+- Add GetFids API (#407)
+- Forward errors from mempool to client (#455)
+- Add timestamp to hub event (#409)
+
+### 🐛 Bug Fixes
+
+- Prirotize data_bytes on message when both data and data_bytes are set (#454)
+- Fix validateMessage http method (#460)
+- Update eth-signature-verifier to use version with static build outputs (#459)
+
+### 📚 Documentation
+
+- Add a section on protocol upgrades (#377)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update readme
+
 ## [0.2.12] - 2025-04-26
 
 ### 🐛 Bug Fixes
