@@ -2477,7 +2477,7 @@ impl Router {
                 })
                 .await
             }
-            (&Method::GET, "/v1/validateMessage") => {
+            (&Method::POST, "/v1/validateMessage") => {
                 self.handle_protobuf_request::<ValidationResult, _>(
                     req,
                     |service, _headers, req| {
