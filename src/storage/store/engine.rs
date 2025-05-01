@@ -7,11 +7,11 @@ use crate::core::validations;
 use crate::core::validations::verification;
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::message_data::Body;
-use crate::proto::UserNameType;
 use crate::proto::{self, Block, MessageType, ShardChunk, Transaction};
 use crate::proto::{FarcasterNetwork, HubEvent};
 use crate::proto::{OnChainEvent, OnChainEventType};
 use crate::proto::{Protocol, UserNameProof};
+use crate::proto::{UserDataType, UserNameType};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{CastStore, MessagesPage};
 use crate::storage::store::stores::{StoreLimits, Stores};
@@ -861,11 +861,58 @@ impl ShardEngine {
                 .user_data_store
                 .merge(msg, txn_batch)
                 .map_err(|e| MessageValidationError::StoreError(e)),
-            MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => self
-                .stores
-                .verification_store
-                .merge(msg, txn_batch)
-                .map_err(|e| MessageValidationError::StoreError(e)),
+            MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => {
+                // Handle verification messages with special post-hook for removals
+                let result = self
+                    .stores
+                    .verification_store
+                    .merge(msg, txn_batch)
+                    .map_err(|e| MessageValidationError::StoreError(e));
+
+                // If this is a verification remove and it was successful, run post-hook
+                if mt == MessageType::VerificationRemove && result.is_ok() {
+                    if let Some(Body::VerificationRemoveBody(verification_remove_body)) =
+                        &msg.data.as_ref().unwrap().body
+                    {
+                        // parsed address in string format so it's compatible with the UserDataStore
+                        let parsed_address_result: Result<String, MessageValidationError> = {
+                            match verification_remove_body.protocol {
+                                x if x == proto::Protocol::Ethereum as i32 => {
+                                    Ok(Address::from_slice(&verification_remove_body.address)
+                                        .to_checksum(None))
+                                }
+                                x if x == proto::Protocol::Solana as i32 => {
+                                    Ok(bs58::encode(&verification_remove_body.address)
+                                        .into_string())
+                                }
+                                _ => {
+                                    return Err(
+                                        MessageValidationError::AddressNotPartOfVerification,
+                                    )
+                                }
+                            }
+                        };
+                        let parsed_address = parsed_address_result?;
+
+                        // Get all UserDataAdd messages for this FID from that store
+                        let user_data = UserDataStore::get_user_data_by_fid_and_type(
+                            &self.stores.user_data_store,
+                            msg.fid(),
+                            UserDataType::UserDataPrimaryAddressEthereum,
+                        );
+                        if let Ok(user_data) = user_data {
+                            if let Some(Body::UserDataBody(body)) =
+                                &user_data.data.as_ref().unwrap().body
+                            {
+                                if body.value == parsed_address {
+                                    self.stores.user_data_store.revoke(&user_data, txn_batch)?;
+                                }
+                            }
+                        }
+                    }
+                }
+                result
+            }
             MessageType::UsernameProof => {
                 let store = &self.stores.username_proof_store;
                 let result = store.merge(msg, txn_batch);
