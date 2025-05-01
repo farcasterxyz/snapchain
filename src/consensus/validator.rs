@@ -14,7 +14,7 @@ use std::cmp::PartialEq;
 use std::time::Duration;
 use tracing::{error, warn};
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum ProposalSource {
     Consensus,
     Sync,
@@ -273,9 +273,9 @@ impl ShardValidator {
             panic!("Received proposal for wrong shard");
         }
         let validity = if let Some(block_proposer) = &mut self.block_proposer {
-            block_proposer.add_proposed_value(full_proposal)
+            block_proposer.add_proposed_value(full_proposal, proposal_source)
         } else if let Some(shard_proposer) = &mut self.shard_proposer {
-            shard_proposer.add_proposed_value(full_proposal)
+            shard_proposer.add_proposed_value(full_proposal, proposal_source)
         } else {
             panic!("No proposer set");
         };

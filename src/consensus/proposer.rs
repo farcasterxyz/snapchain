@@ -19,6 +19,8 @@ use tokio::time::Instant;
 use tokio::{select, time};
 use tracing::{error, warn};
 
+use super::validator::ProposalSource;
+
 #[derive(Eq, PartialEq, Clone, Copy)]
 pub enum ProtocolVersion {
     UNKNOWN = 0,
@@ -69,7 +71,11 @@ pub trait Proposer {
         timeout: Duration,
     ) -> FullProposal;
     // Receive a block/shard chunk proposed by another validator and return whether it is valid
-    fn add_proposed_value(&mut self, full_proposal: &FullProposal) -> Validity;
+    fn add_proposed_value(
+        &mut self,
+        full_proposal: &FullProposal,
+        proposal_source: ProposalSource,
+    ) -> Validity;
 
     // Consensus has confirmed the block/shard_chunk, apply it to the local state
     async fn decide(&mut self, commits: Commits);
@@ -225,7 +231,11 @@ impl Proposer for ShardProposer {
         proposal
     }
 
-    fn add_proposed_value(&mut self, full_proposal: &FullProposal) -> Validity {
+    fn add_proposed_value(
+        &mut self,
+        full_proposal: &FullProposal,
+        _proposal_source: ProposalSource,
+    ) -> Validity {
         if let Some(proto::full_proposal::ProposedValue::Shard(chunk)) =
             full_proposal.proposed_value.clone()
         {
@@ -524,7 +534,11 @@ impl Proposer for BlockProposer {
         proposal
     }
 
-    fn add_proposed_value(&mut self, full_proposal: &FullProposal) -> Validity {
+    fn add_proposed_value(
+        &mut self,
+        full_proposal: &FullProposal,
+        proposal_source: ProposalSource,
+    ) -> Validity {
         if let Some(proto::full_proposal::ProposedValue::Block(block)) =
             &full_proposal.proposed_value
         {
@@ -549,7 +563,9 @@ impl Proposer for BlockProposer {
             // Once the active_at time for the latest version has passed
             // (1) If this node hasn't been upgraded, it will infer the previous version while the proposer will publish the latest version so this node will reject the propsal.
             // (2) If the proposer hasn't been upgraded, this node will infer the latest version while the proposer will publish the previous version so this node will reject the proposal.
-            if header.version != get_current_version() as u32 {
+            if proposal_source == ProposalSource::Consensus
+                && header.version != get_current_version() as u32
+            {
                 error!(
                     "Received block with wrong protocol version: {}",
                     header.version
