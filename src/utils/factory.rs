@@ -566,6 +566,40 @@ pub mod username_factory {
     }
 }
 
+pub mod frame_action_factory {
+    use crate::proto::{CastId, FrameActionBody, Message};
+
+    use super::messages_factory::create_message_with_data;
+
+    pub fn create_frame_action(
+        fid: u64,
+        url: String,
+        button_index: u32,
+        cast_id: Option<CastId>,
+        input_text: Option<String>,
+        state: Option<String>,
+        transaction_id: Option<String>,
+        address: Option<String>,
+    ) -> Message {
+        let body = FrameActionBody {
+            url: url.as_bytes().to_vec(),
+            button_index,
+            cast_id,
+            input_text: input_text.unwrap_or("".to_string()).as_bytes().to_vec(),
+            state: state.unwrap_or("".to_string()).as_bytes().to_vec(),
+            transaction_id: transaction_id.unwrap_or("".to_string()).as_bytes().to_vec(),
+            address: address.unwrap_or("".to_string()).as_bytes().to_vec(),
+        };
+        create_message_with_data(
+            fid,
+            crate::proto::MessageType::FrameAction,
+            crate::proto::message_data::Body::FrameActionBody(body),
+            None,
+            None,
+        )
+    }
+}
+
 pub mod shard_chunk_factory {
     use crate::proto;
     use crate::proto::Height;

@@ -26,4 +26,6 @@ pub enum ValidationError {
     InvalidButtonIndex,
     #[error("Invalid url")]
     InvalidUrl,
+    #[error("Invalid input text")]
+    InvalidInputText,
 }

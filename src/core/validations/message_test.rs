@@ -2,9 +2,11 @@ mod tests {
     use crate::core::util::calculate_message_hash;
     use crate::core::validations::error::ValidationError;
     use crate::core::validations::message::validate_message;
-    use crate::proto::FarcasterNetwork;
     use crate::proto::{self};
+    use crate::proto::{CastId, FarcasterNetwork};
     use crate::storage::store::test_helper;
+    use crate::storage::util::blake3_20;
+    use crate::utils::factory::frame_action_factory::create_frame_action;
     use crate::utils::factory::messages_factory::links::create_link_compact_state;
     use crate::utils::factory::messages_factory::user_data::create_user_data_add;
     use crate::utils::factory::{messages_factory, time};
@@ -184,5 +186,133 @@ mod tests {
             .to_bytes()
             .to_vec();
         assert_validation_error(&msg, ValidationError::InvalidSignature);
+    }
+
+    #[test]
+    fn validates_frame_action_body() {
+        let url = "example.com".to_string();
+        let button_index = 1;
+        let msg = create_frame_action(1, url.clone(), button_index, None, None, None, None, None);
+        assert_valid(&msg);
+
+        let msg = create_frame_action(1, url.clone(), 6, None, None, None, None, None);
+        assert_validation_error(&msg, ValidationError::InvalidButtonIndex);
+
+        let msg = create_frame_action(
+            1,
+            "".to_string(),
+            button_index,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+
+        let msg = create_frame_action(
+            1,
+            "a".repeat(1025),
+            button_index,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+
+        let msg = create_frame_action(
+            1,
+            url.clone(),
+            button_index,
+            None,
+            Some("a".repeat(257)),
+            None,
+            None,
+            None,
+        );
+        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+
+        let msg = create_frame_action(
+            1,
+            url.clone(),
+            button_index,
+            None,
+            None,
+            Some("a".repeat(4097)),
+            None,
+            None,
+        );
+        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+
+        let msg = create_frame_action(
+            1,
+            url.clone(),
+            button_index,
+            None,
+            None,
+            None,
+            Some("a".repeat(257)),
+            None,
+        );
+        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+
+        let msg = create_frame_action(
+            1,
+            url.clone(),
+            button_index,
+            None,
+            None,
+            None,
+            None,
+            Some("a".repeat(65)),
+        );
+        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+
+        let msg = create_frame_action(
+            1,
+            url.clone(),
+            button_index,
+            Some(CastId {
+                fid: 1,
+                hash: "".as_bytes().to_vec(),
+            }),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_validation_error(&msg, ValidationError::InvalidData);
+
+        let msg = create_frame_action(
+            1,
+            url.clone(),
+            button_index,
+            Some(CastId {
+                fid: 0,
+                hash: blake3_20("abc".as_bytes()),
+            }),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_validation_error(&msg, ValidationError::InvalidData);
+
+        let msg = create_frame_action(
+            1,
+            url.clone(),
+            button_index,
+            Some(CastId {
+                fid: 1,
+                hash: blake3_20("abc".as_bytes()),
+            }),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_valid(&msg);
     }
 }
