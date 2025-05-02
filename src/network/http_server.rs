@@ -14,8 +14,8 @@ use tonic::metadata::MetadataValue;
 
 use crate::proto::{
     self, embed, hub_service_server::HubService, link_body::Target, message_data::Body, CastType,
-    FarcasterNetwork, FidTimestampRequest, HashScheme, MessageType, ReactionType, SignatureScheme,
-    UserDataType, UserNameType,
+    FarcasterNetwork, HashScheme, MessageType, ReactionType, SignatureScheme, UserDataType,
+    UserNameType,
 };
 use crate::proto::{
     casts_by_parent_request, hub_event, link_request, links_by_target_request, on_chain_event,
@@ -332,6 +332,7 @@ pub struct ShardInfo {
     pub mempool_size: u64,
 }
 
+#[allow(non_snake_case)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetFidsRequest {
     pub shard_id: u32,
@@ -345,6 +346,23 @@ pub struct GetFidsRequest {
     pub page_token: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
+
+    // For backwards compatibility
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageSize: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageToken: Option<Vec<u8>>,
+}
+
+impl GetFidsRequest {
+    pub fn to_proto(self) -> proto::FidsRequest {
+        proto::FidsRequest {
+            shard_id: self.shard_id,
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+            reverse: self.reverse,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -354,6 +372,7 @@ pub struct GetFidsResponse {
     pub next_page_token: Option<String>,
 }
 
+#[allow(non_snake_case)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FidRequest {
     pub fid: u64,
@@ -367,12 +386,26 @@ pub struct FidRequest {
     pub page_token: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
+
+    // For backwards compatibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start_timestamp: Option<u64>,
+    pub pageSize: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stop_timestamp: Option<u64>,
+    pub pageToken: Option<Vec<u8>>,
 }
 
+impl FidRequest {
+    pub fn to_proto(self) -> proto::FidRequest {
+        proto::FidRequest {
+            fid: self.fid,
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+            reverse: self.reverse,
+        }
+    }
+}
+
+#[allow(non_snake_case)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CastsByParentRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -391,6 +424,26 @@ pub struct CastsByParentRequest {
     pub page_token: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
+
+    // For backwards compatibility
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageSize: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageToken: Option<Vec<u8>>,
+}
+
+impl CastsByParentRequest {
+    pub fn to_proto(
+        self,
+        parent: Option<casts_by_parent_request::Parent>,
+    ) -> proto::CastsByParentRequest {
+        proto::CastsByParentRequest {
+            parent,
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+            reverse: self.reverse,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -405,6 +458,7 @@ pub struct ReactionRequest {
     reaction_type: ReactionType,
 }
 
+#[allow(non_snake_case)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReactionsByFidRequest {
     fid: u64,
@@ -419,8 +473,27 @@ pub struct ReactionsByFidRequest {
     page_token: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reverse: Option<bool>,
+
+    // For backwards compatibility
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageSize: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageToken: Option<Vec<u8>>,
 }
 
+impl ReactionsByFidRequest {
+    pub fn to_proto(self) -> proto::ReactionsByFidRequest {
+        proto::ReactionsByFidRequest {
+            fid: self.fid,
+            reaction_type: Some(self.reaction_type as i32),
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+            reverse: self.reverse,
+        }
+    }
+}
+
+#[allow(non_snake_case)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReactionsByCastRequest {
     pub target_fid: u64,
@@ -438,8 +511,30 @@ pub struct ReactionsByCastRequest {
     pub page_token: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
+
+    // For backwards compatibility
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageSize: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageToken: Option<Vec<u8>>,
 }
 
+impl ReactionsByCastRequest {
+    pub fn to_proto(
+        self,
+        target: reactions_by_target_request::Target,
+    ) -> proto::ReactionsByTargetRequest {
+        proto::ReactionsByTargetRequest {
+            target: Some(target),
+            reaction_type: self.reaction_type.map(|r| r as i32),
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+            reverse: self.reverse,
+        }
+    }
+}
+
+#[allow(non_snake_case)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReactionsByTargetRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -458,6 +553,27 @@ pub struct ReactionsByTargetRequest {
     pub page_token: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<bool>,
+
+    // For backwards compatibility
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageSize: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageToken: Option<Vec<u8>>,
+}
+
+impl ReactionsByTargetRequest {
+    pub fn to_proto(
+        self,
+        target: reactions_by_target_request::Target,
+    ) -> proto::ReactionsByTargetRequest {
+        proto::ReactionsByTargetRequest {
+            target: Some(target),
+            reaction_type: self.reaction_type.map(|r| r as i32),
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+            reverse: self.reverse,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -468,6 +584,7 @@ pub struct LinkRequest {
     target_fid: Option<u64>,
 }
 
+#[allow(non_snake_case)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LinksByFidRequest {
     fid: u64,
@@ -483,8 +600,27 @@ pub struct LinksByFidRequest {
     page_token: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reverse: Option<bool>,
+
+    // For backwards compatibility
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageSize: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageToken: Option<Vec<u8>>,
 }
 
+impl LinksByFidRequest {
+    pub fn to_proto(self) -> proto::LinksByFidRequest {
+        proto::LinksByFidRequest {
+            fid: self.fid,
+            link_type: self.link_type,
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+            reverse: self.reverse,
+        }
+    }
+}
+
+#[allow(non_snake_case)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LinksByTargetRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -501,6 +637,24 @@ pub struct LinksByTargetRequest {
     page_token: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reverse: Option<bool>,
+
+    // For backwards compatibility
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageSize: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageToken: Option<Vec<u8>>,
+}
+
+impl LinksByTargetRequest {
+    pub fn to_proto(self, target: links_by_target_request::Target) -> proto::LinksByTargetRequest {
+        proto::LinksByTargetRequest {
+            target: Some(target),
+            link_type: self.link_type,
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+            reverse: self.reverse,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -680,11 +834,12 @@ pub struct OnChainEventResponse {
     pub next_page_token: Option<String>,
 }
 
+#[allow(non_snake_case)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OnChainEventRequest {
     fid: u64,
     event_type: OnChainEventType,
-    #[serde(default, rename = "pageSize", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     page_size: Option<u32>,
     #[serde(
         default,
@@ -694,6 +849,24 @@ pub struct OnChainEventRequest {
     page_token: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reverse: Option<bool>,
+
+    // For backwards compatibility
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageSize: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageToken: Option<Vec<u8>>,
+}
+
+impl OnChainEventRequest {
+    pub fn to_proto(self) -> proto::OnChainEventRequest {
+        proto::OnChainEventRequest {
+            fid: self.fid,
+            event_type: self.event_type as i32,
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+            reverse: self.reverse,
+        }
+    }
 }
 
 #[allow(non_camel_case_types)]
@@ -796,6 +969,7 @@ pub struct EventsResponse {
     // pub next_page_token: Option<String>,
 }
 
+#[allow(non_snake_case)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EventsRequest {
     #[serde(default, rename = "from_event_id")] // To keep it consistent with hubble
@@ -814,6 +988,25 @@ pub struct EventsRequest {
     page_token: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reverse: Option<bool>,
+
+    // For backwards compatibility
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageSize: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageToken: Option<Vec<u8>>,
+}
+
+impl EventsRequest {
+    pub fn to_proto(self) -> proto::EventsRequest {
+        proto::EventsRequest {
+            start_id: self.start_id,
+            shard_index: self.shard_index,
+            stop_id: self.stop_id,
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+            reverse: self.reverse,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1705,12 +1898,7 @@ impl HubHttpService for HubHttpServiceImpl {
         let response = self
             .service
             .get_fids(tonic::Request::<proto::FidsRequest>::new(
-                proto::FidsRequest {
-                    shard_id: request.shard_id,
-                    page_size: request.page_size,
-                    page_token: request.page_token,
-                    reverse: request.reverse,
-                },
+                request.to_proto(),
             ))
             .await
             .map_err(|e| ErrorResponse {
@@ -1755,16 +1943,7 @@ impl HubHttpService for HubHttpServiceImpl {
     async fn get_casts_by_fid(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse> {
         let service = &self.service;
         let response = service
-            .get_all_cast_messages_by_fid(tonic::Request::<FidTimestampRequest>::new(
-                FidTimestampRequest {
-                    fid: req.fid,
-                    page_size: req.page_size,
-                    page_token: req.page_token,
-                    reverse: req.reverse,
-                    start_timestamp: req.start_timestamp,
-                    stop_timestamp: req.stop_timestamp,
-                },
-            ))
+            .get_casts_by_fid(tonic::Request::<proto::FidRequest>::new(req.to_proto()))
             .await
             .map_err(|e| ErrorResponse {
                 error: "Failed to get casts".to_string(),
@@ -1778,12 +1957,7 @@ impl HubHttpService for HubHttpServiceImpl {
     async fn get_casts_by_mention(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse> {
         let service = &self.service;
 
-        let grpc_req = tonic::Request::new(proto::FidRequest {
-            fid: req.fid,
-            page_size: req.page_size,
-            page_token: req.page_token,
-            reverse: req.reverse,
-        });
+        let grpc_req = tonic::Request::new(req.to_proto());
         let response = service
             .get_casts_by_mention(grpc_req)
             .await
@@ -1804,17 +1978,17 @@ impl HubHttpService for HubHttpServiceImpl {
             Ok(Some(casts_by_parent_request::Parent::ParentCastId(
                 proto::CastId {
                     fid: req.fid.unwrap(),
-                    hash: hex::decode(req.hash.unwrap().replace("0x", "")).map_err(|e| {
-                        ErrorResponse {
+                    hash: hex::decode(req.hash.clone().unwrap().replace("0x", "")).map_err(
+                        |e| ErrorResponse {
                             error: "Invalid request".to_string(),
                             error_detail: Some(e.to_string()),
-                        }
-                    })?,
+                        },
+                    )?,
                 },
             )))
         } else if req.url.is_some() {
             Ok(Some(casts_by_parent_request::Parent::ParentUrl(
-                req.url.unwrap(),
+                req.url.clone().unwrap(),
             )))
         } else {
             Err(ErrorResponse {
@@ -1825,12 +1999,7 @@ impl HubHttpService for HubHttpServiceImpl {
             })
         }?;
 
-        let grpc_req = tonic::Request::new(proto::CastsByParentRequest {
-            parent: parent,
-            page_size: req.page_size,
-            page_token: req.page_token,
-            reverse: req.reverse,
-        });
+        let grpc_req = tonic::Request::new(req.to_proto(parent));
         let response = service
             .get_casts_by_parent(grpc_req)
             .await
@@ -1889,13 +2058,7 @@ impl HubHttpService for HubHttpServiceImpl {
         req: ReactionsByFidRequest,
     ) -> Result<PagedResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(proto::ReactionsByFidRequest {
-            fid: req.fid,
-            reaction_type: Some(req.reaction_type as i32),
-            page_size: req.page_size,
-            page_token: req.page_token,
-            reverse: req.reverse,
-        });
+        let grpc_req = tonic::Request::new(req.to_proto());
         let response = service
             .get_reactions_by_fid(grpc_req)
             .await
@@ -1926,13 +2089,7 @@ impl HubHttpService for HubHttpServiceImpl {
             hash,
         });
 
-        let grpc_req = tonic::Request::new(proto::ReactionsByTargetRequest {
-            reaction_type: req.reaction_type.map(|r| r as i32),
-            page_size: req.page_size,
-            page_token: req.page_token,
-            reverse: req.reverse,
-            target: Some(target),
-        });
+        let grpc_req = tonic::Request::new(req.to_proto(target));
 
         let response = self
             .service
@@ -1954,7 +2111,7 @@ impl HubHttpService for HubHttpServiceImpl {
     ) -> Result<PagedResponse, ErrorResponse> {
         let service = &self.service;
         let target = if req.target_cast_id.is_some() {
-            let cast_id = req.target_cast_id.unwrap();
+            let cast_id = req.target_cast_id.clone().unwrap();
             let hash = hex::decode(cast_id.hash.replace("0x", ""));
             if hash.is_err() {
                 return Err(ErrorResponse {
@@ -1967,20 +2124,14 @@ impl HubHttpService for HubHttpServiceImpl {
                 hash: hash.unwrap(),
             })
         } else if req.target_url.is_some() {
-            reactions_by_target_request::Target::TargetUrl(req.target_url.unwrap())
+            reactions_by_target_request::Target::TargetUrl(req.target_url.clone().unwrap())
         } else {
             return Err(ErrorResponse {
                 error: "target not specified".to_string(),
                 error_detail: None,
             });
         };
-        let grpc_req = tonic::Request::new(proto::ReactionsByTargetRequest {
-            reaction_type: req.reaction_type.map(|r| r as i32),
-            page_size: req.page_size,
-            page_token: req.page_token,
-            reverse: req.reverse,
-            target: Some(target),
-        });
+        let grpc_req = tonic::Request::new(req.to_proto(target));
         let response = service
             .get_reactions_by_target(grpc_req)
             .await
@@ -2025,13 +2176,7 @@ impl HubHttpService for HubHttpServiceImpl {
         req: LinksByFidRequest,
     ) -> Result<PagedResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(proto::LinksByFidRequest {
-            fid: req.fid,
-            link_type: req.link_type,
-            page_size: req.page_size,
-            page_token: req.page_token,
-            reverse: req.reverse,
-        });
+        let grpc_req = tonic::Request::new(req.to_proto());
         let response = service
             .get_links_by_fid(grpc_req)
             .await
@@ -2058,13 +2203,7 @@ impl HubHttpService for HubHttpServiceImpl {
                 error_detail: None,
             });
         };
-        let grpc_req = tonic::Request::new(proto::LinksByTargetRequest {
-            link_type: req.link_type,
-            page_size: req.page_size,
-            page_token: req.page_token,
-            reverse: req.reverse,
-            target: Some(target),
-        });
+        let grpc_req = tonic::Request::new(req.to_proto(target));
         let response = service
             .get_links_by_target(grpc_req)
             .await
@@ -2079,12 +2218,7 @@ impl HubHttpService for HubHttpServiceImpl {
     /// GET /v1/userDataByFid
     async fn get_user_data_by_fid(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(proto::FidRequest {
-            fid: req.fid,
-            page_size: req.page_size,
-            page_token: req.page_token,
-            reverse: req.reverse,
-        });
+        let grpc_req = tonic::Request::new(req.to_proto());
         let response = service
             .get_user_data_by_fid(grpc_req)
             .await
@@ -2102,12 +2236,7 @@ impl HubHttpService for HubHttpServiceImpl {
         req: FidRequest,
     ) -> Result<StorageLimitsResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(proto::FidRequest {
-            fid: req.fid,
-            page_size: req.page_size,
-            page_token: req.page_token,
-            reverse: req.reverse,
-        });
+        let grpc_req = tonic::Request::new(req.to_proto());
         let response = service
             .get_current_storage_limits_by_fid(grpc_req)
             .await
@@ -2188,12 +2317,7 @@ impl HubHttpService for HubHttpServiceImpl {
         req: FidRequest,
     ) -> Result<UsernameProofsResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(proto::FidRequest {
-            fid: req.fid,
-            page_size: req.page_size,
-            page_token: req.page_token,
-            reverse: req.reverse,
-        });
+        let grpc_req = tonic::Request::new(req.to_proto());
         let response = service
             .get_user_name_proofs_by_fid(grpc_req)
             .await
@@ -2283,12 +2407,7 @@ impl HubHttpService for HubHttpServiceImpl {
         req: FidRequest,
     ) -> Result<PagedResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(proto::FidRequest {
-            fid: req.fid,
-            page_size: req.page_size,
-            page_token: req.page_token,
-            reverse: req.reverse,
-        });
+        let grpc_req = tonic::Request::new(req.to_proto());
         let response = service
             .get_verifications_by_fid(grpc_req)
             .await
@@ -2306,12 +2425,7 @@ impl HubHttpService for HubHttpServiceImpl {
         req: FidRequest,
     ) -> Result<OnChainEventResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(proto::FidRequest {
-            fid: req.fid,
-            page_size: req.page_size,
-            page_token: req.page_token,
-            reverse: req.reverse,
-        });
+        let grpc_req = tonic::Request::new(req.to_proto());
         let response = service
             .get_on_chain_signers_by_fid(grpc_req)
             .await
@@ -2338,13 +2452,7 @@ impl HubHttpService for HubHttpServiceImpl {
         req: OnChainEventRequest,
     ) -> Result<OnChainEventResponse, ErrorResponse> {
         let service = &self.service;
-        let grpc_req = tonic::Request::new(proto::OnChainEventRequest {
-            fid: req.fid,
-            event_type: req.event_type as i32,
-            page_size: req.page_size,
-            page_token: req.page_token,
-            reverse: req.reverse,
-        });
+        let grpc_req = tonic::Request::new(req.to_proto());
         let response = service
             .get_on_chain_events(grpc_req)
             .await
@@ -2368,14 +2476,7 @@ impl HubHttpService for HubHttpServiceImpl {
     async fn get_events(&self, req: EventsRequest) -> Result<EventsResponse, ErrorResponse> {
         let service = &self.service;
 
-        let grpc_req = tonic::Request::new(proto::EventsRequest {
-            start_id: req.start_id,
-            shard_index: req.shard_index,
-            stop_id: req.stop_id,
-            page_size: req.page_size,
-            page_token: req.page_token,
-            reverse: req.reverse,
-        });
+        let grpc_req = tonic::Request::new(req.to_proto());
         let response = service
             .get_events(grpc_req)
             .await
