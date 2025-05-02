@@ -407,6 +407,49 @@ impl FidRequest {
 
 #[allow(non_snake_case)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FidTimestampRequest {
+    pub fid: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub page_token: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_timestamp: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_timestamp: Option<u64>,
+
+    // For backwards compatibility
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageSize: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageToken: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startTimestamp: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopTimestamp: Option<u64>,
+}
+
+impl FidTimestampRequest {
+    pub fn to_proto(self) -> proto::FidTimestampRequest {
+        proto::FidTimestampRequest {
+            fid: self.fid,
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+            start_timestamp: self.start_timestamp.or(self.startTimestamp),
+            stop_timestamp: self.stop_timestamp.or(self.stopTimestamp),
+            reverse: self.reverse,
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CastsByParentRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fid: Option<u64>,
@@ -1812,7 +1855,10 @@ pub trait HubHttpService {
     async fn get_info(&self, req: InfoRequest) -> Result<InfoResponse, ErrorResponse>;
     async fn get_fids(&self, req: GetFidsRequest) -> Result<GetFidsResponse, ErrorResponse>;
     async fn get_cast_by_id(&self, req: IdRequest) -> Result<Message, ErrorResponse>;
-    async fn get_casts_by_fid(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse>;
+    async fn get_casts_by_fid(
+        &self,
+        req: FidTimestampRequest,
+    ) -> Result<PagedResponse, ErrorResponse>;
     async fn get_casts_by_mention(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse>;
     async fn get_casts_by_parent(
         &self,
@@ -1940,10 +1986,15 @@ impl HubHttpService for HubHttpServiceImpl {
         return map_proto_message_to_json_message(message);
     }
 
-    async fn get_casts_by_fid(&self, req: FidRequest) -> Result<PagedResponse, ErrorResponse> {
+    async fn get_casts_by_fid(
+        &self,
+        req: FidTimestampRequest,
+    ) -> Result<PagedResponse, ErrorResponse> {
         let service = &self.service;
         let response = service
-            .get_casts_by_fid(tonic::Request::<proto::FidRequest>::new(req.to_proto()))
+            .get_all_cast_messages_by_fid(tonic::Request::<proto::FidTimestampRequest>::new(
+                req.to_proto(),
+            ))
             .await
             .map_err(|e| ErrorResponse {
                 error: "Failed to get casts".to_string(),
@@ -2531,9 +2582,12 @@ impl Router {
                 .await
             }
             (&Method::GET, "/v1/castsByFid") => {
-                self.handle_request::<FidRequest, PagedResponse, _>(req, move |service, req| {
-                    Box::pin(async move { service.get_casts_by_fid(req).await })
-                })
+                self.handle_request::<FidTimestampRequest, PagedResponse, _>(
+                    req,
+                    move |service, req| {
+                        Box::pin(async move { service.get_casts_by_fid(req).await })
+                    },
+                )
                 .await
             }
             (&Method::GET, "/v1/castsByMention") => {
