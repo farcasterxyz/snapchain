@@ -24,8 +24,4 @@ pub enum ValidationError {
     InvalidNetwork,
     #[error("Invalid button index")]
     InvalidButtonIndex,
-    #[error("Invalid url")]
-    InvalidUrl,
-    #[error("Invalid input text")]
-    InvalidInputText,
 }
