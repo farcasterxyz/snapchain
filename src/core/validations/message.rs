@@ -1,5 +1,8 @@
 use crate::core::validations::error::ValidationError;
-use crate::proto::{self, FarcasterNetwork, MessageData, MessageType, UserDataBody, UserDataType};
+use crate::core::validations::validate_cast_id;
+use crate::proto::{
+    self, FarcasterNetwork, FrameActionBody, MessageData, MessageType, UserDataBody, UserDataType,
+};
 use crate::storage::util::{blake3_20, bytes_compare};
 
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -15,6 +18,43 @@ const EMBEDS_V1_CUTOFF: u32 = 73612800;
 pub fn validate_message_type(message_type: i32) -> Result<(), ValidationError> {
     MessageType::try_from(message_type)
         .map_or_else(|_| Err(ValidationError::InvalidData), |_| Ok(()))
+}
+
+fn validate_bytes_as_string(
+    byte_array: &Vec<u8>,
+    max_length: u64,
+    required: bool,
+) -> Result<(), ValidationError> {
+    if required && byte_array.len() == 0 {
+        return Err(ValidationError::InvalidDataLength);
+    }
+    if byte_array.len() as u64 > max_length {
+        return Err(ValidationError::InvalidDataLength);
+    }
+    Ok(())
+}
+
+fn validate_frame_action_body(body: &FrameActionBody) -> Result<(), ValidationError> {
+    // url and buttonId are required and must not exceed the length limits. cast id is optional
+    if body.button_index > 5 {
+        return Err(ValidationError::InvalidButtonIndex);
+    }
+
+    validate_bytes_as_string(&body.url, 1024, true)?;
+
+    validate_bytes_as_string(&body.input_text, 256, false)?;
+
+    validate_bytes_as_string(&body.state, 4096, false)?;
+
+    validate_bytes_as_string(&body.transaction_id, 256, false)?;
+
+    validate_bytes_as_string(&body.address, 64, false)?;
+
+    if let Some(cast_id) = &body.cast_id {
+        validate_cast_id(cast_id)?;
+    }
+
+    Ok(())
 }
 
 pub fn validate_message(
@@ -104,10 +144,10 @@ pub fn validate_message(
         Some(proto::message_data::Body::VerificationRemoveBody(remove_body)) => {
             verification::validate_remove_address(&remove_body)?;
         }
-        Some(proto::message_data::Body::FrameActionBody(_)) => {}
-        None => {
-            return Err(ValidationError::MissingData);
+        Some(proto::message_data::Body::FrameActionBody(frame_action_body)) => {
+            validate_frame_action_body(&frame_action_body)?;
         }
+        None => {}
     }
 
     Ok(())

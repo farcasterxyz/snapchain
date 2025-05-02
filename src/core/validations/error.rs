@@ -22,4 +22,8 @@ pub enum ValidationError {
     InvalidSignature,
     #[error("Invalid network")]
     InvalidNetwork,
+    #[error("Invalid button index")]
+    InvalidButtonIndex,
+    #[error("Invalid url")]
+    InvalidUrl,
 }
