@@ -839,90 +839,92 @@ impl ShardEngine {
         Ok((account_root, events, validation_errors))
     }
 
-    fn handle_verification_remove(
+    fn handle_verification_merge_hooks(
         &mut self,
         fid: u64,
         hub_event: &proto::HubEvent,
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<(), MessageValidationError> {
-        match &hub_event.body {
-            Some(hub_event::Body::MergeMessageBody(body)) => {
-                if let Some(message) = &body.message {
-                    if let Some(data) = &message.data {
-                        if data.r#type == MessageType::VerificationRemove as i32 {
-                            if let Some(Body::VerificationRemoveBody(verification_remove_body)) =
-                                &data.body
-                            {
-                                let (parsed_address_result, protocol) =
-                                    match verification_remove_body.protocol {
-                                        x if x == proto::Protocol::Ethereum as i32 => (
-                                            Ok::<String, MessageValidationError>(
-                                                Address::from_slice(
-                                                    &verification_remove_body.address,
-                                                )
-                                                .to_checksum(None),
-                                            ),
-                                            proto::Protocol::Ethereum,
-                                        ),
-                                        x if x == proto::Protocol::Solana as i32 => (
-                                            Ok::<String, MessageValidationError>(
-                                                bs58::encode(&verification_remove_body.address)
-                                                    .into_string(),
-                                            ),
-                                            proto::Protocol::Solana,
-                                        ),
-                                        _ => return Err(
-                                            MessageValidationError::AddressNotPartOfVerification,
-                                        ),
-                                    };
-                                let parsed_address = parsed_address_result?;
+        // Early return if not a merge message event
+        let merge_body = match &hub_event.body {
+            Some(hub_event::Body::MergeMessageBody(body)) => body,
+            _ => return Ok(()),
+        };
 
-                                // Check if this address is set as the primary Ethereum address
-                                if protocol == proto::Protocol::Ethereum {
-                                    let user_data = UserDataStore::get_user_data_by_fid_and_type(
-                                        &self.stores.user_data_store,
-                                        fid,
-                                        UserDataType::UserDataPrimaryAddressEthereum,
-                                    );
-                                    if let Ok(user_data) = user_data {
-                                        if let Some(Body::UserDataBody(body)) =
-                                            &user_data.data.as_ref().unwrap().body
-                                        {
-                                            if body.value == parsed_address {
-                                                self.stores
-                                                    .user_data_store
-                                                    .revoke(&user_data, txn_batch)?;
-                                            }
-                                        }
-                                    }
-                                }
+        // Early return if no message
+        let message = match &merge_body.message {
+            Some(message) => message,
+            None => return Ok(()),
+        };
 
-                                // Check if this address is set as the primary Solana address
-                                if protocol == proto::Protocol::Solana {
-                                    let user_data = UserDataStore::get_user_data_by_fid_and_type(
-                                        &self.stores.user_data_store,
-                                        fid,
-                                        UserDataType::UserDataPrimaryAddressSolana,
-                                    );
-                                    if let Ok(user_data) = user_data {
-                                        if let Some(Body::UserDataBody(body)) =
-                                            &user_data.data.as_ref().unwrap().body
-                                        {
-                                            if body.value == parsed_address {
-                                                self.stores
-                                                    .user_data_store
-                                                    .revoke(&user_data, txn_batch)?;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
+        // Early return if no message data
+        let data = match &message.data {
+            Some(data) => data,
+            None => return Ok(()),
+        };
+
+        // Check if this is a verification remove message. This should never
+        // happen as we only call this function for verification remove messages
+        if data.r#type != MessageType::VerificationRemove as i32 {
+            return Err(MessageValidationError::InvalidMessageType(data.r#type));
         }
+
+        // Extract verification remove body or return early
+        let verification_body = match &data.body {
+            Some(Body::VerificationRemoveBody(body)) => body,
+            _ => return Ok(()),
+        };
+
+        // Determine protocol from removal message
+        let protocol = match verification_body.protocol {
+            x if x == proto::Protocol::Ethereum as i32 => proto::Protocol::Ethereum,
+            x if x == proto::Protocol::Solana as i32 => proto::Protocol::Solana,
+            _ => return Err(MessageValidationError::AddressNotPartOfVerification),
+        };
+
+        // Parse address based on protocol
+        let parsed_address = match protocol {
+            proto::Protocol::Ethereum => {
+                Address::from_slice(&verification_body.address).to_checksum(None)
+            }
+            proto::Protocol::Solana => bs58::encode(&verification_body.address).into_string(),
+        };
+
+        // Determine user data type based on protocol
+        let user_data_type = match protocol {
+            proto::Protocol::Ethereum => UserDataType::UserDataPrimaryAddressEthereum,
+            proto::Protocol::Solana => UserDataType::UserDataPrimaryAddressSolana,
+        };
+
+        // Check if this address is set as the primary address
+        let user_data_result = UserDataStore::get_user_data_by_fid_and_type(
+            &self.stores.user_data_store,
+            fid,
+            user_data_type,
+        );
+
+        // If we can't find the user data or there's an error, just return OK (nothing to revoke)
+        let user_data = match user_data_result {
+            Ok(data) => data,
+            Err(_) => return Ok(()),
+        };
+
+        // Check if the stored primary address matches the one being removed
+        let data_ref = match &user_data.data {
+            Some(data) => data,
+            None => return Ok(()),
+        };
+
+        let user_data_body = match &data_ref.body {
+            Some(Body::UserDataBody(body)) => body,
+            _ => return Ok(()),
+        };
+
+        // If the primary address matches the one being removed, revoke it
+        if user_data_body.value == parsed_address {
+            self.stores.user_data_store.revoke(&user_data, txn_batch)?;
+        }
+
         Ok(())
     }
 
@@ -966,8 +968,6 @@ impl ShardEngine {
                 .merge(msg, txn_batch)
                 .map_err(|e| MessageValidationError::StoreError(e)),
             MessageType::VerificationRemove => {
-                // Handle verification messages with special post-hook for removals
-                // Match on hub event, make sure it's a merge message event
                 let result = self
                     .stores
                     .verification_store
@@ -975,7 +975,7 @@ impl ShardEngine {
                     .map_err(|e| MessageValidationError::StoreError(e));
 
                 if let Ok(hub_event) = result.as_ref() {
-                    self.handle_verification_remove(msg.fid(), hub_event, txn_batch)?;
+                    self.handle_verification_merge_hooks(msg.fid(), hub_event, txn_batch)?;
                 }
                 result
             }
