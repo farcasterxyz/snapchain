@@ -243,7 +243,20 @@ pub struct UsernameProofBody {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FrameActionBody {}
+pub struct FrameActionBody {
+    pub url: Vec<u8>,
+    #[serde(rename = "buttonIndex")]
+    pub button_index: u32,
+    #[serde(rename = "castId", skip_serializing_if = "Option::is_none")]
+    pub cast_id: Option<CastId>,
+    #[serde(rename = "inputText")]
+    pub input_text: Vec<u8>,
+    pub state: Vec<u8>,
+    #[serde(rename = "transactionId")]
+    pub transaction_id: Vec<u8>,
+    #[serde(with = "serdehex")]
+    pub address: Vec<u8>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkCompactStateBody {
@@ -1112,10 +1125,47 @@ fn map_proto_message_data_to_json_message_data(
             frame_action_body: None,
             link_compact_state_body: None,
         }),
-        Some(Body::FrameActionBody(_)) => Err(ErrorResponse {
-            error: "No message data".to_string(),
-            error_detail: None,
-        }),
+        Some(Body::FrameActionBody(frame_action_body)) => {
+            return Ok(MessageData {
+                message_type: MessageType::try_from(message_data.r#type)
+                    .map_err(|_| ErrorResponse {
+                        error: "Invalid message type".to_string(),
+                        error_detail: None,
+                    })?
+                    .as_str_name()
+                    .to_owned(),
+                fid: message_data.fid,
+                network: FarcasterNetwork::try_from(message_data.network)
+                    .map_err(|_| ErrorResponse {
+                        error: "Invalid network".to_string(),
+                        error_detail: None,
+                    })?
+                    .as_str_name()
+                    .to_owned(),
+                timestamp: message_data.timestamp,
+                cast_add_body: None,
+                cast_remove_body: None,
+                reaction_body: None,
+                verification_add_address_body: None,
+                verification_remove_body: None,
+                user_data_body: None,
+                link_body: None,
+                username_proof_body: None,
+                frame_action_body: Some(FrameActionBody {
+                    url: frame_action_body.url,
+                    button_index: frame_action_body.button_index,
+                    cast_id: frame_action_body.cast_id.map(|cast_id| CastId {
+                        fid: cast_id.fid,
+                        hash: format!("0x{}", hex::encode(cast_id.hash)),
+                    }),
+                    input_text: frame_action_body.input_text,
+                    state: frame_action_body.state,
+                    transaction_id: frame_action_body.transaction_id,
+                    address: frame_action_body.address,
+                }),
+                link_compact_state_body: None,
+            });
+        }
         Some(Body::LinkBody(link_body)) => {
             let result = map_proto_link_body_to_json_link_body(link_body)?;
             return Ok(MessageData {
