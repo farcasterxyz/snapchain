@@ -242,17 +242,20 @@ pub struct UsernameProofBody {
     pub username_proof_type: String,
 }
 
+// Serialize as base64 strings for compatibility with hubs
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrameActionBody {
+    #[serde(with = "serdebase64")]
     pub url: Vec<u8>,
     #[serde(rename = "buttonIndex")]
     pub button_index: u32,
     #[serde(rename = "castId", skip_serializing_if = "Option::is_none")]
     pub cast_id: Option<CastId>,
-    #[serde(rename = "inputText")]
+    #[serde(with = "serdebase64", rename = "inputText")]
     pub input_text: Vec<u8>,
+    #[serde(with = "serdebase64")]
     pub state: Vec<u8>,
-    #[serde(rename = "transactionId")]
+    #[serde(with = "serdebase64", rename = "transactionId")]
     pub transaction_id: Vec<u8>,
     #[serde(with = "serdehex")]
     pub address: Vec<u8>,
