@@ -350,7 +350,11 @@ pub struct GetFidsRequest {
     // For backwards compatibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pageSize: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub pageToken: Option<Vec<u8>>,
 }
 
@@ -390,7 +394,11 @@ pub struct FidRequest {
     // For backwards compatibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pageSize: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub pageToken: Option<Vec<u8>>,
 }
 
@@ -427,7 +435,11 @@ pub struct FidTimestampRequest {
     // For backwards compatibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pageSize: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub pageToken: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startTimestamp: Option<u64>,
@@ -471,7 +483,11 @@ pub struct CastsByParentRequest {
     // For backwards compatibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pageSize: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub pageToken: Option<Vec<u8>>,
 }
 
@@ -520,7 +536,11 @@ pub struct ReactionsByFidRequest {
     // For backwards compatibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pageSize: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub pageToken: Option<Vec<u8>>,
 }
 
@@ -558,7 +578,11 @@ pub struct ReactionsByCastRequest {
     // For backwards compatibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pageSize: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub pageToken: Option<Vec<u8>>,
 }
 
@@ -600,7 +624,11 @@ pub struct ReactionsByTargetRequest {
     // For backwards compatibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pageSize: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub pageToken: Option<Vec<u8>>,
 }
 
@@ -647,7 +675,11 @@ pub struct LinksByFidRequest {
     // For backwards compatibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pageSize: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub pageToken: Option<Vec<u8>>,
 }
 
@@ -684,7 +716,11 @@ pub struct LinksByTargetRequest {
     // For backwards compatibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pageSize: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub pageToken: Option<Vec<u8>>,
 }
 
@@ -896,7 +932,11 @@ pub struct OnChainEventRequest {
     // For backwards compatibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pageSize: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub pageToken: Option<Vec<u8>>,
 }
 
@@ -1035,7 +1075,11 @@ pub struct EventsRequest {
     // For backwards compatibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pageSize: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub pageToken: Option<Vec<u8>>,
 }
 
