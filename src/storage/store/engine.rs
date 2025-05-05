@@ -734,7 +734,6 @@ impl ShardEngine {
 
         for msg in &snapchain_txn.user_messages {
             // Errors are validated based on the shard root
-            // CHECK HERE for
             match self.validate_user_message(msg, txn_batch) {
                 Ok(()) => {
                     let result = self.merge_message(msg, txn_batch);
