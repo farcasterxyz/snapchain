@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.14] - 2025-05-05
+
+### 🐛 Bug Fixes
+
+- Validate frame action body (#464)
+- Handle frame actions in http server (#466)
+- Read camelCase pageOption in http requests for backwards compatibility (#463)
+
 ## [0.2.13] - 2025-05-01
 
 ### 🚀 Features
