@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.15] - 2025-05-06
+
+### ⚙️ Miscellaneous Tasks
+
+- Add config option for forcing download from snapshot (#468)
+
 ## [0.2.14] - 2025-05-05
 
 ### 🐛 Bug Fixes
