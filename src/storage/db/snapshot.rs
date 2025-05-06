@@ -36,6 +36,7 @@ pub struct Config {
     pub backup_dir: String,
     pub backup_on_startup: bool,
     pub load_db_from_snapshot: bool,
+    pub force_load_db_from_snapshot: bool,
     pub snapshot_download_url: String,
     pub snapshot_download_dir: String,
     pub aws_access_key_id: String,
@@ -51,6 +52,7 @@ impl Default for Config {
             snapshot_download_dir: ".rocks.snapshot".to_string(),
             backup_on_startup: false,
             load_db_from_snapshot: true,
+            force_load_db_from_snapshot: false,
             snapshot_download_url: "https://pub-d352dd8819104a778e20d08888c5a661.r2.dev"
                 .to_string(),
             aws_access_key_id: "".to_string(),

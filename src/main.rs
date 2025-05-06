@@ -243,9 +243,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // We only use snapshots if the db directory doesn't exist or is empty.
-    if app_config.snapshot.load_db_from_snapshot
-        && (!fs::exists(app_config.rocksdb_dir.clone()).unwrap()
-            || is_dir_empty(&app_config.rocksdb_dir).unwrap())
+    // If the user sets [force_load_db_from_snapshot], load the snapshot without checking directory contents.
+    if app_config.snapshot.force_load_db_from_snapshot
+        || (app_config.snapshot.load_db_from_snapshot
+            && (!fs::exists(app_config.rocksdb_dir.clone()).unwrap()
+                || is_dir_empty(&app_config.rocksdb_dir).unwrap()))
     {
         info!("Downloading snapshots");
         let mut shard_ids = app_config.consensus.shard_ids.clone();
