@@ -65,6 +65,8 @@ use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use hex::ToHex;
+use moka::policy::EvictionPolicy;
+use moka::sync::{Cache, CacheBuilder};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
@@ -91,6 +93,7 @@ pub struct MyHubService {
     network: proto::FarcasterNetwork,
     version: String,
     peer_id: String,
+    id_registry_cache: Cache<Vec<u8>, OnChainEvent>, // <–– new
 }
 
 impl MyHubService {
@@ -122,6 +125,11 @@ impl MyHubService {
             info!("RPC server auth enabled with {} users", allowed_users.len());
         }
 
+        let id_registry_cache = CacheBuilder::new(2_000_000) // max 2M entries
+            .time_to_idle(Duration::from_secs(60 * 60)) // idle TTL 1h
+            .eviction_policy(EvictionPolicy::lru()) // LRU policy
+            .build();
+
         let service = Self {
             allowed_users,
             network,
@@ -135,6 +143,7 @@ impl MyHubService {
             mempool_tx,
             version,
             peer_id,
+            id_registry_cache, // <–– init here
         };
         service
     }
