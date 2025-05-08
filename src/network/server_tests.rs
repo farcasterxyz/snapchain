@@ -1243,4 +1243,34 @@ mod tests {
 
         assert_eq!(shard2_ref.next_page_token, vec![110, 117, 108, 108].into());
     }
+
+    #[tokio::test]
+    async fn test_get_id_registry_event_by_address() {
+        let (_stores, _senders, [mut engine1, _], service) = make_server(None).await;
+        let owner = test_helper::default_custody_address();
+        let fid = SHARD1_FID;
+        // Should we write a bunch of users to test the iteration or is this sufficient?
+        test_helper::register_user(
+            fid,
+            test_helper::default_signer(),
+            owner.clone(),
+            &mut engine1,
+        )
+        .await;
+
+        let mut request = Request::new(proto::IdRegistryEventByAddressRequest {
+            address: owner.clone(),
+        });
+        add_auth_header(&mut request, USER_NAME, PASSWORD);
+        let response = service
+            .get_id_registry_on_chain_event_by_address(request)
+            .await
+            .unwrap();
+        let event = response.into_inner();
+        if let Some(proto::on_chain_event::Body::IdRegisterEventBody(body)) = event.body {
+            assert_eq!(body.to, owner);
+        } else {
+            panic!("Expected IdRegisterEventBody");
+        }
+    }
 }
