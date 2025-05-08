@@ -93,7 +93,7 @@ pub struct MyHubService {
     network: proto::FarcasterNetwork,
     version: String,
     peer_id: String,
-    id_registry_cache: Cache<Vec<u8>, OnChainEvent>, 
+    id_registry_cache: Cache<Vec<u8>, OnChainEvent>,
 }
 
 impl MyHubService {
@@ -1799,7 +1799,7 @@ impl HubService for MyHubService {
         }
 
         for store in self.shard_stores.values() {
-            let mut events = store
+            let events = store
                 .onchain_event_store
                 .get_all_onchain_events(proto::OnChainEventType::EventTypeIdRegister)
                 .map_err(|_| {
