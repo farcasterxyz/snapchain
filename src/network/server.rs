@@ -1790,9 +1790,38 @@ impl HubService for MyHubService {
 
     async fn get_id_registry_on_chain_event_by_address(
         &self,
-        _: Request<IdRegistryEventByAddressRequest>,
+        request: Request<IdRegistryEventByAddressRequest>,
     ) -> Result<Response<OnChainEvent>, Status> {
-        Err(Status::internal("method not supported".to_string()))
+        let address = request.into_inner().address;
+
+        if let Some(evt) = self.id_registry_cache.get(&address) {
+            return Ok(Response::new(evt.clone()));
+        }
+
+        for store in self.shard_stores.values() {
+            let mut iter = store
+                .onchain_event_store
+                .iter(Some(proto::OnChainEventType::EventTypeIdRegister))
+                .map_err(|_| {
+                    Status::internal("on chain event store iterator not found for EventType")
+                    // Is this the correct error and hows the string look?
+                })?;
+
+            while let Some(evt) = iter.next().transpose().map_err(|_| {
+                Status::internal("on chain event store iterator failure on address lookup")
+            })? {
+                if let Some(Body::IdRegisterEventBody(body)) = &evt.body {
+                    let key = &body.to;
+                    self.id_registry_cache.insert(key.clone(), evt.clone());
+                    // return here so we don't have to iterate through everything
+                    if *key == address {
+                        return Ok(Response::new(evt.clone()));
+                    }
+                }
+            }
+        }
+        // If we reach here, we didn't find the event so error out
+        Err(Status::not_found("no id-registry event for address"))
     }
 
     async fn get_links_by_target(
