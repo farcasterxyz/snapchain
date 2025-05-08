@@ -93,7 +93,7 @@ pub struct MyHubService {
     network: proto::FarcasterNetwork,
     version: String,
     peer_id: String,
-    id_registry_cache: Cache<Vec<u8>, OnChainEvent>, // <–– new
+    id_registry_cache: Cache<Vec<u8>, OnChainEvent>, 
 }
 
 impl MyHubService {
@@ -125,9 +125,9 @@ impl MyHubService {
             info!("RPC server auth enabled with {} users", allowed_users.len());
         }
 
-        let id_registry_cache = CacheBuilder::new(2_000_000) // max 2M entries
-            .time_to_idle(Duration::from_secs(60 * 60)) // idle TTL 1h
-            .eviction_policy(EvictionPolicy::lru()) // LRU policy
+        let id_registry_cache = CacheBuilder::new(2_000_000)
+            .time_to_idle(Duration::from_secs(60 * 60))
+            .eviction_policy(EvictionPolicy::lru())
             .build();
 
         let service = Self {
@@ -143,7 +143,7 @@ impl MyHubService {
             mempool_tx,
             version,
             peer_id,
-            id_registry_cache, // <–– init here
+            id_registry_cache,
         };
         service
     }
@@ -1799,17 +1799,15 @@ impl HubService for MyHubService {
         }
 
         for store in self.shard_stores.values() {
-            let mut iter = store
+            let mut events = store
                 .onchain_event_store
-                .iter(Some(proto::OnChainEventType::EventTypeIdRegister))
+                .get_all_onchain_events(proto::OnChainEventType::EventTypeIdRegister)
                 .map_err(|_| {
                     Status::internal("on chain event store iterator not found for EventType")
                     // Is this the correct error and hows the string look?
                 })?;
 
-            while let Some(evt) = iter.next().transpose().map_err(|_| {
-                Status::internal("on chain event store iterator failure on address lookup")
-            })? {
+            for evt in events {
                 if let Some(Body::IdRegisterEventBody(body)) = &evt.body {
                     let key = &body.to;
                     self.id_registry_cache.insert(key.clone(), evt.clone());

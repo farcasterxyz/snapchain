@@ -425,6 +425,34 @@ impl OnchainEventStore {
         Ok(onchain_events)
     }
 
+    pub fn get_all_onchain_events(
+        &self,
+        event_type: OnChainEventType,
+    ) -> Result<Vec<OnChainEvent>, OnchainEventStorageError> {
+        let mut onchain_events = vec![];
+        let mut next_page_token = None;
+        loop {
+            let onchain_events_page = get_onchain_events(
+                &self.db,
+                &PageOptions {
+                    page_size: Some(PAGE_SIZE),
+                    page_token: next_page_token,
+                    reverse: false,
+                },
+                event_type,
+                None,
+            )?;
+            onchain_events.extend(onchain_events_page.onchain_events);
+            if onchain_events_page.next_page_token.is_none() {
+                break;
+            } else {
+                next_page_token = onchain_events_page.next_page_token
+            }
+        }
+
+        Ok(onchain_events)
+    }
+
     pub fn get_fids(
         &self,
         page_options: &PageOptions,
@@ -496,48 +524,5 @@ impl OnchainEventStore {
             None => Ok(false),
             Some(_) => Ok(true),
         }
-    }
-
-    pub fn iter(
-        &self,
-        event_type: Option<OnChainEventType>,
-    ) -> Result<
-        impl Iterator<Item = Result<OnChainEvent, OnchainEventStorageError>>,
-        OnchainEventStorageError,
-    > {
-        let types_to_scan = if let Some(t) = event_type {
-            vec![t]
-        } else {
-            vec![
-                OnChainEventType::EventTypeIdRegister,
-                OnChainEventType::EventTypeSigner,
-                OnChainEventType::EventTypeSignerMigrated,
-                OnChainEventType::EventTypeStorageRent,
-            ]
-        };
-
-        let mut all_events = Vec::new();
-        for et in types_to_scan {
-            let mut page_token = None;
-            loop {
-                let page = get_onchain_events(
-                    &self.db,
-                    &PageOptions {
-                        page_size: Some(PAGE_SIZE),
-                        page_token: page_token.clone(),
-                        reverse: false,
-                    },
-                    et,
-                    None,
-                )?;
-                all_events.extend(page.onchain_events.into_iter().map(Ok));
-                if let Some(tok) = page.next_page_token {
-                    page_token = Some(tok);
-                } else {
-                    break;
-                }
-            }
-        }
-        Ok(all_events.into_iter())
     }
 }
