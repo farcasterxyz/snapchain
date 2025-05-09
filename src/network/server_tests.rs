@@ -1258,10 +1258,9 @@ mod tests {
         )
         .await;
 
-        let mut request = Request::new(proto::IdRegistryEventByAddressRequest {
+        let request = Request::new(proto::IdRegistryEventByAddressRequest {
             address: owner.clone(),
         });
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
         let response = service
             .get_id_registry_on_chain_event_by_address(request)
             .await
