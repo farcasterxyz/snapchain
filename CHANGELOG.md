@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.16] - 2025-05-09
+
+### 🐛 Bug Fixes
+
+- `getidregistryonchaineventbyaddress` (#471)
+
 ## [0.2.15] - 2025-05-06
 
 ### ⚙️ Miscellaneous Tasks
