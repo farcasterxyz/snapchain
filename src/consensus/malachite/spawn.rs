@@ -143,7 +143,8 @@ pub async fn spawn_sync_actor(
 pub struct MalachiteConsensusActors {
     pub network_actor: NetworkRef<SnapchainValidatorContext>,
     pub wal_actor: WalRef<SnapchainValidatorContext>,
-    pub host_actor: HostRef<SnapchainValidatorContext>,
+    pub consensus_host_actor: HostRef<SnapchainValidatorContext>,
+    pub sync_host_actor: HostRef<SnapchainValidatorContext>,
     pub sync_actor: SyncRef<SnapchainValidatorContext>,
     pub consensus_actor: ConsensusRef<SnapchainValidatorContext>,
 }
@@ -191,13 +192,13 @@ impl MalachiteConsensusActors {
             span.clone(),
         )
         .await?;
-        let host_actor = spawn_host(
+        let sync_host_actor = spawn_host(
             network_actor.clone(),
-            shard_validator,
+            shard_validator.clone(),
             gossip_tx.clone(),
             config.consensus_start_delay,
             config.block_time.as_millis() as u64,
-            statsd,
+            statsd.clone(),
         )
         .await?;
         let sync_config = ValueSyncConfig {
@@ -207,7 +208,7 @@ impl MalachiteConsensusActors {
         let sync_actor = spawn_sync_actor(
             ctx.clone(),
             network_actor.clone(),
-            host_actor.clone(),
+            sync_host_actor.clone(),
             sync_config,
             registry,
             span.clone(),
@@ -215,6 +216,15 @@ impl MalachiteConsensusActors {
         .await?;
 
         let timeout_config = timeout_from_config(&config);
+        let consensus_host_actor = spawn_host(
+            network_actor.clone(),
+            shard_validator,
+            gossip_tx.clone(),
+            config.consensus_start_delay,
+            config.block_time.as_millis() as u64,
+            statsd.clone(),
+        )
+        .await?;
         let consensus_actor = spawn_consensus_actor(
             ctx.clone(),
             timeout_config,
@@ -222,7 +232,7 @@ impl MalachiteConsensusActors {
             validator_set,
             address,
             network_actor.clone(),
-            host_actor.clone(),
+            consensus_host_actor.clone(),
             wal_actor.clone(),
             Some(sync_actor.clone()),
             Metrics::new(),
@@ -234,7 +244,8 @@ impl MalachiteConsensusActors {
         Ok(Self {
             network_actor,
             wal_actor,
-            host_actor,
+            consensus_host_actor,
+            sync_host_actor,
             sync_actor,
             consensus_actor,
         })
@@ -250,7 +261,8 @@ impl MalachiteConsensusActors {
 
     pub fn stop(&self) {
         self.consensus_actor.stop(None);
-        self.host_actor.stop(None);
+        self.consensus_host_actor.stop(None);
+        self.sync_host_actor.stop(None);
         self.network_actor.stop(None);
         self.wal_actor.stop(None);
         self.sync_actor.stop(None);

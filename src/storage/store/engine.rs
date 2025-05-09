@@ -152,6 +152,7 @@ struct CachedTransaction {
     txn: RocksDbTransactionBatch,
 }
 
+#[derive(Clone)]
 pub struct ShardEngine {
     shard_id: u32,
     network: FarcasterNetwork,
@@ -1492,6 +1493,7 @@ impl ShardEngine {
     }
 }
 
+#[derive(Clone)]
 pub struct BlockEngine {
     block_store: BlockStore,
     statsd_client: StatsdClientWrapper,
