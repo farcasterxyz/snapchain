@@ -1468,7 +1468,7 @@ impl ShardEngine {
     ) -> Result<Vec<OnChainEvent>, OnchainEventStorageError> {
         self.stores
             .onchain_event_store
-            .get_onchain_events(event_type, fid)
+            .get_onchain_events(event_type, Some(fid))
     }
 
     fn txn_counts(txns: &[Transaction]) -> TransactionCounts {

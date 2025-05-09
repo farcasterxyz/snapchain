@@ -399,7 +399,7 @@ impl OnchainEventStore {
     pub fn get_onchain_events(
         &self,
         event_type: OnChainEventType,
-        fid: u64,
+        fid: Option<u64>,
     ) -> Result<Vec<OnChainEvent>, OnchainEventStorageError> {
         let mut onchain_events = vec![];
         let mut next_page_token = None;
@@ -412,35 +412,7 @@ impl OnchainEventStore {
                     reverse: false,
                 },
                 event_type,
-                Some(fid),
-            )?;
-            onchain_events.extend(onchain_events_page.onchain_events);
-            if onchain_events_page.next_page_token.is_none() {
-                break;
-            } else {
-                next_page_token = onchain_events_page.next_page_token
-            }
-        }
-
-        Ok(onchain_events)
-    }
-
-    pub fn get_all_onchain_events(
-        &self,
-        event_type: OnChainEventType,
-    ) -> Result<Vec<OnChainEvent>, OnchainEventStorageError> {
-        let mut onchain_events = vec![];
-        let mut next_page_token = None;
-        loop {
-            let onchain_events_page = get_onchain_events(
-                &self.db,
-                &PageOptions {
-                    page_size: Some(PAGE_SIZE),
-                    page_token: next_page_token,
-                    reverse: false,
-                },
-                event_type,
-                None,
+                fid,
             )?;
             onchain_events.extend(onchain_events_page.onchain_events);
             if onchain_events_page.next_page_token.is_none() {
@@ -509,7 +481,8 @@ impl OnchainEventStore {
         &self,
         fid: u64,
     ) -> Result<StorageSlot, OnchainEventStorageError> {
-        let rent_events = self.get_onchain_events(OnChainEventType::EventTypeStorageRent, fid)?;
+        let rent_events =
+            self.get_onchain_events(OnChainEventType::EventTypeStorageRent, Some(fid))?;
         let mut storage_slot = StorageSlot::new(0, 0, 0);
         for rent_event in rent_events {
             storage_slot.merge(&StorageSlot::from_event(&rent_event)?);

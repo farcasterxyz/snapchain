@@ -1726,7 +1726,7 @@ impl HubService for MyHubService {
         for (_shard_id, stores) in &self.shard_stores {
             let events = stores
                 .onchain_event_store
-                .get_onchain_events(event_type, fid)
+                .get_onchain_events(event_type, Some(fid))
                 .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
             combined_events.extend(events);
         }
@@ -1752,7 +1752,7 @@ impl HubService for MyHubService {
         for (_shard_id, stores) in &self.shard_stores {
             let events = stores
                 .onchain_event_store
-                .get_onchain_events(event_type, fid)
+                .get_onchain_events(event_type, Some(fid))
                 .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
             combined_events.extend(events);
         }
@@ -1801,7 +1801,7 @@ impl HubService for MyHubService {
         for store in self.shard_stores.values() {
             let events = store
                 .onchain_event_store
-                .get_all_onchain_events(proto::OnChainEventType::EventTypeIdRegister)
+                .get_onchain_events(proto::OnChainEventType::EventTypeIdRegister, None)
                 .map_err(|_| {
                     Status::internal("on chain event store iterator not found for EventType")
                     // Is this the correct error and hows the string look?
