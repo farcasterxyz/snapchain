@@ -798,6 +798,33 @@ impl ShardEngine {
             }
         }
 
+        // Process verification removal hooks
+        // Look for any events with deleted verification messages
+        for event in &events {
+            if let Some(hub_event::Body::MergeMessageBody(merge_body)) = &event.body {
+                for deleted_message in &merge_body.deleted_messages {
+                    // Check if this was a verification add message that was deleted
+                    if let Some(data) = &deleted_message.data {
+                        if data.r#type == MessageType::VerificationAddEthAddress as i32 {
+                            if let Err(err) = self.handle_verification_merge_hooks(
+                                deleted_message.fid(),
+                                event,
+                                txn_batch,
+                            ) {
+                                if source != ProposalSource::Simulate {
+                                    warn!(
+                                        fid = deleted_message.fid(),
+                                        "Error handling verification hooks for deleted verification: {:?}",
+                                        err
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let account_root =
             self.stores
                 .trie
@@ -954,18 +981,11 @@ impl ShardEngine {
                 .verification_store
                 .merge(msg, txn_batch)
                 .map_err(|e| MessageValidationError::StoreError(e)),
-            MessageType::VerificationRemove => {
-                let result = self
-                    .stores
-                    .verification_store
-                    .merge(msg, txn_batch)
-                    .map_err(|e| MessageValidationError::StoreError(e));
-
-                if let Ok(hub_event) = result.as_ref() {
-                    self.handle_verification_merge_hooks(msg.fid(), hub_event, txn_batch)?;
-                }
-                result
-            }
+            MessageType::VerificationRemove => self
+                .stores
+                .verification_store
+                .merge(msg, txn_batch)
+                .map_err(|e| MessageValidationError::StoreError(e)),
             MessageType::UsernameProof => {
                 let store = &self.stores.username_proof_store;
                 let result = store.merge(msg, txn_batch);
