@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.17] - 2025-05-14
+
+### 🚀 Features
+
+- Implement eventById in the http server (#478)
+
+### 🐛 Bug Fixes
+
+- Send back CORS headers from the http server (#477)
+
 ## [0.2.16] - 2025-05-09
 
 ### 🐛 Bug Fixes
