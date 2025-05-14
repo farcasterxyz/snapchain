@@ -2638,7 +2638,7 @@ impl Router {
         &self,
         req: Request<hyper::body::Incoming>,
     ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
-        match (req.method(), req.uri().path()) {
+        let mut response = match (req.method(), req.uri().path()) {
             (&Method::GET, "/v1/info") => {
                 self.handle_request::<InfoRequest, InfoResponse, _>(req, |service, req| {
                     Box::pin(async move { service.get_info(req).await })
@@ -2815,7 +2815,14 @@ impl Router {
                 .status(StatusCode::NOT_FOUND)
                 .body(Full::new(Bytes::from("Not Found")).boxed())
                 .unwrap()),
+        };
+
+        if let Ok(res) = &mut response {
+            res.headers_mut()
+                .append("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
         }
+
+        response
     }
 
     async fn handle_protobuf_request<Resp, F>(
