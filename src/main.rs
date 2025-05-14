@@ -104,6 +104,7 @@ async fn start_servers(
     let http_socket_addr: SocketAddr = http_addr.parse().unwrap();
 
     let http_shutdown_tx = shutdown_tx.clone();
+    let http_server_config = app_config.http_server.clone();
     tokio::spawn(async move {
         let listener = TcpListener::bind(http_socket_addr).await.unwrap();
         info!(http_addr = http_addr, "HttpService listening",);
@@ -115,11 +116,15 @@ async fn start_servers(
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let io = TokioIo::new(stream);
+                    let http_server_config = http_server_config.clone();
                     let service_clone = http_service.clone();
                     tokio::spawn(async move {
                         let router = snapchain::network::http_server::Router::new(service_clone);
                         if let Err(err) = http1::Builder::new()
-                            .serve_connection(io, service_fn(|r| router.handle(r)))
+                            .serve_connection(
+                                io,
+                                service_fn(|r| router.handle(r, &http_server_config)),
+                            )
                             .await
                         {
                             error!("Error serving connection: {}", err);

@@ -25,6 +25,19 @@ use crate::storage::store::account::message_decode;
 
 use super::server::MyHubService;
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Config {
+    cors_origin: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            cors_origin: "*".to_string(),
+        }
+    }
+}
+
 mod serdebase64 {
     use base64::prelude::*;
 
@@ -2637,6 +2650,7 @@ impl Router {
     pub async fn handle(
         &self,
         req: Request<hyper::body::Incoming>,
+        config: &Config,
     ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
         let mut response = match (req.method(), req.uri().path()) {
             (&Method::GET, "/v1/info") => {
@@ -2818,8 +2832,10 @@ impl Router {
         };
 
         if let Ok(res) = &mut response {
-            res.headers_mut()
-                .append("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
+            res.headers_mut().append(
+                "Access-Control-Allow-Origin",
+                HeaderValue::from_str(&config.cors_origin).unwrap(),
+            );
         }
 
         response

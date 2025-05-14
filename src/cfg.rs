@@ -1,4 +1,9 @@
-use crate::{connectors, consensus, mempool, network, proto::FarcasterNetwork, storage};
+use crate::{
+    connectors, consensus, mempool,
+    network::{self, http_server},
+    proto::FarcasterNetwork,
+    storage,
+};
 use clap::Parser;
 use figment::{
     providers::{Env, Format, Serialized, Toml},
@@ -68,6 +73,7 @@ pub struct Config {
     pub fc_network: FarcasterNetwork,
     pub read_node: bool,
     pub pruning: PruningConfig,
+    pub http_server: http_server::Config,
 }
 
 impl Default for Config {
@@ -92,6 +98,7 @@ impl Default for Config {
             snapshot: storage::db::snapshot::Config::default(),
             read_node: false,
             pruning: PruningConfig::default(),
+            http_server: http_server::Config::default(),
         }
     }
 }
