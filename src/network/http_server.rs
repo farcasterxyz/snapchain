@@ -1097,6 +1097,21 @@ impl EventsRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EventRequest {
+    event_id: u64,
+    shard_index: u32,
+}
+
+impl EventRequest {
+    pub fn to_proto(self) -> proto::EventRequest {
+        proto::EventRequest {
+            id: self.event_id,
+            shard_index: self.shard_index,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ValidationResult {
     pub valid: bool,
     pub message: Option<Message>,
@@ -1965,6 +1980,7 @@ pub trait HubHttpService {
         req: OnChainEventRequest,
     ) -> Result<OnChainEventResponse, ErrorResponse>;
     async fn get_events(&self, req: EventsRequest) -> Result<EventsResponse, ErrorResponse>;
+    async fn get_event_by_id(&self, req: EventRequest) -> Result<HubEvent, ErrorResponse>;
 }
 
 #[async_trait]
@@ -2588,6 +2604,22 @@ impl HubHttpService for HubHttpServiceImpl {
                 .collect(),
         })
     }
+
+    async fn get_event_by_id(&self, req: EventRequest) -> Result<HubEvent, ErrorResponse> {
+        let service = &self.service;
+
+        let grpc_req = tonic::Request::new(req.to_proto());
+        let response = service
+            .get_event(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get event".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+        Ok(map_proto_hub_event_to_json_hub_event(
+            response.into_inner(),
+        )?)
+    }
 }
 
 // Router implementation
@@ -2770,6 +2802,12 @@ impl Router {
             (&Method::GET, "/v1/events") => {
                 self.handle_request::<EventsRequest, EventsResponse, _>(req, |service, req| {
                     Box::pin(async move { service.get_events(req).await })
+                })
+                .await
+            }
+            (&Method::GET, "/v1/eventById") => {
+                self.handle_request::<EventRequest, HubEvent, _>(req, |service, req| {
+                    Box::pin(async move { service.get_event_by_id(req).await })
                 })
                 .await
             }
