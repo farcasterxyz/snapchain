@@ -262,14 +262,6 @@ impl SnapchainGossip {
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
             .build();
 
-        for addr in config.trusted_addrs() {
-            let _ = Self::dial(&mut swarm, &addr);
-        }
-
-        for addr in config.bootstrap_addrs() {
-            let _ = Self::dial(&mut swarm, &addr);
-        }
-
         if read_node {
             let topic = gossipsub::IdentTopic::new(READ_NODE_PEER_STATUSES);
             let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
@@ -304,6 +296,14 @@ impl SnapchainGossip {
 
         // Listen on all assigned port for this id
         swarm.listen_on(config.address.parse()?)?;
+
+        for addr in config.trusted_addrs() {
+            let _ = Self::dial(&mut swarm, &addr);
+        }
+
+        for addr in config.bootstrap_addrs() {
+            let _ = Self::dial(&mut swarm, &addr);
+        }
 
         let announce_address = Self::get_announce_address(config).await;
 
