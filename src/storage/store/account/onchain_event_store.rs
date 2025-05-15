@@ -491,12 +491,12 @@ impl OnchainEventStore {
             OnChainEventType::EventTypeSigner,
             fid,
             |onchain_event: &OnChainEvent| match &onchain_event.body {
-                None => return false,
+                None => false,
                 Some(body) => match body {
                     on_chain_event::Body::SignerEventBody(signer_event_body) => {
-                        return Self::is_signer_key(signer_event_body)
+                        Self::is_signer_key(signer_event_body)
                     }
-                    _ => return false,
+                    _ => false,
                 },
             },
         )
