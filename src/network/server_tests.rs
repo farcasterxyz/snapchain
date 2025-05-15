@@ -1200,6 +1200,13 @@ mod tests {
         )
         .await;
         test_helper::register_user(
+            SHARD1_FID + 2, // another fid for shard 1
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine1,
+        )
+        .await;
+        test_helper::register_user(
             SHARD2_FID,
             test_helper::default_signer(),
             test_helper::default_custody_address(),
@@ -1210,20 +1217,26 @@ mod tests {
         let shard1_response = service
             .get_fids(Request::new(proto::FidsRequest {
                 shard_id: 1,
-                page_size: None,
+                page_size: Some(1),
                 page_token: None,
                 reverse: None,
             }))
             .await
             .unwrap();
+        let res = shard1_response.into_inner();
+        assert_eq!(res.fids, vec![SHARD1_FID]);
+        assert!(res.next_page_token.is_some());
 
-        let shard1_ref = shard1_response.get_ref();
-
-        let shard1_fids = &shard1_ref.fids;
-
-        assert_eq!(*shard1_fids, vec![SHARD1_FID]);
-
-        assert_eq!(shard1_ref.next_page_token, vec![110, 117, 108, 108].into());
+        let shard1_response = service
+            .get_fids(Request::new(proto::FidsRequest {
+                shard_id: 1,
+                page_size: None,
+                page_token: res.next_page_token.clone(),
+                reverse: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(shard1_response.into_inner().fids, vec![SHARD1_FID + 2]);
 
         let shard2_response = service
             .get_fids(Request::new(proto::FidsRequest {
@@ -1234,14 +1247,10 @@ mod tests {
             }))
             .await
             .unwrap();
-
         let shard2_ref = shard2_response.get_ref();
-
         let shard2_fids = &shard2_ref.fids;
-
         assert_eq!(*shard2_fids, vec![SHARD2_FID]);
-
-        assert_eq!(shard2_ref.next_page_token, vec![110, 117, 108, 108].into());
+        assert_eq!(shard2_ref.next_page_token, None);
     }
 
     #[tokio::test]

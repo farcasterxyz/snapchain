@@ -767,17 +767,14 @@ impl HubService for MyHubService {
             reverse: inner_request.reverse.unwrap_or(false),
         };
 
-        let (fids, raw_next_page_token) = stores
+        let (fids, next_page_token) = stores
             .onchain_event_store
             .get_fids(&page_options)
             .unwrap_or((vec![], None));
 
-        let next_page_token = serde_json::to_vec(&raw_next_page_token)
-            .map_err(|e| Status::internal(format!("Failed to serialize next_page_token: {}", e)))?;
-
         Ok(Response::new(FidsResponse {
             fids,
-            next_page_token: Some(next_page_token),
+            next_page_token,
         }))
     }
 
