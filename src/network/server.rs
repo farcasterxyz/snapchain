@@ -1718,18 +1718,22 @@ impl HubService for MyHubService {
         let req = request.into_inner();
         let fid = req.fid;
 
-        let mut combined_events = Vec::new();
-        for (_shard_id, stores) in &self.shard_stores {
-            let events = stores
-                .onchain_event_store
-                .get_signers(Some(fid))
-                .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
-            combined_events.extend(events);
-        }
+        let stores = self.get_stores_for(fid)?;
+        let events_page = stores
+            .onchain_event_store
+            .get_signers(
+                Some(fid),
+                &PageOptions {
+                    page_size: req.page_size.map(|s| s as usize),
+                    page_token: req.page_token.clone(),
+                    reverse: req.reverse(),
+                },
+            )
+            .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
 
         let response = OnChainEventResponse {
-            events: combined_events,
-            next_page_token: None,
+            events: events_page.onchain_events,
+            next_page_token: events_page.next_page_token,
         };
         Ok(Response::new(response))
     }

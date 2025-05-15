@@ -443,38 +443,23 @@ impl OnchainEventStore {
     pub fn get_signers(
         &self,
         fid: Option<u64>,
-    ) -> Result<Vec<OnChainEvent>, OnchainEventStorageError> {
-        let mut onchain_events = vec![];
-        let mut next_page_token = None;
-        loop {
-            let onchain_events_page = get_onchain_events(
-                &self.db,
-                &PageOptions {
-                    page_size: Some(PAGE_SIZE),
-                    page_token: next_page_token,
-                    reverse: false,
+        page_options: &PageOptions,
+    ) -> Result<OnchainEventsPage, OnchainEventStorageError> {
+        get_onchain_events(
+            &self.db,
+            &page_options,
+            OnChainEventType::EventTypeSigner,
+            fid,
+            Some(|onchain_event: &OnChainEvent| match &onchain_event.body {
+                None => false,
+                Some(body) => match body {
+                    on_chain_event::Body::SignerEventBody(signer_event_body) => {
+                        Self::is_signer_key(signer_event_body)
+                    }
+                    _ => false,
                 },
-                OnChainEventType::EventTypeSigner,
-                fid,
-                Some(|onchain_event: &OnChainEvent| match &onchain_event.body {
-                    None => false,
-                    Some(body) => match body {
-                        on_chain_event::Body::SignerEventBody(signer_event_body) => {
-                            Self::is_signer_key(signer_event_body)
-                        }
-                        _ => false,
-                    },
-                }),
-            )?;
-            onchain_events.extend(onchain_events_page.onchain_events);
-            if onchain_events_page.next_page_token.is_none() {
-                break;
-            } else {
-                next_page_token = onchain_events_page.next_page_token
-            }
-        }
-
-        Ok(onchain_events)
+            }),
+        )
     }
 
     pub fn get_fids(
