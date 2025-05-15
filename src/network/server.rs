@@ -1717,13 +1717,12 @@ impl HubService for MyHubService {
     ) -> Result<Response<OnChainEventResponse>, Status> {
         let req = request.into_inner();
         let fid = req.fid;
-        let event_type = proto::OnChainEventType::EventTypeSigner;
 
         let mut combined_events = Vec::new();
         for (_shard_id, stores) in &self.shard_stores {
             let events = stores
                 .onchain_event_store
-                .get_onchain_events(event_type, Some(fid))
+                .get_signers(Some(fid))
                 .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
             combined_events.extend(events);
         }

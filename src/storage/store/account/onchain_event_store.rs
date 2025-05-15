@@ -18,7 +18,7 @@ static PAGE_SIZE: usize = 1000;
 
 const LEGACY_STORAGE_UNIT_CUTOFF_TIMESTAMP: u32 = 1724889600;
 const ONE_YEAR_IN_SECONDS: u32 = 365 * 24 * 60 * 60;
-pub const SUPPORTED_SIGNER_KEY_TYPE: u32 = 1;
+const SUPPORTED_SIGNER_KEY_TYPE: u32 = 1;
 
 #[derive(Error, Debug)]
 pub enum OnchainEventStorageError {
@@ -164,7 +164,7 @@ fn build_secondary_indices_for_signer(
     if signer_event_body.event_type() == SignerEventType::AdminReset {
         let mut next_page_token = None;
         loop {
-            let events_page = get_onchain_events(
+            let events_page = get_onchain_events::<fn(&OnChainEvent) -> bool>(
                 db,
                 &PageOptions {
                     page_size: None,
@@ -414,7 +414,7 @@ impl OnchainEventStore {
         let mut onchain_events = vec![];
         let mut next_page_token = None;
         loop {
-            let onchain_events_page = get_onchain_events(
+            let onchain_events_page = get_onchain_events::<fn(&OnChainEvent) -> bool>(
                 &self.db,
                 &PageOptions {
                     page_size: Some(PAGE_SIZE),
@@ -436,9 +436,12 @@ impl OnchainEventStore {
         Ok(onchain_events)
     }
 
+    pub fn is_signer_key(signer_event_body: &SignerEventBody) -> bool {
+        signer_event_body.key_type == SUPPORTED_SIGNER_KEY_TYPE
+    }
+
     pub fn get_signers(
         &self,
-        event_type: OnChainEventType,
         fid: Option<u64>,
     ) -> Result<Vec<OnChainEvent>, OnchainEventStorageError> {
         let mut onchain_events = vec![];
@@ -451,13 +454,13 @@ impl OnchainEventStore {
                     page_token: next_page_token,
                     reverse: false,
                 },
-                event_type,
+                OnChainEventType::EventTypeSigner,
                 fid,
                 Some(|onchain_event: &OnChainEvent| match &onchain_event.body {
                     None => false,
                     Some(body) => match body {
                         on_chain_event::Body::SignerEventBody(signer_event_body) => {
-                            signer_event_body.key_type == SUPPORTED_SIGNER_KEY_TYPE
+                            Self::is_signer_key(signer_event_body)
                         }
                         _ => false,
                     },
@@ -478,7 +481,7 @@ impl OnchainEventStore {
         &self,
         page_options: &PageOptions,
     ) -> Result<(Vec<u64>, Option<Vec<u8>>), OnchainEventStorageError> {
-        let onchain_events_page = get_onchain_events(
+        let onchain_events_page = get_onchain_events::<fn(&OnChainEvent) -> bool>(
             &self.db,
             page_options,
             OnChainEventType::EventTypeIdRegister,
