@@ -18,7 +18,7 @@ static PAGE_SIZE: usize = 1000;
 
 const LEGACY_STORAGE_UNIT_CUTOFF_TIMESTAMP: u32 = 1724889600;
 const ONE_YEAR_IN_SECONDS: u32 = 365 * 24 * 60 * 60;
-const SUPPORTED_SIGNER_KEY_TYPE: u32 = 1;
+pub const SUPPORTED_SIGNER_KEY_TYPE: u32 = 1;
 
 #[derive(Error, Debug)]
 pub enum OnchainEventStorageError {
@@ -173,6 +173,7 @@ fn build_secondary_indices_for_signer(
                 },
                 OnChainEventType::EventTypeSigner,
                 Some(onchain_event.fid),
+                None,
             )?;
 
             let onchain_event = events_page.onchain_events.into_iter().find(|event| {
@@ -251,12 +252,16 @@ fn get_event_by_secondary_key(
     }
 }
 
-pub fn get_onchain_events(
+pub fn get_onchain_events<F>(
     db: &RocksDB,
     page_options: &PageOptions,
     event_type: OnChainEventType,
     fid: Option<u64>,
-) -> Result<OnchainEventsPage, OnchainEventStorageError> {
+    filter: Option<F>,
+) -> Result<OnchainEventsPage, OnchainEventStorageError>
+where
+    F: Fn(&OnChainEvent) -> bool,
+{
     let mut start_prefix = make_onchain_event_type_prefix(event_type);
 
     if let Some(fid) = &fid {
@@ -273,11 +278,16 @@ pub fn get_onchain_events(
         page_options,
         |key, value| {
             let onchain_event = OnChainEvent::decode(value).map_err(|e| HubError::from(e))?;
-            onchain_events.push(onchain_event);
+            if filter
+                .as_ref()
+                .map_or(true, |filter| filter(&onchain_event))
+            {
+                onchain_events.push(onchain_event);
 
-            if onchain_events.len() >= page_options.page_size.unwrap_or(PAGE_SIZE_MAX) {
-                last_key = key.to_vec();
-                return Ok(true); // Stop iterating
+                if onchain_events.len() >= page_options.page_size.unwrap_or(PAGE_SIZE_MAX) {
+                    last_key = key.to_vec();
+                    return Ok(true); // Stop iterating
+                }
             }
 
             Ok(false) // Continue iterating
@@ -413,6 +423,45 @@ impl OnchainEventStore {
                 },
                 event_type,
                 fid,
+                None,
+            )?;
+            onchain_events.extend(onchain_events_page.onchain_events);
+            if onchain_events_page.next_page_token.is_none() {
+                break;
+            } else {
+                next_page_token = onchain_events_page.next_page_token
+            }
+        }
+
+        Ok(onchain_events)
+    }
+
+    pub fn get_signers(
+        &self,
+        event_type: OnChainEventType,
+        fid: Option<u64>,
+    ) -> Result<Vec<OnChainEvent>, OnchainEventStorageError> {
+        let mut onchain_events = vec![];
+        let mut next_page_token = None;
+        loop {
+            let onchain_events_page = get_onchain_events(
+                &self.db,
+                &PageOptions {
+                    page_size: Some(PAGE_SIZE),
+                    page_token: next_page_token,
+                    reverse: false,
+                },
+                event_type,
+                fid,
+                Some(|onchain_event: &OnChainEvent| match &onchain_event.body {
+                    None => false,
+                    Some(body) => match body {
+                        on_chain_event::Body::SignerEventBody(signer_event_body) => {
+                            signer_event_body.key_type == SUPPORTED_SIGNER_KEY_TYPE
+                        }
+                        _ => false,
+                    },
+                }),
             )?;
             onchain_events.extend(onchain_events_page.onchain_events);
             if onchain_events_page.next_page_token.is_none() {
@@ -433,6 +482,7 @@ impl OnchainEventStore {
             &self.db,
             page_options,
             OnChainEventType::EventTypeIdRegister,
+            None,
             None,
         )?;
 
