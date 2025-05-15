@@ -1334,6 +1334,7 @@ mod tests {
         });
         let response = service.get_on_chain_signers_by_fid(request).await.unwrap();
         let events = response.get_ref().events.clone();
+        // only 2 keys total, non-signer key is not returned
         assert_eq!(events.len(), 1);
         assert!(events
             .iter()
