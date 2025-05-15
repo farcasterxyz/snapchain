@@ -128,6 +128,7 @@ pub mod events_factory {
         signer: SigningKey,
         event_type: proto::SignerEventType,
         timestamp: Option<u32>,
+        key_type: Option<u32>,
     ) -> OnChainEvent {
         if timestamp.is_some() && !(timestamp.unwrap() > (FARCASTER_EPOCH / 1000) as u32) {
             panic!("Block timestamps must be unix epoch in seconds");
@@ -136,7 +137,7 @@ pub mod events_factory {
             key: signer.verifying_key().as_bytes().to_vec(),
             event_type: event_type as i32,
             metadata: vec![],
-            key_type: 1,
+            key_type: key_type.unwrap_or(1),
             metadata_type: 1,
         };
         let block_timestamp = timestamp.unwrap_or_else(|| time::current_timestamp_with_offset(-10));

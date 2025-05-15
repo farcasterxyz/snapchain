@@ -1203,6 +1203,7 @@ mod tests {
             another_signer.clone(),
             proto::SignerEventType::Add,
             None,
+            None,
         );
         test_helper::commit_event(&mut engine, &another_signer_event).await;
         test_helper::register_user(
@@ -1236,6 +1237,7 @@ mod tests {
             signer.clone(),
             proto::SignerEventType::Remove,
             Some(revoke_timestamp),
+            None,
         );
         test_helper::commit_event(&mut engine, &revoke_event).await;
         assert_onchain_hub_event(&event_rx.try_recv().unwrap(), &revoke_event, 0);
@@ -1455,6 +1457,7 @@ mod tests {
                 test_helper::default_signer(),
                 proto::SignerEventType::Add,
                 None,
+                None,
             ),
         )
         .await;
@@ -1512,6 +1515,7 @@ mod tests {
                 FID_FOR_TEST,
                 test_helper::default_signer(),
                 proto::SignerEventType::Add,
+                None,
                 None,
             ),
         )

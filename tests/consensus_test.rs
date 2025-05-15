@@ -545,6 +545,7 @@ async fn register_fid(fid: u64, messages_tx: Sender<MempoolRequest>) -> SigningK
                     signer.clone(),
                     SignerEventType::Add,
                     None,
+                    None,
                 )),
                 fname_transfer: None,
             }),

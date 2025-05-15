@@ -192,6 +192,7 @@ mod tests {
             default_signer(),
             proto::SignerEventType::Add,
             None,
+            None,
         );
         commit_event(&mut engine, &signer_event).await;
 

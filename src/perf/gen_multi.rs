@@ -52,6 +52,7 @@ impl MessageGenerator for MultiUser {
                     private_key,
                     proto::SignerEventType::Add,
                     None,
+                    None,
                 ),
             ));
 

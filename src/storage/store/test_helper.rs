@@ -357,7 +357,7 @@ pub async fn register_user(
     );
     commit_event(engine, &id_register_event).await;
     let signer_event =
-        events_factory::create_signer_event(fid, signer, proto::SignerEventType::Add, None);
+        events_factory::create_signer_event(fid, signer, proto::SignerEventType::Add, None, None);
     commit_event(engine, &signer_event).await;
 }
 
@@ -392,7 +392,6 @@ pub fn default_custody_address() -> Vec<u8> {
     "000000000000000000".to_string().encode_to_vec()
 }
 
-#[allow(dead_code)]
 pub fn generate_signer() -> SigningKey {
     SigningKey::generate(&mut rand::thread_rng())
 }

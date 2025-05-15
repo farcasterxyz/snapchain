@@ -44,6 +44,7 @@ impl MessageGenerator for SingleUser {
                     self.private_key.clone(),
                     proto::SignerEventType::Add,
                     None,
+                    None,
                 ),
             ));
         }

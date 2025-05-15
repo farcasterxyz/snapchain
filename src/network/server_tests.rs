@@ -17,15 +17,15 @@ mod tests {
     use crate::network::server::MyHubService;
     use crate::proto::hub_service_server::HubService;
     use crate::proto::{
-        self, EventRequest, EventsRequest, HubEvent, HubEventType, ShardChunk, UserNameProof,
-        UserNameType, UsernameProofRequest, VerificationAddAddressBody,
+        self, EventRequest, EventsRequest, HubEvent, HubEventType, OnChainEventType, ShardChunk,
+        UserNameProof, UserNameType, UsernameProofRequest, VerificationAddAddressBody,
     };
     use crate::proto::{FidRequest, SubscribeRequest};
     use crate::storage::db::{self, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{HubEventIdGenerator, SEQUENCE_BITS};
     use crate::storage::store::engine::{Senders, ShardEngine};
     use crate::storage::store::stores::Stores;
-    use crate::storage::store::test_helper::register_user;
+    use crate::storage::store::test_helper::{commit_event, generate_signer, register_user};
     use crate::storage::store::{test_helper, BlockStore};
     use crate::storage::trie::merkle_trie;
     use crate::utils::factory::{events_factory, messages_factory};
@@ -1280,5 +1280,63 @@ mod tests {
         } else {
             panic!("Expected IdRegisterEventBody");
         }
+    }
+
+    #[tokio::test]
+    async fn test_get_on_chain_signers_by_fid() {
+        let (_stores, _senders, [mut engine1, _], service) = make_server(None).await;
+        let fid = SHARD1_FID;
+        let signer = test_helper::default_signer();
+        let owner = test_helper::default_custody_address();
+
+        // Register user to create signer event
+        test_helper::register_user(fid, signer.clone(), owner.clone(), &mut engine1).await;
+
+        let signer_event = events_factory::create_signer_event(
+            fid,
+            generate_signer(),
+            proto::SignerEventType::Add,
+            None,
+            None,
+        );
+        commit_event(&mut engine1, &signer_event).await;
+
+        // Non-signer key
+        let signer_event = events_factory::create_signer_event(
+            fid,
+            generate_signer(),
+            proto::SignerEventType::Add,
+            None,
+            Some(2),
+        );
+        commit_event(&mut engine1, &signer_event).await;
+
+        // Test normal request
+        let request = Request::new(FidRequest {
+            fid,
+            page_size: Some(1),
+            page_token: None,
+            reverse: None,
+        });
+        let response = service.get_on_chain_signers_by_fid(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 1);
+        assert!(events
+            .iter()
+            .all(|event| event.r#type() == OnChainEventType::EventTypeSigner));
+
+        // Test pagination
+        let request = Request::new(FidRequest {
+            fid,
+            page_size: None,
+            page_token: response.get_ref().next_page_token.clone(),
+            reverse: None,
+        });
+        let response = service.get_on_chain_signers_by_fid(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 1);
+        assert!(events
+            .iter()
+            .all(|event| event.r#type() == OnChainEventType::EventTypeSigner));
     }
 }
