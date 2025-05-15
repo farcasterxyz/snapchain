@@ -262,11 +262,11 @@ impl SnapchainGossip {
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
             .build();
 
-        for addr in config.bootstrap_addrs() {
+        for addr in config.trusted_addrs() {
             let _ = Self::dial(&mut swarm, &addr);
         }
 
-        for addr in config.trusted_addrs() {
+        for addr in config.bootstrap_addrs() {
             let _ = Self::dial(&mut swarm, &addr);
         }
 
@@ -379,6 +379,18 @@ impl SnapchainGossip {
     }
 
     pub async fn check_and_reconnect_to_important_peers(&mut self) {
+        // All nodes should stay connected to all trusted peers
+        for addr in &self.trusted_addrs {
+            if !self.connected_trusted_addrs.contains(addr) {
+                warn!("Attempting to reconnect to trusted peer: {}", addr);
+                if let Err(err) = Self::dial(&mut self.swarm, &addr) {
+                    warn!("Failed to re-dial trusted peer: {}. Error: {}", addr, err);
+                } else {
+                    info!("Re-dialed trusted peer: {}", addr);
+                };
+            }
+        }
+
         let connected_peers_count = self.swarm.connected_peers().count();
         // Validators should stay connected to all bootstrap peers. Read nodes should only try to connect if they're connected to too few peers
         if !self.read_node || (self.read_node && connected_peers_count < self.bootstrap_addrs.len())
@@ -392,17 +404,6 @@ impl SnapchainGossip {
                         info!("Re-dialed bootstrap peer: {}", addr);
                     }
                 }
-            }
-        }
-        // All nodes should stay connected to all trusted peers
-        for addr in &self.trusted_addrs {
-            if !self.connected_trusted_addrs.contains(addr) {
-                warn!("Attempting to reconnect to trusted peer: {}", addr);
-                if let Err(err) = Self::dial(&mut self.swarm, &addr) {
-                    warn!("Failed to re-dial trusted peer: {}. Error: {}", addr, err);
-                } else {
-                    info!("Re-dialed trusted peer: {}", addr);
-                };
             }
         }
     }
