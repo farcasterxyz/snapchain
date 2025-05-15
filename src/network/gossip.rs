@@ -397,7 +397,7 @@ impl SnapchainGossip {
         // All nodes should stay connected to all trusted peers
         for addr in &self.trusted_addrs {
             if !self.connected_trusted_addrs.contains(addr) {
-                warn!("Attempting to reconnect to bootstrap peer: {}", addr);
+                warn!("Attempting to reconnect to trusted peer: {}", addr);
                 if let Err(err) = Self::dial(&mut self.swarm, &addr) {
                     warn!("Failed to re-dial trusted peer: {}. Error: {}", addr, err);
                 } else {
