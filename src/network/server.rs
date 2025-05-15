@@ -1726,7 +1726,7 @@ impl HubService for MyHubService {
                 &PageOptions {
                     page_size: req.page_size.map(|s| s as usize),
                     page_token: req.page_token.clone(),
-                    reverse: req.reverse(),
+                    reverse: req.reverse.unwrap_or(false),
                 },
             )
             .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
