@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.18] - 2025-05-15
+
+### 🐛 Bug Fixes
+
+- Fix pagination for GetFids (#482)
+
 ## [0.2.17] - 2025-05-14
 
 ### 🚀 Features
