@@ -389,7 +389,7 @@ impl SnapchainGossip {
                     if let Err(err) = Self::dial(&mut self.swarm, &addr) {
                         warn!("Failed to re-dial bootstrap peer: {}. Error: {}", addr, err);
                     } else {
-                        info!("Reconnected to bootstrap peer: {}", addr);
+                        info!("Re-dialed bootstrap peer: {}", addr);
                     }
                 }
             }
@@ -401,7 +401,7 @@ impl SnapchainGossip {
                 if let Err(err) = Self::dial(&mut self.swarm, &addr) {
                     warn!("Failed to re-dial trusted peer: {}. Error: {}", addr, err);
                 } else {
-                    info!("Reconnecting to trusted peer: {}", addr);
+                    info!("Re-dialed trusted peer: {}", addr);
                 };
             }
         }
