@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.19] - 2025-05-15
+
+### 🐛 Bug Fixes
+
+- Make sure to check key_type for signers (#484)
+- Fix pagination for get_on_chain_signers_by_fid (#486)
+
 ## [0.2.18] - 2025-05-15
 
 ### 🐛 Bug Fixes

@@ -7672,7 +7672,7 @@ dependencies = [
 
 [[package]]
 name = "snapchain"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "alloy-contract",
  "alloy-dyn-abi",
