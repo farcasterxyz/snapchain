@@ -19,7 +19,37 @@ use tokio::time::Instant;
 use tokio::{select, time};
 use tracing::{error, warn};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+use super::validator::ProposalSource;
+
+#[derive(Eq, PartialEq, Clone, Copy)]
+pub enum ProtocolVersion {
+    UNKNOWN = 0,
+    ONE = 1,
+    TWO = 2,
+}
+
+struct VersionSchedule {
+    version: ProtocolVersion,
+    active_at: u64,
+}
+
+const PROTOCOL_VERSION_SCHEDULE: [VersionSchedule; 1] = [VersionSchedule {
+    version: ProtocolVersion::ONE,
+    active_at: 0,
+}];
+
+pub fn get_version_at_timestamp(timestamp: u64) -> ProtocolVersion {
+    PROTOCOL_VERSION_SCHEDULE
+        .iter()
+        .filter(|version| version.active_at <= timestamp)
+        .max_by_key(|version| version.active_at)
+        .map_or(ProtocolVersion::UNKNOWN, |version| version.version)
+}
+
+pub fn get_current_version() -> ProtocolVersion {
+    get_version_at_timestamp(current_time())
+}
+
 pub const GENESIS_MESSAGE: &str =
     "It occurs to me that our survival may depend upon our talking to one another.";
 
@@ -41,7 +71,11 @@ pub trait Proposer {
         timeout: Duration,
     ) -> FullProposal;
     // Receive a block/shard chunk proposed by another validator and return whether it is valid
-    fn add_proposed_value(&mut self, full_proposal: &FullProposal) -> Validity;
+    fn add_proposed_value(
+        &mut self,
+        full_proposal: &FullProposal,
+        proposal_source: ProposalSource,
+    ) -> Validity;
 
     // Consensus has confirmed the block/shard_chunk, apply it to the local state
     async fn decide(&mut self, commits: Commits);
@@ -197,7 +231,11 @@ impl Proposer for ShardProposer {
         proposal
     }
 
-    fn add_proposed_value(&mut self, full_proposal: &FullProposal) -> Validity {
+    fn add_proposed_value(
+        &mut self,
+        full_proposal: &FullProposal,
+        _proposal_source: ProposalSource,
+    ) -> Validity {
         if let Some(proto::full_proposal::ProposedValue::Shard(chunk)) =
             full_proposal.proposed_value.clone()
         {
@@ -465,11 +503,12 @@ impl Proposer for BlockProposer {
         let witness_hash = blake3::hash(&shard_witness.encode_to_vec())
             .as_bytes()
             .to_vec();
+        let timestamp = current_time();
         let block_header = BlockHeader {
             parent_hash,
             chain_id: self.network as i32,
-            version: PROTOCOL_VERSION,
-            timestamp: current_time(),
+            version: get_version_at_timestamp(timestamp) as u32,
+            timestamp,
             height: Some(height.clone()),
             shard_witnesses_hash: witness_hash,
         };
@@ -495,7 +534,11 @@ impl Proposer for BlockProposer {
         proposal
     }
 
-    fn add_proposed_value(&mut self, full_proposal: &FullProposal) -> Validity {
+    fn add_proposed_value(
+        &mut self,
+        full_proposal: &FullProposal,
+        proposal_source: ProposalSource,
+    ) -> Validity {
         if let Some(proto::full_proposal::ProposedValue::Block(block)) =
             &full_proposal.proposed_value
         {
@@ -516,7 +559,13 @@ impl Proposer for BlockProposer {
                 error!("Received block with wrong chain_id: {}", header.chain_id);
                 return Validity::Invalid;
             }
-            if header.version != PROTOCOL_VERSION {
+
+            // Once the active_at time for the latest version has passed
+            // (1) If this node hasn't been upgraded, it will infer the previous version while the proposer will publish the latest version so this node will reject the propsal.
+            // (2) If the proposer hasn't been upgraded, this node will infer the latest version while the proposer will publish the previous version so this node will reject the proposal.
+            if proposal_source == ProposalSource::Consensus
+                && header.version != get_current_version() as u32
+            {
                 error!(
                     "Received block with wrong protocol version: {}",
                     header.version

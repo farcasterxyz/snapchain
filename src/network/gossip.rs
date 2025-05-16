@@ -1,7 +1,7 @@
 use crate::consensus::consensus::{MalachiteEventShard, SystemMessage};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
-use crate::consensus::proposer::PROTOCOL_VERSION;
+use crate::consensus::proposer::get_current_version;
 use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::proto::{
@@ -381,7 +381,7 @@ impl SnapchainGossip {
                 peer_id: self.swarm.local_peer_id().to_bytes(),
                 gossip_address: self.announce_address.clone(),
                 network: self.fc_network as i32,
-                snapchain_version: PROTOCOL_VERSION.to_string(),
+                snapchain_version: (get_current_version() as u32).to_string(),
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
@@ -607,7 +607,7 @@ impl SnapchainGossip {
             return;
         }
 
-        if contact_info_body.snapchain_version != PROTOCOL_VERSION.to_string() {
+        if contact_info_body.snapchain_version != (get_current_version() as u32).to_string() {
             info!(
                 peer_id = contact_peer_id.to_string(),
                 "Peer running a different protocol version"
