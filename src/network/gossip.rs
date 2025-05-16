@@ -479,10 +479,8 @@ impl SnapchainGossip {
                                 libp2p::core::ConnectedPoint::Dialer { address, ..} => {
                                     let address_str = address.to_string();
 
-                                    let bootstrap_removed = self.connected_bootstrap_addrs.remove(&address_str);
-                                    if !bootstrap_removed {
-                                        self.connected_trusted_addrs.remove(&address_str);
-                                    }
+                                    self.connected_bootstrap_addrs.remove(&address_str);
+                                    self.connected_trusted_addrs.remove(&address_str);
                                 },
                                 libp2p::core::ConnectedPoint::Listener { .. } => {},
                             };
