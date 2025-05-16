@@ -5,11 +5,12 @@ use crate::core::types::Height;
 use crate::core::validations;
 use crate::core::validations::verification;
 use crate::mempool::mempool::MempoolMessagesRequest;
-use crate::proto::UserNameProof;
-use crate::proto::UserNameType;
-use crate::proto::{self, Block, MessageType, ShardChunk, Transaction};
+use crate::proto::message_data::Body;
+use crate::proto::{self, hub_event, Block, MessageType, ShardChunk, Transaction};
 use crate::proto::{FarcasterNetwork, HubEvent};
 use crate::proto::{OnChainEvent, OnChainEventType};
+use crate::proto::{Protocol, UserNameProof};
+use crate::proto::{UserDataType, UserNameType};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{CastStore, MessagesPage, OnchainEventStore};
 use crate::storage::store::stores::{StoreLimits, Stores};
@@ -17,6 +18,8 @@ use crate::storage::store::BlockStore;
 use crate::storage::trie;
 use crate::storage::trie::merkle_trie;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use alloy_primitives::hex::FromHex;
+use alloy_primitives::Address;
 use informalsystems_malachitebft_core_types::Round;
 use itertools::Itertools;
 use merkle_trie::TrieKey;
@@ -89,6 +92,15 @@ pub enum MessageValidationError {
 
     #[error("fname is not registered for fid")]
     MissingFname,
+
+    #[error("invalid ethereum address")]
+    InvalidEthereumAddress,
+
+    #[error("invalid solana address")]
+    InvalidSolanaAddress,
+
+    #[error("address is not part of any verification")]
+    AddressNotPartOfVerification,
 }
 
 #[derive(Clone, Debug)]
@@ -765,6 +777,33 @@ impl ShardEngine {
             }
         }
 
+        // Process verification removal hooks
+        // Look for any events with deleted verification messages
+        for event in &events {
+            if let Some(hub_event::Body::MergeMessageBody(merge_body)) = &event.body {
+                for deleted_message in &merge_body.deleted_messages {
+                    // Check if this was a verification add message that was deleted
+                    if let Some(data) = &deleted_message.data {
+                        if data.r#type == MessageType::VerificationAddEthAddress as i32 {
+                            if let Err(err) = self.handle_verification_merge_hooks(
+                                deleted_message.fid(),
+                                event,
+                                txn_batch,
+                            ) {
+                                if source != ProposalSource::Simulate {
+                                    warn!(
+                                        fid = deleted_message.fid(),
+                                        "Error handling verification hooks for deleted verification: {:?}",
+                                        err
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let account_root =
             self.stores
                 .trie
@@ -791,6 +830,95 @@ impl ShardEngine {
 
         // Return the new account root hash
         Ok((account_root, events, validation_errors))
+    }
+
+    fn handle_verification_merge_hooks(
+        &mut self,
+        fid: u64,
+        hub_event: &proto::HubEvent,
+        txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Result<(), MessageValidationError> {
+        // Early return if not a merge message event
+        let merge_body = match &hub_event.body {
+            Some(hub_event::Body::MergeMessageBody(body)) => body,
+            _ => return Ok(()),
+        };
+
+        // Early return if no message
+        let message = match &merge_body.message {
+            Some(message) => message,
+            None => return Ok(()),
+        };
+
+        // Early return if no message data
+        let data = match &message.data {
+            Some(data) => data,
+            None => return Ok(()),
+        };
+
+        // Check if this is a verification remove message. This should never
+        // happen as we only call this function for verification remove messages
+        if data.r#type != MessageType::VerificationRemove as i32 {
+            return Err(MessageValidationError::InvalidMessageType(data.r#type));
+        }
+
+        // Extract verification remove body or return early
+        let verification_body = match &data.body {
+            Some(Body::VerificationRemoveBody(body)) => body,
+            _ => return Ok(()),
+        };
+
+        // Determine protocol from removal message
+        let protocol = match verification_body.protocol {
+            x if x == proto::Protocol::Ethereum as i32 => proto::Protocol::Ethereum,
+            x if x == proto::Protocol::Solana as i32 => proto::Protocol::Solana,
+            _ => return Err(MessageValidationError::AddressNotPartOfVerification),
+        };
+
+        // Parse address based on protocol
+        let parsed_address = match protocol {
+            proto::Protocol::Ethereum => {
+                Address::from_slice(&verification_body.address).to_checksum(None)
+            }
+            proto::Protocol::Solana => bs58::encode(&verification_body.address).into_string(),
+        };
+
+        // Determine user data type based on protocol
+        let user_data_type = match protocol {
+            proto::Protocol::Ethereum => UserDataType::UserDataPrimaryAddressEthereum,
+            proto::Protocol::Solana => UserDataType::UserDataPrimaryAddressSolana,
+        };
+
+        // Check if this address is set as the primary address
+        let user_data_result = UserDataStore::get_user_data_by_fid_and_type(
+            &self.stores.user_data_store,
+            fid,
+            user_data_type,
+        );
+
+        // If we can't find the user data or there's an error, just return OK (nothing to revoke)
+        let user_data = match user_data_result {
+            Ok(data) => data,
+            Err(_) => return Ok(()),
+        };
+
+        // Check if the stored primary address matches the one being removed
+        let data_ref = match &user_data.data {
+            Some(data) => data,
+            None => return Ok(()),
+        };
+
+        let user_data_body = match &data_ref.body {
+            Some(Body::UserDataBody(body)) => body,
+            _ => return Ok(()),
+        };
+
+        // If the primary address matches the one being removed, revoke it
+        if user_data_body.value == parsed_address {
+            self.stores.user_data_store.revoke(&user_data, txn_batch)?;
+        }
+
+        Ok(())
     }
 
     fn merge_message(
@@ -827,7 +955,12 @@ impl ShardEngine {
                 .user_data_store
                 .merge(msg, txn_batch)
                 .map_err(|e| MessageValidationError::StoreError(e)),
-            MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => self
+            MessageType::VerificationAddEthAddress => self
+                .stores
+                .verification_store
+                .merge(msg, txn_batch)
+                .map_err(|e| MessageValidationError::StoreError(e)),
+            MessageType::VerificationRemove => self
                 .stores
                 .verification_store
                 .merge(msg, txn_batch)
@@ -1025,6 +1158,7 @@ impl ShardEngine {
             .as_ref()
             .ok_or(MessageValidationError::NoMessageData)?;
 
+        // THIS: does the message validation
         validations::message::validate_message(message, self.network)?;
 
         // Check that the user has a custody address
@@ -1046,6 +1180,12 @@ impl ShardEngine {
             Some(proto::message_data::Body::UserDataBody(user_data)) => {
                 if user_data.r#type == proto::UserDataType::Username as i32 {
                     self.validate_username(message_data.fid, &user_data.value, txn_batch)?;
+                }
+                if user_data.r#type == proto::UserDataType::UserDataPrimaryAddressEthereum as i32 {
+                    self.validate_ethereum_address(message_data.fid, &user_data.value)?;
+                }
+                if user_data.r#type == proto::UserDataType::UserDataPrimaryAddressSolana as i32 {
+                    self.validate_solana_address(message_data.fid, &user_data.value)?;
                 }
             }
             _ => {}
@@ -1090,6 +1230,35 @@ impl ShardEngine {
         }
     }
 
+    fn validate_ethereum_address(
+        &self,
+        fid: u64,
+        address: &str,
+    ) -> Result<(), MessageValidationError> {
+        if address.is_empty() {
+            return Ok(());
+        }
+        // Decode Ethereum address into bytes
+        let address_instance: Address = Address::from_hex(address)
+            .map_err(|_| MessageValidationError::InvalidEthereumAddress)?;
+        self.validate_fid_has_verification(fid, Protocol::Ethereum, address_instance.as_ref())?;
+        Ok(())
+    }
+
+    fn validate_solana_address(
+        &self,
+        fid: u64,
+        address: &str,
+    ) -> Result<(), MessageValidationError> {
+        if address.is_empty() {
+            return Ok(());
+        }
+        let address_instance: Address =
+            Address::from_hex(address).map_err(|_| MessageValidationError::InvalidSolanaAddress)?;
+        self.validate_fid_has_verification(fid, Protocol::Solana, address_instance.as_ref())?;
+        Ok(())
+    }
+
     fn validate_username(
         &self,
         fid: u64,
@@ -1102,6 +1271,8 @@ impl ShardEngine {
         }
         let name = name.to_string();
         // TODO: validate fname string
+
+        // self.get_verifications_by_fid()
 
         let proof = self.get_username_proof(name.clone(), txn)?;
         match proof {
@@ -1440,6 +1611,49 @@ impl ShardEngine {
             fid,
             user_data_type,
         )
+    }
+
+    pub fn validate_fid_has_verification(
+        &self,
+        fid: u64,
+        protocol: Protocol,
+        address: &[u8],
+    ) -> Result<(), MessageValidationError> {
+        let mut page_options = PageOptions::default();
+        loop {
+            let page_result = self
+                .stores
+                .verification_store
+                .get_adds_by_fid::<fn(&proto::Message) -> bool>(fid, &page_options, None);
+
+            if page_result.is_err() {
+                return Err(MessageValidationError::StoreError(
+                    HubError::invalid_internal_state("Unable to get verifications by fid"),
+                ));
+            }
+            let page = page_result.unwrap();
+            for msg in page.messages {
+                if let Some(msg_data) = msg.data {
+                    if let Some(Body::VerificationAddAddressBody(verification)) = msg_data.body {
+                        if verification.protocol != protocol as i32 {
+                            continue;
+                        }
+                        if verification.address == address {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            match page.next_page_token {
+                Some(next_page_token) => {
+                    page_options.page_token = Some(next_page_token);
+                }
+                None => {
+                    break;
+                }
+            }
+        }
+        Err(MessageValidationError::AddressNotPartOfVerification)
     }
 
     pub fn get_verifications_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
