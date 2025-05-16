@@ -11,7 +11,7 @@ use crate::proto::{self, Block, MessageType, ShardChunk, Transaction};
 use crate::proto::{FarcasterNetwork, HubEvent};
 use crate::proto::{OnChainEvent, OnChainEventType};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
-use crate::storage::store::account::{CastStore, MessagesPage, OnchainEventStore};
+use crate::storage::store::account::{CastStore, MessagesPage};
 use crate::storage::store::stores::{StoreLimits, Stores};
 use crate::storage::store::BlockStore;
 use crate::storage::trie;
@@ -578,7 +578,6 @@ impl ShardEngine {
                         match &onchain_event.body {
                             Some(proto::on_chain_event::Body::SignerEventBody(signer_event)) => {
                                 if signer_event.event_type == proto::SignerEventType::Remove as i32
-                                    && OnchainEventStore::is_signer_key(&signer_event)
                                 {
                                     revoked_signers.insert(signer_event.key.clone());
                                 }
