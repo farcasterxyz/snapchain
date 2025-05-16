@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.20] - 2025-05-16
+
+### 🐛 Bug Fixes
+
+- Update tests that depend on hubs being up (#493)
+- Process signer revoke messages as expected (#492)
+
 ## [0.2.19] - 2025-05-15
 
 ### 🐛 Bug Fixes
