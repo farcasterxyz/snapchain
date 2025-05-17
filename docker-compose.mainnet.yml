@@ -41,6 +41,7 @@ services:
         EOF
         exec $0 $@ # Now run the original command
     command: [ "./snapchain", "--config-path", "config.toml" ]
+    restart: always
     ports:
       - "3381:3381/tcp"
       - "3382:3382/udp"
