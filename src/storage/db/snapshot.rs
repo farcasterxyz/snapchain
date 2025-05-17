@@ -314,7 +314,7 @@ pub async fn upload_to_s3(
     let start_date = chrono::DateTime::from_timestamp_millis(start_timetamp)
         .ok_or(SnapshotError::DateError)?
         .date_naive();
-    let s3_client = create_s3_client(&snapshot_config).await;
+    let mut s3_client = create_s3_client(&snapshot_config).await;
     let upload_dir = format!(
         "{}/snapshot-{}-{}.tar.gz",
         snapshot_directory(network, shard_id),
@@ -336,14 +336,33 @@ pub async fn upload_to_s3(
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer).await?;
 
-        s3_client
+        let result = s3_client
             .put_object()
             .bucket(snapshot_config.s3_bucket.clone())
             .key(key.clone())
-            .body(ByteStream::from(buffer))
+            .body(ByteStream::from(buffer.clone()))
             .send()
-            .await?;
+            .await;
 
+        if let Err(err) = &result {
+            error!(
+                "Error uploading snapshot to s3: {}, key: {}, bucket: {}",
+                DisplayErrorContext(err),
+                key,
+                snapshot_config.s3_bucket
+            );
+
+            // The sdk retries by default, but certain errors are not retriable like credentials
+            // expiring, so retry manually once with a fresh client.
+            s3_client = create_s3_client(&snapshot_config).await;
+            s3_client
+                .put_object()
+                .bucket(snapshot_config.s3_bucket.clone())
+                .key(key.clone())
+                .body(ByteStream::from(buffer))
+                .send()
+                .await?;
+        }
         info!(key, "Finished uploading snapshot to s3");
         statsd_client.count_with_shard(shard_id, "snapshots.successful_upload", 1);
 
