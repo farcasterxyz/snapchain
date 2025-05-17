@@ -3,7 +3,9 @@ use crate::jobs::snapshot_upload::upload_snapshot;
 use crate::mempool::mempool::MempoolRequest;
 use crate::network::rpc_extensions::authenticate_request;
 use crate::proto::admin_service_server::AdminService;
-use crate::proto::{self, Empty, FarcasterNetwork, RetryOnchainEventsRequest};
+use crate::proto::{
+    self, Empty, FarcasterNetwork, RetryOnchainEventsRequest, UploadSnapshotRequest,
+};
 use crate::storage;
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
@@ -173,7 +175,7 @@ impl AdminService for MyAdminService {
 
     async fn upload_snapshot(
         &self,
-        request: Request<Empty>,
+        request: Request<UploadSnapshotRequest>,
     ) -> std::result::Result<Response<Empty>, Status> {
         authenticate_request(&request, &self.allowed_users)?;
 
@@ -186,6 +188,12 @@ impl AdminService for MyAdminService {
         let shard_stores = self.shard_stores.clone();
         let block_store = self.block_store.clone();
         let statsd_client = self.statsd_client.clone();
+        let shard_ids = if request.get_ref().shard_indexes.is_empty() {
+            None
+        } else {
+            Some(request.into_inner().shard_indexes.into_iter().collect())
+        };
+
         tokio::spawn(async move {
             if let Err(err) = upload_snapshot(
                 snapshot_config,
@@ -193,6 +201,7 @@ impl AdminService for MyAdminService {
                 block_store,
                 shard_stores,
                 statsd_client,
+                shard_ids,
             )
             .await
             {
