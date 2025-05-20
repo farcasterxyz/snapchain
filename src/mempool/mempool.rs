@@ -1,6 +1,7 @@
 use governor::clock::QuantaClock;
 use governor::state::{InMemoryState, NotKeyed};
 use moka::policy::EvictionPolicy;
+use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
 use std::sync::Arc;
@@ -225,7 +226,51 @@ impl MempoolMessage {
             MempoolMessage::ValidatorMessage(msg) => msg.mempool_key(),
         }
     }
+
+    /// Constructs a unique RocksDB key for this mempool message
+    pub fn db_key(&self) -> Vec<u8> {
+        let mut key = Vec::from(MEMPOOL_KEY_PREFIX);
+        let mempool_key = self.mempool_key();
+        key.extend_from_slice(&[mempool_key.message_kind as u8]);
+        key.extend_from_slice(&mempool_key.timestamp.to_be_bytes());
+        key.extend_from_slice(mempool_key.identity.as_bytes());
+        key
+    }
+
+    /// Serializes the message to protobuf bytes
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            MempoolMessage::UserMessage(msg) => {
+                let mut buf = Vec::new();
+                msg.encode(&mut buf).expect("Failed to encode UserMessage");
+                buf
+            }
+            MempoolMessage::ValidatorMessage(msg) => {
+                let mut buf = Vec::new();
+                msg.encode(&mut buf)
+                    .expect("Failed to encode ValidatorMessage");
+                buf
+            }
+        }
+    }
+
+    /// Deserializes a MempoolMessage from protobuf bytes and kind
+    pub fn from_bytes(kind: MempoolMessageKind, bytes: &[u8]) -> Result<Self, prost::DecodeError> {
+        match kind {
+            MempoolMessageKind::UserMessage => {
+                let msg = proto::Message::decode(bytes)?;
+                Ok(MempoolMessage::UserMessage(msg))
+            }
+            MempoolMessageKind::ValidatorMessage => {
+                let msg = proto::ValidatorMessage::decode(bytes)?;
+                Ok(MempoolMessage::ValidatorMessage(msg))
+            }
+        }
+    }
 }
+
+/// Prefix for all mempool keys in RocksDB
+const MEMPOOL_KEY_PREFIX: &[u8] = b"mempool:";
 
 pub struct MempoolMessagesRequest {
     pub shard_id: u32,
