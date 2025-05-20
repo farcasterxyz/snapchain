@@ -30,7 +30,7 @@ use std::{fs, net};
 use tokio::net::TcpListener;
 use tokio::select;
 use tokio::signal::ctrl_c;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use tokio_cron_scheduler::JobScheduler;
 use tonic::transport::Server;
 use tracing::{error, info, warn};
@@ -477,7 +477,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .await;
 
-        let mut mempool = Mempool::new(
+        // Don't like this, is there a better way to do this?
+        use snapchain::storage::db::RocksDB;
+        use std::collections::HashMap;
+        let mut shard_dbs: HashMap<u32, std::sync::Arc<RocksDB>> = HashMap::new();
+        for shard_id in 0..=app_config.consensus.num_shards {
+            let db = RocksDB::open_shard_db(app_config.rocksdb_dir.as_str(), shard_id);
+            shard_dbs.insert(shard_id, db);
+        }
+
+        let mempool = Arc::new(Mutex::new(Mempool::new(
             app_config.mempool.clone(),
             mempool_rx,
             messages_request_rx,
@@ -486,8 +495,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             gossip_tx.clone(),
             shard_decision_rx,
             statsd_client.clone(),
-        );
-        tokio::spawn(async move { mempool.run().await });
+            shard_dbs,
+        )));
+        let mempool_task = mempool.clone();
+        tokio::spawn(async move { mempool_task.lock().await.run().await });
 
         if !app_config.fnames.disable {
             let mut fetcher = snapchain::connectors::fname::Fetcher::new(
@@ -570,11 +581,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             select! {
                 _ = ctrl_c() => {
                     info!("Received Ctrl-C, shutting down");
+                    mempool.lock().await.persist_to_db().await;
                     node.stop();
                     return Ok(());
                 }
                 _ = shutdown_rx.recv() => {
                     error!("Received shutdown signal, shutting down");
+                    mempool.lock().await.persist_to_db().await;
                     node.stop();
                     return Ok(());
                 }

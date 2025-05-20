@@ -235,6 +235,7 @@ mod tests {
             gossip_tx,
             shard_decision_rx,
             statsd_client.clone(),
+            HashMap::new(),
         );
         tokio::spawn(async move { mempool.run().await });
 
