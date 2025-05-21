@@ -2846,7 +2846,7 @@ impl Router {
                 )
                 .await
             }
-            (&Method::GET, "/v1/idRegistryOnChainEventByAddress") => {
+            (&Method::GET, "/v1/onChainIdRegistryEventByAddress") => {
                 self.handle_request::<IdRegistryEventByAddressRequest, OnChainEvent, _>(
                     req,
                     |service, req| {
