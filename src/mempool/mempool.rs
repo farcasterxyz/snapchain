@@ -227,7 +227,6 @@ impl MempoolMessage {
         }
     }
 
-    /// Constructs a unique RocksDB key for this mempool message
     pub fn db_key(&self) -> Vec<u8> {
         let mut key = Vec::from(MEMPOOL_KEY_PREFIX);
         let mempool_key = self.mempool_key();
@@ -237,7 +236,6 @@ impl MempoolMessage {
         key
     }
 
-    /// Serializes the message to protobuf bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
             MempoolMessage::UserMessage(msg) => {
@@ -254,7 +252,6 @@ impl MempoolMessage {
         }
     }
 
-    /// Deserializes a MempoolMessage from protobuf bytes and kind
     pub fn from_bytes(kind: MempoolMessageKind, bytes: &[u8]) -> Result<Self, prost::DecodeError> {
         match kind {
             MempoolMessageKind::UserMessage => {
@@ -269,7 +266,6 @@ impl MempoolMessage {
     }
 }
 
-/// Prefix for all mempool keys in RocksDB
 const MEMPOOL_KEY_PREFIX: &[u8] = b"mempool:";
 
 pub struct MempoolMessagesRequest {
@@ -433,15 +429,13 @@ impl ReadNodeMempool {
 }
 
 pub struct Mempool {
-    config: Config,
-    messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
     messages: HashMap<u32, BTreeMap<MempoolKey, MempoolMessage>>,
+    messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
     shard_decision_rx: broadcast::Receiver<ShardChunk>,
-    statsd_client: StatsdClientWrapper,
-    read_node_mempool: ReadNodeMempool,
     rate_limits: Option<RateLimits>,
-    /// Don't like modifying this struct let's figure out a better way to do this
-    shard_dbs: HashMap<u32, std::sync::Arc<crate::storage::db::RocksDB>>,
+    read_node_mempool: ReadNodeMempool,
+    config: Config,
+    statsd_client: StatsdClientWrapper,
 }
 
 impl Mempool {
@@ -454,62 +448,9 @@ impl Mempool {
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         shard_decision_rx: broadcast::Receiver<ShardChunk>,
         statsd_client: StatsdClientWrapper,
-        shard_dbs: HashMap<u32, std::sync::Arc<crate::storage::db::RocksDB>>,
     ) -> Self {
-        let mut messages = HashMap::new();
-        // Restore persisted mempool messages from RocksDB for each non-block shard
-        for (&shard_id, db) in &shard_dbs {
-            if shard_id == 0 {
-                continue;
-            } // skip block shard
-            let mut shard_messages = BTreeMap::new();
-            let mut restore_items: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-            use crate::storage::db::PageOptions;
-            if let Err(e) = db.for_each_iterator_by_prefix(
-                Some(MEMPOOL_KEY_PREFIX.to_vec()),
-                None,
-                &PageOptions::default(),
-                |key: &[u8], value: &[u8]| {
-                    restore_items.push((key.to_vec(), value.to_vec()));
-                    Ok(true)
-                },
-            ) {
-                tracing::warn!(shard_id, error=?e, "Failed to iterate persisted mempool messages");
-            }
-            for (key, value) in restore_items {
-                // key: mempool:<kind><timestamp><identity>
-                // parse kind (1 byte after prefix)
-                let prefix_len = MEMPOOL_KEY_PREFIX.len();
-                if key.len() <= prefix_len {
-                    continue;
-                }
-                let kind_byte = key[prefix_len];
-                let kind = match kind_byte {
-                    1 => MempoolMessageKind::ValidatorMessage,
-                    2 => MempoolMessageKind::UserMessage,
-                    _ => continue,
-                };
-                match MempoolMessage::from_bytes(kind, &value) {
-                    Ok(msg) => {
-                        let mempool_key = msg.mempool_key();
-                        shard_messages.insert(mempool_key, msg);
-                    }
-                    Err(e) => {
-                        tracing::warn!(shard_id, error=?e, "Failed to decode persisted mempool message");
-                    }
-                }
-            }
-            if !shard_messages.is_empty() {
-                tracing::info!(
-                    shard_id,
-                    count = shard_messages.len(),
-                    "Restored mempool messages from RocksDB"
-                );
-                messages.insert(shard_id, shard_messages);
-            }
-        }
         Mempool {
-            messages,
+            messages: HashMap::new(),
             messages_request_rx,
             shard_decision_rx,
             rate_limits: if config.enable_rate_limits {
@@ -521,7 +462,6 @@ impl Mempool {
             } else {
                 None
             },
-            config,
             read_node_mempool: ReadNodeMempool::new(
                 mempool_rx,
                 num_shards,
@@ -529,9 +469,18 @@ impl Mempool {
                 gossip_tx,
                 statsd_client.clone(),
             ),
+            config,
             statsd_client,
-            shard_dbs,
         }
+    }
+
+    /// Returns all mempool messages for all shards except 0, for persistence.
+    pub fn all_messages(&self) -> Vec<(u32, Vec<MempoolMessage>)> {
+        self.messages
+            .iter()
+            .filter(|(&shard_id, _)| shard_id != 0) // Is this a reliable optomization?
+            .map(|(&shard_id, msgs)| (shard_id, msgs.values().cloned().collect()))
+            .collect()
     }
 
     fn message_exceeds_rate_limits(&mut self, shard_id: u32, message: &MempoolMessage) -> bool {
@@ -647,32 +596,18 @@ impl Mempool {
         result
     }
 
-    pub async fn persist_to_db(&self) {
-        use crate::storage::db::RocksDbTransactionBatch;
-        use tracing::info;
-        let mut num_persisted = 0u64;
-        for (shard_id, messages) in &self.messages {
-            // Is this a valid optimization in the sense that anything in 0 should be persisted already?
-            if *shard_id == 0 {
-                continue;
-            }
-            if let Some(db) = self.shard_dbs.get(shard_id) {
-                let mut batch = RocksDbTransactionBatch::new();
-                for message in messages.values() {
-                    batch.put(message.db_key(), message.to_bytes());
-                    num_persisted += 1;
-                }
-                if let Err(e) = db.commit(batch) {
-                    tracing::error!(shard_id, error=?e, "Failed to persist mempool to db");
-                }
-            } else {
-                tracing::warn!(shard_id, "No db found for shard when persisting mempool");
-            }
-        }
-        info!(
-            num_persisted,
-            "Persisted mempool messages to RocksDB on shutdown"
-        );
+    pub fn insert_message_for_restore(&mut self, message: MempoolMessage) {
+        let fid = message.fid();
+        let shard_id = self
+            .read_node_mempool
+            .message_router
+            .route_fid(fid, self.read_node_mempool.num_shards);
+
+        let key = message.mempool_key();
+        self.messages
+            .entry(shard_id)
+            .or_insert_with(BTreeMap::new)
+            .insert(key, message);
     }
 
     pub async fn run(&mut self) {
@@ -695,26 +630,10 @@ impl Mempool {
                                 for transaction in chunk.transactions {
                                     for user_message in transaction.user_messages {
                                         mempool.remove(&user_message.mempool_key());
-                                        if height.shard_index != 0 {
-                                            if let Some(db) = self.shard_dbs.get(&height.shard_index) {
-                                                let key = MempoolMessage::UserMessage(user_message.clone()).db_key();
-                                                if let Err(e) = db.del(&key) {
-                                                    tracing::warn!(shard_id=height.shard_index, error=?e, "Failed to delete mempool message from RocksDB");
-                                                }
-                                            }
-                                        }
                                         self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
                                     }
                                     for system_message in transaction.system_messages {
                                         mempool.remove(&system_message.mempool_key());
-                                        if height.shard_index != 0 {
-                                            if let Some(db) = self.shard_dbs.get(&height.shard_index) {
-                                                let key = MempoolMessage::ValidatorMessage(system_message.clone()).db_key();
-                                                if let Err(e) = db.del(&key) {
-                                                    tracing::warn!(shard_id=height.shard_index, error=?e, "Failed to delete mempool validator message from RocksDB");
-                                                }
-                                            }
-                                        }
                                         if let Some(onchain_event) = system_message.on_chain_event {
                                             if onchain_event.r#type() == OnChainEventType::EventTypeStorageRent{
                                                 // If the user buys more storage, we should bump their rate limit

@@ -97,7 +97,6 @@ mod tests {
             gossip_tx,
             shard_decision_rx,
             statsd_client,
-            HashMap::new(),
         );
 
         (
@@ -329,7 +328,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mempool_eviction() {
-        let (mut engine, _, mut mempool, mempool_tx, messages_request_tx, shard_decision_tx, _) =
+        let (mut engine, _, mempool, mempool_tx, messages_request_tx, shard_decision_tx, _) =
             setup(None, false).await;
         test_helper::register_user(
             1234,
@@ -340,8 +339,9 @@ mod tests {
         .await;
 
         // Spawn mempool task
+        let mut mempool_for_task = mempool;
         tokio::spawn(async move {
-            mempool.run().await;
+            mempool_for_task.run().await;
         });
 
         let fid = 1234;
@@ -573,7 +573,6 @@ mod tests {
         let mut shard_dbs = HashMap::new();
         shard_dbs.insert(1, db.clone());
 
-        // Manually insert a message into RocksDB
         let message = MempoolMessage::UserMessage(messages_factory::casts::create_cast_add(
             5678, "restore", None, None,
         ));
@@ -581,11 +580,10 @@ mod tests {
         let val = message.to_bytes();
         db.put(&key, &val).unwrap();
 
-        // Setup minimal mempool with restore, and keep the messages_request_tx
         let (_engine, _, _mempool, _mempool_tx, _old_messages_request_tx, _decision_tx, _) =
             setup(None, false).await;
         let (messages_request_tx, messages_request_rx) = mpsc::channel(1);
-        let mempool = Mempool::new(
+        let mut mempool = Mempool::new(
             mempool::Config::default(),
             mpsc::channel(1).1,
             messages_request_rx,
@@ -597,16 +595,41 @@ mod tests {
                 cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
                 true,
             ),
-            shard_dbs,
         );
 
-        // Spawn mempool task
-        let mut mempool_task = mempool;
+        let mut restore_items: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        use crate::mempool::mempool::MempoolMessageKind;
+        use crate::storage::db::PageOptions;
+        db.for_each_iterator_by_prefix(
+            Some(b"mempool:".to_vec()),
+            None,
+            &PageOptions::default(),
+            |key: &[u8], value: &[u8]| {
+                restore_items.push((key.to_vec(), value.to_vec()));
+                Ok(true)
+            },
+        )
+        .unwrap();
+        for (key, value) in restore_items {
+            let prefix_len = b"mempool:".len();
+            if key.len() <= prefix_len {
+                continue;
+            }
+            let kind_byte = key[prefix_len];
+            let kind = match kind_byte {
+                1 => MempoolMessageKind::ValidatorMessage,
+                2 => MempoolMessageKind::UserMessage,
+                _ => continue,
+            };
+            if let Ok(msg) = MempoolMessage::from_bytes(kind, &value) {
+                mempool.insert_message_for_restore(msg);
+            }
+        }
+
         tokio::spawn(async move {
-            mempool_task.run().await;
+            mempool.run().await;
         });
 
-        // Query mempool for restored messages via public API
         let (oneshot_tx, oneshot_rx) = oneshot::channel();
         messages_request_tx
             .send(MempoolMessagesRequest {

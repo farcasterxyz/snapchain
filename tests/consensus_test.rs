@@ -327,7 +327,6 @@ impl NodeForTest {
             gossip_tx,
             shard_decision_rx,
             statsd_client.clone(),
-            HashMap::new(),
         );
         let handle = tokio::spawn(async move { mempool.run().await });
         join_handles.push(handle);
