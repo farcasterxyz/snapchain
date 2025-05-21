@@ -31,6 +31,10 @@ mod tests {
     use libp2p::identity::ed25519::Keypair;
     use messages_factory::casts::create_cast_add;
 
+    use crate::storage::db::RocksDB;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
     const HOST_FOR_TEST: &str = "127.0.0.1";
     const PORT_FOR_TEST: u32 = 9388;
 
@@ -557,5 +561,65 @@ mod tests {
 
         let error = result.unwrap_err();
         assert_eq!(error.code, "bad_request.duplicate");
+    }
+
+    #[tokio::test]
+    async fn test_mempool_restore_from_db() {
+        // Setup temp RocksDB for shard 1
+        let tmp_dir = tempdir().unwrap();
+        let db_path = tmp_dir.path().join("shard-1");
+        let db = Arc::new(RocksDB::new(db_path.to_str().unwrap()));
+        db.open().unwrap();
+        let mut shard_dbs = HashMap::new();
+        shard_dbs.insert(1, db.clone());
+
+        // Manually insert a message into RocksDB
+        let message = MempoolMessage::UserMessage(messages_factory::casts::create_cast_add(
+            5678, "restore", None, None,
+        ));
+        let key = message.db_key();
+        let val = message.to_bytes();
+        db.put(&key, &val).unwrap();
+
+        // Setup minimal mempool with restore, and keep the messages_request_tx
+        let (_engine, _, _mempool, _mempool_tx, _old_messages_request_tx, _decision_tx, _) =
+            setup(None, false).await;
+        let (messages_request_tx, messages_request_rx) = mpsc::channel(1);
+        let mempool = Mempool::new(
+            mempool::Config::default(),
+            mpsc::channel(1).1,
+            messages_request_rx,
+            1,
+            HashMap::new(),
+            mpsc::channel(1).0,
+            broadcast::channel(1).1,
+            StatsdClientWrapper::new(
+                cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
+                true,
+            ),
+            shard_dbs,
+        );
+
+        // Spawn mempool task
+        let mut mempool_task = mempool;
+        tokio::spawn(async move {
+            mempool_task.run().await;
+        });
+
+        // Query mempool for restored messages via public API
+        let (oneshot_tx, oneshot_rx) = oneshot::channel();
+        messages_request_tx
+            .send(MempoolMessagesRequest {
+                shard_id: 1,
+                max_messages_per_block: 10,
+                message_tx: oneshot_tx,
+            })
+            .await
+            .unwrap();
+        let restored = oneshot_rx.await.unwrap();
+        assert!(
+            restored.iter().any(|m| m.fid() == 5678),
+            "Restored mempool message not found in memory"
+        );
     }
 }
