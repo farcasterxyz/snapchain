@@ -278,7 +278,7 @@ impl UserDataStore {
         if username_proof.fid == 0 {
             delete_username_proof_transaction(txn, username_proof, existing_fid);
         } else {
-            put_username_proof_transaction(txn, username_proof);
+            put_username_proof_transaction(txn, username_proof, existing_fid);
         }
 
         let mut hub_event = HubEvent::from(
