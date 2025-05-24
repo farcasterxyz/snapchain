@@ -1,6 +1,7 @@
 use governor::clock::QuantaClock;
 use governor::state::{InMemoryState, NotKeyed};
 use moka::policy::EvictionPolicy;
+use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
 use std::sync::Arc;
@@ -225,7 +226,47 @@ impl MempoolMessage {
             MempoolMessage::ValidatorMessage(msg) => msg.mempool_key(),
         }
     }
+
+    pub fn db_key(&self) -> Vec<u8> {
+        let mut key = Vec::from(MEMPOOL_KEY_PREFIX);
+        let mempool_key = self.mempool_key();
+        key.extend_from_slice(&[mempool_key.message_kind as u8]);
+        key.extend_from_slice(&mempool_key.timestamp.to_be_bytes());
+        key.extend_from_slice(mempool_key.identity.as_bytes());
+        key
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            MempoolMessage::UserMessage(msg) => {
+                let mut buf = Vec::new();
+                msg.encode(&mut buf).expect("Failed to encode UserMessage");
+                buf
+            }
+            MempoolMessage::ValidatorMessage(msg) => {
+                let mut buf = Vec::new();
+                msg.encode(&mut buf)
+                    .expect("Failed to encode ValidatorMessage");
+                buf
+            }
+        }
+    }
+
+    pub fn from_bytes(kind: MempoolMessageKind, bytes: &[u8]) -> Result<Self, prost::DecodeError> {
+        match kind {
+            MempoolMessageKind::UserMessage => {
+                let msg = proto::Message::decode(bytes)?;
+                Ok(MempoolMessage::UserMessage(msg))
+            }
+            MempoolMessageKind::ValidatorMessage => {
+                let msg = proto::ValidatorMessage::decode(bytes)?;
+                Ok(MempoolMessage::ValidatorMessage(msg))
+            }
+        }
+    }
 }
+
+const MEMPOOL_KEY_PREFIX: &[u8] = b"mempool:";
 
 pub struct MempoolMessagesRequest {
     pub shard_id: u32,
@@ -388,13 +429,13 @@ impl ReadNodeMempool {
 }
 
 pub struct Mempool {
-    config: Config,
-    messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
     messages: HashMap<u32, BTreeMap<MempoolKey, MempoolMessage>>,
+    messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
     shard_decision_rx: broadcast::Receiver<ShardChunk>,
-    statsd_client: StatsdClientWrapper,
-    read_node_mempool: ReadNodeMempool,
     rate_limits: Option<RateLimits>,
+    read_node_mempool: ReadNodeMempool,
+    config: Config,
+    statsd_client: StatsdClientWrapper,
 }
 
 impl Mempool {
@@ -421,7 +462,6 @@ impl Mempool {
             } else {
                 None
             },
-            config,
             read_node_mempool: ReadNodeMempool::new(
                 mempool_rx,
                 num_shards,
@@ -429,8 +469,18 @@ impl Mempool {
                 gossip_tx,
                 statsd_client.clone(),
             ),
+            config,
             statsd_client,
         }
+    }
+
+    /// Returns all mempool messages for all shards except 0, for persistence.
+    pub fn all_messages(&self) -> Vec<(u32, Vec<MempoolMessage>)> {
+        self.messages
+            .iter()
+            .filter(|(&shard_id, _)| shard_id != 0) // Is this a reliable optomization?
+            .map(|(&shard_id, msgs)| (shard_id, msgs.values().cloned().collect()))
+            .collect()
     }
 
     fn message_exceeds_rate_limits(&mut self, shard_id: u32, message: &MempoolMessage) -> bool {
@@ -546,6 +596,20 @@ impl Mempool {
         result
     }
 
+    pub fn insert_message_for_restore(&mut self, message: MempoolMessage) {
+        let fid = message.fid();
+        let shard_id = self
+            .read_node_mempool
+            .message_router
+            .route_fid(fid, self.read_node_mempool.num_shards);
+
+        let key = message.mempool_key();
+        self.messages
+            .entry(shard_id)
+            .or_insert_with(BTreeMap::new)
+            .insert(key, message);
+    }
+
     pub async fn run(&mut self) {
         let mut poll_interval = tokio::time::interval(self.config.rx_poll_interval);
         loop {
@@ -570,8 +634,7 @@ impl Mempool {
                                     }
                                     for system_message in transaction.system_messages {
                                         mempool.remove(&system_message.mempool_key());
-                                        if let Some(onchain_event) = system_message.on_chain_event
-                                        {
+                                        if let Some(onchain_event) = system_message.on_chain_event {
                                             if onchain_event.r#type() == OnChainEventType::EventTypeStorageRent{
                                                 // If the user buys more storage, we should bump their rate limit
                                                 if let Some(rate_limits) = &mut self.rate_limits {
