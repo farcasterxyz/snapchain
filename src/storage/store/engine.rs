@@ -2,6 +2,7 @@ use super::account::UsernameProofStore;
 use super::account::{IntoU8, OnchainEventStorageError, UserDataStore};
 use crate::core::error::HubError;
 use crate::core::types::Height;
+use crate::core::util::FarcasterTime;
 use crate::core::validations;
 use crate::core::validations::verification;
 use crate::mempool::mempool::MempoolMessagesRequest;
@@ -17,6 +18,7 @@ use crate::storage::store::BlockStore;
 use crate::storage::trie;
 use crate::storage::trie::merkle_trie;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use informalsystems_malachitebft_core_types::Round;
 use itertools::Itertools;
 use merkle_trie::TrieKey;
@@ -122,9 +124,11 @@ impl MempoolMessage {
 #[derive(Clone)]
 pub struct ShardStateChange {
     pub shard_id: u32,
+    pub timestamp: FarcasterTime,
     pub new_state_root: Vec<u8>,
     pub transactions: Vec<Transaction>,
     pub events: Vec<HubEvent>,
+    pub version: EngineVersion,
 }
 
 #[derive(Clone)]
@@ -285,12 +289,15 @@ impl ShardEngine {
         let mut snapchain_txns = self.create_transactions_from_mempool(messages)?;
         let mut events = vec![];
         let mut validation_error_count = 0;
+        let timestamp = FarcasterTime::current();
+        let version = EngineVersion::version_for(&timestamp);
         for snapchain_txn in &mut snapchain_txns {
             let (account_root, txn_events, validation_errors) = self.replay_snapchain_txn(
                 trie_ctx,
                 &snapchain_txn,
                 txn_batch,
                 ProposalSource::Propose,
+                version,
             )?;
             snapchain_txn.account_root = account_root;
             events.extend(txn_events);
@@ -310,6 +317,8 @@ impl ShardEngine {
         let new_root_hash = self.stores.trie.root_hash()?;
         let result = ShardStateChange {
             shard_id,
+            timestamp: FarcasterTime::current(),
+            version,
             new_state_root: new_root_hash.clone(),
             transactions: snapchain_txns,
             events,
@@ -470,6 +479,7 @@ impl ShardEngine {
         transactions: &[Transaction],
         shard_root: &[u8],
         source: ProposalSource,
+        version: EngineVersion,
     ) -> Result<Vec<HubEvent>, EngineError> {
         let now = std::time::Instant::now();
         let mut events = vec![];
@@ -500,8 +510,13 @@ impl ShardEngine {
         }
 
         for snapchain_txn in transactions {
-            let (account_root, txn_events, _) =
-                self.replay_snapchain_txn(trie_ctx, snapchain_txn, txn_batch, source.clone())?;
+            let (account_root, txn_events, _) = self.replay_snapchain_txn(
+                trie_ctx,
+                snapchain_txn,
+                txn_batch,
+                source.clone(),
+                version,
+            )?;
             // Reject early if account roots fail to match (shard roots will definitely fail)
             if &account_root != &snapchain_txn.account_root {
                 warn!(
@@ -544,6 +559,7 @@ impl ShardEngine {
         snapchain_txn: &Transaction,
         txn_batch: &mut RocksDbTransactionBatch,
         source: ProposalSource,
+        version: EngineVersion,
     ) -> Result<(Vec<u8>, Vec<HubEvent>, Vec<MessageValidationError>), EngineError> {
         let now = std::time::Instant::now();
         let total_user_messages = snapchain_txn.user_messages.len();
@@ -577,8 +593,7 @@ impl ShardEngine {
                         system_messages_count += 1;
                         match &onchain_event.body {
                             Some(proto::on_chain_event::Body::SignerEventBody(signer_event)) => {
-                                if signer_event.event_type == proto::SignerEventType::Remove as i32
-                                {
+                                if Self::should_revoke_signer(&signer_event, version) {
                                     revoked_signers.insert(signer_event.key.clone());
                                 }
                             }
@@ -1145,6 +1160,7 @@ impl ShardEngine {
             transactions,
             shard_root,
             ProposalSource::Validate,
+            shard_state_change.version,
         );
 
         match proposal_result {
@@ -1279,20 +1295,17 @@ impl ShardEngine {
                 "No valid cached transaction to apply. Replaying proposal"
             );
             // If we need to replay, reset the sequence number on the event id generator, just in case
-            let block_number = &shard_chunk
-                .header
-                .as_ref()
-                .unwrap()
-                .height
-                .unwrap()
-                .block_number;
-            self.stores.event_handler.set_current_height(*block_number);
+            let header = &shard_chunk.header.as_ref().unwrap();
+            let block_number = header.height.unwrap().block_number;
+            self.stores.event_handler.set_current_height(block_number);
+            let version = EngineVersion::version_for(&FarcasterTime::new(header.timestamp));
             match self.replay_proposal(
                 trie_ctx,
                 &mut txn,
                 transactions,
                 shard_root,
                 ProposalSource::Commit,
+                version,
             ) {
                 Err(err) => {
                     error!("State change commit failed: {}", err);
@@ -1316,11 +1329,13 @@ impl ShardEngine {
             system_messages: vec![],
             user_messages: vec![message.clone()],
         };
+        let version = EngineVersion::version_for(&FarcasterTime::current());
         let result = self.replay_snapchain_txn(
             &merkle_trie::Context::new(),
             &snapchain_txn,
             &mut txn,
             ProposalSource::Simulate,
+            version,
         );
 
         match result {
@@ -1489,6 +1504,14 @@ impl ShardEngine {
 
     pub fn trie_num_items(&mut self) -> usize {
         self.stores.trie.items().unwrap()
+    }
+
+    fn should_revoke_signer(signer_event: &proto::SignerEventBody, version: EngineVersion) -> bool {
+        // When this bug was active, we did not revoke any signers, so, always return false
+        if version.is_enabled(ProtocolFeature::SignerRevokeBug) {
+            return false;
+        }
+        signer_event.event_type == proto::SignerEventType::Remove as i32
     }
 }
 

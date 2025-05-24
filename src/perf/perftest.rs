@@ -1,12 +1,13 @@
+use crate::core::util::FarcasterTime;
 use crate::perf::gen_single::SingleUser;
 use crate::perf::generate::{new_generator, GeneratorTypes};
 use crate::perf::{gen_single, generate};
 use crate::proto;
+use crate::proto::admin_service_client::AdminServiceClient;
 use crate::proto::hub_service_client::HubServiceClient;
 use crate::proto::Block;
 use crate::utils::cli::follow_blocks;
 use crate::utils::cli::send_on_chain_event;
-use crate::{consensus::proposer::current_time, proto::admin_service_client::AdminServiceClient};
 use clap::Parser;
 use figment::{
     providers::{Env, Format, Toml},
@@ -181,7 +182,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     let start = Instant::now();
     let mut stats_calculation_timer = time::interval(cfg.stats_calculation_interval);
-    let start_time = current_time();
+    let start_time = FarcasterTime::current().to_u64();
     let mut block_count = 0;
     let mut num_messages_confirmed = 0;
     let mut num_messages_submitted = 0;

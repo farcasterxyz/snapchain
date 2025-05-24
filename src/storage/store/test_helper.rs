@@ -1,4 +1,3 @@
-use crate::consensus::proposer::current_time;
 use crate::core::types::{Address, Vote};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::storage::db::{self, RocksDB};
@@ -15,6 +14,7 @@ use tempfile;
 use tokio::sync::mpsc;
 
 use crate::core::error::HubError;
+use crate::core::util::FarcasterTime;
 #[allow(unused_imports)] // Used by cfg(test)
 use crate::proto::{self, FnameTransfer};
 use crate::proto::{
@@ -317,7 +317,7 @@ pub fn state_change_to_shard_chunk(
         shard_index,
         block_number,
     });
-    chunk.header.as_mut().unwrap().timestamp = current_time();
+    chunk.header.as_mut().unwrap().timestamp = FarcasterTime::current().into();
     chunk.transactions = change.transactions.clone();
     chunk
 }

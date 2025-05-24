@@ -1,6 +1,45 @@
 use crate::core::error::HubError;
 use crate::core::types::FARCASTER_EPOCH;
 
+#[derive(Clone, Debug)]
+pub struct FarcasterTime {
+    time: u64, // seconds since the farcaster epoch
+}
+
+impl FarcasterTime {
+    pub fn current() -> Self {
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - (FARCASTER_EPOCH / 1000);
+        FarcasterTime { time }
+    }
+
+    pub fn new(time: u64) -> Self {
+        FarcasterTime { time }
+    }
+
+    pub fn from_unix_seconds(time: u64) -> Self {
+        let time = time - (FARCASTER_EPOCH / 1000);
+        FarcasterTime { time }
+    }
+
+    pub fn to_unix_seconds(&self) -> u64 {
+        self.time + (FARCASTER_EPOCH / 1000)
+    }
+
+    pub fn to_u64(&self) -> u64 {
+        self.time
+    }
+}
+
+impl Into<u64> for FarcasterTime {
+    fn into(self) -> u64 {
+        self.time
+    }
+}
+
 #[allow(dead_code)]
 pub fn to_farcaster_time(time_ms: u64) -> Result<u64, HubError> {
     if time_ms < FARCASTER_EPOCH {
@@ -24,10 +63,6 @@ pub fn to_farcaster_time(time_ms: u64) -> Result<u64, HubError> {
 #[allow(dead_code)]
 pub fn from_farcaster_time(time: u64) -> u64 {
     time * 1000 + FARCASTER_EPOCH
-}
-
-pub fn farcaster_time_to_unix_seconds(time: u64) -> u64 {
-    time + (FARCASTER_EPOCH / 1000)
 }
 
 #[allow(dead_code)]
