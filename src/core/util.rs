@@ -1,7 +1,6 @@
 use crate::core::error::HubError;
 use crate::core::types::FARCASTER_EPOCH;
 
-#[allow(dead_code)]
 pub fn to_farcaster_time(time_ms: u64) -> Result<u64, HubError> {
     if time_ms < FARCASTER_EPOCH {
         return Err(HubError {
@@ -21,7 +20,6 @@ pub fn to_farcaster_time(time_ms: u64) -> Result<u64, HubError> {
     Ok(seconds_since_epoch as u64)
 }
 
-#[allow(dead_code)]
 pub fn from_farcaster_time(time: u64) -> u64 {
     time * 1000 + FARCASTER_EPOCH
 }
@@ -30,7 +28,6 @@ pub fn farcaster_time_to_unix_seconds(time: u64) -> u64 {
     time + (FARCASTER_EPOCH / 1000)
 }
 
-#[allow(dead_code)]
 pub fn get_farcaster_time() -> Result<u64, HubError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
