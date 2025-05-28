@@ -45,6 +45,18 @@ docker compose up  # append -d to run in the background
 
 A brand new node will download historical snapshots to catchup to the latest state before it begins sync. This can take up to 2 hours. Check the node's status by running `curl http://localhost:3381/v1/info`. You should see `maxHeight` increasing and `blockDelay` decreasing until it approaches zero. 
 
+## Upgrade
+
+To upgrade your Snapchain node to the latest version, follow these steps:
+
+```bash
+cd snapchain
+docker compose pull
+docker compose up -d --force-recreate
+```
+
+This ensures your node is always running the latest available version.
+
 ## Contributing 
 
 We welcome contributions from developers of all skill levels. Please look for issues labeled with "help wanted" to find good tickets to work on. If you are working on something that is not explicitly a ticket, we may or may not accept it. We encourage checking with someone on the team before spending a lot of time on something. 
