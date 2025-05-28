@@ -17,9 +17,13 @@ message RetryOnchainEventsRequest {
   }
 }
 
+message UploadSnapshotRequest {
+  repeated uint32 shard_indexes = 1;
+}
+
 service AdminService {
 //  rpc SubmitOnChainEvent(OnChainEvent) returns (OnChainEvent);
 //  rpc SubmitUserNameProof(UserNameProof) returns (UserNameProof);
-  rpc UploadSnapshot(Empty) returns (Empty);
+  rpc UploadSnapshot(UploadSnapshotRequest) returns (Empty);
   rpc RetryOnchainEvents(RetryOnchainEventsRequest) returns (Empty);
 }

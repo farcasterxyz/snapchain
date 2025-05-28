@@ -9,6 +9,7 @@ pub mod node;
 pub mod perf;
 pub mod storage;
 pub mod utils;
+pub mod version;
 
 mod tests;
 

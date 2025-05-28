@@ -48,6 +48,7 @@ services:
       - "3383:3383/tcp"
     volumes:
       - .rocks:/app/.rocks
+      - .rocks.snapshot:/app/.rocks.snapshot
     networks:
       - snapchain
 

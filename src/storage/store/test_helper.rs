@@ -1,4 +1,3 @@
-use crate::consensus::proposer::current_time;
 use crate::core::types::{Address, Vote};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::storage::db::{self, RocksDB};
@@ -15,6 +14,7 @@ use tempfile;
 use tokio::sync::mpsc;
 
 use crate::core::error::HubError;
+use crate::core::util::FarcasterTime;
 #[allow(unused_imports)] // Used by cfg(test)
 use crate::proto::{self, FnameTransfer};
 use crate::proto::{
@@ -176,8 +176,25 @@ pub async fn commit_event(engine: &mut ShardEngine, event: &OnChainEvent) -> Sha
             on_chain_event: Some(event.clone()),
             fname_transfer: None,
         })],
+        None,
     );
 
+    validate_and_commit_state_change(engine, &state_change)
+}
+
+pub async fn commit_event_at(
+    engine: &mut ShardEngine,
+    event: &OnChainEvent,
+    timestamp: &FarcasterTime,
+) -> ShardChunk {
+    let state_change = engine.propose_state_change(
+        1,
+        vec![MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
+            on_chain_event: Some(event.clone()),
+            fname_transfer: None,
+        })],
+        Some(timestamp.clone()),
+    );
     validate_and_commit_state_change(engine, &state_change)
 }
 
@@ -218,6 +235,7 @@ pub async fn commit_fname_transfer(
             on_chain_event: None,
             fname_transfer: Some(fname_transfer.clone()),
         })],
+        None,
     );
 
     validate_and_commit_state_change(engine, &state_change)
@@ -226,7 +244,7 @@ pub async fn commit_fname_transfer(
 #[cfg(test)]
 pub async fn commit_message(engine: &mut ShardEngine, msg: &proto::Message) -> ShardChunk {
     let state_change =
-        engine.propose_state_change(1, vec![MempoolMessage::UserMessage(msg.clone())]);
+        engine.propose_state_change(1, vec![MempoolMessage::UserMessage(msg.clone())], None);
 
     if state_change.transactions.is_empty() {
         panic!("Failed to propose message");
@@ -250,6 +268,7 @@ pub async fn commit_messages(engine: &mut ShardEngine, msgs: Vec<proto::Message>
         msgs.iter()
             .map(|msg| MempoolMessage::UserMessage(msg.clone()))
             .collect_vec(),
+        None,
     );
 
     if state_change.transactions.is_empty() {
@@ -317,7 +336,7 @@ pub fn state_change_to_shard_chunk(
         shard_index,
         block_number,
     });
-    chunk.header.as_mut().unwrap().timestamp = current_time();
+    chunk.header.as_mut().unwrap().timestamp = change.timestamp.clone().into();
     chunk.transactions = change.transactions.clone();
     chunk
 }
@@ -376,6 +395,7 @@ pub async fn register_fname(
             on_chain_event: None,
             fname_transfer: Some(fname_transfer),
         })],
+        None,
     );
 
     validate_and_commit_state_change(engine, &state_change);

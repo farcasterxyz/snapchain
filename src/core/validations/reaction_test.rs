@@ -37,8 +37,9 @@ mod tests {
     #[tokio::test]
     async fn test_reaction_validation() {
         let n: u32 = rand::thread_rng().gen::<u32>() % 10000;
+        // TODO(aditi): Allow no reaction type
         let resp = reqwest::get(format!(
-            "https://hoyt.farcaster.xyz:2281/v1/reactionsByFid?fid={}",
+            "https://snap.farcaster.xyz:3381/v1/reactionsByFid?fid={}&reaction_type=Like",
             n
         ))
         .await;

@@ -25,9 +25,8 @@ use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use tokio::io::{AsyncWriteExt, BufWriter};
 
-use tracing::{error, info};
-
 use super::RocksdbError;
+use tracing::{error, info, warn};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
@@ -268,7 +267,7 @@ pub async fn download_snapshots(
 
         let filename = format!("{}/{}", snapshot_dir, chunk);
         let mut file = BufWriter::new(tokio::fs::File::create(filename.clone()).await?);
-        let download_response = reqwest::get(download_path).await?;
+        let download_response = download_with_retry(download_path.as_str(), 3).await?;
         let mut byte_stream = download_response.bytes_stream();
 
         while let Some(piece) = byte_stream.next().await {
@@ -302,6 +301,27 @@ pub async fn download_snapshots(
     Ok(())
 }
 
+async fn download_with_retry(url: &str, retries: u32) -> Result<reqwest::Response, reqwest::Error> {
+    let mut attempts = 0;
+    loop {
+        match reqwest::get(url).await {
+            Ok(response) => return Ok(response),
+            Err(e) if attempts < retries => {
+                warn!(
+                    "Failed to download {}: {}, retrying {}/{}",
+                    url,
+                    e,
+                    attempts + 1,
+                    retries
+                );
+                attempts += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 pub async fn upload_to_s3(
     network: FarcasterNetwork,
     chunked_dir_path: String,
@@ -314,7 +334,7 @@ pub async fn upload_to_s3(
     let start_date = chrono::DateTime::from_timestamp_millis(start_timetamp)
         .ok_or(SnapshotError::DateError)?
         .date_naive();
-    let s3_client = create_s3_client(&snapshot_config).await;
+    let mut s3_client = create_s3_client(&snapshot_config).await;
     let upload_dir = format!(
         "{}/snapshot-{}-{}.tar.gz",
         snapshot_directory(network, shard_id),
@@ -336,14 +356,33 @@ pub async fn upload_to_s3(
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer).await?;
 
-        s3_client
+        let result = s3_client
             .put_object()
             .bucket(snapshot_config.s3_bucket.clone())
             .key(key.clone())
-            .body(ByteStream::from(buffer))
+            .body(ByteStream::from(buffer.clone()))
             .send()
-            .await?;
+            .await;
 
+        if let Err(err) = &result {
+            error!(
+                "Error uploading snapshot to s3: {}, key: {}, bucket: {}",
+                DisplayErrorContext(err),
+                key,
+                snapshot_config.s3_bucket
+            );
+
+            // The sdk retries by default, but certain errors are not retriable like credentials
+            // expiring, so retry manually once with a fresh client.
+            s3_client = create_s3_client(&snapshot_config).await;
+            s3_client
+                .put_object()
+                .bucket(snapshot_config.s3_bucket.clone())
+                .key(key.clone())
+                .body(ByteStream::from(buffer))
+                .send()
+                .await?;
+        }
         info!(key, "Finished uploading snapshot to s3");
         statsd_client.count_with_shard(shard_id, "snapshots.successful_upload", 1);
 

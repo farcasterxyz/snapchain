@@ -99,7 +99,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         }
 
         let messages = engine.pull_messages(Duration::from_millis(50)).await?;
-        let state_change = engine.propose_state_change(1, messages);
+        let state_change = engine.propose_state_change(1, messages, None);
 
         let valid = engine.validate_state_change(&state_change);
         assert!(valid);

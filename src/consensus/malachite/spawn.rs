@@ -214,6 +214,8 @@ impl MalachiteConsensusActors {
         )
         .await?;
 
+        let metrics = Metrics::register(registry);
+
         let timeout_config = timeout_from_config(&config);
         let consensus_actor = spawn_consensus_actor(
             ctx.clone(),
@@ -225,7 +227,7 @@ impl MalachiteConsensusActors {
             host_actor.clone(),
             wal_actor.clone(),
             Some(sync_actor.clone()),
-            Metrics::new(),
+            metrics,
             TxEvent::new(),
             span,
         )

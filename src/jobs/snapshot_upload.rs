@@ -5,7 +5,7 @@ use crate::storage::db::RocksDB;
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_cron_scheduler::{Job, JobSchedulerError};
@@ -39,6 +39,7 @@ pub async fn upload_snapshot(
     block_store: BlockStore,
     shard_stores: HashMap<u32, Stores>,
     statsd_client: StatsdClientWrapper,
+    only_for_shard_ids: Option<HashSet<u32>>,
 ) -> Result<(), SnapshotError> {
     if std::fs::exists(snapshot_config.backup_dir.clone())? {
         return Err(SnapshotError::UploadAlreadyInProgress);
@@ -49,39 +50,49 @@ pub async fn upload_snapshot(
         .unwrap()
         .as_millis();
 
-    if let Err(err) = backup_and_upload(
-        fc_network,
-        snapshot_config.clone(),
-        0,
-        block_store.db.clone(),
-        now as i64,
-        statsd_client.clone(),
-    )
-    .await
+    if only_for_shard_ids
+        .as_ref()
+        .map_or(true, |shard_ids| shard_ids.contains(&0))
     {
-        error!(
-            shard = 0,
-            "Unable to upload snapshot for shard {}",
-            err.to_string()
-        )
-    }
-
-    for (shard, stores) in shard_stores.iter() {
         if let Err(err) = backup_and_upload(
             fc_network,
             snapshot_config.clone(),
-            *shard,
-            stores.db.clone(),
+            0,
+            block_store.db.clone(),
             now as i64,
             statsd_client.clone(),
         )
         .await
         {
             error!(
-                shard,
+                shard = 0,
                 "Unable to upload snapshot for shard {}",
                 err.to_string()
-            );
+            )
+        }
+    }
+
+    for (shard, stores) in shard_stores.iter() {
+        if only_for_shard_ids
+            .as_ref()
+            .map_or(true, |shard_ids| shard_ids.contains(shard))
+        {
+            if let Err(err) = backup_and_upload(
+                fc_network,
+                snapshot_config.clone(),
+                *shard,
+                stores.db.clone(),
+                now as i64,
+                statsd_client.clone(),
+            )
+            .await
+            {
+                error!(
+                    shard,
+                    "Unable to upload snapshot for shard {}",
+                    err.to_string()
+                );
+            }
         }
     }
 
@@ -112,6 +123,7 @@ pub fn snapshot_upload_job(
                 block_store,
                 shard_stores,
                 statsd_client,
+                None,
             )
             .await
             {
