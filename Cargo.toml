@@ -20,6 +20,7 @@ prost = "0.13.3"
 futures = "0.3.28"
 futures-core = "0.3.31"
 parking_lot = "0.12.1"
+tokio-retry2 = { version = "0.5", features = ["jitter", "tracing"] }
 clap = { version = "4.3.0", features = ["derive"] }
 libp2p = { version = "0.55.0", features = ["tokio", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux", "quic", "request-response"] }
 async-trait = "0.1.68"
