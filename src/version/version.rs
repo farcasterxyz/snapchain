@@ -14,7 +14,7 @@ pub enum ProtocolFeature {
 }
 
 pub struct VersionSchedule {
-    pub active_at: u64, // Unix timestamp in ms
+    pub active_at: u64, // Unix timestamp in seconds
     pub version: EngineVersion,
 }
 
@@ -56,6 +56,10 @@ impl EngineVersion {
         }
     }
 
+    pub fn latest() -> EngineVersion {
+        ENGINE_VERSION_SCHEDULE.last().unwrap().version
+    }
+
     pub fn is_enabled(&self, feature: ProtocolFeature) -> bool {
         match feature {
             ProtocolFeature::SignerRevokeBug => {
@@ -92,8 +96,28 @@ mod version_test {
     }
 
     #[test]
+    fn test_latest_progression() {
+        for i in 1..ENGINE_VERSION_SCHEDULE.len() {
+            let previous_version = &ENGINE_VERSION_SCHEDULE[i - 1];
+            let current_version = &ENGINE_VERSION_SCHEDULE[i];
+
+            assert!(
+                current_version.version > previous_version.version,
+                "Version {:?} should be greater than {:?}",
+                current_version.version,
+                previous_version.version
+            );
+            assert!(
+                current_version.active_at > previous_version.active_at,
+                "Active time {:?} should be greater than {:?}",
+                current_version.active_at,
+                previous_version.active_at
+            );
+        }
+    }
+
+    #[test]
     fn test_version_for_with_current_schedule() {
-        // Since all versions are currently set to activate at 0, any timestamp will return V2 (the last one)
         let time = FarcasterTime::new(0);
         assert_eq!(EngineVersion::version_for(&time), EngineVersion::V0);
 

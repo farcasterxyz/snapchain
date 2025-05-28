@@ -159,9 +159,9 @@ impl Proposer for ShardProposer {
             None => vec![0, 32],
         };
 
-        let state_change = self
-            .engine
-            .propose_state_change(self.shard_id.shard_id(), messages);
+        let state_change =
+            self.engine
+                .propose_state_change(self.shard_id.shard_id(), messages, None);
         let shard_header = ShardHeader {
             parent_hash,
             timestamp: state_change.timestamp.into(),

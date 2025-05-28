@@ -283,14 +283,14 @@ impl ShardEngine {
         txn_batch: &mut RocksDbTransactionBatch,
         shard_id: u32,
         messages: Vec<MempoolMessage>,
+        timestamp: &FarcasterTime,
     ) -> Result<ShardStateChange, EngineError> {
         self.count("prepare_proposal.recv_messages", messages.len() as u64);
 
         let mut snapchain_txns = self.create_transactions_from_mempool(messages)?;
         let mut events = vec![];
         let mut validation_error_count = 0;
-        let timestamp = FarcasterTime::current();
-        let version = EngineVersion::version_for(&timestamp);
+        let version = EngineVersion::version_for(timestamp);
         for snapchain_txn in &mut snapchain_txns {
             let (account_root, txn_events, validation_errors) = self.replay_snapchain_txn(
                 trie_ctx,
@@ -317,7 +317,7 @@ impl ShardEngine {
         let new_root_hash = self.stores.trie.root_hash()?;
         let result = ShardStateChange {
             shard_id,
-            timestamp: FarcasterTime::current(),
+            timestamp: timestamp.clone(),
             version,
             new_state_root: new_root_hash.clone(),
             transactions: snapchain_txns,
@@ -384,6 +384,7 @@ impl ShardEngine {
         &mut self,
         shard: u32,
         messages: Vec<MempoolMessage>,
+        timestamp: Option<FarcasterTime>,
     ) -> ShardStateChange {
         let now = std::time::Instant::now();
         let mut txn = RocksDbTransactionBatch::new();
@@ -395,12 +396,14 @@ impl ShardEngine {
             count_fn("trie.mem_get_count.total", read_count.1);
             count_fn("trie.mem_get_count.for_propose", read_count.1);
         };
+        let timestamp = timestamp.unwrap_or_else(FarcasterTime::current);
         let result = self
             .prepare_proposal(
                 &merkle_trie::Context::with_callback(count_callback),
                 &mut txn,
                 shard,
                 messages,
+                &timestamp,
             )
             .unwrap(); //TODO: don't unwrap()
 
