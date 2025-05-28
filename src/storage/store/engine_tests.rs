@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use crate::core::util::{calculate_message_hash, from_farcaster_time, get_farcaster_time};
+    use crate::core::util::{
+        calculate_message_hash, from_farcaster_time, get_farcaster_time, FarcasterTime,
+    };
     use crate::proto::{self, ReactionType};
     use crate::proto::{FnameTransfer, ShardChunk, UserNameProof};
     use crate::proto::{HubEvent, ValidatorMessage};
@@ -10,13 +12,14 @@ mod tests {
     use crate::storage::store::engine::{MempoolMessage, ShardEngine};
     use crate::storage::store::stores::StoreLimits;
     use crate::storage::store::test_helper::{
-        self, default_custody_address, EngineOptions, FID3_FOR_TEST,
+        self, commit_messages, default_custody_address, EngineOptions, FID3_FOR_TEST,
     };
     use crate::storage::store::test_helper::{
         commit_message, message_exists_in_trie, register_user, FID2_FOR_TEST, FID_FOR_TEST,
     };
     use crate::storage::trie::merkle_trie::TrieKey;
     use crate::utils::factory::{self, events_factory, messages_factory, time, username_factory};
+    use crate::version::version::{EngineVersion, ProtocolFeature};
     use ed25519_dalek::{Signer, SigningKey};
     use prost::Message;
 
@@ -126,7 +129,7 @@ mod tests {
         error_message: &str,
     ) -> ShardChunk {
         let state_change =
-            engine.propose_state_change(1, vec![MempoolMessage::UserMessage(msg.clone())]);
+            engine.propose_state_change(1, vec![MempoolMessage::UserMessage(msg.clone())], None);
 
         if state_change.transactions.is_empty() {
             panic!("Failed to propose message");
@@ -176,7 +179,7 @@ mod tests {
         assert_eq!("", to_hex(&engine.trie_root_hash()));
 
         // Propose empty transaction
-        let state_change = engine.propose_state_change(1, vec![]);
+        let state_change = engine.propose_state_change(1, vec![], None);
         assert_eq!(1, state_change.shard_id);
         assert_eq!(state_change.transactions.len(), 0);
         // No messages so, new state root should be same as before
@@ -191,6 +194,7 @@ mod tests {
                 on_chain_event: Some(events_factory::create_onchain_event(FID_FOR_TEST)),
                 fname_transfer: None,
             })],
+            None,
         );
 
         assert_eq!(1, state_change.shard_id);
@@ -204,7 +208,7 @@ mod tests {
     #[should_panic(expected = "State change commit failed: merkle trie root hash mismatch")]
     async fn test_engine_commit_with_mismatched_hash() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
-        let mut state_change = engine.propose_state_change(1, vec![]);
+        let mut state_change = engine.propose_state_change(1, vec![], None);
         let invalid_hash = from_hex("ffffffffffffffffffffffffffffffffffffffff");
 
         {
@@ -277,7 +281,7 @@ mod tests {
     #[tokio::test]
     async fn test_engine_commit_no_messages_happy_path() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
-        let state_change = engine.propose_state_change(1, vec![]);
+        let state_change = engine.propose_state_change(1, vec![], None);
         let expected_roots = vec![""];
 
         test_helper::validate_and_commit_state_change(&mut engine, &state_change);
@@ -310,7 +314,7 @@ mod tests {
         assert_eq!(3, initial_events_count);
 
         let state_change =
-            engine.propose_state_change(1, vec![MempoolMessage::UserMessage(msg1.clone())]);
+            engine.propose_state_change(1, vec![MempoolMessage::UserMessage(msg1.clone())], None);
 
         assert_eq!(1, state_change.transactions.len());
         assert_eq!(1, state_change.transactions[0].user_messages.len());
@@ -695,8 +699,11 @@ mod tests {
         .await;
 
         {
-            let state_change =
-                engine.propose_state_change(1, vec![MempoolMessage::UserMessage(msg1.clone())]);
+            let state_change = engine.propose_state_change(
+                1,
+                vec![MempoolMessage::UserMessage(msg1.clone())],
+                None,
+            );
 
             assert_eq!(1, state_change.shard_id);
             assert_eq!(state_change.transactions.len(), 1);
@@ -718,8 +725,11 @@ mod tests {
         }
 
         {
-            let state_change =
-                engine.propose_state_change(1, vec![MempoolMessage::UserMessage(msg2.clone())]);
+            let state_change = engine.propose_state_change(
+                1,
+                vec![MempoolMessage::UserMessage(msg2.clone())],
+                None,
+            );
 
             assert_eq!(1, state_change.shard_id);
             assert_eq!(state_change.transactions.len(), 1);
@@ -760,7 +770,7 @@ mod tests {
                 MempoolMessage::UserMessage(msg1.clone()),
                 MempoolMessage::UserMessage(msg2.clone()),
             ];
-            let state_change = engine.propose_state_change(1, messages);
+            let state_change = engine.propose_state_change(1, messages, None);
 
             assert_eq!(1, state_change.shard_id);
             assert_eq!(state_change.transactions.len(), 1);
@@ -818,7 +828,7 @@ mod tests {
             MempoolMessage::UserMessage(cast2.clone()),
             MempoolMessage::UserMessage(cast3.clone()),
         ];
-        let state_change = engine.propose_state_change(1, messages);
+        let state_change = engine.propose_state_change(1, messages, None);
         test_helper::validate_and_commit_state_change(&mut engine, &state_change);
 
         // We merged an add, a remove and a second remove which should win over the first (later timestamp)
@@ -860,6 +870,7 @@ mod tests {
                 on_chain_event: Some(onchain_event.clone()),
                 fname_transfer: None,
             })],
+            None,
         );
         assert_eq!(1, state_change.shard_id);
         assert_eq!(state_change.transactions.len(), 1);
@@ -920,6 +931,7 @@ mod tests {
                 MempoolMessage::UserMessage(cast1.clone()),
                 MempoolMessage::UserMessage(cast2.clone()),
             ],
+            None,
         );
         test_helper::validate_and_commit_state_change(&mut engine, &state_change);
 
@@ -931,6 +943,7 @@ mod tests {
                 MempoolMessage::UserMessage(cast3.clone()),
                 MempoolMessage::UserMessage(cast4.clone()),
             ],
+            None,
         );
         test_helper::validate_and_commit_state_change(&mut engine, &state_change);
 
@@ -965,8 +978,11 @@ mod tests {
             messages_factory::casts::create_cast_add(FID_FOR_TEST + 1, "no storage", None, None);
 
         assert_eq!("", to_hex(&engine.trie_root_hash()));
-        let state_change =
-            engine.propose_state_change(1, vec![MempoolMessage::UserMessage(cast_add.clone())]);
+        let state_change = engine.propose_state_change(
+            1,
+            vec![MempoolMessage::UserMessage(cast_add.clone())],
+            None,
+        );
 
         assert_eq!(0, state_change.transactions.len());
         assert_eq!("", to_hex(&state_change.new_state_root));
@@ -1121,7 +1137,7 @@ mod tests {
             MempoolMessage::UserMessage(cast2.clone()),
             MempoolMessage::UserMessage(cast3.clone()),
         ];
-        let state_change = engine.propose_state_change(1, messages);
+        let state_change = engine.propose_state_change(1, messages, None);
         test_helper::validate_and_commit_state_change(&mut engine, &state_change);
         assert_merge_event(&event_rx.try_recv().unwrap(), &cast1, 0);
         assert_merge_event(&event_rx.try_recv().unwrap(), &cast2, 1);
@@ -1133,7 +1149,7 @@ mod tests {
             MempoolMessage::UserMessage(cast5.clone()),
             MempoolMessage::UserMessage(cast6.clone()),
         ];
-        let state_change = engine.propose_state_change(1, messages);
+        let state_change = engine.propose_state_change(1, messages, None);
         let chunk = test_helper::validate_and_commit_state_change(&mut engine, &state_change);
         assert_merge_event(&event_rx.try_recv().unwrap(), &cast4, 0);
         assert_merge_event(&event_rx.try_recv().unwrap(), &cast5, 1);
@@ -1304,6 +1320,7 @@ mod tests {
                 on_chain_event: None,
                 fname_transfer: Some(fname_transfer.clone()),
             })],
+            None,
         );
         test_helper::validate_and_commit_state_change(&mut engine, &state_change);
 
@@ -1420,6 +1437,7 @@ mod tests {
                 on_chain_event: None,
                 fname_transfer: Some(transfer),
             })],
+            None,
         );
         test_helper::validate_and_commit_state_change(&mut engine, &state_change);
 
@@ -1555,8 +1573,11 @@ mod tests {
         commit_message(&mut engine, &remove_message).await;
 
         // We can't use assert_commit_fails here, because it checks against existence in the trie, and duplicate will exist already
-        let state_change = engine
-            .propose_state_change(1, vec![MempoolMessage::UserMessage(remove_message.clone())]);
+        let state_change = engine.propose_state_change(
+            1,
+            vec![MempoolMessage::UserMessage(remove_message.clone())],
+            None,
+        );
         assert_eq!(state_change.events.len(), 1);
         assert_failure_event(
             state_change.events[0].clone(),
@@ -1638,6 +1659,7 @@ mod tests {
                 on_chain_event: None,
                 fname_transfer: Some(fname_transfer),
             })],
+            None,
         );
 
         test_helper::validate_and_commit_state_change(&mut engine, &state_change);
@@ -1755,5 +1777,85 @@ mod tests {
                 .starts_with("bad_request.conflict"),
             true
         );
+    }
+
+    #[tokio::test]
+    async fn test_revoke_signer_bug() {
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let bad_signer = test_helper::generate_signer();
+        // Register a signer
+        let signer_event = events_factory::create_signer_event(
+            FID_FOR_TEST,
+            bad_signer.clone(),
+            proto::SignerEventType::Add,
+            None,
+            None,
+        );
+        test_helper::commit_event(&mut engine, &signer_event).await;
+
+        let timestamp = FarcasterTime::from_unix_seconds(1747333801); // 1s after EngineVersion::V2 is activated
+        let version = EngineVersion::version_for(&timestamp);
+        assert_eq!(version, EngineVersion::V1);
+        assert_eq!(version.is_enabled(ProtocolFeature::SignerRevokeBug), true);
+
+        let bad_signer_cast = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "msg1",
+            Some(timestamp.to_u64() as u32),
+            Some(&bad_signer),
+        );
+        let good_signer_cast = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "msg2",
+            Some(timestamp.to_u64() as u32 + 1),
+            Some(&test_helper::default_signer()),
+        );
+
+        commit_messages(
+            &mut engine,
+            vec![bad_signer_cast.clone(), good_signer_cast.clone()],
+        )
+        .await;
+
+        // Revoke the signer
+        let revoke_event = events_factory::create_signer_event(
+            FID_FOR_TEST,
+            bad_signer.clone(),
+            proto::SignerEventType::Remove,
+            Some(timestamp.to_unix_seconds() as u32),
+            None,
+        );
+        test_helper::commit_event_at(&mut engine, &revoke_event, &timestamp).await;
+
+        // Both casts should still exist
+        assert_eq!(message_exists_in_trie(&mut engine, &bad_signer_cast), true); // Not revoked due to bug
+        assert_eq!(message_exists_in_trie(&mut engine, &good_signer_cast), true);
+
+        // Now, revoke the good signer using the current timestamp
+        let current_time = FarcasterTime::current();
+        let good_signer_revoke_event = events_factory::create_signer_event(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            proto::SignerEventType::Remove,
+            Some(current_time.to_unix_seconds() as u32),
+            None,
+        );
+
+        test_helper::commit_event_at(&mut engine, &good_signer_revoke_event, &current_time).await;
+
+        // The bad signer cast should still exist, but the good signer cast should be revoked
+        assert_eq!(message_exists_in_trie(&mut engine, &bad_signer_cast), true); // Still exists due to bug
+        assert_eq!(
+            message_exists_in_trie(&mut engine, &good_signer_cast),
+            false
+        ); // Revoked
     }
 }

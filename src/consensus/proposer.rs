@@ -1,6 +1,5 @@
-use crate::core::types::{
-    proto, Address, Height, ShardHash, ShardId, SnapchainShard, FARCASTER_EPOCH,
-};
+use crate::core::types::{proto, Address, Height, ShardHash, ShardId, SnapchainShard};
+use crate::core::util::FarcasterTime;
 use crate::proto::{
     full_proposal, Block, BlockHeader, Commits, FullProposal, ShardChunk, ShardChunkWitness,
     ShardHeader, ShardWitness,
@@ -9,6 +8,7 @@ use crate::storage::store::engine::{BlockEngine, ShardEngine, ShardStateChange};
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStorageError;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use crate::version::version::EngineVersion;
 use informalsystems_malachitebft_core_types::{Round, Validity};
 use prost::Message;
 use std::collections::{BTreeMap, HashMap};
@@ -22,14 +22,6 @@ use tracing::{error, warn};
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const GENESIS_MESSAGE: &str =
     "It occurs to me that our survival may depend upon our talking to one another.";
-
-pub fn current_time() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        - (FARCASTER_EPOCH / 1000)
-}
 
 #[allow(async_fn_in_trait)] // TODO
 pub trait Proposer {
@@ -167,12 +159,12 @@ impl Proposer for ShardProposer {
             None => vec![0, 32],
         };
 
-        let state_change = self
-            .engine
-            .propose_state_change(self.shard_id.shard_id(), messages);
+        let state_change =
+            self.engine
+                .propose_state_change(self.shard_id.shard_id(), messages, None);
         let shard_header = ShardHeader {
             parent_hash,
-            timestamp: current_time(),
+            timestamp: state_change.timestamp.into(),
             height: Some(height.clone()),
             shard_root: state_change.new_state_root.clone(),
         };
@@ -205,7 +197,11 @@ impl Proposer for ShardProposer {
             let height = header.height.unwrap();
             self.proposed_chunks
                 .add_proposed_value(full_proposal.clone());
-            let receive_delay = current_time().saturating_sub(header.timestamp);
+            let timestamp = FarcasterTime::new(header.timestamp);
+            let receive_delay = FarcasterTime::current()
+                .to_u64()
+                .saturating_sub(timestamp.to_u64());
+            let version = EngineVersion::version_for(&timestamp);
             self.statsd_client.gauge_with_shard(
                 self.shard_id.shard_id(),
                 "proposer.receive_delay",
@@ -225,6 +221,8 @@ impl Proposer for ShardProposer {
 
             let state = ShardStateChange {
                 shard_id: height.shard_index,
+                timestamp,
+                version,
                 new_state_root: header.shard_root.clone(),
                 transactions: chunk.transactions.clone(),
                 events: vec![],
@@ -469,7 +467,7 @@ impl Proposer for BlockProposer {
             parent_hash,
             chain_id: self.network as i32,
             version: PROTOCOL_VERSION,
-            timestamp: current_time(),
+            timestamp: FarcasterTime::current().into(),
             height: Some(height.clone()),
             shard_witnesses_hash: witness_hash,
         };

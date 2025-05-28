@@ -11,7 +11,7 @@ use std::{
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::core::error::HubError;
-use crate::core::util::farcaster_time_to_unix_seconds;
+use crate::core::util::FarcasterTime;
 use crate::proto::OnChainEventType;
 use crate::{
     core::types::SnapchainValidatorContext,
@@ -171,7 +171,7 @@ impl proto::Message {
             // TODO: Consider revisiting choice of timestamp here as backdated messages currently are prioritized.
             return MempoolKey::new(
                 MempoolMessageKind::UserMessage,
-                farcaster_time_to_unix_seconds(data.timestamp as u64),
+                FarcasterTime::new(data.timestamp as u64).to_unix_seconds(),
                 self.hex_hash(),
             );
         }

@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.21] - 2025-05-28
+
+### 🚀 Features
+
+- Implement `get_id_registry_on_chain_event_by_address` in http (#474)
+
+### 🐛 Bug Fixes
+
+- Log s3 errors better and retry on upload (#495)
+- Register malachite consensus metrics in registry (#488)
+- Handle historical bug where messages were not correctly revoked (#503)
+- Retry when snapshot download fails (#504)
+
+### ⚙️ Miscellaneous Tasks
+
+- Add ability to upload snapshot just for 1 shard (#496)
+
+## [0.2.20] - 2025-05-16
+
+### 🐛 Bug Fixes
+
+- Update tests that depend on hubs being up (#493)
+- Process signer revoke messages as expected (#492)
+
 ## [0.2.19] - 2025-05-15
 
 ### 🐛 Bug Fixes

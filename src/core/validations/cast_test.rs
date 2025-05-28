@@ -66,7 +66,7 @@ mod tests {
     async fn test_cast_validation() {
         let n: u32 = rand::thread_rng().gen::<u32>() % 10000;
         let resp = reqwest::get(format!(
-            "https://hoyt.farcaster.xyz:2281/v1/castsByFid?fid={}",
+            "https://snap.farcaster.xyz:3381/v1/castsByFid?fid={}",
             n
         ))
         .await;

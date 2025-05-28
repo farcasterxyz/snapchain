@@ -1123,6 +1123,19 @@ impl EventRequest {
         }
     }
 }
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IdRegistryEventByAddressRequest {
+    #[serde(with = "serdehex")]
+    pub address: Vec<u8>,
+}
+
+impl IdRegistryEventByAddressRequest {
+    pub fn to_proto(self) -> proto::IdRegistryEventByAddressRequest {
+        proto::IdRegistryEventByAddressRequest {
+            address: self.address,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ValidationResult {
@@ -1994,6 +2007,10 @@ pub trait HubHttpService {
     ) -> Result<OnChainEventResponse, ErrorResponse>;
     async fn get_events(&self, req: EventsRequest) -> Result<EventsResponse, ErrorResponse>;
     async fn get_event_by_id(&self, req: EventRequest) -> Result<HubEvent, ErrorResponse>;
+    async fn get_id_registry_on_chain_event_by_address(
+        &self,
+        req: IdRegistryEventByAddressRequest,
+    ) -> Result<OnChainEvent, ErrorResponse>;
 }
 
 #[async_trait]
@@ -2633,6 +2650,22 @@ impl HubHttpService for HubHttpServiceImpl {
             response.into_inner(),
         )?)
     }
+    async fn get_id_registry_on_chain_event_by_address(
+        &self,
+        req: IdRegistryEventByAddressRequest,
+    ) -> Result<OnChainEvent, ErrorResponse> {
+        let grpc_req = tonic::Request::new(req.to_proto());
+        let response = self
+            .service
+            .get_id_registry_on_chain_event_by_address(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get id registry event".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+        let onchain = response.into_inner();
+        map_proto_on_chain_event_to_json_on_chain_event(onchain)
+    }
 }
 
 // Router implementation
@@ -2809,6 +2842,17 @@ impl Router {
                     req,
                     |service, req| {
                         Box::pin(async move { service.get_on_chain_events_by_fid(req).await })
+                    },
+                )
+                .await
+            }
+            (&Method::GET, "/v1/onChainIdRegistryEventByAddress") => {
+                self.handle_request::<IdRegistryEventByAddressRequest, OnChainEvent, _>(
+                    req,
+                    |service, req| {
+                        Box::pin(async move {
+                            service.get_id_registry_on_chain_event_by_address(req).await
+                        })
                     },
                 )
                 .await
