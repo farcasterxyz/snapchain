@@ -22,8 +22,8 @@ message UploadSnapshotRequest {
 }
 
 service AdminService {
-//  rpc SubmitOnChainEvent(OnChainEvent) returns (OnChainEvent);
-//  rpc SubmitUserNameProof(UserNameProof) returns (UserNameProof);
+  rpc SubmitOnChainEvent(OnChainEvent) returns (OnChainEvent);
+  rpc SubmitUserNameProof(UserNameProof) returns (UserNameProof);
   rpc UploadSnapshot(UploadSnapshotRequest) returns (Empty);
   rpc RetryOnchainEvents(RetryOnchainEventsRequest) returns (Empty);
 }

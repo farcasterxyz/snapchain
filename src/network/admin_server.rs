@@ -1,12 +1,15 @@
 use crate::connectors::onchain_events::OnchainEventsRequest;
 use crate::jobs::snapshot_upload::upload_snapshot;
-use crate::mempool::mempool::MempoolRequest;
+use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::network::rpc_extensions::authenticate_request;
+use crate::network::server::MEMPOOL_ADD_REQUEST_TIMEOUT;
 use crate::proto::admin_service_server::AdminService;
 use crate::proto::{
-    self, Empty, FarcasterNetwork, RetryOnchainEventsRequest, UploadSnapshotRequest,
+    self, Empty, FarcasterNetwork, FnameTransfer, OnChainEvent, RetryOnchainEventsRequest,
+    UploadSnapshotRequest, UserNameProof, ValidatorMessage,
 };
 use crate::storage;
+use crate::storage::store::engine::MempoolMessage;
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
@@ -14,9 +17,10 @@ use rocksdb;
 use std::collections::HashMap;
 use std::io;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::timeout;
 use tonic::{Request, Response, Status};
-use tracing::error;
+use tracing::{error, info};
 
 pub struct MyAdminService {
     allowed_users: HashMap<String, String>,
@@ -78,73 +82,101 @@ impl MyAdminService {
 impl AdminService for MyAdminService {
     // This should probably go in a separate "DebugService" that's not mounted for production
 
-    // async fn submit_on_chain_event(
-    //     &self,
-    //     request: Request<OnChainEvent>,
-    // ) -> Result<Response<OnChainEvent>, Status> {
-    //     info!("Received call to [submit_on_chain_event] RPC");
-    //
-    //     let onchain_event = request.into_inner();
-    //
-    //     let fid = onchain_event.fid;
-    //     if fid == 0 {
-    //         return Err(Status::invalid_argument(
-    //             "no fid or invalid fid".to_string(),
-    //         ));
-    //     }
-    //
-    //     let result = self.mempool_tx.try_send((
-    //         MempoolMessage::ValidatorMessage(ValidatorMessage {
-    //             on_chain_event: Some(onchain_event.clone()),
-    //             fname_transfer: None,
-    //         }),
-    //         MempoolSource::RPC,
-    //     ));
-    //
-    //     match result {
-    //         Ok(()) => {
-    //             let response = Response::new(onchain_event);
-    //             Ok(response)
-    //         }
-    //         Err(err) => Err(Status::from_error(Box::new(err))),
-    //     }
-    // }
-    //
-    // async fn submit_user_name_proof(
-    //     &self,
-    //     request: Request<UserNameProof>,
-    // ) -> Result<Response<UserNameProof>, Status> {
-    //     info!("Received call to [submit_user_name_proof] RPC");
-    //
-    //     let username_proof = request.into_inner();
-    //
-    //     let fid = username_proof.fid;
-    //     if fid == 0 {
-    //         return Err(Status::invalid_argument(
-    //             "no fid or invalid fid".to_string(),
-    //         ));
-    //     }
-    //
-    //     let result = self.mempool_tx.try_send((
-    //         MempoolMessage::ValidatorMessage(ValidatorMessage {
-    //             on_chain_event: None,
-    //             fname_transfer: Some(FnameTransfer {
-    //                 id: username_proof.fid,
-    //                 from_fid: 0, // Assume the username is being transfer from the "root" fid to the one in the username proof
-    //                 proof: Some(username_proof.clone()),
-    //             }),
-    //         }),
-    //         MempoolSource::RPC,
-    //     ));
-    //
-    //     match result {
-    //         Ok(()) => {
-    //             let response = Response::new(username_proof);
-    //             Ok(response)
-    //         }
-    //         Err(err) => Err(Status::from_error(Box::new(err))),
-    //     }
-    // }
+    async fn submit_on_chain_event(
+        &self,
+        request: Request<OnChainEvent>,
+    ) -> Result<Response<OnChainEvent>, Status> {
+        info!("Received call to [submit_on_chain_event] RPC");
+
+        let onchain_event = request.into_inner();
+
+        let fid = onchain_event.fid;
+        if fid == 0 {
+            return Err(Status::invalid_argument(
+                "no fid or invalid fid".to_string(),
+            ));
+        }
+
+        let (tx, rx) = oneshot::channel();
+        self.mempool_tx
+            .try_send(MempoolRequest::AddMessage(
+                MempoolMessage::ValidatorMessage(ValidatorMessage {
+                    on_chain_event: Some(onchain_event.clone()),
+                    fname_transfer: None,
+                }),
+                MempoolSource::RPC,
+                Some(tx),
+            ))
+            .map_err(|err| Status::from_error(Box::new(err)))?;
+
+        match timeout(MEMPOOL_ADD_REQUEST_TIMEOUT, rx).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                error!(
+                    "Error receiving message from mempool channel: {:?}",
+                    err.to_string()
+                );
+                return Err(Status::internal("Error adding to mempool"));
+            }
+            Err(_) => {
+                error!("Timeout receiving message from mempool channel",);
+                return Err(Status::internal("Error adding to mempool"));
+            }
+        };
+
+        let response = Response::new(onchain_event);
+        Ok(response)
+    }
+
+    async fn submit_user_name_proof(
+        &self,
+        request: Request<UserNameProof>,
+    ) -> Result<Response<UserNameProof>, Status> {
+        info!("Received call to [submit_user_name_proof] RPC");
+
+        let username_proof = request.into_inner();
+
+        let fid = username_proof.fid;
+        if fid == 0 {
+            return Err(Status::invalid_argument(
+                "no fid or invalid fid".to_string(),
+            ));
+        }
+
+        let (tx, rx) = oneshot::channel();
+        self.mempool_tx
+            .try_send(MempoolRequest::AddMessage(
+                MempoolMessage::ValidatorMessage(ValidatorMessage {
+                    on_chain_event: None,
+                    fname_transfer: Some(FnameTransfer {
+                        id: username_proof.fid,
+                        from_fid: 0, // Assume the username is being transfer from the "root" fid to the one in the username proof
+                        proof: Some(username_proof.clone()),
+                    }),
+                }),
+                MempoolSource::RPC,
+                Some(tx),
+            ))
+            .map_err(|err| Status::from_error(Box::new(err)))?;
+
+        match timeout(MEMPOOL_ADD_REQUEST_TIMEOUT, rx).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                error!(
+                    "Error receiving message from mempool channel: {:?}",
+                    err.to_string()
+                );
+                return Err(Status::internal("Error adding to mempool"));
+            }
+            Err(_) => {
+                error!("Timeout receiving message from mempool channel",);
+                return Err(Status::internal("Error adding to mempool"));
+            }
+        };
+
+        let response = Response::new(username_proof);
+        Ok(response)
+    }
 
     async fn retry_onchain_events(
         &self,

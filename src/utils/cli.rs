@@ -3,11 +3,15 @@ use crate::proto::hub_service_client::HubServiceClient;
 use crate::proto::OnChainEvent;
 use crate::proto::{self, Block};
 use crate::utils::factory::messages_factory;
+use base64::Engine;
 use ed25519_dalek::SigningKey;
 use std::error::Error;
+use std::str::FromStr;
 use tokio::sync::mpsc;
 use tokio::time;
+use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
+use tonic::Status;
 
 use super::factory;
 
@@ -18,21 +22,36 @@ const FETCH_SIZE: u64 = 100;
 pub async fn send_message(
     client: &mut HubServiceClient<Channel>,
     msg: &proto::Message,
-) -> Result<proto::Message, Box<dyn Error>> {
-    let request = tonic::Request::new(msg.clone());
+    auth: Option<String>,
+) -> Result<proto::Message, Status> {
+    let mut request = tonic::Request::new(msg.clone());
+    if let Some(auth) = auth {
+        let encoded_creds = base64::engine::general_purpose::STANDARD.encode(auth);
+        let auth = format!("Basic {}", encoded_creds);
+        request
+            .metadata_mut()
+            .insert("authorization", MetadataValue::from_str(&auth).unwrap());
+    }
     let response = client.submit_message(request).await?;
     // println!("{}", serde_json::to_string(&response.get_ref()).unwrap());
     Ok(response.into_inner())
 }
 
 pub async fn send_on_chain_event(
-    _client: &mut AdminServiceClient<Channel>,
-    _onchain_event: &OnChainEvent,
+    client: &mut AdminServiceClient<Channel>,
+    onchain_event: &OnChainEvent,
+    auth: Option<String>,
 ) -> Result<OnChainEvent, Box<dyn Error>> {
-    // let request = tonic::Request::new(onchain_event.clone());
-    // let response = client.submit_on_chain_event(request).await?;
-    // Ok(response.into_inner())
-    Err("Not implemented".into())
+    let mut request = tonic::Request::new(onchain_event.clone());
+    if let Some(auth) = auth {
+        let encoded_creds = base64::engine::general_purpose::STANDARD.encode(auth);
+        let auth = format!("Basic {}", encoded_creds);
+        request
+            .metadata_mut()
+            .insert("authorization", MetadataValue::from_str(&auth).unwrap());
+    }
+    let response = client.submit_on_chain_event(request).await?;
+    Ok(response.into_inner())
 }
 
 pub fn compose_rent_event(fid: u64) -> OnChainEvent {
