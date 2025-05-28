@@ -25,9 +25,8 @@ use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use tokio::io::{AsyncWriteExt, BufWriter};
 
-use tracing::{error, info};
-
 use super::RocksdbError;
+use tracing::{error, info, warn};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
@@ -268,7 +267,7 @@ pub async fn download_snapshots(
 
         let filename = format!("{}/{}", snapshot_dir, chunk);
         let mut file = BufWriter::new(tokio::fs::File::create(filename.clone()).await?);
-        let download_response = reqwest::get(download_path).await?;
+        let download_response = download_with_retry(download_path.as_str(), 3).await?;
         let mut byte_stream = download_response.bytes_stream();
 
         while let Some(piece) = byte_stream.next().await {
@@ -300,6 +299,27 @@ pub async fn download_snapshots(
 
     std::fs::remove_dir_all(snapshot_dir)?;
     Ok(())
+}
+
+async fn download_with_retry(url: &str, retries: u32) -> Result<reqwest::Response, reqwest::Error> {
+    let mut attempts = 0;
+    loop {
+        match reqwest::get(url).await {
+            Ok(response) => return Ok(response),
+            Err(e) if attempts < retries => {
+                warn!(
+                    "Failed to download {}: {}, retrying {}/{}",
+                    url,
+                    e,
+                    attempts + 1,
+                    retries
+                );
+                attempts += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 pub async fn upload_to_s3(
