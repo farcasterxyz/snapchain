@@ -259,13 +259,19 @@ pub async fn download_snapshots(
 
     let mut local_chunks = vec![];
     for chunk in metadata_json.chunks {
+        let filename = format!("{}/{}", snapshot_dir, chunk);
+        info!("Check if {} exists", filename);
+        if std::path::Path::new(&filename).exists() {
+            info!("Skipping already downloaded chunk: {}", chunk);
+            local_chunks.push(filename);
+            continue;
+        }
         info!("Downloading zipped snapshot chunk {}", chunk);
         let download_path = format!(
             "{}/{}/{}",
             snapshot_config.snapshot_download_url, base_path, chunk
         );
 
-        let filename = format!("{}/{}", snapshot_dir, chunk);
         let mut file = BufWriter::new(tokio::fs::File::create(filename.clone()).await?);
         let download_response = download_with_retry(download_path.as_str(), 3).await?;
         let mut byte_stream = download_response.bytes_stream();
