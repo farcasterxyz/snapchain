@@ -77,7 +77,7 @@ use tonic::metadata::AsciiMetadataValue;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
 
-const MEMPOOL_ADD_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
+pub const MEMPOOL_ADD_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 const MEMPOOL_SIZE_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
 
 pub struct MyHubService {

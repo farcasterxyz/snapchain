@@ -5,6 +5,7 @@ use crate::proto;
 pub enum NextMessage {
     OnChainEvent(proto::OnChainEvent),
     Message(proto::Message),
+    Sleep,
 }
 
 pub trait MessageGenerator: Send {

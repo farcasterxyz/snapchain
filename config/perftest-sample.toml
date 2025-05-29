@@ -3,12 +3,11 @@ num_iterations = 120
 
 [submit_message]
 rpc_addrs = [
-    "http://127.0.0.11:3383",
-    "http://127.0.0.12:3383",
-    "http://127.0.0.13:3383"
+    "http://127.0.0.1:3383",
 ]
-interval = "2500us"
+interval = "1000us"
+auth = "user:test"
 
 [follow_blocks]
 rpc_addr = "http://127.0.0.11:3383"
-enable = true
+enable = false 

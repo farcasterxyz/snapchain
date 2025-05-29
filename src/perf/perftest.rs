@@ -6,8 +6,8 @@ use crate::proto;
 use crate::proto::admin_service_client::AdminServiceClient;
 use crate::proto::hub_service_client::HubServiceClient;
 use crate::proto::Block;
-use crate::utils::cli::follow_blocks;
 use crate::utils::cli::send_on_chain_event;
+use crate::utils::cli::{follow_blocks, send_message};
 use clap::Parser;
 use figment::{
     providers::{Env, Format, Toml},
@@ -28,6 +28,8 @@ use tokio::{select, time};
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SubmitMessageConfig {
     pub rpc_addrs: Vec<String>,
+
+    pub auth: Option<String>,
 
     #[serde(with = "humantime_serde")]
     pub interval: Duration,
@@ -85,15 +87,11 @@ fn start_submit_messages(
         let messages_tx = messages_tx.clone();
         let seq = seq.clone();
         let gen_type = gen_type.clone();
+        let auth = config.submit_message.auth.clone();
 
         submit_message_handles.push(tokio::spawn(async move {
-            let mut generator = new_generator(
-                gen_type,
-                thread_id,
-                generate::Config {
-                    users_per_shard: 5000,
-                },
-            );
+            let mut generator =
+                new_generator(gen_type, thread_id, generate::Config { users_per_shard: 2 });
 
             let mut submit_message_timer = time::interval(config.submit_message.interval);
 
@@ -101,7 +99,6 @@ fn start_submit_messages(
             let mut client = HubServiceClient::connect(rpc_addr.clone())
                 .await
                 .unwrap_or_else(|e| panic!("Error connecting to {}: {}", &rpc_addr, e));
-
             let mut admin_client = AdminServiceClient::connect(rpc_addr.clone())
                 .await
                 .unwrap_or_else(|e| panic!("Error connecting to {}: {}", &rpc_addr, e));
@@ -120,12 +117,11 @@ fn start_submit_messages(
 
                 match msg {
                     generate::NextMessage::Message(message) => {
-                        let response = client.submit_message(message.clone()).await;
+                        let response = send_message(&mut client, message, auth.clone()).await;
 
                         match response {
                             Ok(resp) => {
-                                let sent = resp.into_inner();
-                                messages_tx.send(sent).await.unwrap();
+                                messages_tx.send(resp).await.unwrap();
                                 message_queue.pop_front(); // Remove message only if successfully sent
                             }
                             Err(status) if status.code() == tonic::Code::ResourceExhausted => {
@@ -137,11 +133,21 @@ fn start_submit_messages(
                         }
                     }
                     generate::NextMessage::OnChainEvent(event) => {
-                        if let Err(e) = send_on_chain_event(&mut admin_client, &event).await {
+                        if let Err(e) =
+                            send_on_chain_event(&mut admin_client, &event, auth.clone()).await
+                        {
                             panic!("Failed to send on-chain event: {:?}", e);
                         } else {
                             message_queue.pop_front(); // Remove event if successfully sent
                         }
+                    }
+                    generate::NextMessage::Sleep => {
+                        // Sleep so previous messages can be processed
+                        println!(
+                            "Sleeping for 5 seconds to allow previous messages to be processed"
+                        );
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        message_queue.pop_front();
                     }
                 }
             }

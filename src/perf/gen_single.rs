@@ -47,6 +47,7 @@ impl MessageGenerator for SingleUser {
                     None,
                 ),
             ));
+            messages.push(NextMessage::Sleep);
         }
 
         let text = format!("For benchmarking {}", seq);
