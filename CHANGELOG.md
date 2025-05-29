@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.22] - 2025-05-29
+
+### 🐛 Bug Fixes
+
+- Fix snapshot retry logic with more comprehensive error handling (#509)
+
 ## [0.2.21] - 2025-05-28
 
 ### 🚀 Features
