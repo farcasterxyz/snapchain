@@ -55,6 +55,7 @@ impl MessageGenerator for MultiUser {
                     None,
                 ),
             ));
+            messages.push(NextMessage::Sleep);
 
             self.initialized_fids.insert(fid);
         }

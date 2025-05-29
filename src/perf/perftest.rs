@@ -90,13 +90,8 @@ fn start_submit_messages(
         let auth = config.submit_message.auth.clone();
 
         submit_message_handles.push(tokio::spawn(async move {
-            let mut generator = new_generator(
-                gen_type,
-                thread_id,
-                generate::Config {
-                    users_per_shard: 5000,
-                },
-            );
+            let mut generator =
+                new_generator(gen_type, thread_id, generate::Config { users_per_shard: 2 });
 
             let mut submit_message_timer = time::interval(config.submit_message.interval);
 
@@ -145,6 +140,14 @@ fn start_submit_messages(
                         } else {
                             message_queue.pop_front(); // Remove event if successfully sent
                         }
+                    }
+                    generate::NextMessage::Sleep => {
+                        // Sleep so previous messages can be processed
+                        println!(
+                            "Sleeping for 5 seconds to allow previous messages to be processed"
+                        );
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        message_queue.pop_front();
                     }
                 }
             }

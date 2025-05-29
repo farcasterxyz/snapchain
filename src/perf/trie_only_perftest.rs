@@ -157,6 +157,9 @@ fn run_shard(
                 generate::NextMessage::OnChainEvent(_) => {
                     // Ignore for now
                 }
+                generate::NextMessage::Sleep => {
+                    // Ignored since we don't produce blocks
+                }
             }
         }
 

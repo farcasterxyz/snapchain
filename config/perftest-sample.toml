@@ -5,7 +5,7 @@ num_iterations = 120
 rpc_addrs = [
     "http://127.0.0.1:3383",
 ]
-interval = "2500us"
+interval = "1000us"
 auth = "user:test"
 
 [follow_blocks]
