@@ -3,7 +3,7 @@ mod tests {
     use crate::core::util::{
         calculate_message_hash, from_farcaster_time, get_farcaster_time, FarcasterTime,
     };
-    use crate::proto::{self, ReactionType};
+    use crate::proto::{self, FarcasterNetwork, ReactionType};
     use crate::proto::{FnameTransfer, ShardChunk, UserNameProof};
     use crate::proto::{HubEvent, ValidatorMessage};
     use crate::proto::{OnChainEvent, OnChainEventType};
@@ -1553,6 +1553,7 @@ mod tests {
             limits: Some(single_message_limit),
             db: None,
             messages_request_tx: None,
+            network: None,
         });
         register_user(
             FID_FOR_TEST,
@@ -1781,7 +1782,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_revoke_signer_bug() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            network: Some(FarcasterNetwork::Mainnet),
+            limits: None,
+            db: None,
+            messages_request_tx: None,
+        });
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -1802,7 +1808,7 @@ mod tests {
         test_helper::commit_event(&mut engine, &signer_event).await;
 
         let timestamp = FarcasterTime::from_unix_seconds(1747333801); // 1s after EngineVersion::V2 is activated
-        let version = EngineVersion::version_for(&timestamp);
+        let version = engine.version_for(&timestamp);
         assert_eq!(version, EngineVersion::V1);
         assert_eq!(version.is_enabled(ProtocolFeature::SignerRevokeBug), true);
 

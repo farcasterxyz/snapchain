@@ -31,6 +31,7 @@ mod tests {
             limits: None,
             db: Some(read_node_engine.db.clone()),
             messages_request_tx: None,
+            network: None,
         });
 
         let proposer_address = Address(proposer_keypair.public().to_bytes());

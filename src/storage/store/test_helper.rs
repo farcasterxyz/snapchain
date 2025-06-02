@@ -116,6 +116,7 @@ pub struct EngineOptions {
     pub limits: Option<StoreLimits>,
     pub db: Option<Arc<RocksDB>>,
     pub messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
+    pub network: Option<proto::FarcasterNetwork>,
 }
 
 pub fn statsd_client() -> StatsdClientWrapper {
@@ -148,7 +149,7 @@ pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile
     (
         ShardEngine::new(
             db,
-            proto::FarcasterNetwork::Testnet,
+            options.network.unwrap_or(proto::FarcasterNetwork::Testnet),
             merkle_trie::MerkleTrie::new(16).unwrap(),
             1,
             test_limits,
@@ -166,6 +167,7 @@ pub fn new_engine() -> (ShardEngine, tempfile::TempDir) {
         limits: None,
         db: None,
         messages_request_tx: None,
+        network: None,
     })
 }
 

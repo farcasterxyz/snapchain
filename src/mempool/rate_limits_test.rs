@@ -30,6 +30,7 @@ mod tests {
             }),
             db: None,
             messages_request_tx: None,
+            network: None,
         });
         let mut shard_stores = HashMap::new();
         shard_stores.insert(engine.shard_id(), engine.get_stores());

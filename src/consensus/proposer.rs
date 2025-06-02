@@ -8,7 +8,6 @@ use crate::storage::store::engine::{BlockEngine, ShardEngine, ShardStateChange};
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStorageError;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
-use crate::version::version::EngineVersion;
 use informalsystems_malachitebft_core_types::{Round, Validity};
 use prost::Message;
 use std::collections::{BTreeMap, HashMap};
@@ -201,7 +200,7 @@ impl Proposer for ShardProposer {
             let receive_delay = FarcasterTime::current()
                 .to_u64()
                 .saturating_sub(timestamp.to_u64());
-            let version = EngineVersion::version_for(&timestamp);
+            let version = self.engine.version_for(&timestamp);
             self.statsd_client.gauge_with_shard(
                 self.shard_id.shard_id(),
                 "proposer.receive_delay",

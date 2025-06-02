@@ -290,7 +290,7 @@ impl ShardEngine {
         let mut snapchain_txns = self.create_transactions_from_mempool(messages)?;
         let mut events = vec![];
         let mut validation_error_count = 0;
-        let version = EngineVersion::version_for(timestamp);
+        let version = self.version_for(timestamp);
         for snapchain_txn in &mut snapchain_txns {
             let (account_root, txn_events, validation_errors) = self.replay_snapchain_txn(
                 trie_ctx,
@@ -325,6 +325,10 @@ impl ShardEngine {
         };
 
         Ok(result)
+    }
+
+    pub fn version_for(&self, timestamp: &FarcasterTime) -> EngineVersion {
+        EngineVersion::version_for(timestamp, self.network)
     }
 
     // Groups messages by fid and creates a transaction for each fid
@@ -1301,7 +1305,7 @@ impl ShardEngine {
             let header = &shard_chunk.header.as_ref().unwrap();
             let block_number = header.height.unwrap().block_number;
             self.stores.event_handler.set_current_height(block_number);
-            let version = EngineVersion::version_for(&FarcasterTime::new(header.timestamp));
+            let version = self.version_for(&FarcasterTime::new(header.timestamp));
             match self.replay_proposal(
                 trie_ctx,
                 &mut txn,
@@ -1332,7 +1336,7 @@ impl ShardEngine {
             system_messages: vec![],
             user_messages: vec![message.clone()],
         };
-        let version = EngineVersion::version_for(&FarcasterTime::current());
+        let version = self.version_for(&FarcasterTime::current());
         let result = self.replay_snapchain_txn(
             &merkle_trie::Context::new(),
             &snapchain_txn,

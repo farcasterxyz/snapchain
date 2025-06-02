@@ -45,6 +45,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         }),
         db: None,
         messages_request_tx: Some(messages_request_tx),
+        network: None,
     });
 
     let statsd_client = StatsdClientWrapper::new(

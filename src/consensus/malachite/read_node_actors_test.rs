@@ -59,6 +59,7 @@ mod tests {
             limits: None,
             db: Some(read_node_engine.db.clone()),
             messages_request_tx: None,
+            network: None,
         });
         let read_node_actors = MalachiteReadNodeActors::create_and_start(
             SnapchainValidatorContext::new(read_keypair),
