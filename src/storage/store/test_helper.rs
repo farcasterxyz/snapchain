@@ -149,7 +149,7 @@ pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile
     (
         ShardEngine::new(
             db,
-            options.network.unwrap_or(proto::FarcasterNetwork::Testnet),
+            options.network.unwrap_or(proto::FarcasterNetwork::Devnet), // So all protocol features are enabled by default
             merkle_trie::MerkleTrie::new(16).unwrap(),
             1,
             test_limits,
