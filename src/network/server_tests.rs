@@ -9,7 +9,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use tokio::time::{sleep, timeout};
 
-    use crate::connectors::onchain_events::L1Client;
+    use crate::connectors::onchain_events::{Chain, ChainAPI, ChainClients};
     use crate::core::validations::{self, verification::VerificationAddressClaim};
     use crate::mempool::mempool::{self, Mempool};
     use crate::mempool::routing;
@@ -56,7 +56,7 @@ mod tests {
     struct MockL1Client {}
 
     #[async_trait]
-    impl L1Client for MockL1Client {
+    impl ChainAPI for MockL1Client {
         async fn resolve_ens_name(
             &self,
             _name: String,
@@ -240,6 +240,14 @@ mod tests {
         );
         tokio::spawn(async move { mempool.run().await });
 
+        let mut chain_clients = ChainClients {
+            chain_api_map: HashMap::new(),
+        };
+        chain_clients.chain_api_map.insert(
+            Chain::EthMainnet,
+            Box::new(MockL1Client {}) as Box<dyn ChainAPI>,
+        );
+
         (
             stores.clone(),
             senders.clone(),
@@ -254,7 +262,7 @@ mod tests {
                 proto::FarcasterNetwork::Testnet,
                 message_router,
                 mempool_tx.clone(),
-                Some(Box::new(MockL1Client {})),
+                chain_clients,
                 "0.1.2".to_string(),
                 "asddef".to_string(),
             ),

@@ -722,7 +722,7 @@ impl ShardEngine {
 
         for msg in &snapchain_txn.user_messages {
             // Errors are validated based on the shard root
-            match self.validate_user_message(msg, txn_batch) {
+            match self.validate_user_message(msg, txn_batch, &version) {
                 Ok(()) => {
                     let result = self.merge_message(msg, txn_batch);
                     match result {
@@ -1038,6 +1038,7 @@ impl ShardEngine {
         &self,
         message: &proto::Message,
         txn_batch: &mut RocksDbTransactionBatch,
+        version: &EngineVersion,
     ) -> Result<(), MessageValidationError> {
         let now = std::time::Instant::now();
         // Ensure message data is present
@@ -1046,7 +1047,7 @@ impl ShardEngine {
             .as_ref()
             .ok_or(MessageValidationError::NoMessageData)?;
 
-        validations::message::validate_message(message, self.network)?;
+        validations::message::validate_message(message, self.network, version)?;
 
         // Check that the user has a custody address
         self.stores

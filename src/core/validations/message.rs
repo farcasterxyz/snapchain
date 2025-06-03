@@ -2,14 +2,15 @@ use crate::core::validations::error::ValidationError;
 use crate::core::validations::validate_cast_id;
 use crate::proto::{
     self, FarcasterNetwork, FrameActionBody, MessageData, MessageType, UserDataBody, UserDataType,
+    UserNameType,
 };
 use crate::storage::util::{blake3_20, bytes_compare};
 
+use super::{cast, link, reaction, verification};
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use ed25519_dalek::{Signature, VerifyingKey};
 use fancy_regex::Regex;
 use prost::Message;
-
-use super::{cast, link, reaction, verification};
 
 const MAX_DATA_BYTES: usize = 2048;
 const MAX_DATA_BYTES_FOR_LINK_COMPACT: usize = 65536;
@@ -60,6 +61,7 @@ fn validate_frame_action_body(body: &FrameActionBody) -> Result<(), ValidationEr
 pub fn validate_message(
     message: &proto::Message,
     current_network: proto::FarcasterNetwork,
+    version: &EngineVersion,
 ) -> Result<(), ValidationError> {
     let data_bytes;
     let message_data;
@@ -117,8 +119,28 @@ pub fn validate_message(
         Some(proto::message_data::Body::UserDataBody(user_data)) => {
             validate_user_data_add_body(user_data)?;
         }
-        Some(proto::message_data::Body::UsernameProofBody(_)) => {
-            // Validate ens
+        Some(proto::message_data::Body::UsernameProofBody(proof)) => {
+            match UserNameType::try_from(proof.r#type) {
+                Ok(UserNameType::UsernameTypeEnsL1) => {
+                    if version.is_enabled(ProtocolFeature::EnsValidation) {
+                        let name = &std::str::from_utf8(&proof.name)
+                            .map_err(|_| ValidationError::InvalidData)?
+                            .to_string();
+                        validate_ens_name(name)?;
+                    }
+                }
+                Ok(UserNameType::UsernameTypeBasename) => {
+                    if version.is_enabled(ProtocolFeature::Basenames) {
+                        let name = &std::str::from_utf8(&proof.name)
+                            .map_err(|_| ValidationError::InvalidData)?
+                            .to_string();
+                        validate_ens_name(name)?;
+                    } else {
+                        return Err(ValidationError::UnsupportedFeature);
+                    }
+                }
+                _ => return Err(ValidationError::InvalidData),
+            }
         }
         Some(proto::message_data::Body::VerificationAddAddressBody(add)) => {
             verification::validate_add_address(&add, message_data.fid, network)?;
@@ -236,6 +258,31 @@ pub fn validate_ens_name(input: &String) -> Result<(), ValidationError> {
     if !Regex::new("^[a-z0-9][a-z0-9-]{0,15}$")
         .unwrap()
         .is_match(name_parts[0])
+        .map_err(|_| ValidationError::InvalidData)?
+    {
+        return Err(ValidationError::InvalidData);
+    }
+
+    Ok(())
+}
+
+pub fn validate_base_name(input: &String) -> Result<(), ValidationError> {
+    if !input.ends_with(".base.eth") {
+        return Err(ValidationError::InvalidData);
+    }
+
+    let name_parts: Vec<&str> = input.split('.').collect();
+    if name_parts.len() != 3 || name_parts[0].is_empty() {
+        return Err(ValidationError::InvalidData);
+    }
+
+    if input.len() > 20 {
+        return Err(ValidationError::InvalidDataLength);
+    }
+
+    if !Regex::new("^[a-z0-9][a-z0-9-]{0,15}$")
+        .unwrap()
+        .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
     {
         return Err(ValidationError::InvalidData);

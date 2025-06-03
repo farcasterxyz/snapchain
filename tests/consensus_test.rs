@@ -3,6 +3,7 @@ use hex;
 use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
 use serial_test::serial;
+use snapchain::connectors::onchain_events::ChainClients;
 use snapchain::consensus::consensus::{SystemMessage, ValidatorSetConfig};
 use snapchain::consensus::proposer::GENESIS_MESSAGE;
 use snapchain::mempool::mempool::{
@@ -341,7 +342,9 @@ impl NodeForTest {
             FarcasterNetwork::Testnet,
             Box::new(routing::EvenOddRouterForTest {}),
             mempool_tx.clone(),
-            None,
+            ChainClients {
+                chain_api_map: Default::default(),
+            },
             "".to_string(),
             "".to_string(),
         );

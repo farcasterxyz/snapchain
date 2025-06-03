@@ -1,3 +1,4 @@
+use crate::cfg::Config as AppConfig;
 use alloy_primitives::U256;
 use alloy_primitives::{address, ruint::FromUintError, Address, FixedBytes};
 use alloy_provider::{Provider, ProviderBuilder, RootProvider};
@@ -8,10 +9,12 @@ use async_trait::async_trait;
 use foundry_common::ens::EnsError;
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
+use crate::core::error::HubError;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::{
     core::validations::{
@@ -126,13 +129,50 @@ pub enum SubscribeError {
 }
 
 #[async_trait]
-pub trait L1Client: Send + Sync {
+pub trait ChainAPI: Send + Sync {
     async fn resolve_ens_name(&self, name: String) -> Result<Address, EnsError>;
     async fn verify_contract_signature(
         &self,
         claim: VerificationAddressClaim,
         body: &VerificationAddAddressBody,
     ) -> Result<(), validations::error::ValidationError>;
+}
+
+#[derive(Eq, Hash, PartialEq, Debug)]
+pub enum Chain {
+    EthMainnet,
+    BaseMainnet,
+}
+
+pub struct ChainClients {
+    pub chain_api_map: HashMap<Chain, Box<dyn ChainAPI>>,
+}
+
+impl ChainClients {
+    pub fn new(app_config: &AppConfig) -> Self {
+        let mut chain_api_map = HashMap::new();
+        if !app_config.l1_rpc_url.is_empty() {
+            let client: Box<dyn ChainAPI> =
+                Box::new(RealL1Client::new(app_config.l1_rpc_url.clone()).unwrap());
+            chain_api_map.insert(Chain::EthMainnet, client);
+        }
+        if !app_config.base_rpc_url.is_empty() {
+            let client: Box<dyn ChainAPI> =
+                Box::new(RealL1Client::new(app_config.base_rpc_url.clone()).unwrap());
+            chain_api_map.insert(Chain::BaseMainnet, client);
+        }
+
+        ChainClients { chain_api_map }
+    }
+
+    pub fn for_chain(&self, chain: Chain) -> Result<&Box<dyn ChainAPI>, HubError> {
+        match self.chain_api_map.get(&chain) {
+            Some(client) => Ok(client),
+            None => Err(HubError::invalid_internal_state(
+                format!("No client configured for chain: {:?}", chain).as_str(),
+            )),
+        }
+    }
 }
 
 pub struct RealL1Client {
@@ -151,7 +191,7 @@ impl RealL1Client {
 }
 
 #[async_trait]
-impl L1Client for RealL1Client {
+impl ChainAPI for RealL1Client {
     async fn resolve_ens_name(&self, name: String) -> Result<Address, EnsError> {
         foundry_common::ens::NameOrAddress::Name(name)
             .resolve(&self.provider)

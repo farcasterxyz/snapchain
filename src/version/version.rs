@@ -15,6 +15,7 @@ pub enum ProtocolFeature {
     SignerRevokeBug,
     FarcasterPro,
     Basenames,
+    EnsValidation, // Before this version, ENS validation was not enforced
 }
 
 pub struct VersionSchedule {
@@ -94,9 +95,9 @@ impl EngineVersion {
                 // This was a bug that was only active for a short time
                 self == &EngineVersion::V1 || self == &EngineVersion::V3
             }
-            ProtocolFeature::FarcasterPro | ProtocolFeature::Basenames => {
-                self >= &EngineVersion::V5
-            }
+            ProtocolFeature::FarcasterPro
+            | ProtocolFeature::Basenames
+            | ProtocolFeature::EnsValidation => self >= &EngineVersion::V5,
         }
     }
 }

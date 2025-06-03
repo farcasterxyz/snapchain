@@ -2,7 +2,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
-use snapchain::connectors::onchain_events::{L1Client, OnchainEventsRequest, RealL1Client};
+use snapchain::connectors::onchain_events::{ChainClients, OnchainEventsRequest};
 use snapchain::consensus::consensus::SystemMessage;
 use snapchain::mempool::mempool::{Mempool, MempoolRequest, ReadNodeMempool};
 use snapchain::mempool::routing;
@@ -48,7 +48,7 @@ async fn start_servers(
     shard_stores: HashMap<u32, Stores>,
     shard_senders: HashMap<u32, Senders>,
     block_store: BlockStore,
-    l1_client: Option<Box<dyn L1Client>>,
+    chain_clients: ChainClients,
 ) {
     let grpc_addr = app_config.rpc_address.clone();
     let grpc_socket_addr: SocketAddr = grpc_addr.parse().unwrap();
@@ -74,7 +74,7 @@ async fn start_servers(
         app_config.fc_network,
         Box::new(routing::ShardRouter {}),
         mempool_tx.clone(),
-        l1_client,
+        chain_clients,
         VERSION.unwrap_or("unknown").to_string(),
         gossip.swarm.local_peer_id().to_string(),
     ));
@@ -338,11 +338,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let _ = Metrics::register(registry);
     let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
 
-    let l1_client: Option<Box<dyn L1Client>> =
-        match RealL1Client::new(app_config.l1_rpc_url.clone()) {
-            Ok(client) => Some(Box::new(client)),
-            Err(_) => None,
-        };
+    let chains_clients = ChainClients::new(&app_config);
 
     let (sync_complete_tx, sync_complete_rx) = watch::channel(false);
 
@@ -393,7 +389,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.shard_stores.clone(),
             node.shard_senders.clone(),
             block_store.clone(),
-            l1_client,
+            chains_clients,
         )
         .await;
 
@@ -532,7 +528,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.shard_stores.clone(),
             node.shard_senders.clone(),
             block_store.clone(),
-            l1_client,
+            chains_clients,
         )
         .await;
 

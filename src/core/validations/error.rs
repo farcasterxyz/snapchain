@@ -10,6 +10,8 @@ pub enum ValidationError {
     InvalidHashScheme,
     #[error("Message data invalid")]
     InvalidData,
+    #[error("Protocol feature is not supported in this version")]
+    UnsupportedFeature,
     #[error("Invalid data length")]
     InvalidDataLength,
     #[error("Unrecognized signature scheme")]

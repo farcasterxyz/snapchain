@@ -1,7 +1,7 @@
 use super::rpc_extensions::{authenticate_request, AsMessagesResponse, AsSingleMessageResponse};
-use crate::connectors::onchain_events::L1Client;
+use crate::connectors::onchain_events::{Chain, ChainClients};
 use crate::core::error::HubError;
-use crate::core::util::get_farcaster_time;
+use crate::core::util::{get_farcaster_time, FarcasterTime};
 use crate::core::validations;
 use crate::core::validations::verification::VerificationAddressClaim;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
@@ -64,6 +64,7 @@ use crate::storage::store::engine::{MempoolMessage, MessageValidationError, Send
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use crate::version::version::EngineVersion;
 use hex::ToHex;
 use moka::policy::EvictionPolicy;
 use moka::sync::{Cache, CacheBuilder};
@@ -88,7 +89,7 @@ pub struct MyHubService {
     num_shards: u32,
     message_router: Box<dyn routing::MessageRouter>,
     statsd_client: StatsdClientWrapper,
-    l1_client: Option<Box<dyn L1Client>>,
+    chain_clients: ChainClients,
     mempool_tx: mpsc::Sender<MempoolRequest>,
     network: proto::FarcasterNetwork,
     version: String,
@@ -107,7 +108,7 @@ impl MyHubService {
         network: proto::FarcasterNetwork,
         message_router: Box<dyn routing::MessageRouter>,
         mempool_tx: mpsc::Sender<MempoolRequest>,
-        l1_client: Option<Box<dyn L1Client>>,
+        chain_clients: ChainClients,
         version: String,
         peer_id: String,
     ) -> Self {
@@ -139,13 +140,17 @@ impl MyHubService {
             statsd_client,
             message_router,
             num_shards,
-            l1_client,
+            chain_clients,
             mempool_tx,
             version,
             peer_id,
             id_registry_cache,
         };
         service
+    }
+
+    fn current_version(&self) -> EngineVersion {
+        EngineVersion::version_for(&FarcasterTime::current(), self.network)
     }
 
     async fn submit_message_internal(
@@ -302,20 +307,15 @@ impl MyHubService {
         claim: VerificationAddressClaim,
         body: &VerificationAddAddressBody,
     ) -> Result<(), HubError> {
-        match &self.l1_client {
-            None => {
-                // Fail validation, can be fixed with config change
-                Err(HubError::invalid_internal_state("L1 client not configured"))
-            }
-            Some(l1_client) => l1_client
-                .verify_contract_signature(claim, body)
-                .await
-                .or_else(|e| {
-                    Err(HubError::validation_failure(
-                        format!("could not verify contract signature: {}", e.to_string()).as_str(),
-                    ))
-                }),
-        }
+        let client = &self.chain_clients.for_chain(Chain::EthMainnet)?;
+        client
+            .verify_contract_signature(claim, body)
+            .await
+            .or_else(|e| {
+                Err(HubError::validation_failure(
+                    format!("could not verify contract signature: {}", e.to_string()).as_str(),
+                ))
+            })
     }
 
     pub async fn validate_ens_username_proof(
@@ -323,77 +323,93 @@ impl MyHubService {
         fid: u64,
         proof: &UserNameProof,
     ) -> Result<(), HubError> {
-        match &self.l1_client {
-            None => {
-                // Fail validation, can be fixed with config change
-                Err(HubError::invalid_internal_state("L1 client not configured"))
-            }
-            Some(l1_client) => {
-                let name = std::str::from_utf8(&proof.name)
-                    .map_err(|_| HubError::validation_failure("ENS name is not utf8"))?;
+        let resolved_ens_address = self.resolve_ens_address(proof).await?;
+        if resolved_ens_address != proof.owner {
+            return Err(HubError::validation_failure(
+                "invalid ens name, resolved address doesn't match proof owner address",
+            ));
+        }
 
+        let stores = self
+            .get_stores_for(fid)
+            .map_err(|_| HubError::internal_db_error("stores not found for fid"))?;
+
+        let id_register = stores
+            .onchain_event_store
+            .get_id_register_event_by_fid(fid)
+            .map_err(|_| HubError::internal_db_error("Could not fetch id registration"))?;
+
+        match id_register {
+            None => return Err(HubError::validation_failure("missing fid registration")),
+            Some(id_register) => {
+                match id_register.body {
+                    Some(Body::IdRegisterEventBody(id_register)) => {
+                        // Check verified addresses if the resolved address doesn't match the custody address
+                        if id_register.to != resolved_ens_address {
+                            let verification = VerificationStore::get_verification_add(
+                                &stores.verification_store,
+                                fid,
+                                &resolved_ens_address,
+                            )?;
+
+                            match verification {
+                            None => Err(HubError::validation_failure("invalid ens proof, no matching custody address or verified addresses")),
+                            Some(_) => Ok(()),
+                        }
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    _ => return Err(HubError::validation_failure("missing fid registration")),
+                }
+            }
+        }
+    }
+
+    async fn resolve_ens_address(&self, proof: &UserNameProof) -> Result<Vec<u8>, HubError> {
+        let name = std::str::from_utf8(&proof.name)
+            .map_err(|_| HubError::validation_failure("ENS name is not utf8"))?;
+
+        let chain_api = match UserNameType::try_from(proof.r#type) {
+            Ok(UserNameType::UsernameTypeEnsL1) => {
+                if !name.ends_with(".eth") {
+                    return Err(HubError::validation_failure(
+                        "ENS name does not end with .eth",
+                    ));
+                }
+                self.chain_clients.for_chain(Chain::EthMainnet)?
+            }
+            Ok(UserNameType::UsernameTypeBasename) => {
                 if !name.ends_with(".eth") {
                     return Err(HubError::validation_failure(
                         "ENS name does not end with .eth",
                     ));
                 }
 
-                let resolved_ens_address = l1_client
-                    .resolve_ens_name(name.to_string())
-                    .await
-                    .map_err(|err| {
-                        HubError::validation_failure(
-                            format!("ENS resolution error: {}", err.to_string()).as_str(),
-                        )
-                    })?
-                    .to_vec();
-
-                if resolved_ens_address != proof.owner {
-                    return Err(HubError::validation_failure(
-                        "invalid ens name, resolved address doesn't match proof owner address",
-                    ));
-                }
-
-                let stores = self
-                    .get_stores_for(fid)
-                    .map_err(|_| HubError::internal_db_error("stores not found for fid"))?;
-
-                let id_register = stores
-                    .onchain_event_store
-                    .get_id_register_event_by_fid(fid)
-                    .map_err(|_| HubError::internal_db_error("Could not fetch id registration"))?;
-
-                match id_register {
-                    None => return Err(HubError::validation_failure("missing fid registration")),
-                    Some(id_register) => {
-                        match id_register.body {
-                            Some(Body::IdRegisterEventBody(id_register)) => {
-                                // Check verified addresses if the resolved address doesn't match the custody address
-                                if id_register.to != resolved_ens_address {
-                                    let verification = VerificationStore::get_verification_add(
-                                        &stores.verification_store,
-                                        fid,
-                                        &resolved_ens_address,
-                                    )?;
-
-                                    match verification {
-                                    None => Err(HubError::validation_failure("invalid ens proof, no matching custody address or verified addresses")),
-                                    Some(_) => Ok(()),
-                                }
-                                } else {
-                                    Ok(())
-                                }
-                            }
-                            _ => {
-                                return Err(HubError::validation_failure(
-                                    "missing fid registration",
-                                ))
-                            }
-                        }
-                    }
-                }
+                self.chain_clients.for_chain(Chain::BaseMainnet)?
             }
-        }
+            _ => {
+                return Err(HubError::validation_failure(
+                    format!(
+                        "unsupported username type: {} for name: {}",
+                        proof.r#type, name,
+                    )
+                    .as_str(),
+                ))
+            }
+        };
+
+        let resolved_ens_address = chain_api
+            .resolve_ens_name(name.to_string())
+            .await
+            .map_err(|err| {
+                HubError::validation_failure(
+                    format!("ENS resolution error: {}", err.to_string()).as_str(),
+                )
+            })?
+            .to_vec();
+
+        Ok(resolved_ens_address)
     }
 
     async fn validate_ens_username(&self, fid: u64, name: String) -> Result<(), HubError> {
@@ -1187,8 +1203,9 @@ impl HubService for MyHubService {
         request: Request<Message>,
     ) -> Result<Response<ValidationResponse>, Status> {
         let request = request.into_inner();
-        let result = validations::message::validate_message(&request, self.network)
-            .map_or_else(|_| false, |_| true);
+        let result =
+            validations::message::validate_message(&request, self.network, &self.current_version())
+                .map_or_else(|_| false, |_| true);
 
         Ok(Response::new(ValidationResponse {
             valid: result,
