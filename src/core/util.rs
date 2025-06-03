@@ -1,7 +1,7 @@
 use crate::core::error::HubError;
 use crate::core::types::FARCASTER_EPOCH;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, PartialOrd, Eq, Ord)]
 pub struct FarcasterTime {
     time: u64, // seconds since the farcaster epoch
 }
@@ -31,6 +31,18 @@ impl FarcasterTime {
 
     pub fn to_u64(&self) -> u64 {
         self.time
+    }
+
+    pub fn incr_by(&self, secs: u64) -> Self {
+        FarcasterTime {
+            time: self.time + secs,
+        }
+    }
+
+    pub fn decr_by(&self, secs: u64) -> Self {
+        FarcasterTime {
+            time: self.time - secs,
+        }
     }
 }
 

@@ -26,4 +26,6 @@ pub enum ValidationError {
     InvalidNetwork,
     #[error("Invalid button index")]
     InvalidButtonIndex,
+    #[error("Pro subscription required")]
+    ProUserFeature,
 }

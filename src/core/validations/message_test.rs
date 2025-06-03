@@ -1,5 +1,5 @@
 mod tests {
-    use crate::core::util::{calculate_message_hash, FarcasterTime};
+    use crate::core::util::calculate_message_hash;
     use crate::core::validations::error::ValidationError;
     use crate::core::validations::message::validate_message;
     use crate::proto::{self, UserNameType};
@@ -15,19 +15,24 @@ mod tests {
     use itertools::Itertools;
     use prost::Message;
 
-    fn version() -> EngineVersion {
-        // Always returns the latest version for testing
-        EngineVersion::version_for(&FarcasterTime::current(), FarcasterNetwork::Devnet)
-    }
-
     fn assert_validation_error(msg: &proto::Message, expected_error: ValidationError) {
-        let result = validate_message(msg, FarcasterNetwork::Testnet, &version());
+        let result = validate_message(
+            msg,
+            FarcasterNetwork::Testnet,
+            false,
+            EngineVersion::latest(),
+        );
         assert!(result.is_err());
         assert_eq!(result.err().unwrap(), expected_error);
     }
 
     fn assert_valid(msg: &proto::Message) {
-        let result = validate_message(msg, FarcasterNetwork::Testnet, &version());
+        let result = validate_message(
+            msg,
+            FarcasterNetwork::Testnet,
+            false,
+            EngineVersion::latest(),
+        );
         assert!(result.is_ok());
     }
 
@@ -37,7 +42,12 @@ mod tests {
         let signer = test_helper::generate_signer();
         msg.signer = signer.verifying_key().to_bytes().to_vec();
         msg.signature = signer.sign(&msg.hash).to_bytes().to_vec();
-        let result = validate_message(msg, FarcasterNetwork::Testnet, &version());
+        let result = validate_message(
+            msg,
+            FarcasterNetwork::Testnet,
+            false,
+            EngineVersion::latest(),
+        );
         assert!(result.is_ok());
     }
 
@@ -101,26 +111,50 @@ mod tests {
 
         msg.data.as_mut().unwrap().network = FarcasterNetwork::None as i32;
         assert_eq!(
-            validate_message(&msg, FarcasterNetwork::Testnet, &version()).unwrap_err(),
+            validate_message(
+                &msg,
+                FarcasterNetwork::Testnet,
+                false,
+                EngineVersion::latest()
+            )
+            .unwrap_err(),
             ValidationError::InvalidNetwork
         );
 
         // When network is mainnet, other networks are not allowed
         msg.data.as_mut().unwrap().network = FarcasterNetwork::Testnet as i32;
         assert_eq!(
-            validate_message(&msg, FarcasterNetwork::Mainnet, &version()).unwrap_err(),
+            validate_message(
+                &msg,
+                FarcasterNetwork::Mainnet,
+                false,
+                EngineVersion::latest()
+            )
+            .unwrap_err(),
             ValidationError::InvalidNetwork
         );
 
         msg.data.as_mut().unwrap().network = FarcasterNetwork::Devnet as i32;
         assert_eq!(
-            validate_message(&msg, FarcasterNetwork::Mainnet, &version()).unwrap_err(),
+            validate_message(
+                &msg,
+                FarcasterNetwork::Mainnet,
+                false,
+                EngineVersion::latest()
+            )
+            .unwrap_err(),
             ValidationError::InvalidNetwork
         );
 
         msg.data.as_mut().unwrap().network = FarcasterNetwork::None as i32;
         assert_eq!(
-            validate_message(&msg, FarcasterNetwork::Mainnet, &version()).unwrap_err(),
+            validate_message(
+                &msg,
+                FarcasterNetwork::Mainnet,
+                false,
+                EngineVersion::latest()
+            )
+            .unwrap_err(),
             ValidationError::InvalidNetwork
         );
 
@@ -217,7 +251,12 @@ mod tests {
                 None,
                 None,
             );
-            let result = validate_message(&msg, FarcasterNetwork::Testnet, &version());
+            let result = validate_message(
+                &msg,
+                FarcasterNetwork::Testnet,
+                false,
+                EngineVersion::latest(),
+            );
             assert!(result.is_ok(), "Failed for valid name: {}", name);
         }
         for name in invalid_names {
@@ -228,7 +267,12 @@ mod tests {
                 None,
                 None,
             );
-            let result = validate_message(&msg, FarcasterNetwork::Testnet, &version());
+            let result = validate_message(
+                &msg,
+                FarcasterNetwork::Testnet,
+                false,
+                EngineVersion::latest(),
+            );
             assert!(result.is_err(), "Failed for invalid name: {}", name);
             assert_eq!(result.err().unwrap(), ValidationError::InvalidDataLength);
         }
@@ -247,14 +291,20 @@ mod tests {
         );
 
         // Basenames are supported on the latest version
-        let result = validate_message(&proof_message, FarcasterNetwork::Testnet, &version());
+        let result = validate_message(
+            &proof_message,
+            FarcasterNetwork::Testnet,
+            false,
+            EngineVersion::latest(),
+        );
         assert!(result.is_ok());
 
         // Message is invalid for versions before basename support was enabled
         let result = validate_message(
             &proof_message,
             FarcasterNetwork::Testnet,
-            &EngineVersion::V4,
+            false,
+            EngineVersion::latest(),
         );
         assert!(result.is_err());
         assert_eq!(result.err().unwrap(), ValidationError::UnsupportedFeature);
@@ -276,12 +326,18 @@ mod tests {
         let result = validate_message(
             &proof_message,
             FarcasterNetwork::Testnet,
-            &EngineVersion::V4,
+            false,
+            EngineVersion::V4,
         );
         assert!(result.is_ok());
 
         // Validation fails for versions after ens validation was fixed
-        let result = validate_message(&proof_message, FarcasterNetwork::Testnet, &version());
+        let result = validate_message(
+            &proof_message,
+            FarcasterNetwork::Testnet,
+            false,
+            EngineVersion::latest(),
+        );
         assert!(result.is_err());
         assert_eq!(result.err().unwrap(), ValidationError::InvalidDataLength);
     }

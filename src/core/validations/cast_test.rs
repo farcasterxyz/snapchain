@@ -112,7 +112,7 @@ mod tests {
                             })
                         }),
                     };
-                    assert!(validations::cast::validate_cast_add_body(&cast, true).is_ok())
+                    assert!(validations::cast::validate_cast_add_body(&cast, true, false).is_ok())
                 }
                 None => {}
             }

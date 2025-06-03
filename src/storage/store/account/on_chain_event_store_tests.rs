@@ -1,9 +1,11 @@
 #[cfg(test)]
 mod tests {
+    use crate::core::util::FarcasterTime;
+    use crate::proto::TierType;
     use crate::storage::db;
     use crate::storage::db::RocksDbTransactionBatch;
     use crate::storage::store::account::{OnchainEventStore, StorageSlot, StoreEventHandler};
-    use crate::utils::factory;
+    use crate::utils::factory::{self};
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -150,5 +152,85 @@ mod tests {
         assert_eq!(storage_slot.is_active(), true);
         assert_eq!(storage_slot.legacy_units, 12); // 5 + 7
         assert_eq!(storage_slot.units, 20); // 9 + 11
+    }
+
+    #[test]
+    fn test_pro_user_expiration() {
+        let (store, _dir) = store();
+        let day_in_secs = 24 * 60 * 60;
+        let start_time = FarcasterTime::new(100);
+
+        let pro_user_event1 = factory::events_factory::create_pro_user_event(
+            10,
+            1,
+            Some(start_time.to_unix_seconds() as u32),
+        );
+        let pro_user_event2 = factory::events_factory::create_pro_user_event(
+            10,
+            1,
+            Some((pro_user_event1.block_timestamp + day_in_secs - 10) as u32),
+        );
+        let pro_user_event3 = factory::events_factory::create_pro_user_event(
+            10,
+            1,
+            Some((pro_user_event1.block_timestamp + (2 * day_in_secs) + 10) as u32),
+        );
+
+        let mut txn = RocksDbTransactionBatch::new();
+        for event in [
+            pro_user_event1.clone(),
+            pro_user_event2.clone(),
+            pro_user_event3.clone(),
+        ] {
+            store.merge_onchain_event(event, &mut txn).unwrap();
+        }
+        store.db.commit(txn).unwrap();
+
+        assert!(!store
+            .is_tier_subscription_active_at(TierType::Pro, 10, &start_time.decr_by(1))
+            .unwrap());
+        assert!(store
+            .is_tier_subscription_active_at(TierType::Pro, 10, &start_time)
+            .unwrap());
+        assert!(store
+            .is_tier_subscription_active_at(TierType::Pro, 10, &start_time.incr_by(2 * day_in_secs))
+            .unwrap());
+        assert!(!store
+            .is_tier_subscription_active_at(
+                TierType::Pro,
+                10,
+                &start_time.incr_by((2 * day_in_secs) + 1)
+            )
+            .unwrap());
+        assert!(!store
+            .is_tier_subscription_active_at(
+                TierType::Pro,
+                10,
+                &FarcasterTime::from_unix_seconds(pro_user_event3.block_timestamp).decr_by(1)
+            )
+            .unwrap());
+        assert!(store
+            .is_tier_subscription_active_at(
+                TierType::Pro,
+                10,
+                &FarcasterTime::from_unix_seconds(pro_user_event3.block_timestamp)
+            )
+            .unwrap());
+        assert!(store
+            .is_tier_subscription_active_at(
+                TierType::Pro,
+                10,
+                &FarcasterTime::from_unix_seconds(pro_user_event3.block_timestamp)
+                    .incr_by(day_in_secs)
+            )
+            .unwrap());
+        assert!(!store
+            .is_tier_subscription_active_at(
+                TierType::Pro,
+                10,
+                &FarcasterTime::from_unix_seconds(pro_user_event3.block_timestamp)
+                    .incr_by(day_in_secs + 1)
+            )
+            .unwrap());
     }
 }

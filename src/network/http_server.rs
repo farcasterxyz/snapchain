@@ -834,6 +834,12 @@ pub enum SignerEventType {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum TierType {
+    None = 0,
+    Pro = 1,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum IdRegisterEventType {
     None = 0,
     Register = 1,
@@ -882,6 +888,14 @@ pub struct StorageRentEventBody {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TierPurchaseEventBody {
+    #[serde(with = "serdehex")]
+    pub payer: Vec<u8>,
+    pub for_days: u64,
+    pub tier_type: TierType,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OnChainEvent {
     pub r#type: OnChainEventType,
     #[serde(rename = "chainId")]
@@ -914,6 +928,7 @@ pub struct OnChainEvent {
         skip_serializing_if = "Option::is_none"
     )]
     pub storage_rent_event_body: Option<StorageRentEventBody>,
+    pub tier_purchase_event_body: Option<TierPurchaseEventBody>,
     #[serde(rename = "txIndex")]
     pub tx_index: u32,
     pub version: u32,
@@ -1777,6 +1792,7 @@ fn map_proto_on_chain_event_to_json_on_chain_event(
     let mut signer_migrated_event_body: Option<SignerMigratedEventBody> = None;
     let mut id_register_event_body: Option<IdRegisterEventBody> = None;
     let mut storage_rent_event_body: Option<StorageRentEventBody> = None;
+    let mut tier_purchase_event_body: Option<TierPurchaseEventBody> = None;
     match &onchain_event.body {
         None => {}
         Some(on_chain_event::Body::SignerEventBody(body)) => {
@@ -1818,6 +1834,16 @@ fn map_proto_on_chain_event_to_json_on_chain_event(
                 expiry: body.expiry,
             });
         }
+        Some(on_chain_event::Body::TierPurchaseEventBody(body)) => {
+            tier_purchase_event_body = Some(TierPurchaseEventBody {
+                payer: body.payer.clone(),
+                for_days: body.for_days,
+                tier_type: match body.tier_type {
+                    1 => TierType::Pro,
+                    _ => TierType::None,
+                },
+            })
+        }
     }
     Ok(OnChainEvent {
         r#type: match onchain_event.r#type {
@@ -1840,6 +1866,7 @@ fn map_proto_on_chain_event_to_json_on_chain_event(
         signer_migrated_event_body,
         id_register_event_body,
         storage_rent_event_body,
+        tier_purchase_event_body,
     })
 }
 

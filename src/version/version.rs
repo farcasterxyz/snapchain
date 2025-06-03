@@ -1,7 +1,9 @@
 use crate::core::util::FarcasterTime;
 use crate::proto::FarcasterNetwork;
+use strum::IntoEnumIterator;
+use strum_macros::EnumIter;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, EnumIter)]
 pub enum EngineVersion {
     V0 = 0,
     V1 = 1,
@@ -16,6 +18,7 @@ pub enum ProtocolFeature {
     FarcasterPro,
     Basenames,
     EnsValidation, // Before this version, ENS validation was not enforced
+    MessageLengthCheckFix,
 }
 
 pub struct VersionSchedule {
@@ -97,8 +100,15 @@ impl EngineVersion {
             }
             ProtocolFeature::FarcasterPro
             | ProtocolFeature::Basenames
-            | ProtocolFeature::EnsValidation => self >= &EngineVersion::V5,
+            | ProtocolFeature::EnsValidation
+            | ProtocolFeature::MessageLengthCheckFix => self >= &EngineVersion::V5,
         }
+    }
+
+    pub fn latest() -> Self {
+        EngineVersion::iter()
+            .max()
+            .expect("Version list can't be empty")
     }
 }
 
@@ -223,6 +233,15 @@ mod version_test {
         assert_eq!(
             EngineVersion::V4.is_enabled(ProtocolFeature::SignerRevokeBug),
             false
+        );
+    }
+
+    #[test]
+    fn test_latest() {
+        assert_eq!(EngineVersion::latest(), EngineVersion::V5);
+        assert_eq!(
+            EngineVersion::version_for(&FarcasterTime::current(), FarcasterNetwork::Devnet),
+            EngineVersion::latest()
         );
     }
 }

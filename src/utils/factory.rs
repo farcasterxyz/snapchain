@@ -3,7 +3,6 @@ use crate::proto as message;
 use crate::proto::{OnChainEvent, OnChainEventType};
 use ed25519_dalek::{SecretKey, Signer, SigningKey};
 use hex::FromHex;
-use message::CastType::Cast;
 use message::MessageType;
 use message::{CastAddBody, FarcasterNetwork, MessageData};
 use prost::Message;
@@ -48,7 +47,7 @@ pub mod time {
 
 pub mod events_factory {
     use super::*;
-    use crate::proto;
+    use crate::proto::{self, TierPurchaseBody, TierType};
 
     pub fn create_onchain_event(fid: u64) -> OnChainEvent {
         OnChainEvent {
@@ -196,6 +195,36 @@ pub mod events_factory {
             )),
         }
     }
+
+    pub fn create_pro_user_event(
+        fid: u64,
+        for_days: u64,
+        block_timestamp: Option<u32>,
+    ) -> OnChainEvent {
+        let block_timestamp = block_timestamp.unwrap_or(time::current_timestamp_with_offset(-10));
+        let random_number_under_1000 = rand::random::<u32>() % 1000;
+        // Ensure higher timestamp always has higher block number by left shifting the timestamp by 10 bits (1024)
+        let block_number = block_timestamp.checked_shl(10).unwrap() + random_number_under_1000;
+        OnChainEvent {
+            r#type: OnChainEventType::EventTypeTierPurchase as i32,
+            chain_id: 10,
+            block_number,
+            block_hash: vec![],
+            block_timestamp: block_timestamp as u64,
+            transaction_hash: rand::random::<[u8; 32]>().to_vec(),
+            log_index: 0,
+            fid,
+            tx_index: 0,
+            version: 1,
+            body: Some(proto::on_chain_event::Body::TierPurchaseEventBody(
+                TierPurchaseBody {
+                    for_days,
+                    tier_type: TierType::Pro as i32,
+                    payer: rand::random::<[u8; 32]>().to_vec(),
+                },
+            )),
+        }
+    }
 }
 
 pub mod messages_factory {
@@ -255,7 +284,33 @@ pub mod messages_factory {
 
     pub mod casts {
         use super::*;
-        use crate::proto::CastRemoveBody;
+        use crate::proto::{CastRemoveBody, CastType, Embed};
+
+        pub fn create_cast_add_rich(
+            fid: u64,
+            text: &str,
+            cast_type: Option<CastType>,
+            embeds: Vec<Embed>,
+            timestamp: Option<u32>,
+            private_key: Option<&SigningKey>,
+        ) -> message::Message {
+            let cast_add = CastAddBody {
+                text: text.to_string(),
+                embeds,
+                embeds_deprecated: vec![],
+                mentions: vec![],
+                mentions_positions: vec![],
+                parent: None,
+                r#type: cast_type.unwrap_or(CastType::Cast) as i32,
+            };
+            create_message_with_data(
+                fid,
+                MessageType::CastAdd,
+                message::message_data::Body::CastAddBody(cast_add),
+                timestamp,
+                private_key,
+            )
+        }
 
         pub fn create_cast_add(
             fid: u64,
@@ -263,19 +318,11 @@ pub mod messages_factory {
             timestamp: Option<u32>,
             private_key: Option<&SigningKey>,
         ) -> message::Message {
-            let cast_add = CastAddBody {
-                text: text.to_string(),
-                embeds: vec![],
-                embeds_deprecated: vec![],
-                mentions: vec![],
-                mentions_positions: vec![],
-                parent: None,
-                r#type: Cast as i32,
-            };
-            create_message_with_data(
+            create_cast_add_rich(
                 fid,
-                MessageType::CastAdd,
-                message::message_data::Body::CastAddBody(cast_add),
+                text,
+                Some(CastType::Cast),
+                vec![],
                 timestamp,
                 private_key,
             )

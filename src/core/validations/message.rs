@@ -13,6 +13,7 @@ use fancy_regex::Regex;
 use prost::Message;
 
 const MAX_DATA_BYTES: usize = 2048;
+const MAX_DATA_BYTES_FOR_10K_CAST: usize = 16_384;
 const MAX_DATA_BYTES_FOR_LINK_COMPACT: usize = 65536;
 const EMBEDS_V1_CUTOFF: u32 = 73612800;
 
@@ -61,7 +62,8 @@ fn validate_frame_action_body(body: &FrameActionBody) -> Result<(), ValidationEr
 pub fn validate_message(
     message: &proto::Message,
     current_network: proto::FarcasterNetwork,
-    version: &EngineVersion,
+    is_pro_user: bool,
+    version: EngineVersion,
 ) -> Result<(), ValidationError> {
     let data_bytes;
     let message_data;
@@ -86,11 +88,20 @@ pub fn validate_message(
         message_data = message.data.as_ref().unwrap().clone();
     }
 
-    if message_data.r#type() == MessageType::LinkCompactState
-        && data_bytes.len() > MAX_DATA_BYTES_FOR_LINK_COMPACT
-    {
-        return Err(ValidationError::InvalidDataLength);
-    } else if data_bytes.len() > MAX_DATA_BYTES {
+    let max_data_size =
+        if version.is_enabled(crate::version::version::ProtocolFeature::MessageLengthCheckFix) {
+            if message_data.r#type() == MessageType::LinkCompactState {
+                MAX_DATA_BYTES_FOR_LINK_COMPACT
+            } else if is_pro_user && message_data.r#type() == MessageType::CastAdd {
+                MAX_DATA_BYTES_FOR_10K_CAST
+            } else {
+                MAX_DATA_BYTES
+            }
+        } else {
+            MAX_DATA_BYTES
+        };
+
+    if data_bytes.len() > max_data_size {
         return Err(ValidationError::InvalidDataLength);
     }
 
@@ -117,7 +128,7 @@ pub fn validate_message(
 
     match &message_data.body {
         Some(proto::message_data::Body::UserDataBody(user_data)) => {
-            validate_user_data_add_body(user_data)?;
+            validate_user_data_add_body(user_data, is_pro_user)?;
         }
         Some(proto::message_data::Body::UsernameProofBody(proof)) => {
             match UserNameType::try_from(proof.r#type) {
@@ -152,6 +163,7 @@ pub fn validate_message(
             cast::validate_cast_add_body(
                 &cast_add_body,
                 message_data.timestamp < EMBEDS_V1_CUTOFF,
+                is_pro_user,
             )?;
         }
         Some(proto::message_data::Body::CastRemoveBody(cast_remove_body)) => {
@@ -379,11 +391,22 @@ pub fn validate_user_location(location: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-pub fn validate_user_data_add_body(body: &UserDataBody) -> Result<(), ValidationError> {
+pub fn validate_user_data_add_body(
+    body: &UserDataBody,
+    is_pro_user: bool,
+) -> Result<(), ValidationError> {
     let value_bytes = body.value.as_bytes();
 
     match UserDataType::try_from(body.r#type).map_err(|_| ValidationError::InvalidData)? {
         UserDataType::Pfp => {
+            if value_bytes.len() > 256 {
+                return Err(ValidationError::InvalidDataLength);
+            }
+        }
+        UserDataType::Banner => {
+            if !is_pro_user {
+                return Err(ValidationError::ProUserFeature);
+            }
             if value_bytes.len() > 256 {
                 return Err(ValidationError::InvalidDataLength);
             }

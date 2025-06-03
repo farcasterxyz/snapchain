@@ -3,7 +3,7 @@ mod tests {
     use crate::core::util::{
         calculate_message_hash, from_farcaster_time, get_farcaster_time, FarcasterTime,
     };
-    use crate::proto::{self, FarcasterNetwork, ReactionType};
+    use crate::proto::{self, CastId, Embed, FarcasterNetwork, ReactionType};
     use crate::proto::{FnameTransfer, ShardChunk, UserNameProof};
     use crate::proto::{HubEvent, ValidatorMessage};
     use crate::proto::{OnChainEvent, OnChainEventType};
@@ -12,8 +12,8 @@ mod tests {
     use crate::storage::store::engine::{MempoolMessage, ShardEngine};
     use crate::storage::store::stores::StoreLimits;
     use crate::storage::store::test_helper::{
-        self, commit_message_at, commit_messages, default_custody_address, EngineOptions,
-        FID3_FOR_TEST,
+        self, commit_event, commit_message_at, commit_messages, default_custody_address,
+        EngineOptions, FID3_FOR_TEST,
     };
     use crate::storage::store::test_helper::{
         commit_message, message_exists_in_trie, register_user, FID2_FOR_TEST, FID_FOR_TEST,
@@ -1930,5 +1930,101 @@ mod tests {
             message_exists_in_trie(&mut engine, &good_signer_cast),
             false
         ); // Revoked
+    }
+
+    #[tokio::test]
+    async fn pro_users_get_10k_casts() {
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+        let pro_event = events_factory::create_pro_user_event(
+            FID_FOR_TEST,
+            1,
+            Some(time::current_timestamp_with_offset(-1)),
+        );
+        commit_event(&mut engine, &pro_event).await;
+        let long_cast = messages_factory::casts::create_cast_add_rich(
+            FID_FOR_TEST,
+            &"a".repeat(9999),
+            Some(proto::CastType::TenKCast),
+            vec![],
+            None,
+            None,
+        );
+        commit_message_at(&mut engine, &long_cast, &FarcasterTime::current()).await;
+    }
+
+    #[tokio::test]
+    async fn pro_users_get_four_embeds() {
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+        let pro_event = events_factory::create_pro_user_event(
+            FID_FOR_TEST,
+            1,
+            Some(time::current_timestamp_with_offset(-1)),
+        );
+        commit_event(&mut engine, &pro_event).await;
+        let long_cast = messages_factory::casts::create_cast_add_rich(
+            FID_FOR_TEST,
+            "test",
+            Some(proto::CastType::Cast),
+            vec![
+                Embed {
+                    embed: Some(proto::embed::Embed::Url("abcde".to_string())),
+                },
+                Embed {
+                    embed: Some(proto::embed::Embed::Url("fghi".to_string())),
+                },
+                Embed {
+                    embed: Some(proto::embed::Embed::CastId(CastId {
+                        fid: FID_FOR_TEST + 1,
+                        hash: rand::random::<[u8; 20]>().to_vec(),
+                    })),
+                },
+                Embed {
+                    embed: Some(proto::embed::Embed::Url("jklmn".to_string())),
+                },
+            ],
+            None,
+            None,
+        );
+        commit_message_at(&mut engine, &long_cast, &FarcasterTime::current()).await;
+    }
+
+    #[tokio::test]
+    async fn pro_users_get_banners() {
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+        let pro_event = events_factory::create_pro_user_event(
+            FID_FOR_TEST,
+            1,
+            Some(time::current_timestamp_with_offset(-1)),
+        );
+        commit_event(&mut engine, &pro_event).await;
+        let banner = messages_factory::user_data::create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::Banner,
+            &"image".to_string(),
+            None,
+            None,
+        );
+        commit_message_at(&mut engine, &banner, &FarcasterTime::current()).await;
     }
 }

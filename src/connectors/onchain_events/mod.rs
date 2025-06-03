@@ -338,6 +338,9 @@ impl Subscriber {
             OnChainEventType::EventTypeStorageRent => {
                 self.count("num_storage_events", 1);
             }
+            OnChainEventType::EventTypeTierPurchase => {
+                self.count("num_tier_purchase_events", 1);
+            }
         };
         match &event.body {
             Some(on_chain_event::Body::IdRegisterEventBody(id_register_event_body)) => {

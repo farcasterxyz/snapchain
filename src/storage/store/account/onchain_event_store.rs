@@ -4,9 +4,10 @@ use prost::{DecodeError, Message};
 
 use super::{get_from_db_or_txn, make_fid_key, StoreEventHandler};
 use crate::core::error::HubError;
+use crate::core::util::FarcasterTime;
 use crate::proto::{
     self, on_chain_event, IdRegisterEventBody, IdRegisterEventType, OnChainEvent, OnChainEventType,
-    SignerEventBody, SignerEventType,
+    SignerEventBody, SignerEventType, TierType,
 };
 use crate::proto::{HubEvent, HubEventType, MergeOnChainEventBody};
 use crate::storage::constants::{OnChainEventPostfix, RootPrefix, PAGE_SIZE_MAX};
@@ -228,7 +229,8 @@ fn build_secondary_indices(
                 build_secondary_indices_for_signer(db, txn, onchain_event, signer_event_body)?
             }
             on_chain_event::Body::SignerMigratedEventBody(_)
-            | on_chain_event::Body::StorageRentEventBody(_) => {}
+            | on_chain_event::Body::StorageRentEventBody(_)
+            | on_chain_event::Body::TierPurchaseEventBody(_) => {}
         }
     };
 
@@ -552,6 +554,43 @@ impl OnchainEventStore {
             }
         }
         Ok(None)
+    }
+    pub fn is_tier_subscription_active_at(
+        &self,
+        tier_type: TierType,
+        fid: u64,
+        timestamp: &FarcasterTime,
+    ) -> Result<bool, OnchainEventStorageError> {
+        // Sorted by block timestamp
+        let tier_purchase_events = self
+            .get_onchain_events(OnChainEventType::EventTypeTierPurchase, Some(fid))?
+            .into_iter()
+            .filter(|event| match &event.body {
+                Some(on_chain_event::Body::TierPurchaseEventBody(body)) => {
+                    if body.tier_type == tier_type as i32 {
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            });
+
+        let mut expires_at = 0;
+        for tier_purchase in tier_purchase_events {
+            match tier_purchase.body.unwrap() {
+                on_chain_event::Body::TierPurchaseEventBody(body) => {
+                    if tier_purchase.block_timestamp > timestamp.to_unix_seconds() {
+                        break;
+                    }
+                    let extend_by = body.for_days * 24 * 60 * 60;
+                    expires_at = tier_purchase.block_timestamp.max(expires_at) + extend_by;
+                }
+                _ => {}
+            };
+        }
+
+        Ok(expires_at >= timestamp.to_unix_seconds())
     }
 
     pub fn get_storage_slot_for_fid(

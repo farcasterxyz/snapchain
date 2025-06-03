@@ -8,6 +8,7 @@ use super::{validate_cast_id, validate_fid, validate_url};
 pub fn validate_cast_add_body(
     body: &CastAddBody,
     allow_embeds_deprecated: bool,
+    is_pro_user: bool,
 ) -> Result<(), ValidationError> {
     let text_bytes = body.text.as_bytes();
 
@@ -21,10 +22,20 @@ pub fn validate_cast_add_body(
         Ok(CastType::LongCast) if text_bytes.len() <= 320 => {
             return Err(ValidationError::InvalidDataLength);
         }
+        Ok(CastType::TenKCast) if !is_pro_user => {
+            return Err(ValidationError::ProUserFeature);
+        }
+        Ok(CastType::TenKCast) if text_bytes.len() > 10_000 => {
+            return Err(ValidationError::InvalidDataLength);
+        }
+        Ok(CastType::TenKCast) if text_bytes.len() <= 1024 => {
+            return Err(ValidationError::InvalidDataLength);
+        }
         _ => {}
     }
 
-    if body.embeds.len() > 2 {
+    let num_embeds = if is_pro_user { 4 } else { 2 };
+    if body.embeds.len() > num_embeds {
         return Err(ValidationError::InvalidData);
     }
 

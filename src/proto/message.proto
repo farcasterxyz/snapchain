@@ -102,6 +102,7 @@ enum UserDataType {
   USER_DATA_TYPE_LOCATION = 7; // Current location for the user
   USER_DATA_TYPE_TWITTER = 8; // Username of user on twitter
   USER_DATA_TYPE_GITHUB = 9; // Username of user on github
+  USER_DATA_TYPE_BANNER = 10; // Banner image for the user
 }
 
 message Embed {
@@ -115,6 +116,7 @@ message Embed {
 enum CastType {
   CAST = 0;
   LONG_CAST = 1;
+  TEN_K_CAST = 2;
 }
 
 
