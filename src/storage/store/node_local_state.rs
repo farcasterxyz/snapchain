@@ -38,15 +38,22 @@ pub enum DataType {
     FnameTransfer = 2,
 }
 
+#[derive(Clone, strum_macros::Display)]
+pub enum Chain {
+    Optimism = 1,
+    Base = 2,
+}
+
 impl LocalStateStore {
     pub fn new(db: Arc<RocksDB>) -> Self {
         LocalStateStore { db }
     }
 
-    fn make_onchain_event_primary_key() -> Vec<u8> {
+    fn make_onchain_event_primary_key(chain: Chain) -> Vec<u8> {
         vec![
             RootPrefix::NodeLocalState as u8,
             DataType::OnchainEvent as u8,
+            chain as u8,
         ]
     }
 
@@ -111,9 +118,13 @@ impl LocalStateStore {
         }
     }
 
-    pub fn set_latest_block_number(&self, block_number: u64) -> Result<(), LocalStateError> {
+    pub fn set_latest_block_number(
+        &self,
+        chain: Chain,
+        block_number: u64,
+    ) -> Result<(), LocalStateError> {
         Ok(self.db.put(
-            &Self::make_onchain_event_primary_key(),
+            &Self::make_onchain_event_primary_key(chain),
             &OnChainEventState {
                 last_l2_block: block_number,
             }
@@ -121,8 +132,8 @@ impl LocalStateStore {
         )?)
     }
 
-    pub fn get_latest_block_number(&self) -> Result<Option<u64>, LocalStateError> {
-        match self.db.get(&Self::make_onchain_event_primary_key())? {
+    pub fn get_latest_block_number(&self, chain: Chain) -> Result<Option<u64>, LocalStateError> {
+        match self.db.get(&Self::make_onchain_event_primary_key(chain))? {
             Some(state) => Ok(Some(
                 OnChainEventState::decode(state.as_slice())?.last_l2_block,
             )),

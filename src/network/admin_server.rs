@@ -17,7 +17,7 @@ use rocksdb;
 use std::collections::HashMap;
 use std::io;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::timeout;
 use tonic::{Request, Response, Status};
 use tracing::{error, info};
@@ -25,7 +25,7 @@ use tracing::{error, info};
 pub struct MyAdminService {
     allowed_users: HashMap<String, String>,
     pub mempool_tx: mpsc::Sender<MempoolRequest>,
-    onchain_events_request_tx: mpsc::Sender<OnchainEventsRequest>,
+    onchain_events_request_tx: broadcast::Sender<OnchainEventsRequest>,
     snapshot_config: storage::db::snapshot::Config,
     shard_stores: HashMap<u32, Stores>,
     block_store: BlockStore,
@@ -46,7 +46,7 @@ impl MyAdminService {
     pub fn new(
         rpc_auth: String,
         mempool_tx: mpsc::Sender<MempoolRequest>,
-        onchain_events_request_tx: mpsc::Sender<OnchainEventsRequest>,
+        onchain_events_request_tx: broadcast::Sender<OnchainEventsRequest>,
         shard_stores: HashMap<u32, Stores>,
         block_store: BlockStore,
         snapshot_config: storage::db::snapshot::Config,
@@ -208,8 +208,7 @@ impl AdminService for MyAdminService {
                 proto::retry_onchain_events_request::Kind::Fid(fid) => {
                     self.onchain_events_request_tx
                         .send(OnchainEventsRequest::RetryFid(fid))
-                        .await
-                        .map_err(|err| Status::from_error(Box::new(err)))?;
+                        .map_err(|_| Status::internal("unable to handle request"))?;
                 }
                 proto::retry_onchain_events_request::Kind::BlockRange(retry_block_number_range) => {
                     self.onchain_events_request_tx
@@ -217,8 +216,7 @@ impl AdminService for MyAdminService {
                             start_block_number: retry_block_number_range.start_block_number,
                             stop_block_number: retry_block_number_range.stop_block_number,
                         })
-                        .await
-                        .map_err(|err| Status::from_error(Box::new(err)))?;
+                        .map_err(|_| Status::internal("unable to handle request"))?;
                 }
             },
         }

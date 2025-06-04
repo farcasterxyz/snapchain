@@ -1,4 +1,6 @@
 use crate::cfg::Config as AppConfig;
+use crate::proto::TierPurchaseBody;
+use crate::storage::store::node_local_state;
 use alloy_primitives::U256;
 use alloy_primitives::{address, ruint::FromUintError, Address, FixedBytes};
 use alloy_provider::{Provider, ProviderBuilder, RootProvider};
@@ -12,7 +14,7 @@ use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, warn};
 
 use crate::core::error::HubError;
@@ -52,11 +54,20 @@ sol!(
     "src/connectors/onchain_events/key_registry_abi.json"
 );
 
-static STORAGE_REGISTRY: Address = address!("00000000fcce7f938e7ae6d3c335bd6a1a7c593d");
+sol!(
+    #[allow(missing_docs)]
+    #[sol(rpc)]
+    TierRegistryAbi,
+    "src/connectors/onchain_events/tier_registry_abi.json"
+);
 
-static KEY_REGISTRY: Address = address!("00000000Fc1237824fb747aBDE0FF18990E59b7e");
+pub static STORAGE_REGISTRY: Address = address!("00000000fcce7f938e7ae6d3c335bd6a1a7c593d");
 
-static ID_REGISTRY: Address = address!("00000000Fc6c5F01Fc30151999387Bb99A9f489b");
+pub static KEY_REGISTRY: Address = address!("00000000Fc1237824fb747aBDE0FF18990E59b7e");
+
+pub static ID_REGISTRY: Address = address!("00000000Fc6c5F01Fc30151999387Bb99A9f489b");
+
+pub static TIER_REGISTRY: Address = address!("6F22091496694c370E5EbEF861c8f69472fF89B9");
 
 // Note these are the registry addresses, not the resolver addresses. We look up the resolver from the registry.
 static ETH_L1_ENS_REGISTRY: Address = address!("00000000000C2E074eC69A0dFb2997BA6C7d2e1e");
@@ -64,7 +75,8 @@ static BASE_MAINNET_ENS_REGISTRY: Address = address!("0xB94704422c2a1E396835A571
 
 // For reference, in case it needs to be specified manually
 const FIRST_BLOCK: u64 = 108864739;
-static CHAIN_ID: u32 = 10; // OP mainnet
+pub static OP_MAINNET_CHAIN_ID: u32 = 10; // OP mainnet
+pub static BASE_MAINNET_CHAIN_ID: u32 = 8453; // Base mainnet
 const RENT_EXPIRY_IN_SECONDS: u64 = 365 * 24 * 60 * 60; // One year
 
 const RETRY_TIMEOUT_SECONDS: u64 = 10;
@@ -86,6 +98,7 @@ impl Default for Config {
     }
 }
 
+#[derive(Clone)]
 pub enum OnchainEventsRequest {
     RetryFid(u64),
     RetryBlockRange {
@@ -110,6 +123,9 @@ pub enum SubscribeError {
 
     #[error(transparent)]
     UnableToConvertToU32(#[from] FromUintError<u32>),
+
+    #[error(transparent)]
+    UnableToConvertToI32(#[from] FromUintError<i32>),
 
     #[error("Empty rpc url")]
     EmptyRpcUrl,
@@ -162,10 +178,13 @@ impl ChainClients {
             );
             chain_api_map.insert(Chain::EthMainnet, client);
         }
-        if !app_config.base_rpc_url.is_empty() {
+        if !app_config.base_onchain_events.rpc_url.is_empty() {
             let client: Box<dyn ChainAPI> = Box::new(
-                RealL1Client::new(app_config.base_rpc_url.clone(), BASE_MAINNET_ENS_REGISTRY)
-                    .unwrap(),
+                RealL1Client::new(
+                    app_config.base_onchain_events.rpc_url.clone(),
+                    BASE_MAINNET_ENS_REGISTRY,
+                )
+                .unwrap(),
             );
             chain_api_map.insert(Chain::BaseMainnet, client);
         }
@@ -250,17 +269,23 @@ pub struct Subscriber {
     stop_block_number: Option<u64>,
     statsd_client: StatsdClientWrapper,
     local_state_store: LocalStateStore,
-    onchain_events_request_rx: mpsc::Receiver<OnchainEventsRequest>,
+    onchain_events_request_rx: broadcast::Receiver<OnchainEventsRequest>,
+    chain: node_local_state::Chain,
+    chain_id: u32,
+    contracts: Vec<Address>,
 }
 
 // TODO(aditi): Wait for 1 confirmation before "committing" an onchain event.
 impl Subscriber {
     pub fn new(
         config: &Config,
+        chain: node_local_state::Chain,
         mempool_tx: mpsc::Sender<MempoolRequest>,
         statsd_client: StatsdClientWrapper,
         local_state_store: LocalStateStore,
-        onchain_events_request_rx: mpsc::Receiver<OnchainEventsRequest>,
+        onchain_events_request_rx: broadcast::Receiver<OnchainEventsRequest>,
+        contracts: Vec<Address>,
+        chain_id: u32,
     ) -> Result<Subscriber, SubscribeError> {
         if config.rpc_url.is_empty() {
             return Err(SubscribeError::EmptyRpcUrl);
@@ -277,6 +302,9 @@ impl Subscriber {
             stop_block_number: config.stop_block_number,
             statsd_client,
             onchain_events_request_rx,
+            chain,
+            contracts,
+            chain_id,
         })
     }
 
@@ -310,7 +338,7 @@ impl Subscriber {
             log_index,
             tx_index,
             r#type: event_type as i32,
-            chain_id: CHAIN_ID,
+            chain_id: self.chain_id,
             version: 0,
             body: Some(event_body),
             transaction_hash: transaction_hash.to_vec(),
@@ -375,7 +403,10 @@ impl Subscriber {
 
     fn record_block_number(&self, block_number: u64) {
         if block_number as u64 > self.latest_block_in_db() {
-            match self.local_state_store.set_latest_block_number(block_number) {
+            match self
+                .local_state_store
+                .set_latest_block_number(self.chain.clone(), block_number)
+            {
                 Err(err) => {
                     error!(
                         block_number,
@@ -599,6 +630,25 @@ impl Subscriber {
                 .await;
                 Ok(())
             }
+            Some(&TierRegistryAbi::PurchasedTier::SIGNATURE_HASH) => {
+                let TierRegistryAbi::PurchasedTier {
+                    fid,
+                    tier,
+                    forDays,
+                    payer,
+                } = event.log_decode()?.inner.data;
+                add_event(
+                    fid.try_into()?,
+                    OnChainEventType::EventTypeTierPurchase,
+                    on_chain_event::Body::TierPurchaseEventBody(TierPurchaseBody {
+                        tier_type: tier.try_into()?,
+                        for_days: forDays.try_into()?,
+                        payer: payer.to_vec(),
+                    }),
+                )
+                .await;
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -648,6 +698,20 @@ impl Subscriber {
         }
     }
 
+    pub fn event_kind(contract: Address) -> String {
+        if contract == STORAGE_REGISTRY {
+            "storage".to_string()
+        } else if contract == ID_REGISTRY {
+            "id".to_string()
+        } else if contract == KEY_REGISTRY {
+            "key".to_string()
+        } else if contract == TIER_REGISTRY {
+            "tier".to_string()
+        } else {
+            "unknown".to_string()
+        }
+    }
+
     pub async fn sync_historical_events(
         &mut self,
         initial_start_block: u64,
@@ -658,21 +722,14 @@ impl Subscriber {
         loop {
             let stop_block = final_stop_block.min(start_block + batch_size);
 
-            let storage_filter = Filter::new()
-                .address(STORAGE_REGISTRY)
-                .from_block(start_block)
-                .to_block(stop_block);
-            self.get_logs_with_retry(storage_filter, "storage").await?;
-            let id_filter = Filter::new()
-                .address(ID_REGISTRY)
-                .from_block(start_block)
-                .to_block(stop_block);
-            self.get_logs_with_retry(id_filter, "id").await?;
-            let key_filter = Filter::new()
-                .address(KEY_REGISTRY)
-                .from_block(start_block)
-                .to_block(stop_block);
-            self.get_logs_with_retry(key_filter, "key").await?;
+            for contract in self.contracts.clone() {
+                let filter = Filter::new()
+                    .address(contract)
+                    .from_block(start_block)
+                    .to_block(stop_block);
+                self.get_logs_with_retry(filter, &Self::event_kind(contract.clone()))
+                    .await?;
+            }
 
             self.record_block_number(stop_block);
             start_block += batch_size;
@@ -689,7 +746,10 @@ impl Subscriber {
     }
 
     fn latest_block_in_db(&self) -> u64 {
-        match self.local_state_store.get_latest_block_number() {
+        match self
+            .local_state_store
+            .get_latest_block_number(self.chain.clone())
+        {
             Ok(number) => number.unwrap_or(0),
             Err(err) => {
                 error!(
@@ -738,7 +798,7 @@ impl Subscriber {
 
     async fn sync_live_events(&mut self, start_block_number: u64) -> Result<(), SubscribeError> {
         let filter = Filter::new()
-            .address(vec![STORAGE_REGISTRY, KEY_REGISTRY, ID_REGISTRY])
+            .address(self.contracts.clone())
             .from_block(start_block_number);
 
         let filter = match self.stop_block_number {
@@ -754,9 +814,9 @@ impl Subscriber {
 
                  request = self.onchain_events_request_rx.recv() => {
                     match request {
-                        None => {
+                        Err(_) => {
                             // Ignore, this can happen if we don't run an admin server
-                        }, Some(request) => {
+                        }, Ok(request) => {
                             match request {
                                 OnchainEventsRequest::RetryFid(retry_fid) =>  {
                                     if let Err(err) = self.retry_fid(retry_fid).await {
@@ -806,38 +866,40 @@ impl Subscriber {
         Ok(())
     }
 
+    fn retry_filter_for_contract(contract: Address, fid: u64) -> Filter {
+        if contract == STORAGE_REGISTRY {
+            Filter::new()
+                .address(vec![STORAGE_REGISTRY])
+                .from_block(FIRST_BLOCK)
+                .events(vec!["Rent(address,uint256,uint256)"])
+                .topic2(U256::from(fid))
+        } else if contract == KEY_REGISTRY {
+            Filter::new()
+                .address(vec![KEY_REGISTRY])
+                .from_block(FIRST_BLOCK)
+                .events(vec![
+                    "Add(uint256,uint32,bytes,bytes,uint8,bytes)",
+                    "Remove(uint256,bytes,bytes)",
+                ])
+                .topic1(U256::from(fid))
+        } else if contract == ID_REGISTRY {
+            Filter::new()
+                .address(vec![ID_REGISTRY])
+                .from_block(FIRST_BLOCK)
+                .events(vec!["Register(address,uint256,address)"])
+                .topic2(U256::from(fid))
+        } else {
+            panic!("Unrecognized contract")
+        }
+    }
+
     pub async fn retry_fid(&mut self, fid: u64) -> Result<(), SubscribeError> {
         info!(fid, "Retrying onchain events for fid");
-        let filter = Filter::new()
-            .address(vec![STORAGE_REGISTRY])
-            .from_block(FIRST_BLOCK)
-            .events(vec!["Rent(address,uint256,uint256)"])
-            .topic2(U256::from(fid));
-        self.get_logs_with_retry(filter, "storage").await?;
-
-        let filter = Filter::new()
-            .address(vec![KEY_REGISTRY])
-            .from_block(FIRST_BLOCK)
-            .events(vec![
-                "Add(uint256,uint32,bytes,bytes,uint8,bytes)",
-                "Remove(uint256,bytes,bytes)",
-            ])
-            .topic1(U256::from(fid));
-        self.get_logs_with_retry(filter, "key").await?;
-
-        let filter = Filter::new()
-            .address(vec![ID_REGISTRY])
-            .from_block(FIRST_BLOCK)
-            .events(vec!["Register(address,uint256,address)"])
-            .topic2(U256::from(fid));
-        self.get_logs_with_retry(filter, "id").await?;
-
-        let filter = Filter::new()
-            .address(vec![ID_REGISTRY])
-            .from_block(FIRST_BLOCK)
-            .events(vec!["Transfer(address,address,uint256)"])
-            .topic3(U256::from(fid));
-        self.get_logs_with_retry(filter, "id").await?;
+        for contract in self.contracts.clone() {
+            let filter = Self::retry_filter_for_contract(contract, fid);
+            self.get_logs_with_retry(filter, &Self::event_kind(contract))
+                .await?;
+        }
 
         Ok(())
     }
@@ -852,7 +914,7 @@ impl Subscriber {
             stop_block_number, "Retrying onchain events in range"
         );
         let filter = Filter::new()
-            .address(vec![STORAGE_REGISTRY, KEY_REGISTRY, ID_REGISTRY])
+            .address(self.contracts.clone())
             .from_block(start_block_number)
             .to_block(stop_block_number);
         self.get_logs_with_retry(filter, "all").await?;
@@ -924,6 +986,8 @@ impl Subscriber {
 
 #[cfg(test)]
 mod tests {
+    use crate::connectors::onchain_events;
+
     use super::*;
 
     #[tokio::test]
@@ -933,7 +997,11 @@ mod tests {
         let api_key = "<KEY>";
         let app_config = AppConfig {
             l1_rpc_url: format!("https://eth-mainnet.g.alchemy.com/v2/{}", api_key).to_string(),
-            base_rpc_url: format!("https://base-mainnet.g.alchemy.com/v2/{}", api_key).to_string(),
+            base_onchain_events: onchain_events::Config {
+                rpc_url: format!("https://base-mainnet.g.alchemy.com/v2/{}", api_key).to_string(),
+                start_block_number: None,
+                stop_block_number: None,
+            },
             ..Default::default()
         };
         let chain_clients = ChainClients::new(&app_config);
