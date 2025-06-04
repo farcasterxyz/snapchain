@@ -651,6 +651,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_primary_address_revoked_when_verification_deleted() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            limits: None,
+            db: None,
+            messages_request_tx: None,
+            network: Some(proto::FarcasterNetwork::Devnet), // Enables all protocol features including primary addresses
+        });
+
+        // Register a user
+        test_helper::register_user(
+            FID3_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        // Test Ethereum primary address revocation
+        let eth_address = "91031dcfdea024b4d51e775486111d2b2a715871";
+        let eth_address_bytes = hex::decode(eth_address).unwrap();
+        // Generate the proper checksummed address
+        let address_instance = alloy_primitives::Address::from_slice(&eth_address_bytes);
+        let eth_address_checksummed = address_instance.to_checksum(None);
+
+        // Step 1: Add Ethereum verification
+        let verification_add = messages_factory::verifications::create_verification_add(
+            FID3_FOR_TEST,
+            0, // Protocol::Ethereum
+            eth_address_bytes.clone(),
+            hex::decode("b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c").unwrap(),
+            hex::decode("d74860c4bbf574d5ad60f03a478a30f990e05ac723e138a5c860cdb3095f4296").unwrap(),
+            Some(timestamp),
+            None,
+        );
+        commit_message(&mut engine, &verification_add).await;
+
+        // Step 2: Set the Ethereum address as primary address
+        let primary_address_msg = messages_factory::user_data::create_user_data_add(
+            FID3_FOR_TEST,
+            proto::UserDataType::UserDataPrimaryAddressEthereum,
+            &eth_address_checksummed.to_string(),
+            Some(timestamp + 1),
+            None,
+        );
+        commit_message(&mut engine, &primary_address_msg).await;
+
+        // Verify the primary address was set
+        let user_data_result = engine.get_user_data_by_fid_and_type(
+            FID3_FOR_TEST,
+            proto::UserDataType::UserDataPrimaryAddressEthereum,
+        );
+        assert!(user_data_result.is_ok(), "Primary address should be set");
+        let user_data = user_data_result.unwrap();
+        if let Some(data) = &user_data.data {
+            if let Some(proto::message_data::Body::UserDataBody(body)) = &data.body {
+                assert_eq!(
+                    body.value, eth_address_checksummed,
+                    "Primary address should match"
+                );
+            }
+        }
+
+        // Step 3: Remove the verification (this should also revoke the primary address)
+        let verification_remove = messages_factory::verifications::create_verification_remove(
+            FID3_FOR_TEST,
+            eth_address_bytes.clone(),
+            Some(timestamp + 2),
+            None,
+        );
+        commit_message(&mut engine, &verification_remove).await;
+
+        // Step 4: Verify the primary address was automatically revoked
+        let user_data_result_after = engine.get_user_data_by_fid_and_type(
+            FID3_FOR_TEST,
+            proto::UserDataType::UserDataPrimaryAddressEthereum,
+        );
+        assert!(
+            user_data_result_after.is_err(),
+            "Primary address should be automatically revoked when verification is removed"
+        );
+
+        // Verify verifications were actually removed
+        let verification_result = engine.get_verifications_by_fid(FID3_FOR_TEST);
+        assert_eq!(
+            0,
+            verification_result.unwrap().messages.len(),
+            "All verifications should be removed"
+        );
+    }
+
+    #[tokio::test]
     async fn test_commit_username_proof_messages() {
         let timestamp = messages_factory::farcaster_time();
         let (mut engine, _tmpdir) = test_helper::new_engine();

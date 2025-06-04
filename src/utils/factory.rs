@@ -489,6 +489,26 @@ pub mod messages_factory {
                 private_key,
             )
         }
+
+        pub fn create_verification_remove_with_protocol(
+            fid: u64,
+            protocol: i32,
+            address: Vec<u8>,
+            timestamp: Option<u32>,
+            private_key: Option<&SigningKey>,
+        ) -> message::Message {
+            let body = VerificationRemoveBody {
+                address: address,
+                protocol: protocol,
+            };
+            create_message_with_data(
+                fid,
+                MessageType::VerificationRemove,
+                message::message_data::Body::VerificationRemoveBody(body),
+                timestamp,
+                private_key,
+            )
+        }
     }
 
     pub mod username_proof {
