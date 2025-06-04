@@ -1001,12 +1001,7 @@ impl ShardEngine {
                 .user_data_store
                 .merge(msg, txn_batch)
                 .map_err(|e| MessageValidationError::StoreError(e)),
-            MessageType::VerificationAddEthAddress => self
-                .stores
-                .verification_store
-                .merge(msg, txn_batch)
-                .map_err(|e| MessageValidationError::StoreError(e)),
-            MessageType::VerificationRemove => self
+            MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => self
                 .stores
                 .verification_store
                 .merge(msg, txn_batch)
