@@ -1299,9 +1299,14 @@ impl ShardEngine {
         if address.is_empty() {
             return Ok(());
         }
-        let address_instance: Address =
-            Address::from_hex(address).map_err(|_| MessageValidationError::InvalidSolanaAddress)?;
-        self.validate_fid_has_verification(fid, Protocol::Solana, address_instance.as_ref())?;
+        // Decode Solana address from base58 to bytes
+        let address_bytes = bs58::decode(address)
+            .into_vec()
+            .map_err(|_| MessageValidationError::InvalidSolanaAddress)?;
+        if address_bytes.len() != 32 {
+            return Err(MessageValidationError::InvalidSolanaAddress);
+        }
+        self.validate_fid_has_verification(fid, Protocol::Solana, &address_bytes)?;
         Ok(())
     }
 
