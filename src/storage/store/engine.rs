@@ -852,41 +852,11 @@ impl ShardEngine {
     fn check_and_revoke_primary_address(
         &mut self,
         fid: u64,
-        deleted_verification: &proto::HubEvent,
+        deleted_verification: &proto::VerificationAddAddressBody,
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<(), MessageValidationError> {
-        // Early return if not a merge message event
-        let merge_body = match &deleted_verification.body {
-            Some(hub_event::Body::MergeMessageBody(body)) => body,
-            _ => return Err(MessageValidationError::NoMessageData),
-        };
-
-        // Early return if no message
-        let message = match &merge_body.message {
-            Some(message) => message,
-            None => return Err(MessageValidationError::NoMessageData),
-        };
-
-        // Early return if no message data
-        let data = match &message.data {
-            Some(data) => data,
-            None => return Err(MessageValidationError::NoMessageData),
-        };
-
-        // Check if this is a verification add message
-        // (deleted verifications are represented as deleted VerificationAdd messages)
-        if data.r#type != MessageType::VerificationAddEthAddress as i32 {
-            return Err(MessageValidationError::InvalidMessageType(data.r#type));
-        }
-
-        // Extract verification remove body or return early
-        let verification_body = match &data.body {
-            Some(Body::VerificationAddAddressBody(body)) => body,
-            _ => return Err(MessageValidationError::InvalidMessageType(data.r#type)),
-        };
-
         // Determine protocol from removal message
-        let protocol = match verification_body.protocol {
+        let protocol = match deleted_verification.protocol {
             x if x == proto::Protocol::Ethereum as i32 => proto::Protocol::Ethereum,
             x if x == proto::Protocol::Solana as i32 => proto::Protocol::Solana,
             _ => return Err(MessageValidationError::AddressNotPartOfVerification),
@@ -895,9 +865,9 @@ impl ShardEngine {
         // Parse address based on protocol
         let parsed_address = match protocol {
             proto::Protocol::Ethereum => {
-                Address::from_slice(&verification_body.address).to_checksum(None)
+                Address::from_slice(&deleted_verification.address).to_checksum(None)
             }
-            proto::Protocol::Solana => bs58::encode(&verification_body.address).into_string(),
+            proto::Protocol::Solana => bs58::encode(&deleted_verification.address).into_string(),
         };
 
         // Determine user data type based on protocol
@@ -962,17 +932,19 @@ impl ShardEngine {
                         // NOTE: VerificationAddEthAddress is used for both Ethereum and Solana verifications.
                         // we differentiate between the two by checking the protocol field.
                         if data.r#type == MessageType::VerificationAddEthAddress as i32 {
-                            if let Err(err) = self.check_and_revoke_primary_address(
-                                deleted_message.fid(),
-                                event,
-                                txn_batch,
-                            ) {
-                                if *source != ProposalSource::Simulate {
-                                    warn!(
-                                        fid = deleted_message.fid(),
-                                        "Error handling verification hooks for deleted verification: {:?}",
-                                        err
-                                    );
+                            if let Some(Body::VerificationAddAddressBody(body)) = &data.body {
+                                if let Err(err) = self.check_and_revoke_primary_address(
+                                    deleted_message.fid(),
+                                    body,
+                                    txn_batch,
+                                ) {
+                                    if *source != ProposalSource::Simulate {
+                                        warn!(
+                                            fid = deleted_message.fid(),
+                                            "Error handling verification hooks for deleted verification: {:?}",
+                                            err
+                                        );
+                                    }
                                 }
                             }
                         }
