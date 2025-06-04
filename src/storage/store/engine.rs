@@ -958,6 +958,8 @@ impl ShardEngine {
                 for deleted_message in &merge_body.deleted_messages {
                     // Check if this was a verification add message that was deleted
                     if let Some(data) = &deleted_message.data {
+                        // NOTE: VerificationAddEthAddress is used for both Ethereum and Solana verifications.
+                        // we differentiate between the two by checking the protocol field.
                         if data.r#type == MessageType::VerificationAddEthAddress as i32 {
                             if let Err(err) = self.check_and_revoke_primary_address(
                                 deleted_message.fid(),
@@ -1253,10 +1255,10 @@ impl ShardEngine {
                     self.validate_username(message_data.fid, &user_data.value, txn_batch)?;
                 }
                 if user_data.r#type == proto::UserDataType::UserDataPrimaryAddressEthereum as i32 {
-                    self.validate_ethereum_address(message_data.fid, &user_data.value)?;
+                    self.validate_ethereum_address_ownership(message_data.fid, &user_data.value)?;
                 }
                 if user_data.r#type == proto::UserDataType::UserDataPrimaryAddressSolana as i32 {
-                    self.validate_solana_address(message_data.fid, &user_data.value)?;
+                    self.validate_solana_address_ownership(message_data.fid, &user_data.value)?;
                 }
             }
             _ => {}
@@ -1300,7 +1302,7 @@ impl ShardEngine {
         }
     }
 
-    fn validate_ethereum_address(
+    fn validate_ethereum_address_ownership(
         &self,
         fid: u64,
         address: &str,
@@ -1311,11 +1313,11 @@ impl ShardEngine {
         // Decode Ethereum address into bytes
         let address_instance: Address = Address::from_hex(address)
             .map_err(|_| MessageValidationError::InvalidEthereumAddress)?;
-        self.validate_fid_has_verification(fid, Protocol::Ethereum, address_instance.as_ref())?;
+        self.verify_fid_owns_address(fid, Protocol::Ethereum, address_instance.as_ref())?;
         Ok(())
     }
 
-    fn validate_solana_address(
+    fn validate_solana_address_ownership(
         &self,
         fid: u64,
         address: &str,
@@ -1330,7 +1332,7 @@ impl ShardEngine {
         if address_bytes.len() != 32 {
             return Err(MessageValidationError::InvalidSolanaAddress);
         }
-        self.validate_fid_has_verification(fid, Protocol::Solana, &address_bytes)?;
+        self.verify_fid_owns_address(fid, Protocol::Solana, &address_bytes)?;
         Ok(())
     }
 
@@ -1689,7 +1691,7 @@ impl ShardEngine {
         )
     }
 
-    pub fn validate_fid_has_verification(
+    pub fn verify_fid_owns_address(
         &self,
         fid: u64,
         protocol: Protocol,
