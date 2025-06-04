@@ -19,6 +19,7 @@ pub enum ProtocolFeature {
     Basenames,
     EnsValidation, // Before this version, ENS validation was not enforced
     MessageLengthCheckFix,
+    PrimaryAddresses,
 }
 
 pub struct VersionSchedule {
@@ -105,7 +106,8 @@ impl EngineVersion {
             ProtocolFeature::FarcasterPro
             | ProtocolFeature::Basenames
             | ProtocolFeature::EnsValidation
-            | ProtocolFeature::MessageLengthCheckFix => self >= &EngineVersion::V5,
+            | ProtocolFeature::MessageLengthCheckFix
+            | ProtocolFeature::PrimaryAddresses => self >= &EngineVersion::V5,
         }
     }
 
