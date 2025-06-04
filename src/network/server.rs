@@ -1196,14 +1196,16 @@ impl HubService for MyHubService {
     ) -> Result<Response<ValidationResponse>, Status> {
         let request = request.into_inner();
         let stores = self.get_stores_for(request.fid())?;
-        let current_time = FarcasterTime::current();
-        let version = EngineVersion::version_for(&current_time, self.network);
         let is_pro_user = stores
-            .is_pro_user(request.fid(), &current_time)
+            .is_pro_user(request.fid(), &FarcasterTime::current())
             .map_err(|err| Status::from_error(Box::new(err)))?;
-        let result =
-            validations::message::validate_message(&request, self.network, is_pro_user, version)
-                .map_or_else(|_| false, |_| true);
+        let result = validations::message::validate_message(
+            &request,
+            self.network,
+            is_pro_user,
+            EngineVersion::current(self.network),
+        )
+        .map_or_else(|_| false, |_| true);
 
         Ok(Response::new(ValidationResponse {
             valid: result,

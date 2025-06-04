@@ -1,7 +1,7 @@
 use tokio::sync::{broadcast, mpsc};
 
 use crate::mempool::mempool::{self, Mempool, MempoolRequest, MempoolSource};
-use crate::proto::{FarcasterNetwork, Height, ShardChunk, ShardHeader};
+use crate::proto::{Height, ShardChunk, ShardHeader};
 use crate::storage::store::engine::{MempoolMessage, ShardStateChange};
 use crate::storage::store::stores::StoreLimits;
 use crate::storage::store::test_helper;
@@ -38,7 +38,6 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     let (gossip_tx, _gossip_rx) = mpsc::channel(100);
     let (_shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
 
-    let network = FarcasterNetwork::Devnet;
     let (mut engine, _tmpdir) = test_helper::new_engine_with_options(test_helper::EngineOptions {
         limits: Some(StoreLimits {
             limits: test_helper::limits::unlimited(),
@@ -46,7 +45,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         }),
         db: None,
         messages_request_tx: Some(messages_request_tx),
-        network: Some(network),
+        network: None,
     });
 
     let statsd_client = StatsdClientWrapper::new(
