@@ -304,7 +304,7 @@ mod tests {
             &proof_message,
             FarcasterNetwork::Testnet,
             false,
-            EngineVersion::latest(),
+            EngineVersion::V4,
         );
         assert!(result.is_err());
         assert_eq!(result.err().unwrap(), ValidationError::UnsupportedFeature);
