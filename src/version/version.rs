@@ -15,6 +15,7 @@ pub enum ProtocolFeature {
     SignerRevokeBug,
     FarcasterPro,
     Basenames,
+    PrimaryAddresses,
 }
 
 pub struct VersionSchedule {
@@ -97,6 +98,7 @@ impl EngineVersion {
             ProtocolFeature::FarcasterPro | ProtocolFeature::Basenames => {
                 self >= &EngineVersion::V5
             }
+            ProtocolFeature::PrimaryAddresses => self >= &EngineVersion::V5,
         }
     }
 }
