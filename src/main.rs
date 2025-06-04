@@ -520,7 +520,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 match result {
                     Ok(()) => {}
                     Err(e) => {
-                        error!("Error subscribing to on chain events {:#?}", e);
+                        error!("Error subscribing to on chain events on optimism {:#?}", e);
                     }
                 }
             });
@@ -544,7 +544,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 match result {
                     Ok(()) => {}
                     Err(e) => {
-                        error!("Error subscribing to on chain events {:#?}", e);
+                        error!("Error subscribing to on chain events on base {:#?}", e);
                     }
                 }
             });
