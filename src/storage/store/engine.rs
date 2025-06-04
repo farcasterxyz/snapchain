@@ -960,7 +960,7 @@ impl ShardEngine {
                     if let Some(data) = &deleted_message.data {
                         // NOTE: VerificationAddEthAddress is used for both Ethereum and Solana verifications.
                         // we differentiate between the two by checking the protocol field.
-                        if data.r#type == MessageType::VerificationAddEthAddress as i32 {
+                        if data.r#type == MessageType::VerificationRemove as i32 {
                             if let Err(err) = self.check_and_revoke_primary_address(
                                 deleted_message.fid(),
                                 event,
