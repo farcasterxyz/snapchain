@@ -561,6 +561,7 @@ impl OnchainEventStore {
         fid: u64,
         timestamp: &FarcasterTime,
     ) -> Result<bool, OnchainEventStorageError> {
+        // TODO(aditi): This is pretty expensive, we may want to add caching for fid -> tier expiration to speed up.
         // Sorted by block timestamp
         let tier_purchase_events = self
             .get_onchain_events(OnChainEventType::EventTypeTierPurchase, Some(fid))?
