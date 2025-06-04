@@ -1691,6 +1691,16 @@ impl ShardEngine {
         )
     }
 
+    /// Verifies that a FID has an active verification for a specific address and protocol.
+    ///
+    /// This function checks if a user has previously verified ownership of an address by looking for
+    /// existing VerificationAddAddress messages in their verification store. It's used to ensure that
+    /// users can only set addresses as primary addresses if they have already proven ownership through
+    /// the verification process.
+    ///
+    /// # Note
+    /// Only checks for add messages since CRDT rules ensure that verification remove messages
+    /// automatically drop the corresponding add messages from the active state.
     pub fn verify_fid_owns_address(
         &self,
         fid: u64,
