@@ -830,7 +830,13 @@ impl ShardEngine {
         Ok((account_root, events, validation_errors))
     }
 
-    fn handle_verification_merge_hooks(
+    /// Checks if a removed verification was set as the user's primary address and revokes it if necessary.
+    ///
+    /// When a verification is removed from a user's account, this function ensures that if the
+    /// removed address was also set as their primary address (for either Ethereum or Solana),
+    /// the primary address setting is also revoked to maintain consistency.
+    ///
+    fn check_and_revoke_primary_address(
         &mut self,
         fid: u64,
         hub_event: &proto::HubEvent,
@@ -919,6 +925,8 @@ impl ShardEngine {
         Ok(())
     }
 
+    /// Takes a list of merge events of type VerificationAddAddress and revokes the user's primary address
+    /// if it was deleted as part of a verification remove message.
     fn revoke_primary_addresses_for_deleted_verifications(
         &mut self,
         version: &EngineVersion,
@@ -938,7 +946,7 @@ impl ShardEngine {
                     // Check if this was a verification add message that was deleted
                     if let Some(data) = &deleted_message.data {
                         if data.r#type == MessageType::VerificationAddEthAddress as i32 {
-                            if let Err(err) = self.handle_verification_merge_hooks(
+                            if let Err(err) = self.check_and_revoke_primary_address(
                                 deleted_message.fid(),
                                 event,
                                 txn_batch,
