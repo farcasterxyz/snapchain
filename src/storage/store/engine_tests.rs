@@ -21,6 +21,7 @@ mod tests {
     use crate::storage::trie::merkle_trie::TrieKey;
     use crate::utils::factory::{self, events_factory, messages_factory, time, username_factory};
     use crate::version::version::{EngineVersion, ProtocolFeature};
+    use base64::prelude::*;
     use ed25519_dalek::{Signer, SigningKey};
     use prost::Message;
 
@@ -842,7 +843,7 @@ mod tests {
             FID3_FOR_TEST,
             0, // Protocol::Ethereum
             other_address_bytes.clone(),
-            base64::decode("TaU+v+BdZnIJc5CBir69j1taejse9uFgFSUOx3AYH1t7rPH6p8YlAmTbO9poXMRunbGcAmtGibn0DL1wXmIEkhs=").unwrap(),
+            BASE64_STANDARD.decode("TaU+v+BdZnIJc5CBir69j1taejse9uFgFSUOx3AYH1t7rPH6p8YlAmTbO9poXMRunbGcAmtGibn0DL1wXmIEkhs=").unwrap(),
             hex::decode("e9ddee7d7fe82a1f326b8c624b9c8031ba7561bf9d92c76067a9d0c01b5ba424").unwrap(),
             Some(timestamp + 1),
             None,
