@@ -486,7 +486,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             gossip_tx.clone(),
             shard_decision_rx,
             statsd_client.clone(),
-            app_config.fc_network,
         );
         tokio::spawn(async move { mempool.run().await });
 

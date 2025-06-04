@@ -90,6 +90,9 @@ pub enum MessageValidationError {
 
     #[error("fname is not registered for fid")]
     MissingFname,
+
+    #[error("inactive feature")]
+    InactiveFeature,
 }
 
 #[derive(Clone, Debug)]
@@ -590,6 +593,13 @@ impl ShardEngine {
         // System messages first, then user messages and finally prunes
         for msg in &snapchain_txn.system_messages {
             if let Some(onchain_event) = &msg.on_chain_event {
+                if onchain_event.r#type() == OnChainEventType::EventTypeTierPurchase
+                    && !version.is_enabled(ProtocolFeature::FarcasterPro)
+                {
+                    warn!("Saw tier purchase while feature isn't active");
+                    continue;
+                }
+
                 let event = self
                     .stores
                     .onchain_event_store
@@ -1065,7 +1075,7 @@ impl ShardEngine {
 
         let is_pro_user = self
             .stores
-            .is_pro_user(message.fid(), timestamp, version)
+            .is_pro_user(message.fid(), timestamp)
             .map_err(|err| HubError::internal_db_error(&err.to_string()))?;
         validations::message::validate_message(message, self.network, is_pro_user, version)?;
 

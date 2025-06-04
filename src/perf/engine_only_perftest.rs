@@ -65,7 +65,6 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         gossip_tx,
         shard_decision_rx,
         statsd_client,
-        network,
     );
 
     tokio::spawn(async move {
