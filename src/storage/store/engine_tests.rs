@@ -684,7 +684,7 @@ mod tests {
             FID_FOR_TEST,
             proto::UserDataType::Username,
             &"username.base.eth".to_string(),
-            Some(timestamp + 1),
+            Some(timestamp + 2),
             Some(&signer),
         );
         commit_message(&mut engine, &base_userdata_add).await;
