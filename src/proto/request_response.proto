@@ -156,6 +156,7 @@ message StorageLimitsResponse {
   repeated StorageLimit limits = 1;
   uint32 units = 2;
   repeated StorageUnitDetails unit_details = 3;
+  bool is_pro_user = 4;
 }
 
 enum StoreType {

@@ -64,6 +64,7 @@ mod tests {
                 max_capacity: 10,
             },
             statsd_client(),
+            crate::proto::FarcasterNetwork::Devnet,
         );
 
         for _ in 0..6000 {
@@ -103,6 +104,7 @@ mod tests {
                 max_capacity: 10,
             },
             statsd_client(),
+            crate::proto::FarcasterNetwork::Devnet,
         );
 
         for _ in 0..600 {
@@ -145,6 +147,7 @@ mod tests {
                 max_capacity: 10,
             },
             statsd_client(),
+            crate::proto::FarcasterNetwork::Devnet,
         );
 
         for fid in FID_FOR_TEST..FID_FOR_TEST + 11 {
@@ -186,6 +189,7 @@ mod tests {
                 max_capacity: 10,
             },
             statsd_client(),
+            crate::proto::FarcasterNetwork::Devnet,
         );
 
         // Min allowance is 100
@@ -213,6 +217,7 @@ mod tests {
                 max_capacity: 10,
             },
             statsd_client(),
+            crate::proto::FarcasterNetwork::Devnet,
         );
 
         // If allowance is 0, don't allow any messages. This more realistically happens when the user has no storage.

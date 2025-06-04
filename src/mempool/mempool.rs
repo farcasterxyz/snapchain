@@ -12,7 +12,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
-use crate::proto::OnChainEventType;
+use crate::proto::{FarcasterNetwork, OnChainEventType};
+use crate::version::version::EngineVersion;
 use crate::{
     core::types::SnapchainValidatorContext,
     network::gossip::GossipEvent,
@@ -58,6 +59,7 @@ pub struct RateLimits {
     shard_stores: HashMap<u32, Stores>,
     rate_limits_by_fid: Cache<u64, Arc<DirectRateLimiter>>,
     statsd_client: StatsdClientWrapper,
+    network: FarcasterNetwork,
 }
 
 impl RateLimits {
@@ -65,6 +67,7 @@ impl RateLimits {
         shard_stores: HashMap<u32, Stores>,
         config: RateLimitsConfig,
         statsd_client: StatsdClientWrapper,
+        network: FarcasterNetwork,
     ) -> Self {
         RateLimits {
             shard_stores,
@@ -73,6 +76,7 @@ impl RateLimits {
                 .time_to_idle(config.time_to_idle)
                 .eviction_policy(EvictionPolicy::lru())
                 .build(),
+            network,
         }
     }
 
@@ -87,7 +91,9 @@ impl RateLimits {
     ) -> Option<Arc<DirectRateLimiter>> {
         self.rate_limits_by_fid.optionally_get_with(fid, || {
             let stores = self.shard_stores.get(&shard_id).unwrap();
-            let storage_limits = stores.get_storage_limits(fid).unwrap();
+            let storage_limits = stores
+                .get_storage_limits(fid, EngineVersion::current(self.network))
+                .unwrap();
             let storage_allowance: u32 = storage_limits
                 .limits
                 .iter()
@@ -407,6 +413,7 @@ impl Mempool {
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         shard_decision_rx: broadcast::Receiver<ShardChunk>,
         statsd_client: StatsdClientWrapper,
+        network: FarcasterNetwork,
     ) -> Self {
         Mempool {
             messages: HashMap::new(),
@@ -417,6 +424,7 @@ impl Mempool {
                     shard_stores.clone(),
                     RateLimitsConfig::default(),
                     statsd_client.clone(),
+                    network,
                 ))
             } else {
                 None

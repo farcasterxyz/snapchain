@@ -1063,7 +1063,10 @@ impl ShardEngine {
             .as_ref()
             .ok_or(MessageValidationError::NoMessageData)?;
 
-        let is_pro_user = Self::is_pro_user(&self.stores, message.fid(), timestamp, version)?;
+        let is_pro_user = self
+            .stores
+            .is_pro_user(message.fid(), timestamp, version)
+            .map_err(|err| HubError::internal_db_error(&err.to_string()))?;
         validations::message::validate_message(message, self.network, is_pro_user, version)?;
 
         // Check that the user has a custody address
@@ -1539,22 +1542,6 @@ impl ShardEngine {
             return false;
         }
         signer_event.event_type == proto::SignerEventType::Remove as i32
-    }
-
-    pub fn is_pro_user(
-        stores: &Stores,
-        fid: u64,
-        block_timestamp: &FarcasterTime,
-        version: EngineVersion,
-    ) -> Result<bool, HubError> {
-        if version.is_enabled(ProtocolFeature::FarcasterPro) {
-            Ok(stores
-                .onchain_event_store
-                .is_tier_subscription_active_at(proto::TierType::Pro, fid, block_timestamp)
-                .map_err(|err| HubError::internal_db_error(&err.to_string()))?)
-        } else {
-            Ok(false)
-        }
     }
 }
 

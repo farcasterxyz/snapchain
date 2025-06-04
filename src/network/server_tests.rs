@@ -241,6 +241,7 @@ mod tests {
         let (mempool_tx, mempool_rx) = mpsc::channel(1000);
         let (gossip_tx, _gossip_rx) = mpsc::channel(1000);
         let (_shard_decision_tx, shard_decision_rx) = broadcast::channel(1000);
+        let network = proto::FarcasterNetwork::Devnet;
         let mut mempool = Mempool::new(
             mempool::Config::default(),
             mempool_rx,
@@ -250,6 +251,7 @@ mod tests {
             gossip_tx,
             shard_decision_rx,
             statsd_client.clone(),
+            network,
         );
         tokio::spawn(async move { mempool.run().await });
 
@@ -275,7 +277,7 @@ mod tests {
                 senders,
                 statsd_client,
                 num_shards,
-                proto::FarcasterNetwork::Testnet,
+                network,
                 message_router,
                 mempool_tx.clone(),
                 chain_clients,

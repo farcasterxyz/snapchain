@@ -92,6 +92,10 @@ impl EngineVersion {
         }
     }
 
+    pub fn current(network: FarcasterNetwork) -> Self {
+        Self::version_for(&FarcasterTime::current(), network)
+    }
+
     pub fn is_enabled(&self, feature: ProtocolFeature) -> bool {
         match feature {
             ProtocolFeature::SignerRevokeBug => {

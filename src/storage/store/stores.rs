@@ -3,9 +3,11 @@ use super::account::{
     VerificationStore, VerificationStoreDef,
 };
 use crate::core::error::HubError;
+use crate::core::util::FarcasterTime;
 use crate::proto::MessageType;
 use crate::proto::{
-    HubEvent, StorageLimit, StorageLimitsResponse, StorageUnitDetails, StorageUnitType, StoreType,
+    self, HubEvent, StorageLimit, StorageLimitsResponse, StorageUnitDetails, StorageUnitType,
+    StoreType,
 };
 use crate::storage::constants::PAGE_SIZE_MAX;
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
@@ -17,6 +19,7 @@ use crate::storage::store::shard::ShardStore;
 use crate::storage::trie::merkle_trie;
 use crate::storage::trie::merkle_trie::TrieKey;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -243,7 +246,28 @@ impl Stores {
         total_count
     }
 
-    pub fn get_storage_limits(&self, fid: u64) -> Result<StorageLimitsResponse, StoresError> {
+    pub fn is_pro_user(
+        &self,
+        fid: u64,
+        block_timestamp: &FarcasterTime,
+        version: EngineVersion,
+    ) -> Result<bool, OnchainEventStorageError> {
+        if version.is_enabled(ProtocolFeature::FarcasterPro) {
+            Ok(self.onchain_event_store.is_tier_subscription_active_at(
+                proto::TierType::Pro,
+                fid,
+                block_timestamp,
+            )?)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn get_storage_limits(
+        &self,
+        fid: u64,
+        version: EngineVersion,
+    ) -> Result<StorageLimitsResponse, StoresError> {
         let slot = self
             .onchain_event_store
             .get_storage_slot_for_fid(fid)
@@ -282,6 +306,7 @@ impl Stores {
             };
             limits.push(limit);
         }
+        let is_pro_user = self.is_pro_user(fid, &FarcasterTime::current(), version)?;
 
         let response = StorageLimitsResponse {
             limits,
@@ -296,6 +321,7 @@ impl Stores {
                     unit_size: slot.units,
                 },
             ],
+            is_pro_user,
         };
         Ok(response)
     }

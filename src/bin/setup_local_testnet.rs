@@ -14,13 +14,20 @@ struct Args {
     l1_rpc_url: String,
 
     #[arg(long, default_value = "")]
-    l2_rpc_url: String,
+    op_l2_rpc_url: String,
 
-    #[arg(long, default_value = "108864739")]
-    start_block_number: u64,
+    op_start_block_number: Option<u64>,
 
     #[arg(long)]
-    stop_block_number: Option<u64>,
+    op_stop_block_number: Option<u64>,
+
+    #[arg(long, default_value = "")]
+    base_l2_rpc_url: String,
+
+    base_start_block_number: Option<u64>,
+
+    #[arg(long)]
+    base_stop_block_number: Option<u64>,
 
     /// Statsd prefix. note: node ID will be appended before config file written
     #[arg(long, default_value = "snapchain")]
@@ -128,12 +135,24 @@ async fn main() {
         let statsd_addr = args.statsd_addr.clone();
         let statsd_use_tags = args.statsd_use_tags;
         let l1_rpc_url = args.l1_rpc_url.clone();
-        let l2_rpc_url = args.l2_rpc_url.clone();
-        let start_block_number = args.start_block_number;
+        let op_l2_rpc_url = args.op_l2_rpc_url.clone();
+        let base_l2_rpc_url = args.base_l2_rpc_url.clone();
         let snapshot_endpoint_url = args.snapshot_endpoint_url.clone();
         let aws_access_key_id = args.aws_access_key_id.clone();
         let aws_secret_access_key = args.aws_secret_access_key.clone();
-        let stop_block_number = match args.stop_block_number {
+        let op_start_block_number = match args.op_start_block_number {
+            None => "".to_string(),
+            Some(number) => format!("start_block_number = {number}").to_string(),
+        };
+        let op_stop_block_number = match args.op_stop_block_number {
+            None => "".to_string(),
+            Some(number) => format!("stop_block_number = {number}").to_string(),
+        };
+        let base_start_block_number = match args.base_start_block_number {
+            None => "".to_string(),
+            Some(number) => format!("start_block_number = {number}").to_string(),
+        };
+        let base_stop_block_number = match args.base_stop_block_number {
             None => "".to_string(),
             Some(number) => format!("stop_block_number = {number}").to_string(),
         };
@@ -162,9 +181,14 @@ num_shards = {num_shards}
 validator_sets = [{validator_sets}]
 
 [onchain_events]
-rpc_url= "{l2_rpc_url}"
-start_block_number = {start_block_number}
-{stop_block_number}
+rpc_url= "{op_l2_rpc_url}"
+{op_start_block_number}
+{op_stop_block_number}
+
+[base_onchain_events]
+rpc_url= "{base_l2_rpc_url}"
+{base_start_block_number}
+{base_stop_block_number}
 
 [snapshot]
 endpoint_url = "{snapshot_endpoint_url}"

@@ -3,8 +3,9 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::onchain_events::{
-    ChainClients, OnchainEventsRequest, BASE_MAINNET_CHAIN_ID, ID_REGISTRY, KEY_REGISTRY,
-    OP_MAINNET_CHAIN_ID, STORAGE_REGISTRY, TIER_REGISTRY,
+    ChainClients, OnchainEventsRequest, BASE_MAINNET_CHAIN_ID, BASE_MAINNET_FIRST_BLOCK,
+    ID_REGISTRY, KEY_REGISTRY, OP_MAINNET_CHAIN_ID, OP_MAINNET_FIRST_BLOCK, STORAGE_REGISTRY,
+    TIER_REGISTRY,
 };
 use snapchain::consensus::consensus::SystemMessage;
 use snapchain::mempool::mempool::{Mempool, MempoolRequest, ReadNodeMempool};
@@ -485,6 +486,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             gossip_tx.clone(),
             shard_decision_rx,
             statsd_client.clone(),
+            app_config.fc_network,
         );
         tokio::spawn(async move { mempool.run().await });
 
@@ -512,6 +514,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     onchain_events_request_rx,
                     vec![STORAGE_REGISTRY, KEY_REGISTRY, ID_REGISTRY],
                     OP_MAINNET_CHAIN_ID,
+                    OP_MAINNET_FIRST_BLOCK,
                 )?;
             tokio::spawn(async move {
                 let result = onchain_events_subscriber.run().await;
@@ -527,7 +530,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if !app_config.base_onchain_events.rpc_url.is_empty() {
             let mut onchain_events_subscriber =
                 snapchain::connectors::onchain_events::Subscriber::new(
-                    &app_config.onchain_events,
+                    &app_config.base_onchain_events,
                     node_local_state::Chain::Base,
                     mempool_tx.clone(),
                     statsd_client.clone(),
@@ -535,6 +538,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     onchain_events_request_tx.subscribe(),
                     vec![TIER_REGISTRY],
                     BASE_MAINNET_CHAIN_ID,
+                    BASE_MAINNET_FIRST_BLOCK,
                 )?;
             tokio::spawn(async move {
                 let result = onchain_events_subscriber.run().await;

@@ -74,8 +74,9 @@ static ETH_L1_ENS_REGISTRY: Address = address!("00000000000C2E074eC69A0dFb2997BA
 static BASE_MAINNET_ENS_REGISTRY: Address = address!("0xB94704422c2a1E396835A571837Aa5AE53285a95");
 
 // For reference, in case it needs to be specified manually
-const FIRST_BLOCK: u64 = 108864739;
+pub const OP_MAINNET_FIRST_BLOCK: u64 = 108864739;
 pub static OP_MAINNET_CHAIN_ID: u32 = 10; // OP mainnet
+pub const BASE_MAINNET_FIRST_BLOCK: u64 = 31108599;
 pub static BASE_MAINNET_CHAIN_ID: u32 = 8453; // Base mainnet
 const RENT_EXPIRY_IN_SECONDS: u64 = 365 * 24 * 60 * 60; // One year
 
@@ -273,6 +274,7 @@ pub struct Subscriber {
     chain: node_local_state::Chain,
     chain_id: u32,
     contracts: Vec<Address>,
+    first_block: u64,
 }
 
 // TODO(aditi): Wait for 1 confirmation before "committing" an onchain event.
@@ -286,6 +288,7 @@ impl Subscriber {
         onchain_events_request_rx: broadcast::Receiver<OnchainEventsRequest>,
         contracts: Vec<Address>,
         chain_id: u32,
+        first_block: u64,
     ) -> Result<Subscriber, SubscribeError> {
         if config.rpc_url.is_empty() {
             return Err(SubscribeError::EmptyRpcUrl);
@@ -298,13 +301,14 @@ impl Subscriber {
             mempool_tx,
             start_block_number: config
                 .start_block_number
-                .map(|start_block| start_block.max(FIRST_BLOCK)),
+                .map(|start_block| start_block.max(first_block)),
             stop_block_number: config.stop_block_number,
             statsd_client,
             onchain_events_request_rx,
             chain,
             contracts,
             chain_id,
+            first_block,
         })
     }
 
@@ -350,6 +354,7 @@ impl Subscriber {
             block_timestamp = event.block_timestamp,
             tx_hash = hex::encode(&event.transaction_hash),
             log_index = event.log_index,
+            chain = self.chain.to_string(),
             "Processed onchain event"
         );
         match event_type {
@@ -378,7 +383,10 @@ impl Subscriber {
             }
             _ => {}
         }
-        self.gauge("latest_block_number", block_number as u64);
+        self.gauge(
+            &format!("latest_block_number_on_{}", self.chain.to_string()),
+            block_number as u64,
+        );
         if let Err(err) = self
             .mempool_tx
             .send(MempoolRequest::AddMessage(
@@ -402,7 +410,8 @@ impl Subscriber {
     }
 
     fn record_block_number(&self, block_number: u64) {
-        if block_number as u64 > self.latest_block_in_db() {
+        let latest_block_in_db = self.latest_block_in_db();
+        if block_number as u64 > latest_block_in_db {
             match self
                 .local_state_store
                 .set_latest_block_number(self.chain.clone(), block_number)
@@ -717,6 +726,12 @@ impl Subscriber {
         initial_start_block: u64,
         final_stop_block: u64,
     ) -> Result<(), SubscribeError> {
+        info!(
+            start_block_number = initial_start_block,
+            stop_block_number = final_stop_block,
+            chain = self.chain.to_string(),
+            "Starting historical sync"
+        );
         let batch_size = 1000;
         let mut start_block = initial_start_block;
         loop {
@@ -738,7 +753,7 @@ impl Subscriber {
                 info!(
                     start_block,
                     stop_block = final_stop_block,
-                    "Stopping onchain events sync"
+                    "Stopping historical sync"
                 );
                 return Ok(());
             }
@@ -797,6 +812,11 @@ impl Subscriber {
     }
 
     async fn sync_live_events(&mut self, start_block_number: u64) -> Result<(), SubscribeError> {
+        info!(
+            start_block_number,
+            chain = self.chain.to_string(),
+            "Starting live sync"
+        );
         let filter = Filter::new()
             .address(self.contracts.clone())
             .from_block(start_block_number);
@@ -866,17 +886,17 @@ impl Subscriber {
         Ok(())
     }
 
-    fn retry_filter_for_contract(contract: Address, fid: u64) -> Filter {
+    fn retry_filter_for_contract(&self, contract: Address, fid: u64) -> Filter {
         if contract == STORAGE_REGISTRY {
             Filter::new()
                 .address(vec![STORAGE_REGISTRY])
-                .from_block(FIRST_BLOCK)
+                .from_block(self.first_block)
                 .events(vec!["Rent(address,uint256,uint256)"])
                 .topic2(U256::from(fid))
         } else if contract == KEY_REGISTRY {
             Filter::new()
                 .address(vec![KEY_REGISTRY])
-                .from_block(FIRST_BLOCK)
+                .from_block(self.first_block)
                 .events(vec![
                     "Add(uint256,uint32,bytes,bytes,uint8,bytes)",
                     "Remove(uint256,bytes,bytes)",
@@ -885,13 +905,13 @@ impl Subscriber {
         } else if contract == ID_REGISTRY {
             Filter::new()
                 .address(vec![ID_REGISTRY])
-                .from_block(FIRST_BLOCK)
+                .from_block(self.first_block)
                 .events(vec!["Register(address,uint256,address)"])
                 .topic2(U256::from(fid))
         } else if contract == TIER_REGISTRY {
             Filter::new()
                 .address(vec![TIER_REGISTRY])
-                .from_block(FIRST_BLOCK)
+                .from_block(self.first_block)
                 .events(vec!["PurchasedTier(uint256,uint256,uint256,address)"])
                 .topic1(U256::from(fid))
         } else {
@@ -902,7 +922,7 @@ impl Subscriber {
     pub async fn retry_fid(&mut self, fid: u64) -> Result<(), SubscribeError> {
         info!(fid, "Retrying onchain events for fid");
         for contract in self.contracts.clone() {
-            let filter = Self::retry_filter_for_contract(contract, fid);
+            let filter = self.retry_filter_for_contract(contract, fid);
             self.get_logs_with_retry(filter, &Self::event_kind(contract))
                 .await?;
         }
@@ -935,13 +955,14 @@ impl Subscriber {
             stop_block_numer = self.stop_block_number,
             latest_block_on_chain,
             latest_block_in_db,
+            chain = self.chain.to_string(),
             "Starting l2 events subscription"
         );
         let live_sync_block;
         match self.start_block_number {
             None => {
                 // By default, start from the first block or the latest block in the db. Whichever is higher
-                live_sync_block = Some(FIRST_BLOCK.max(latest_block_in_db));
+                live_sync_block = Some(self.first_block.max(latest_block_in_db));
             }
             Some(start_block_number) => {
                 let historical_sync_start_block = latest_block_in_db.max(start_block_number);
