@@ -12,7 +12,8 @@ mod tests {
     use crate::storage::store::engine::{MempoolMessage, ShardEngine};
     use crate::storage::store::stores::StoreLimits;
     use crate::storage::store::test_helper::{
-        self, commit_messages, default_custody_address, EngineOptions, FID3_FOR_TEST,
+        self, commit_message_at, commit_messages, default_custody_address, EngineOptions,
+        FID3_FOR_TEST,
     };
     use crate::storage::store::test_helper::{
         commit_message, message_exists_in_trie, register_user, FID2_FOR_TEST, FID_FOR_TEST,
@@ -578,8 +579,12 @@ mod tests {
     #[tokio::test]
     async fn test_commit_username_proof_messages() {
         let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
-        let name = "username".to_string();
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            network: Some(FarcasterNetwork::Testnet), // To test basename support
+            messages_request_tx: None,
+            db: None,
+            limits: None,
+        });
         let owner = "owner".to_string().encode_to_vec();
         let signature = "signature".to_string();
         let signer = test_helper::default_signer();
@@ -592,10 +597,36 @@ mod tests {
         )
         .await;
 
+        let user_data_add = messages_factory::user_data::create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::Username,
+            &"username.eth".to_string(),
+            Some(timestamp),
+            Some(&signer),
+        );
+        // Cannot set username without a username proof
+        assert_commit_fails(
+            &mut engine,
+            &user_data_add,
+            "not_found",
+            "NotFound: Username proof not found for name username.eth",
+        )
+        .await;
+
         let username_proof_add = messages_factory::username_proof::create_username_proof(
             FID_FOR_TEST as u64,
-            proto::UserNameType::UsernameTypeFname,
-            name.clone(),
+            proto::UserNameType::UsernameTypeEnsL1,
+            "username.eth".to_string().clone(),
+            owner.clone(),
+            signature.clone(),
+            timestamp as u64,
+            Some(&signer),
+        );
+
+        let base_username_proof_add = messages_factory::username_proof::create_username_proof(
+            FID_FOR_TEST as u64,
+            proto::UserNameType::UsernameTypeBasename,
+            "username.base.eth".to_string().clone(),
             owner,
             signature.clone(),
             timestamp as u64,
@@ -603,6 +634,26 @@ mod tests {
         );
 
         commit_message(&mut engine, &username_proof_add).await;
+
+        // Cannot add basenames on old engine versions
+        let before_base_support = &FarcasterTime::from_unix_seconds(1748950000);
+        assert_eq!(
+            engine
+                .version_for(before_base_support)
+                .is_enabled(ProtocolFeature::Basenames),
+            false
+        );
+        commit_message_at(&mut engine, &base_username_proof_add, before_base_support).await;
+        assert_eq!(
+            engine.trie_key_exists(
+                test_helper::trie_ctx(),
+                &TrieKey::for_message(&base_username_proof_add)
+            ),
+            false
+        );
+
+        // Works on the latest engine version
+        commit_message(&mut engine, &base_username_proof_add).await;
 
         {
             let username_proof_result = engine.get_username_proofs_by_fid(FID2_FOR_TEST);
@@ -615,12 +666,28 @@ mod tests {
             let username_proof_result = engine.get_username_proofs_by_fid(FID_FOR_TEST);
             assert!(username_proof_result.is_ok());
 
-            let messages_bytes_len = username_proof_result.unwrap().messages.len();
-            assert_eq!(1, messages_bytes_len);
+            let messages_len = username_proof_result.unwrap().messages.len();
+            assert_eq!(2, messages_len);
         }
 
-        // TODO: test get_username_proof (by name)
-        // TODO: do we need a test for ENS name registration?
+        // Allows setting the proof as the username
+        let userdata_add = messages_factory::user_data::create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::Username,
+            &"username.eth".to_string(),
+            Some(timestamp + 1),
+            Some(&signer),
+        );
+        commit_message(&mut engine, &userdata_add).await;
+
+        let base_userdata_add = messages_factory::user_data::create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::Username,
+            &"username.base.eth".to_string(),
+            Some(timestamp + 1),
+            Some(&signer),
+        );
+        commit_message(&mut engine, &base_userdata_add).await;
     }
 
     #[tokio::test]

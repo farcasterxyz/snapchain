@@ -261,6 +261,30 @@ pub async fn commit_message(engine: &mut ShardEngine, msg: &proto::Message) -> S
     chunk
 }
 
+// Note, this function does not check that the commit was successful, unlike `commit_message`.
+pub async fn commit_message_at(
+    engine: &mut ShardEngine,
+    msg: &proto::Message,
+    timestamp: &FarcasterTime,
+) -> ShardChunk {
+    let state_change = engine.propose_state_change(
+        1,
+        vec![MempoolMessage::UserMessage(msg.clone())],
+        Some(timestamp.clone()),
+    );
+
+    if state_change.transactions.is_empty() {
+        panic!("Failed to propose message");
+    }
+
+    let chunk = validate_and_commit_state_change(engine, &state_change);
+    assert_eq!(
+        state_change.new_state_root,
+        chunk.header.as_ref().unwrap().shard_root
+    );
+    chunk
+}
+
 #[cfg(test)]
 pub async fn commit_messages(engine: &mut ShardEngine, msgs: Vec<proto::Message>) -> ShardChunk {
     use itertools::Itertools;
