@@ -873,8 +873,8 @@ impl ShardEngine {
             None => return Err(MessageValidationError::NoMessageData),
         };
 
-        // Check if this is a verification remove message. This should never
-        // happen as we only call this function for verification remove messages
+        // Check if this is a verification add message
+        // (deleted verifications are represented as deleted VerificationAdd messages)
         if data.r#type != MessageType::VerificationAddEthAddress as i32 {
             return Err(MessageValidationError::InvalidMessageType(data.r#type));
         }
