@@ -76,6 +76,14 @@ impl MyAdminService {
     pub fn enabled(&self) -> bool {
         !self.allowed_users.is_empty()
     }
+
+    // Allow debug operations only on Devnet or Unspecified networks
+    fn allow_debug(&self) -> bool {
+        matches!(
+            self.fc_network,
+            FarcasterNetwork::None | FarcasterNetwork::Devnet
+        )
+    }
 }
 
 #[tonic::async_trait]
@@ -87,6 +95,12 @@ impl AdminService for MyAdminService {
         request: Request<OnChainEvent>,
     ) -> Result<Response<OnChainEvent>, Status> {
         info!("Received call to [submit_on_chain_event] RPC");
+
+        if !self.allow_debug() {
+            return Err(Status::permission_denied(
+                "submit_on_chain_event is not supported on this network".to_string(),
+            ));
+        }
 
         let onchain_event = request.into_inner();
 
@@ -133,6 +147,12 @@ impl AdminService for MyAdminService {
         request: Request<UserNameProof>,
     ) -> Result<Response<UserNameProof>, Status> {
         info!("Received call to [submit_user_name_proof] RPC");
+
+        if !self.allow_debug() {
+            return Err(Status::permission_denied(
+                "submit_user_name_proof is not supported on this network".to_string(),
+            ));
+        }
 
         let username_proof = request.into_inner();
 
