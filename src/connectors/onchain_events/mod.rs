@@ -886,34 +886,57 @@ impl Subscriber {
         Ok(())
     }
 
-    fn retry_filter_for_contract(&self, contract: Address, fid: u64) -> Filter {
+    async fn retry_for_contract(
+        &mut self,
+        contract: Address,
+        fid: u64,
+    ) -> Result<(), SubscribeError> {
         if contract == STORAGE_REGISTRY {
-            Filter::new()
+            let filter = Filter::new()
                 .address(vec![STORAGE_REGISTRY])
                 .from_block(self.first_block)
                 .events(vec!["Rent(address,uint256,uint256)"])
-                .topic2(U256::from(fid))
+                .topic2(U256::from(fid));
+            self.get_logs_with_retry(filter, &Self::event_kind(contract))
+                .await?;
+            Ok(())
         } else if contract == KEY_REGISTRY {
-            Filter::new()
+            let filter = Filter::new()
                 .address(vec![KEY_REGISTRY])
                 .from_block(self.first_block)
                 .events(vec![
                     "Add(uint256,uint32,bytes,bytes,uint8,bytes)",
                     "Remove(uint256,bytes,bytes)",
                 ])
-                .topic1(U256::from(fid))
+                .topic1(U256::from(fid));
+            self.get_logs_with_retry(filter, &Self::event_kind(contract))
+                .await?;
+            Ok(())
         } else if contract == ID_REGISTRY {
-            Filter::new()
+            let filter = Filter::new()
                 .address(vec![ID_REGISTRY])
                 .from_block(self.first_block)
                 .events(vec!["Register(address,uint256,address)"])
-                .topic2(U256::from(fid))
+                .topic2(U256::from(fid));
+            self.get_logs_with_retry(filter, &Self::event_kind(contract))
+                .await?;
+            let filter = Filter::new()
+                .address(vec![ID_REGISTRY])
+                .from_block(self.first_block)
+                .events(vec!["Transfer(address,address,uint256)"])
+                .topic3(U256::from(fid));
+            self.get_logs_with_retry(filter, &Self::event_kind(contract))
+                .await?;
+            Ok(())
         } else if contract == TIER_REGISTRY {
-            Filter::new()
+            let filter = Filter::new()
                 .address(vec![TIER_REGISTRY])
                 .from_block(self.first_block)
                 .events(vec!["PurchasedTier(uint256,uint256,uint256,address)"])
-                .topic1(U256::from(fid))
+                .topic1(U256::from(fid));
+            self.get_logs_with_retry(filter, &Self::event_kind(contract))
+                .await?;
+            Ok(())
         } else {
             panic!("Unrecognized contract")
         }
@@ -922,9 +945,7 @@ impl Subscriber {
     pub async fn retry_fid(&mut self, fid: u64) -> Result<(), SubscribeError> {
         info!(fid, "Retrying onchain events for fid");
         for contract in self.contracts.clone() {
-            let filter = self.retry_filter_for_contract(contract, fid);
-            self.get_logs_with_retry(filter, &Self::event_kind(contract))
-                .await?;
+            self.retry_for_contract(contract, fid).await?;
         }
 
         Ok(())
