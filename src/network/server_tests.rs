@@ -18,7 +18,8 @@ mod tests {
     use crate::proto::hub_service_server::HubService;
     use crate::proto::{
         self, EventRequest, EventsRequest, HubEvent, HubEventType, OnChainEventType, ShardChunk,
-        UserNameProof, UserNameType, UsernameProofRequest, VerificationAddAddressBody,
+        UserDataType, UserNameProof, UserNameType, UsernameProofRequest,
+        VerificationAddAddressBody,
     };
     use crate::proto::{FidRequest, SubscribeRequest};
     use crate::storage::db::{self, RocksDB, RocksDbTransactionBatch};
@@ -166,6 +167,15 @@ mod tests {
         request
             .metadata_mut()
             .insert("authorization", auth.parse().unwrap());
+    }
+
+    async fn submit_message(
+        service: &MyHubService,
+        message: proto::Message,
+    ) -> Result<tonic::Response<proto::Message>, tonic::Status> {
+        let mut request = Request::new(message);
+        add_auth_header(&mut request, USER_NAME, PASSWORD);
+        service.submit_message(request).await
     }
 
     async fn make_server(
@@ -398,11 +408,10 @@ mod tests {
         HubEvent::put_event_transaction(&mut txn, &hub_event).unwrap();
         db.commit(txn).unwrap();
 
-        let mut request = Request::new(proto::EventRequest {
+        let request = Request::new(proto::EventRequest {
             id: event_id,
             shard_index: 1,
         });
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
         let response = service.get_event(request).await.unwrap();
 
         let hub_event_response = response.into_inner();
@@ -418,11 +427,10 @@ mod tests {
 
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 1).await;
 
-        let mut request = Request::new(proto::EventRequest {
+        let request = Request::new(proto::EventRequest {
             id: 99999, // Junk event ID
             shard_index: 1,
         });
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
         let response = service.get_event(request).await;
 
         assert!(response.is_err());
@@ -438,11 +446,10 @@ mod tests {
         let event_id = 12345;
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 1).await;
 
-        let mut request = Request::new(proto::EventRequest {
+        let request = Request::new(proto::EventRequest {
             id: event_id,
             shard_index: 999, // junk shard
         });
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
         let response = service.get_event(request).await;
 
         // Validate the response
@@ -459,11 +466,10 @@ mod tests {
         let event_id = 12345;
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 1).await;
 
-        let mut request = Request::new(proto::EventRequest {
+        let request = Request::new(proto::EventRequest {
             id: event_id,
             shard_index: 0,
         });
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
         let response = service.get_event(request).await;
 
         assert!(response.is_err());
@@ -543,10 +549,7 @@ mod tests {
         // Message with no fid registration
         let invalid_message = messages_factory::casts::create_cast_add(123, "test", None, None);
 
-        let mut request = Request::new(invalid_message);
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
-
-        let response = service.submit_message(request).await.unwrap_err();
+        let response = submit_message(&service, invalid_message).await.unwrap_err();
 
         assert_eq!(response.code(), tonic::Code::InvalidArgument);
         assert_eq!(
@@ -575,9 +578,7 @@ mod tests {
         test_helper::commit_message(&mut engine1, &valid_message).await;
 
         // Submitting a duplicate message should return an error
-        let mut request = Request::new(valid_message);
-        add_auth_header(&mut request, USER_NAME, PASSWORD);
-        let response = service.submit_message(request).await.unwrap_err();
+        let response = submit_message(&service, valid_message).await.unwrap_err();
         assert_eq!(response.code(), tonic::Code::InvalidArgument);
         assert_eq!(
             response.message(),
@@ -783,8 +784,33 @@ mod tests {
         let result = service
             .validate_ens_username_proof(fid, &username_proof)
             .await;
-
         assert!(result.is_ok());
+
+        let user_data_add = messages_factory::user_data::create_user_data_add(
+            fid,
+            UserDataType::Username,
+            &"username.base.eth".to_string(),
+            None,
+            None,
+        );
+
+        // User data add fails because the proof is not committed yet
+        let result = submit_message(&service, user_data_add.clone()).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+
+        let proof_message =
+            messages_factory::username_proof::create_from_proof(&username_proof, None);
+        test_helper::commit_message(&mut engine1, &proof_message).await;
+
+        // Now the user data add should succeed
+        let result = submit_message(&service, user_data_add).await;
+
+        let error = result.unwrap_err();
+        // Ensure that it's not a validation error, if it got as far as adding to the mempool, validation passed
+        // TODO: We should fix the test setup so adding to mempool does not fail
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(error.message(), "unavailable/Error adding to mempool");
     }
 
     #[tokio::test]

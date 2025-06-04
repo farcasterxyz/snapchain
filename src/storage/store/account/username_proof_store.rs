@@ -3,16 +3,11 @@ use super::{
     store::{Store, StoreDef},
     IntoU8, MessagesPage, StoreEventHandler, TS_HASH_LENGTH,
 };
-
+use crate::core::error::HubError;
+use crate::proto::message_data::Body;
+use crate::proto::{self, HubEvent, HubEventType, MergeUserNameProofBody, Message, MessageType};
 use crate::storage::constants::{RootPrefix, UserPostfix};
 use crate::storage::db::PageOptions;
-
-use crate::proto::{self, HubEvent, HubEventType, MergeUserNameProofBody, Message, MessageType};
-
-use crate::proto::message_data::Body;
-use crate::proto::UserNameType;
-
-use crate::core::error::HubError;
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::util;
 use std::sync::Arc;
@@ -380,18 +375,7 @@ impl UsernameProofStore {
     pub fn get_username_proof(
         store: &Store<UsernameProofStoreDef>,
         name: &Vec<u8>,
-        name_type: u8,
     ) -> Result<Option<Message>, HubError> {
-        if name_type != UserNameType::UsernameTypeEnsL1 as u8 {
-            return Err(HubError {
-                code: "bad_request".to_string(),
-                message: format!(
-                    "Unsupported username type {}. Only ENS L1 is supported",
-                    name_type as u8
-                ),
-            });
-        }
-
         let by_name_key = UsernameProofStoreDef::make_username_proof_by_name_key(name);
         let fid_result = store.db().get(by_name_key.as_slice())?;
         if fid_result.is_none() {

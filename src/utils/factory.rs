@@ -521,6 +521,19 @@ pub mod messages_factory {
                 private_key,
             )
         }
+
+        pub fn create_from_proof(
+            proof: &UserNameProof,
+            private_key: Option<&SigningKey>,
+        ) -> message::Message {
+            create_message_with_data(
+                proof.fid,
+                MessageType::UsernameProof,
+                message::message_data::Body::UsernameProofBody(proof.clone()),
+                Some(proof.timestamp as u32),
+                private_key,
+            )
+        }
     }
 }
 

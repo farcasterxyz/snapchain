@@ -206,9 +206,7 @@ impl MyHubService {
                         };
                     }
                     Some(proto::message_data::Body::UsernameProofBody(proof)) => {
-                        if proof.r#type() == UserNameType::UsernameTypeEnsL1 {
-                            self.validate_ens_username_proof(fid, &proof).await?;
-                        }
+                        self.validate_ens_username_proof(fid, &proof).await?;
                     }
                     Some(proto::message_data::Body::VerificationAddAddressBody(body)) => {
                         if body.verification_type == 1 {
@@ -380,12 +378,11 @@ impl MyHubService {
                 self.chain_clients.for_chain(Chain::EthMainnet)?
             }
             Ok(UserNameType::UsernameTypeBasename) => {
-                if !name.ends_with(".eth") {
+                if !name.ends_with(".base.eth") {
                     return Err(HubError::validation_failure(
-                        "ENS name does not end with .eth",
+                        "Basename does not end with base.eth",
                     ));
                 }
-
                 self.chain_clients.for_chain(Chain::BaseMainnet)?
             }
             _ => {
@@ -419,7 +416,6 @@ impl MyHubService {
         let proof_message = UsernameProofStore::get_username_proof(
             &stores.username_proof_store,
             &name.as_bytes().to_vec(),
-            UserNameType::UsernameTypeEnsL1 as u8,
         )?;
         match proof_message {
             Some(message) => match message.data {
@@ -1569,14 +1565,11 @@ impl HubService for MyHubService {
 
         // Check if this is an .eth name (look in username_proof_store) or fname (look in user_data_store)
         if name_str.ends_with(".eth") {
-            let user_name_type = UserNameType::UsernameTypeEnsL1 as u8;
-
             // Look for ENS username proofs in the username_proof_store
             let proof_opt = self.shard_stores.iter().find_map(|(_shard_entry, stores)| {
                 match UsernameProofStore::get_username_proof(
                     &stores.username_proof_store,
                     &req.name,
-                    user_name_type,
                 ) {
                     Ok(Some(message)) => message.data.and_then(|data| {
                         if let Some(message_data::Body::UsernameProofBody(user_name_proof)) =
