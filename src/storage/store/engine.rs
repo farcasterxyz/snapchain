@@ -1665,39 +1665,35 @@ impl ShardEngine {
         protocol: Protocol,
         address: &[u8],
     ) -> Result<(), MessageValidationError> {
-        let mut page_options = PageOptions::default();
-        loop {
-            let page_result = self
-                .stores
-                .verification_store
-                .get_adds_by_fid::<fn(&proto::Message) -> bool>(fid, &page_options, None);
+        // Create a filter that only checks verification messages for the specific protocol and address
+        let target_protocol = protocol as i32;
+        let target_address = address.to_vec();
 
-            if page_result.is_err() {
-                return Err(MessageValidationError::StoreError(
-                    HubError::invalid_internal_state("Unable to get verifications by fid"),
-                ));
-            }
-            let page = page_result.unwrap();
-            for msg in page.messages {
-                if let Some(msg_data) = msg.data {
-                    if let Some(Body::VerificationAddAddressBody(verification)) = msg_data.body {
-                        if verification.protocol != protocol as i32 {
-                            continue;
-                        }
-                        if verification.address == address {
-                            return Ok(());
-                        }
-                    }
+        let verification_filter = |message: &proto::Message| -> bool {
+            if let Some(msg_data) = &message.data {
+                if let Some(Body::VerificationAddAddressBody(verification)) = &msg_data.body {
+                    return verification.protocol == target_protocol
+                        && verification.address == target_address;
                 }
             }
-            match page.next_page_token {
-                Some(next_page_token) => {
-                    page_options.page_token = Some(next_page_token);
-                }
-                None => {
-                    break;
-                }
-            }
+            false
+        };
+
+        let page_result = self.stores.verification_store.get_adds_by_fid(
+            fid,
+            &PageOptions::default(),
+            Some(verification_filter),
+        );
+
+        let page = page_result.map_err(|_| {
+            MessageValidationError::StoreError(HubError::invalid_internal_state(
+                "Unable to get verifications by fid",
+            ))
+        })?;
+
+        // If we find any matching verification, the user owns the address
+        if !page.messages.is_empty() {
+            return Ok(());
         }
         Err(MessageValidationError::AddressNotPartOfVerification)
     }
