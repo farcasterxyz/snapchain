@@ -839,37 +839,37 @@ impl ShardEngine {
     fn check_and_revoke_primary_address(
         &mut self,
         fid: u64,
-        hub_event: &proto::HubEvent,
+        deleted_verification: &proto::HubEvent,
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<(), MessageValidationError> {
         // Early return if not a merge message event
-        let merge_body = match &hub_event.body {
+        let merge_body = match &deleted_verification.body {
             Some(hub_event::Body::MergeMessageBody(body)) => body,
-            _ => return Ok(()),
+            _ => return Err(MessageValidationError::NoMessageData),
         };
 
         // Early return if no message
         let message = match &merge_body.message {
             Some(message) => message,
-            None => return Ok(()),
+            None => return Err(MessageValidationError::NoMessageData),
         };
 
         // Early return if no message data
         let data = match &message.data {
             Some(data) => data,
-            None => return Ok(()),
+            None => return Err(MessageValidationError::NoMessageData),
         };
 
         // Check if this is a verification remove message. This should never
         // happen as we only call this function for verification remove messages
-        if data.r#type != MessageType::VerificationRemove as i32 {
+        if data.r#type != MessageType::VerificationAddEthAddress as i32 {
             return Err(MessageValidationError::InvalidMessageType(data.r#type));
         }
 
         // Extract verification remove body or return early
         let verification_body = match &data.body {
-            Some(Body::VerificationRemoveBody(body)) => body,
-            _ => return Ok(()),
+            Some(Body::VerificationAddAddressBody(body)) => body,
+            _ => return Err(MessageValidationError::InvalidMessageType(data.r#type)),
         };
 
         // Determine protocol from removal message
@@ -939,7 +939,8 @@ impl ShardEngine {
         }
 
         // Process verification removal hooks
-        // Look for any events with deleted verification messages
+        // Look for any events with deleted verification messages. We use this as a trigger to revoke
+        // the user's primary address if it was deleted as part of a verification remove message.
         for event in events {
             if let Some(hub_event::Body::MergeMessageBody(merge_body)) = &event.body {
                 for deleted_message in &merge_body.deleted_messages {
@@ -947,7 +948,7 @@ impl ShardEngine {
                     if let Some(data) = &deleted_message.data {
                         // NOTE: VerificationAddEthAddress is used for both Ethereum and Solana verifications.
                         // we differentiate between the two by checking the protocol field.
-                        if data.r#type == MessageType::VerificationRemove as i32 {
+                        if data.r#type == MessageType::VerificationAddEthAddress as i32 {
                             if let Err(err) = self.check_and_revoke_primary_address(
                                 deleted_message.fid(),
                                 event,
