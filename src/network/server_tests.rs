@@ -59,11 +59,14 @@ mod tests {
     impl ChainAPI for MockL1Client {
         async fn resolve_ens_name(
             &self,
-            _name: String,
+            name: String,
         ) -> Result<alloy_primitives::Address, EnsError> {
-            let addr = alloy_primitives::Address::from_slice(
-                &hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap(),
-            );
+            let address_str = match name.as_str() {
+                "username.eth" => "91031dcfdea024b4d51e775486111d2b2a715871",
+                "username.base.eth" => "849151d7D0bF1F34b70d5caD5149D28CC2308bf1",
+                _ => return Err(EnsError::ResolverNotFound(name)),
+            };
+            let addr = alloy_primitives::Address::from_slice(&hex::decode(address_str).unwrap());
             future::ready(Ok(addr)).await
         }
 
@@ -247,7 +250,10 @@ mod tests {
             Chain::EthMainnet,
             Box::new(MockL1Client {}) as Box<dyn ChainAPI>,
         );
-
+        chain_clients.chain_api_map.insert(
+            Chain::BaseMainnet,
+            Box::new(MockL1Client {}) as Box<dyn ChainAPI>,
+        );
         (
             stores.clone(),
             senders.clone(),
@@ -742,11 +748,36 @@ mod tests {
 
         let username_proof = UserNameProof {
             timestamp: messages_factory::farcaster_time() as u64,
-            name: "username.eth".to_string().encode_to_vec(),
+            name: b"username.eth".to_vec(),
             owner,
             signature: "signature".to_string().encode_to_vec(),
             fid,
             r#type: UserNameType::UsernameTypeEnsL1 as i32,
+        };
+
+        let result = service
+            .validate_ens_username_proof(fid, &username_proof)
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_basename_proof() {
+        let (_stores, _senders, [mut engine1, mut _engine2], service) = make_server(None).await;
+        let signer = test_helper::default_signer();
+        let owner = hex::decode("849151d7D0bF1F34b70d5caD5149D28CC2308bf1").unwrap();
+        let fid = SHARD1_FID;
+
+        test_helper::register_user(fid, signer.clone(), owner.clone(), &mut engine1).await;
+
+        let username_proof = UserNameProof {
+            timestamp: messages_factory::farcaster_time() as u64,
+            name: b"username.base.eth".to_vec(),
+            owner,
+            signature: "signature".to_string().encode_to_vec(),
+            fid,
+            r#type: UserNameType::UsernameTypeBasename as i32,
         };
 
         let result = service
@@ -767,7 +798,7 @@ mod tests {
 
         let username_proof = UserNameProof {
             timestamp: messages_factory::farcaster_time() as u64,
-            name: "username.eth".to_string().encode_to_vec(),
+            name: b"username.eth".to_vec(),
             owner: "100000000000000000".to_string().encode_to_vec(),
             signature: "signature".to_string().encode_to_vec(),
             fid,
@@ -798,7 +829,7 @@ mod tests {
 
         let username_proof = UserNameProof {
             timestamp: messages_factory::farcaster_time() as u64,
-            name: "username.eth".to_string().encode_to_vec(),
+            name: b"username.eth".to_vec(),
             owner,
             signature: "signature".to_string().encode_to_vec(),
             fid,
@@ -836,7 +867,7 @@ mod tests {
 
         let username_proof = UserNameProof {
             timestamp: messages_factory::farcaster_time() as u64,
-            name: "username.eth".to_string().encode_to_vec(),
+            name: b"username.eth".to_vec(),
             owner: hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap(),
             signature: signature.encode_to_vec(),
             fid,

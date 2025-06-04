@@ -134,7 +134,7 @@ pub fn validate_message(
                         let name = &std::str::from_utf8(&proof.name)
                             .map_err(|_| ValidationError::InvalidData)?
                             .to_string();
-                        validate_ens_name(name)?;
+                        validate_base_name(name)?;
                     } else {
                         return Err(ValidationError::UnsupportedFeature);
                     }
@@ -276,13 +276,14 @@ pub fn validate_base_name(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::InvalidData);
     }
 
-    if input.len() > 20 {
+    if input.len() > 25 {
+        // 16 for fname + 9 for ".base.eth"
         return Err(ValidationError::InvalidDataLength);
     }
 
     if !Regex::new("^[a-z0-9][a-z0-9-]{0,15}$")
         .unwrap()
-        .is_match(&input)
+        .is_match(&name_parts[0])
         .map_err(|_| ValidationError::InvalidData)?
     {
         return Err(ValidationError::InvalidData);
@@ -405,11 +406,13 @@ pub fn validate_user_data_add_body(body: &UserDataBody) -> Result<(), Validation
         UserDataType::Username => {
             // Users are allowed to set fname = '' to remove their fname
             if !body.value.is_empty() {
-                let fname_result = validate_fname(&body.value);
-                let ens_result = validate_ens_name(&body.value);
-                if fname_result.is_err() && ens_result.is_err() {
-                    return fname_result;
-                }
+                if body.value.ends_with(".base.eth") {
+                    validate_base_name(&body.value)?;
+                } else if body.value.ends_with(".eth") {
+                    validate_ens_name(&body.value)?;
+                } else {
+                    validate_fname(&body.value)?;
+                };
             }
         }
         UserDataType::Location => {

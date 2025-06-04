@@ -353,9 +353,9 @@ impl MyHubService {
                             )?;
 
                             match verification {
-                            None => Err(HubError::validation_failure("invalid ens proof, no matching custody address or verified addresses")),
-                            Some(_) => Ok(()),
-                        }
+                                None => Err(HubError::validation_failure("invalid ens proof, no matching custody address or verified addresses")),
+                                Some(_) => Ok(()),
+                            }
                         } else {
                             Ok(())
                         }

@@ -6,13 +6,14 @@ use alloy_rpc_types::{Filter, Log};
 use alloy_sol_types::{sol, SolEvent};
 use alloy_transport_http::{Client, Http};
 use async_trait::async_trait;
-use foundry_common::ens::EnsError;
+use foundry_common::ens::EnsResolver::EnsResolverInstance;
+use foundry_common::ens::{namehash, EnsError, EnsRegistry};
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::core::error::HubError;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
@@ -56,6 +57,10 @@ static STORAGE_REGISTRY: Address = address!("00000000fcce7f938e7ae6d3c335bd6a1a7
 static KEY_REGISTRY: Address = address!("00000000Fc1237824fb747aBDE0FF18990E59b7e");
 
 static ID_REGISTRY: Address = address!("00000000Fc6c5F01Fc30151999387Bb99A9f489b");
+
+// Note these are the registry addresses, not the resolver addresses. We look up the resolver from the registry.
+static ETH_L1_ENS_REGISTRY: Address = address!("00000000000C2E074eC69A0dFb2997BA6C7d2e1e");
+static BASE_MAINNET_ENS_REGISTRY: Address = address!("0xB94704422c2a1E396835A571837Aa5AE53285a95");
 
 // For reference, in case it needs to be specified manually
 const FIRST_BLOCK: u64 = 108864739;
@@ -152,13 +157,16 @@ impl ChainClients {
     pub fn new(app_config: &AppConfig) -> Self {
         let mut chain_api_map = HashMap::new();
         if !app_config.l1_rpc_url.is_empty() {
-            let client: Box<dyn ChainAPI> =
-                Box::new(RealL1Client::new(app_config.l1_rpc_url.clone()).unwrap());
+            let client: Box<dyn ChainAPI> = Box::new(
+                RealL1Client::new(app_config.l1_rpc_url.clone(), ETH_L1_ENS_REGISTRY).unwrap(),
+            );
             chain_api_map.insert(Chain::EthMainnet, client);
         }
         if !app_config.base_rpc_url.is_empty() {
-            let client: Box<dyn ChainAPI> =
-                Box::new(RealL1Client::new(app_config.base_rpc_url.clone()).unwrap());
+            let client: Box<dyn ChainAPI> = Box::new(
+                RealL1Client::new(app_config.base_rpc_url.clone(), BASE_MAINNET_ENS_REGISTRY)
+                    .unwrap(),
+            );
             chain_api_map.insert(Chain::BaseMainnet, client);
         }
 
@@ -177,25 +185,53 @@ impl ChainClients {
 
 pub struct RealL1Client {
     provider: RootProvider<Http<Client>>,
+    ens_resolver_address: Address,
 }
 
 impl RealL1Client {
-    pub fn new(rpc_url: String) -> Result<RealL1Client, SubscribeError> {
+    pub fn new(
+        rpc_url: String,
+        ens_resolver_address: Address,
+    ) -> Result<RealL1Client, SubscribeError> {
         if rpc_url.is_empty() {
             return Err(SubscribeError::EmptyRpcUrl);
         }
         let url = rpc_url.parse()?;
         let provider = ProviderBuilder::new().on_http(url);
-        Ok(RealL1Client { provider })
+        Ok(RealL1Client {
+            provider,
+            ens_resolver_address,
+        })
     }
 }
 
 #[async_trait]
 impl ChainAPI for RealL1Client {
     async fn resolve_ens_name(&self, name: String) -> Result<Address, EnsError> {
-        foundry_common::ens::NameOrAddress::Name(name)
-            .resolve(&self.provider)
+        // Copied from foundry_common::ens so we can support both ETH and Base mainnet
+        let node = namehash(name.as_str());
+
+        let registry = EnsRegistry::new(self.ens_resolver_address, self.provider.clone());
+        let address = registry
+            .resolver(node)
+            .call()
             .await
+            .map_err(EnsError::Resolver)?
+            ._0;
+        if address == Address::ZERO {
+            return Err(EnsError::ResolverNotFound(name.to_string()));
+        }
+        let resolver = EnsResolverInstance::new(address, self.provider.clone());
+        let addr = resolver
+            .addr(node)
+            .call()
+            .await
+            .map_err(EnsError::Resolve)
+            .inspect_err(|e| {
+                warn!("Failed to resolve ens name {name}: {}", e);
+            })?
+            ._0;
+        Ok(addr)
     }
 
     async fn verify_contract_signature(
@@ -880,5 +916,47 @@ impl Subscriber {
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_TIMEOUT_SECONDS)).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "Requires a valid Alchemy API key"]
+    async fn test_chain_clients() {
+        // Test with a valid API key for Alchemy
+        let api_key = "<KEY>";
+        let app_config = AppConfig {
+            l1_rpc_url: format!("https://eth-mainnet.g.alchemy.com/v2/{}", api_key).to_string(),
+            base_rpc_url: format!("https://base-mainnet.g.alchemy.com/v2/{}", api_key).to_string(),
+            ..Default::default()
+        };
+        let chain_clients = ChainClients::new(&app_config);
+        assert!(chain_clients.for_chain(Chain::EthMainnet).is_ok());
+        assert!(chain_clients.for_chain(Chain::BaseMainnet).is_ok());
+
+        let address = chain_clients
+            .for_chain(Chain::EthMainnet)
+            .unwrap()
+            .resolve_ens_name("vitalik.eth".to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            address,
+            address!("0xD8dA6BF26964aF9D7eEd9e03E53415D37aA96045")
+        );
+
+        let address = chain_clients
+            .for_chain(Chain::BaseMainnet)
+            .unwrap()
+            .resolve_ens_name("jesse.base.eth".to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            address,
+            address!("0x849151d7D0bF1F34b70d5caD5149D28CC2308bf1")
+        );
     }
 }

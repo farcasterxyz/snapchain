@@ -2,7 +2,7 @@ mod tests {
     use crate::core::util::{calculate_message_hash, FarcasterTime};
     use crate::core::validations::error::ValidationError;
     use crate::core::validations::message::validate_message;
-    use crate::proto::{self};
+    use crate::proto::{self, UserNameType};
     use crate::proto::{CastId, FarcasterNetwork};
     use crate::storage::store::test_helper;
     use crate::storage::util::blake3_20;
@@ -192,6 +192,98 @@ mod tests {
             .to_bytes()
             .to_vec();
         assert_validation_error(&msg, ValidationError::InvalidSignature);
+    }
+
+    #[test]
+    fn validates_username_userdata() {
+        let valid_names = vec![
+            "valid-name",
+            "valid-name.eth",
+            "valid-basename.base.eth",
+            "valid-user123",
+            "validusername123",
+        ];
+
+        let invalid_names = vec![
+            "too_long_for_a_ens_name.eth",       // Contains space
+            "too_long_for_a_base_name.base.eth", // Contains special character
+            "invalid_username!",                 // Contains special character
+        ];
+        for name in valid_names {
+            let msg = create_user_data_add(
+                1,
+                proto::UserDataType::Username,
+                &name.to_string(),
+                None,
+                None,
+            );
+            let result = validate_message(&msg, FarcasterNetwork::Testnet, &version());
+            assert!(result.is_ok(), "Failed for valid name: {}", name);
+        }
+        for name in invalid_names {
+            let msg = create_user_data_add(
+                1,
+                proto::UserDataType::Username,
+                &name.to_string(),
+                None,
+                None,
+            );
+            let result = validate_message(&msg, FarcasterNetwork::Testnet, &version());
+            assert!(result.is_err(), "Failed for invalid name: {}", name);
+            assert_eq!(result.err().unwrap(), ValidationError::InvalidDataLength);
+        }
+    }
+
+    #[test]
+    fn test_username_proof_basenames() {
+        let proof_message = messages_factory::username_proof::create_username_proof(
+            123,
+            UserNameType::UsernameTypeBasename,
+            "user.base.eth".to_string(),
+            hex::decode("849151d7D0bF1F34b70d5caD5149D28CC2308bf1").unwrap(),
+            "signature".to_string(),
+            messages_factory::farcaster_time() as u64,
+            None,
+        );
+
+        // Basenames are supported on the latest version
+        let result = validate_message(&proof_message, FarcasterNetwork::Testnet, &version());
+        assert!(result.is_ok());
+
+        // Message is invalid for versions before basename support was enabled
+        let result = validate_message(
+            &proof_message,
+            FarcasterNetwork::Testnet,
+            &EngineVersion::V4,
+        );
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap(), ValidationError::UnsupportedFeature);
+    }
+
+    #[test]
+    fn test_username_proof_ensname_validation() {
+        let proof_message = messages_factory::username_proof::create_username_proof(
+            123,
+            UserNameType::UsernameTypeEnsL1,
+            "very_long_invalid_proof.ens".to_string(),
+            hex::decode("849151d7D0bF1F34b70d5caD5149D28CC2308bf1").unwrap(),
+            "signature".to_string(),
+            messages_factory::farcaster_time() as u64,
+            None,
+        );
+
+        // Message is valid for versions before ens validation was fixed (v4 and below had no validation)
+        let result = validate_message(
+            &proof_message,
+            FarcasterNetwork::Testnet,
+            &EngineVersion::V4,
+        );
+        assert!(result.is_ok());
+
+        // Validation fails for versions after ens validation was fixed
+        let result = validate_message(&proof_message, FarcasterNetwork::Testnet, &version());
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap(), ValidationError::InvalidDataLength);
     }
 
     #[test]
