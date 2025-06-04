@@ -888,6 +888,12 @@ impl Subscriber {
                 .from_block(FIRST_BLOCK)
                 .events(vec!["Register(address,uint256,address)"])
                 .topic2(U256::from(fid))
+        } else if contract == TIER_REGISTRY {
+            Filter::new()
+                .address(vec![TIER_REGISTRY])
+                .from_block(FIRST_BLOCK)
+                .events(vec!["PurchasedTier(uint256,uint256,uint256,address)"])
+                .topic1(U256::from(fid))
         } else {
             panic!("Unrecognized contract")
         }
