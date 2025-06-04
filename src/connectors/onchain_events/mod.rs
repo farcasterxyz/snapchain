@@ -982,8 +982,8 @@ impl Subscriber {
         let live_sync_block;
         match self.start_block_number {
             None => {
-                // By default, start from the first block or the latest block in the db. Whichever is higher
-                live_sync_block = Some(self.first_block.max(latest_block_in_db));
+                // By default, start from the latest block on chain. If we miss events, other nodes will likely have picked them up.
+                live_sync_block = Some(latest_block_on_chain);
             }
             Some(start_block_number) => {
                 let historical_sync_start_block = latest_block_in_db.max(start_block_number);
