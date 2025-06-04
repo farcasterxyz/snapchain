@@ -90,9 +90,6 @@ pub enum MessageValidationError {
 
     #[error("fname is not registered for fid")]
     MissingFname,
-
-    #[error("inactive feature")]
-    InactiveFeature,
 }
 
 #[derive(Clone, Debug)]
