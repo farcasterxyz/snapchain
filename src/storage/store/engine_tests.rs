@@ -610,7 +610,7 @@ mod tests {
 
         // Now validate the Ethereum address verification
         let eth_address_bytes = hex::decode(eth_address).unwrap();
-        let result = engine.validate_fid_has_verification(
+        let result = engine.verify_fid_owns_address(
             FID3_FOR_TEST,
             proto::Protocol::Ethereum,
             &eth_address_bytes,
@@ -619,7 +619,7 @@ mod tests {
 
         // Validate with wrong FID should fail
         let wrong_fid = FID3_FOR_TEST + 1;
-        let wrong_fid_result = engine.validate_fid_has_verification(
+        let wrong_fid_result = engine.verify_fid_owns_address(
             wrong_fid,
             proto::Protocol::Ethereum,
             &eth_address_bytes,
@@ -635,7 +635,7 @@ mod tests {
         );
 
         // Validate with wrong protocol (Solana) should fail
-        let wrong_protocol_result = engine.validate_fid_has_verification(
+        let wrong_protocol_result = engine.verify_fid_owns_address(
             FID3_FOR_TEST,
             proto::Protocol::Solana,
             &eth_address_bytes,
