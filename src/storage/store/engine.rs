@@ -811,32 +811,9 @@ impl ShardEngine {
             }
         }
 
-        // Process verification removal hooks
-        // Look for any events with deleted verification messages
-        for event in &events {
-            if let Some(hub_event::Body::MergeMessageBody(merge_body)) = &event.body {
-                for deleted_message in &merge_body.deleted_messages {
-                    // Check if this was a verification add message that was deleted
-                    if let Some(data) = &deleted_message.data {
-                        if data.r#type == MessageType::VerificationAddEthAddress as i32 {
-                            if let Err(err) = self.handle_verification_merge_hooks(
-                                deleted_message.fid(),
-                                event,
-                                txn_batch,
-                            ) {
-                                if source != ProposalSource::Simulate {
-                                    warn!(
-                                        fid = deleted_message.fid(),
-                                        "Error handling verification hooks for deleted verification: {:?}",
-                                        err
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        self.revoke_primary_addresses_for_deleted_verifications(
+            &version, &events, txn_batch, &source,
+        )?;
 
         let account_root =
             self.stores
@@ -952,6 +929,46 @@ impl ShardEngine {
             self.stores.user_data_store.revoke(&user_data, txn_batch)?;
         }
 
+        Ok(())
+    }
+
+    fn revoke_primary_addresses_for_deleted_verifications(
+        &mut self,
+        version: &EngineVersion,
+        events: &[HubEvent],
+        txn_batch: &mut RocksDbTransactionBatch,
+        source: &ProposalSource,
+    ) -> Result<(), EngineError> {
+        if !version.is_enabled(ProtocolFeature::PrimaryAddresses) {
+            return Ok(());
+        }
+
+        // Process verification removal hooks
+        // Look for any events with deleted verification messages
+        for event in events {
+            if let Some(hub_event::Body::MergeMessageBody(merge_body)) = &event.body {
+                for deleted_message in &merge_body.deleted_messages {
+                    // Check if this was a verification add message that was deleted
+                    if let Some(data) = &deleted_message.data {
+                        if data.r#type == MessageType::VerificationAddEthAddress as i32 {
+                            if let Err(err) = self.handle_verification_merge_hooks(
+                                deleted_message.fid(),
+                                event,
+                                txn_batch,
+                            ) {
+                                if *source != ProposalSource::Simulate {
+                                    warn!(
+                                        fid = deleted_message.fid(),
+                                        "Error handling verification hooks for deleted verification: {:?}",
+                                        err
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1321,8 +1338,6 @@ impl ShardEngine {
         }
         let name = name.to_string();
         // TODO: validate fname string
-
-        // self.get_verifications_by_fid()
 
         let proof = self.get_username_proof(name.clone(), txn)?;
         match proof {
