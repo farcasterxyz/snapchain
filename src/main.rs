@@ -6,6 +6,7 @@ use snapchain::connectors::onchain_events::{ChainClients, OnchainEventsRequest};
 use snapchain::consensus::consensus::SystemMessage;
 use snapchain::mempool::mempool::{Mempool, MempoolRequest, ReadNodeMempool};
 use snapchain::mempool::routing;
+use snapchain::mempool::MempoolMessageKind;
 use snapchain::network::admin_server::MyAdminService;
 use snapchain::network::gossip::{GossipEvent, SnapchainGossip};
 use snapchain::network::http_server::HubHttpServiceImpl;
@@ -16,7 +17,7 @@ use snapchain::proto::admin_service_server::AdminServiceServer;
 use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::storage::db::snapshot::download_snapshots;
 use snapchain::storage::db::RocksDB;
-use snapchain::storage::store::engine::Senders;
+use snapchain::storage::store::engine::{MempoolMessage, Senders};
 use snapchain::storage::store::node_local_state::LocalStateStore;
 use snapchain::storage::store::stores::Stores;
 use snapchain::storage::store::BlockStore;
@@ -37,6 +38,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 const VERSION: Option<&str> = option_env!("CARGO_PKG_VERSION");
+const MEMPOOL_KEY_PREFIX: &[u8] = b"mempool:";
 
 async fn start_servers(
     app_config: &snapchain::cfg::Config,
@@ -473,6 +475,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .await;
 
+        // Don't like this, is there a better way to do this?
+        // We stil probably want to be seeding the mempool with messages from the db
+        use snapchain::storage::db::RocksDB;
+        use std::collections::HashMap;
+        let mut shard_dbs: HashMap<u32, std::sync::Arc<RocksDB>> = HashMap::new();
+        for shard_id in 0..=app_config.consensus.num_shards {
+            let db = RocksDB::open_shard_db(app_config.rocksdb_dir.as_str(), shard_id);
+            shard_dbs.insert(shard_id, db);
+        }
+
         let mut mempool = Mempool::new(
             app_config.mempool.clone(),
             mempool_rx,
@@ -483,7 +495,45 @@ async fn main() -> Result<(), Box<dyn Error>> {
             shard_decision_rx,
             statsd_client.clone(),
         );
-        tokio::spawn(async move { mempool.run().await });
+
+        // Can we move this to init?
+        for shard_id in 1..=app_config.consensus.num_shards {
+            let db = RocksDB::open_shard_db(app_config.rocksdb_dir.as_str(), shard_id);
+            use snapchain::storage::db::PageOptions;
+            let mut restore_items: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+            if let Err(e) = db.for_each_iterator_by_prefix(
+                Some(MEMPOOL_KEY_PREFIX.to_vec()),
+                None,
+                &PageOptions::default(),
+                |key: &[u8], value: &[u8]| {
+                    restore_items.push((key.to_vec(), value.to_vec()));
+                    Ok(true)
+                },
+            ) {
+                tracing::warn!(shard_id, error=?e, "Failed to iterate persisted mempool messages");
+            }
+            for (key, value) in restore_items {
+                let prefix_len = MEMPOOL_KEY_PREFIX.len();
+                if key.len() <= prefix_len {
+                    continue;
+                }
+                let kind_byte = key[prefix_len];
+                let kind = match kind_byte {
+                    1 => MempoolMessageKind::ValidatorMessage,
+                    2 => MempoolMessageKind::UserMessage,
+                    _ => continue,
+                };
+                if let Ok(msg) = MempoolMessage::from_bytes(kind, &value) {
+                    mempool.insert_message_for_restore(msg);
+                }
+            }
+        }
+
+        let mut mempool_task = mempool;
+        let mempool_handle = tokio::spawn(async move {
+            mempool_task.run().await;
+            mempool_task
+        });
 
         if !app_config.fnames.disable {
             let mut fetcher = snapchain::connectors::fname::Fetcher::new(
@@ -566,13 +616,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             select! {
                 _ = ctrl_c() => {
                     info!("Received Ctrl-C, shutting down");
-                    node.stop();
-                    return Ok(());
+                    break;
                 }
                 _ = shutdown_rx.recv() => {
                     error!("Received shutdown signal, shutting down");
-                    node.stop();
-                    return Ok(());
+                    break;
                 }
                 Some(msg) = system_rx.recv() => {
                     match msg {
@@ -588,7 +636,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         },
                         SystemMessage::DecidedValueForReadNode(_) => {
                             // Ignore these for validator nodes
-                        }
+                        },
                         SystemMessage::ReadNodeFinishedInitialSync{shard_id: _} => {
                             // Ignore these for validator nodes
                             sync_complete_tx.send(true)?; // TODO: is this necessary?
@@ -597,5 +645,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
         }
+        if let Ok(mempool) = mempool_handle.await {
+            // Persist mempool to db
+            for (shard_id, messages) in mempool.all_messages() {
+                let db = RocksDB::open_shard_db(app_config.rocksdb_dir.as_str(), shard_id);
+                use snapchain::storage::db::RocksDbTransactionBatch;
+                let mut batch = RocksDbTransactionBatch::new();
+                for message in messages {
+                    batch.put(message.db_key(), message.to_bytes());
+                }
+                if let Err(e) = db.commit(batch) {
+                    tracing::error!(shard_id, error=?e, "Failed to persist mempool to db");
+                }
+            }
+        }
+        node.stop();
+        return Ok(());
     }
 }

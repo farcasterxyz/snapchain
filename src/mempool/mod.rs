@@ -6,3 +6,5 @@ mod mempool_test;
 
 #[cfg(test)]
 mod rate_limits_test;
+
+pub use mempool::MempoolMessageKind;

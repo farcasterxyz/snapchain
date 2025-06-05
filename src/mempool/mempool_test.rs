@@ -31,6 +31,10 @@ mod tests {
     use libp2p::identity::ed25519::Keypair;
     use messages_factory::casts::create_cast_add;
 
+    use crate::storage::db::RocksDB;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
     const HOST_FOR_TEST: &str = "127.0.0.1";
     const PORT_FOR_TEST: u32 = 9388;
 
@@ -324,7 +328,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mempool_eviction() {
-        let (mut engine, _, mut mempool, mempool_tx, messages_request_tx, shard_decision_tx, _) =
+        let (mut engine, _, mempool, mempool_tx, messages_request_tx, shard_decision_tx, _) =
             setup(None, false).await;
         test_helper::register_user(
             1234,
@@ -335,8 +339,9 @@ mod tests {
         .await;
 
         // Spawn mempool task
+        let mut mempool_for_task = mempool;
         tokio::spawn(async move {
-            mempool.run().await;
+            mempool_for_task.run().await;
         });
 
         let fid = 1234;
@@ -556,5 +561,88 @@ mod tests {
 
         let error = result.unwrap_err();
         assert_eq!(error.code, "bad_request.duplicate");
+    }
+
+    #[tokio::test]
+    async fn test_mempool_restore_from_db() {
+        // Setup temp RocksDB for shard 1
+        let tmp_dir = tempdir().unwrap();
+        let db_path = tmp_dir.path().join("shard-1");
+        let db = Arc::new(RocksDB::new(db_path.to_str().unwrap()));
+        db.open().unwrap();
+        let mut shard_dbs = HashMap::new();
+        shard_dbs.insert(1, db.clone());
+
+        let message = MempoolMessage::UserMessage(messages_factory::casts::create_cast_add(
+            5678, "restore", None, None,
+        ));
+        let key = message.db_key();
+        let val = message.to_bytes();
+        db.put(&key, &val).unwrap();
+
+        let (_engine, _, _mempool, _mempool_tx, _old_messages_request_tx, _decision_tx, _) =
+            setup(None, false).await;
+        let (messages_request_tx, messages_request_rx) = mpsc::channel(1);
+        let mut mempool = Mempool::new(
+            mempool::Config::default(),
+            mpsc::channel(1).1,
+            messages_request_rx,
+            1,
+            HashMap::new(),
+            mpsc::channel(1).0,
+            broadcast::channel(1).1,
+            StatsdClientWrapper::new(
+                cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
+                true,
+            ),
+        );
+
+        let mut restore_items: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        use crate::mempool::mempool::MempoolMessageKind;
+        use crate::storage::db::PageOptions;
+        db.for_each_iterator_by_prefix(
+            Some(b"mempool:".to_vec()),
+            None,
+            &PageOptions::default(),
+            |key: &[u8], value: &[u8]| {
+                restore_items.push((key.to_vec(), value.to_vec()));
+                Ok(true)
+            },
+        )
+        .unwrap();
+        for (key, value) in restore_items {
+            let prefix_len = b"mempool:".len();
+            if key.len() <= prefix_len {
+                continue;
+            }
+            let kind_byte = key[prefix_len];
+            let kind = match kind_byte {
+                1 => MempoolMessageKind::ValidatorMessage,
+                2 => MempoolMessageKind::UserMessage,
+                _ => continue,
+            };
+            if let Ok(msg) = MempoolMessage::from_bytes(kind, &value) {
+                mempool.insert_message_for_restore(msg);
+            }
+        }
+
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let (oneshot_tx, oneshot_rx) = oneshot::channel();
+        messages_request_tx
+            .send(MempoolMessagesRequest {
+                shard_id: 1,
+                max_messages_per_block: 10,
+                message_tx: oneshot_tx,
+            })
+            .await
+            .unwrap();
+        let restored = oneshot_rx.await.unwrap();
+        assert!(
+            restored.iter().any(|m| m.fid() == 5678),
+            "Restored mempool message not found in memory"
+        );
     }
 }
