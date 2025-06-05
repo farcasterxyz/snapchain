@@ -810,9 +810,13 @@ impl ShardEngine {
             }
         }
 
-        self.revoke_primary_addresses_for_deleted_verifications(
-            &version, &events, txn_batch, &source,
-        )?;
+        let revoke_events =
+            self.handle_delete_side_effects(&version, &events, txn_batch, &source)?;
+        for event in revoke_events {
+            revoked_messages_count += 1;
+            self.update_trie(trie_ctx, &event, txn_batch)?;
+            events.push(event);
+        }
 
         let account_root =
             self.stores
@@ -853,7 +857,7 @@ impl ShardEngine {
         fid: u64,
         deleted_verification: &proto::VerificationAddAddressBody,
         txn_batch: &mut RocksDbTransactionBatch,
-    ) -> Result<(), MessageValidationError> {
+    ) -> Result<Vec<HubEvent>, MessageValidationError> {
         // Determine protocol from removal message
         let protocol = match deleted_verification.protocol {
             x if x == proto::Protocol::Ethereum as i32 => proto::Protocol::Ethereum,
@@ -885,44 +889,46 @@ impl ShardEngine {
         // If we can't find the user data or there's an error, just return OK (nothing to revoke)
         let user_data = match user_data_result {
             Ok(data) => data,
-            Err(_) => return Ok(()),
+            Err(_) => return Ok(vec![]),
         };
 
         // Check if the stored primary address matches the one being removed
         let data_ref = match &user_data.data {
             Some(data) => data,
-            None => return Ok(()),
+            None => return Ok(vec![]),
         };
 
         let user_data_body = match &data_ref.body {
             Some(Body::UserDataBody(body)) => body,
-            _ => return Ok(()),
+            _ => return Ok(vec![]),
         };
 
         // If the primary address matches the one being removed, revoke it
         if user_data_body.value == parsed_address {
-            self.stores.user_data_store.revoke(&user_data, txn_batch)?;
+            let revoke_hub_event = self.stores.user_data_store.revoke(&user_data, txn_batch)?;
+            return Ok(vec![revoke_hub_event]);
         }
 
-        Ok(())
+        Ok(vec![])
     }
 
     /// Takes a list of merge events of type VerificationAddAddress and revokes the user's primary address
     /// if it was deleted as part of a verification remove message.
-    fn revoke_primary_addresses_for_deleted_verifications(
+    fn handle_delete_side_effects(
         &mut self,
         version: &EngineVersion,
         events: &[HubEvent],
         txn_batch: &mut RocksDbTransactionBatch,
         source: &ProposalSource,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Vec<HubEvent>, EngineError> {
         if !version.is_enabled(ProtocolFeature::PrimaryAddresses) {
-            return Ok(());
+            return Ok(vec![]);
         }
 
         // Process verification removal hooks
         // Look for any events with deleted verification messages. We use this as a trigger to revoke
         // the user's primary address if it was deleted as part of a verification remove message.
+        let mut revoke_events = Vec::new();
         for event in events {
             if let Some(hub_event::Body::MergeMessageBody(merge_body)) = &event.body {
                 for deleted_message in &merge_body.deleted_messages {
@@ -932,17 +938,22 @@ impl ShardEngine {
                         // we differentiate between the two by checking the protocol field.
                         if data.r#type == MessageType::VerificationAddEthAddress as i32 {
                             if let Some(Body::VerificationAddAddressBody(body)) = &data.body {
-                                if let Err(err) = self.check_and_revoke_primary_address(
+                                match self.check_and_revoke_primary_address(
                                     deleted_message.fid(),
                                     body,
                                     txn_batch,
                                 ) {
-                                    if *source != ProposalSource::Simulate {
-                                        warn!(
-                                            fid = deleted_message.fid(),
-                                            "Error handling verification hooks for deleted verification: {:?}",
-                                            err
-                                        );
+                                    Ok(new_revoke_events) => {
+                                        revoke_events.extend(new_revoke_events);
+                                    }
+                                    Err(err) => {
+                                        if *source != ProposalSource::Simulate {
+                                            warn!(
+                                                fid = deleted_message.fid(),
+                                                "Error handling verification hooks for deleted verification: {:?}",
+                                                err
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -951,7 +962,7 @@ impl ShardEngine {
                 }
             }
         }
-        Ok(())
+        Ok(revoke_events)
     }
 
     fn merge_message(
