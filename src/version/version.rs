@@ -13,7 +13,7 @@ pub enum EngineVersion {
 
 pub enum ProtocolFeature {
     SignerRevokeBug,
-    EnableSignerRevokeFix,
+    EnableSignerRevokeBackfill,
     FarcasterPro,
     Basenames,
     EnsValidation, // Before this version, ENS validation was not enforced
@@ -107,7 +107,7 @@ impl EngineVersion {
             ProtocolFeature::FarcasterPro
             | ProtocolFeature::Basenames
             | ProtocolFeature::EnsValidation
-            | ProtocolFeature::EnableSignerRevokeFix => self >= &EngineVersion::V5,
+            | ProtocolFeature::EnableSignerRevokeBackfill => self >= &EngineVersion::V5,
         }
     }
 }

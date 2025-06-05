@@ -1543,7 +1543,7 @@ impl ShardEngine {
         network: proto::FarcasterNetwork,
         version: EngineVersion,
     ) -> bool {
-        version.is_enabled(ProtocolFeature::EnableSignerRevokeFix)
+        version.is_enabled(ProtocolFeature::EnableSignerRevokeBackfill)
             && ProtocolFeature::SignerRevokeBug.is_active_at(onchain_event.block_timestamp, network)
     }
 }
