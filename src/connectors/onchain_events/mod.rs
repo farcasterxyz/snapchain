@@ -67,7 +67,7 @@ pub static KEY_REGISTRY: Address = address!("00000000Fc1237824fb747aBDE0FF18990E
 
 pub static ID_REGISTRY: Address = address!("00000000Fc6c5F01Fc30151999387Bb99A9f489b");
 
-pub static TIER_REGISTRY: Address = address!("6F22091496694c370E5EbEF861c8f69472fF89B9");
+pub static TIER_REGISTRY: Address = address!("0x00000000fc84484d585C3cF48d213424DFDE43FD");
 
 // Note these are the registry addresses, not the resolver addresses. We look up the resolver from the registry.
 static ETH_L1_ENS_REGISTRY: Address = address!("00000000000C2E074eC69A0dFb2997BA6C7d2e1e");
@@ -76,7 +76,7 @@ static BASE_MAINNET_ENS_REGISTRY: Address = address!("0xB94704422c2a1E396835A571
 // For reference, in case it needs to be specified manually
 pub const OP_MAINNET_FIRST_BLOCK: u64 = 108864739;
 pub static OP_MAINNET_CHAIN_ID: u32 = 10; // OP mainnet
-pub const BASE_MAINNET_FIRST_BLOCK: u64 = 31108599;
+pub const BASE_MAINNET_FIRST_BLOCK: u64 = 31180908;
 pub static BASE_MAINNET_CHAIN_ID: u32 = 8453; // Base mainnet
 const RENT_EXPIRY_IN_SECONDS: u64 = 365 * 24 * 60 * 60; // One year
 
@@ -982,8 +982,8 @@ impl Subscriber {
         let live_sync_block;
         match self.start_block_number {
             None => {
-                // By default, start from the latest block on chain. If we miss events, other nodes will likely have picked them up.
-                live_sync_block = Some(latest_block_on_chain);
+                // By default, start from the first block or the latest block in the db. Whichever is higher
+                live_sync_block = Some(self.first_block.max(latest_block_in_db));
             }
             Some(start_block_number) => {
                 let historical_sync_start_block = latest_block_in_db.max(start_block_number);
