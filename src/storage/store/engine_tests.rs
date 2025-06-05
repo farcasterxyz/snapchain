@@ -659,7 +659,7 @@ mod tests {
             limits: None,
             db: None,
             messages_request_tx: None,
-            network: Some(proto::FarcasterNetwork::Devnet), // Enables all protocol features including primary addresses
+            network: None,
         });
 
         // Register a user
@@ -735,6 +735,12 @@ mod tests {
             "Primary address should be automatically revoked when verification is removed"
         );
 
+        // Verify the user data message no longer exists in the trie
+        assert!(
+            !test_helper::message_exists_in_trie(&mut engine, &primary_address_msg),
+            "User data message should not exist in trie after revocation"
+        );
+
         // Verify verifications were actually removed
         let verification_result = engine.get_verifications_by_fid(FID3_FOR_TEST);
         assert_eq!(
@@ -751,7 +757,7 @@ mod tests {
             limits: None,
             db: None,
             messages_request_tx: None,
-            network: Some(proto::FarcasterNetwork::Devnet), // Enables all protocol features including primary addresses
+            network: None,
         });
 
         // Register a user
@@ -804,7 +810,7 @@ mod tests {
             limits: None,
             db: None,
             messages_request_tx: None,
-            network: Some(proto::FarcasterNetwork::Devnet), // Enables all protocol features including primary addresses
+            network: None,
         });
 
         // Register a user
@@ -896,6 +902,12 @@ mod tests {
                 );
             }
         }
+
+        // Verify the user data message still exists in the trie
+        assert!(
+            test_helper::message_exists_in_trie(&mut engine, &primary_address_msg),
+            "User data message should still exist in trie when removing non-primary verification"
+        );
 
         // Verify we still have the original verification
         let verification_result = engine.get_verifications_by_fid(FID3_FOR_TEST);
