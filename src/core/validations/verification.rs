@@ -159,7 +159,7 @@ pub fn validate_fname_transfer(transfer: &proto::FnameTransfer) -> Result<(), Va
     Ok(())
 }
 
-fn validate_eth_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationError> {
+pub fn validate_eth_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationError> {
     if address.len() == 0 {
         return Err(ValidationError::InvalidData);
     }
@@ -183,7 +183,7 @@ fn validate_eth_block_hash(block_hash: &Vec<u8>) -> Result<&Vec<u8>, ValidationE
     Ok(block_hash)
 }
 
-fn validate_sol_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationError> {
+pub fn validate_sol_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationError> {
     if address.len() == 0 {
         return Err(ValidationError::InvalidData);
     }

@@ -375,7 +375,9 @@ pub fn validate_user_data_primary_address_ethereum(input: &String) -> Result<(),
     }
 
     let parsed = Address::from_hex(input).map_err(|_| ValidationError::InvalidData)?;
+    verification::validate_eth_address(&parsed.to_vec())?;
 
+    // Also check the checksum
     let checksummed = parsed.to_checksum(None);
     if checksummed != *input {
         return Err(ValidationError::InvalidData);
@@ -393,9 +395,8 @@ pub fn validate_user_data_primary_address_solana(input: &String) -> Result<(), V
     let decoded = bs58::decode(input)
         .into_vec()
         .map_err(|_| ValidationError::InvalidData)?;
-    if decoded.len() != 32 {
-        return Err(ValidationError::InvalidDataLength);
-    }
+    verification::validate_sol_address(&decoded)?;
+
     Ok(())
 }
 
