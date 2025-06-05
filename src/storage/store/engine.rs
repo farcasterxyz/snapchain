@@ -858,25 +858,17 @@ impl ShardEngine {
         deleted_verification: &proto::VerificationAddAddressBody,
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<Vec<HubEvent>, MessageValidationError> {
-        // Determine protocol from removal message
-        let protocol = match deleted_verification.protocol {
-            x if x == proto::Protocol::Ethereum as i32 => proto::Protocol::Ethereum,
-            x if x == proto::Protocol::Solana as i32 => proto::Protocol::Solana,
+        // Determine protocol, parse address, and get user data type in one match
+        let (parsed_address, user_data_type) = match deleted_verification.protocol {
+            x if x == proto::Protocol::Ethereum as i32 => (
+                Address::from_slice(&deleted_verification.address).to_checksum(None),
+                UserDataType::UserDataPrimaryAddressEthereum,
+            ),
+            x if x == proto::Protocol::Solana as i32 => (
+                bs58::encode(&deleted_verification.address).into_string(),
+                UserDataType::UserDataPrimaryAddressSolana,
+            ),
             _ => return Err(MessageValidationError::AddressNotPartOfVerification),
-        };
-
-        // Parse address based on protocol
-        let parsed_address = match protocol {
-            proto::Protocol::Ethereum => {
-                Address::from_slice(&deleted_verification.address).to_checksum(None)
-            }
-            proto::Protocol::Solana => bs58::encode(&deleted_verification.address).into_string(),
-        };
-
-        // Determine user data type based on protocol
-        let user_data_type = match protocol {
-            proto::Protocol::Ethereum => UserDataType::UserDataPrimaryAddressEthereum,
-            proto::Protocol::Solana => UserDataType::UserDataPrimaryAddressSolana,
         };
 
         // Check if this address is set as the primary address
