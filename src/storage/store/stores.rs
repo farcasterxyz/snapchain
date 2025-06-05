@@ -4,11 +4,12 @@ use super::account::{
 };
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
-use crate::proto::MessageType;
+use crate::network::http_server::TierType;
 use crate::proto::{
     self, HubEvent, StorageLimit, StorageLimitsResponse, StorageUnitDetails, StorageUnitType,
     StoreType,
 };
+use crate::proto::{MessageType, TierDetails};
 use crate::storage::constants::PAGE_SIZE_MAX;
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
@@ -296,7 +297,6 @@ impl Stores {
             };
             limits.push(limit);
         }
-        let is_pro_user = self.is_pro_user(fid, &FarcasterTime::current())?;
 
         let response = StorageLimitsResponse {
             limits,
@@ -311,7 +311,14 @@ impl Stores {
                     unit_size: slot.units,
                 },
             ],
-            is_pro_user,
+            tier_subscriptions: vec![TierDetails {
+                tier_type: TierType::Pro as i32,
+                expires_at: self.onchain_event_store.tier_subscription_exires_at(
+                    proto::TierType::Pro,
+                    fid,
+                    None,
+                )?,
+            }],
         };
         Ok(response)
     }

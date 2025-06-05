@@ -555,12 +555,12 @@ impl OnchainEventStore {
         }
         Ok(None)
     }
-    pub fn is_tier_subscription_active_at(
+    pub fn tier_subscription_exires_at(
         &self,
         tier_type: TierType,
         fid: u64,
-        timestamp: &FarcasterTime,
-    ) -> Result<bool, OnchainEventStorageError> {
+        as_of: Option<&FarcasterTime>,
+    ) -> Result<u64, OnchainEventStorageError> {
         // TODO(aditi): This is pretty expensive, we may want to add caching for fid -> tier expiration to speed up.
         // Sorted by block timestamp
         let tier_purchase_events = self
@@ -581,16 +581,27 @@ impl OnchainEventStore {
         for tier_purchase in tier_purchase_events {
             match tier_purchase.body.unwrap() {
                 on_chain_event::Body::TierPurchaseEventBody(body) => {
-                    if tier_purchase.block_timestamp > timestamp.to_unix_seconds() {
-                        break;
-                    }
+                    if let Some(as_of) = as_of {
+                        if tier_purchase.block_timestamp > as_of.to_unix_seconds() {
+                            break;
+                        }
+                    };
                     let extend_by = body.for_days * 24 * 60 * 60;
                     expires_at = tier_purchase.block_timestamp.max(expires_at) + extend_by;
                 }
                 _ => {}
             };
         }
+        Ok(expires_at)
+    }
 
+    pub fn is_tier_subscription_active_at(
+        &self,
+        tier_type: TierType,
+        fid: u64,
+        timestamp: &FarcasterTime,
+    ) -> Result<bool, OnchainEventStorageError> {
+        let expires_at = self.tier_subscription_exires_at(tier_type, fid, Some(timestamp))?;
         Ok(expires_at >= timestamp.to_unix_seconds())
     }
 

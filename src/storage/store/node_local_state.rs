@@ -34,8 +34,9 @@ pub struct LocalStateStore {
 }
 
 pub enum DataType {
-    OnchainEvent = 1,
+    OptimismOnchainEvent = 1,
     FnameTransfer = 2,
+    BaseOnchainEvent = 3,
 }
 
 #[derive(Clone, strum_macros::Display)]
@@ -52,8 +53,10 @@ impl LocalStateStore {
     fn make_onchain_event_primary_key(chain: Chain) -> Vec<u8> {
         vec![
             RootPrefix::NodeLocalState as u8,
-            DataType::OnchainEvent as u8,
-            chain as u8,
+            match chain {
+                Chain::Optimism => DataType::OptimismOnchainEvent as u8,
+                Chain::Base => DataType::BaseOnchainEvent as u8,
+            },
         ]
     }
 
