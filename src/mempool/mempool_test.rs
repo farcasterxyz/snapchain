@@ -93,6 +93,7 @@ mod tests {
             gossip_tx,
             shard_decision_rx,
             statsd_client,
+            proto::FarcasterNetwork::Devnet,
         );
 
         (

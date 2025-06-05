@@ -13,9 +13,18 @@ pub enum EngineVersion {
 
 pub enum ProtocolFeature {
     SignerRevokeBug,
+    EnableSignerRevokeFix,
     FarcasterPro,
     Basenames,
     EnsValidation, // Before this version, ENS validation was not enforced
+}
+
+impl ProtocolFeature {
+    pub fn is_active_at(self, unix_seconds: u64, network: FarcasterNetwork) -> bool {
+        let version =
+            EngineVersion::version_for(&FarcasterTime::from_unix_seconds(unix_seconds), network);
+        version.is_enabled(self)
+    }
 }
 
 pub struct VersionSchedule {
@@ -97,7 +106,8 @@ impl EngineVersion {
             }
             ProtocolFeature::FarcasterPro
             | ProtocolFeature::Basenames
-            | ProtocolFeature::EnsValidation => self >= &EngineVersion::V5,
+            | ProtocolFeature::EnsValidation
+            | ProtocolFeature::EnableSignerRevokeFix => self >= &EngineVersion::V5,
         }
     }
 }

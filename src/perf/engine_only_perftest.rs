@@ -45,7 +45,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         }),
         db: None,
         messages_request_tx: Some(messages_request_tx),
-        network: None,
+        network: Some(crate::proto::FarcasterNetwork::Devnet),
     });
 
     let statsd_client = StatsdClientWrapper::new(
@@ -64,6 +64,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         gossip_tx,
         shard_decision_rx,
         statsd_client,
+        crate::proto::FarcasterNetwork::Devnet,
     );
 
     tokio::spawn(async move {

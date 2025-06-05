@@ -586,10 +586,16 @@ impl ShardEngine {
         // System messages first, then user messages and finally prunes
         for msg in &snapchain_txn.system_messages {
             if let Some(onchain_event) = &msg.on_chain_event {
-                let event = self
-                    .stores
-                    .onchain_event_store
-                    .merge_onchain_event(onchain_event.clone(), txn_batch);
+                let disable_duplicate_check = Self::should_disable_onchain_events_duplicate_check(
+                    onchain_event,
+                    self.network,
+                    version,
+                );
+                let event = self.stores.onchain_event_store.merge_onchain_event(
+                    onchain_event.clone(),
+                    txn_batch,
+                    disable_duplicate_check,
+                );
 
                 match event {
                     Ok(hub_event) => {
@@ -1530,6 +1536,15 @@ impl ShardEngine {
             return false;
         }
         signer_event.event_type == proto::SignerEventType::Remove as i32
+    }
+
+    pub fn should_disable_onchain_events_duplicate_check(
+        onchain_event: &OnChainEvent,
+        network: proto::FarcasterNetwork,
+        version: EngineVersion,
+    ) -> bool {
+        version.is_enabled(ProtocolFeature::EnableSignerRevokeFix)
+            && ProtocolFeature::SignerRevokeBug.is_active_at(onchain_event.block_timestamp, network)
     }
 }
 

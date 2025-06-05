@@ -250,6 +250,7 @@ mod tests {
             gossip_tx,
             shard_decision_rx,
             statsd_client.clone(),
+            proto::FarcasterNetwork::Devnet,
         );
         tokio::spawn(async move { mempool.run().await });
 
@@ -275,7 +276,7 @@ mod tests {
                 senders,
                 statsd_client,
                 num_shards,
-                proto::FarcasterNetwork::Testnet,
+                proto::FarcasterNetwork::Devnet,
                 message_router,
                 mempool_tx.clone(),
                 chain_clients,
