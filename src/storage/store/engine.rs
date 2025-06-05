@@ -810,12 +810,20 @@ impl ShardEngine {
             }
         }
 
-        let revoke_events =
-            self.handle_delete_side_effects(&version, &events, txn_batch, &source)?;
-        for event in revoke_events {
-            revoked_messages_count += 1;
-            self.update_trie(trie_ctx, &event, txn_batch)?;
-            events.push(event);
+        let result = self.handle_delete_side_effects(&version, &events, txn_batch);
+        match result {
+            Ok(revoke_events) => {
+                for event in revoke_events {
+                    revoked_messages_count += 1;
+                    self.update_trie(trie_ctx, &event, txn_batch)?;
+                    events.push(event);
+                }
+            }
+            Err(err) => {
+                if source != ProposalSource::Simulate {
+                    warn!("Error handling delete side effects: {:?}", err);
+                }
+            }
         }
 
         let account_root =
@@ -899,7 +907,6 @@ impl ShardEngine {
         version: &EngineVersion,
         events: &[HubEvent],
         txn_batch: &mut RocksDbTransactionBatch,
-        source: &ProposalSource,
     ) -> Result<Vec<HubEvent>, EngineError> {
         if !version.is_enabled(ProtocolFeature::PrimaryAddresses) {
             return Ok(vec![]);
@@ -918,24 +925,12 @@ impl ShardEngine {
                         .ok_or(MessageValidationError::NoMessageData)?;
                     match &data.body {
                         Some(Body::VerificationAddAddressBody(body)) => {
-                            match self.check_and_revoke_primary_address(
+                            let new_revoke_events = self.check_and_revoke_primary_address(
                                 deleted_message.fid(),
                                 body,
                                 txn_batch,
-                            ) {
-                                Ok(new_revoke_events) => {
-                                    revoke_events.extend(new_revoke_events);
-                                }
-                                Err(err) => {
-                                    if *source != ProposalSource::Simulate {
-                                        warn!(
-                                            fid = deleted_message.fid(),
-                                            "Error handling verification hooks for deleted verification: {:?}",
-                                            err
-                                        );
-                                    }
-                                }
-                            }
+                            )?;
+                            revoke_events.extend(new_revoke_events);
                         }
                         _ => continue,
                     }
