@@ -2001,6 +2001,10 @@ mod tests {
         );
 
         commit_event(&mut engine, &pro_event).await;
+        assert!(engine.trie_key_exists(
+            test_helper::trie_ctx(),
+            &TrieKey::for_onchain_event(&pro_event)
+        ));
 
         commit_message_at(&mut engine, &long_cast, &FarcasterTime::current()).await;
         assert!(engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&long_cast)),);
@@ -2051,6 +2055,10 @@ mod tests {
         );
 
         commit_event(&mut engine, &pro_event).await;
+        assert!(engine.trie_key_exists(
+            test_helper::trie_ctx(),
+            &TrieKey::for_onchain_event(&pro_event)
+        ));
 
         commit_message_at(&mut engine, &four_embeds, &FarcasterTime::current()).await;
         assert!(
@@ -2084,6 +2092,10 @@ mod tests {
         assert!(!engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&banner)),);
 
         commit_event(&mut engine, &pro_event).await;
+        assert!(engine.trie_key_exists(
+            test_helper::trie_ctx(),
+            &TrieKey::for_onchain_event(&pro_event)
+        ));
 
         commit_message_at(&mut engine, &banner, &FarcasterTime::current()).await;
         assert!(engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&banner)),);
