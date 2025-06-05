@@ -878,29 +878,17 @@ impl ShardEngine {
             user_data_type,
         );
 
-        // If we can't find the user data or there's an error, just return OK (nothing to revoke)
-        let user_data = match user_data_result {
-            Ok(data) => data,
-            Err(_) => return Ok(vec![]),
-        };
-
-        // Check if the stored primary address matches the one being removed
-        let data_ref = match &user_data.data {
-            Some(data) => data,
-            None => return Ok(vec![]),
-        };
-
-        let user_data_body = match &data_ref.body {
-            Some(Body::UserDataBody(body)) => body,
-            _ => return Ok(vec![]),
-        };
-
-        // If the primary address matches the one being removed, revoke it
-        if user_data_body.value == parsed_address {
-            let revoke_hub_event = self.stores.user_data_store.revoke(&user_data, txn_batch)?;
-            return Ok(vec![revoke_hub_event]);
+        if let Ok(user_data) = user_data_result {
+            if let Some(data_ref) = &user_data.data {
+                if let Some(Body::UserDataBody(body)) = &data_ref.body {
+                    if body.value == parsed_address {
+                        let revoke_hub_event =
+                            self.stores.user_data_store.revoke(&user_data, txn_batch)?;
+                        return Ok(vec![revoke_hub_event]);
+                    }
+                }
+            }
         }
-
         Ok(vec![])
     }
 
