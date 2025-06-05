@@ -76,10 +76,13 @@ pub fn merge_onchain_event(
     db: &RocksDB,
     txn: &mut RocksDbTransactionBatch,
     onchain_event: OnChainEvent,
+    disable_duplicate_check: bool,
 ) -> Result<(), OnchainEventStorageError> {
     let primary_key = make_onchain_event_primary_key(&onchain_event);
-    if let Some(_) = get_from_db_or_txn(db, txn, &primary_key)? {
-        return Err(OnchainEventStorageError::DuplicateOnchainEvent);
+    if !disable_duplicate_check {
+        if let Some(_) = get_from_db_or_txn(db, txn, &primary_key)? {
+            return Err(OnchainEventStorageError::DuplicateOnchainEvent);
+        }
     }
     txn.put(primary_key, onchain_event.encode_to_vec());
     build_secondary_indices(db, txn, &onchain_event)?;
@@ -432,8 +435,14 @@ impl OnchainEventStore {
         &self,
         onchain_event: OnChainEvent,
         txn: &mut RocksDbTransactionBatch,
+        disable_duplicate_check: bool,
     ) -> Result<HubEvent, OnchainEventStorageError> {
-        merge_onchain_event(&self.db, txn, onchain_event.clone())?;
+        merge_onchain_event(
+            &self.db,
+            txn,
+            onchain_event.clone(),
+            disable_duplicate_check,
+        )?;
         let hub_event = &mut HubEvent::from(
             HubEventType::MergeOnChainEvent,
             proto::hub_event::Body::MergeOnChainEventBody(MergeOnChainEventBody {

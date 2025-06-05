@@ -137,7 +137,7 @@ mod tests {
             another_valid_2024_rent_event,
             valid_rent_event_different_fid,
         ] {
-            store.merge_onchain_event(event, &mut txn).unwrap();
+            store.merge_onchain_event(event, &mut txn, false).unwrap();
         }
         store.db.commit(txn).unwrap();
 

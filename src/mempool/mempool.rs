@@ -12,7 +12,9 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
-use crate::proto::OnChainEventType;
+use crate::proto::{FarcasterNetwork, OnChainEventType};
+use crate::storage::store::engine::ShardEngine;
+use crate::version::version::EngineVersion;
 use crate::{
     core::types::SnapchainValidatorContext,
     network::gossip::GossipEvent,
@@ -240,6 +242,7 @@ pub struct ReadNodeMempool {
     mempool_rx: mpsc::Receiver<MempoolRequest>,
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     statsd_client: StatsdClientWrapper,
+    network: FarcasterNetwork,
 }
 
 impl ReadNodeMempool {
@@ -249,6 +252,7 @@ impl ReadNodeMempool {
         shard_stores: HashMap<u32, Stores>,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         statsd_client: StatsdClientWrapper,
+        network: FarcasterNetwork,
     ) -> Self {
         ReadNodeMempool {
             shard_stores,
@@ -257,6 +261,7 @@ impl ReadNodeMempool {
             message_router: Box::new(ShardRouter {}),
             gossip_tx,
             statsd_client,
+            network,
         }
     }
 
@@ -301,6 +306,13 @@ impl ReadNodeMempool {
                 },
                 MempoolMessage::ValidatorMessage(message) => {
                     if let Some(onchain_event) = &message.on_chain_event {
+                        if ShardEngine::should_disable_onchain_events_duplicate_check(
+                            onchain_event,
+                            self.network,
+                            EngineVersion::version_for(&FarcasterTime::current(), self.network),
+                        ) {
+                            return false;
+                        }
                         match stores.onchain_event_store.exists(&onchain_event) {
                             Err(_) => return false,
                             Ok(exists) => return exists,
@@ -407,6 +419,7 @@ impl Mempool {
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         shard_decision_rx: broadcast::Receiver<ShardChunk>,
         statsd_client: StatsdClientWrapper,
+        network: FarcasterNetwork,
     ) -> Self {
         Mempool {
             messages: HashMap::new(),
@@ -428,6 +441,7 @@ impl Mempool {
                 shard_stores,
                 gossip_tx,
                 statsd_client.clone(),
+                network,
             ),
             statsd_client,
         }
