@@ -924,32 +924,32 @@ impl ShardEngine {
         for event in events {
             if let Some(hub_event::Body::MergeMessageBody(merge_body)) = &event.body {
                 for deleted_message in &merge_body.deleted_messages {
-                    // Check if this was a verification add message that was deleted
-                    if let Some(data) = &deleted_message.data {
-                        // NOTE: VerificationAddEthAddress is used for both Ethereum and Solana verifications.
-                        // we differentiate between the two by checking the protocol field.
-                        if data.r#type == MessageType::VerificationAddEthAddress as i32 {
-                            if let Some(Body::VerificationAddAddressBody(body)) = &data.body {
-                                match self.check_and_revoke_primary_address(
-                                    deleted_message.fid(),
-                                    body,
-                                    txn_batch,
-                                ) {
-                                    Ok(new_revoke_events) => {
-                                        revoke_events.extend(new_revoke_events);
-                                    }
-                                    Err(err) => {
-                                        if *source != ProposalSource::Simulate {
-                                            warn!(
-                                                fid = deleted_message.fid(),
-                                                "Error handling verification hooks for deleted verification: {:?}",
-                                                err
-                                            );
-                                        }
+                    let data = deleted_message
+                        .data
+                        .as_ref()
+                        .ok_or(MessageValidationError::NoMessageData)?;
+                    match &data.body {
+                        Some(Body::VerificationAddAddressBody(body)) => {
+                            match self.check_and_revoke_primary_address(
+                                deleted_message.fid(),
+                                body,
+                                txn_batch,
+                            ) {
+                                Ok(new_revoke_events) => {
+                                    revoke_events.extend(new_revoke_events);
+                                }
+                                Err(err) => {
+                                    if *source != ProposalSource::Simulate {
+                                        warn!(
+                                            fid = deleted_message.fid(),
+                                            "Error handling verification hooks for deleted verification: {:?}",
+                                            err
+                                        );
                                     }
                                 }
                             }
                         }
+                        _ => continue,
                     }
                 }
             }
