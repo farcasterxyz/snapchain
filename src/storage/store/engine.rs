@@ -14,7 +14,7 @@ use crate::proto::{self, hub_event, Block, MessageType, ShardChunk, Transaction}
 use crate::proto::{FarcasterNetwork, HubEvent};
 use crate::proto::{OnChainEvent, OnChainEventType};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
-use crate::storage::store::account::{CastStore, MessagesPage};
+use crate::storage::store::account::{CastStore, MessagesPage, VerificationStore};
 use crate::storage::store::stores::{StoreLimits, Stores};
 use crate::storage::store::BlockStore;
 use crate::storage::trie;
@@ -1690,37 +1690,30 @@ impl ShardEngine {
         protocol: Protocol,
         address: &[u8],
     ) -> Result<(), MessageValidationError> {
-        // Create a filter that only checks verification messages for the specific protocol and address
-        let target_protocol = protocol as i32;
-        let target_address = address.to_vec();
+        let page_result =
+            VerificationStore::get_verification_add(&self.stores.verification_store, fid, address)
+                .map_err(|_| {
+                    MessageValidationError::StoreError(HubError::invalid_internal_state(
+                        "Unable to get verifications by fid",
+                    ))
+                })?;
+        match page_result {
+            Some(message) => {
+                let verification = match &message.data.as_ref().unwrap().body.as_ref().unwrap() {
+                    Body::VerificationAddAddressBody(body) => body,
+                    _ => unreachable!(),
+                };
 
-        let verification_filter = |message: &proto::Message| -> bool {
-            if let Some(msg_data) = &message.data {
-                if let Some(Body::VerificationAddAddressBody(verification)) = &msg_data.body {
-                    return verification.protocol == target_protocol
-                        && verification.address == target_address;
+                if verification.protocol == protocol as i32 {
+                    Ok(())
+                } else {
+                    Err(MessageValidationError::AddressNotPartOfVerification)
                 }
             }
-            false
-        };
-
-        let page_result = self.stores.verification_store.get_adds_by_fid(
-            fid,
-            &PageOptions::default(),
-            Some(verification_filter),
-        );
-
-        let page = page_result.map_err(|_| {
-            MessageValidationError::StoreError(HubError::invalid_internal_state(
-                "Unable to get verifications by fid",
-            ))
-        })?;
-
-        // If we find any matching verification, the user owns the address
-        if !page.messages.is_empty() {
-            return Ok(());
+            None => {
+                return Err(MessageValidationError::AddressNotPartOfVerification);
+            }
         }
-        Err(MessageValidationError::AddressNotPartOfVerification)
     }
 
     pub fn get_verifications_by_fid(&self, fid: u64) -> Result<MessagesPage, HubError> {
