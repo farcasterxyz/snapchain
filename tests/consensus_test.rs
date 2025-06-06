@@ -10,6 +10,7 @@ use snapchain::mempool::mempool::{
     self, Mempool, MempoolMessagesRequest, MempoolRequest, MempoolSource,
 };
 use snapchain::mempool::routing;
+use snapchain::mempool::routing::{MessageRouter, ShardRouter};
 use snapchain::network::gossip::SnapchainGossip;
 use snapchain::network::server::MyHubService;
 use snapchain::node::snapchain_node::SnapchainNode;
@@ -586,6 +587,7 @@ async fn transfer_fname(transfer: proto::FnameTransfer, messages_tx: Sender<Memp
                 fname_transfer: Some(transfer),
             }),
             MempoolSource::Local,
+            None,
         ))
         .await
         .unwrap();
@@ -805,8 +807,18 @@ async fn test_cross_shard_interactions() {
 
     let messages_tx = network.nodes[0].mempool_tx.clone();
 
-    register_fid(20270, messages_tx.clone()).await;
-    register_fid(211428, messages_tx.clone()).await;
+    let first_fid = 20270;
+    let second_fid = 211428;
+
+    register_fid(first_fid, messages_tx.clone()).await;
+    register_fid(second_fid, messages_tx.clone()).await;
+
+    let router = ShardRouter {};
+    // Ensure that the two fids are routed to different shards
+    assert_ne!(
+        router.route_fid(first_fid, 2),
+        router.route_fid(second_fid, 2)
+    );
 
     let fname = "erica";
 
@@ -817,7 +829,7 @@ async fn test_cross_shard_interactions() {
             proof: Some(proto::UserNameProof {
                 timestamp: 1741384226,
                 name: fname.as_bytes().to_vec(),
-                fid: 211428,
+                fid: second_fid,
                 owner: hex::decode("2b4d92e7626c5fc56cb4641f6f758563de1f6bdc").unwrap(),
 
                 signature: hex::decode("050b42fdda7b0a7309a1fb8a2cbc9a5f4bbf241aec74f53191f9665d9b9f572d4f452ac807911af7b6980219482d6f7fda7f99f23ab19c961b4701b9934fa2f91b").unwrap(),
@@ -831,11 +843,11 @@ async fn test_cross_shard_interactions() {
     transfer_fname(
         proto::FnameTransfer {
             id: 829595,
-            from_fid: 211428,
+            from_fid: second_fid,
             proof: Some(proto::UserNameProof {
                 timestamp: 1741384226,
                 name: fname.as_bytes().to_vec(),
-                fid: 20270,
+                fid: first_fid,
                 owner: hex::decode("92ce59c18a97646e9a7e011653d8417d3a08bb2b").unwrap(),
                 signature: hex::decode("00c3601c515edffe208e7128f47f89c2fb7b8e0beaaf615158305ddf02818a71679a8e7062503be59a19d241bd0b47396a3c294cfafd0d5478db1ae8249463bd1c").unwrap(),
                 r#type: proto::UserNameType::UsernameTypeFname as i32,
@@ -866,7 +878,7 @@ async fn test_cross_shard_interactions() {
             .unwrap()
             .unwrap();
 
-            assert_eq!(proof1.fid, 20270);
+            assert_eq!(proof1.fid, first_fid);
 
             let proof2 = UserDataStore::get_username_proof(
                 &stores.user_data_store,
@@ -876,7 +888,7 @@ async fn test_cross_shard_interactions() {
             .unwrap()
             .unwrap();
 
-            assert_eq!(proof2.fid, 20270);
+            assert_eq!(proof2.fid, first_fid);
         });
     }
 }
