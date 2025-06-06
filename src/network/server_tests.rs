@@ -243,6 +243,7 @@ mod tests {
         let (_shard_decision_tx, shard_decision_rx) = broadcast::channel(1000);
         let mut mempool = Mempool::new(
             mempool::Config::default(),
+            engine1.network,
             mempool_rx,
             msgs_request_rx,
             num_shards,

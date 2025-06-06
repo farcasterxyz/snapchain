@@ -323,6 +323,7 @@ impl NodeForTest {
         let (mempool_tx, mempool_rx) = mpsc::channel(100);
         let mut mempool = Mempool::new(
             mempool::Config::default(),
+            fc_network,
             mempool_rx,
             messages_request_rx,
             num_shards,

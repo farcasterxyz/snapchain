@@ -483,6 +483,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         let mut mempool = Mempool::new(
             app_config.mempool.clone(),
+            app_config.fc_network,
             mempool_rx,
             messages_request_rx,
             app_config.consensus.num_shards,

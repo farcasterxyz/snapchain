@@ -12,7 +12,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
-use crate::proto::OnChainEventType;
+use crate::proto::{FarcasterNetwork, OnChainEventType};
 use crate::{
     core::types::SnapchainValidatorContext,
     network::gossip::GossipEvent,
@@ -32,6 +32,7 @@ use crate::{
 };
 
 use super::routing::{MessageRouter, ShardRouter};
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use governor::{Quota, RateLimiter};
 use moka::sync::{Cache, CacheBuilder};
 use std::num::NonZeroU32;
@@ -395,11 +396,13 @@ pub struct Mempool {
     statsd_client: StatsdClientWrapper,
     read_node_mempool: ReadNodeMempool,
     rate_limits: Option<RateLimits>,
+    network: FarcasterNetwork,
 }
 
 impl Mempool {
     pub fn new(
         config: Config,
+        network: FarcasterNetwork,
         mempool_rx: mpsc::Receiver<MempoolRequest>,
         messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
         num_shards: u32,
@@ -430,6 +433,7 @@ impl Mempool {
                 statsd_client.clone(),
             ),
             statsd_client,
+            network,
         }
     }
 
@@ -516,7 +520,11 @@ impl Mempool {
                     .message_router
                     .route_fid(fname_transfer.from_fid, self.read_node_mempool.num_shards);
 
-                if mirror_shard_id != shard_id {
+                let version = EngineVersion::current(self.network);
+
+                if mirror_shard_id != shard_id
+                    && version.is_enabled(ProtocolFeature::UsernameShardRoutingFix)
+                {
                     let second_result = self
                         .insert_into_shard(mirror_shard_id, message, source)
                         .await;

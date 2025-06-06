@@ -22,6 +22,7 @@ pub enum ProtocolFeature {
     EnsValidation, // Before this version, ENS validation was not enforced
     MessageLengthCheckFix,
     PrimaryAddresses,
+    UsernameShardRoutingFix,
 }
 
 pub struct VersionSchedule {
@@ -109,6 +110,7 @@ impl EngineVersion {
             | ProtocolFeature::Basenames
             | ProtocolFeature::EnsValidation
             | ProtocolFeature::MessageLengthCheckFix
+            | ProtocolFeature::UsernameShardRoutingFix
             | ProtocolFeature::PrimaryAddresses => self >= &EngineVersion::V5,
         }
     }

@@ -1,7 +1,7 @@
 use tokio::sync::{broadcast, mpsc};
 
 use crate::mempool::mempool::{self, Mempool, MempoolRequest, MempoolSource};
-use crate::proto::{Height, ShardChunk, ShardHeader};
+use crate::proto::{FarcasterNetwork, Height, ShardChunk, ShardHeader};
 use crate::storage::store::engine::{MempoolMessage, ShardStateChange};
 use crate::storage::store::stores::StoreLimits;
 use crate::storage::store::test_helper;
@@ -57,6 +57,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     shard_stores.insert(1, engine.get_stores());
     let mut mempool = Mempool::new(
         mempool::Config::default(),
+        FarcasterNetwork::Devnet,
         mempool_rx,
         messages_request_rx,
         1,

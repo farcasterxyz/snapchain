@@ -171,7 +171,7 @@ struct CachedTransaction {
 
 pub struct ShardEngine {
     shard_id: u32,
-    network: FarcasterNetwork,
+    pub network: FarcasterNetwork,
     pub db: Arc<RocksDB>,
     senders: Senders,
     stores: Stores,

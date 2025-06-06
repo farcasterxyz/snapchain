@@ -86,6 +86,7 @@ mod tests {
         mempool_config.enable_rate_limits = enable_rate_limits;
         let mempool = Mempool::new(
             mempool_config,
+            engine.network,
             mempool_rx,
             messages_request_rx,
             1,
