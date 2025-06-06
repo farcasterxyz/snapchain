@@ -6,6 +6,7 @@ mod tests {
     };
     use crate::core::validations::verification::{validate_add_address, validate_fname_transfer};
     use crate::proto;
+    use crate::version::version::EngineVersion;
     use proto::{FnameTransfer, UserDataBody, UserDataType, UserNameProof};
 
     #[test]
@@ -236,7 +237,7 @@ mod tests {
             r#type: UserDataType::UserDataPrimaryAddressEthereum as i32,
             value: "0xd5596099ec95b32ddC3F22814785a253f6a09D56".to_string(),
         };
-        let result = validate_user_data_add_body(&user_data_body, false);
+        let result = validate_user_data_add_body(&user_data_body, false, EngineVersion::latest());
         assert!(result.is_ok());
     }
 
@@ -246,7 +247,7 @@ mod tests {
             r#type: UserDataType::UserDataPrimaryAddressEthereum as i32,
             value: "0x123".to_string(), // Invalid address
         };
-        let result = validate_user_data_add_body(&user_data_body, false);
+        let result = validate_user_data_add_body(&user_data_body, false, EngineVersion::latest());
         assert!(result.is_err());
     }
 
@@ -256,7 +257,7 @@ mod tests {
             r#type: UserDataType::UserDataPrimaryAddressEthereum as i32,
             value: "".to_string(), // Empty is allowed to unset
         };
-        let result = validate_user_data_add_body(&user_data_body, false);
+        let result = validate_user_data_add_body(&user_data_body, false, EngineVersion::latest());
         assert!(result.is_ok());
     }
 
@@ -266,7 +267,7 @@ mod tests {
             r#type: UserDataType::UserDataPrimaryAddressSolana as i32,
             value: "4TciSRW38RGNiTSKmQamQvxUg4epWKBirBvG8LCh3ahZ".to_string(),
         };
-        let result = validate_user_data_add_body(&user_data_body, false);
+        let result = validate_user_data_add_body(&user_data_body, false, EngineVersion::latest());
         assert!(result.is_ok());
     }
 
@@ -276,7 +277,7 @@ mod tests {
             r#type: UserDataType::UserDataPrimaryAddressSolana as i32,
             value: "4TciSRW38".to_string(), // Invalid address
         };
-        let result = validate_user_data_add_body(&user_data_body, false);
+        let result = validate_user_data_add_body(&user_data_body, false, EngineVersion::latest());
         assert!(result.is_err());
     }
 
@@ -286,7 +287,36 @@ mod tests {
             r#type: UserDataType::UserDataPrimaryAddressSolana as i32,
             value: "".to_string(), // Empty is allowed to unset
         };
-        let result = validate_user_data_add_body(&user_data_body, false);
+        let result = validate_user_data_add_body(&user_data_body, false, EngineVersion::latest());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_user_data_primary_address_version_check() {
+        // Test with V4 (PrimaryAddresses not enabled)
+        let user_data_body_eth = UserDataBody {
+            r#type: UserDataType::UserDataPrimaryAddressEthereum as i32,
+            value: "0xd5596099ec95b32ddC3F22814785a253f6a09D56".to_string(),
+        };
+        let result = validate_user_data_add_body(&user_data_body_eth, false, EngineVersion::V4);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), ValidationError::UnsupportedFeature);
+
+        // Test with V5 (PrimaryAddresses enabled)
+        let result = validate_user_data_add_body(&user_data_body_eth, false, EngineVersion::V5);
+        assert!(result.is_ok());
+
+        // Test Solana with V4 (PrimaryAddresses not enabled)
+        let user_data_body_sol = UserDataBody {
+            r#type: UserDataType::UserDataPrimaryAddressSolana as i32,
+            value: "4TciSRW38RGNiTSKmQamQvxUg4epWKBirBvG8LCh3ahZ".to_string(),
+        };
+        let result = validate_user_data_add_body(&user_data_body_sol, false, EngineVersion::V4);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), ValidationError::UnsupportedFeature);
+
+        // Test Solana with V5 (PrimaryAddresses enabled)
+        let result = validate_user_data_add_body(&user_data_body_sol, false, EngineVersion::V5);
         assert!(result.is_ok());
     }
 }

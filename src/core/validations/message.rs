@@ -130,7 +130,7 @@ pub fn validate_message(
 
     match &message_data.body {
         Some(proto::message_data::Body::UserDataBody(user_data)) => {
-            validate_user_data_add_body(user_data, is_pro_user)?;
+            validate_user_data_add_body(user_data, is_pro_user, version)?;
         }
         Some(proto::message_data::Body::UsernameProofBody(proof)) => {
             match UserNameType::try_from(proof.r#type) {
@@ -432,6 +432,7 @@ pub fn validate_user_location(location: &str) -> Result<(), ValidationError> {
 pub fn validate_user_data_add_body(
     body: &UserDataBody,
     is_pro_user: bool,
+    version: EngineVersion,
 ) -> Result<(), ValidationError> {
     let value_bytes = body.value.as_bytes();
 
@@ -486,9 +487,15 @@ pub fn validate_user_data_add_body(
             validate_github_username(&body.value)?;
         }
         UserDataType::UserDataPrimaryAddressEthereum => {
+            if !version.is_enabled(ProtocolFeature::PrimaryAddresses) {
+                return Err(ValidationError::UnsupportedFeature);
+            }
             validate_user_data_primary_address_ethereum(&body.value)?;
         }
         UserDataType::UserDataPrimaryAddressSolana => {
+            if !version.is_enabled(ProtocolFeature::PrimaryAddresses) {
+                return Err(ValidationError::UnsupportedFeature);
+            }
             validate_user_data_primary_address_solana(&body.value)?;
         }
         UserDataType::None => return Err(ValidationError::InvalidData),
