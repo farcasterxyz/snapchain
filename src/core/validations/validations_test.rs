@@ -236,7 +236,7 @@ mod tests {
             r#type: UserDataType::UserDataPrimaryAddressEthereum as i32,
             value: "0xd5596099ec95b32ddC3F22814785a253f6a09D56".to_string(),
         };
-        let result = validate_user_data_add_body(&user_data_body);
+        let result = validate_user_data_add_body(&user_data_body, false);
         assert!(result.is_ok());
     }
 
@@ -246,7 +246,7 @@ mod tests {
             r#type: UserDataType::UserDataPrimaryAddressEthereum as i32,
             value: "0x123".to_string(), // Invalid address
         };
-        let result = validate_user_data_add_body(&user_data_body);
+        let result = validate_user_data_add_body(&user_data_body, false);
         assert!(result.is_err());
     }
 
@@ -256,7 +256,7 @@ mod tests {
             r#type: UserDataType::UserDataPrimaryAddressEthereum as i32,
             value: "".to_string(), // Empty is allowed to unset
         };
-        let result = validate_user_data_add_body(&user_data_body);
+        let result = validate_user_data_add_body(&user_data_body, false);
         assert!(result.is_ok());
     }
 
@@ -266,7 +266,7 @@ mod tests {
             r#type: UserDataType::UserDataPrimaryAddressSolana as i32,
             value: "4TciSRW38RGNiTSKmQamQvxUg4epWKBirBvG8LCh3ahZ".to_string(),
         };
-        let result = validate_user_data_add_body(&user_data_body);
+        let result = validate_user_data_add_body(&user_data_body, false);
         assert!(result.is_ok());
     }
 
@@ -276,7 +276,7 @@ mod tests {
             r#type: UserDataType::UserDataPrimaryAddressSolana as i32,
             value: "4TciSRW38".to_string(), // Invalid address
         };
-        let result = validate_user_data_add_body(&user_data_body);
+        let result = validate_user_data_add_body(&user_data_body, false);
         assert!(result.is_err());
     }
 
@@ -286,7 +286,7 @@ mod tests {
             r#type: UserDataType::UserDataPrimaryAddressSolana as i32,
             value: "".to_string(), // Empty is allowed to unset
         };
-        let result = validate_user_data_add_body(&user_data_body);
+        let result = validate_user_data_add_body(&user_data_body, false);
         assert!(result.is_ok());
     }
 }
