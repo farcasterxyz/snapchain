@@ -46,6 +46,7 @@ pub async fn spawn_read_host(
             buffered_blocks: BTreeMap::new(),
             validator_sets: StoredValidatorSets::new(shard_id, validator_sets),
             statsd_client,
+            system_tx: system_tx.clone(),
         },
         system_tx,
     };

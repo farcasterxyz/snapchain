@@ -8,6 +8,7 @@ use crate::storage::store::engine::{BlockEngine, ShardEngine, ShardStateChange};
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStorageError;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use crate::version::version::EngineVersion;
 use informalsystems_malachitebft_core_types::{Round, Validity};
 use prost::Message;
 use std::collections::{BTreeMap, HashMap};
@@ -18,7 +19,6 @@ use tokio::time::Instant;
 use tokio::{select, time};
 use tracing::{error, warn};
 
-pub const PROTOCOL_VERSION: u32 = 1;
 pub const GENESIS_MESSAGE: &str =
     "It occurs to me that our survival may depend upon our talking to one another.";
 
@@ -462,11 +462,15 @@ impl Proposer for BlockProposer {
         let witness_hash = blake3::hash(&shard_witness.encode_to_vec())
             .as_bytes()
             .to_vec();
+
+        let timestamp = FarcasterTime::current();
+        let version = EngineVersion::version_for(&timestamp, self.network);
+
         let block_header = BlockHeader {
             parent_hash,
             chain_id: self.network as i32,
-            version: PROTOCOL_VERSION,
-            timestamp: FarcasterTime::current().into(),
+            version: version.protocol_version(),
+            timestamp: timestamp.into(),
             height: Some(height.clone()),
             shard_witnesses_hash: witness_hash,
         };
@@ -513,7 +517,11 @@ impl Proposer for BlockProposer {
                 error!("Received block with wrong chain_id: {}", header.chain_id);
                 return Validity::Invalid;
             }
-            if header.version != PROTOCOL_VERSION {
+            let timestamp = FarcasterTime::new(header.timestamp);
+            let engine_version = EngineVersion::version_for(&timestamp, self.network);
+            let expected_version = engine_version.protocol_version();
+
+            if header.version != expected_version {
                 error!(
                     "Received block with wrong protocol version: {}",
                     header.version

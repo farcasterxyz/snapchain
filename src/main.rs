@@ -438,7 +438,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         SystemMessage::Mempool(_) => {},// No need to store mempool messages from other nodes in read nodes
                         SystemMessage::DecidedValueForReadNode(decided_value) => {
                             node.dispatch_decided_value(decided_value);
-
+                        }
+                        SystemMessage::ExitWithError(err) => {
+                            error!("Exiting due to: {}", err);
+                            node.stop();
+                            return Err(err.into());
                         }
                     }
                 }
@@ -624,6 +628,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         SystemMessage::ReadNodeFinishedInitialSync{shard_id: _} => {
                             // Ignore these for validator nodes
                             sync_complete_tx.send(true)?; // TODO: is this necessary?
+                        },
+                        SystemMessage::ExitWithError(err) => {
+                            error!("Exiting due to: {}", err);
+                            node.stop();
+                            return Err(err.into());
                         }
                     }
                 }

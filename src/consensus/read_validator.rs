@@ -1,18 +1,21 @@
 use std::collections::BTreeMap;
 
+use super::validator::StoredValidatorSets;
+use crate::consensus::consensus::SystemMessage;
 use crate::core::types::{SnapchainValidatorContext, Vote};
-use crate::proto::{self, DecidedValue, Height};
+use crate::core::util::FarcasterTime;
+use crate::proto::{self, DecidedValue, FarcasterNetwork, Height};
 use crate::storage::store::engine::{BlockEngine, ShardEngine};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use crate::version::version::EngineVersion;
 use bytes::Bytes;
 use informalsystems_malachitebft_core_types::{NilOrVal, ThresholdParams};
 use informalsystems_malachitebft_sync::RawDecidedValue;
 use itertools::Itertools;
 use libp2p::identity::ed25519::PublicKey;
 use prost::Message;
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
-
-use super::validator::StoredValidatorSets;
 
 pub enum Engine {
     ShardEngine(ShardEngine),
@@ -26,6 +29,7 @@ pub struct ReadValidator {
     pub buffered_blocks: BTreeMap<Height, proto::DecidedValue>,
     pub statsd_client: StatsdClientWrapper,
     pub validator_sets: StoredValidatorSets,
+    pub system_tx: mpsc::Sender<SystemMessage>,
 }
 
 impl ReadValidator {
@@ -158,6 +162,37 @@ impl ReadValidator {
         true
     }
 
+    pub fn validate_protocol_version(&self, value: &DecidedValue) -> bool {
+        match &value.value {
+            Some(proto::decided_value::Value::Block(block)) => {
+                let header = block.header.as_ref().unwrap();
+                let network = FarcasterNetwork::try_from(header.chain_id).unwrap();
+                let timestamp = FarcasterTime::new(header.timestamp);
+                let expected_version =
+                    EngineVersion::version_for(&timestamp, network).protocol_version();
+
+                if header.version != expected_version {
+                    let error_message = format!(
+                        "Invalid protocol version in decided block at height {}: expected {}, got {}. Does your node need an upgrade?",
+                        header.height.unwrap().block_number,
+                        expected_version, header.version
+                    );
+                    error!(%self.last_height, error_message);
+                    self.system_tx
+                        .try_send(SystemMessage::ExitWithError(error_message))
+                        .unwrap_or_else(|e| {
+                            error!(%self.last_height, "Failed to send system message: {}", e);
+                        });
+                    return false;
+                }
+            }
+            _ => {
+                // no-op. Only blocks have protocol version
+            }
+        }
+        true
+    }
+
     pub fn process_decided_value(&mut self, value: DecidedValue) -> u64 {
         let height = Self::get_decided_value_height(&value);
         let verified = self.verify_signatures(&value);
@@ -165,6 +200,13 @@ impl ReadValidator {
             error!(%height, last_height = %self.last_height, "Dropping decided block because its signatures are invalid");
             return 0;
         }
+
+        // Only validate the protocol version after verifying signatures so we know it's a valid block
+        if !self.validate_protocol_version(&value) {
+            error!(%height, last_height = %self.last_height, "Dropping decided block because its protocol version is invalid");
+            return 0;
+        }
+
         let num_committed_values = if height > self.last_height.increment() {
             if (self.buffered_blocks.len() as u32) < self.max_num_buffered_blocks {
                 self.buffered_blocks.insert(height, value);

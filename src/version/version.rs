@@ -3,6 +3,8 @@ use crate::proto::FarcasterNetwork;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
+const LATEST_PROTOCOL_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, EnumIter)]
 pub enum EngineVersion {
     V0 = 0,
@@ -109,6 +111,17 @@ impl EngineVersion {
         }
     }
 
+    pub fn protocol_version(&self) -> u32 {
+        match self {
+            EngineVersion::V0
+            | EngineVersion::V1
+            | EngineVersion::V2
+            | EngineVersion::V3
+            | EngineVersion::V4 => 1,
+            EngineVersion::V5 => LATEST_PROTOCOL_VERSION,
+        }
+    }
+
     pub fn latest() -> Self {
         EngineVersion::iter()
             .max()
@@ -121,14 +134,14 @@ mod version_test {
     use super::*;
 
     #[test]
-    fn test_protocol_version_values() {
+    fn test_engine_version_values() {
         assert_eq!(EngineVersion::V0 as u8, 0);
         assert_eq!(EngineVersion::V1 as u8, 1);
         assert_eq!(EngineVersion::V2 as u8, 2);
     }
 
     #[test]
-    fn test_protocol_version_ordering() {
+    fn test_engine_version_ordering() {
         assert!(EngineVersion::V0 < EngineVersion::V1);
         assert!(EngineVersion::V1 < EngineVersion::V2);
         assert!(EngineVersion::V0 < EngineVersion::V2);
@@ -158,6 +171,13 @@ mod version_test {
                 "Active time {:?} should be greater than {:?}",
                 current_version.active_at,
                 previous_version.active_at
+            );
+            assert!(
+                current_version.version.protocol_version()
+                    >= previous_version.version.protocol_version(),
+                "Protocol version for {:?} should be greater than or equal to {:?}",
+                current_version.version,
+                previous_version.version
             );
         }
     }
@@ -246,6 +266,10 @@ mod version_test {
         assert_eq!(
             EngineVersion::version_for(&FarcasterTime::current(), FarcasterNetwork::Devnet),
             EngineVersion::latest()
+        );
+        assert_eq!(
+            EngineVersion::latest().protocol_version(),
+            LATEST_PROTOCOL_VERSION
         );
     }
 }

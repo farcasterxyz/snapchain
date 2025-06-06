@@ -1,7 +1,6 @@
 use crate::consensus::consensus::{MalachiteEventShard, SystemMessage};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
-use crate::consensus::proposer::PROTOCOL_VERSION;
 use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::proto::{
@@ -11,6 +10,7 @@ use crate::proto::{
 use crate::storage::store::account::message_bytes_decode;
 use crate::storage::store::engine::MempoolMessage;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use crate::version::version::EngineVersion;
 use bytes::Bytes;
 use futures::StreamExt;
 use informalsystems_malachitebft_codec::Codec;
@@ -376,12 +376,13 @@ impl SnapchainGossip {
     }
 
     pub fn publish_contact_info(&mut self) {
+        let current_version = EngineVersion::current(self.fc_network).protocol_version();
         let contact_info = ContactInfo {
             body: Some(ContactInfoBody {
                 peer_id: self.swarm.local_peer_id().to_bytes(),
                 gossip_address: self.announce_address.clone(),
                 network: self.fc_network as i32,
-                snapchain_version: PROTOCOL_VERSION.to_string(),
+                snapchain_version: current_version.to_string(),
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
@@ -607,7 +608,8 @@ impl SnapchainGossip {
             return;
         }
 
-        if contact_info_body.snapchain_version != PROTOCOL_VERSION.to_string() {
+        let current_version = EngineVersion::current(self.fc_network).protocol_version();
+        if contact_info_body.snapchain_version != current_version.to_string() {
             info!(
                 peer_id = contact_peer_id.to_string(),
                 "Peer running a different protocol version"

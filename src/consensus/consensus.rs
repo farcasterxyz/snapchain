@@ -21,6 +21,7 @@ pub enum SystemMessage {
     DecidedValueForReadNode(proto::DecidedValue),
 
     ReadNodeFinishedInitialSync { shard_id: u32 },
+    ExitWithError(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
