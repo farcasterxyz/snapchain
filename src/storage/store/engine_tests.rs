@@ -1843,7 +1843,8 @@ mod tests {
             false
         );
 
-        // Username proof only exists for fid2 on engine2
+        // Username proof only should only exist on engine2 for fid2
+        // It's currently also present on engine1, but this is a bug that will be fixed in the future
         assert_eq!(is_username_present(&engine1, fid1), false);
         assert_eq!(is_username_present(&engine1, fid2), true);
         assert_eq!(is_username_present(&engine2, fid1), false);
@@ -1857,6 +1858,8 @@ mod tests {
             Some(fid2),
             default_custody_address(),
         );
+        // Mirror existing behavior in the mempool where fname transfers are sent to all shards
+        test_helper::commit_fname_transfer(&mut engine1, &fname_transfer).await;
         test_helper::commit_fname_transfer(&mut engine2, &fname_transfer).await;
         assert_eq!(
             key_exists_in_trie(&mut engine2, &TrieKey::for_fname(fid2, &fname)),
@@ -1865,7 +1868,7 @@ mod tests {
 
         // After deregistering, the fname should not exist in either engine
         assert_eq!(is_username_present(&engine1, fid1), false);
-        assert_eq!(is_username_present(&engine1, fid2), true);
+        assert_eq!(is_username_present(&engine1, fid2), false);
         assert_eq!(is_username_present(&engine2, fid1), false);
         assert_eq!(is_username_present(&engine2, fid2), false);
     }

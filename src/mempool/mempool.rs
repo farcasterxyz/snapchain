@@ -526,7 +526,6 @@ impl Mempool {
                             let copy_result = self
                                 .insert_into_shard(copy_shard, message.clone(), source.clone())
                                 .await;
-                            // Return an error if either insert fails
                             if copy_result.is_err() {
                                 warn!(
                                     "Failed to insert fname transfer into copy shard {}: {:?}",
