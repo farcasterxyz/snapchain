@@ -503,34 +503,37 @@ impl Mempool {
         source: MempoolSource,
     ) -> Result<(), HubError> {
         let fid = message.fid();
-        let shard_id = self
+        let original_shard_id = self
             .read_node_mempool
             .message_router
             .route_fid(fid, self.read_node_mempool.num_shards);
 
-        let mut result = self
-            .insert_into_shard(shard_id, message.clone(), source.clone())
+        let result = self
+            .insert_into_shard(original_shard_id, message.clone(), source.clone())
             .await;
 
         // Fname transfers are mirrored to both the sender and receiver shard.
         if let MempoolMessage::ValidatorMessage(inner_message) = &message {
-            if let Some(fname_transfer) = &inner_message.fname_transfer {
-                let mirror_shard_id = self
-                    .read_node_mempool
-                    .message_router
-                    .route_fid(fname_transfer.from_fid, self.read_node_mempool.num_shards);
-
+            if let Some(_fname_transfer) = &inner_message.fname_transfer {
                 let version = EngineVersion::current(self.network);
-
-                if mirror_shard_id != shard_id
-                    && version.is_enabled(ProtocolFeature::UsernameShardRoutingFix)
-                {
-                    let second_result = self
-                        .insert_into_shard(mirror_shard_id, message, source)
-                        .await;
-                    // Return an error if either insert fails
-                    if second_result.is_err() {
-                        result = second_result;
+                // Send the username transfer to all other shards, transfers from a->b->c are
+                // correctly tracked. Due to current limitations of the engine, if we transfer from
+                // shard 1 to shard 2, and then transfer within shard 2, we will keep the transfer
+                // around forever on shard 1. See test_fname_transfer for an example.
+                if version.is_enabled(ProtocolFeature::UsernameShardRoutingFix) {
+                    for copy_shard in 1..self.read_node_mempool.num_shards {
+                        if copy_shard != original_shard_id {
+                            let copy_result = self
+                                .insert_into_shard(copy_shard, message.clone(), source.clone())
+                                .await;
+                            // Return an error if either insert fails
+                            if copy_result.is_err() {
+                                warn!(
+                                    "Failed to insert fname transfer into copy shard {}: {:?}",
+                                    copy_shard, copy_result
+                                );
+                            }
+                        }
                     }
                 }
             }

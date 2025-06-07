@@ -1830,7 +1830,10 @@ mod tests {
             false
         );
 
-        // Engine 1 is still tracking the fname for fid2. It probably should not, but this is a bigger change
+        // TODO: Engine 1 is still tracking the fname for fid2. It should not, but at the engine level we
+        // don't have a way to fix this yet. Since engines don't know about other shards. We work around
+        // this by sending the transfer to all shards in the mempool. In this particular way, this
+        // test is not reflective of what happens in prod, but leaving the assert as a reminder of current behavior.
         assert_eq!(
             key_exists_in_trie(&mut engine1, &TrieKey::for_fname(fid2, &fname)),
             true
