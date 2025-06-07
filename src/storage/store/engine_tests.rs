@@ -8,7 +8,7 @@ mod tests {
     use crate::proto::{HubEvent, ValidatorMessage};
     use crate::proto::{OnChainEvent, OnChainEventType};
     use crate::storage::db::{PageOptions, RocksDbTransactionBatch};
-    use crate::storage::store::account::HubEventIdGenerator;
+    use crate::storage::store::account::{HubEventIdGenerator, UserDataStore};
     use crate::storage::store::engine::{MempoolMessage, ShardEngine};
     use crate::storage::store::stores::StoreLimits;
     use crate::storage::store::test_helper::{
@@ -655,12 +655,7 @@ mod tests {
     #[tokio::test]
     async fn test_primary_address_revoked_when_verification_deleted() {
         let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
-            limits: None,
-            db: None,
-            messages_request_tx: None,
-            network: None,
-        });
+        let (mut engine, _tmpdir) = test_helper::new_engine();
 
         // Register a user
         test_helper::register_user(
@@ -753,12 +748,7 @@ mod tests {
     #[tokio::test]
     async fn test_primary_address_validation_requires_verification() {
         let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
-            limits: None,
-            db: None,
-            messages_request_tx: None,
-            network: None,
-        });
+        let (mut engine, _tmpdir) = test_helper::new_engine();
 
         // Register a user
         test_helper::register_user(
@@ -806,12 +796,7 @@ mod tests {
     #[tokio::test]
     async fn test_removing_non_primary_verification_keeps_primary_address() {
         let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
-            limits: None,
-            db: None,
-            messages_request_tx: None,
-            network: None,
-        });
+        let (mut engine, _tmpdir) = test_helper::new_engine();
 
         // Register a user
         test_helper::register_user(
@@ -923,9 +908,7 @@ mod tests {
         let timestamp = messages_factory::farcaster_time();
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             network: Some(FarcasterNetwork::Testnet), // To test basename support
-            messages_request_tx: None,
-            db: None,
-            limits: None,
+            ..Default::default()
         });
         let owner = "owner".to_string().encode_to_vec();
         let signature = "signature".to_string();
@@ -1754,6 +1737,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fname_transfer() {
+        let (mut engine1, _) = test_helper::new_engine_with_options(EngineOptions {
+            shard_id: 1,
+            ..Default::default()
+        });
+        let (mut engine2, _) = test_helper::new_engine_with_options(EngineOptions {
+            shard_id: 2,
+            ..Default::default()
+        });
+
+        let fid1 = FID_FOR_TEST;
+        let signer = test_helper::generate_signer();
+        let fid2 = FID2_FOR_TEST;
+        let timestamp = factory::time::farcaster_time();
+        register_user(
+            fid1,
+            signer.clone(),
+            default_custody_address(),
+            &mut engine1,
+        )
+        .await;
+        register_user(
+            fid2,
+            signer.clone(),
+            default_custody_address(),
+            &mut engine2,
+        )
+        .await;
+
+        let fname = "username".to_string();
+        let fname_register = username_factory::create_transfer(
+            fid1,
+            &fname,
+            Some(timestamp),
+            Some(0),
+            default_custody_address(),
+        );
+        test_helper::commit_fname_transfer(&mut engine1, &fname_register).await;
+        assert!(key_exists_in_trie(
+            &mut engine1,
+            &TrieKey::for_fname(fid1, &fname)
+        ));
+
+        let fid1_username_msg = messages_factory::user_data::create_user_data_add(
+            fid1,
+            proto::UserDataType::Username,
+            &fname,
+            Some(timestamp + 1),
+            Some(&signer),
+        );
+        commit_message(&mut engine1, &fid1_username_msg).await;
+        assert!(key_exists_in_trie(
+            &mut engine1,
+            &TrieKey::for_message(&fid1_username_msg)
+        ));
+
+        let is_username_present = |engine: &ShardEngine, fid: u64| {
+            let result =
+                UserDataStore::get_username_proof_by_fid(&engine.get_stores().user_data_store, fid);
+            assert!(result.is_ok());
+            result.unwrap().is_some()
+        };
+
+        assert_eq!(is_username_present(&engine1, fid1), true);
+        assert_eq!(is_username_present(&engine1, fid2), false);
+
+        // Now transfer the fname to fid2, on a different shard
+        let fname_transfer = username_factory::create_transfer(
+            fid2,
+            &fname,
+            Some(timestamp + 2),
+            Some(fid1),
+            default_custody_address(),
+        );
+        // Send transfer to both shards
+        test_helper::commit_fname_transfer(&mut engine1, &fname_transfer).await;
+        test_helper::commit_fname_transfer(&mut engine2, &fname_transfer).await;
+
+        // The fname should not exist in the trie for the original fid, and must exist for the new fid
+        assert_eq!(
+            key_exists_in_trie(&mut engine1, &TrieKey::for_fname(fid1, &fname)),
+            false
+        );
+        assert_eq!(
+            key_exists_in_trie(&mut engine2, &TrieKey::for_fname(fid2, &fname)),
+            true
+        );
+        // Username has been revoked
+        assert_eq!(
+            message_exists_in_trie(&mut engine1, &fid1_username_msg),
+            false
+        );
+
+        // Engine 1 is still tracking the fname for fid2. It probably should not, but this is a bigger change
+        assert_eq!(
+            key_exists_in_trie(&mut engine1, &TrieKey::for_fname(fid2, &fname)),
+            true
+        );
+        assert_eq!(
+            key_exists_in_trie(&mut engine2, &TrieKey::for_fname(fid1, &fname)),
+            false
+        );
+
+        // Username proof only exists for fid2 on engine2
+        assert_eq!(is_username_present(&engine1, fid1), false);
+        assert_eq!(is_username_present(&engine1, fid2), true);
+        assert_eq!(is_username_present(&engine2, fid1), false);
+        assert_eq!(is_username_present(&engine2, fid2), true);
+
+        // deregister the fname
+        let fname_transfer = username_factory::create_transfer(
+            0,
+            &fname,
+            Some(timestamp + 3),
+            Some(fid2),
+            default_custody_address(),
+        );
+        test_helper::commit_fname_transfer(&mut engine2, &fname_transfer).await;
+        assert_eq!(
+            key_exists_in_trie(&mut engine2, &TrieKey::for_fname(fid2, &fname)),
+            false
+        );
+
+        // After deregistering, the fname should not exist in either engine
+        assert_eq!(is_username_present(&engine1, fid1), false);
+        assert_eq!(is_username_present(&engine1, fid2), true);
+        assert_eq!(is_username_present(&engine2, fid1), false);
+        assert_eq!(is_username_present(&engine2, fid2), false);
+    }
+
+    #[tokio::test]
     async fn test_merge_ens_username() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
         let ens_name = &"farcaster.eth".to_string();
@@ -1790,8 +1904,6 @@ mod tests {
         commit_message(&mut engine, &username_add).await;
     }
 
-    // this test needs to be updated to use an actual transfer event since validation logic checks the fname signer signature
-    #[ignore]
     #[tokio::test]
     async fn test_username_revoked_when_proof_transferred() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
@@ -1805,14 +1917,14 @@ mod tests {
         .await;
 
         let fname = &"farcaster".to_string();
-        test_helper::register_fname(
+        let transfer = username_factory::create_transfer(
             FID_FOR_TEST,
             fname,
             None,
-            &mut engine,
+            None,
             default_custody_address(),
-        )
-        .await;
+        );
+        test_helper::commit_fname_transfer(&mut engine, &transfer).await;
 
         let fid_username_msg = messages_factory::user_data::create_user_data_add(
             FID_FOR_TEST,
@@ -1836,19 +1948,11 @@ mod tests {
         let transfer = username_factory::create_transfer(
             FID2_FOR_TEST,
             fname,
-            Some(time::current_timestamp() as u64 + 10),
+            Some(time::current_timestamp() + 10),
             Some(FID_FOR_TEST),
             test_helper::default_custody_address(),
         );
-        let state_change = engine.propose_state_change(
-            1,
-            vec![MempoolMessage::ValidatorMessage(ValidatorMessage {
-                on_chain_event: None,
-                fname_transfer: Some(transfer),
-            })],
-            None,
-        );
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::commit_fname_transfer(&mut engine, &transfer).await;
 
         // Fname has moved to the new fid and the username userdata is revoked
         assert!(test_helper::key_exists_in_trie(
@@ -1960,9 +2064,7 @@ mod tests {
         };
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             limits: Some(single_message_limit),
-            db: None,
-            messages_request_tx: None,
-            network: None,
+            ..Default::default()
         });
         register_user(
             FID_FOR_TEST,
@@ -2193,9 +2295,7 @@ mod tests {
     async fn test_revoke_signer_bug() {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             network: Some(FarcasterNetwork::Mainnet),
-            limits: None,
-            db: None,
-            messages_request_tx: None,
+            ..Default::default()
         });
         register_user(
             FID_FOR_TEST,
@@ -2302,9 +2402,7 @@ mod tests {
             };
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             network: Some(FarcasterNetwork::Testnet), // To test pro support
-            messages_request_tx: None,
-            db: None,
-            limits: None,
+            ..Default::default()
         });
         // Before active
         purchase_pro_at_time(&mut engine, 1748950000, false).await;

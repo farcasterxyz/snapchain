@@ -593,11 +593,14 @@ pub mod username_factory {
         fid: u64,
         username_type: crate::proto::UserNameType,
         name: &String,
-        timestamp: Option<u64>,
+        timestamp: Option<u32>,
         owner: Vec<u8>,
     ) -> UserNameProof {
+        let timestamp = timestamp
+            .map(|t| t as u64)
+            .unwrap_or_else(|| time::current_timestamp() as u64);
         UserNameProof {
-            timestamp: timestamp.unwrap_or_else(|| time::current_timestamp() as u64),
+            timestamp,
             name: name.as_bytes().to_vec(),
             owner,
             signature: rand::random::<[u8; 32]>().to_vec(),
@@ -609,7 +612,7 @@ pub mod username_factory {
     pub fn create_transfer(
         fid: u64,
         name: &String,
-        timestamp: Option<u64>,
+        timestamp: Option<u32>,
         from_fid: Option<u64>,
         owner: Vec<u8>,
     ) -> FnameTransfer {

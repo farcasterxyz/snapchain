@@ -56,10 +56,8 @@ mod tests {
         let config = Config::default().with(vec![shard_id], vec![validator_set_config]);
 
         let (read_node_engine_clone, _) = new_engine_with_options(EngineOptions {
-            limits: None,
             db: Some(read_node_engine.db.clone()),
-            messages_request_tx: None,
-            network: None,
+            ..Default::default()
         });
         let read_node_actors = MalachiteReadNodeActors::create_and_start(
             SnapchainValidatorContext::new(read_keypair),

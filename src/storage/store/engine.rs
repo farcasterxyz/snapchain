@@ -650,7 +650,7 @@ impl ShardEngine {
                         }
                     }
                     Some(proof) => {
-                        match verification::validate_fname_transfer(fname_transfer) {
+                        match verification::validate_fname_transfer(fname_transfer, self.network) {
                             Ok(_) => {
                                 let event = UserDataStore::merge_username_proof(
                                     &self.stores.user_data_store,

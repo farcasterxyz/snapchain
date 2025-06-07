@@ -871,7 +871,7 @@ async fn test_cross_shard_interactions() {
 
         let node = &network.nodes[i].node;
         node.shard_stores.iter().for_each(|(_, stores)| {
-            let proof1 = UserDataStore::get_username_proof(
+            let proof = UserDataStore::get_username_proof(
                 &stores.user_data_store,
                 &mut RocksDbTransactionBatch::new(),
                 &fname.as_bytes().to_vec(),
@@ -879,17 +879,7 @@ async fn test_cross_shard_interactions() {
             .unwrap()
             .unwrap();
 
-            assert_eq!(proof1.fid, first_fid);
-
-            let proof2 = UserDataStore::get_username_proof(
-                &stores.user_data_store,
-                &mut RocksDbTransactionBatch::new(),
-                &fname.as_bytes().to_vec(),
-            )
-            .unwrap()
-            .unwrap();
-
-            assert_eq!(proof2.fid, first_fid);
+            assert_eq!(proof.fid, first_fid);
         });
     }
 }

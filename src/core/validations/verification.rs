@@ -1,5 +1,5 @@
 use crate::core::validations::error::ValidationError;
-use crate::proto::{self, VerificationAddAddressBody};
+use crate::proto::{self, FarcasterNetwork, VerificationAddAddressBody};
 use alloy_dyn_abi::TypedData;
 use alloy_provider::Provider;
 use alloy_transport::Transport;
@@ -106,7 +106,10 @@ fn name_registry_domain() -> Value {
     })
 }
 
-pub fn validate_fname_transfer(transfer: &proto::FnameTransfer) -> Result<(), ValidationError> {
+pub fn validate_fname_transfer(
+    transfer: &proto::FnameTransfer,
+    network: FarcasterNetwork,
+) -> Result<(), ValidationError> {
     let proof = transfer.proof.as_ref().unwrap();
     let username = std::str::from_utf8(&proof.name);
     if username.is_err() {
@@ -133,6 +136,11 @@ pub fn validate_fname_transfer(transfer: &proto::FnameTransfer) -> Result<(), Va
     let prehash = data.eip712_signing_hash();
     if prehash.is_err() {
         return Err(ValidationError::InvalidHash);
+    }
+
+    if network == FarcasterNetwork::Devnet {
+        // Don't validate signatures on devnet (tests)
+        return Ok(());
     }
 
     if proof.signature.len() != 65 {

@@ -117,6 +117,19 @@ pub struct EngineOptions {
     pub db: Option<Arc<RocksDB>>,
     pub messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
     pub network: Option<proto::FarcasterNetwork>,
+    pub shard_id: u32,
+}
+
+impl Default for EngineOptions {
+    fn default() -> Self {
+        EngineOptions {
+            limits: None,
+            db: None,
+            messages_request_tx: None,
+            network: None,
+            shard_id: 1,
+        }
+    }
 }
 
 pub fn statsd_client() -> StatsdClientWrapper {
@@ -151,7 +164,7 @@ pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile
             db,
             options.network.unwrap_or(proto::FarcasterNetwork::Devnet), // So all protocol features are enabled by default
             merkle_trie::MerkleTrie::new(16).unwrap(),
-            1,
+            options.shard_id,
             test_limits,
             statsd_client,
             256,
@@ -163,12 +176,7 @@ pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile
 
 #[cfg(test)]
 pub fn new_engine() -> (ShardEngine, tempfile::TempDir) {
-    new_engine_with_options(EngineOptions {
-        limits: None,
-        db: None,
-        messages_request_tx: None,
-        network: None,
-    })
+    new_engine_with_options(EngineOptions::default())
 }
 
 pub async fn commit_event(engine: &mut ShardEngine, event: &OnChainEvent) -> ShardChunk {
@@ -224,23 +232,6 @@ pub async fn sign_chunk(keypair: &Keypair, mut shard_chunk: ShardChunk) -> Shard
     });
 
     shard_chunk
-}
-
-#[cfg(test)]
-pub async fn commit_fname_transfer(
-    engine: &mut ShardEngine,
-    fname_transfer: &FnameTransfer,
-) -> ShardChunk {
-    let state_change = engine.propose_state_change(
-        1,
-        vec![MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
-            on_chain_event: None,
-            fname_transfer: Some(fname_transfer.clone()),
-        })],
-        None,
-    );
-
-    validate_and_commit_state_change(engine, &state_change)
 }
 
 #[cfg(test)]
@@ -407,24 +398,20 @@ pub async fn register_user(
 }
 
 #[cfg(test)]
-pub async fn register_fname(
-    fid: u64,
-    username: &String,
-    timestamp: Option<u64>,
-    engine: &mut ShardEngine,
-    owner: Vec<u8>,
-) {
-    let fname_transfer = username_factory::create_transfer(fid, username, timestamp, None, owner);
+pub async fn commit_fname_transfer(engine: &mut ShardEngine, transfer: &FnameTransfer) {
     let state_change = engine.propose_state_change(
         engine.shard_id(),
         vec![MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
             on_chain_event: None,
-            fname_transfer: Some(fname_transfer),
+            fname_transfer: Some(transfer.clone()),
         })],
         None,
     );
 
     validate_and_commit_state_change(engine, &state_change);
+    // let proof = transfer.proof.as_ref().unwrap();
+    // let name = String::from_utf8(proof.name.clone()).unwrap();
+    // assert!(engine.trie_key_exists(trie_ctx(), &TrieKey::for_fname(proof.fid, &name)));
 }
 
 pub fn default_signer() -> SigningKey {

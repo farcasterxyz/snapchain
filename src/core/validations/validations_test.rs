@@ -6,6 +6,7 @@ mod tests {
     };
     use crate::core::validations::verification::{validate_add_address, validate_fname_transfer};
     use crate::proto;
+    use crate::proto::FarcasterNetwork;
     use crate::version::version::EngineVersion;
     use proto::{FnameTransfer, UserDataBody, UserDataType, UserNameProof};
 
@@ -99,7 +100,7 @@ mod tests {
                 r#type: 1,
             })
         };
-        let result = validate_fname_transfer(transfer);
+        let result = validate_fname_transfer(transfer, FarcasterNetwork::Mainnet);
         assert!(result.is_ok());
     }
 
@@ -117,7 +118,7 @@ mod tests {
                 r#type: 1,
             })
         };
-        let result = validate_fname_transfer(transfer);
+        let result = validate_fname_transfer(transfer, FarcasterNetwork::Testnet);
         assert!(result.is_ok());
     }
 
@@ -135,7 +136,7 @@ mod tests {
                 r#type: 1,
             })
         };
-        let result = validate_fname_transfer(transfer);
+        let result = validate_fname_transfer(transfer, FarcasterNetwork::Mainnet);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), ValidationError::InvalidSignature);
     }
@@ -154,7 +155,7 @@ mod tests {
         r#type: 1,
       })
     };
-        let result = validate_fname_transfer(transfer);
+        let result = validate_fname_transfer(transfer, FarcasterNetwork::Mainnet);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), ValidationError::InvalidSignature);
     }

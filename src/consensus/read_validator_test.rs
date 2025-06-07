@@ -34,10 +34,8 @@ mod tests {
         }
 
         let (read_node_engine_clone, _) = new_engine_with_options(EngineOptions {
-            limits: None,
             db: Some(read_node_engine.db.clone()),
-            messages_request_tx: None,
-            network: None,
+            ..Default::default()
         });
 
         let proposer_address = Address(proposer_keypair.public().to_bytes());
