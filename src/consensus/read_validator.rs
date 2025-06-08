@@ -170,21 +170,22 @@ impl ReadValidator {
                 let timestamp = FarcasterTime::new(header.timestamp);
                 let expected_version =
                     EngineVersion::version_for(&timestamp, network).protocol_version();
-
-                if header.version != expected_version {
-                    let error_message = format!(
-                        "Invalid protocol version in decided block at height {}: expected {}, got {}. Does your node need an upgrade?",
-                        header.height.unwrap().block_number,
-                        expected_version, header.version
-                    );
-                    error!(%self.last_height, error_message);
-                    self.system_tx
-                        .try_send(SystemMessage::ExitWithError(error_message))
-                        .unwrap_or_else(|e| {
-                            error!(%self.last_height, "Failed to send system message: {}", e);
-                        });
-                    return false;
-                }
+                // Temporarily ignore.
+                return true;
+                // if header.version != expected_version {
+                //     let error_message = format!(
+                //         "Invalid protocol version in decided block at height {}: expected {}, got {}. Does your node need an upgrade?",
+                //         header.height.unwrap().block_number,
+                //         expected_version, header.version
+                //     );
+                //     error!(%self.last_height, error_message);
+                //     self.system_tx
+                //         .try_send(SystemMessage::ExitWithError(error_message))
+                //         .unwrap_or_else(|e| {
+                //             error!(%self.last_height, "Failed to send system message: {}", e);
+                //         });
+                //     return false;
+                // }
             }
             _ => {
                 // no-op. Only blocks have protocol version

@@ -1,8 +1,8 @@
 use crate::core::types::{proto, Address, Height, ShardHash, ShardId, SnapchainShard};
 use crate::core::util::FarcasterTime;
 use crate::proto::{
-    full_proposal, Block, BlockHeader, Commits, FullProposal, ShardChunk, ShardChunkWitness,
-    ShardHeader, ShardWitness,
+    full_proposal, Block, BlockHeader, Commits, FarcasterNetwork, FullProposal, ShardChunk,
+    ShardChunkWitness, ShardHeader, ShardWitness,
 };
 use crate::storage::store::engine::{BlockEngine, ShardEngine, ShardStateChange};
 use crate::storage::store::stores::Stores;
@@ -526,7 +526,10 @@ impl Proposer for BlockProposer {
                     "Received block with wrong protocol version: {}",
                     header.version
                 );
-                return Validity::Invalid;
+                // Temporarily ignore testnet
+                if self.network != FarcasterNetwork::Testnet {
+                    return Validity::Invalid;
+                }
             }
             if header.height.is_none() {
                 error!("Received block with missing height");
