@@ -1,5 +1,6 @@
 use crate::{
-    connectors, consensus, mempool,
+    connectors::{self},
+    consensus, mempool,
     network::{self, http_server},
     proto::FarcasterNetwork,
     storage,

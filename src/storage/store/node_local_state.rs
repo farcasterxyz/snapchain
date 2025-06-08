@@ -39,7 +39,7 @@ pub enum DataType {
     BaseOnchainEvent = 3,
 }
 
-#[derive(Clone, strum_macros::Display)]
+#[derive(Clone, Copy, strum_macros::Display)]
 pub enum Chain {
     Optimism = 1,
     Base = 2,

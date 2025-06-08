@@ -13,6 +13,7 @@ use foundry_common::ens::{namehash, EnsError, EnsRegistry};
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::str::FromStr;
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, warn};
@@ -61,23 +62,15 @@ sol!(
     "src/connectors/onchain_events/tier_registry_abi.json"
 );
 
-pub static STORAGE_REGISTRY: Address = address!("00000000fcce7f938e7ae6d3c335bd6a1a7c593d");
-
-pub static KEY_REGISTRY: Address = address!("00000000Fc1237824fb747aBDE0FF18990E59b7e");
-
-pub static ID_REGISTRY: Address = address!("00000000Fc6c5F01Fc30151999387Bb99A9f489b");
-
-pub static TIER_REGISTRY: Address = address!("0x00000000fc84484d585C3cF48d213424DFDE43FD");
-
 // Note these are the registry addresses, not the resolver addresses. We look up the resolver from the registry.
 static ETH_L1_ENS_REGISTRY: Address = address!("00000000000C2E074eC69A0dFb2997BA6C7d2e1e");
 static BASE_MAINNET_ENS_REGISTRY: Address = address!("0xB94704422c2a1E396835A571837Aa5AE53285a95");
 
 // For reference, in case it needs to be specified manually
-pub const OP_MAINNET_FIRST_BLOCK: u64 = 108864739;
-pub static OP_MAINNET_CHAIN_ID: u32 = 10; // OP mainnet
-pub const BASE_MAINNET_FIRST_BLOCK: u64 = 31180908;
-pub static BASE_MAINNET_CHAIN_ID: u32 = 8453; // Base mainnet
+const OP_MAINNET_FIRST_BLOCK: u64 = 108864739;
+static OP_MAINNET_CHAIN_ID: u32 = 10; // OP mainnet
+const BASE_MAINNET_FIRST_BLOCK: u64 = 31180908;
+static BASE_MAINNET_CHAIN_ID: u32 = 8453; // Base mainnet
 const RENT_EXPIRY_IN_SECONDS: u64 = 365 * 24 * 60 * 60; // One year
 
 const RETRY_TIMEOUT_SECONDS: u64 = 10;
@@ -87,6 +80,7 @@ pub struct Config {
     pub rpc_url: String,
     pub start_block_number: Option<u64>,
     pub stop_block_number: Option<u64>,
+    pub override_tier_registry_address: Option<String>, // For testing
 }
 
 impl Default for Config {
@@ -95,6 +89,7 @@ impl Default for Config {
             rpc_url: String::new(),
             start_block_number: None,
             stop_block_number: None,
+            override_tier_registry_address: None,
         };
     }
 }
@@ -263,6 +258,101 @@ impl ChainAPI for RealL1Client {
     }
 }
 
+#[derive(Clone)]
+pub enum ContractKind {
+    TierRegistry,
+    StorageRegistry,
+    KeyRegistry,
+    IdRegistry,
+}
+#[derive(Clone)]
+pub struct Contract {
+    address: Address,
+    kind: ContractKind,
+}
+
+impl Contract {
+    pub fn storage_registry() -> Self {
+        Contract {
+            address: address!("00000000fcce7f938e7ae6d3c335bd6a1a7c593d"),
+            kind: ContractKind::StorageRegistry,
+        }
+    }
+
+    pub fn key_registry() -> Self {
+        Contract {
+            address: address!("00000000Fc1237824fb747aBDE0FF18990E59b7e"),
+            kind: ContractKind::KeyRegistry,
+        }
+    }
+
+    pub fn id_registry() -> Self {
+        Contract {
+            address: address!("00000000Fc6c5F01Fc30151999387Bb99A9f489b"),
+            kind: ContractKind::IdRegistry,
+        }
+    }
+
+    pub fn tier_registry() -> Self {
+        Contract {
+            address: address!("0x00000000fc84484d585C3cF48d213424DFDE43FD"),
+            kind: ContractKind::TierRegistry,
+        }
+    }
+
+    pub fn event_kind(&self) -> &str {
+        match self.kind {
+            ContractKind::TierRegistry => "tier",
+            ContractKind::StorageRegistry => "storage",
+            ContractKind::KeyRegistry => "key",
+            ContractKind::IdRegistry => "id",
+        }
+    }
+
+    pub fn retry_filters(&self, fid: u64, start_block: u64) -> Vec<Filter> {
+        match self.kind {
+            ContractKind::TierRegistry => {
+                vec![Filter::new()
+                    .address(vec![self.address])
+                    .from_block(start_block)
+                    .events(vec!["PurchasedTier(uint256,uint256,uint256,address)"])
+                    .topic1(U256::from(fid))]
+            }
+            ContractKind::StorageRegistry => {
+                vec![Filter::new()
+                    .address(vec![self.address])
+                    .from_block(start_block)
+                    .events(vec!["Rent(address,uint256,uint256)"])
+                    .topic2(U256::from(fid))]
+            }
+            ContractKind::KeyRegistry => {
+                vec![Filter::new()
+                    .address(vec![self.address])
+                    .from_block(start_block)
+                    .events(vec![
+                        "Add(uint256,uint32,bytes,bytes,uint8,bytes)",
+                        "Remove(uint256,bytes,bytes)",
+                    ])
+                    .topic1(U256::from(fid))]
+            }
+            ContractKind::IdRegistry => {
+                vec![
+                    Filter::new()
+                        .address(vec![self.address])
+                        .from_block(start_block)
+                        .events(vec!["Register(address,uint256,address)"])
+                        .topic2(U256::from(fid)),
+                    Filter::new()
+                        .address(vec![self.address])
+                        .from_block(start_block)
+                        .events(vec!["Transfer(address,address,uint256)"])
+                        .topic3(U256::from(fid)),
+                ]
+            }
+        }
+    }
+}
+
 pub struct Subscriber {
     provider: RootProvider<Http<Client>>,
     mempool_tx: mpsc::Sender<MempoolRequest>,
@@ -272,9 +362,7 @@ pub struct Subscriber {
     local_state_store: LocalStateStore,
     onchain_events_request_rx: broadcast::Receiver<OnchainEventsRequest>,
     chain: node_local_state::Chain,
-    chain_id: u32,
-    contracts: Vec<Address>,
-    first_block: u64,
+    override_tier_registry_address: Option<String>,
 }
 
 // TODO(aditi): Wait for 1 confirmation before "committing" an onchain event.
@@ -286,9 +374,6 @@ impl Subscriber {
         statsd_client: StatsdClientWrapper,
         local_state_store: LocalStateStore,
         onchain_events_request_rx: broadcast::Receiver<OnchainEventsRequest>,
-        contracts: Vec<Address>,
-        chain_id: u32,
-        first_block: u64,
     ) -> Result<Subscriber, SubscribeError> {
         if config.rpc_url.is_empty() {
             return Err(SubscribeError::EmptyRpcUrl);
@@ -301,15 +386,44 @@ impl Subscriber {
             mempool_tx,
             start_block_number: config
                 .start_block_number
-                .map(|start_block| start_block.max(first_block)),
+                .map(|start_block| start_block.max(Self::first_block(chain))),
             stop_block_number: config.stop_block_number,
             statsd_client,
             onchain_events_request_rx,
             chain,
-            contracts,
-            chain_id,
-            first_block,
+            override_tier_registry_address: config.override_tier_registry_address.clone(),
         })
+    }
+
+    fn contracts(&self) -> Vec<Contract> {
+        match self.chain {
+            node_local_state::Chain::Optimism => vec![
+                Contract::storage_registry(),
+                Contract::key_registry(),
+                Contract::id_registry(),
+            ],
+            node_local_state::Chain::Base => vec![match &self.override_tier_registry_address {
+                None => Contract::tier_registry(),
+                Some(tier_registry_address) => Contract {
+                    address: Address::from_str(&tier_registry_address).unwrap(),
+                    kind: ContractKind::TierRegistry,
+                },
+            }],
+        }
+    }
+
+    fn first_block(chain: node_local_state::Chain) -> u64 {
+        match chain {
+            node_local_state::Chain::Optimism => OP_MAINNET_FIRST_BLOCK,
+            node_local_state::Chain::Base => BASE_MAINNET_FIRST_BLOCK,
+        }
+    }
+
+    fn chain_id(chain: node_local_state::Chain) -> u32 {
+        match chain {
+            node_local_state::Chain::Optimism => OP_MAINNET_CHAIN_ID,
+            node_local_state::Chain::Base => BASE_MAINNET_CHAIN_ID,
+        }
     }
 
     fn count(&self, key: &str, value: i64) {
@@ -342,7 +456,7 @@ impl Subscriber {
             log_index,
             tx_index,
             r#type: event_type as i32,
-            chain_id: self.chain_id,
+            chain_id: Self::chain_id(self.chain),
             version: 0,
             body: Some(event_body),
             transaction_hash: transaction_hash.to_vec(),
@@ -707,20 +821,6 @@ impl Subscriber {
         }
     }
 
-    pub fn event_kind(contract: Address) -> String {
-        if contract == STORAGE_REGISTRY {
-            "storage".to_string()
-        } else if contract == ID_REGISTRY {
-            "id".to_string()
-        } else if contract == KEY_REGISTRY {
-            "key".to_string()
-        } else if contract == TIER_REGISTRY {
-            "tier".to_string()
-        } else {
-            "unknown".to_string()
-        }
-    }
-
     pub async fn sync_historical_events(
         &mut self,
         initial_start_block: u64,
@@ -737,12 +837,12 @@ impl Subscriber {
         loop {
             let stop_block = final_stop_block.min(start_block + batch_size);
 
-            for contract in self.contracts.clone() {
+            for contract in self.contracts() {
                 let filter = Filter::new()
-                    .address(contract)
+                    .address(contract.address)
                     .from_block(start_block)
                     .to_block(stop_block);
-                self.get_logs_with_retry(filter, &Self::event_kind(contract.clone()))
+                self.get_logs_with_retry(filter, contract.event_kind())
                     .await?;
             }
 
@@ -817,8 +917,13 @@ impl Subscriber {
             chain = self.chain.to_string(),
             "Starting live sync"
         );
+        let contract_addresses: Vec<Address> = self
+            .contracts()
+            .iter()
+            .map(|contract| contract.address)
+            .collect();
         let filter = Filter::new()
-            .address(self.contracts.clone())
+            .address(contract_addresses)
             .from_block(start_block_number);
 
         let filter = match self.stop_block_number {
@@ -886,66 +991,13 @@ impl Subscriber {
         Ok(())
     }
 
-    async fn retry_for_contract(
-        &mut self,
-        contract: Address,
-        fid: u64,
-    ) -> Result<(), SubscribeError> {
-        if contract == STORAGE_REGISTRY {
-            let filter = Filter::new()
-                .address(vec![STORAGE_REGISTRY])
-                .from_block(self.first_block)
-                .events(vec!["Rent(address,uint256,uint256)"])
-                .topic2(U256::from(fid));
-            self.get_logs_with_retry(filter, &Self::event_kind(contract))
-                .await?;
-            Ok(())
-        } else if contract == KEY_REGISTRY {
-            let filter = Filter::new()
-                .address(vec![KEY_REGISTRY])
-                .from_block(self.first_block)
-                .events(vec![
-                    "Add(uint256,uint32,bytes,bytes,uint8,bytes)",
-                    "Remove(uint256,bytes,bytes)",
-                ])
-                .topic1(U256::from(fid));
-            self.get_logs_with_retry(filter, &Self::event_kind(contract))
-                .await?;
-            Ok(())
-        } else if contract == ID_REGISTRY {
-            let filter = Filter::new()
-                .address(vec![ID_REGISTRY])
-                .from_block(self.first_block)
-                .events(vec!["Register(address,uint256,address)"])
-                .topic2(U256::from(fid));
-            self.get_logs_with_retry(filter, &Self::event_kind(contract))
-                .await?;
-            let filter = Filter::new()
-                .address(vec![ID_REGISTRY])
-                .from_block(self.first_block)
-                .events(vec!["Transfer(address,address,uint256)"])
-                .topic3(U256::from(fid));
-            self.get_logs_with_retry(filter, &Self::event_kind(contract))
-                .await?;
-            Ok(())
-        } else if contract == TIER_REGISTRY {
-            let filter = Filter::new()
-                .address(vec![TIER_REGISTRY])
-                .from_block(self.first_block)
-                .events(vec!["PurchasedTier(uint256,uint256,uint256,address)"])
-                .topic1(U256::from(fid));
-            self.get_logs_with_retry(filter, &Self::event_kind(contract))
-                .await?;
-            Ok(())
-        } else {
-            panic!("Unrecognized contract")
-        }
-    }
-
     pub async fn retry_fid(&mut self, fid: u64) -> Result<(), SubscribeError> {
         info!(fid, "Retrying onchain events for fid");
-        for contract in self.contracts.clone() {
-            self.retry_for_contract(contract, fid).await?;
+        for contract in self.contracts() {
+            for retry_filter in contract.retry_filters(fid, Self::first_block(self.chain)) {
+                self.get_logs_with_retry(retry_filter, contract.event_kind())
+                    .await?;
+            }
         }
 
         Ok(())
@@ -961,7 +1013,12 @@ impl Subscriber {
             stop_block_number, "Retrying onchain events in range"
         );
         let filter = Filter::new()
-            .address(self.contracts.clone())
+            .address(
+                self.contracts()
+                    .iter()
+                    .map(|contract| contract.address)
+                    .collect::<Vec<Address>>(),
+            )
             .from_block(start_block_number)
             .to_block(stop_block_number);
         self.get_logs_with_retry(filter, "all").await?;
@@ -983,7 +1040,7 @@ impl Subscriber {
         match self.start_block_number {
             None => {
                 // By default, start from the first block or the latest block in the db. Whichever is higher
-                live_sync_block = Some(self.first_block.max(latest_block_in_db));
+                live_sync_block = Some(Self::first_block(self.chain).max(latest_block_in_db));
             }
             Some(start_block_number) => {
                 let historical_sync_start_block = latest_block_in_db.max(start_block_number);
@@ -1049,6 +1106,7 @@ mod tests {
                 rpc_url: format!("https://base-mainnet.g.alchemy.com/v2/{}", api_key).to_string(),
                 start_block_number: None,
                 stop_block_number: None,
+                override_tier_registry_address: None,
             },
             ..Default::default()
         };
