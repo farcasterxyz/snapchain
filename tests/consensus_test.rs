@@ -628,18 +628,19 @@ impl TestNetwork {
         self.test_fids.insert(fid, (signer, address));
     }
 
-    fn fid_registered(&self, fid: u64) -> Option<proto::OnChainEvent> {
-        for node in &self.nodes {
-            if let Some(event) = node.fid_registered(fid) {
-                return Some(event);
-            }
-        }
-        None
-    }
-
     pub async fn wait_for_fid(&self, fid: u64) -> Option<proto::OnChainEvent> {
         wait_for(
-            || self.fid_registered(fid),
+            || {
+                if self
+                    .nodes
+                    .iter()
+                    .all(|node| node.fid_registered(fid).is_some())
+                {
+                    return self.nodes[0].fid_registered(fid);
+                }
+
+                None
+            },
             tokio::time::Duration::from_secs(5),
             tokio::time::Duration::from_millis(100),
         )
@@ -679,11 +680,14 @@ impl TestNetwork {
     pub async fn wait_for_cast(&self, fid: u64, hash: Vec<u8>) -> Option<proto::Message> {
         wait_for(
             || {
-                for node in &self.nodes {
-                    if let Some(message) = node.cast_added(fid, hash.clone()) {
-                        return Some(message);
-                    }
+                if self
+                    .nodes
+                    .iter()
+                    .all(|node| node.cast_added(fid, hash.clone()).is_some())
+                {
+                    return self.nodes[0].cast_added(fid, hash.clone());
                 }
+
                 None
             },
             tokio::time::Duration::from_secs(5),
@@ -735,13 +739,18 @@ impl TestNetwork {
     ) -> Option<proto::UserNameProof> {
         wait_for(
             || {
-                for node in &self.nodes {
+                let all_have_proof = self.nodes.iter().all(|node| {
                     if let Some(proof) = node.get_username_proof(fname.clone()) {
-                        if proof.fid == fid {
-                            return Some(proof);
-                        }
+                        proof.fid == fid
+                    } else {
+                        false
                     }
+                });
+
+                if all_have_proof {
+                    return self.nodes[0].get_username_proof(fname.clone());
                 }
+
                 None
             },
             tokio::time::Duration::from_secs(5),
