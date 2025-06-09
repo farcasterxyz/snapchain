@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio_cron_scheduler::{Job, JobSchedulerError};
 use tracing::error;
 
-const THROTTLE: Duration = Duration::from_millis(100);
+const THROTTLE: Duration = Duration::from_millis(200);
 
 pub fn event_pruning_job(
     schedule: &str,
