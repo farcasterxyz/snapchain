@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2025-06-09
+
+### 🚀 Features
+
+- Setup version schedule for next protocol release (#514)
+- Support Basenames (#515)
+- Support pro users (#516)
+- Update protocol version in block header and validate it (#521)
+
+### 🐛 Bug Fixes
+
+- Fix flaky test due to timestamp conflict (#517)
+- Handle fname transfers across shards (#522)
+- Increase throttling of the event pruning job (#525)
+
+### ⚡ Performance
+
+- Fix perf test script (#507)
+
+### ⚙️ Miscellaneous Tasks
+
+- Make tier registry contract address configurable for testing (#524)
+- Add chain as a tag to onchain events logs (#526)
+
 ## [0.2.22] - 2025-05-29
 
 ### 🐛 Bug Fixes

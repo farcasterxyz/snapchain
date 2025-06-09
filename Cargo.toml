@@ -1,6 +1,6 @@
 [package]
 name = "snapchain"
-version = "0.2.22"
+version = "0.3.0"
 edition = "2021"
 default-run = "snapchain"
 
