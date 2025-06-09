@@ -518,6 +518,7 @@ impl Subscriber {
                 tx_hash = hex::encode(&event.transaction_hash),
                 log_index = event.log_index,
                 err = err.to_string(),
+                chain = self.chain.to_string(),
                 "Unable to send onchain event to mempool"
             )
         }
@@ -534,6 +535,7 @@ impl Subscriber {
                     error!(
                         block_number,
                         err = err.to_string(),
+                        chain = self.chain.to_string(),
                         "Unable to store last block number",
                     );
                 }
@@ -564,6 +566,7 @@ impl Subscriber {
                     }
 
                     error!(
+                        chain = self.chain.to_string(),
                         "Error getting block timestamp for hash {}: {}. Retry {} in {} seconds",
                         hex::encode(block_hash),
                         err,
@@ -783,8 +786,11 @@ impl Subscriber {
             match result {
                 Err(err) => {
                     error!(
+                        chain = self.chain.to_string(),
                         event_kind,
-                        "Error processing onchain event. Error: {:#?}. Event: {:#?}", err, event,
+                        "Error processing onchain event. Error: {:#?}. Event: {:#?}",
+                        err,
+                        event,
                     )
                 }
                 Ok(()) => {}
@@ -810,8 +816,12 @@ impl Subscriber {
                     }
 
                     error!(
+                        chain = self.chain.to_string(),
                         "Error getting logs for {} event kind(s): {}. Retry {} in {} seconds",
-                        event_kind, err, retry_count, RETRY_TIMEOUT_SECONDS
+                        event_kind,
+                        err,
+                        retry_count,
+                        RETRY_TIMEOUT_SECONDS
                     );
 
                     tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_TIMEOUT_SECONDS))
@@ -853,6 +863,7 @@ impl Subscriber {
                 info!(
                     start_block,
                     stop_block = final_stop_block,
+                    chain = self.chain.to_string(),
                     "Stopping historical sync"
                 );
                 return Ok(());
@@ -869,6 +880,7 @@ impl Subscriber {
             Err(err) => {
                 error!(
                     err = err.to_string(),
+                    chain = self.chain.to_string(),
                     "Unable to retrieve last block number",
                 );
                 0
@@ -900,8 +912,11 @@ impl Subscriber {
                     }
 
                     error!(
+                        chain = self.chain.to_string(),
                         "Error getting latest block on chain: {}. Retry {} in {} seconds",
-                        err, retry_count, RETRY_TIMEOUT_SECONDS
+                        err,
+                        retry_count,
+                        RETRY_TIMEOUT_SECONDS
                     );
 
                     tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_TIMEOUT_SECONDS))
@@ -945,12 +960,14 @@ impl Subscriber {
                             match request {
                                 OnchainEventsRequest::RetryFid(retry_fid) =>  {
                                     if let Err(err) = self.retry_fid(retry_fid).await {
-                                        error!(fid = retry_fid, "Unable to retry fid: {}", err.to_string())
+                                        error!(fid = retry_fid, chain = self.chain.to_string(),
+                                             "Unable to retry fid: {}", err.to_string())
                                     }
                                 },
                                 OnchainEventsRequest::RetryBlockRange{start_block_number, stop_block_number} => {
                                     if let Err(err) = self.retry_block_range(start_block_number, stop_block_number).await {
-                                        error!(start_block_number, stop_block_number, "Unable to retry block range: {}", err.to_string())
+                                        error!(start_block_number, stop_block_number, chain = self.chain.to_string(),
+                                            "Unable to retry block range: {}", err.to_string())
                                     }
 
 
@@ -992,7 +1009,11 @@ impl Subscriber {
     }
 
     pub async fn retry_fid(&mut self, fid: u64) -> Result<(), SubscribeError> {
-        info!(fid, "Retrying onchain events for fid");
+        info!(
+            fid,
+            chain = self.chain.to_string(),
+            "Retrying onchain events for fid"
+        );
         for contract in self.contracts() {
             for retry_filter in contract.retry_filters(fid, Self::first_block(self.chain)) {
                 self.get_logs_with_retry(retry_filter, contract.event_kind())
@@ -1010,7 +1031,9 @@ impl Subscriber {
     ) -> Result<(), SubscribeError> {
         info!(
             start_block_number,
-            stop_block_number, "Retrying onchain events in range"
+            stop_block_number,
+            chain = self.chain.to_string(),
+            "Retrying onchain events in range"
         );
         let filter = Filter::new()
             .address(
@@ -1071,17 +1094,26 @@ impl Subscriber {
         }
 
         if live_sync_block.is_none() {
-            info!("Historical sync complete. Not subscribing to live events");
+            info!(
+                chain = self.chain.to_string(),
+                "Historical sync complete. Not subscribing to live events"
+            );
             return Ok(());
         }
 
         loop {
             match self.sync_live_events(live_sync_block.unwrap()).await {
                 Err(e) => {
-                    error!("Live sync ended with error: {e}. Retrying in 10 seconds",);
+                    error!(
+                        chain = self.chain.to_string(),
+                        "Live sync ended with error: {e}. Retrying in 10 seconds",
+                    );
                 }
                 _ => {
-                    error!("Live sync ended unexpectedly. Retrying in 10 seconds",);
+                    error!(
+                        chain = self.chain.to_string(),
+                        "Live sync ended unexpectedly. Retrying in 10 seconds",
+                    );
                 }
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_TIMEOUT_SECONDS)).await;
