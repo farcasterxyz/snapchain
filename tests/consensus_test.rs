@@ -834,7 +834,11 @@ async fn test_basic_consensus() {
         .await
         .unwrap();
 
-    assert_network_has_num_blocks(&network, 1);
+    // Wait for nodes to reach the next block height
+    let next_block_height = network.max_block_height() + 1;
+    network.wait_for_block(next_block_height).await;
+
+    assert_network_has_num_blocks(&network, next_block_height);
     assert_network_has_num_shard_chunks(&network, 3);
     assert_network_has_messages(&network, 1);
 
