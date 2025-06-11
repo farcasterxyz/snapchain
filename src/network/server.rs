@@ -206,12 +206,11 @@ impl MyHubService {
                     }
                     Some(proto::message_data::Body::VerificationAddAddressBody(body)) => {
                         if body.verification_type == 1 {
-                            // todo: thread through network
                             let claim_result =
                                 validations::verification::make_verification_address_claim(
                                     message_data.fid,
                                     &body.address,
-                                    proto::FarcasterNetwork::Mainnet,
+                                    self.network,
                                     &body.block_hash,
                                     proto::Protocol::Ethereum,
                                 );
