@@ -764,6 +764,12 @@ pub struct StorageUnitDetails {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TierDetails {
+    tier_type: TierType,
+    expires_at: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum StoreType {
     None = 0,
     Casts = 1,
@@ -793,6 +799,7 @@ pub struct StorageLimitsResponse {
     pub units: u32,
     #[serde(rename = "unitDetails")]
     pub unit_details: Vec<StorageUnitDetails>,
+    pub tier_subscriptions: Vec<TierDetails>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2444,6 +2451,17 @@ impl HubHttpService for HubHttpServiceImpl {
                         1 => StorageUnitType::UnitType2024,
                         _ => StorageUnitType::UnitTypeLegacy,
                     },
+                })
+                .collect(),
+            tier_subscriptions: limits
+                .tier_subscriptions
+                .iter()
+                .map(|d| TierDetails {
+                    tier_type: match d.tier_type {
+                        1 => TierType::Pro,
+                        _ => TierType::None,
+                    },
+                    expires_at: d.expires_at,
                 })
                 .collect(),
         })
