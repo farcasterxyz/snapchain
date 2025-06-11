@@ -292,3 +292,15 @@ message EventsResponse {
   repeated HubEvent events = 1;
   optional bytes next_page_token = 2;
 }
+
+message FidAddressTypeRequest {
+  uint64 fid = 1;
+  bytes address = 2;
+}
+
+message FidAddressTypeResponse {
+  bool is_custody = 1;
+  bool is_auth = 2;
+  bool is_verified = 3;
+  bool valid = 4;
+}

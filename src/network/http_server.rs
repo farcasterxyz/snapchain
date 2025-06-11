@@ -943,6 +943,32 @@ pub struct OnChainEventResponse {
 
 #[allow(non_snake_case)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FidAddressTypeRequest {
+    pub fid: u64,
+    #[serde(with = "serdehex")]
+    pub address: Vec<u8>,
+}
+
+impl FidAddressTypeRequest {
+    pub fn to_proto(self) -> proto::FidAddressTypeRequest {
+        proto::FidAddressTypeRequest {
+            fid: self.fid,
+            address: self.address,
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FidAddressTypeResponse {
+    pub is_custody: bool,
+    pub is_auth: bool,
+    pub is_verified: bool,
+    pub valid: bool,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OnChainEventRequest {
     fid: u64,
     event_type: OnChainEventType,
@@ -2032,6 +2058,10 @@ pub trait HubHttpService {
         &self,
         req: OnChainEventRequest,
     ) -> Result<OnChainEventResponse, ErrorResponse>;
+    async fn get_fid_address_type(
+        &self,
+        req: FidAddressTypeRequest,
+    ) -> Result<FidAddressTypeResponse, ErrorResponse>;
     async fn get_events(&self, req: EventsRequest) -> Result<EventsResponse, ErrorResponse>;
     async fn get_event_by_id(&self, req: EventRequest) -> Result<HubEvent, ErrorResponse>;
     async fn get_id_registry_on_chain_event_by_address(
@@ -2693,6 +2723,29 @@ impl HubHttpService for HubHttpServiceImpl {
         let onchain = response.into_inner();
         map_proto_on_chain_event_to_json_on_chain_event(onchain)
     }
+
+    /// GET /v1/fidAddressType
+    async fn get_fid_address_type(
+        &self,
+        req: FidAddressTypeRequest,
+    ) -> Result<FidAddressTypeResponse, ErrorResponse> {
+        let service = &self.service;
+        let grpc_req = tonic::Request::new(req.to_proto());
+        let response = service
+            .get_fid_address_type(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get fid address type".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+        let proto_resp = response.into_inner();
+        Ok(FidAddressTypeResponse {
+            is_custody: proto_resp.is_custody,
+            is_auth: proto_resp.is_auth,
+            is_verified: proto_resp.is_verified,
+            valid: proto_resp.valid,
+        })
+    }
 }
 
 // Router implementation
@@ -2881,6 +2934,13 @@ impl Router {
                             service.get_id_registry_on_chain_event_by_address(req).await
                         })
                     },
+                )
+                .await
+            }
+            (&Method::GET, "/v1/fidAddressType") => {
+                self.handle_request::<FidAddressTypeRequest, FidAddressTypeResponse, _>(
+                    req,
+                    |service, req| Box::pin(async move { service.get_fid_address_type(req).await }),
                 )
                 .await
             }

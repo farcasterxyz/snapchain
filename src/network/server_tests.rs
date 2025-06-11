@@ -1347,6 +1347,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_fid_address_type() {
+        let (_stores, _senders, [mut engine1, _], service) = make_server(None).await;
+        let fid = SHARD1_FID;
+        let signer = test_helper::default_signer();
+        let custody_address = test_helper::default_custody_address();
+        let auth_signer = generate_signer(); // Generate a signing key for auth
+        let auth_key = auth_signer.verifying_key().as_bytes().to_vec(); // Auth key with keyType=2
+
+        // Register user with custody address
+        test_helper::register_user(fid, signer.clone(), custody_address.clone(), &mut engine1)
+            .await;
+
+        // Add an auth key (keyType=2)
+        let auth_signer_event = events_factory::create_signer_event(
+            fid,
+            auth_signer,
+            proto::SignerEventType::Add,
+            None,
+            Some(2), // keyType=2 for auth
+        );
+        commit_event(&mut engine1, &auth_signer_event).await;
+
+        // Test custody address
+        let request = Request::new(proto::FidAddressTypeRequest {
+            fid,
+            address: custody_address.clone(),
+        });
+        let response = service.get_fid_address_type(request).await.unwrap();
+        let result = response.get_ref();
+        assert!(result.is_custody);
+        assert!(!result.is_auth);
+        assert!(!result.is_verified);
+        assert!(result.valid);
+
+        // Test auth address
+        let request = Request::new(proto::FidAddressTypeRequest {
+            fid,
+            address: auth_key.clone(),
+        });
+        let response = service.get_fid_address_type(request).await.unwrap();
+        let result = response.get_ref();
+        assert!(!result.is_custody);
+        assert!(result.is_auth);
+        assert!(!result.is_verified);
+        assert!(result.valid);
+
+        // Test unknown address
+        let unknown_address = hex::decode("1234567890abcdef1234567890abcdef12345678").unwrap();
+        let request = Request::new(proto::FidAddressTypeRequest {
+            fid,
+            address: unknown_address,
+        });
+        let response = service.get_fid_address_type(request).await.unwrap();
+        let result = response.get_ref();
+        assert!(!result.is_custody);
+        assert!(!result.is_auth);
+        assert!(!result.is_verified);
+        assert!(!result.valid);
+    }
+
+    #[tokio::test]
     async fn test_get_on_chain_signers_by_fid() {
         let (_stores, _senders, [mut engine1, _], service) = make_server(None).await;
         let fid = SHARD1_FID;

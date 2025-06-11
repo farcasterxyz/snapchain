@@ -26,6 +26,7 @@ use crate::proto::OnChainEventRequest;
 use crate::proto::OnChainEventResponse;
 use crate::proto::ReactionType;
 use crate::proto::ReactionsByTargetRequest;
+use crate::proto::SignerEventType;
 use crate::proto::SignerRequest;
 use crate::proto::TrieNodeMetadataRequest;
 use crate::proto::TrieNodeMetadataResponse;
@@ -43,6 +44,7 @@ use crate::proto::{
     BlocksRequest, EventRequest, EventsRequest, EventsResponse, ShardChunksRequest,
     ShardChunksResponse, SubscribeRequest,
 };
+use crate::proto::{FidAddressTypeRequest, FidAddressTypeResponse};
 use crate::proto::{FidRequest, FidTimestampRequest};
 use crate::proto::{GetInfoRequest, StorageLimitsResponse};
 use crate::proto::{
@@ -1834,6 +1836,72 @@ impl HubService for MyHubService {
         }
         // If we reach here, we didn't find the event so error out
         Err(Status::not_found("no id-registry event for address"))
+    }
+
+    async fn get_fid_address_type(
+        &self,
+        request: Request<FidAddressTypeRequest>,
+    ) -> Result<Response<FidAddressTypeResponse>, Status> {
+        let req = request.into_inner();
+        let fid = req.fid;
+        let address = req.address;
+
+        let mut is_custody = false;
+        let mut is_auth = false;
+        let mut is_verified = false;
+
+        // Check if the address is a custody address (from IdRegistry)
+        for store in self.shard_stores.values() {
+            // Check IdRegistry for custody address
+            if let Ok(Some(id_event)) = store.onchain_event_store.get_id_register_event_by_fid(fid)
+            {
+                if let Some(Body::IdRegisterEventBody(body)) = &id_event.body {
+                    if body.to == address {
+                        is_custody = true;
+                    }
+                }
+            }
+
+            // Check KeyRegistry for auth address (keyType=2)
+            // We need to get all signer events, not just the filtered ones
+            if let Ok(events) = store
+                .onchain_event_store
+                .get_onchain_events(proto::OnChainEventType::EventTypeSigner, Some(fid))
+            {
+                for signer_event in events {
+                    if let Some(Body::SignerEventBody(signer_body)) = &signer_event.body {
+                        // Check if this is an auth key (keyType=2) and matches the address
+                        if signer_body.key_type == 2
+                            && signer_body.key == address
+                            && signer_body.event_type() == SignerEventType::Add
+                        {
+                            is_auth = true;
+                        }
+                    }
+                }
+            }
+
+            // Check verified addresses
+            if let Ok(Some(_verification)) =
+                VerificationStore::get_verification_add(&store.verification_store, fid, &address)
+            {
+                is_verified = true;
+            }
+
+            // If we found results in this shard, no need to check others
+            if is_custody || is_auth || is_verified {
+                break;
+            }
+        }
+
+        let valid = is_custody || is_auth || is_verified;
+
+        Ok(Response::new(FidAddressTypeResponse {
+            is_custody,
+            is_auth,
+            is_verified,
+            valid,
+        }))
     }
 
     async fn get_links_by_target(

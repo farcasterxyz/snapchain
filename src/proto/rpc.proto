@@ -59,6 +59,7 @@ service HubService {
   rpc GetIdRegistryOnChainEvent(FidRequest) returns (OnChainEvent);
   rpc GetIdRegistryOnChainEventByAddress(IdRegistryEventByAddressRequest) returns (OnChainEvent);
   rpc GetCurrentStorageLimitsByFid(FidRequest) returns (StorageLimitsResponse);
+  rpc GetFidAddressType(FidAddressTypeRequest) returns (FidAddressTypeResponse);
 
   // Links
   rpc GetLink(LinkRequest) returns (Message);
