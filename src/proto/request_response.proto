@@ -302,5 +302,4 @@ message FidAddressTypeResponse {
   bool is_custody = 1;
   bool is_auth = 2;
   bool is_verified = 3;
-  bool valid = 4;
 }

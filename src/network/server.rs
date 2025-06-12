@@ -1894,13 +1894,10 @@ impl HubService for MyHubService {
             }
         }
 
-        let valid = is_custody || is_auth || is_verified;
-
         Ok(Response::new(FidAddressTypeResponse {
             is_custody,
             is_auth,
             is_verified,
-            valid,
         }))
     }
 

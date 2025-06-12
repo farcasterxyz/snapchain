@@ -964,7 +964,6 @@ pub struct FidAddressTypeResponse {
     pub is_custody: bool,
     pub is_auth: bool,
     pub is_verified: bool,
-    pub valid: bool,
 }
 
 #[allow(non_snake_case)]
@@ -2743,7 +2742,6 @@ impl HubHttpService for HubHttpServiceImpl {
             is_custody: proto_resp.is_custody,
             is_auth: proto_resp.is_auth,
             is_verified: proto_resp.is_verified,
-            valid: proto_resp.valid,
         })
     }
 }

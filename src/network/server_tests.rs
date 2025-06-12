@@ -1379,7 +1379,6 @@ mod tests {
         assert!(result.is_custody);
         assert!(!result.is_auth);
         assert!(!result.is_verified);
-        assert!(result.valid);
 
         // Test auth address
         let request = Request::new(proto::FidAddressTypeRequest {
@@ -1391,7 +1390,6 @@ mod tests {
         assert!(!result.is_custody);
         assert!(result.is_auth);
         assert!(!result.is_verified);
-        assert!(result.valid);
 
         // Test unknown address
         let unknown_address = hex::decode("1234567890abcdef1234567890abcdef12345678").unwrap();
@@ -1404,7 +1402,6 @@ mod tests {
         assert!(!result.is_custody);
         assert!(!result.is_auth);
         assert!(!result.is_verified);
-        assert!(!result.valid);
     }
 
     #[tokio::test]
