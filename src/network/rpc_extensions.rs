@@ -65,9 +65,14 @@ fn page_options(
         None => None,
     };
     let reverse = reverse.unwrap_or(false);
+    let token = match page_token {
+        None => None,
+        Some(token) if token.is_empty() => None, // Make sure we don't use the empty key for pagination
+        Some(token) => Some(token.clone()),
+    };
     PageOptions {
         page_size,
-        page_token: page_token.clone(),
+        page_token: token,
         reverse,
     }
 }

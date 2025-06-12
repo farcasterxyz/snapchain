@@ -1044,6 +1044,20 @@ mod tests {
             .get_all_cast_messages_by_fid(Request::new(bulk_casts_request))
             .await;
         test_helper::assert_contains_all_messages(&response, &[&cast_add2, &cast_remove]);
+
+        // Returns casts even if page token is empty
+        let empty_page_token_request = proto::FidTimestampRequest {
+            fid: SHARD1_FID,
+            page_size: None,
+            page_token: Some(vec![]),
+            reverse: None,
+            start_timestamp: None,
+            stop_timestamp: None,
+        };
+        let response = service
+            .get_all_cast_messages_by_fid(Request::new(empty_page_token_request))
+            .await;
+        test_helper::assert_contains_all_messages(&response, &[&cast_add2, &cast_remove]);
     }
 
     #[tokio::test]
