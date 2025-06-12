@@ -12,9 +12,12 @@ use snapchain::mempool::mempool::{
 use snapchain::mempool::routing::{self, MessageRouter, ShardRouter};
 use snapchain::network::gossip::SnapchainGossip;
 use snapchain::network::server::MyHubService;
+use snapchain::network::sync_server::SyncServer;
 use snapchain::node::snapchain_node::SnapchainNode;
 use snapchain::node::snapchain_read_node::SnapchainReadNode;
 use snapchain::proto::hub_service_server::HubServiceServer;
+use snapchain::proto::sync_service_client::SyncServiceClient;
+use snapchain::proto::sync_service_server::SyncServiceServer;
 use snapchain::proto::{self, Height};
 use snapchain::proto::{Block, FarcasterNetwork, IdRegisterEventType, SignerEventType};
 use snapchain::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
@@ -33,6 +36,8 @@ use tokio::time;
 use tonic::transport::Server;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
+
+use snapchain::storage::trie::merkle_trie;
 
 const HOST_FOR_TEST: &str = "127.0.0.1";
 const BASE_PORT_FOR_TEST: u32 = 9482;
@@ -156,6 +161,7 @@ struct NodeForTest {
     block_store: BlockStore,
     mempool_tx: mpsc::Sender<MempoolRequest>,
     handles: Vec<tokio::task::JoinHandle<()>>,
+    grpc_addr: String,
 }
 
 impl Node for NodeForTest {
@@ -186,6 +192,8 @@ struct ReadNodeForTest {
     db: Arc<RocksDB>,
     block_store: BlockStore,
     _messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
+    gossip: Option<SnapchainGossip>,
+    system_rx: Option<mpsc::Receiver<SystemMessage>>,
 }
 
 impl Node for ReadNodeForTest {
@@ -268,37 +276,44 @@ impl ReadNodeForTest {
         )
         .await;
 
-        let mut join_handles = Vec::new();
-
-        let handle = tokio::spawn(async move {
-            gossip.start().await;
-        });
-        join_handles.push(handle);
-
-        let node_for_dispatch = node.clone();
-        let handle = tokio::spawn(async move {
-            loop {
-                if let Some(system_event) = system_rx.recv().await {
-                    match system_event {
-                        SystemMessage::MalachiteNetwork(event_shard, event) => {
-                            node_for_dispatch.dispatch_network_event(event_shard, event);
-                        }
-                        _ => {
-                            // noop
-                        }
-                    }
-                }
-            }
-        });
-        join_handles.push(handle);
-
         Self {
-            handles: join_handles,
+            handles: vec![],
             node,
             db: db.clone(),
             block_store,
             _messages_request_rx: messages_request_rx,
+            gossip: Some(gossip),
+            system_rx: Some(system_rx),
         }
+    }
+
+    fn start(&mut self) {
+        let mut join_handles = Vec::new();
+        if let Some(mut gossip) = self.gossip.take() {
+            join_handles.push(tokio::spawn(async move {
+                gossip.start().await;
+            }));
+        }
+
+        if let Some(mut system_rx) = self.system_rx.take() {
+            let node_for_dispatch = self.node.clone();
+            let handle = tokio::spawn(async move {
+                loop {
+                    if let Some(system_event) = system_rx.recv().await {
+                        match system_event {
+                            SystemMessage::MalachiteNetwork(event_shard, event) => {
+                                node_for_dispatch.dispatch_network_event(event_shard, event);
+                            }
+                            _ => {
+                                // noop
+                            }
+                        }
+                    }
+                }
+            });
+            join_handles.push(handle);
+        }
+        self.handles = join_handles;
     }
 }
 
@@ -439,10 +454,13 @@ impl NodeForTest {
             "".to_string(),
         );
 
+        let sync_server = SyncServer::new(node.shard_stores.clone());
+
         let handle = tokio::spawn(async move {
             let grpc_socket_addr: SocketAddr = addr.parse().unwrap();
             let resp = Server::builder()
                 .add_service(HubServiceServer::new(service))
+                .add_service(SyncServiceServer::new(sync_server))
                 .serve(grpc_socket_addr)
                 .await;
 
@@ -482,6 +500,7 @@ impl NodeForTest {
             block_store,
             mempool_tx,
             handles: join_handles,
+            grpc_addr,
         }
     }
 
@@ -494,6 +513,13 @@ impl NodeForTest {
         self.mempool_tx
             .send(MempoolRequest::AddMessage(message, source, rx))
             .await
+    }
+
+    pub async fn sync_client(
+        &self,
+    ) -> Result<SyncServiceClient<tonic::transport::Channel>, tonic::transport::Error> {
+        let addr = format!("grpc://{}", self.grpc_addr);
+        SyncServiceClient::connect(addr).await
     }
 }
 
@@ -555,7 +581,7 @@ impl TestNetwork {
         self.nodes.push(node);
     }
 
-    async fn start_read_node(&mut self) {
+    async fn create_read_node(&mut self) -> ReadNodeForTest {
         let keypair = Keypair::generate();
         let port = get_available_port();
         let gossip_address = format!("/ip4/{HOST_FOR_TEST}/udp/{port}/quic-v1");
@@ -567,6 +593,12 @@ impl TestNetwork {
             self.gossip_addresses.join(","),
         )
         .await;
+        node
+    }
+
+    async fn start_read_node(&mut self) {
+        let mut node = self.create_read_node().await;
+        node.start();
         self.read_nodes.push(node);
     }
 
@@ -1004,4 +1036,107 @@ async fn test_cross_shard_interactions() {
         .wait_for_username_registered_to_fid(first_fid, fname.to_string())
         .await
         .unwrap();
+}
+
+#[tokio::test]
+#[serial]
+async fn test_sync() {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .try_init();
+
+    let num_shards = 2;
+    let mut network = TestNetwork::create(3, num_shards).await;
+    network.start_validators().await;
+
+    network.register_and_wait_for_fid(1000).await;
+    let cast = network
+        .send_and_wait_for_cast(1000, "Hello, world")
+        .await
+        .unwrap();
+
+    // Wait for nodes to reach the next block height
+    let next_block_height = network.max_block_height() + 1;
+    network.wait_for_block(next_block_height).await;
+
+    let node = &network.nodes[0];
+    let mut sync_client = node.sync_client().await.unwrap();
+
+    let result = sync_client
+        .get_sync_transactions(proto::GetSyncTransactionsRequest {
+            shard_id: 1,
+            fids: vec![1000],
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    println!("Sync transactions for shard 1: {:?}", result);
+
+    let node = network.create_read_node().await;
+
+    let txn = result.transactions.get(0).unwrap();
+
+    // This is a hack to get the RocksDB instance for a shard
+    let db = node
+        .node
+        .shard_stores
+        .get(&1)
+        .unwrap()
+        .shard_store
+        .db
+        .clone();
+    let mut engine = node.node.shard_engines.get(&1).unwrap().clone();
+    let mut tx_batch = RocksDbTransactionBatch::new();
+    let ctx = merkle_trie::Context::new();
+    let (_, _, validation_errors) = engine
+        .replay_snapchain_txn(
+            &ctx,
+            &txn,
+            &mut tx_batch,
+            snapchain::storage::store::engine::ProposalSource::Commit,
+            snapchain::version::version::EngineVersion::V5,
+            &snapchain::core::util::FarcasterTime::current(),
+        )
+        .unwrap();
+
+    assert!(
+        validation_errors.is_empty(),
+        "Validation errors found: {:?}",
+        validation_errors
+    );
+
+    db.commit(tx_batch).unwrap();
+
+    let txn = result.transactions.get(1).unwrap();
+    let mut tx_batch = RocksDbTransactionBatch::new();
+    let (account_root, events, validation_errors) = engine
+        .replay_snapchain_txn(
+            &ctx,
+            &txn,
+            &mut tx_batch,
+            snapchain::storage::store::engine::ProposalSource::Commit,
+            snapchain::version::version::EngineVersion::V5,
+            &snapchain::core::util::FarcasterTime::current(),
+        )
+        .unwrap();
+
+    assert!(
+        validation_errors.is_empty(),
+        "Validation errors found: {:?}",
+        validation_errors
+    );
+
+    assert!(
+        txn.account_root == account_root,
+        "Account root mismatch: expected {}, got {}",
+        hex::encode(txn.account_root.clone()),
+        hex::encode(account_root)
+    );
+
+    println!(
+        "expected account root: {}",
+        hex::encode(txn.account_root.clone())
+    );
 }

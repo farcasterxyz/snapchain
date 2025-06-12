@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+import "message.proto";
+import "blocks.proto";
+
+
+service SyncService {
+  rpc GetSyncTransactions(GetSyncTransactionsRequest) returns (GetSyncTransactionsResponse);
+}
+
+message GetSyncTransactionsRequest {
+  uint32 shard_id = 1;
+  repeated uint64 fids = 2;
+}
+
+message GetSyncTransactionsResponse {
+  // Transactions (one per fid) that include the messages to sync
+  repeated Transaction transactions = 1;
+}

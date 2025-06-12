@@ -27,6 +27,7 @@ pub struct SnapchainReadNode {
     pub consensus_actors: BTreeMap<u32, MalachiteReadNodeActors>,
     pub shard_stores: HashMap<u32, Stores>,
     pub shard_senders: HashMap<u32, Senders>,
+    pub shard_engines: HashMap<u32, ShardEngine>,
     pub address: Address,
 }
 
@@ -51,6 +52,7 @@ impl SnapchainReadNode {
 
         let mut shard_senders: HashMap<u32, Senders> = HashMap::new();
         let mut shard_stores: HashMap<u32, Stores> = HashMap::new();
+        let mut shard_engines: HashMap<u32, ShardEngine> = HashMap::new();
 
         // Create the shard validators
         for shard_id in config.shard_ids.clone() {
@@ -77,6 +79,7 @@ impl SnapchainReadNode {
 
             shard_senders.insert(shard_id, engine.get_senders());
             shard_stores.insert(shard_id, engine.get_stores());
+            shard_engines.insert(shard_id, engine.clone());
 
             let consensus_actor = MalachiteReadNodeActors::create_and_start(
                 ctx,
@@ -126,6 +129,7 @@ impl SnapchainReadNode {
             address: validator_address,
             shard_senders,
             shard_stores,
+            shard_engines,
         }
     }
 

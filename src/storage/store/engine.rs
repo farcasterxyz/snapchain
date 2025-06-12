@@ -169,6 +169,7 @@ struct CachedTransaction {
     txn: RocksDbTransactionBatch,
 }
 
+#[derive(Clone)] // TODO: Temporary
 pub struct ShardEngine {
     shard_id: u32,
     pub network: FarcasterNetwork,
@@ -440,7 +441,7 @@ impl ShardEngine {
         result
     }
 
-    fn txn_summary(txn: &Transaction) -> String {
+    pub fn txn_summary(txn: &Transaction) -> String {
         let mut summary = String::new();
         let fid = format!("fid: {}\n", txn.fid);
         summary += fid.as_str();
@@ -576,7 +577,7 @@ impl ShardEngine {
         Ok(events)
     }
 
-    fn replay_snapchain_txn(
+    pub fn replay_snapchain_txn(
         &mut self,
         trie_ctx: &merkle_trie::Context,
         snapchain_txn: &Transaction,
