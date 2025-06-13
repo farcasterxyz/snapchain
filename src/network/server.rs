@@ -669,6 +669,7 @@ impl HubService for MyHubService {
         &self,
         _request: Request<GetInfoRequest>,
     ) -> Result<Response<GetInfoResponse>, Status> {
+        info!("Received call to [get_info] RPC");
         let mut total_fid_registrations = 0;
         let mut total_approx_size = 0;
         let mut total_num_messages = 0;
@@ -767,6 +768,10 @@ impl HubService for MyHubService {
         request: Request<FidsRequest>,
     ) -> Result<Response<proto::FidsResponse>, Status> {
         let inner_request = request.into_inner();
+        info!(
+            { shard_id = inner_request.shard_id },
+            "Received call to [get_fids] RPC"
+        );
 
         let stores = self.get_stores_for_shard(inner_request.shard_id)?;
 
@@ -925,6 +930,7 @@ impl HubService for MyHubService {
         request: Request<EventRequest>,
     ) -> Result<Response<HubEvent>, Status> {
         let request = request.into_inner();
+        info!({event_id = request.id, shard_index = request.shard_index}, "Received call to [get_event] RPC");
         // Not sure this is the correct way to be handling the shard
         let stores = self.get_stores_for_shard(request.shard_index)?;
         let hub_event_result = stores.get_event(request.id);
@@ -959,6 +965,7 @@ impl HubService for MyHubService {
         request: Request<EventsRequest>,
     ) -> Result<Response<EventsResponse>, Status> {
         let req = request.into_inner();
+        info!({start_id = req.start_id, stop_id = req.stop_id, shard_index = req.shard_index}, "Received call to [get_events] RPC");
 
         let num_shards;
         let shard_stores;
@@ -1023,6 +1030,7 @@ impl HubService for MyHubService {
 
     async fn get_cast(&self, request: Request<CastId>) -> Result<Response<proto::Message>, Status> {
         let cast_id = request.into_inner();
+        info!({ fid = cast_id.fid }, "Received call to [get_cast] RPC");
         let stores = self.get_stores_for(cast_id.fid)?;
         CastStore::get_cast_add(&stores.cast_store, cast_id.fid, cast_id.hash).as_response()
     }
@@ -1032,6 +1040,10 @@ impl HubService for MyHubService {
         request: Request<FidRequest>,
     ) -> Result<Response<proto::MessagesResponse>, Status> {
         let request = request.into_inner();
+        info!(
+            { fid = request.fid },
+            "Received call to [get_casts_by_fid] RPC"
+        );
         let stores = self.get_stores_for(request.fid)?;
         let options = request.page_options();
         CastStore::get_cast_adds_by_fid(&stores.cast_store, request.fid, &options).as_response()
@@ -1042,6 +1054,10 @@ impl HubService for MyHubService {
         request: Request<FidTimestampRequest>,
     ) -> Result<Response<proto::MessagesResponse>, Status> {
         let request = request.into_inner();
+        info!(
+            { fid = request.fid },
+            "Received call to [get_all_cast_messages_by_fid] RPC"
+        );
         let stores = self.get_stores_for(request.fid)?;
         let (start_ts, stop_ts) = request.timestamps();
         stores
@@ -1055,6 +1071,7 @@ impl HubService for MyHubService {
         request: Request<ReactionRequest>,
     ) -> Result<Response<Message>, Status> {
         let request = request.into_inner();
+        info!({fid = request.fid, reaction_type = request.reaction_type}, "Received call to [get_reaction] RPC");
         let stores = self.get_stores_for(request.fid)?;
         let target = match request.target {
             Some(proto::reaction_request::Target::TargetCastId(cast_id)) => {
@@ -1079,6 +1096,10 @@ impl HubService for MyHubService {
         request: Request<ReactionsByFidRequest>,
     ) -> Result<Response<MessagesResponse>, Status> {
         let request = request.into_inner();
+        info!(
+            { fid = request.fid },
+            "Received call to [get_reactions_by_fid] RPC"
+        );
         let stores = self.get_stores_for(request.fid)?;
         let options = request.page_options();
         ReactionStore::get_reaction_adds_by_fid(
@@ -1095,6 +1116,10 @@ impl HubService for MyHubService {
         request: Request<FidTimestampRequest>,
     ) -> Result<Response<proto::MessagesResponse>, Status> {
         let request = request.into_inner();
+        info!(
+            { fid = request.fid },
+            "Received call to [get_all_reaction_messages_by_fid] RPC"
+        );
         let stores = self.get_stores_for(request.fid)?;
         let (start_ts, stop_ts) = request.timestamps();
         stores
@@ -1105,6 +1130,7 @@ impl HubService for MyHubService {
 
     async fn get_link(&self, request: Request<LinkRequest>) -> Result<Response<Message>, Status> {
         let request = request.into_inner();
+        info!({fid = request.fid, link_type = request.link_type}, "Received call to [get_link] RPC");
         let stores = self.get_stores_for(request.fid)?;
         let target = match request.target {
             Some(proto::link_request::Target::TargetFid(fid)) => {
@@ -1121,6 +1147,10 @@ impl HubService for MyHubService {
         request: Request<LinksByFidRequest>,
     ) -> Result<Response<MessagesResponse>, Status> {
         let request = request.into_inner();
+        info!(
+            { fid = request.fid },
+            "Received call to [get_links_by_fid] RPC"
+        );
         let stores = self.get_stores_for(request.fid)?;
         let options = request.page_options();
         LinkStore::get_link_adds_by_fid(
@@ -1137,6 +1167,10 @@ impl HubService for MyHubService {
         request: Request<FidTimestampRequest>,
     ) -> Result<Response<MessagesResponse>, Status> {
         let request = request.into_inner();
+        info!(
+            { fid = request.fid },
+            "Received call to [get_all_link_messages_by_fid] RPC"
+        );
         let stores = self.get_stores_for(request.fid)?;
         let (start_ts, stop_ts) = request.timestamps();
         stores
@@ -1150,6 +1184,7 @@ impl HubService for MyHubService {
         request: Request<UserDataRequest>,
     ) -> Result<Response<Message>, Status> {
         let request = request.into_inner();
+        info!({fid = request.fid, user_data_type = request.user_data_type}, "Received call to [get_user_data] RPC");
         let stores = self.get_stores_for(request.fid)?;
         let user_data_type = proto::UserDataType::try_from(request.user_data_type)
             .map_err(|_| Status::invalid_argument("Invalid user data type"))?;
@@ -1166,6 +1201,10 @@ impl HubService for MyHubService {
         request: Request<FidRequest>,
     ) -> Result<Response<MessagesResponse>, Status> {
         let request = request.into_inner();
+        info!(
+            { fid = request.fid },
+            "Received call to [get_user_data_by_fid] RPC"
+        );
         let stores = self.get_stores_for(request.fid)?;
         let options = request.page_options();
         UserDataStore::get_user_data_adds_by_fid(
@@ -1183,6 +1222,10 @@ impl HubService for MyHubService {
         request: Request<FidTimestampRequest>,
     ) -> Result<Response<MessagesResponse>, Status> {
         let request = request.into_inner();
+        info!(
+            { fid = request.fid },
+            "Received call to [get_all_user_data_messages_by_fid] RPC"
+        );
         let stores = self.get_stores_for(request.fid)?;
         let (start_ts, stop_ts) = request.timestamps();
         stores
@@ -1196,6 +1239,10 @@ impl HubService for MyHubService {
         request: Request<Message>,
     ) -> Result<Response<ValidationResponse>, Status> {
         let request = request.into_inner();
+        info!(
+            { fid = request.fid() },
+            "Received call to [validate_message] RPC"
+        );
         let stores = self.get_stores_for(request.fid())?;
         let is_pro_user = stores
             .is_pro_user(request.fid(), &FarcasterTime::current())
@@ -1219,6 +1266,10 @@ impl HubService for MyHubService {
         request: Request<VerificationRequest>,
     ) -> Result<Response<Message>, Status> {
         let request = request.into_inner();
+        info!(
+            { fid = request.fid },
+            "Received call to [get_verification] RPC"
+        );
         let stores = self.get_stores_for(request.fid)?;
         VerificationStore::get_verification_add(
             &stores.verification_store,
@@ -1233,6 +1284,10 @@ impl HubService for MyHubService {
         request: Request<FidRequest>,
     ) -> Result<Response<MessagesResponse>, Status> {
         let request = request.into_inner();
+        info!(
+            { fid = request.fid },
+            "Received call to [get_verifications_by_fid] RPC"
+        );
         let stores = self.get_stores_for(request.fid)?;
         let options = request.page_options();
         VerificationStore::get_verification_adds_by_fid(
@@ -1248,6 +1303,10 @@ impl HubService for MyHubService {
         request: Request<FidTimestampRequest>,
     ) -> Result<Response<MessagesResponse>, Status> {
         let request = request.into_inner();
+        info!(
+            { fid = request.fid },
+            "Received call to [get_all_verification_messages_by_fid] RPC"
+        );
         let stores = self.get_stores_for(request.fid)?;
         let (start_ts, stop_ts) = request.timestamps();
         stores
@@ -1261,6 +1320,10 @@ impl HubService for MyHubService {
         request: Request<FidRequest>,
     ) -> Result<Response<MessagesResponse>, Status> {
         let request = request.into_inner();
+        info!(
+            { fid = request.fid },
+            "Received call to [get_link_compact_state_message_by_fid] RPC"
+        );
         let stores = self.get_stores_for(request.fid)?;
         let options = request.page_options();
         LinkStore::get_link_compact_state_message_by_fid(&stores.link_store, request.fid, &options)
@@ -1272,6 +1335,10 @@ impl HubService for MyHubService {
         request: Request<FidRequest>,
     ) -> Result<Response<StorageLimitsResponse>, Status> {
         let request = request.into_inner();
+        info!(
+            { fid = request.fid },
+            "Received call to [get_current_storage_limits_by_fid] RPC"
+        );
         let stores = self.get_stores_for(request.fid)?;
         let limits = stores
             .get_storage_limits(request.fid)
@@ -1284,6 +1351,7 @@ impl HubService for MyHubService {
         request: Request<CastsByParentRequest>,
     ) -> Result<Response<MessagesResponse>, Status> {
         let req = request.into_inner();
+        info!("Received call to [get_casts_by_parent] RPC");
         let parent = match req.parent {
             Some(casts_by_parent_request::Parent::ParentCastId(cast_id)) => {
                 cast_add_body::Parent::ParentCastId(cast_id)
@@ -1344,6 +1412,10 @@ impl HubService for MyHubService {
         request: Request<FidRequest>,
     ) -> Result<Response<MessagesResponse>, Status> {
         let req = request.into_inner();
+        info!(
+            { mention_fid = req.fid },
+            "Received call to [get_casts_by_mention] RPC"
+        );
         let mention = req.fid;
 
         let num_shards = self.shard_stores.len();
@@ -1405,6 +1477,10 @@ impl HubService for MyHubService {
         request: Request<ReactionsByTargetRequest>,
     ) -> Result<Response<MessagesResponse>, Status> {
         let req = request.into_inner();
+        info!(
+            { reaction_type = req.reaction_type },
+            "Received call to [get_reactions_by_cast] RPC"
+        );
 
         let reaction_type = req
             .reaction_type
@@ -1483,6 +1559,10 @@ impl HubService for MyHubService {
         request: Request<ReactionsByTargetRequest>,
     ) -> Result<Response<MessagesResponse>, Status> {
         let req = request.into_inner();
+        info!(
+            { reaction_type = req.reaction_type },
+            "Received call to [get_reactions_by_target] RPC"
+        );
 
         let reaction_type = req.reaction_type.unwrap_or(ReactionType::None.into()); // Use enum vs 0?
 
@@ -1566,6 +1646,7 @@ impl HubService for MyHubService {
         request: Request<UsernameProofRequest>,
     ) -> Result<Response<UserNameProof>, Status> {
         let req = request.into_inner();
+        info!("Received call to [get_username_proof] RPC");
         let name_str = std::str::from_utf8(&req.name).unwrap_or("");
 
         // Check if this is an .eth name (look in username_proof_store) or fname (look in user_data_store)
@@ -1622,6 +1703,10 @@ impl HubService for MyHubService {
         request: Request<FidRequest>,
     ) -> Result<Response<UsernameProofsResponse>, Status> {
         let req = request.into_inner();
+        info!(
+            { fid = req.fid },
+            "Received call to [get_user_name_proofs_by_fid] RPC"
+        );
         let fid = req.fid;
 
         let mut combined_proofs = Vec::new();
@@ -1703,6 +1788,10 @@ impl HubService for MyHubService {
         request: Request<SignerRequest>,
     ) -> Result<Response<OnChainEvent>, Status> {
         let req = request.into_inner();
+        info!(
+            { fid = req.fid },
+            "Received call to [get_on_chain_signer] RPC"
+        );
         let fid = req.fid;
         let signer = req.signer;
 
@@ -1731,6 +1820,10 @@ impl HubService for MyHubService {
         request: Request<FidRequest>,
     ) -> Result<Response<OnChainEventResponse>, Status> {
         let req = request.into_inner();
+        info!(
+            { fid = req.fid },
+            "Received call to [get_on_chain_signers_by_fid] RPC"
+        );
         let fid = req.fid;
 
         let stores = self.get_stores_for(fid)?;
@@ -1758,6 +1851,7 @@ impl HubService for MyHubService {
         request: Request<OnChainEventRequest>,
     ) -> Result<Response<OnChainEventResponse>, Status> {
         let req = request.into_inner();
+        info!({fid = req.fid, event_type = req.event_type}, "Received call to [get_on_chain_events] RPC");
         let fid = req.fid;
 
         let event_type = proto::OnChainEventType::try_from(req.event_type)
@@ -1776,6 +1870,12 @@ impl HubService for MyHubService {
             events: combined_events,
             next_page_token: None,
         };
+        info!(
+            { fid = fid, event_count = response.events.len() },
+            "Returning {} on-chain events for fid {}",
+            response.events.len(),
+            fid
+        );
         Ok(Response::new(response))
     }
 
@@ -1784,6 +1884,10 @@ impl HubService for MyHubService {
         request: Request<FidRequest>,
     ) -> Result<Response<OnChainEvent>, Status> {
         let req = request.into_inner();
+        info!(
+            { fid = req.fid },
+            "Received call to [get_id_registry_on_chain_event] RPC"
+        );
         let fid = req.fid;
 
         let maybe_event = self.shard_stores.iter().find_map(|(_shard_id, stores)| {
@@ -1808,6 +1912,7 @@ impl HubService for MyHubService {
         request: Request<IdRegistryEventByAddressRequest>,
     ) -> Result<Response<OnChainEvent>, Status> {
         let address = request.into_inner().address;
+        info!("Received call to [get_id_registry_on_chain_event_by_address] RPC");
 
         if let Some(evt) = self.id_registry_cache.get(&address) {
             return Ok(Response::new(evt.clone()));
@@ -1842,6 +1947,10 @@ impl HubService for MyHubService {
         request: Request<FidAddressTypeRequest>,
     ) -> Result<Response<FidAddressTypeResponse>, Status> {
         let req = request.into_inner();
+        info!(
+            { fid = req.fid },
+            "Received call to [get_fid_address_type] RPC"
+        );
         let fid = req.fid;
         let address = req.address;
 
@@ -1905,6 +2014,10 @@ impl HubService for MyHubService {
         request: Request<LinksByTargetRequest>,
     ) -> Result<Response<MessagesResponse>, Status> {
         let req = request.into_inner();
+        info!(
+            { link_type = req.link_type },
+            "Received call to [get_links_by_target] RPC"
+        );
 
         if req.link_type.clone().is_none() {
             return Err(Status::invalid_argument(
@@ -1983,6 +2096,10 @@ impl HubService for MyHubService {
         request: Request<TrieNodeMetadataRequest>,
     ) -> Result<Response<TrieNodeMetadataResponse>, Status> {
         let request = request.into_inner();
+        info!(
+            { shard_id = request.shard_id },
+            "Received call to [get_trie_metadata_by_prefix] RPC"
+        );
         let stores = self.get_stores_for_shard(request.shard_id)?;
         let trie_node = stores
             .trie
