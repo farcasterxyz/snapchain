@@ -28,7 +28,7 @@ use libp2p_connection_limits::ConnectionLimits;
 use prost::Message;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Duration;
 use tokio::io;
@@ -134,6 +134,7 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
     SyncReply(InboundRequestId, sync::Response<SnapchainValidatorContext>),
     BroadcastDecidedValue(proto::DecidedValue),
     SubscribeToDecidedValuesTopic(),
+    GetConnectedPeers(oneshot::Sender<Vec<ContactInfoBody>>),
 }
 
 pub enum GossipTopic {
@@ -167,6 +168,7 @@ pub struct SnapchainGossip {
     contact_info_interval: Duration,
     bootstrap_reconnect_interval: Duration,
     statsd_client: StatsdClientWrapper,
+    peers: BTreeMap<PeerId, ContactInfoBody>,
 }
 
 impl SnapchainGossip {
@@ -311,6 +313,7 @@ impl SnapchainGossip {
             statsd_client,
             connected_bootstrap_addrs: HashSet::new(),
             enable_autodiscovery: config.enable_autodiscovery,
+            peers: BTreeMap::new(),
         })
     }
 
@@ -588,6 +591,10 @@ impl SnapchainGossip {
         );
 
         let contact_peer_id = PeerId::from_bytes(&contact_info_body.peer_id).unwrap();
+
+        self.peers
+            .insert(contact_peer_id, contact_info_body.clone());
+
         if let Some(peer_id) = self
             .swarm
             .connected_peers()
@@ -913,7 +920,27 @@ impl SnapchainGossip {
                     }
                 }
             }
+            Some(GossipEvent::GetConnectedPeers(channel)) => {
+                let connected_peers = self.get_connected_peers();
+                let _ = channel.send(connected_peers);
+
+                None
+            }
             None => None,
         }
+    }
+
+    fn get_connected_peers(&self) -> Vec<ContactInfoBody> {
+        let connected_peers = self.swarm.connected_peers();
+
+        connected_peers
+            .filter_map(|peer| {
+                let info = self.peers.get(peer);
+                match info {
+                    Some(contact) => Some(contact.to_owned()),
+                    None => None,
+                }
+            })
+            .collect()
     }
 }
