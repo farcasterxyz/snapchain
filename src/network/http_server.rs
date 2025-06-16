@@ -830,6 +830,7 @@ pub enum OnChainEventType {
     EVENT_TYPE_SIGNER_MIGRATED = 2,
     EVENT_TYPE_ID_REGISTER = 3,
     EVENT_TYPE_STORAGE_RENT = 4,
+    EVENT_TYPE_TIER_PURCHASE = 5,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1883,6 +1884,7 @@ fn map_proto_on_chain_event_to_json_on_chain_event(
             2 => OnChainEventType::EVENT_TYPE_SIGNER_MIGRATED,
             3 => OnChainEventType::EVENT_TYPE_ID_REGISTER,
             4 => OnChainEventType::EVENT_TYPE_STORAGE_RENT,
+            5 => OnChainEventType::EVENT_TYPE_TIER_PURCHASE,
             _ => OnChainEventType::EVENT_TYPE_NONE,
         },
         chain_id: onchain_event.chain_id,
