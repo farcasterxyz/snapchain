@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
-    sync::mpsc,
+    sync::{broadcast, mpsc},
     time::{sleep, Duration},
 };
 use tracing::{debug, error, info, warn};
@@ -30,6 +30,11 @@ impl Default for Config {
             disable: false,
         }
     }
+}
+
+#[derive(Clone)]
+pub enum FnameRequest {
+    RetryFid(u64),
 }
 
 #[derive(Deserialize, Debug)]
@@ -89,6 +94,7 @@ pub struct Fetcher {
     mempool_tx: mpsc::Sender<MempoolRequest>,
     statsd_client: StatsdClientWrapper,
     local_state_store: LocalStateStore,
+    fname_request_rx: broadcast::Receiver<FnameRequest>,
 }
 
 impl Fetcher {
@@ -97,6 +103,7 @@ impl Fetcher {
         mempool_tx: mpsc::Sender<MempoolRequest>,
         statsd_client: StatsdClientWrapper,
         local_state_store: LocalStateStore,
+        fname_request_rx: broadcast::Receiver<FnameRequest>,
     ) -> Self {
         Fetcher {
             position: 0,
@@ -104,6 +111,7 @@ impl Fetcher {
             mempool_tx,
             statsd_client,
             local_state_store,
+            fname_request_rx,
         }
     }
 
@@ -173,59 +181,70 @@ impl Fetcher {
                     return Err(FetchError::Stop);
                 }
                 self.position = t.id;
-
-                let owner = hex::decode(t.owner[2..].to_string());
-                let signature = hex::decode(t.server_signature[2..].to_string());
-
-                if owner.is_err() || signature.is_err() {
-                    return Err(FetchError::InvalidFormat);
-                }
-
-                let username_proof = UserNameProof {
-                    timestamp: t.timestamp,
-                    name: t.username.clone().into_bytes(),
-                    owner: owner.unwrap(),
-                    signature: signature.unwrap(),
-                    fid: t.to,
-                    r#type: UserNameType::UsernameTypeFname as i32,
-                };
-                self.count("num_transfers", 1);
-                self.gauge("latest_transfer_id", t.id);
-                if let Err(err) = self
-                    .mempool_tx
-                    .send(MempoolRequest::AddMessage(
-                        MempoolMessage::ValidatorMessage(ValidatorMessage {
-                            on_chain_event: None,
-                            fname_transfer: Some(FnameTransfer {
-                                id: t.id,
-                                from_fid: t.from,
-                                proof: Some(username_proof),
-                            }),
-                        }),
-                        MempoolSource::Local,
-                        None,
-                    ))
-                    .await
-                {
+                let res = self.submit_transfer(&t).await;
+                if let Err(err) = res {
                     error!(
-                        from = t.from,
-                        to = t.to,
+                        transfer_id = t.id,
                         err = err.to_string(),
-                        "Unable to send fname transfer to mempool"
-                    )
+                        "Error processing fname transfer"
+                    );
                 }
-                info!(
-                    from = t.from,
-                    fid = t.to,
-                    name = t.username.clone(),
-                    "Processed fname transfer"
-                );
+                self.gauge("latest_transfer_id", t.id);
                 last_transfer_id = t.id;
             }
             if last_transfer_id > 0 {
                 self.record_username_proof(last_transfer_id);
             }
         }
+    }
+
+    async fn submit_transfer(&mut self, t: &Transfer) -> Result<(), FetchError> {
+        let owner = hex::decode(t.owner[2..].to_string());
+        let signature = hex::decode(t.server_signature[2..].to_string());
+
+        if owner.is_err() || signature.is_err() {
+            return Err(FetchError::InvalidFormat);
+        }
+
+        let username_proof = UserNameProof {
+            timestamp: t.timestamp,
+            name: t.username.clone().into_bytes(),
+            owner: owner.unwrap(),
+            signature: signature.unwrap(),
+            fid: t.to,
+            r#type: UserNameType::UsernameTypeFname as i32,
+        };
+        self.count("num_transfers", 1);
+        if let Err(err) = self
+            .mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::ValidatorMessage(ValidatorMessage {
+                    on_chain_event: None,
+                    fname_transfer: Some(FnameTransfer {
+                        id: t.id,
+                        from_fid: t.from,
+                        proof: Some(username_proof),
+                    }),
+                }),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+        {
+            error!(
+                from = t.from,
+                to = t.to,
+                err = err.to_string(),
+                "Unable to send fname transfer to mempool"
+            )
+        }
+        info!(
+            from = t.from,
+            fid = t.to,
+            name = t.username.clone(),
+            "Processed fname transfer"
+        );
+        Ok(())
     }
 
     async fn set_initial_position(&mut self) -> Result<(), FetchError> {
@@ -245,6 +264,37 @@ impl Fetcher {
         Ok(())
     }
 
+    async fn retry_fid(&mut self, fid: u64) -> Result<(), FetchError> {
+        info!(fid, "Retrying fname events for fid");
+
+        // For fname, we need to refetch transfers for a specific FID
+        // Since we don't have a direct API to get transfers by FID,
+        // we'll scan through recent transfers to find ones for this FID
+        let url = format!("{}/transfers?fid={}", self.cfg.url, fid);
+        debug!(%url, "fetching current transfer for retry");
+
+        let response = reqwest::get(&url).await?.json::<TransfersData>().await?;
+
+        for t in response.transfers {
+            info!(
+                fid,
+                transfer_id = t.id,
+                username = t.username,
+                "Retrying fname transfer"
+            );
+            if let Err(e) = self.submit_transfer(&t).await {
+                error!(
+                    fid,
+                    transfer_id = t.id,
+                    err = e.to_string(),
+                    "Error processing fname transfer during retry"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn run(&mut self) -> () {
         match self.set_initial_position().await {
             Ok(()) => {}
@@ -259,27 +309,48 @@ impl Fetcher {
         info!(start_id = self.position, "Starting fname ingest");
 
         loop {
-            let result = self.fetch().await;
+            tokio::select! {
+                biased;
 
-            if let Err(e) = result {
-                match e {
-                    FetchError::NonSequentialIds { id, position } => {
-                        error!(id, position, %e);
+                request = self.fname_request_rx.recv() => {
+                    match request {
+                        Err(_) => {
+                            // Ignore, this can happen if we don't run an admin server
+                        },
+                        Ok(request) => {
+                            match request {
+                                FnameRequest::RetryFid(retry_fid) => {
+                                    if let Err(err) = self.retry_fid(retry_fid).await {
+                                        error!(fid = retry_fid, "Unable to retry fid: {}", err.to_string())
+                                    }
+                                }
+                            }
+                        }
                     }
-                    FetchError::Reqwest(request_error) => {
-                        warn!(error = %request_error, "reqwest error fetching transfers");
-                    }
-                    FetchError::Stop => {
-                        info!(position = self.position, "stopped fetching transfers");
-                        return;
-                    }
-                    FetchError::InvalidFormat => {
-                        error!("fname server returning different format than expected");
+                }
+
+                _ = sleep(Duration::from_secs(5)) => {
+                    let result = self.fetch().await;
+
+                    if let Err(e) = result {
+                        match e {
+                            FetchError::NonSequentialIds { id, position } => {
+                                error!(id, position, %e);
+                            }
+                            FetchError::Reqwest(request_error) => {
+                                warn!(error = %request_error, "reqwest error fetching transfers");
+                            }
+                            FetchError::Stop => {
+                                info!(position = self.position, "stopped fetching transfers");
+                                return;
+                            }
+                            FetchError::InvalidFormat => {
+                                error!("fname server returning different format than expected");
+                            }
+                        }
                     }
                 }
             }
-
-            sleep(Duration::from_secs(5)).await;
         }
     }
 }
