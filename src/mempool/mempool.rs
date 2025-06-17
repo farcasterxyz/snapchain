@@ -22,7 +22,6 @@ use crate::{
         store::{
             account::{
                 get_message_by_key, make_message_primary_key, make_ts_hash, type_to_set_postfix,
-                UserDataStore,
             },
             engine::MempoolMessage,
             stores::Stores,
@@ -300,31 +299,9 @@ impl ReadNodeMempool {
                         }
                     }
                 },
-                MempoolMessage::ValidatorMessage(message) => {
-                    if let Some(onchain_event) = &message.on_chain_event {
-                        match stores.onchain_event_store.exists(&onchain_event) {
-                            Err(_) => return false,
-                            Ok(exists) => return exists,
-                        }
-                    }
-
-                    if let Some(fname_transfer) = &message.fname_transfer {
-                        match &fname_transfer.proof {
-                            None => return false,
-                            Some(proof) => {
-                                let username_proof = UserDataStore::get_username_proof(
-                                    &stores.user_data_store,
-                                    &mut RocksDbTransactionBatch::new(),
-                                    &proof.name,
-                                );
-                                match username_proof {
-                                    Err(_) | Ok(None) => return false,
-                                    Ok(Some(_)) => return true,
-                                }
-                            }
-                        }
-                    }
-                    return false;
+                MempoolMessage::ValidatorMessage(_) => {
+                    // Don't do duplicate checks for validator messages. They are infrequent, and engine can handle duplicates.
+                    false
                 }
             },
         }

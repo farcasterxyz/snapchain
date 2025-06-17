@@ -594,6 +594,7 @@ pub mod username_factory {
     use crate::core::validations::verification::name_registry_domain;
     use crate::proto::FnameTransfer;
     use crate::proto::UserNameProof;
+    use crate::storage::store::test_helper::default_custody_address;
 
     pub fn create_username_proof(
         fid: u64,
@@ -617,14 +618,14 @@ pub mod username_factory {
 
     pub fn create_transfer(
         fid: u64,
-        name: &String,
+        name: &str,
         timestamp: Option<u32>,
         from_fid: Option<u64>,
         owner: Option<Vec<u8>>,
         fname_signer: alloy_signer_local::PrivateKeySigner,
     ) -> FnameTransfer {
         let usable_timestamp = timestamp.unwrap_or_else(|| time::current_timestamp() as u32);
-        let usable_owner = owner.unwrap_or_else(|| rand::random::<[u8; 32]>().to_vec());
+        let usable_owner = owner.unwrap_or_else(|| default_custody_address());
         let username = name;
 
         let json = json!({
@@ -646,7 +647,7 @@ pub mod username_factory {
         let data = typed_data.unwrap();
         let prehash = data.eip712_signing_hash();
         if prehash.is_err() {
-            panic!("invalid hash");
+            panic!("invalid hash: {}", prehash.unwrap_err());
         }
         let sig = fname_signer.sign_hash_sync(&prehash.unwrap());
         let proof = UserNameProof {

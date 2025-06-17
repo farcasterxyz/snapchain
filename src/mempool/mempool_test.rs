@@ -9,10 +9,7 @@ mod tests {
         core::util::to_farcaster_time,
         mempool::mempool::{self, Mempool, MempoolMessagesRequest},
         network::gossip::{Config, SnapchainGossip},
-        proto::{
-            self, FnameTransfer, Height, ShardChunk, ShardHeader, Transaction, UserNameProof,
-            UserNameType, ValidatorMessage,
-        },
+        proto::{self, Height, ShardChunk, ShardHeader, Transaction, ValidatorMessage},
         storage::store::{
             engine::{MempoolMessage, ShardEngine},
             test_helper::{self, commit_event, default_storage_event, FID_FOR_TEST},
@@ -28,6 +25,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::mempool::mempool::{MempoolRequest, MempoolSource};
+    use crate::utils::factory::username_factory;
     use libp2p::identity::ed25519::Keypair;
     use messages_factory::casts::create_cast_add;
 
@@ -126,7 +124,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_duplicate_onchain_event_is_invalid() {
+    async fn test_duplicate_onchain_event_is_valid() {
         let (mut engine, _, mut mempool, _, _, _, _) = setup(None, false).await;
         let onchain_event = events_factory::create_rent_event(1234, Some(10), None, false);
         let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
@@ -139,11 +137,12 @@ mod tests {
             on_chain_event: Some(onchain_event.clone()),
             fname_transfer: None,
         }));
-        assert!(!valid.is_ok())
+        // Mempool allows duplicate on-chain events
+        assert!(valid.is_ok())
     }
 
     #[tokio::test]
-    async fn test_duplicate_fname_transfer_is_invalid() {
+    async fn test_duplicate_fname_transfer_is_valid() {
         let (mut engine, _, mut mempool, _, _, _, _) = setup(None, false).await;
         test_helper::register_user(
             1,
@@ -152,29 +151,24 @@ mod tests {
             &mut engine,
         )
         .await;
-        let fname_transfer = FnameTransfer {
-            id: 1,
-            from_fid: 0,
-            proof: Some(UserNameProof {
-                timestamp: 1628882891,
-                name: "farcaster".as_bytes().to_vec(),
-                owner: hex::decode("8773442740c17c9d0f0b87022c722f9a136206ed").unwrap(),
-                signature: hex::decode("b7181760f14eda0028e0b647ff15f45235526ced3b4ae07fcce06141b73d32960d3253776e62f761363fb8137087192047763f4af838950a96f3885f3c2289c41b").unwrap(),
-                fid: 1,
-                r#type: UserNameType::UsernameTypeEnsL1 as i32,
-            }),
-        };
+        let signer = alloy_signer_local::PrivateKeySigner::random();
+        let fname_transfer =
+            username_factory::create_transfer(1, "farcaster", None, None, None, signer.clone());
         let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
             on_chain_event: None,
             fname_transfer: Some(fname_transfer.clone()),
         }));
         assert!(valid.is_ok());
         test_helper::commit_fname_transfer(&mut engine, &fname_transfer).await;
+
+        // Transferring the same fname again should be valid
+        let fname_transfer =
+            username_factory::create_transfer(2, "farcaster", None, Some(1), None, signer);
         let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
             on_chain_event: None,
             fname_transfer: Some(fname_transfer),
         }));
-        assert!(!valid.is_ok())
+        assert!(valid.is_ok())
     }
 
     #[tokio::test]
