@@ -2,6 +2,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
+use snapchain::connectors::fname::FnameRequest;
 use snapchain::connectors::onchain_events::{ChainClients, OnchainEventsRequest};
 use snapchain::consensus::consensus::SystemMessage;
 use snapchain::mempool::mempool::{Mempool, MempoolRequest, ReadNodeMempool};
@@ -44,6 +45,7 @@ async fn start_servers(
     mempool_tx: mpsc::Sender<MempoolRequest>,
     shutdown_tx: mpsc::Sender<()>,
     onchain_events_request_tx: broadcast::Sender<OnchainEventsRequest>,
+    fname_request_tx: broadcast::Sender<FnameRequest>,
     statsd_client: StatsdClientWrapper,
     shard_stores: HashMap<u32, Stores>,
     shard_senders: HashMap<u32, Senders>,
@@ -57,6 +59,7 @@ async fn start_servers(
         app_config.admin_rpc_auth.clone(),
         mempool_tx.clone(),
         onchain_events_request_tx,
+        fname_request_tx,
         shard_stores.clone(),
         block_store.clone(),
         app_config.snapshot.clone(),
@@ -343,6 +346,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (sync_complete_tx, sync_complete_rx) = watch::channel(false);
 
     let (onchain_events_request_tx, onchain_events_request_rx) = broadcast::channel(100);
+    let (fname_request_tx, fname_request_rx) = broadcast::channel(100);
 
     if app_config.read_node {
         let node = SnapchainReadNode::create(
@@ -385,6 +389,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             mempool_tx,
             shutdown_tx,
             onchain_events_request_tx,
+            fname_request_tx,
             statsd_client,
             node.shard_stores.clone(),
             node.shard_senders.clone(),
@@ -496,6 +501,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 mempool_tx.clone(),
                 statsd_client.clone(),
                 local_state_store.clone(),
+                fname_request_rx,
             );
 
             tokio::spawn(async move {
@@ -551,6 +557,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             mempool_tx.clone(),
             shutdown_tx.clone(),
             onchain_events_request_tx,
+            fname_request_tx,
             statsd_client,
             node.shard_stores.clone(),
             node.shard_senders.clone(),

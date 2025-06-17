@@ -17,6 +17,13 @@ message RetryOnchainEventsRequest {
   }
 }
 
+message RetryFnameRequest {
+  oneof kind {
+    uint64 fid = 1;
+    // May want to allow retrying by fname in the future
+  }
+}
+
 message UploadSnapshotRequest {
   repeated uint32 shard_indexes = 1;
 }
@@ -26,4 +33,5 @@ service AdminService {
   rpc SubmitUserNameProof(UserNameProof) returns (UserNameProof);
   rpc UploadSnapshot(UploadSnapshotRequest) returns (Empty);
   rpc RetryOnchainEvents(RetryOnchainEventsRequest) returns (Empty);
+  rpc RetryFnameEvents(RetryFnameRequest) returns (Empty);
 }

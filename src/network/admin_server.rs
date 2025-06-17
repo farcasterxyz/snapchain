@@ -1,3 +1,4 @@
+use crate::connectors::fname::FnameRequest;
 use crate::connectors::onchain_events::OnchainEventsRequest;
 use crate::jobs::snapshot_upload::upload_snapshot;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
@@ -5,8 +6,8 @@ use crate::network::rpc_extensions::authenticate_request;
 use crate::network::server::MEMPOOL_ADD_REQUEST_TIMEOUT;
 use crate::proto::admin_service_server::AdminService;
 use crate::proto::{
-    self, Empty, FarcasterNetwork, FnameTransfer, OnChainEvent, RetryOnchainEventsRequest,
-    UploadSnapshotRequest, UserNameProof, ValidatorMessage,
+    self, Empty, FarcasterNetwork, FnameTransfer, OnChainEvent, RetryFnameRequest,
+    RetryOnchainEventsRequest, UploadSnapshotRequest, UserNameProof, ValidatorMessage,
 };
 use crate::storage;
 use crate::storage::store::engine::MempoolMessage;
@@ -26,6 +27,7 @@ pub struct MyAdminService {
     allowed_users: HashMap<String, String>,
     pub mempool_tx: mpsc::Sender<MempoolRequest>,
     onchain_events_request_tx: broadcast::Sender<OnchainEventsRequest>,
+    fname_request_tx: broadcast::Sender<FnameRequest>,
     snapshot_config: storage::db::snapshot::Config,
     shard_stores: HashMap<u32, Stores>,
     block_store: BlockStore,
@@ -47,6 +49,7 @@ impl MyAdminService {
         rpc_auth: String,
         mempool_tx: mpsc::Sender<MempoolRequest>,
         onchain_events_request_tx: broadcast::Sender<OnchainEventsRequest>,
+        fname_request_tx: broadcast::Sender<FnameRequest>,
         shard_stores: HashMap<u32, Stores>,
         block_store: BlockStore,
         snapshot_config: storage::db::snapshot::Config,
@@ -65,6 +68,7 @@ impl MyAdminService {
             allowed_users,
             mempool_tx,
             onchain_events_request_tx,
+            fname_request_tx,
             shard_stores,
             block_store,
             snapshot_config,
@@ -202,20 +206,47 @@ impl AdminService for MyAdminService {
         &self,
         request: Request<RetryOnchainEventsRequest>,
     ) -> std::result::Result<Response<Empty>, Status> {
+        info!("Received call to [retry_fname_events] RPC");
         match request.into_inner().kind {
             None => {}
             Some(kind) => match kind {
                 proto::retry_onchain_events_request::Kind::Fid(fid) => {
+                    info!("Retrying Onchain events for fid: {}", fid);
                     self.onchain_events_request_tx
                         .send(OnchainEventsRequest::RetryFid(fid))
                         .map_err(|_| Status::internal("unable to handle request"))?;
                 }
                 proto::retry_onchain_events_request::Kind::BlockRange(retry_block_number_range) => {
+                    info!(
+                        "Retrying Onchain events for block range: {}-{}",
+                        retry_block_number_range.start_block_number,
+                        retry_block_number_range.stop_block_number
+                    );
                     self.onchain_events_request_tx
                         .send(OnchainEventsRequest::RetryBlockRange {
                             start_block_number: retry_block_number_range.start_block_number,
                             stop_block_number: retry_block_number_range.stop_block_number,
                         })
+                        .map_err(|_| Status::internal("unable to handle request"))?;
+                }
+            },
+        }
+        Ok(Response::new(Empty {}))
+    }
+
+    async fn retry_fname_events(
+        &self,
+        request: Request<RetryFnameRequest>,
+    ) -> std::result::Result<Response<Empty>, Status> {
+        info!("Received call to [retry_fname_events] RPC");
+
+        match request.into_inner().kind {
+            None => {}
+            Some(kind) => match kind {
+                proto::retry_fname_request::Kind::Fid(fid) => {
+                    info!("Retrying Fname events for fid: {}", fid);
+                    self.fname_request_tx
+                        .send(FnameRequest::RetryFid(fid))
                         .map_err(|_| Status::internal("unable to handle request"))?;
                 }
             },
