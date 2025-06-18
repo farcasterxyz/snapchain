@@ -236,12 +236,12 @@ fn validate_message_hash(
 
 pub fn validate_fname(input: &String) -> Result<(), ValidationError> {
     if input.len() == 0 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::FnameIsMissing);
     }
 
     // FNAME_MAX_LENGTH - ".eth".length
     if input.len() > 16 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::FnameExceedsLength(input.clone()));
     }
 
     if !Regex::new("^[a-z0-9][a-z0-9-]{0,15}$")
@@ -249,7 +249,10 @@ pub fn validate_fname(input: &String) -> Result<(), ValidationError> {
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
     {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::FnameDoesntMatch(
+            input.clone(),
+            "^[a-z0-9][a-z0-9-]{0,15}$".to_string(),
+        ));
     }
 
     Ok(())
@@ -257,16 +260,21 @@ pub fn validate_fname(input: &String) -> Result<(), ValidationError> {
 
 pub fn validate_ens_name(input: &String) -> Result<(), ValidationError> {
     if !input.ends_with(".eth") {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::EnsNameDoesntEndWithEth(input.clone()));
     }
 
     let name_parts: Vec<&str> = input.split('.').collect();
+
+    if name_parts.len() > 2 {
+        return Err(ValidationError::EnsNameUnsupportedSubdomain(input.clone()));
+    }
+
     if name_parts.len() != 2 || name_parts[0].is_empty() {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::EnsNameNotValid(input.clone()));
     }
 
     if input.len() > 20 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::EnsNameExceedsLength(input.clone()));
     }
 
     if !Regex::new("^[a-z0-9][a-z0-9-]{0,15}$")
@@ -274,7 +282,10 @@ pub fn validate_ens_name(input: &String) -> Result<(), ValidationError> {
         .is_match(name_parts[0])
         .map_err(|_| ValidationError::InvalidData)?
     {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::EnsNameDoesntMatch(
+            input.clone(),
+            "^[a-z0-9][a-z0-9-]{0,15}$".to_string(),
+        ));
     }
 
     Ok(())
@@ -308,7 +319,7 @@ pub fn validate_base_name(input: &String) -> Result<(), ValidationError> {
 
 pub fn validate_twitter_username(input: &String) -> Result<(), ValidationError> {
     if input.len() > 15 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::UsernameExceedsLength(input.clone()));
     }
 
     if !Regex::new("^[a-z0-9_]{0,15}$")
@@ -316,7 +327,10 @@ pub fn validate_twitter_username(input: &String) -> Result<(), ValidationError> 
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
     {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::UsernameDoesntMatch(
+            input.clone(),
+            "^[a-z0-9_]{0,15}$".to_string(),
+        ));
     }
 
     Ok(())
@@ -341,14 +355,14 @@ pub fn validate_github_username(input: &String) -> Result<(), ValidationError> {
 fn validate_number(value: &str) -> Result<f64, ValidationError> {
     return value
         .parse::<f64>()
-        .map_err(|_| ValidationError::InvalidData);
+        .map_err(|_| ValidationError::InvalidLocationString);
 }
 
 fn validate_latitude(value: &str) -> Result<(), ValidationError> {
     let number = validate_number(value)?;
 
     if number < -90.0 || number > 90.0 {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::LatitudeOutOfRange);
     }
 
     Ok(())
@@ -358,7 +372,7 @@ fn validate_longitude(value: &str) -> Result<(), ValidationError> {
     let number = validate_number(value)?;
 
     if number < -180.0 || number > 180.0 {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::LongitudeOutOfRange);
     }
 
     Ok(())
@@ -408,22 +422,22 @@ pub fn validate_user_location(location: &str) -> Result<(), ValidationError> {
     let captures = Regex::new(r"^geo:(-?\d{1,2}\.\d{2}),(-?\d{1,3}\.\d{2})$")
         .unwrap()
         .captures(location)
-        .map_err(|_| ValidationError::InvalidData)?;
+        .map_err(|_| ValidationError::InvalidLocationString)?;
 
     if captures.is_none() {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::InvalidLocationString);
     }
 
     let captured = captures.unwrap();
 
     let latitude = captured
         .get(1)
-        .ok_or_else(|| ValidationError::InvalidData)?;
+        .ok_or_else(|| ValidationError::InvalidLocationString)?;
     validate_latitude(latitude.as_str())?;
 
     let longitude = captured
         .get(2)
-        .ok_or_else(|| ValidationError::InvalidData)?;
+        .ok_or_else(|| ValidationError::InvalidLocationString)?;
     validate_longitude(longitude.as_str())?;
 
     Ok(())
@@ -439,7 +453,7 @@ pub fn validate_user_data_add_body(
     match UserDataType::try_from(body.r#type).map_err(|_| ValidationError::InvalidData)? {
         UserDataType::Pfp => {
             if value_bytes.len() > 256 {
-                return Err(ValidationError::InvalidDataLength);
+                return Err(ValidationError::PfpValueTooLong);
             }
         }
         UserDataType::Banner => {
@@ -452,17 +466,17 @@ pub fn validate_user_data_add_body(
         }
         UserDataType::Display => {
             if value_bytes.len() > 32 {
-                return Err(ValidationError::InvalidDataLength);
+                return Err(ValidationError::DisplayValueTooLong);
             }
         }
         UserDataType::Bio => {
             if value_bytes.len() > 256 {
-                return Err(ValidationError::InvalidDataLength);
+                return Err(ValidationError::BioValueTooLong);
             }
         }
         UserDataType::Url => {
             if value_bytes.len() > 256 {
-                return Err(ValidationError::InvalidDataLength);
+                return Err(ValidationError::UrlValueTooLong);
             }
         }
         UserDataType::Username => {
