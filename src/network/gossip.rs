@@ -595,6 +595,11 @@ impl SnapchainGossip {
         self.peers
             .insert(contact_peer_id, contact_info_body.clone());
 
+        // Validators should just dial the bootstrap set since the validator set is fixed.
+        if !self.read_node {
+            return;
+        }
+
         if let Some(peer_id) = self
             .swarm
             .connected_peers()
@@ -637,10 +642,7 @@ impl SnapchainGossip {
         match proto::GossipMessage::decode(gossip_message.as_slice()) {
             Ok(gossip_message) => match gossip_message.gossip_message {
                 Some(gossip_message::GossipMessage::ContactInfoMessage(contact_info)) => {
-                    // Validators should just dial the bootstrap set since the validator set is fixed.
-                    if self.read_node {
-                        self.handle_contact_info(contact_info, peer_id);
-                    }
+                    self.handle_contact_info(contact_info, peer_id);
                     None
                 }
 

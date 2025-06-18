@@ -83,8 +83,7 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
 
 pub const MEMPOOL_ADD_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
-const MEMPOOL_SIZE_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
-const CONNECTED_PEERS_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
 
 pub struct MyHubService {
     allowed_users: HashMap<String, String>,
@@ -705,7 +704,7 @@ impl HubService for MyHubService {
         };
         shard_infos.push(block_info);
 
-        let mempool_size = match timeout(MEMPOOL_SIZE_REQUEST_TIMEOUT, size_res).await {
+        let mempool_size = match timeout(DEFAULT_REQUEST_TIMEOUT, size_res).await {
             Ok(Ok(size)) => size,
             Ok(Err(err)) => {
                 error!(
@@ -2033,7 +2032,7 @@ impl HubService for MyHubService {
                 );
             });
 
-        match timeout(CONNECTED_PEERS_REQUEST_TIMEOUT, rx).await {
+        match timeout(DEFAULT_REQUEST_TIMEOUT, rx).await {
             Ok(Ok(peers)) => Ok(Response::new(GetConnectedPeersResponse { contacts: peers })),
             Ok(Err(err)) => {
                 error!(

@@ -415,7 +415,7 @@ impl NodeForTest {
             messages_request_rx,
             num_shards,
             node.shard_stores.clone(),
-            gossip_tx,
+            gossip_tx.clone(),
             shard_decision_rx,
             statsd_client.clone(),
         );
@@ -432,6 +432,7 @@ impl NodeForTest {
             FarcasterNetwork::Testnet,
             Box::new(routing::EvenOddRouterForTest {}),
             mempool_tx.clone(),
+            gossip_tx.clone(),
             ChainClients {
                 chain_api_map: Default::default(),
             },
