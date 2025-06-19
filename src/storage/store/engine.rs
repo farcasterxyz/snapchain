@@ -1955,3 +1955,220 @@ impl BlockEngine {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::{hub_event::Body, HubEventType};
+    use crate::storage::store::test_helper;
+
+    fn create_test_event(event_type: HubEventType) -> HubEvent {
+        HubEvent {
+            r#type: event_type as i32,
+            id: 0,
+            body: None,
+            block_number: 0,
+            shard_index: 0,
+            timestamp: 0,
+        }
+    }
+
+    #[test]
+    fn test_add_block_confirmed_event_basic() {
+        let (engine, _tmpdir) = test_helper::new_engine();
+        let mut shard_chunk = test_helper::default_shard_chunk();
+        shard_chunk.header.as_mut().unwrap().height = Some(proto::Height {
+            block_number: 123,
+            shard_index: 1,
+        });
+        shard_chunk.header.as_mut().unwrap().timestamp = 1000;
+        shard_chunk.hash = vec![5, 6, 7, 8];
+
+        let mut txn = RocksDbTransactionBatch::new();
+        let events = vec![];
+
+        let result = engine.add_block_confirmed_event(&shard_chunk, events, &mut txn);
+        assert!(result.is_ok());
+
+        let events_with_block_confirmed = result.unwrap();
+        assert_eq!(events_with_block_confirmed.len(), 1);
+
+        let block_confirmed = &events_with_block_confirmed[0];
+        assert_eq!(block_confirmed.r#type, HubEventType::BlockConfirmed as i32);
+
+        // Verify BlockConfirmedBody metadata
+        if let Some(Body::BlockConfirmedBody(body)) = &block_confirmed.body {
+            assert_eq!(body.block_number, 123);
+            assert_eq!(body.shard_index, 1);
+            assert_eq!(body.timestamp, 1000);
+            assert_eq!(body.block_hash, vec![5, 6, 7, 8]);
+            assert_eq!(body.total_events, 1); // Only BLOCK_CONFIRMED itself
+        } else {
+            panic!("Expected BlockConfirmedBody");
+        }
+    }
+
+    #[test]
+    fn test_add_block_confirmed_event_with_existing_events() {
+        let (engine, _tmpdir) = test_helper::new_engine();
+        let mut shard_chunk = test_helper::default_shard_chunk();
+        shard_chunk.header.as_mut().unwrap().height = Some(proto::Height {
+            block_number: 456,
+            shard_index: 2,
+        });
+        shard_chunk.header.as_mut().unwrap().timestamp = 2000;
+        shard_chunk.hash = vec![9, 10, 11, 12];
+
+        let mut txn = RocksDbTransactionBatch::new();
+
+        // Create existing events
+        let existing_events = vec![
+            create_test_event(HubEventType::MergeMessage),
+            create_test_event(HubEventType::PruneMessage),
+            create_test_event(HubEventType::RevokeMessage),
+        ];
+
+        let result = engine.add_block_confirmed_event(&shard_chunk, existing_events, &mut txn);
+        assert!(result.is_ok());
+
+        let events_with_block_confirmed = result.unwrap();
+        assert_eq!(events_with_block_confirmed.len(), 4); // 3 existing + 1 BLOCK_CONFIRMED
+
+        // Verify BLOCK_CONFIRMED is at position 0
+        let block_confirmed = &events_with_block_confirmed[0];
+        assert_eq!(block_confirmed.r#type, HubEventType::BlockConfirmed as i32);
+
+        // Verify existing events are preserved in order
+        assert_eq!(
+            events_with_block_confirmed[1].r#type,
+            HubEventType::MergeMessage as i32
+        );
+        assert_eq!(
+            events_with_block_confirmed[2].r#type,
+            HubEventType::PruneMessage as i32
+        );
+        assert_eq!(
+            events_with_block_confirmed[3].r#type,
+            HubEventType::RevokeMessage as i32
+        );
+
+        // Verify total_events count includes BLOCK_CONFIRMED
+        if let Some(Body::BlockConfirmedBody(body)) = &block_confirmed.body {
+            assert_eq!(body.total_events, 4); // 3 existing + 1 BLOCK_CONFIRMED
+        } else {
+            panic!("Expected BlockConfirmedBody");
+        }
+    }
+
+    #[test]
+    fn test_add_block_confirmed_event_metadata_correctness() {
+        let (engine, _tmpdir) = test_helper::new_engine();
+        let block_number = 999;
+        let shard_index = 5;
+        let timestamp = 5000;
+        let block_hash = vec![20, 21, 22, 23, 24, 25, 26, 27];
+
+        let mut shard_chunk = test_helper::default_shard_chunk();
+        shard_chunk.header.as_mut().unwrap().height = Some(proto::Height {
+            block_number,
+            shard_index,
+        });
+        shard_chunk.header.as_mut().unwrap().timestamp = timestamp;
+        shard_chunk.hash = block_hash.clone();
+
+        let mut txn = RocksDbTransactionBatch::new();
+        let events = vec![
+            create_test_event(HubEventType::MergeMessage),
+            create_test_event(HubEventType::PruneMessage),
+        ];
+
+        let result = engine.add_block_confirmed_event(&shard_chunk, events, &mut txn);
+        assert!(result.is_ok());
+
+        let events_with_block_confirmed = result.unwrap();
+        let block_confirmed = &events_with_block_confirmed[0];
+
+        // Verify all metadata is correctly copied from shard_chunk
+        if let Some(Body::BlockConfirmedBody(body)) = &block_confirmed.body {
+            assert_eq!(body.block_number, block_number);
+            assert_eq!(body.shard_index, shard_index);
+            assert_eq!(body.timestamp, timestamp);
+            assert_eq!(body.block_hash, block_hash);
+            assert_eq!(body.total_events, 3); // 2 existing + 1 BLOCK_CONFIRMED
+        } else {
+            panic!("Expected BlockConfirmedBody");
+        }
+    }
+    #[test]
+    fn test_add_block_confirmed_event_empty_block() {
+        let (engine, _tmpdir) = test_helper::new_engine();
+        let mut shard_chunk = test_helper::default_shard_chunk();
+        shard_chunk.header.as_mut().unwrap().height = Some(proto::Height {
+            block_number: 456,
+            shard_index: 2,
+        });
+        shard_chunk.header.as_mut().unwrap().timestamp = 2000;
+        shard_chunk.hash = vec![5, 6, 7, 8];
+
+        let mut txn = RocksDbTransactionBatch::new();
+        let events = vec![];
+
+        let result = engine.add_block_confirmed_event(&shard_chunk, events, &mut txn);
+        assert!(result.is_ok());
+
+        let events_with_block_confirmed = result.unwrap();
+        assert_eq!(events_with_block_confirmed.len(), 1);
+
+        let block_confirmed = &events_with_block_confirmed[0];
+        assert_eq!(block_confirmed.r#type, HubEventType::BlockConfirmed as i32);
+
+        // Verify total_events is 1 for empty block
+        if let Some(Body::BlockConfirmedBody(body)) = &block_confirmed.body {
+            assert_eq!(body.total_events, 1); // Only BLOCK_CONFIRMED itself
+        } else {
+            panic!("Expected BlockConfirmedBody");
+        }
+    }
+
+    #[test]
+    fn test_add_block_confirmed_event_large_block() {
+        let (engine, _tmpdir) = test_helper::new_engine();
+        let mut shard_chunk = test_helper::default_shard_chunk();
+        shard_chunk.header.as_mut().unwrap().height = Some(proto::Height {
+            block_number: 789,
+            shard_index: 3,
+        });
+        shard_chunk.header.as_mut().unwrap().timestamp = 3000;
+        shard_chunk.hash = vec![9, 10, 11, 12];
+
+        let mut txn = RocksDbTransactionBatch::new();
+
+        // Create many events to test large block handling
+        let mut existing_events = Vec::new();
+        for i in 0..100 {
+            let event_type = match i % 3 {
+                0 => HubEventType::MergeMessage,
+                1 => HubEventType::PruneMessage,
+                _ => HubEventType::RevokeMessage,
+            };
+            existing_events.push(create_test_event(event_type));
+        }
+
+        let result = engine.add_block_confirmed_event(&shard_chunk, existing_events, &mut txn);
+        assert!(result.is_ok());
+
+        let events_with_block_confirmed = result.unwrap();
+        assert_eq!(events_with_block_confirmed.len(), 101); // 100 existing + 1 BLOCK_CONFIRMED
+
+        // Verify BLOCK_CONFIRMED is at position 0
+        let block_confirmed = &events_with_block_confirmed[0];
+        assert_eq!(block_confirmed.r#type, HubEventType::BlockConfirmed as i32);
+
+        // Verify total_events count is correct
+        if let Some(Body::BlockConfirmedBody(body)) = &block_confirmed.body {
+            assert_eq!(body.total_events, 101); // 100 existing + 1 BLOCK_CONFIRMED
+        } else {
+            panic!("Expected BlockConfirmedBody");
+        }
+    }
+}
