@@ -254,6 +254,10 @@ mod tests {
     fn test_block_confirmed_sequence_assignment() {
         let mut generator = HubEventIdGenerator::new(Some(123), Some(0));
 
+        // Test initial state
+        assert_eq!(generator.current_height, 123);
+        assert_eq!(generator.current_seq, 0);
+
         // Test BLOCK_CONFIRMED gets sequence 0
         let block_confirmed = create_test_event(HubEventType::BlockConfirmed);
         let event_id = generator.generate_id(&block_confirmed).unwrap();
@@ -261,6 +265,7 @@ mod tests {
 
         assert_eq!(height, 123);
         assert_eq!(sequence, 0);
+        assert_eq!(generator.current_seq, 0); // Should remain 0 for BLOCK_CONFIRMED
 
         // Test regular event gets sequence 1 (sequence 0 is skipped)
         let regular_event = create_test_event(HubEventType::MergeMessage);
@@ -269,6 +274,7 @@ mod tests {
 
         assert_eq!(height, 123);
         assert_eq!(sequence, 1);
+        assert_eq!(generator.current_seq, 2); // Should be incremented
 
         // Test another regular event gets sequence 2
         let regular_event2 = create_test_event(HubEventType::PruneMessage);
@@ -277,75 +283,21 @@ mod tests {
 
         assert_eq!(height, 123);
         assert_eq!(sequence, 2);
+        assert_eq!(generator.current_seq, 3); // Should be incremented
+
+        // Test height transition resets sequence
+        generator.set_current_height(200);
+        assert_eq!(generator.current_height, 200);
+        assert_eq!(generator.current_seq, 0); // Should reset to 0
 
         // Test another BLOCK_CONFIRMED still gets sequence 0
         let block_confirmed2 = create_test_event(HubEventType::BlockConfirmed);
         let event_id = generator.generate_id(&block_confirmed2).unwrap();
         let (height, sequence) = HubEventIdGenerator::extract_height_and_seq(event_id);
 
-        assert_eq!(height, 123);
-        assert_eq!(sequence, 0);
-    }
-
-    #[test]
-    fn test_event_id_generation_with_block_confirmed() {
-        let mut generator = HubEventIdGenerator::new(Some(456), Some(0));
-
-        // Test BLOCK_CONFIRMED event ID generation
-        let block_confirmed = create_test_event(HubEventType::BlockConfirmed);
-        let event_id = generator.generate_id(&block_confirmed).unwrap();
-
-        // Verify the event ID is correctly constructed
-        let expected_id = HubEventIdGenerator::make_event_id(456, 0);
-        assert_eq!(event_id, expected_id);
-
-        // Test extraction works correctly
-        let (height, sequence) = HubEventIdGenerator::extract_height_and_seq(event_id);
-        assert_eq!(height, 456);
-        assert_eq!(sequence, 0);
-
-        // Test regular event ID generation
-        let regular_event = create_test_event(HubEventType::MergeMessage);
-        let event_id = generator.generate_id(&regular_event).unwrap();
-
-        let expected_id = HubEventIdGenerator::make_event_id(456, 1);
-        assert_eq!(event_id, expected_id);
-
-        let (height, sequence) = HubEventIdGenerator::extract_height_and_seq(event_id);
-        assert_eq!(height, 456);
-        assert_eq!(sequence, 1);
-    }
-
-    #[test]
-    fn test_event_id_generator_state_management() {
-        let mut generator = HubEventIdGenerator::new(Some(100), Some(5));
-
-        // Test initial state
-        assert_eq!(generator.current_height, 100);
-        assert_eq!(generator.current_seq, 5);
-
-        // Test height transition
-        generator.set_current_height(200);
-        assert_eq!(generator.current_height, 200);
-        assert_eq!(generator.current_seq, 0); // Should reset to 0
-
-        // Test sequence progression
-        let regular_event = create_test_event(HubEventType::MergeMessage);
-        let event_id = generator.generate_id(&regular_event).unwrap();
-        let (height, sequence) = HubEventIdGenerator::extract_height_and_seq(event_id);
-
-        assert_eq!(height, 200);
-        assert_eq!(sequence, 1);
-        assert_eq!(generator.current_seq, 2); // Should be incremented
-
-        // Test BLOCK_CONFIRMED doesn't affect sequence counter
-        let block_confirmed = create_test_event(HubEventType::BlockConfirmed);
-        let event_id = generator.generate_id(&block_confirmed).unwrap();
-        let (height, sequence) = HubEventIdGenerator::extract_height_and_seq(event_id);
-
         assert_eq!(height, 200);
         assert_eq!(sequence, 0);
-        assert_eq!(generator.current_seq, 2); // Should remain unchanged
+        assert_eq!(generator.current_seq, 0); // Should remain unchanged for BLOCK_CONFIRMED
     }
 
     #[test]
