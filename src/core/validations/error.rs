@@ -70,8 +70,6 @@ pub enum ValidationError {
     FnameIsMissing,
     #[error("hash is missing")]
     HashIsMissing,
-    #[error("cannot use both parentUrl and parentCastId")]
-    CannotUseBothParents,
     #[error("mentions > 10")]
     MentionsExceedsLimit,
     #[error("mentions and mentionsPositions must match")]
@@ -106,10 +104,6 @@ pub enum ValidationError {
     UsernameDoesntMatch(String, String),
     #[error("username \"{0}\" > 15 characters")]
     UsernameExceedsLength(String),
-    #[error("invalid length for eth address")]
-    InvalidEthAddressLength,
-    #[error("invalid length for sol address")]
-    InvalidSolAddressLength,
     #[error("only one body can be set")]
     OnlyOneBodyCanBeSet,
 }
