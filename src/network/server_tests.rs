@@ -151,6 +151,63 @@ mod tests {
         db.commit(txn).unwrap();
     }
 
+    // Helper function to write events with specific types, timestamps, and block numbers
+    async fn write_mixed_events_to_db(
+        db: Arc<RocksDB>,
+        events: Vec<(HubEventType, u64, u64, u64)>, // (event_type, id, timestamp, block_number)
+    ) {
+        let mut txn = RocksDbTransactionBatch::new();
+        for (event_type, id, timestamp, block_number) in events {
+            // Create event ID that corresponds to the desired block number
+            // event_id = (block_number << SEQUENCE_BITS) | sequence
+            // For testing, we'll use the id parameter as the sequence
+            let event_id = (block_number << SEQUENCE_BITS) | id;
+
+            HubEvent::put_event_transaction(
+                &mut txn,
+                &HubEvent {
+                    r#type: event_type as i32,
+                    id: event_id,
+                    body: None,
+                    block_number,
+                    shard_index: 1,
+                    timestamp,
+                },
+            )
+            .unwrap();
+        }
+        db.commit(txn).unwrap();
+    }
+
+    // Helper function to create EventsRequest with filtering
+    fn create_events_request(
+        start_id: u64,
+        shard_index: Option<u32>,
+        stop_id: Option<u64>,
+        page_size: Option<u32>,
+        page_token: Option<Vec<u8>>,
+        reverse: Option<bool>,
+        event_types: Vec<i32>,
+        start_timestamp: Option<u64>,
+        stop_timestamp: Option<u64>,
+        start_block_number: Option<u64>,
+        stop_block_number: Option<u64>,
+    ) -> proto::EventsRequest {
+        proto::EventsRequest {
+            start_id,
+            shard_index,
+            stop_id,
+            page_size,
+            page_token,
+            reverse,
+            event_types,
+            start_timestamp,
+            stop_timestamp,
+            start_block_number,
+            stop_block_number,
+        }
+    }
+
     fn make_db(dir: &tempfile::TempDir, filename: &str) -> Arc<RocksDB> {
         let db_path = dir.path().join(filename);
 
@@ -1512,5 +1569,418 @@ mod tests {
         assert!(events
             .iter()
             .all(|event| event.r#type() == OnChainEventType::EventTypeSigner));
+    }
+
+    #[tokio::test]
+    async fn test_get_events_with_event_type_filtering() {
+        let (stores, _, _, service) = make_server(None).await;
+        let db = stores.get(&1u32).unwrap().shard_store.db.clone();
+
+        // Create mixed events with different types
+        // Each tuple: (event_type, sequence, timestamp, block_number)
+        let events = vec![
+            (HubEventType::MergeMessage, 1, 1000, 1),
+            (HubEventType::PruneMessage, 2, 1001, 1),
+            (HubEventType::MergeMessage, 3, 1002, 2),
+            (HubEventType::RevokeMessage, 4, 1003, 2),
+            (HubEventType::MergeMessage, 5, 1004, 3),
+            (HubEventType::BlockConfirmed, 6, 1005, 3),
+        ];
+
+        write_mixed_events_to_db(db, events).await;
+
+        // Test filtering by single event type (MergeMessage)
+        let request = Request::new(create_events_request(
+            0,                                       // start_id
+            Some(1),                                 // shard_index
+            None,                                    // stop_id
+            Some(10),                                // page_size
+            None,                                    // page_token
+            None,                                    // reverse
+            vec![HubEventType::MergeMessage as i32], // event_types
+            None,                                    // start_timestamp
+            None,                                    // stop_timestamp
+            None,                                    // start_block_number
+            None,                                    // stop_block_number
+        ));
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 3);
+        assert!(events
+            .iter()
+            .all(|event| event.r#type() == HubEventType::MergeMessage));
+
+        // Test filtering by multiple event types (MergeMessage and PruneMessage)
+        let request = Request::new(create_events_request(
+            0,        // start_id
+            Some(1),  // shard_index
+            None,     // stop_id
+            Some(10), // page_size
+            None,     // page_token
+            None,     // reverse
+            vec![
+                HubEventType::MergeMessage as i32,
+                HubEventType::PruneMessage as i32,
+            ], // event_types
+            None,     // start_timestamp
+            None,     // stop_timestamp
+            None,     // start_block_number
+            None,     // stop_block_number
+        ));
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 4);
+        assert!(events.iter().all(|event| {
+            event.r#type() == HubEventType::MergeMessage
+                || event.r#type() == HubEventType::PruneMessage
+        }));
+
+        // Test filtering by BlockConfirmed event type
+        let request = Request::new(create_events_request(
+            0,                                         // start_id
+            Some(1),                                   // shard_index
+            None,                                      // stop_id
+            Some(10),                                  // page_size
+            None,                                      // page_token
+            None,                                      // reverse
+            vec![HubEventType::BlockConfirmed as i32], // event_types
+            None,                                      // start_timestamp
+            None,                                      // stop_timestamp
+            None,                                      // start_block_number
+            None,                                      // stop_block_number
+        ));
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 1);
+        assert!(events
+            .iter()
+            .all(|event| event.r#type() == HubEventType::BlockConfirmed));
+    }
+
+    #[tokio::test]
+    async fn test_get_events_with_timestamp_filtering() {
+        let (stores, _, _, service) = make_server(None).await;
+        let db = stores.get(&1u32).unwrap().shard_store.db.clone();
+
+        // Create events with different timestamps
+        // Each tuple: (event_type, sequence, timestamp, block_number)
+        let events = vec![
+            (HubEventType::MergeMessage, 1, 1000, 1),
+            (HubEventType::PruneMessage, 2, 1001, 1),
+            (HubEventType::MergeMessage, 3, 1002, 2),
+            (HubEventType::RevokeMessage, 4, 1003, 2),
+            (HubEventType::MergeMessage, 5, 1004, 3),
+            (HubEventType::BlockConfirmed, 6, 1005, 3),
+        ];
+
+        write_mixed_events_to_db(db, events).await;
+
+        // Test filtering by start_timestamp only
+        let request = Request::new(create_events_request(
+            0,          // start_id
+            Some(1),    // shard_index
+            None,       // stop_id
+            Some(10),   // page_size
+            None,       // page_token
+            None,       // reverse
+            vec![],     // event_types
+            Some(1002), // start_timestamp
+            None,       // stop_timestamp
+            None,       // start_block_number
+            None,       // stop_block_number
+        ));
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert!(events.iter().all(|e| e.timestamp >= 1002));
+
+        // Test filtering by stop_timestamp only
+        let request = Request::new(create_events_request(
+            0,          // start_id
+            Some(1),    // shard_index
+            None,       // stop_id
+            Some(10),   // page_size
+            None,       // page_token
+            None,       // reverse
+            vec![],     // event_types
+            None,       // start_timestamp
+            Some(1003), // stop_timestamp
+            None,       // start_block_number
+            None,       // stop_block_number
+        ));
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert!(events.iter().all(|e| e.timestamp <= 1003));
+
+        // Test filtering by both start_timestamp and stop_timestamp
+        let request = Request::new(create_events_request(
+            0,          // start_id
+            Some(1),    // shard_index
+            None,       // stop_id
+            Some(10),   // page_size
+            None,       // page_token
+            None,       // reverse
+            vec![],     // event_types
+            Some(1001), // start_timestamp
+            Some(1003), // stop_timestamp
+            None,       // start_block_number
+            None,       // stop_block_number
+        ));
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert!(events
+            .iter()
+            .all(|e| e.timestamp >= 1001 && e.timestamp <= 1003));
+
+        // Test with start_timestamp > stop_timestamp (should return empty)
+        let request = Request::new(create_events_request(
+            0,          // start_id
+            Some(1),    // shard_index
+            None,       // stop_id
+            Some(10),   // page_size
+            None,       // page_token
+            None,       // reverse
+            vec![],     // event_types
+            Some(1005), // start_timestamp
+            Some(1000), // stop_timestamp (less than start)
+            None,       // start_block_number
+            None,       // stop_block_number
+        ));
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_events_with_block_number_filtering() {
+        let (stores, _, _, service) = make_server(None).await;
+        let db = stores.get(&1u32).unwrap().shard_store.db.clone();
+
+        // Create events with different block numbers
+        // Each tuple: (event_type, sequence, timestamp, block_number)
+        let events = vec![
+            (HubEventType::MergeMessage, 1, 1000, 1),
+            (HubEventType::PruneMessage, 2, 1001, 1),
+            (HubEventType::MergeMessage, 3, 1002, 2),
+            (HubEventType::RevokeMessage, 4, 1003, 2),
+            (HubEventType::MergeMessage, 5, 1004, 3),
+            (HubEventType::BlockConfirmed, 6, 1005, 3),
+        ];
+
+        write_mixed_events_to_db(db, events).await;
+
+        // Test filtering by start_block_number only
+        let request = Request::new(create_events_request(
+            0,        // start_id
+            Some(1),  // shard_index
+            None,     // stop_id
+            Some(10), // page_size
+            None,     // page_token
+            None,     // reverse
+            vec![],   // event_types
+            None,     // start_timestamp
+            None,     // stop_timestamp
+            Some(3),  // start_block_number
+            None,     // stop_block_number
+        ));
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert!(events.iter().all(|e| e.block_number >= 3));
+
+        // Test filtering by stop_block_number only
+        let request = Request::new(create_events_request(
+            0,        // start_id
+            Some(1),  // shard_index
+            None,     // stop_id
+            Some(10), // page_size
+            None,     // page_token
+            None,     // reverse
+            vec![],   // event_types
+            None,     // start_timestamp
+            None,     // stop_timestamp
+            None,     // start_block_number
+            Some(3),  // stop_block_number
+        ));
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert!(events.iter().all(|e| e.block_number <= 3));
+
+        // Test filtering by both start_block_number and stop_block_number
+        let request = Request::new(create_events_request(
+            0,        // start_id
+            Some(1),  // shard_index
+            None,     // stop_id
+            Some(10), // page_size
+            None,     // page_token
+            None,     // reverse
+            vec![],   // event_types
+            None,     // start_timestamp
+            None,     // stop_timestamp
+            Some(2),  // start_block_number
+            Some(4),  // stop_block_number
+        ));
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert!(events
+            .iter()
+            .all(|e| e.block_number >= 2 && e.block_number <= 4));
+
+        // Test exact block number match
+        let request = Request::new(create_events_request(
+            0,        // start_id
+            Some(1),  // shard_index
+            None,     // stop_id
+            Some(10), // page_size
+            None,     // page_token
+            None,     // reverse
+            vec![],   // event_types
+            None,     // start_timestamp
+            None,     // stop_timestamp
+            Some(3),  // start_block_number
+            Some(3),  // stop_block_number
+        ));
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events[0].block_number, 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_events_with_combined_filtering() {
+        let (stores, _, _, service) = make_server(None).await;
+        let db = stores.get(&1u32).unwrap().shard_store.db.clone();
+
+        // Create events with different types, timestamps, and block numbers
+        // Each tuple: (event_type, sequence, timestamp, block_number)
+        let events = vec![
+            (HubEventType::MergeMessage, 1, 1000, 1),
+            (HubEventType::PruneMessage, 2, 1001, 1),
+            (HubEventType::MergeMessage, 3, 1002, 2),
+            (HubEventType::RevokeMessage, 4, 1003, 2),
+            (HubEventType::MergeMessage, 5, 1004, 3),
+            (HubEventType::BlockConfirmed, 6, 1005, 3),
+        ];
+
+        write_mixed_events_to_db(db, events).await;
+
+        // Test combined filtering: event type + timestamp + block number
+        let request = Request::new(create_events_request(
+            0,                                       // start_id
+            Some(1),                                 // shard_index
+            None,                                    // stop_id
+            Some(10),                                // page_size
+            None,                                    // page_token
+            None,                                    // reverse
+            vec![HubEventType::MergeMessage as i32], // event_types
+            Some(1001),                              // start_timestamp
+            Some(1003),                              // stop_timestamp
+            Some(2),                                 // start_block_number
+            Some(3),                                 // stop_block_number
+        ));
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert!(events.iter().all(|e| {
+            e.r#type() == HubEventType::MergeMessage
+                && e.timestamp >= 1001
+                && e.timestamp <= 1003
+                && e.block_number >= 2
+                && e.block_number <= 3
+        }));
+
+        // Test combined filtering: multiple event types + block number
+        let request = Request::new(create_events_request(
+            0,        // start_id
+            Some(1),  // shard_index
+            None,     // stop_id
+            Some(10), // page_size
+            None,     // page_token
+            None,     // reverse
+            vec![
+                HubEventType::MergeMessage as i32,
+                HubEventType::PruneMessage as i32,
+            ], // event_types
+            None,     // start_timestamp
+            None,     // stop_timestamp
+            Some(2),  // start_block_number
+            Some(3),  // stop_block_number
+        ));
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert!(events.iter().all(|e| {
+            (e.r#type() == HubEventType::MergeMessage || e.r#type() == HubEventType::PruneMessage)
+                && e.block_number >= 2
+                && e.block_number <= 3
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_get_events_filtering_edge_cases() {
+        let (stores, _, _, service) = make_server(None).await;
+        let db = stores.get(&1u32).unwrap().shard_store.db.clone();
+
+        // Create events with different types, timestamps, and block numbers
+        // Each tuple: (event_type, sequence, timestamp, block_number)
+        let events = vec![
+            (HubEventType::MergeMessage, 1, 1000, 1),
+            (HubEventType::PruneMessage, 2, 1001, 1),
+            (HubEventType::MergeMessage, 3, 1002, 2),
+            (HubEventType::RevokeMessage, 4, 1003, 2),
+            (HubEventType::MergeMessage, 5, 1004, 3),
+            (HubEventType::BlockConfirmed, 6, 1005, 3),
+        ];
+
+        write_mixed_events_to_db(db, events).await;
+
+        // Test with start_block_number > stop_block_number (should return empty)
+        let request = Request::new(create_events_request(
+            0,        // start_id
+            Some(1),  // shard_index
+            None,     // stop_id
+            Some(10), // page_size
+            None,     // page_token
+            None,     // reverse
+            vec![],   // event_types
+            None,     // start_timestamp
+            None,     // stop_timestamp
+            Some(5),  // start_block_number
+            Some(3),  // stop_block_number (less than start)
+        ));
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 0);
+
+        // Test with start_timestamp > stop_timestamp (should return empty)
+        let request = Request::new(create_events_request(
+            0,          // start_id
+            Some(1),    // shard_index
+            None,       // stop_id
+            Some(10),   // page_size
+            None,       // page_token
+            None,       // reverse
+            vec![],     // event_types
+            Some(1005), // start_timestamp
+            Some(1000), // stop_timestamp (less than start)
+            None,       // start_block_number
+            None,       // stop_block_number
+        ));
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 0);
+
+        // Test with non-existent event types (should return empty)
+        let request = Request::new(create_events_request(
+            0,         // start_id
+            Some(1),   // shard_index
+            None,      // stop_id
+            Some(10),  // page_size
+            None,      // page_token
+            None,      // reverse
+            vec![999], // non-existent event type
+            None,      // start_timestamp
+            None,      // stop_timestamp
+            None,      // start_block_number
+            None,      // stop_block_number
+        ));
+        let response = service.get_events(request).await.unwrap();
+        let events = response.get_ref().events.clone();
+        assert_eq!(events.len(), 0);
     }
 }
