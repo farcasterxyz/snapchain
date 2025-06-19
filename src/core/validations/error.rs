@@ -106,4 +106,8 @@ pub enum ValidationError {
     UsernameExceedsLength(String),
     #[error("only one body can be set")]
     OnlyOneBodyCanBeSet,
+    #[error("invalid length for eth address")]
+    InvalidEthAddressLength,
+    #[error("invalid length for sol address")]
+    InvalidSolAddressLength,
 }

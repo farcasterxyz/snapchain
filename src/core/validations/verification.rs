@@ -176,7 +176,7 @@ pub fn validate_eth_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationErr
     }
 
     if address.len() != 20 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::InvalidEthAddressLength);
     }
 
     Ok(address)
@@ -200,7 +200,7 @@ pub fn validate_sol_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationErr
     }
 
     if address.len() != 32 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::InvalidSolAddressLength);
     }
 
     Ok(address)

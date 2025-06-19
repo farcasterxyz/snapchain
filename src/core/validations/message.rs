@@ -385,7 +385,7 @@ pub fn validate_user_data_primary_address_ethereum(input: &String) -> Result<(),
     }
 
     if !input.starts_with("0x") || input.len() != 42 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::InvalidEthAddressLength);
     }
 
     let parsed = Address::from_hex(input).map_err(|_| ValidationError::InvalidData)?;
