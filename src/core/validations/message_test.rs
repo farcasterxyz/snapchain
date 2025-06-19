@@ -66,7 +66,7 @@ mod tests {
         assert_validation_error(&msg, ValidationError::MissingData);
 
         // when data is too large
-        let long_bio = "A".repeat(2000);
+        let long_bio = "A".repeat(3000);
         let mut msg = create_user_data_add(1234, proto::UserDataType::Bio, &long_bio, None, None);
         msg.data_bytes = None;
         assert_validation_error(&msg, ValidationError::InvalidDataLength);
@@ -239,9 +239,18 @@ mod tests {
         ];
 
         let invalid_names = vec![
-            "too_long_for_a_ens_name.eth",       // Contains space
-            "too_long_for_a_base_name.base.eth", // Contains special character
-            "invalid_username!",                 // Contains special character
+            (
+                "too_long_for_a_ens_name.eth",
+                ValidationError::EnsNameExceedsLength("too_long_for_a_ens_name.eth".to_string()),
+            ), // Contains space
+            (
+                "too_long_for_a_base_name.base.eth",
+                ValidationError::InvalidDataLength,
+            ), // Contains special character
+            (
+                "invalid_username!",
+                ValidationError::FnameExceedsLength("invalid_username!".to_string()),
+            ), // Contains special character
         ];
         for name in valid_names {
             let msg = create_user_data_add(
@@ -259,7 +268,7 @@ mod tests {
             );
             assert!(result.is_ok(), "Failed for valid name: {}", name);
         }
-        for name in invalid_names {
+        for (name, error) in invalid_names {
             let msg = create_user_data_add(
                 1,
                 proto::UserDataType::Username,
@@ -274,7 +283,7 @@ mod tests {
                 EngineVersion::latest(),
             );
             assert!(result.is_err(), "Failed for invalid name: {}", name);
-            assert_eq!(result.err().unwrap(), ValidationError::InvalidDataLength);
+            assert_eq!(result.err().unwrap(), error);
         }
     }
 
@@ -339,7 +348,10 @@ mod tests {
             EngineVersion::latest(),
         );
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap(), ValidationError::InvalidDataLength);
+        assert_eq!(
+            result.err().unwrap(),
+            ValidationError::EnsNameDoesntEndWithEth("very_long_invalid_proof.ens".to_string())
+        );
     }
 
     #[test]
@@ -437,7 +449,7 @@ mod tests {
             None,
             None,
         );
-        assert_validation_error(&msg, ValidationError::InvalidData);
+        assert_validation_error(&msg, ValidationError::HashIsMissing);
 
         let msg = create_frame_action(
             1,
@@ -452,7 +464,7 @@ mod tests {
             None,
             None,
         );
-        assert_validation_error(&msg, ValidationError::InvalidData);
+        assert_validation_error(&msg, ValidationError::FidIsMissing);
 
         let msg = create_frame_action(
             1,

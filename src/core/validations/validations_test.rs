@@ -182,7 +182,10 @@ mod tests {
         let address = String::from("0x123"); // too short
         let result = validate_user_data_primary_address_ethereum(&address);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), ValidationError::InvalidDataLength);
+        assert_eq!(
+            result.unwrap_err(),
+            ValidationError::InvalidEthAddressLength
+        );
     }
 
     #[test]
@@ -190,7 +193,10 @@ mod tests {
         let address = String::from("d5596099ec95b32ddC3F22814785a253f6a09D56"); // missing 0x
         let result = validate_user_data_primary_address_ethereum(&address);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), ValidationError::InvalidDataLength);
+        assert_eq!(
+            result.unwrap_err(),
+            ValidationError::InvalidEthAddressLength
+        );
     }
 
     #[test]
@@ -213,7 +219,10 @@ mod tests {
         let address = String::from("4TciSRW38"); // too short
         let result = validate_user_data_primary_address_solana(&address);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), ValidationError::InvalidDataLength);
+        assert_eq!(
+            result.unwrap_err(),
+            ValidationError::InvalidSolAddressLength
+        );
     }
 
     #[test]
