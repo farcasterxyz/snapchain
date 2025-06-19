@@ -239,7 +239,6 @@ impl MyHubService {
         }
 
         let (tx, rx) = oneshot::channel();
-
         match self.mempool_tx.try_send(MempoolRequest::AddMessage(
             MempoolMessage::UserMessage(message.clone()),
             MempoolSource::RPC,
@@ -977,9 +976,10 @@ impl HubService for MyHubService {
                     None => return Err(Status::invalid_argument("Shard not found".to_string())),
                 };
             }
-        }
-        let per_shard_tokens: Vec<Option<Vec<u8>>> = if let Some(token_bytes) = req.page_token {
-            serde_json::from_slice(&token_bytes)
+        } // This is necessary because we need to use req later for timestamps() and block_numbers().
+          // Without `ref`, the page_token field would be moved, making req partially moved and unusable.
+        let per_shard_tokens: Vec<Option<Vec<u8>>> = if let Some(ref token_bytes) = req.page_token {
+            serde_json::from_slice(token_bytes)
                 .map_err(|e| Status::invalid_argument(format!("Invalid page token: {}", e)))?
         } else {
             vec![None; num_shards as usize]
@@ -1008,8 +1008,50 @@ impl HubService for MyHubService {
                 events
             })
             .collect();
-        let combined_events: Vec<HubEvent> =
+        let mut combined_events: Vec<HubEvent> =
             pages.iter().flat_map(|page| page.events.clone()).collect();
+
+        // Apply all filtering in a single pass for efficiency
+        combined_events = combined_events
+            .into_iter()
+            .filter(|event| {
+                // Event Type Filtering:
+                // Apply optional event type filtering if event_types is provided.
+                // When event_types is empty, all events are returned (backward compatibility).
+                if !req.event_types.is_empty() && !req.event_types.contains(&event.r#type) {
+                    return false;
+                }
+
+                // Timestamp Filtering:
+                // Apply optional timestamp filtering if start_timestamp or stop_timestamp is provided.
+                // When neither is provided, timestamp filtering is not applied (backward compatibility).
+                if req.start_timestamp.is_some() || req.stop_timestamp.is_some() {
+                    let event_timestamp = event.timestamp;
+                    let start_timestamp = req.start_timestamp.unwrap_or(std::u64::MIN);
+                    let stop_timestamp = req.stop_timestamp.unwrap_or(std::u64::MAX);
+                    if event_timestamp < start_timestamp || event_timestamp > stop_timestamp {
+                        return false;
+                    }
+                }
+
+                // Block Number Filtering:
+                // Apply optional block number filtering if start_block_number or stop_block_number is provided.
+                // When neither is provided, block number filtering is not applied (backward compatibility).
+                if req.start_block_number.is_some() || req.stop_block_number.is_some() {
+                    let event_block_number = event.block_number;
+                    let start_block_number = req.start_block_number.unwrap_or(std::u64::MIN);
+                    let stop_block_number = req.stop_block_number.unwrap_or(std::u64::MAX);
+                    if event_block_number < start_block_number
+                        || event_block_number > stop_block_number
+                    {
+                        return false;
+                    }
+                }
+
+                true
+            })
+            .collect();
+
         let next_page_tokens: Vec<Option<Vec<u8>>> =
             pages.into_iter().map(|page| page.next_page_token).collect();
         let new_page_token = serde_json::to_vec(&next_page_tokens)
@@ -1546,17 +1588,12 @@ impl HubService for MyHubService {
         let next_page_tokens: Vec<Option<Vec<u8>>> =
             pages.into_iter().map(|page| page.next_page_token).collect();
 
-        let new_page_token = if next_page_tokens.iter().any(|token| token.is_some()) {
-            Some(serde_json::to_vec(&next_page_tokens).map_err(|e| {
-                Status::internal(format!("Failed to serialize next_page_token: {}", e))
-            })?)
-        } else {
-            None // Return None if no subsequent page exists
-        };
+        let new_page_token = serde_json::to_vec(&next_page_tokens)
+            .map_err(|e| Status::internal(format!("Failed to serialize next_page_token: {}", e)))?;
 
         let response = MessagesResponse {
             messages: combined_messages,
-            next_page_token: new_page_token,
+            next_page_token: Some(new_page_token),
         };
 
         Ok(Response::new(response))

@@ -308,12 +308,21 @@ mod tests {
         .await;
         let mut event_rx = engine.get_senders().events_tx.subscribe();
 
-        // Registering a user generates events
+        // BLOCK_CONFIRMED Event Impact on Testing:
+        // After implementing BLOCK_CONFIRMED events, every block commit generates an additional
+        // BLOCK_CONFIRMED event as the first event (sequence 0). This affects test expectations:
+        //
+        // 1. Event counts: Each block now has +1 additional event
+        // 2. Event ordering: BLOCK_CONFIRMED always comes first, then message events
+        // 3. Sequence numbers: Message events now start at sequence 1 instead of 0
+        // 4. Event reception: Tests receive BLOCK_CONFIRMED first, then actual events
+
+        // Registering a user generates events (including BLOCK_CONFIRMED events)
         let initial_events_count = HubEvent::get_events(engine.db.clone(), 0, None, None)
             .unwrap()
             .events
             .len();
-        assert_eq!(3, initial_events_count);
+        assert_eq!(6, initial_events_count); // 3 original events + 3 BLOCK_CONFIRMED events // study this
 
         let state_change =
             engine.propose_state_change(1, vec![MempoolMessage::UserMessage(msg1.clone())], None);
@@ -345,16 +354,24 @@ mod tests {
         let casts_result = engine.get_casts_by_fid(msg1.fid());
         test_helper::assert_contains_all_messages(&casts_result, &[&msg1]);
 
-        // And events are generated
+        // And events are generated (including one more BLOCK_CONFIRMED event)
         let mut events = HubEvent::get_events(engine.db.clone(), 0, None, None).unwrap();
-        assert_eq!(initial_events_count + 1, events.events.len());
+        assert_eq!(initial_events_count + 2, events.events.len()); // +1 for message event, +1 for BLOCK_CONFIRMED
+                                                                   // Receive BLOCK_CONFIRMED event first
+        let _block_confirmed_event = event_rx.recv().await.unwrap();
+        // Then receive the actual message event
         let mut generated_event = event_rx.recv().await.unwrap();
         // Timestamp is populated on the generated event but it's not stored in the db. Set to 0 for both so that the equality assertion doesn't fail.
         generated_event.timestamp = 0;
-        events.events.get_mut(0).unwrap().timestamp = 0;
-        assert_eq!(generated_event, events.events[initial_events_count]);
+        // The generated message event is at index initial_events_count + 1 (after BLOCK_CONFIRMED)
+        events
+            .events
+            .get_mut(initial_events_count + 1)
+            .unwrap()
+            .timestamp = 0;
+        assert_eq!(generated_event, events.events[initial_events_count + 1]);
 
-        assert_merge_event(&generated_event, &msg1, 0);
+        assert_merge_event(&generated_event, &msg1, 1); // sequence 1 since BLOCK_CONFIRMED is sequence 0
 
         // The message exists in the trie
         assert_eq!(message_exists_in_trie(&mut engine, &msg1), true);
@@ -1246,9 +1263,12 @@ mod tests {
         test_helper::assert_contains_all_messages(messages, &[cast3]);
 
         // We receive a merge event for the add and the intermediate remove, even though it would never get committed to the db
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast1, 0);
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast2, 1);
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast3, 2);
+        // First receive BLOCK_CONFIRMED event
+        let _block_confirmed_event = &event_rx.try_recv().unwrap();
+        // Then receive the merge events with updated sequence numbers (BLOCK_CONFIRMED takes sequence 0)
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast1, 1);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast2, 2);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast3, 3);
     }
 
     #[tokio::test]
@@ -1283,17 +1303,21 @@ mod tests {
             .unwrap();
         assert_eq!(stored_onchain_events.len(), 1);
 
-        // Hub events are generated
+        // Hub events are generated (including BLOCK_CONFIRMED event)
         let mut events = HubEvent::get_events(engine.db.clone(), 0, None, None).unwrap();
-        assert_eq!(1, events.events.len());
+        assert_eq!(2, events.events.len()); // 1 onchain event + 1 BLOCK_CONFIRMED
+                                            // Receive BLOCK_CONFIRMED event first
+        let _block_confirmed_event = event_rx.recv().await.unwrap();
+        // Then receive the actual onchain event
         let mut received_event = event_rx.recv().await.unwrap();
         // Timestamp is populated on the received event but it's not stored in the db. Set to 0 for both so that the equality assertion doesn't fail.
         received_event.timestamp = 0;
-        events.events.get_mut(0).unwrap().timestamp = 0;
-        assert_eq!(received_event, events.events[0]);
+        events.events.get_mut(1).unwrap().timestamp = 0;
+        // The onchain event is at index 1 (after BLOCK_CONFIRMED at index 0)
+        assert_eq!(received_event, events.events[1]);
         assert!(event_rx.try_recv().is_err()); // only 1 event
 
-        let generated_event = match events.events[0].clone().body {
+        let generated_event = match events.events[1].clone().body {
             Some(proto::hub_event::Body::MergeOnChainEventBody(e)) => e,
             _ => panic!("Unexpected event type"),
         };
@@ -1301,7 +1325,7 @@ mod tests {
             to_hex(&onchain_event.transaction_hash),
             to_hex(&generated_event.on_chain_event.unwrap().transaction_hash)
         );
-        assert_event_id(&received_event, Some(1), 0);
+        assert_event_id(&received_event, Some(1), 1); // sequence 1 since BLOCK_CONFIRMED is sequence 0
     }
 
     #[tokio::test]
@@ -1339,7 +1363,7 @@ mod tests {
         );
         test_helper::validate_and_commit_state_change(&mut engine, &state_change);
 
-        // Ignore first 3 blocks which are user registration events
+        // Ignore first 6 blocks which are user registration events (3 original + 3 BLOCK_CONFIRMED)
         let events = HubEvent::get_events(
             engine.db.clone(),
             HubEventIdGenerator::make_event_id(4, 0),
@@ -1347,19 +1371,20 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(4, events.events.len());
-        // First two events are in block 1, second two are in block 2. sequence resets for each block
-        assert_merge_event(&events.events[0], &cast1, 0);
-        assert_event_id(&events.events[0], Some(4), 0);
-
-        assert_merge_event(&events.events[1], &cast2, 1);
+        assert_eq!(6, events.events.len()); // 4 message events + 2 BLOCK_CONFIRMED events
+                                            // First two events are in block 1, second two are in block 2. sequence resets for each block
+                                            // Events order: BLOCK_CONFIRMED, cast1, cast2, BLOCK_CONFIRMED, cast3, cast4
+        assert_merge_event(&events.events[1], &cast1, 1); // cast1 is at index 1 (after BLOCK_CONFIRMED)
         assert_event_id(&events.events[1], Some(4), 1);
 
-        assert_merge_event(&events.events[2], &cast3, 0);
-        assert_event_id(&events.events[2], Some(5), 0);
+        assert_merge_event(&events.events[2], &cast2, 2);
+        assert_event_id(&events.events[2], Some(4), 2);
 
-        assert_merge_event(&events.events[3], &cast4, 1);
-        assert_event_id(&events.events[3], Some(5), 1);
+        assert_merge_event(&events.events[4], &cast3, 1); // cast3 is at index 4 (after second BLOCK_CONFIRMED)
+        assert_event_id(&events.events[4], Some(5), 1);
+
+        assert_merge_event(&events.events[5], &cast4, 2);
+        assert_event_id(&events.events[5], Some(5), 2);
     }
 
     #[tokio::test]
@@ -1452,18 +1477,23 @@ mod tests {
 
         // Default size in tests is 4 casts, so first four messages should merge without issues
         commit_message(&mut engine, &cast1).await;
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast1, 0);
+        let _block_confirmed_event1 = &event_rx.try_recv().unwrap();
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast1, 1);
         commit_message(&mut engine, &cast2).await;
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast2, 0);
+        let _block_confirmed_event2 = &event_rx.try_recv().unwrap();
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast2, 1);
         commit_message(&mut engine, &cast3).await;
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast3, 0);
+        let _block_confirmed_event3 = &event_rx.try_recv().unwrap();
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast3, 1);
         commit_message(&mut engine, &cast4).await;
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast4, 0);
+        let _block_confirmed_event4 = &event_rx.try_recv().unwrap();
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast4, 1);
 
         // Fifth message should be merged, but should cause cast1 to be pruned
         commit_message(&mut engine, &cast5).await;
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast5, 0);
-        assert_prune_event(&event_rx.try_recv().unwrap(), &cast1, 1);
+        let _block_confirmed_event5 = &event_rx.try_recv().unwrap();
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast5, 1);
+        assert_prune_event(&event_rx.try_recv().unwrap(), &cast1, 2);
 
         // Prunes are reflected in the trie
         assert_eq!(message_exists_in_trie(&mut engine, &cast1), false);
@@ -1531,9 +1561,12 @@ mod tests {
         ];
         let state_change = engine.propose_state_change(1, messages, None);
         test_helper::validate_and_commit_state_change(&mut engine, &state_change);
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast1, 0);
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast2, 1);
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast3, 2);
+        // First receive BLOCK_CONFIRMED event
+        let _block_confirmed_event1 = &event_rx.try_recv().unwrap();
+        // Then receive the merge events with updated sequence numbers (BLOCK_CONFIRMED takes sequence 0)
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast1, 1);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast2, 2);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast3, 3);
 
         // Now send the last three messages, all of them should be merged, and the first two should be pruned
         let messages = vec![
@@ -1543,12 +1576,15 @@ mod tests {
         ];
         let state_change = engine.propose_state_change(1, messages, None);
         let chunk = test_helper::validate_and_commit_state_change(&mut engine, &state_change);
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast4, 0);
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast5, 1);
-        assert_merge_event(&event_rx.try_recv().unwrap(), &cast6, 2);
+        // First receive BLOCK_CONFIRMED event
+        let _block_confirmed_event2 = &event_rx.try_recv().unwrap();
+        // Then receive the merge and prune events with updated sequence numbers
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast4, 1);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast5, 2);
+        assert_merge_event(&event_rx.try_recv().unwrap(), &cast6, 3);
 
-        assert_prune_event(&event_rx.try_recv().unwrap(), &cast1, 3);
-        assert_prune_event(&event_rx.try_recv().unwrap(), &cast2, 4);
+        assert_prune_event(&event_rx.try_recv().unwrap(), &cast1, 4);
+        assert_prune_event(&event_rx.try_recv().unwrap(), &cast2, 5);
 
         let user_messages = chunk.transactions[0]
             .user_messages
@@ -1624,12 +1660,16 @@ mod tests {
         let mut event_rx = engine.get_senders().events_tx.subscribe();
 
         commit_message(&mut engine, &msg1).await;
+        let _ = &event_rx.try_recv().unwrap(); // Ignore BLOCK_CONFIRMED event
         let _ = &event_rx.try_recv().unwrap(); // Ignore merge event
         commit_message(&mut engine, &msg2).await;
+        let _ = &event_rx.try_recv().unwrap(); // Ignore BLOCK_CONFIRMED event
         let _ = &event_rx.try_recv().unwrap(); // Ignore merge event
         commit_message(&mut engine, &same_fid_different_signer).await;
+        let _ = &event_rx.try_recv().unwrap(); // Ignore BLOCK_CONFIRMED event
         let _ = &event_rx.try_recv().unwrap(); // Ignore merge event
         commit_message(&mut engine, &different_fid_same_signer).await;
+        let _ = &event_rx.try_recv().unwrap(); // Ignore BLOCK_CONFIRMED event
         let _ = &event_rx.try_recv().unwrap(); // Ignore merge event
 
         // All 4 messages exist
@@ -1648,9 +1688,12 @@ mod tests {
             None,
         );
         test_helper::commit_event(&mut engine, &revoke_event).await;
-        assert_onchain_hub_event(&event_rx.try_recv().unwrap(), &revoke_event, 0);
-        assert_revoke_event(&event_rx.try_recv().unwrap(), &msg1, 1);
-        assert_revoke_event(&event_rx.try_recv().unwrap(), &msg2, 2);
+        // First receive BLOCK_CONFIRMED event
+        let _ = &event_rx.try_recv().unwrap();
+        // Then receive the revoke events with updated sequence numbers
+        assert_onchain_hub_event(&event_rx.try_recv().unwrap(), &revoke_event, 1);
+        assert_revoke_event(&event_rx.try_recv().unwrap(), &msg1, 2);
+        assert_revoke_event(&event_rx.try_recv().unwrap(), &msg2, 3);
 
         assert_eq!(event_rx.try_recv().is_err(), true); // No more events
 
@@ -1717,6 +1760,9 @@ mod tests {
         test_helper::validate_and_commit_state_change(&mut engine, &state_change);
 
         // Emits a hub event for the user name proof
+        // First receive BLOCK_CONFIRMED event
+        let _block_confirmed_event = &event_rx.try_recv().unwrap();
+        // Then receive the actual username proof event
         let transfer_event = &event_rx.try_recv().unwrap();
         assert_eq!(
             transfer_event.r#type,
@@ -1775,6 +1821,9 @@ mod tests {
         test_helper::validate_and_commit_state_change(&mut engine, &state_change);
 
         // Emits a hub event for the user name proof
+        // First receive BLOCK_CONFIRMED event
+        let _block_confirmed_event = &event_rx.try_recv().unwrap();
+        // Then receive the actual username proof event
         let transfer_event = &event_rx.try_recv().unwrap();
         assert_eq!(
             transfer_event.r#type,
@@ -1810,6 +1859,9 @@ mod tests {
         );
         test_helper::validate_and_commit_state_change(&mut engine, &state_change);
 
+        // First receive BLOCK_CONFIRMED event
+        let _block_confirmed_event = &event_rx.try_recv().unwrap();
+        // Then receive the actual username proof event
         let transfer_event = &event_rx.try_recv().unwrap();
         assert_eq!(
             transfer_event.r#type,
