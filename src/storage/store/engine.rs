@@ -215,6 +215,48 @@ impl ShardEngine {
         }
     }
 
+    // BLOCK_CONFIRMED Event Creation:
+    // This helper function creates and adds a BLOCK_CONFIRMED event as the first event
+    // in every block. BLOCK_CONFIRMED events serve as metadata events that:
+    // 1. Signal the completion of a block to subscribers
+    // 2. Provide block metadata (number, hash, timestamp, shard)
+    // 3. Include the total count of events in the block
+    // 4. Always receive sequence number 0 for consistent ordering
+    //
+    // The event is inserted at the beginning of the events vector to ensure it
+    // appears first chronologically, even though it's generated last.
+    fn add_block_confirmed_event(
+        &self,
+        shard_chunk: &ShardChunk,
+        mut events: Vec<HubEvent>,
+        txn: &mut RocksDbTransactionBatch,
+    ) -> Result<Vec<HubEvent>, HubError> {
+        let header = shard_chunk.header.as_ref().unwrap();
+        let height = header.height.as_ref().unwrap();
+
+        let mut block_confirmed = HubEvent::from(
+            proto::HubEventType::BlockConfirmed,
+            proto::hub_event::Body::BlockConfirmedBody(proto::BlockConfirmedBody {
+                block_number: height.block_number,
+                shard_index: height.shard_index,
+                timestamp: header.timestamp,
+                block_hash: shard_chunk.hash.clone(),
+                total_events: (events.len() + 1) as u64, // +1 for BLOCK_CONFIRMED itself
+            }),
+        );
+
+        // Use event-aware generate_id to assign sequence 0
+        let _block_confirmed_id = self
+            .stores
+            .event_handler
+            .commit_transaction(txn, &mut block_confirmed)?;
+
+        // Insert BLOCK_CONFIRMED at the beginning
+        events.insert(0, block_confirmed);
+
+        Ok(events)
+    }
+
     pub fn shard_id(&self) -> u32 {
         self.shard_id
     }
@@ -1169,6 +1211,12 @@ impl ShardEngine {
             Some(proto::hub_event::Body::MergeFailure(_)) => {
                 // Merge failures don't affect the trie. They are only for event subscribers
             }
+            Some(proto::hub_event::Body::BlockConfirmedBody(_)) => {
+                // BLOCK_CONFIRMED Trie Handling:
+                // BLOCK_CONFIRMED events don't affect the trie state. They are metadata-only
+                // events that provide information about block completion and don't represent
+                // any state changes that need to be tracked in the Merkle trie.
+            }
             &None => {
                 // This should never happen
                 panic!("No body in event");
@@ -1472,10 +1520,33 @@ impl ShardEngine {
         let trie_ctx = &merkle_trie::Context::with_callback(count_callback);
 
         let mut applied_cached_txn = false;
-        if let Some(cached_txn) = self.pending_txn.clone() {
+        if let Some(mut cached_txn) = self.pending_txn.clone() {
             if &cached_txn.shard_root == shard_root {
                 applied_cached_txn = true;
-                self.commit_and_emit_events(shard_chunk, cached_txn.events, cached_txn.txn);
+                // BLOCK_CONFIRMED Integration - Cached Transaction Path:
+                // When we have a valid cached transaction (from validation), we add the
+                // BLOCK_CONFIRMED event to the existing events before committing.
+                // This ensures every block gets a BLOCK_CONFIRMED event regardless of
+                // whether it goes through the full replay or uses cached results.
+                match self.add_block_confirmed_event(
+                    shard_chunk,
+                    cached_txn.events,
+                    &mut cached_txn.txn,
+                ) {
+                    Ok(events_with_block_confirmed) => {
+                        self.commit_and_emit_events(
+                            shard_chunk,
+                            events_with_block_confirmed,
+                            cached_txn.txn,
+                        );
+                    }
+                    Err(err) => {
+                        error!(
+                            "Failed to add BLOCK_CONFIRMED to cached transaction: {}",
+                            err
+                        );
+                    }
+                }
             } else {
                 error!(
                     shard_id = self.shard_id,
@@ -1511,7 +1582,35 @@ impl ShardEngine {
                     panic!("State change commit failed: {}", err);
                 }
                 Ok(events) => {
-                    self.commit_and_emit_events(shard_chunk, events, txn);
+                    // BLOCK_CONFIRMED Integration - Replay Path:
+                    // When replaying transactions (no cached data), we add the BLOCK_CONFIRMED
+                    // event to the freshly generated events. If this fails, we gracefully
+                    // continue without BLOCK_CONFIRMED rather than failing the entire commit.
+                    match self.add_block_confirmed_event(shard_chunk, events.clone(), &mut txn) {
+                        Ok(events_with_block_confirmed) => {
+                            self.commit_and_emit_events(
+                                shard_chunk,
+                                events_with_block_confirmed,
+                                txn,
+                            );
+                        }
+                        Err(err) => {
+                            error!("Failed to add BLOCK_CONFIRMED to replay events: {}", err);
+                            warn!(
+                                "Block {} will be committed without BLOCK_CONFIRMED event",
+                                shard_chunk
+                                    .header
+                                    .as_ref()
+                                    .unwrap()
+                                    .height
+                                    .as_ref()
+                                    .unwrap()
+                                    .block_number
+                            );
+                            // Continue with original events (no BLOCK_CONFIRMED)
+                            self.commit_and_emit_events(shard_chunk, events, txn);
+                        }
+                    }
                 }
             }
         }

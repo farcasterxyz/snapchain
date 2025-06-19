@@ -1,7 +1,8 @@
 use crate::core::error::HubError;
 use crate::proto;
 use crate::proto::{
-    CastsByParentRequest, FidRequest, FidTimestampRequest, LinksByFidRequest, ReactionsByFidRequest,
+    CastsByParentRequest, EventsRequest, FidRequest, FidTimestampRequest, LinksByFidRequest,
+    ReactionsByFidRequest,
 };
 use crate::storage::db::PageOptions;
 use crate::storage::store::account::MessagesPage;
@@ -116,6 +117,36 @@ impl ReactionsByFidRequest {
 impl LinksByFidRequest {
     pub fn page_options(&self) -> PageOptions {
         page_options(self.page_size, self.page_token.clone(), self.reverse)
+    }
+}
+
+impl EventsRequest {
+    pub fn timestamps(&self) -> (Option<u64>, Option<u64>) {
+        let start_timestamp = match self.start_timestamp {
+            Some(ts) => Some(ts),
+            None => None,
+        };
+        let stop_timestamp = match self.stop_timestamp {
+            Some(ts) => Some(ts),
+            None => None,
+        };
+        (start_timestamp, stop_timestamp)
+    }
+
+    pub fn block_numbers(&self) -> (Option<u64>, Option<u64>) {
+        let start_block_number = match self.start_block_number {
+            Some(bn) => Some(bn),
+            None => None,
+        };
+        let stop_block_number = match self.stop_block_number {
+            Some(bn) => Some(bn),
+            None => None,
+        };
+        (start_block_number, stop_block_number)
+    }
+
+    pub fn get_event_types(&self) -> &Vec<i32> {
+        &self.event_types
     }
 }
 

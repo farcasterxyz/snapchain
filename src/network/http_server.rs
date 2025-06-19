@@ -1023,6 +1023,11 @@ pub enum HubEventType {
     HUB_EVENT_TYPE_MERGE_USERNAME_PROOF = 6,
     HUB_EVENT_TYPE_MERGE_ON_CHAIN_EVENT = 9,
     HUB_EVENT_TYPE_MERGE_FAILURE = 10,
+    // BLOCK_CONFIRMED Event Type:
+    // Added to support BLOCK_CONFIRMED events in HTTP API JSON responses.
+    // This matches the protobuf enum value and enables proper event type
+    // conversion between protobuf and JSON formats.
+    HUB_EVENT_TYPE_BLOCK_CONFIRMED = 11,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1077,6 +1082,31 @@ pub struct MergeUsernameProofBody {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+// BLOCK_CONFIRMED Event JSON Structure:
+// This struct represents the BLOCK_CONFIRMED event body in JSON format for HTTP API responses.
+// It contains all the metadata about a completed block including:
+// - Block number and shard index for identification
+// - Timestamp when the block was completed
+// - Block hash for integrity verification
+// - Total count of events in the block for clients to validate completeness
+pub struct BlockConfirmedBody {
+    #[serde(rename = "blockNumber")]
+    pub block_number: u64,
+    #[serde(rename = "shardIndex")]
+    pub shard_index: u32,
+    pub timestamp: u64,
+    #[serde(rename = "blockHash", with = "serdehex")]
+    pub block_hash: Vec<u8>,
+    #[serde(rename = "totalEvents")]
+    pub total_events: u64,
+}
+
+// BLOCK_CONFIRMED HubEvent JSON Structure:
+// This struct represents a complete HubEvent in JSON format for HTTP API responses.
+// The block_confirmed_body field was added to support BLOCK_CONFIRMED events,
+// allowing the HTTP API to properly serialize and return these metadata events
+// alongside other event types like message merges, prunes, and revokes.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HubEvent {
     #[serde(rename = "type")]
     pub hub_event_type: String,
@@ -1099,6 +1129,8 @@ pub struct HubEvent {
     pub merge_on_chain_event_body: Option<MergeOnChainEventBody>,
     #[serde(rename = "mergeFailureBody", skip_serializing_if = "Option::is_none")]
     pub merge_failure_body: Option<MergeFailureBody>,
+    #[serde(rename = "blockConfirmedBody", skip_serializing_if = "Option::is_none")]
+    pub block_confirmed_body: Option<BlockConfirmedBody>,
     #[serde(rename = "blockNumber")]
     pub block_number: u64,
     #[serde(rename = "shardIndex")]
@@ -1132,6 +1164,28 @@ pub struct EventsRequest {
     page_token: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reverse: Option<bool>,
+    // Optional Event Type Filtering:
+    // Allows filtering events by type, similar to SubscribeRequest.
+    // When provided, only events matching the specified types will be returned.
+    // When omitted, all events in the range will be returned (backward compatibility).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    event_types: Option<Vec<HubEventType>>,
+    // Optional Timestamp Filtering:
+    // Allows filtering events by timestamp range, similar to FidTimestampRequest.
+    // When provided, only events within the timestamp range will be returned.
+    // When omitted, all events in the range will be returned (backward compatibility).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    start_timestamp: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop_timestamp: Option<u64>,
+    // Optional Block Number Filtering:
+    // Allows filtering events by block number range.
+    // When provided, only events within the block number range will be returned.
+    // When omitted, all events in the range will be returned (backward compatibility).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    start_block_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop_block_number: Option<u64>,
 
     // For backwards compatibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1142,6 +1196,14 @@ pub struct EventsRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub pageToken: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startTimestamp: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopTimestamp: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startBlockNumber: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopBlockNumber: Option<u64>,
 }
 
 impl EventsRequest {
@@ -1153,6 +1215,19 @@ impl EventsRequest {
             page_size: self.page_size.or(self.pageSize),
             page_token: self.page_token.or(self.pageToken),
             reverse: self.reverse,
+            // Convert HubEventType enum to protobuf i32 values for filtering
+            event_types: self
+                .event_types
+                .unwrap_or_default()
+                .into_iter()
+                .map(|t| t as i32)
+                .collect(),
+            // Timestamp filtering fields with backwards compatibility
+            start_timestamp: self.start_timestamp.or(self.startTimestamp),
+            stop_timestamp: self.stop_timestamp.or(self.stopTimestamp),
+            // Block number filtering fields with backwards compatibility
+            start_block_number: self.start_block_number.or(self.startBlockNumber),
+            stop_block_number: self.stop_block_number.or(self.stopBlockNumber),
         }
     }
 }
@@ -1913,6 +1988,7 @@ fn map_proto_hub_event_to_json_hub_event(
     let mut merge_username_proof_body: Option<MergeUsernameProofBody> = None;
     let mut merge_on_chain_event_body: Option<MergeOnChainEventBody> = None;
     let mut merge_failure_body: Option<MergeFailureBody> = None;
+    let mut block_confirmed_body: Option<BlockConfirmedBody> = None;
     match &hub_event.body {
         None => {}
         Some(hub_event::Body::MergeMessageBody(body)) => {
@@ -1973,6 +2049,15 @@ fn map_proto_hub_event_to_json_hub_event(
                 reason: body.reason.clone(),
             });
         }
+        Some(hub_event::Body::BlockConfirmedBody(body)) => {
+            block_confirmed_body = Some(BlockConfirmedBody {
+                block_number: body.block_number,
+                shard_index: body.shard_index,
+                timestamp: body.timestamp,
+                block_hash: body.block_hash.clone(),
+                total_events: body.total_events,
+            });
+        } // study this
     }
 
     Ok(HubEvent {
@@ -1990,6 +2075,7 @@ fn map_proto_hub_event_to_json_hub_event(
         merge_username_proof_body,
         merge_on_chain_event_body,
         merge_failure_body,
+        block_confirmed_body,
         block_number: hub_event.block_number,
         shard_index: hub_event.shard_index,
     })

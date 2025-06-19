@@ -490,6 +490,11 @@ mod tests {
             page_size: Some(3),
             page_token: None,
             reverse: None,
+            event_types: vec![], // No filtering - return all events
+            start_timestamp: None,
+            stop_timestamp: None,
+            start_block_number: None,
+            stop_block_number: None,
         });
         let response = service.get_events(request).await.unwrap();
         let events = response.get_ref().events.clone();
@@ -504,6 +509,11 @@ mod tests {
             page_size: Some(3),
             page_token: next_page_token,
             reverse: None,
+            event_types: vec![], // No filtering - return all events
+            start_timestamp: None,
+            stop_timestamp: None,
+            start_block_number: None,
+            stop_block_number: None,
         });
         let response = service.get_events(request).await.unwrap();
         let events = response.get_ref().events.clone();
@@ -517,6 +527,11 @@ mod tests {
             page_size: Some(3),
             page_token: None,
             reverse: None,
+            event_types: vec![], // No filtering - return all events
+            start_timestamp: None,
+            stop_timestamp: None,
+            start_block_number: None,
+            stop_block_number: None,
         });
         let response = service.get_events(request).await.unwrap();
         let events = response.get_ref().events.clone();
@@ -530,6 +545,11 @@ mod tests {
             page_size: Some(7),
             page_token: None,
             reverse: Some(true),
+            event_types: vec![], // No filtering - return all events
+            start_timestamp: None,
+            stop_timestamp: None,
+            start_block_number: None,
+            stop_block_number: None,
         });
         let response = service.get_events(request).await.unwrap();
         let events = response.get_ref().events.clone();
@@ -658,6 +678,14 @@ mod tests {
         });
         let mut listener = service.subscribe(request).await.unwrap();
 
+        // BLOCK_CONFIRMED Event Subscription Behavior:
+        // The subscription correctly filters events based on event_types, returning only
+        // MergeMessage events as requested. However, the get_events API does not have
+        // filtering capability and returns ALL events in the ID range, including
+        // BLOCK_CONFIRMED events. This explains the different event counts between
+        // subscription results (filtered) and API results (unfiltered).
+        // to address
+
         let mut events = vec![];
         let start_time = Instant::now();
         loop {
@@ -702,6 +730,7 @@ mod tests {
                 shard_chunks[2].header.as_ref().unwrap().timestamp
             );
         };
+
         assert_events(&events, &shard_chunks);
 
         let req = Request::new(EventsRequest {
@@ -711,6 +740,14 @@ mod tests {
             page_size: None,
             page_token: None,
             reverse: None,
+            // Event Type Filtering Fix:
+            // Now both subscription and get_events API can filter by event type.
+            // This ensures consistent behavior between both APIs.
+            event_types: vec![HubEventType::MergeMessage as i32],
+            start_timestamp: None,
+            stop_timestamp: None,
+            start_block_number: None,
+            stop_block_number: None,
         });
         let res = service.get_events(req).await.unwrap();
         assert_events(&res.into_inner().events, &shard_chunks);

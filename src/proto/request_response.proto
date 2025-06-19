@@ -286,6 +286,23 @@ message EventsRequest {
   optional uint32 page_size = 4;
   optional bytes page_token = 5;
   optional bool reverse = 6;
+  // Optional Event Type Filtering:
+  // Allows filtering events by type, similar to SubscribeRequest.
+  // When provided, only events matching the specified types will be returned.
+  // When omitted, all events in the range will be returned (backward compatibility).
+  repeated HubEventType event_types = 7;
+  // Optional Timestamp Filtering:
+  // Allows filtering events by timestamp range, similar to FidTimestampRequest.
+  // When provided, only events within the timestamp range will be returned.
+  // When omitted, all events in the range will be returned (backward compatibility).
+  optional uint64 start_timestamp = 8;
+  optional uint64 stop_timestamp = 9;
+  // Optional Block Number Filtering:
+  // Allows filtering events by block number range.
+  // When provided, only events within the block number range will be returned.
+  // When omitted, all events in the range will be returned (backward compatibility).
+  optional uint64 start_block_number = 10;
+  optional uint64 stop_block_number = 11;
 }
 
 message EventsResponse {
