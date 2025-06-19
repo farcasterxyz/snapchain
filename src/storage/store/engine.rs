@@ -1170,10 +1170,7 @@ impl ShardEngine {
                 // Merge failures don't affect the trie. They are only for event subscribers
             }
             Some(proto::hub_event::Body::BlockConfirmedBody(_)) => {
-                // BLOCK_CONFIRMED Trie Handling:
-                // BLOCK_CONFIRMED events don't affect the trie state. They are metadata-only
-                // events that provide information about block completion and don't represent
-                // any state changes that need to be tracked in the Merkle trie.
+                // BLOCK_CONFIRMED events don't affect the trie state.
             }
             &None => {
                 // This should never happen

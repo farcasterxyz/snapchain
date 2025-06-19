@@ -1023,6 +1023,7 @@ pub enum HubEventType {
     HUB_EVENT_TYPE_MERGE_USERNAME_PROOF = 6,
     HUB_EVENT_TYPE_MERGE_ON_CHAIN_EVENT = 9,
     HUB_EVENT_TYPE_MERGE_FAILURE = 10,
+    HUB_EVENT_TYPE_BLOCK_CONFIRMED = 11,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1077,6 +1078,19 @@ pub struct MergeUsernameProofBody {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BlockConfirmedBody {
+    #[serde(rename = "blockNumber")]
+    pub block_number: u64,
+    #[serde(rename = "shardIndex")]
+    pub shard_index: u32,
+    pub timestamp: u64,
+    #[serde(rename = "blockHash", with = "serdehex")]
+    pub block_hash: Vec<u8>,
+    #[serde(rename = "totalEvents")]
+    pub total_events: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HubEvent {
     #[serde(rename = "type")]
     pub hub_event_type: String,
@@ -1099,6 +1113,8 @@ pub struct HubEvent {
     pub merge_on_chain_event_body: Option<MergeOnChainEventBody>,
     #[serde(rename = "mergeFailureBody", skip_serializing_if = "Option::is_none")]
     pub merge_failure_body: Option<MergeFailureBody>,
+    #[serde(rename = "blockConfirmedBody", skip_serializing_if = "Option::is_none")]
+    pub block_confirmed_body: Option<BlockConfirmedBody>,
     #[serde(rename = "blockNumber")]
     pub block_number: u64,
     #[serde(rename = "shardIndex")]
@@ -1913,6 +1929,7 @@ fn map_proto_hub_event_to_json_hub_event(
     let mut merge_username_proof_body: Option<MergeUsernameProofBody> = None;
     let mut merge_on_chain_event_body: Option<MergeOnChainEventBody> = None;
     let mut merge_failure_body: Option<MergeFailureBody> = None;
+    let mut block_confirmed_body: Option<BlockConfirmedBody> = None;
     match &hub_event.body {
         None => {}
         Some(hub_event::Body::MergeMessageBody(body)) => {
@@ -1973,9 +1990,14 @@ fn map_proto_hub_event_to_json_hub_event(
                 reason: body.reason.clone(),
             });
         }
-        Some(hub_event::Body::BlockConfirmedBody(_)) => {
-            // BLOCK_CONFIRMED events are metadata-only and don't need special handling
-            // in the HTTP API response mapping
+        Some(hub_event::Body::BlockConfirmedBody(body)) => {
+            block_confirmed_body = Some(BlockConfirmedBody {
+                block_number: body.block_number,
+                shard_index: body.shard_index,
+                timestamp: body.timestamp,
+                block_hash: body.block_hash.clone(),
+                total_events: body.total_events,
+            });
         }
     }
 
@@ -1994,6 +2016,7 @@ fn map_proto_hub_event_to_json_hub_event(
         merge_username_proof_body,
         merge_on_chain_event_body,
         merge_failure_body,
+        block_confirmed_body,
         block_number: hub_event.block_number,
         shard_index: hub_event.shard_index,
     })
