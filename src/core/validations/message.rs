@@ -18,6 +18,9 @@ const MAX_DATA_BYTES: usize = 2048;
 const MAX_DATA_BYTES_FOR_10K_CAST: usize = 16_384;
 const MAX_DATA_BYTES_FOR_LINK_COMPACT: usize = 65536;
 const EMBEDS_V1_CUTOFF: u32 = 73612800;
+const TWITTER_USERNAME_REGEX: &str = "^[a-z0-9_]{0,15}$";
+const FNAME_REGEX: &str = "^[a-z0-9][a-z0-9-]{0,15}$";
+const GITHUB_USERNAME_REGEX: &str = "^[a-zA-Z\\d](?:[a-zA-Z\\d]|-(?!-)){0,38}$";
 
 pub fn validate_message_type(message_type: i32) -> Result<(), ValidationError> {
     MessageType::try_from(message_type)
@@ -244,14 +247,14 @@ pub fn validate_fname(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::FnameExceedsLength(input.clone()));
     }
 
-    if !Regex::new("^[a-z0-9][a-z0-9-]{0,15}$")
+    if !Regex::new(FNAME_REGEX)
         .unwrap()
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
     {
         return Err(ValidationError::FnameDoesntMatch(
             input.clone(),
-            "^[a-z0-9][a-z0-9-]{0,15}$".to_string(),
+            FNAME_REGEX.to_string(),
         ));
     }
 
@@ -277,14 +280,14 @@ pub fn validate_ens_name(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::EnsNameExceedsLength(input.clone()));
     }
 
-    if !Regex::new("^[a-z0-9][a-z0-9-]{0,15}$")
+    if !Regex::new(FNAME_REGEX)
         .unwrap()
         .is_match(name_parts[0])
         .map_err(|_| ValidationError::InvalidData)?
     {
         return Err(ValidationError::EnsNameDoesntMatch(
             input.clone(),
-            "^[a-z0-9][a-z0-9-]{0,15}$".to_string(),
+            FNAME_REGEX.to_string(),
         ));
     }
 
@@ -306,7 +309,7 @@ pub fn validate_base_name(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::InvalidDataLength);
     }
 
-    if !Regex::new("^[a-z0-9][a-z0-9-]{0,15}$")
+    if !Regex::new(FNAME_REGEX)
         .unwrap()
         .is_match(&name_parts[0])
         .map_err(|_| ValidationError::InvalidData)?
@@ -322,14 +325,14 @@ pub fn validate_twitter_username(input: &String) -> Result<(), ValidationError> 
         return Err(ValidationError::UsernameExceedsLength(input.clone()));
     }
 
-    if !Regex::new("^[a-z0-9_]{0,15}$")
+    if !Regex::new(TWITTER_USERNAME_REGEX)
         .unwrap()
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
     {
         return Err(ValidationError::UsernameDoesntMatch(
             input.clone(),
-            "^[a-z0-9_]{0,15}$".to_string(),
+            TWITTER_USERNAME_REGEX.to_string(),
         ));
     }
 
@@ -341,7 +344,7 @@ pub fn validate_github_username(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::InvalidDataLength);
     }
 
-    if !Regex::new("^[a-zA-Z\\d](?:[a-zA-Z\\d]|-(?!-)){0,38}$")
+    if !Regex::new(GITHUB_USERNAME_REGEX)
         .unwrap()
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
