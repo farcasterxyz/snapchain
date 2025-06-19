@@ -1169,6 +1169,12 @@ impl ShardEngine {
             Some(proto::hub_event::Body::MergeFailure(_)) => {
                 // Merge failures don't affect the trie. They are only for event subscribers
             }
+            Some(proto::hub_event::Body::BlockConfirmedBody(_)) => {
+                // BLOCK_CONFIRMED Trie Handling:
+                // BLOCK_CONFIRMED events don't affect the trie state. They are metadata-only
+                // events that provide information about block completion and don't represent
+                // any state changes that need to be tracked in the Merkle trie.
+            }
             &None => {
                 // This should never happen
                 panic!("No body in event");
@@ -1393,14 +1399,32 @@ impl ShardEngine {
     pub fn commit_and_emit_events(
         &mut self,
         shard_chunk: &ShardChunk,
-        events: Vec<HubEvent>,
-        txn: RocksDbTransactionBatch,
+        mut events: Vec<HubEvent>,
+        mut txn: RocksDbTransactionBatch,
     ) {
+        let header = shard_chunk.header.as_ref().unwrap();
+        let height = header.height.as_ref().unwrap();
+        let mut block_confirmed = HubEvent::from(
+            proto::HubEventType::BlockConfirmed,
+            proto::hub_event::Body::BlockConfirmedBody(proto::BlockConfirmedBody {
+                block_number: height.block_number,
+                shard_index: height.shard_index,
+                timestamp: header.timestamp,
+                block_hash: shard_chunk.hash.clone(),
+                total_events: (events.len() + 1) as u64, // +1 for BLOCK_CONFIRMED itself
+            }),
+        );
+        let _block_confirmed_id = self
+            .stores
+            .event_handler
+            .commit_transaction(&mut txn, &mut block_confirmed)
+            .unwrap();
+        events.insert(0, block_confirmed);
+
         let now = std::time::Instant::now();
         self.db.commit(txn).unwrap();
         for mut event in events {
             event.timestamp = shard_chunk.header.as_ref().unwrap().timestamp;
-            // An error here just means there are no active receivers, which is fine and will happen if there are no active subscribe rpcs
             let _ = self.senders.events_tx.send(event);
         }
         self.stores.trie.reload(&self.db).unwrap();
@@ -1492,7 +1516,6 @@ impl ShardEngine {
                 shard_root = hex::encode(shard_root),
                 "No valid cached transaction to apply. Replaying proposal"
             );
-            // If we need to replay, reset the sequence number on the event id generator, just in case
             let header = &shard_chunk.header.as_ref().unwrap();
             let block_number = header.height.unwrap().block_number;
             self.stores.event_handler.set_current_height(block_number);

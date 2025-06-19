@@ -1973,6 +1973,10 @@ fn map_proto_hub_event_to_json_hub_event(
                 reason: body.reason.clone(),
             });
         }
+        Some(hub_event::Body::BlockConfirmedBody(_)) => {
+            // BLOCK_CONFIRMED events are metadata-only and don't need special handling
+            // in the HTTP API response mapping
+        }
     }
 
     Ok(HubEvent {

@@ -35,7 +35,7 @@ impl HubEventIdGenerator {
         self.current_seq = 0;
     }
 
-    fn generate_id(&mut self) -> Result<u64, HubError> {
+    fn generate_id(&mut self, event: &HubEvent) -> Result<u64, HubError> {
         if self.current_height >= 2u64.pow(HEIGHT_BITS) {
             return Err(HubError {
                 code: "bad_request.invalid_param".to_string(),
@@ -56,8 +56,28 @@ impl HubEventIdGenerator {
             });
         }
 
-        let event_id = Self::make_event_id(self.current_height, self.current_seq);
-        self.current_seq += 1;
+        let sequence = match event.r#type() {
+            crate::proto::HubEventType::BlockConfirmed => 0,
+            _ => {
+                if self.current_seq == 0 {
+                    self.current_seq = 1;
+                }
+                if self.current_seq >= 2u64.pow(SEQUENCE_BITS) {
+                    return Err(HubError {
+                        code: "bad_request.invalid_param".to_string(),
+                        message: format!(
+                            "sequence cannot fit in event id. Seq> {} bits",
+                            SEQUENCE_BITS
+                        ),
+                    });
+                }
+                let seq = self.current_seq;
+                self.current_seq += 1;
+                seq
+            }
+        };
+
+        let event_id = Self::make_event_id(self.current_height, sequence);
         Ok(event_id)
     }
 
@@ -100,7 +120,7 @@ impl StoreEventHandler {
         let mut generator = self.generator.lock().unwrap();
 
         // Generate the event ID
-        let event_id = generator.generate_id()?;
+        let event_id = generator.generate_id(&raw_event)?;
         raw_event.id = event_id;
 
         HubEvent::put_event_transaction(txn, &raw_event)?;

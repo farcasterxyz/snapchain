@@ -18,6 +18,7 @@ enum HubEventType {
   //  HUB_EVENT_TYPE_MERGE_STORAGE_ADMIN_REGISTRY_EVENT = 8;
   HUB_EVENT_TYPE_MERGE_ON_CHAIN_EVENT = 9;
   HUB_EVENT_TYPE_MERGE_FAILURE = 10;
+  HUB_EVENT_TYPE_BLOCK_CONFIRMED = 11;
 }
 
 message MergeMessageBody {
@@ -37,6 +38,14 @@ message PruneMessageBody {
 
 message RevokeMessageBody {
   Message message = 1;
+}
+
+message BlockConfirmedBody {
+  uint64 block_number = 1;
+  uint32 shard_index = 2;
+  uint64 timestamp = 3;
+  bytes block_hash = 4;
+  uint64 total_events = 5;
 }
 
 message MergeOnChainEventBody {
@@ -66,6 +75,7 @@ message HubEvent {
     //    MergeStorageAdminRegistryEventBody merge_storage_admin_registry_event_body = 10;
     MergeOnChainEventBody merge_on_chain_event_body = 11;
     MergeFailureBody merge_failure = 13;
+    BlockConfirmedBody block_confirmed_body = 16;
   };
   uint64 block_number = 12;
   uint32 shard_index = 14;

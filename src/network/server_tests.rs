@@ -713,7 +713,14 @@ mod tests {
             reverse: None,
         });
         let res = service.get_events(req).await.unwrap();
-        assert_events(&res.into_inner().events, &shard_chunks);
+        let inner_res = res.into_inner();
+        let filtered_events: Vec<HubEvent> = inner_res
+            .events
+            .into_iter()
+            .filter(|event| event.r#type == HubEventType::MergeMessage as i32)
+            .collect();
+        assert_eq!(filtered_events.len(), 4);
+        assert_events(&filtered_events, &shard_chunks);
 
         let req = Request::new(EventRequest {
             shard_index: 1,
