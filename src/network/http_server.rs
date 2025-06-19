@@ -444,7 +444,6 @@ pub struct FidTimestampRequest {
     pub start_timestamp: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_timestamp: Option<u64>,
-
     // For backwards compatibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pageSize: Option<u32>,
@@ -454,10 +453,6 @@ pub struct FidTimestampRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub pageToken: Option<Vec<u8>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub startTimestamp: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stopTimestamp: Option<u64>,
 }
 
 impl FidTimestampRequest {
@@ -466,8 +461,8 @@ impl FidTimestampRequest {
             fid: self.fid,
             page_size: self.page_size.or(self.pageSize),
             page_token: self.page_token.or(self.pageToken),
-            start_timestamp: self.start_timestamp.or(self.startTimestamp),
-            stop_timestamp: self.stop_timestamp.or(self.stopTimestamp),
+            start_timestamp: self.start_timestamp,
+            stop_timestamp: self.stop_timestamp,
             reverse: self.reverse,
         }
     }
@@ -1165,28 +1160,18 @@ pub struct EventsRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reverse: Option<bool>,
     // Optional Event Type Filtering:
-    // Allows filtering events by type, similar to SubscribeRequest.
-    // When provided, only events matching the specified types will be returned.
-    // When omitted, all events in the range will be returned (backward compatibility).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     event_types: Option<Vec<HubEventType>>,
     // Optional Timestamp Filtering:
-    // Allows filtering events by timestamp range, similar to FidTimestampRequest.
-    // When provided, only events within the timestamp range will be returned.
-    // When omitted, all events in the range will be returned (backward compatibility).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     start_timestamp: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stop_timestamp: Option<u64>,
     // Optional Block Number Filtering:
-    // Allows filtering events by block number range.
-    // When provided, only events within the block number range will be returned.
-    // When omitted, all events in the range will be returned (backward compatibility).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     start_block_number: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stop_block_number: Option<u64>,
-
     // For backwards compatibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pageSize: Option<u32>,
@@ -1196,14 +1181,6 @@ pub struct EventsRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub pageToken: Option<Vec<u8>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub startTimestamp: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stopTimestamp: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub startBlockNumber: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stopBlockNumber: Option<u64>,
 }
 
 impl EventsRequest {
@@ -1215,19 +1192,16 @@ impl EventsRequest {
             page_size: self.page_size.or(self.pageSize),
             page_token: self.page_token.or(self.pageToken),
             reverse: self.reverse,
-            // Convert HubEventType enum to protobuf i32 values for filtering
             event_types: self
                 .event_types
                 .unwrap_or_default()
                 .into_iter()
                 .map(|t| t as i32)
                 .collect(),
-            // Timestamp filtering fields with backwards compatibility
-            start_timestamp: self.start_timestamp.or(self.startTimestamp),
-            stop_timestamp: self.stop_timestamp.or(self.stopTimestamp),
-            // Block number filtering fields with backwards compatibility
-            start_block_number: self.start_block_number.or(self.startBlockNumber),
-            stop_block_number: self.stop_block_number.or(self.stopBlockNumber),
+            start_timestamp: self.start_timestamp,
+            stop_timestamp: self.stop_timestamp,
+            start_block_number: self.start_block_number,
+            stop_block_number: self.stop_block_number,
         }
     }
 }
