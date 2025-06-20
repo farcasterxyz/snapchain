@@ -2592,9 +2592,9 @@ dependencies = [
 
 [[package]]
 name = "derive-where"
-version = "1.2.7"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62d671cc41a825ebabc75757b62d3d168c577f9149b2d49ece1dad1f72119d25"
+checksum = "510c292c8cf384b1a340b816a9a6cf2599eb8f566a44949024af88418000c50b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4424,14 +4424,14 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-codec"
-version = "0.0.1"
+version = "0.3.0-pre"
 dependencies = [
  "bytes",
 ]
 
 [[package]]
 name = "informalsystems-malachitebft-config"
-version = "0.0.1"
+version = "0.3.0-pre"
 dependencies = [
  "bytesize",
  "config",
@@ -4443,7 +4443,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-core-consensus"
-version = "0.0.1"
+version = "0.3.0-pre"
 dependencies = [
  "async-recursion",
  "derive-where",
@@ -4459,7 +4459,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-core-driver"
-version = "0.0.1"
+version = "0.3.0-pre"
 dependencies = [
  "derive-where",
  "informalsystems-malachitebft-core-state-machine",
@@ -4470,7 +4470,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-core-state-machine"
-version = "0.0.1"
+version = "0.3.0-pre"
 dependencies = [
  "derive-where",
  "displaydoc",
@@ -4479,16 +4479,17 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-core-types"
-version = "0.0.1"
+version = "0.3.0-pre"
 dependencies = [
  "bytes",
  "derive-where",
+ "informalsystems-malachitebft-peer",
  "thiserror 2.0.12",
 ]
 
 [[package]]
 name = "informalsystems-malachitebft-core-votekeeper"
-version = "0.0.1"
+version = "0.3.0-pre"
 dependencies = [
  "derive-where",
  "informalsystems-malachitebft-core-types",
@@ -4497,7 +4498,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-discovery"
-version = "0.0.1"
+version = "0.3.0-pre"
 dependencies = [
  "either",
  "informalsystems-malachitebft-metrics",
@@ -4510,7 +4511,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-engine"
-version = "0.0.1"
+version = "0.3.0-pre"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -4535,7 +4536,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-metrics"
-version = "0.0.1"
+version = "0.3.0-pre"
 dependencies = [
  "informalsystems-malachitebft-core-state-machine",
  "prometheus-client",
@@ -4543,7 +4544,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-network"
-version = "0.0.1"
+version = "0.3.0-pre"
 dependencies = [
  "bytes",
  "either",
@@ -4563,7 +4564,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-peer"
-version = "0.0.1"
+version = "0.3.0-pre"
 dependencies = [
  "bs58",
  "multihash",
@@ -4572,7 +4573,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-sync"
-version = "0.0.1"
+version = "0.3.0-pre"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4592,7 +4593,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-wal"
-version = "0.0.1"
+version = "0.3.0-pre"
 dependencies = [
  "advisory-lock",
  "bytes",
@@ -8316,9 +8317,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.44.2"
+version = "1.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6b88822cbe49de4185e3a4cbf8321dd487cf5fe0c5c65695fef6346371e9c48"
+checksum = "75ef51a33ef1da925cea3e4eb122833cb377c61439ca401b770f54902b806779"
 dependencies = [
  "backtrace",
  "bytes",
