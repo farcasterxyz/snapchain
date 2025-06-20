@@ -26,10 +26,10 @@ pub fn validate_cast_add_body(
             return Err(ValidationError::ProUserFeature);
         }
         Ok(CastType::TenKCast) if text_bytes.len() > 10_000 => {
-            return Err(ValidationError::InvalidDataLength);
+            return Err(ValidationError::TextTooShortFor10kCast);
         }
         Ok(CastType::TenKCast) if text_bytes.len() <= 1024 => {
-            return Err(ValidationError::InvalidDataLength);
+            return Err(ValidationError::TextTooLongFor10kCast);
         }
         Err(_) => {
             return Err(ValidationError::InvalidCastType);
@@ -59,7 +59,7 @@ pub fn validate_cast_add_body(
     }
 
     if !body.embeds.is_empty() && !body.embeds_deprecated.is_empty() {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::InvalidEmbedsAndStringEmbeds);
     }
 
     if body.text.is_empty()
@@ -114,7 +114,7 @@ pub fn validate_embed(embed: &Embed) -> Result<(), ValidationError> {
             embed::Embed::Url(url) => validate_url(&url),
             embed::Embed::CastId(cast_id) => validate_cast_id(&cast_id),
         },
-        None => Err(ValidationError::InvalidData),
+        None => Err(ValidationError::MissingEmbed),
     }
 }
 

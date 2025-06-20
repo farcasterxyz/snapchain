@@ -350,7 +350,10 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap(),
-            ValidationError::EnsNameDoesntEndWithEth("very_long_invalid_proof.ens".to_string())
+            ValidationError::EnsNameDoesntEndWith(
+                "very_long_invalid_proof.ens".to_string(),
+                ".eth".to_string()
+            )
         );
     }
 

@@ -11,7 +11,7 @@ pub fn validate_reaction_type(type_num: i32) -> Result<(), ValidationError> {
 
 pub fn validate_network(network: i32) -> Result<(), ValidationError> {
     FarcasterNetwork::try_from(network)
-        .map_or_else(|_| Err(ValidationError::InvalidData), |_| Ok(()))
+        .map_or_else(|_| Err(ValidationError::InvalidNetwork), |_| Ok(()))
 }
 
 pub fn validate_target(target: &Target) -> Result<(), ValidationError> {

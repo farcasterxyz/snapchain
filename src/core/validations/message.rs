@@ -24,7 +24,7 @@ const GITHUB_USERNAME_REGEX: &str = "^[a-zA-Z\\d](?:[a-zA-Z\\d]|-(?!-)){0,38}$";
 
 pub fn validate_message_type(message_type: i32) -> Result<(), ValidationError> {
     MessageType::try_from(message_type)
-        .map_or_else(|_| Err(ValidationError::InvalidData), |_| Ok(()))
+        .map_or_else(|_| Err(ValidationError::InvalidMessageType), |_| Ok(()))
 }
 
 fn validate_bytes_as_string(
@@ -33,10 +33,10 @@ fn validate_bytes_as_string(
     required: bool,
 ) -> Result<(), ValidationError> {
     if required && byte_array.len() == 0 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::MissingString);
     }
     if byte_array.len() as u64 > max_length {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::StringTooLong);
     }
     Ok(())
 }
@@ -107,7 +107,7 @@ pub fn validate_message(
         };
 
     if data_bytes.len() > max_data_size {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::DataBytesTooLong(max_data_size as u64));
     }
 
     let network = FarcasterNetwork::try_from(message_data.network)
@@ -155,7 +155,7 @@ pub fn validate_message(
                         return Err(ValidationError::UnsupportedFeature);
                     }
                 }
-                _ => return Err(ValidationError::InvalidData),
+                _ => return Err(ValidationError::InvalidUsernameType),
             }
         }
         Some(proto::message_data::Body::VerificationAddAddressBody(add)) => {
@@ -263,7 +263,10 @@ pub fn validate_fname(input: &String) -> Result<(), ValidationError> {
 
 pub fn validate_ens_name(input: &String) -> Result<(), ValidationError> {
     if !input.ends_with(".eth") {
-        return Err(ValidationError::EnsNameDoesntEndWithEth(input.clone()));
+        return Err(ValidationError::EnsNameDoesntEndWith(
+            input.clone(),
+            ".eth".to_string(),
+        ));
     }
 
     let name_parts: Vec<&str> = input.split('.').collect();
@@ -296,7 +299,10 @@ pub fn validate_ens_name(input: &String) -> Result<(), ValidationError> {
 
 pub fn validate_base_name(input: &String) -> Result<(), ValidationError> {
     if !input.ends_with(".base.eth") {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::EnsNameDoesntEndWith(
+            input.clone(),
+            ".base.eth".to_string(),
+        ));
     }
 
     let name_parts: Vec<&str> = input.split('.').collect();
@@ -306,7 +312,7 @@ pub fn validate_base_name(input: &String) -> Result<(), ValidationError> {
 
     if input.len() > 25 {
         // 16 for fname + 9 for ".base.eth"
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::EnsNameExceedsLength(input.clone()));
     }
 
     if !Regex::new(FNAME_REGEX)
@@ -314,7 +320,10 @@ pub fn validate_base_name(input: &String) -> Result<(), ValidationError> {
         .is_match(&name_parts[0])
         .map_err(|_| ValidationError::InvalidData)?
     {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::EnsNameDoesntMatch(
+            input.clone(),
+            FNAME_REGEX.to_string(),
+        ));
     }
 
     Ok(())
@@ -322,7 +331,7 @@ pub fn validate_base_name(input: &String) -> Result<(), ValidationError> {
 
 pub fn validate_twitter_username(input: &String) -> Result<(), ValidationError> {
     if input.len() > 15 {
-        return Err(ValidationError::UsernameExceedsLength(input.clone()));
+        return Err(ValidationError::UsernameExceedsLength(input.clone(), 15));
     }
 
     if !Regex::new(TWITTER_USERNAME_REGEX)
@@ -341,7 +350,7 @@ pub fn validate_twitter_username(input: &String) -> Result<(), ValidationError> 
 
 pub fn validate_github_username(input: &String) -> Result<(), ValidationError> {
     if input.len() > 38 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::UsernameExceedsLength(input.clone(), 38));
     }
 
     if !Regex::new(GITHUB_USERNAME_REGEX)
@@ -349,7 +358,10 @@ pub fn validate_github_username(input: &String) -> Result<(), ValidationError> {
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
     {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::UsernameDoesntMatch(
+            input.clone(),
+            GITHUB_USERNAME_REGEX.to_string(),
+        ));
     }
 
     Ok(())
@@ -464,7 +476,7 @@ pub fn validate_user_data_add_body(
                 return Err(ValidationError::ProUserFeature);
             }
             if value_bytes.len() > 256 {
-                return Err(ValidationError::InvalidDataLength);
+                return Err(ValidationError::BannerValueTooLong);
             }
         }
         UserDataType::Display => {
@@ -515,7 +527,7 @@ pub fn validate_user_data_add_body(
             }
             validate_user_data_primary_address_solana(&body.value)?;
         }
-        UserDataType::None => return Err(ValidationError::InvalidData),
+        UserDataType::None => return Err(ValidationError::InvalidUserDataType),
     }
 
     Ok(())

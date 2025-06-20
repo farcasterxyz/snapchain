@@ -2,7 +2,7 @@ use thiserror::Error;
 
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum ValidationError {
-    #[error("Message data is missing")]
+    #[error("data is missing")]
     MissingData,
     #[error("invalid hash")]
     InvalidHash,
@@ -18,11 +18,11 @@ pub enum ValidationError {
     InvalidDataLength,
     #[error("invalid signatureScheme")]
     InvalidSignatureScheme,
-    #[error("Signer is empty or invalid")]
+    #[error("signer is missing or invalid")]
     MissingOrInvalidSigner,
-    #[error("Signature is empty")]
+    #[error("signature is missing")]
     MissingSignature,
-    #[error("Invalid network")]
+    #[error("invalid network")]
     InvalidNetwork,
     #[error("Invalid button index")]
     InvalidButtonIndex,
@@ -36,8 +36,8 @@ pub enum ValidationError {
     EnsNameDoesntMatch(String, String),
     #[error("ensName \"{0}\" > 20 characters")]
     EnsNameExceedsLength(String),
-    #[error("ensName \"{0}\" doesn't end with .eth")]
-    EnsNameDoesntEndWithEth(String),
+    #[error("ensName \"{0}\" doesn't end with {1}")]
+    EnsNameDoesntEndWith(String, String),
     #[error("ensName \"{0}\" unsupported subdomain")]
     EnsNameUnsupportedSubdomain(String),
     #[error("ensName \"{0}\" is not a valid ENS name")]
@@ -46,6 +46,10 @@ pub enum ValidationError {
     TextTooLongForLongCast,
     #[error("text too short for long cast")]
     TextTooShortForLongCast,
+    #[error("text too short for 10k cast")]
+    TextTooShortFor10kCast,
+    #[error("text > 10,000 bytes for 10k cast")]
+    TextTooLongFor10kCast,
     #[error("invalid cast type")]
     InvalidCastType,
     #[error("string embeds > 2")]
@@ -56,14 +60,14 @@ pub enum ValidationError {
     UrlTooLong,
     #[error("cast is empty")]
     CastIsEmpty,
-    #[error("text is missing")]
-    TextIsMissing,
     #[error("text > 320 bytes")]
     TextTooLong,
     #[error("embeds > 4")]
     EmbedsExceedsLimit,
     #[error("string embeds have been deprecated")]
     StringEmbedsDeprecated,
+    #[error("cannot use both embeds and string embeds")]
+    InvalidEmbedsAndStringEmbeds,
     #[error("fid is missing")]
     FidIsMissing,
     #[error("fname is missing")]
@@ -76,18 +80,16 @@ pub enum ValidationError {
     MentionsMismatch,
     #[error("mentionsPositions must be a position in text")]
     MentionsPositionsInvalid,
-    #[error("mentionsPositions must be integers")]
-    MentionsPositionsMustBeIntegers,
     #[error("mentionsPositions must be sorted in ascending order")]
     MentionsPositionsNotSorted,
     #[error("invalid reaction type")]
     InvalidReactionType,
     #[error("target is missing")]
     TargetIsMissing,
-    #[error("cannot use both targetUrl and targetCastId")]
-    CannotUseBothTargets,
     #[error("pfp value > 256")]
     PfpValueTooLong,
+    #[error("banner value > 256")]
+    BannerValueTooLong,
     #[error("display value > 32")]
     DisplayValueTooLong,
     #[error("bio value > 256")]
@@ -102,12 +104,40 @@ pub enum ValidationError {
     InvalidLocationString,
     #[error("username \"{0}\" doesn't match {1}")]
     UsernameDoesntMatch(String, String),
-    #[error("username \"{0}\" > 15 characters")]
-    UsernameExceedsLength(String),
-    #[error("only one body can be set")]
-    OnlyOneBodyCanBeSet,
+    #[error("username \"{0}\" > {1} characters")]
+    UsernameExceedsLength(String, u64),
     #[error("invalid length for eth address")]
     InvalidEthAddressLength,
     #[error("invalid length for sol address")]
     InvalidSolAddressLength,
+    #[error("solana address is missing")]
+    SolAddressMissing,
+    #[error("blockHash must be 32 bytes")]
+    InvalidBlockhashLength,
+    #[error("blockHash is missing")]
+    BlockHashMissing,
+    #[error("claimSignature > 2048 bytes")]
+    InvalidEthClaimSignatureLength,
+    #[error("claimSignature != 64 bytes")]
+    InvalidSolClaimSignatureLength,
+    #[error("invalid message type")]
+    InvalidMessageType,
+    #[error("invalid user data type")]
+    InvalidUserDataType,
+    #[error("invalid username type")]
+    InvalidUsernameType,
+    #[error("invalid claimSignature")]
+    InvalidClaimSignature,
+    #[error("type must be between 1-8 characters")]
+    InvalidLinkType,
+    #[error("invalid username")]
+    InvalidUsername,
+    #[error("value is missing")]
+    MissingString,
+    #[error("value is too long")]
+    StringTooLong,
+    #[error("dataBytes > {0} bytess")]
+    DataBytesTooLong(u64),
+    #[error("embed is missing")]
+    MissingEmbed,
 }
