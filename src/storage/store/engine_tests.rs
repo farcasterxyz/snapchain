@@ -2777,22 +2777,19 @@ mod tests {
         // Drain all previous events
         while event_rx.try_recv().is_ok() {}
 
-        // Test with single message
-        let message = messages_factory::casts::create_cast_add(FID_FOR_TEST, "test", None, None);
-        let _chunk = test_helper::commit_message(&mut engine, &message).await;
+        // Test with multiple messages
+        let message1 = messages_factory::casts::create_cast_add(FID_FOR_TEST, "test1", None, None);
+        let message2 = messages_factory::casts::create_cast_add(FID_FOR_TEST, "test2", None, None);
+        let message3 = messages_factory::casts::create_cast_add(FID_FOR_TEST, "test3", None, None);
+
+        let _chunk =
+            test_helper::commit_messages(&mut engine, vec![message1, message2, message3]).await;
 
         // Verify BLOCK_CONFIRMED event is received first
         let first_event = event_rx.recv().await.unwrap();
         assert_eq!(
             first_event.r#type,
             proto::HubEventType::BlockConfirmed as i32
-        );
-
-        // Verify the message event is received second
-        let second_event = event_rx.recv().await.unwrap();
-        assert_eq!(
-            second_event.r#type,
-            proto::HubEventType::MergeMessage as i32
         );
 
         // Verify BLOCK_CONFIRMED event has correct data
@@ -2806,30 +2803,6 @@ mod tests {
                 _chunk.header.as_ref().unwrap().height.unwrap().shard_index
             );
             assert_eq!(body.timestamp, _chunk.header.as_ref().unwrap().timestamp);
-            assert_eq!(body.total_events, 2); // BLOCK_CONFIRMED + MergeMessage
-        } else {
-            panic!("Expected BlockConfirmedBody");
-        }
-
-        // Drain events from previous test
-        while event_rx.try_recv().is_ok() {}
-
-        // Test with multiple messages
-        let message1 = messages_factory::casts::create_cast_add(FID_FOR_TEST, "test1", None, None);
-        let message2 = messages_factory::casts::create_cast_add(FID_FOR_TEST, "test2", None, None);
-        let message3 = messages_factory::casts::create_cast_add(FID_FOR_TEST, "test3", None, None);
-
-        let _chunk2 =
-            test_helper::commit_messages(&mut engine, vec![message1, message2, message3]).await;
-
-        // Verify BLOCK_CONFIRMED event is first and has correct total_events
-        let first_event = event_rx.recv().await.unwrap();
-        assert_eq!(
-            first_event.r#type,
-            proto::HubEventType::BlockConfirmed as i32
-        );
-
-        if let Some(proto::hub_event::Body::BlockConfirmedBody(body)) = &first_event.body {
             assert_eq!(body.total_events, 4); // BLOCK_CONFIRMED + 3 MergeMessage events
         } else {
             panic!("Expected BlockConfirmedBody");

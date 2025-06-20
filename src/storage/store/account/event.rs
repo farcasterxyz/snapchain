@@ -79,10 +79,7 @@ impl HubEventIdGenerator {
     }
 
     pub fn make_event_id_for_block_number(height: u64) -> u64 {
-        let seq = 0;
-        let shifted_height = height << SEQUENCE_BITS;
-        let padded_seq = seq & ((1 << SEQUENCE_BITS) - 1); // Ensures seq fits in SEQUENCE_BITS
-        shifted_height | padded_seq
+        Self::make_event_id(height, 0)
     }
 
     pub fn extract_height_and_seq(event_id: u64) -> (u64, u64) {
