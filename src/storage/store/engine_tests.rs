@@ -1458,7 +1458,7 @@ mod tests {
             &mut engine,
             &cast_add,
             "bad_request.validation_failure",
-            "Invalid network",
+            "invalid network",
         )
         .await;
     }
