@@ -110,6 +110,8 @@ pub enum ValidationError {
     InvalidEthAddressLength,
     #[error("invalid length for sol address")]
     InvalidSolAddressLength,
+    #[error("ethereum address is missing")]
+    EthAddressMissing,
     #[error("solana address is missing")]
     SolAddressMissing,
     #[error("blockHash must be 32 bytes")]

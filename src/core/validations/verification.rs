@@ -172,7 +172,7 @@ pub fn validate_fname_transfer(
 
 pub fn validate_eth_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationError> {
     if address.len() == 0 {
-        return Err(ValidationError::SolAddressMissing);
+        return Err(ValidationError::EthAddressMissing);
     }
 
     if address.len() != 20 {
