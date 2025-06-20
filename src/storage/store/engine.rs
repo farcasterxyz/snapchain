@@ -1421,7 +1421,7 @@ impl ShardEngine {
         let now = std::time::Instant::now();
         self.db.commit(txn).unwrap();
         for mut event in events {
-            event.timestamp = shard_chunk.header.as_ref().unwrap().timestamp;
+            event.timestamp = header.timestamp;
             let _ = self.senders.events_tx.send(event);
         }
         self.stores.trie.reload(&self.db).unwrap();

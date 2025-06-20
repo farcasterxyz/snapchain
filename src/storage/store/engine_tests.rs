@@ -1390,7 +1390,7 @@ mod tests {
         // Ignore first 3 blocks which are user registration events
         let events = HubEvent::get_events(
             engine.db.clone(),
-            HubEventIdGenerator::make_event_id_with_seq_0(4),
+            HubEventIdGenerator::make_event_id_for_block_number(4),
             None,
             None,
         )
@@ -2777,14 +2777,9 @@ mod tests {
         // Drain all previous events
         while event_rx.try_recv().is_ok() {}
 
-        // Create a message to commit
+        // Test with single message
         let message = messages_factory::casts::create_cast_add(FID_FOR_TEST, "test", None, None);
-        let state_change = engine.propose_state_change(
-            1,
-            vec![MempoolMessage::UserMessage(message.clone())],
-            None,
-        );
-        let _chunk = test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        let _chunk = test_helper::commit_message(&mut engine, &message).await;
 
         // Verify BLOCK_CONFIRMED event is received first
         let first_event = event_rx.recv().await.unwrap();
@@ -2815,10 +2810,43 @@ mod tests {
         } else {
             panic!("Expected BlockConfirmedBody");
         }
+
+        // Drain events from previous test
+        while event_rx.try_recv().is_ok() {}
+
+        // Test with multiple messages
+        let message1 = messages_factory::casts::create_cast_add(FID_FOR_TEST, "test1", None, None);
+        let message2 = messages_factory::casts::create_cast_add(FID_FOR_TEST, "test2", None, None);
+        let message3 = messages_factory::casts::create_cast_add(FID_FOR_TEST, "test3", None, None);
+
+        let _chunk2 =
+            test_helper::commit_messages(&mut engine, vec![message1, message2, message3]).await;
+
+        // Verify BLOCK_CONFIRMED event is first and has correct total_events
+        let first_event = event_rx.recv().await.unwrap();
+        assert_eq!(
+            first_event.r#type,
+            proto::HubEventType::BlockConfirmed as i32
+        );
+
+        if let Some(proto::hub_event::Body::BlockConfirmedBody(body)) = &first_event.body {
+            assert_eq!(body.total_events, 4); // BLOCK_CONFIRMED + 3 MergeMessage events
+        } else {
+            panic!("Expected BlockConfirmedBody");
+        }
+
+        // Verify we receive 3 message events after BLOCK_CONFIRMED
+        for _ in 0..3 {
+            let event = event_rx.recv().await.unwrap();
+            assert_eq!(event.r#type, proto::HubEventType::MergeMessage as i32);
+        }
     }
 
     #[tokio::test]
     async fn test_block_confirmed_event_sequence_number() {
+        // Test that events are committed to the database in the correct order.
+        // This is distinct from the previous test which checks that events are emitted
+        // from the channel in the right order.
         let (mut engine, _tmpdir) = test_helper::new_engine();
 
         // Register user
@@ -2832,12 +2860,7 @@ mod tests {
 
         // Create and commit a message
         let message = messages_factory::casts::create_cast_add(FID_FOR_TEST, "test", None, None);
-        let state_change = engine.propose_state_change(
-            1,
-            vec![MempoolMessage::UserMessage(message.clone())],
-            None,
-        );
-        let _chunk = test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        let _chunk = test_helper::commit_message(&mut engine, &message).await;
 
         // Get events from database for this specific block
         let block_number = _chunk.header.as_ref().unwrap().height.unwrap().block_number;
@@ -2870,59 +2893,6 @@ mod tests {
             .expect("MergeMessage event not found");
         let (_, sequence) = HubEventIdGenerator::extract_height_and_seq(message_event.id);
         assert_eq!(sequence, 1);
-    }
-
-    #[tokio::test]
-    async fn test_block_confirmed_event_with_multiple_messages() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
-        let mut event_rx = engine.get_senders().events_tx.subscribe();
-
-        // Register user
-        test_helper::register_user(
-            FID_FOR_TEST,
-            test_helper::default_signer(),
-            test_helper::default_custody_address(),
-            &mut engine,
-        )
-        .await;
-
-        // Drain all previous events
-        while event_rx.try_recv().is_ok() {}
-
-        // Create multiple messages
-        let message1 = messages_factory::casts::create_cast_add(FID_FOR_TEST, "test1", None, None);
-        let message2 = messages_factory::casts::create_cast_add(FID_FOR_TEST, "test2", None, None);
-        let message3 = messages_factory::casts::create_cast_add(FID_FOR_TEST, "test3", None, None);
-
-        let state_change = engine.propose_state_change(
-            1,
-            vec![
-                MempoolMessage::UserMessage(message1.clone()),
-                MempoolMessage::UserMessage(message2.clone()),
-                MempoolMessage::UserMessage(message3.clone()),
-            ],
-            None,
-        );
-        let _chunk = test_helper::validate_and_commit_state_change(&mut engine, &state_change);
-
-        // Verify BLOCK_CONFIRMED event is first and has correct total_events
-        let first_event = event_rx.recv().await.unwrap();
-        assert_eq!(
-            first_event.r#type,
-            proto::HubEventType::BlockConfirmed as i32
-        );
-
-        if let Some(proto::hub_event::Body::BlockConfirmedBody(body)) = &first_event.body {
-            assert_eq!(body.total_events, 4); // BLOCK_CONFIRMED + 3 MergeMessage events
-        } else {
-            panic!("Expected BlockConfirmedBody");
-        }
-
-        // Verify we receive 3 message events after BLOCK_CONFIRMED
-        for _ in 0..3 {
-            let event = event_rx.recv().await.unwrap();
-            assert_eq!(event.r#type, proto::HubEventType::MergeMessage as i32);
-        }
     }
 
     #[tokio::test]

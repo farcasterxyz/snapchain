@@ -724,7 +724,7 @@ mod tests {
 
         let req = Request::new(EventRequest {
             shard_index: 1,
-            id: HubEventIdGenerator::make_event_id_with_seq_0(
+            id: HubEventIdGenerator::make_event_id_for_block_number(
                 shard_chunks[2]
                     .header
                     .as_ref()
