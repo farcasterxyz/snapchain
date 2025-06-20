@@ -1,12 +1,13 @@
-use informalsystems_malachitebft_config::{TimeoutConfig, ValueSyncConfig};
-use informalsystems_malachitebft_core_consensus::{ValuePayload, VoteSyncMode};
+use informalsystems_malachitebft_config::{
+    ConsensusConfig, P2pConfig, TimeoutConfig, ValuePayload as ValuePayloadConfig, ValueSyncConfig,
+};
+use informalsystems_malachitebft_core_consensus::ValuePayload;
 use informalsystems_malachitebft_engine::consensus::{Consensus, ConsensusParams, ConsensusRef};
 use informalsystems_malachitebft_engine::host::HostRef;
 use informalsystems_malachitebft_engine::network::NetworkRef;
 use informalsystems_malachitebft_network::{PeerId as MalachitePeerId, PeerIdExt};
 use informalsystems_malachitebft_sync::Metrics as SyncMetrics;
 use std::path::Path;
-use std::time::Duration;
 use tracing::Span;
 
 use crate::consensus::consensus::Config;
@@ -98,14 +99,20 @@ pub async fn spawn_consensus_actor(
         address,
         threshold_params: Default::default(),
         value_payload: ValuePayload::ProposalAndParts,
-        vote_sync_mode: VoteSyncMode::RequestResponse,
     };
     let signing_provider = ctx.signing_provider();
+
+    let consensus_config = ConsensusConfig {
+        queue_capacity: 1000,
+        timeouts: timeout_cfg,
+        value_payload: ValuePayloadConfig::ProposalAndParts,
+        p2p: P2pConfig::default(), // This is not actually using in the consensus actor. Ensure this is the case on future upgrades
+    };
 
     Consensus::spawn(
         ctx,
         consensus_params,
-        timeout_cfg,
+        consensus_config,
         Box::new(signing_provider),
         network,
         host,
@@ -156,8 +163,7 @@ fn timeout_from_config(config: &Config) -> TimeoutConfig {
         timeout_precommit_delta: config.step_delta,
         timeout_prevote_delta: config.step_delta,
         timeout_propose_delta: config.step_delta,
-        timeout_commit: Duration::from_millis(0),
-        timeout_step: Duration::from_secs(10),
+        timeout_rebroadcast: config.propose_time + config.prevote_time + config.precommit_time,
     }
 }
 
