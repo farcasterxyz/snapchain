@@ -81,7 +81,14 @@ impl HubEventIdGenerator {
         Ok(event_id)
     }
 
-    pub fn make_event_id(height: u64, seq: u64) -> u64 {
+    fn make_event_id(height: u64, seq: u64) -> u64 {
+        let shifted_height = height << SEQUENCE_BITS;
+        let padded_seq = seq & ((1 << SEQUENCE_BITS) - 1); // Ensures seq fits in SEQUENCE_BITS
+        shifted_height | padded_seq
+    }
+
+    pub fn make_event_id_with_seq_0(height: u64) -> u64 {
+        let seq = 0;
         let shifted_height = height << SEQUENCE_BITS;
         let padded_seq = seq & ((1 << SEQUENCE_BITS) - 1); // Ensures seq fits in SEQUENCE_BITS
         shifted_height | padded_seq
@@ -214,7 +221,7 @@ impl HubEvent {
         page_options: &PageOptions,
         throttle: Duration,
     ) -> Result<u32, HubError> {
-        let stop_event_id = HubEventIdGenerator::make_event_id(stop_height, 0);
+        let stop_event_id = HubEventIdGenerator::make_event_id_with_seq_0(stop_height);
         let start_event_key = Self::make_event_key(0);
         let stop_event_key = Self::make_event_key(stop_event_id);
         let total_pruned = db

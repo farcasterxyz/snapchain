@@ -1357,7 +1357,7 @@ mod tests {
         // Ignore first 3 blocks which are user registration events
         let events = HubEvent::get_events(
             engine.db.clone(),
-            HubEventIdGenerator::make_event_id(4, 0),
+            HubEventIdGenerator::make_event_id_with_seq_0(4),
             None,
             None,
         )
