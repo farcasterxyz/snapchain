@@ -44,11 +44,14 @@ pub type InflightRequests = HashMap<OutboundRequestId, InflightRequest>;
 #[derive(Debug)]
 pub enum Msg {
     /// Internal tick
-    Tick { reply_to: Option<RpcReplyPort<()>> },
+    Tick {
+        reply_to: Option<RpcReplyPort<()>>,
+    },
 
     /// Receive an even from gossip layer
     NetworkEvent(NetworkEvent<SnapchainValidatorContext>),
 
+    Started(Height),
     /// Consensus has decided on a value at the given height
     Decided(Height),
 
@@ -381,6 +384,11 @@ impl ReadSync {
 
             Msg::Decided(height) => {
                 self.process_input(&myself, state, sync::Input::Decided(height))
+                    .await?;
+            }
+
+            Msg::Started(height) => {
+                self.process_input(&myself, state, sync::Input::StartedHeight(height, false))
                     .await?;
             }
 

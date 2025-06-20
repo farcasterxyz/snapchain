@@ -284,7 +284,7 @@ mod tests {
                         }),
                         min_height: Some(Height {
                             shard_index: read_node_engine.shard_id(),
-                            block_number: 1,
+                            block_number: 0,
                         }),
                     })
                     .encode_to_vec(),
