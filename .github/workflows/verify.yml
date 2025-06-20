@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  MALACHITE_GIT_REF: "13bca14cd209d985c3adf101a02924acde8723a5"
+  MALACHITE_GIT_REF: "44f6292bd7fa9214a2f14a9af0893e8e30b677ef"
 
 jobs:
   build:

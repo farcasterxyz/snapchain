@@ -64,6 +64,7 @@ message Proposal {
   int64 pol_round = 3;
   bytes proposer = 4;
   ShardHash value = 5;
+  optional bool validity = 6; // This is only set when proposal are serialized locally, not when sent over the network
 //  repeated Transaction transactions = 4;  // Transactions for the shard level proposals (submitted by shard leader)
 //  repeated ShardHeader shard_headers = 5; // shard headers for the block level proposal (submitted by the block leader)
 }
@@ -171,7 +172,7 @@ message MempoolMessage {
 
 message StatusMessage {
   bytes peer_id = 1;
-  Height height = 2;
+  Height tip_height = 2;
   Height min_height = 3;
 }
 
@@ -179,15 +180,9 @@ message SyncValueRequest {
   Height height = 1;
 }
 
-message SyncVoteSetRequest {
-  Height height = 1;
-  int64 round = 2;
-}
-
 message SyncRequest {
   oneof sync_request {
     SyncValueRequest value = 1;
-    SyncVoteSetRequest vote_set = 2;
   }
 }
 
@@ -197,16 +192,50 @@ message SyncValueResponse {
   Commits commits = 3;
 }
 
-message SyncVoteSetResponse {
-  Height height = 1;
-  int64 round = 2;
-  repeated Vote votes = 3;
-  repeated bytes signatures = 4;
-}
-
 message SyncResponse {
   oneof sync_response {
     SyncValueResponse value = 1;
-    SyncVoteSetResponse vote_set = 2;
+  }
+}
+
+// Liveness messages
+message PolkaSignature {
+  // TODO: Add flag (no vote, nil, value?)
+  bytes validator_address = 1;
+  bytes signature = 2;
+}
+
+message PolkaCertificate {
+  Height height = 1;
+  int64 round = 2;
+  ShardHash value_id = 3;
+  repeated PolkaSignature signatures = 4;
+}
+
+message RoundSignature {
+  VoteType vote_type = 1;
+  bytes validator_address = 2;
+  bytes signature = 3;
+  // This is optional since a vote can be NIL.
+  optional ShardHash value_id = 4;
+}
+
+enum RoundCertificateType {
+  ROUND_CERT_PRECOMMIT = 0;
+  ROUND_CERT_SKIP = 1;
+}
+
+message RoundCertificate {
+  Height height = 1;
+  int64 round = 2;
+  RoundCertificateType cert_type = 3;
+  repeated RoundSignature signatures = 4;
+}
+
+message LivenessMessage {
+  oneof message {
+    ConsensusMessage vote = 1;
+    PolkaCertificate polka_certificate = 2;
+    RoundCertificate round_certificate = 3;
   }
 }

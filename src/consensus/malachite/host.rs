@@ -76,6 +76,7 @@ impl Host {
                 height,
                 round,
                 proposer,
+                role: _,
             } => {
                 state.shard_validator.start_round(height, round, proposer);
                 info!(
@@ -205,7 +206,9 @@ impl Host {
             }
 
             HostMsg::GetValidatorSet { height, reply_to } => {
-                reply_to.send(state.shard_validator.get_validator_set(height.as_u64()))?;
+                reply_to.send(Some(
+                    state.shard_validator.get_validator_set(height.as_u64()),
+                ))?;
             }
 
             HostMsg::Decided {
@@ -363,8 +366,6 @@ impl Host {
                 extension: _,
                 reply_to,
             } => reply_to.send(Ok(()))?,
-            HostMsg::PeerJoined { .. } => {}
-            HostMsg::PeerLeft { .. } => {}
         };
 
         Ok(())

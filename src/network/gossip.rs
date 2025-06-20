@@ -14,6 +14,7 @@ use crate::version::version::EngineVersion;
 use bytes::Bytes;
 use futures::StreamExt;
 use informalsystems_malachitebft_codec::Codec;
+use informalsystems_malachitebft_core_consensus::LivenessMsg;
 use informalsystems_malachitebft_core_types::{SignedProposal, SignedVote};
 use informalsystems_malachitebft_network::{Channel, PeerIdExt};
 use informalsystems_malachitebft_network::{MessageId, PeerId as MalachitePeerId};
@@ -134,6 +135,7 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
     BroadcastSignedVote(SignedVote<Ctx>),
     BroadcastSignedProposal(SignedProposal<Ctx>),
     BroadcastFullProposal(proto::FullProposal),
+    BroadcastLivenessMessage(LivenessMsg<Ctx>),
     BroadcastMempoolMessage(MempoolMessage),
     BroadcastStatus(sync::Status<SnapchainValidatorContext>),
     SyncRequest(
@@ -681,7 +683,7 @@ impl SnapchainGossip {
                     );
                     let malachite_peer_id = MalachitePeerId::from_libp2p(&peer_id);
                     let bytes = Bytes::from(full_proposal.encode_to_vec());
-                    let event = MalachiteNetworkEvent::Message(
+                    let event = MalachiteNetworkEvent::ConsensusMessage(
                         Channel::ProposalParts,
                         malachite_peer_id,
                         bytes,
@@ -697,7 +699,7 @@ impl SnapchainGossip {
                 Some(proto::gossip_message::GossipMessage::Consensus(signed_consensus_msg)) => {
                     let malachite_peer_id = MalachitePeerId::from_libp2p(&peer_id);
                     let bytes = Bytes::from(signed_consensus_msg.encode_to_vec());
-                    let event = MalachiteNetworkEvent::Message(
+                    let event = MalachiteNetworkEvent::ConsensusMessage(
                         Channel::Consensus,
                         malachite_peer_id,
                         bytes,
@@ -710,9 +712,20 @@ impl SnapchainGossip {
                     let shard = MalachiteEventShard::Shard(shard_result.unwrap());
                     Some(SystemMessage::MalachiteNetwork(shard, event))
                 }
+                Some(proto::gossip_message::GossipMessage::Liveness(liveness_msg)) => {
+                    let malachite_peer_id = MalachitePeerId::from_libp2p(&peer_id);
+                    let bytes = Bytes::from(liveness_msg.encode_to_vec());
+                    let event = MalachiteNetworkEvent::LivenessMessage(
+                        Channel::Liveness,
+                        malachite_peer_id,
+                        bytes,
+                    );
+                    let shard = MalachiteEventShard::None;
+                    Some(SystemMessage::MalachiteNetwork(shard, event))
+                }
                 Some(proto::gossip_message::GossipMessage::Status(status)) => {
                     let encoded = status.encode_to_vec();
-                    let Some(height) = status.height else {
+                    let Some(height) = status.tip_height else {
                         warn!(
                             "Received status message without height from peer: {}",
                             peer_id
@@ -721,7 +734,7 @@ impl SnapchainGossip {
                     };
                     let shard = MalachiteEventShard::Shard(height.shard_index);
                     let malachite_peer_id = MalachitePeerId::from_libp2p(&peer_id);
-                    let event = MalachiteNetworkEvent::Message(
+                    let event = MalachiteNetworkEvent::ConsensusMessage(
                         Channel::Sync,
                         malachite_peer_id,
                         Bytes::from(encoded),
@@ -778,7 +791,6 @@ impl SnapchainGossip {
                     };
                 let shard_index = match request {
                     sync::Request::ValueRequest(request) => request.height.shard_index,
-                    sync::Request::VoteSetRequest(request) => request.height.shard_index,
                 };
                 let shard = MalachiteEventShard::Shard(shard_index);
                 Some(SystemMessage::MalachiteNetwork(shard, event))
@@ -799,7 +811,6 @@ impl SnapchainGossip {
                     };
                 let shard_index = match response {
                     sync::Response::ValueResponse(response) => response.height.shard_index,
-                    sync::Response::VoteSetResponse(response) => response.height.shard_index,
                 };
                 let shard = MalachiteEventShard::Shard(shard_index);
                 Some(SystemMessage::MalachiteNetwork(shard, event))
@@ -944,6 +955,23 @@ impl SnapchainGossip {
                 None
             }
             None => None,
+            Some(GossipEvent::BroadcastLivenessMessage(liveness_msg)) => {
+                let encoded = snapchain_codec.encode(&liveness_msg);
+                match encoded {
+                    Ok(encoded) => {
+                        let gossip_message = proto::GossipMessage {
+                            gossip_message: Some(proto::gossip_message::GossipMessage::Liveness(
+                                proto::LivenessMessage::decode(encoded).unwrap(),
+                            )),
+                        };
+                        Some((vec![GossipTopic::Consensus], gossip_message.encode_to_vec()))
+                    }
+                    Err(e) => {
+                        warn!("Failed to encode liveness message: {}", e);
+                        None
+                    }
+                }
+            }
         }
     }
 

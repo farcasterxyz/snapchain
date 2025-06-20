@@ -11,16 +11,16 @@ use tracing::{debug, error, info, warn};
 
 use informalsystems_malachitebft_core_consensus::PeerId;
 use informalsystems_malachitebft_sync::{
-    self as sync, InboundRequestId, OutboundRequestId, Response,
+    self as sync, InboundRequestId, OutboundRequestId, Response, Resumable,
 };
 use informalsystems_malachitebft_sync::{RawDecidedValue, Request};
 
+use crate::core::types::SnapchainValidatorContext;
+use crate::proto::{self, Height};
 use informalsystems_malachitebft_engine::network::{NetworkEvent, NetworkMsg, NetworkRef, Status};
 use informalsystems_malachitebft_engine::util::ticker::ticker;
 use informalsystems_malachitebft_engine::util::timers::{TimeoutElapsed, TimerScheduler};
-
-use crate::core::types::SnapchainValidatorContext;
-use crate::proto::{self, Height};
+use informalsystems_malachitebft_sync::scoring::ema::ExponentialMovingAverage;
 
 use super::read_host::{ReadHostMsg, ReadHostRef};
 
@@ -123,7 +123,7 @@ impl State {
         let sync_height = self.sync.sync_height;
         let peer_ahead_by_threshold = self
             .sync
-            .random_peer_with_value(sync_height.increment_by(10));
+            .random_peer_with_tip_at_or_above(sync_height.increment_by(10));
 
         self.initial_sync_completed = peer_ahead_by_threshold.is_none();
         return self.initial_sync_completed;
@@ -205,16 +205,17 @@ impl ReadSync {
         use sync::Effect;
 
         match effect {
-            Effect::BroadcastStatus(height) => {
+            Effect::BroadcastStatus(height, r) => {
                 let history_min_height = self.get_history_min_height().await?;
 
                 self.gossip.cast(NetworkMsg::BroadcastStatus(Status::new(
                     height,
                     history_min_height,
                 )))?;
+                Ok(r.resume_with(()))
             }
 
-            Effect::SendValueRequest(peer_id, value_request) => {
+            Effect::SendValueRequest(peer_id, value_request, r) => {
                 debug!(
                     height = %value_request.height, peer = %peer_id,
                     "Send the value request to peer"
@@ -235,14 +236,17 @@ impl ReadSync {
                         );
 
                         inflight.insert(request_id.clone(), InflightRequest { peer_id, request });
+
+                        Ok(r.resume_with(Some(request_id)))
                     }
                     Err(e) => {
                         error!("Failed to send request to gossip layer: {e}");
+                        Ok(r.resume_with(None))
                     }
                 }
             }
 
-            Effect::SendValueResponse(request_id, value_response) => {
+            Effect::SendValueResponse(request_id, value_response, r) => {
                 debug!(
                     height = %value_response.height, request = %request_id,
                     "Sending the value response"
@@ -251,25 +255,19 @@ impl ReadSync {
                 let response = Response::ValueResponse(value_response);
                 self.gossip
                     .cast(NetworkMsg::OutgoingResponse(request_id, response))?;
+                Ok(r.resume_with(()))
             }
 
-            Effect::GetDecidedValue(request_id, height) => {
+            Effect::GetDecidedValue(request_id, height, r) => {
                 self.host.call_and_forward(
                     |reply_to| ReadHostMsg::GetDecidedValue { height, reply_to },
                     myself,
                     move |synced_value| Msg::GotDecidedBlock(request_id, height, synced_value),
                     None,
                 )?;
-            }
-            Effect::SendVoteSetRequest(peer_id, vote_set_request) => {
-                error!(
-                    height = %vote_set_request.height, round = %vote_set_request.round, peer = %peer_id,
-                    "Read node requesting vote set"
-                );
+                Ok(r.resume_with(()))
             }
         }
-
-        Ok(sync::Resume::default())
     }
 
     async fn handle_msg(
@@ -303,10 +301,10 @@ impl ReadSync {
             }
 
             Msg::NetworkEvent(NetworkEvent::Status(peer_id, status)) => {
-                debug!(%peer_id, height = %status.height, "Received peer status");
+                debug!(%peer_id, height = %status.tip_height, "Received peer status");
                 let status = sync::Status {
                     peer_id,
-                    height: status.height,
+                    tip_height: status.tip_height,
                     history_min_height: status.history_min_height,
                 };
 
@@ -315,11 +313,11 @@ impl ReadSync {
                     self.process_input(&myself, state, sync::Input::Status(status))
                         .await?;
                 } else {
-                    info!(%peer_id, height=status.height.to_string(), "Ignoring status from non-connected peer");
+                    info!(%peer_id, height=status.tip_height.to_string(), "Ignoring status from non-connected peer");
                 }
             }
 
-            Msg::NetworkEvent(NetworkEvent::Request(request_id, from, request)) => {
+            Msg::NetworkEvent(NetworkEvent::SyncRequest(request_id, from, request)) => {
                 match request {
                     Request::ValueRequest(value_request) => {
                         self.process_input(
@@ -329,19 +327,15 @@ impl ReadSync {
                         )
                         .await?;
                     }
-                    Request::VoteSetRequest(vote_set_request) => {
-                        error!(height = %vote_set_request.height, round = %vote_set_request.round, peer = %from,
-                            "Read node received vote set request");
-                    }
                 };
             }
 
-            Msg::NetworkEvent(NetworkEvent::Response(request_id, peer, response)) => {
+            Msg::NetworkEvent(NetworkEvent::SyncResponse(request_id, peer, response)) => {
                 // Cancel the timer associated with the request for which we just received a response
                 state.timers.cancel(&Timeout::Request(request_id.clone()));
 
                 match response {
-                    Response::ValueResponse(value_response) => {
+                    Some(Response::ValueResponse(value_response)) => {
                         let decided_value = value_response.value.as_ref().unwrap();
                         let value_bytes =
                             value_response.value.as_ref().unwrap().value_bytes.as_ref();
@@ -362,7 +356,7 @@ impl ReadSync {
                         self.process_input(
                             &myself,
                             state,
-                            sync::Input::ValueResponse(request_id, peer, value_response),
+                            sync::Input::ValueResponse(request_id, peer, Some(value_response)),
                         )
                         .await?;
 
@@ -370,9 +364,13 @@ impl ReadSync {
                             self.host.cast(ReadHostMsg::InitialSyncCompleted)?;
                         }
                     }
-                    Response::VoteSetResponse(vote_set_response) => {
-                        error!(height = %vote_set_response.height, round = %vote_set_response.round, %peer ,
-                            "Read node sending vote set response");
+                    None => {
+                        self.process_input(
+                            &myself,
+                            state,
+                            sync::Input::ValueResponse(request_id, peer, None),
+                        )
+                        .await?;
                     }
                 }
             }
@@ -382,9 +380,7 @@ impl ReadSync {
             }
 
             Msg::Decided(height) => {
-                self.process_input(&myself, state, sync::Input::UpdateHeight(height))
-                    .await?;
-                self.process_input(&myself, state, sync::Input::StartHeight(height.increment()))
+                self.process_input(&myself, state, sync::Input::Decided(height))
                     .await?;
             }
 
@@ -450,9 +446,10 @@ impl Actor for ReadSync {
         ));
 
         let rng = Box::new(rand::rngs::StdRng::from_entropy());
+        let scoring_strategy = ExponentialMovingAverage::default();
 
         Ok(State {
-            sync: sync::State::new(rng),
+            sync: sync::State::new(rng, scoring_strategy, None),
             timers: Timers::new(Box::new(myself.clone())),
             inflight: HashMap::new(),
             connected_peers: HashSet::new(),

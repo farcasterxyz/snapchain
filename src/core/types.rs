@@ -1,6 +1,6 @@
 use core::fmt;
 use informalsystems_malachitebft_core_types::{
-    self, AggregatedSignature, CommitSignature, SignedExtension, SignedMessage, SigningProvider,
+    self, CommitSignature, SignedExtension, SignedMessage, SigningProvider,
 };
 use informalsystems_malachitebft_core_types::{
     NilOrVal, Round, SignedProposal, SignedProposalPart, SignedVote, Validator, VoteType,
@@ -199,38 +199,40 @@ impl SigningProvider<SnapchainValidatorContext> for Ed25519Provider {
         panic!("Cannot verify. Vote extensions are not supported")
     }
 
-    fn verify_commit_signature(
-        &self,
-        certificate: &informalsystems_malachitebft_core_types::CommitCertificate<
-            SnapchainValidatorContext,
-        >,
-        commit_sig: &informalsystems_malachitebft_core_types::CommitSignature<
-            SnapchainValidatorContext,
-        >,
-        validator: &<SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::Validator,
-    ) -> Result<
-        VotingPower,
-        informalsystems_malachitebft_core_types::CertificateError<SnapchainValidatorContext>,
-    > {
-        // Reconstruct the vote that was signed
-        let vote = Vote::new_precommit(
-            certificate.height,
-            certificate.round,
-            NilOrVal::Val(certificate.value_id.clone()),
-            validator.address().clone(),
-        );
+    //TODO: Use SigningProviderExt?
 
-        // Verify signature
-        if !self.verify_signed_vote(&vote, &commit_sig.signature, validator.public_key()) {
-            return Err(
-                informalsystems_malachitebft_core_types::CertificateError::InvalidSignature(
-                    commit_sig.clone(),
-                ),
-            );
-        }
-
-        Ok(validator.voting_power())
-    }
+    // fn verify_commit_signature(
+    //     &self,
+    //     certificate: &informalsystems_malachitebft_core_types::CommitCertificate<
+    //         SnapchainValidatorContext,
+    //     >,
+    //     commit_sig: &informalsystems_malachitebft_core_types::CommitSignature<
+    //         SnapchainValidatorContext,
+    //     >,
+    //     validator: &<SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::Validator,
+    // ) -> Result<
+    //     VotingPower,
+    //     informalsystems_malachitebft_core_types::CertificateError<SnapchainValidatorContext>,
+    // > {
+    //     // Reconstruct the vote that was signed
+    //     let vote = Vote::new_precommit(
+    //         certificate.height,
+    //         certificate.round,
+    //         NilOrVal::Val(certificate.value_id.clone()),
+    //         validator.address().clone(),
+    //     );
+    //
+    //     // Verify signature
+    //     if !self.verify_signed_vote(&vote, &commit_sig.signature, validator.public_key()) {
+    //         return Err(
+    //             informalsystems_malachitebft_core_types::CertificateError::InvalidCommitSignature(
+    //                 commit_sig.clone(),
+    //             ),
+    //         );
+    //     }
+    //
+    //     Ok(validator.voting_power())
+    // }
 }
 
 pub struct InvalidSignatureError();
@@ -587,6 +589,7 @@ impl Proposal {
             proposer: self.proposer.to_vec(),
             value: Some(self.shard_hash.clone()),
             pol_round: self.pol_round.as_i64(),
+            validity: None,
         }
     }
 
@@ -668,6 +671,7 @@ impl informalsystems_malachitebft_core_types::Context for SnapchainValidatorCont
     }
 
     fn new_proposal(
+        &self,
         height: Height,
         round: Round,
         shard_hash: ShardHash,
@@ -684,6 +688,7 @@ impl informalsystems_malachitebft_core_types::Context for SnapchainValidatorCont
     }
 
     fn new_prevote(
+        &self,
         height: Height,
         round: Round,
         value_id: NilOrVal<ShardHash>,
@@ -693,6 +698,7 @@ impl informalsystems_malachitebft_core_types::Context for SnapchainValidatorCont
     }
 
     fn new_precommit(
+        &self,
         height: Height,
         round: Round,
         value_id: NilOrVal<ShardHash>,
@@ -845,7 +851,7 @@ impl proto::Commits {
             height,
             round,
             value_id,
-            aggregated_signature: AggregatedSignature::new(signatures),
+            commit_signatures: signatures,
         }
     }
 
@@ -858,8 +864,7 @@ impl proto::Commits {
         let round = certificate.round.as_i64();
         let value = Some(certificate.value_id.clone());
         let signatures = certificate
-            .aggregated_signature
-            .signatures
+            .commit_signatures
             .iter()
             .map(|commit| proto::CommitSignature {
                 signer: commit.address.to_vec(),
