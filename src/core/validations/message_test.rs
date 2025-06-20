@@ -69,12 +69,12 @@ mod tests {
         let long_bio = "A".repeat(3000);
         let mut msg = create_user_data_add(1234, proto::UserDataType::Bio, &long_bio, None, None);
         msg.data_bytes = None;
-        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+        assert_validation_error(&msg, ValidationError::DataBytesTooLong(2048));
 
         let target_fids = (200000..500000).into_iter().collect_vec();
         let mut msg = create_link_compact_state(1234, "follow", target_fids, None, None);
         msg.data_bytes = None;
-        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+        assert_validation_error(&msg, ValidationError::DataBytesTooLong(65536));
 
         // When valid
         let mut msg = messages_factory::casts::create_cast_add(1234, "test", None, None);
@@ -245,7 +245,9 @@ mod tests {
             ), // Contains space
             (
                 "too_long_for_a_base_name.base.eth",
-                ValidationError::InvalidDataLength,
+                ValidationError::EnsNameExceedsLength(
+                    "too_long_for_a_base_name.base.eth".to_string(),
+                ),
             ), // Contains special character
             (
                 "invalid_username!",
@@ -377,7 +379,7 @@ mod tests {
             None,
             None,
         );
-        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+        assert_validation_error(&msg, ValidationError::MissingString);
 
         let msg = create_frame_action(
             1,
@@ -389,7 +391,7 @@ mod tests {
             None,
             None,
         );
-        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+        assert_validation_error(&msg, ValidationError::StringTooLong);
 
         let msg = create_frame_action(
             1,
@@ -401,7 +403,7 @@ mod tests {
             None,
             None,
         );
-        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+        assert_validation_error(&msg, ValidationError::StringTooLong);
 
         let msg = create_frame_action(
             1,
@@ -413,7 +415,7 @@ mod tests {
             None,
             None,
         );
-        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+        assert_validation_error(&msg, ValidationError::DataBytesTooLong(2048));
 
         let msg = create_frame_action(
             1,
@@ -425,7 +427,7 @@ mod tests {
             Some("a".repeat(257)),
             None,
         );
-        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+        assert_validation_error(&msg, ValidationError::StringTooLong);
 
         let msg = create_frame_action(
             1,
@@ -437,7 +439,7 @@ mod tests {
             None,
             Some("a".repeat(65)),
         );
-        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+        assert_validation_error(&msg, ValidationError::StringTooLong);
 
         let msg = create_frame_action(
             1,
