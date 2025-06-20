@@ -62,15 +62,6 @@ impl HubEventIdGenerator {
                 if self.current_seq == 0 {
                     self.current_seq = 1;
                 }
-                if self.current_seq >= 2u64.pow(SEQUENCE_BITS) {
-                    return Err(HubError {
-                        code: "bad_request.invalid_param".to_string(),
-                        message: format!(
-                            "sequence cannot fit in event id. Seq> {} bits",
-                            SEQUENCE_BITS
-                        ),
-                    });
-                }
                 let seq = self.current_seq;
                 self.current_seq += 1;
                 seq
