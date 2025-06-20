@@ -14,8 +14,6 @@ pub enum ValidationError {
     InvalidData,
     #[error("Protocol feature is not supported in this version")]
     UnsupportedFeature,
-    #[error("Invalid data length")]
-    InvalidDataLength,
     #[error("invalid signatureScheme")]
     InvalidSignatureScheme,
     #[error("signer is missing or invalid")]
