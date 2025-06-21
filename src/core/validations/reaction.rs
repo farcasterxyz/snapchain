@@ -5,12 +5,13 @@ use crate::proto::{FarcasterNetwork, ReactionBody, ReactionType};
 use super::{validate_cast_id, validate_url};
 
 pub fn validate_reaction_type(type_num: i32) -> Result<(), ValidationError> {
-    ReactionType::try_from(type_num).map_or_else(|_| Err(ValidationError::InvalidData), |_| Ok(()))
+    ReactionType::try_from(type_num)
+        .map_or_else(|_| Err(ValidationError::InvalidReactionType), |_| Ok(()))
 }
 
 pub fn validate_network(network: i32) -> Result<(), ValidationError> {
     FarcasterNetwork::try_from(network)
-        .map_or_else(|_| Err(ValidationError::InvalidData), |_| Ok(()))
+        .map_or_else(|_| Err(ValidationError::InvalidNetwork), |_| Ok(()))
 }
 
 pub fn validate_target(target: &Target) -> Result<(), ValidationError> {
@@ -25,6 +26,6 @@ pub fn validate_reaction_body(body: &ReactionBody) -> Result<(), ValidationError
 
     match &body.target {
         Some(target) => validate_target(&target),
-        None => Err(ValidationError::InvalidData),
+        None => Err(ValidationError::TargetIsMissing),
     }
 }

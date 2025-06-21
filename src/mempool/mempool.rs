@@ -469,7 +469,10 @@ impl Mempool {
         if self.message_exceeds_rate_limits(shard, message) {
             self.statsd_client
                 .count_with_shard(shard, "mempool.rate_limit_hit", 1);
-            return Err(HubError::rate_limited("Rate limit exceeded"));
+            return Err(HubError::rate_limited(&format!(
+                "rate limit exceeded for FID {}",
+                message.fid()
+            )));
         }
         Ok(())
     }

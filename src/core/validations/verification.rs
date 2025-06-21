@@ -116,7 +116,7 @@ pub fn validate_fname_transfer(
     let proof = transfer.proof.as_ref().unwrap();
     let username = std::str::from_utf8(&proof.name);
     if username.is_err() {
-        return Err(ValidationError::MissingData);
+        return Err(ValidationError::InvalidUsername);
     }
 
     let json = json!({
@@ -172,11 +172,11 @@ pub fn validate_fname_transfer(
 
 pub fn validate_eth_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationError> {
     if address.len() == 0 {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::EthAddressMissing);
     }
 
     if address.len() != 20 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::InvalidEthAddressLength);
     }
 
     Ok(address)
@@ -184,11 +184,11 @@ pub fn validate_eth_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationErr
 
 fn validate_eth_block_hash(block_hash: &Vec<u8>) -> Result<&Vec<u8>, ValidationError> {
     if block_hash.len() == 0 {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::BlockHashMissing);
     }
 
     if block_hash.len() != 32 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::InvalidBlockhashLength);
     }
 
     Ok(block_hash)
@@ -196,11 +196,11 @@ fn validate_eth_block_hash(block_hash: &Vec<u8>) -> Result<&Vec<u8>, ValidationE
 
 pub fn validate_sol_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationError> {
     if address.len() == 0 {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::SolAddressMissing);
     }
 
     if address.len() != 32 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::InvalidSolAddressLength);
     }
 
     Ok(address)
@@ -208,11 +208,11 @@ pub fn validate_sol_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationErr
 
 fn validate_sol_block_hash(block_hash: &Vec<u8>) -> Result<&Vec<u8>, ValidationError> {
     if block_hash.len() == 0 {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::BlockHashMissing);
     }
 
     if block_hash.len() != 32 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::InvalidBlockhashLength);
     }
 
     Ok(block_hash)
@@ -247,7 +247,7 @@ fn validate_verification_eoa_signature(
     }
 
     if body.claim_signature.len() != 65 {
-        return Err(ValidationError::InvalidSignature);
+        return Err(ValidationError::InvalidClaimSignature);
     }
 
     let hash = prehash.unwrap();
@@ -258,12 +258,12 @@ fn validate_verification_eoa_signature(
 
     let recovered_address = signature.recover_address_from_prehash(&hash);
     if recovered_address.is_err() {
-        return Err(ValidationError::InvalidSignature);
+        return Err(ValidationError::InvalidClaimSignature);
     }
 
     let recovered = recovered_address.unwrap().to_vec();
     if recovered != body.address {
-        return Err(ValidationError::InvalidSignature);
+        return Err(ValidationError::InvalidClaimSignature);
     }
 
     Ok(())
@@ -313,9 +313,9 @@ where
     {
         Ok(verification) => match verification {
             Verification::Valid => Ok(()),
-            Verification::Invalid => Err(ValidationError::InvalidSignature),
+            Verification::Invalid => Err(ValidationError::InvalidClaimSignature),
         },
-        Err(_) => Err(ValidationError::InvalidSignature),
+        Err(_) => Err(ValidationError::InvalidClaimSignature),
     }
 }
 
@@ -383,7 +383,7 @@ fn validate_verification_add_eth_address_signature(
     network: proto::FarcasterNetwork,
 ) -> Result<(), ValidationError> {
     if body.claim_signature.len() > 2048 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::InvalidEthClaimSignatureLength);
     }
 
     let chain_id = body.chain_id as u16;
@@ -427,7 +427,7 @@ fn validate_verification_add_sol_address_signature(
     network: proto::FarcasterNetwork,
 ) -> Result<(), ValidationError> {
     if body.claim_signature.len() != 64 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::InvalidSolClaimSignatureLength);
     }
 
     let reconstructed_claim = make_verification_address_claim(

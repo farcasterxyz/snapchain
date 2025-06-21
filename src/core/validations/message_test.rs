@@ -66,15 +66,15 @@ mod tests {
         assert_validation_error(&msg, ValidationError::MissingData);
 
         // when data is too large
-        let long_bio = "A".repeat(2000);
+        let long_bio = "A".repeat(3000);
         let mut msg = create_user_data_add(1234, proto::UserDataType::Bio, &long_bio, None, None);
         msg.data_bytes = None;
-        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+        assert_validation_error(&msg, ValidationError::DataBytesTooLong(2048));
 
         let target_fids = (200000..500000).into_iter().collect_vec();
         let mut msg = create_link_compact_state(1234, "follow", target_fids, None, None);
         msg.data_bytes = None;
-        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+        assert_validation_error(&msg, ValidationError::DataBytesTooLong(65536));
 
         // When valid
         let mut msg = messages_factory::casts::create_cast_add(1234, "test", None, None);
@@ -239,9 +239,20 @@ mod tests {
         ];
 
         let invalid_names = vec![
-            "too_long_for_a_ens_name.eth",       // Contains space
-            "too_long_for_a_base_name.base.eth", // Contains special character
-            "invalid_username!",                 // Contains special character
+            (
+                "too_long_for_a_ens_name.eth",
+                ValidationError::EnsNameExceedsLength("too_long_for_a_ens_name.eth".to_string()),
+            ), // Contains space
+            (
+                "too_long_for_a_base_name.base.eth",
+                ValidationError::EnsNameExceedsLength(
+                    "too_long_for_a_base_name.base.eth".to_string(),
+                ),
+            ), // Contains special character
+            (
+                "invalid_username!",
+                ValidationError::FnameExceedsLength("invalid_username!".to_string()),
+            ), // Contains special character
         ];
         for name in valid_names {
             let msg = create_user_data_add(
@@ -259,7 +270,7 @@ mod tests {
             );
             assert!(result.is_ok(), "Failed for valid name: {}", name);
         }
-        for name in invalid_names {
+        for (name, error) in invalid_names {
             let msg = create_user_data_add(
                 1,
                 proto::UserDataType::Username,
@@ -274,7 +285,7 @@ mod tests {
                 EngineVersion::latest(),
             );
             assert!(result.is_err(), "Failed for invalid name: {}", name);
-            assert_eq!(result.err().unwrap(), ValidationError::InvalidDataLength);
+            assert_eq!(result.err().unwrap(), error);
         }
     }
 
@@ -339,7 +350,13 @@ mod tests {
             EngineVersion::latest(),
         );
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap(), ValidationError::InvalidDataLength);
+        assert_eq!(
+            result.err().unwrap(),
+            ValidationError::EnsNameDoesntEndWith(
+                "very_long_invalid_proof.ens".to_string(),
+                ".eth".to_string()
+            )
+        );
     }
 
     #[test]
@@ -362,7 +379,7 @@ mod tests {
             None,
             None,
         );
-        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+        assert_validation_error(&msg, ValidationError::MissingString);
 
         let msg = create_frame_action(
             1,
@@ -374,7 +391,7 @@ mod tests {
             None,
             None,
         );
-        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+        assert_validation_error(&msg, ValidationError::StringTooLong);
 
         let msg = create_frame_action(
             1,
@@ -386,7 +403,7 @@ mod tests {
             None,
             None,
         );
-        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+        assert_validation_error(&msg, ValidationError::StringTooLong);
 
         let msg = create_frame_action(
             1,
@@ -398,7 +415,7 @@ mod tests {
             None,
             None,
         );
-        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+        assert_validation_error(&msg, ValidationError::DataBytesTooLong(2048));
 
         let msg = create_frame_action(
             1,
@@ -410,7 +427,7 @@ mod tests {
             Some("a".repeat(257)),
             None,
         );
-        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+        assert_validation_error(&msg, ValidationError::StringTooLong);
 
         let msg = create_frame_action(
             1,
@@ -422,7 +439,7 @@ mod tests {
             None,
             Some("a".repeat(65)),
         );
-        assert_validation_error(&msg, ValidationError::InvalidDataLength);
+        assert_validation_error(&msg, ValidationError::StringTooLong);
 
         let msg = create_frame_action(
             1,
@@ -437,7 +454,7 @@ mod tests {
             None,
             None,
         );
-        assert_validation_error(&msg, ValidationError::InvalidData);
+        assert_validation_error(&msg, ValidationError::HashIsMissing);
 
         let msg = create_frame_action(
             1,
@@ -452,7 +469,7 @@ mod tests {
             None,
             None,
         );
-        assert_validation_error(&msg, ValidationError::InvalidData);
+        assert_validation_error(&msg, ValidationError::FidIsMissing);
 
         let msg = create_frame_action(
             1,

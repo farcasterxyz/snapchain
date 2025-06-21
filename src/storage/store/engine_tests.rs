@@ -278,7 +278,7 @@ mod tests {
             &mut engine,
             &message,
             "bad_request.validation_failure",
-            "Invalid message hash",
+            "invalid hash",
         )
         .await;
     }
@@ -303,7 +303,7 @@ mod tests {
             &mut engine,
             &message,
             "bad_request.validation_failure",
-            "Invalid message signature",
+            "invalid signature",
         )
         .await;
     }
@@ -1458,7 +1458,7 @@ mod tests {
             &mut engine,
             &cast_add,
             "bad_request.validation_failure",
-            "Invalid network",
+            "invalid network",
         )
         .await;
     }

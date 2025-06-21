@@ -4,7 +4,7 @@ use super::{error::ValidationError, validate_fid};
 
 pub fn validate_link_type(type_str: &str) -> Result<(), ValidationError> {
     if type_str.is_empty() || type_str.len() > 8 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::InvalidLinkType);
     }
     Ok(())
 }
@@ -15,7 +15,7 @@ pub fn validate_link_compact_state_body(
     validate_link_type(&body.r#type)?;
 
     if body.target_fids.is_empty() {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::TargetIsMissing);
     }
 
     for &fid in &body.target_fids {
@@ -39,7 +39,7 @@ pub fn validate_link_body(body: &LinkBody) -> Result<(), ValidationError> {
             Target::TargetFid(target_fid) => validate_target(&Target::TargetFid(*target_fid))?,
         }
     } else {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::TargetIsMissing);
     }
 
     Ok(())

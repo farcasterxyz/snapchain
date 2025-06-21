@@ -18,10 +18,13 @@ const MAX_DATA_BYTES: usize = 2048;
 const MAX_DATA_BYTES_FOR_10K_CAST: usize = 16_384;
 const MAX_DATA_BYTES_FOR_LINK_COMPACT: usize = 65536;
 const EMBEDS_V1_CUTOFF: u32 = 73612800;
+const TWITTER_USERNAME_REGEX: &str = "^[a-z0-9_]{0,15}$";
+const FNAME_REGEX: &str = "^[a-z0-9][a-z0-9-]{0,15}$";
+const GITHUB_USERNAME_REGEX: &str = "^[a-zA-Z\\d](?:[a-zA-Z\\d]|-(?!-)){0,38}$";
 
 pub fn validate_message_type(message_type: i32) -> Result<(), ValidationError> {
     MessageType::try_from(message_type)
-        .map_or_else(|_| Err(ValidationError::InvalidData), |_| Ok(()))
+        .map_or_else(|_| Err(ValidationError::InvalidMessageType), |_| Ok(()))
 }
 
 fn validate_bytes_as_string(
@@ -30,10 +33,10 @@ fn validate_bytes_as_string(
     required: bool,
 ) -> Result<(), ValidationError> {
     if required && byte_array.len() == 0 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::MissingString);
     }
     if byte_array.len() as u64 > max_length {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::StringTooLong);
     }
     Ok(())
 }
@@ -104,7 +107,7 @@ pub fn validate_message(
         };
 
     if data_bytes.len() > max_data_size {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::DataBytesTooLong(max_data_size as u64));
     }
 
     let network = FarcasterNetwork::try_from(message_data.network)
@@ -152,7 +155,7 @@ pub fn validate_message(
                         return Err(ValidationError::UnsupportedFeature);
                     }
                 }
-                _ => return Err(ValidationError::InvalidData),
+                _ => return Err(ValidationError::InvalidUsernameType),
             }
         }
         Some(proto::message_data::Body::VerificationAddAddressBody(add)) => {
@@ -236,20 +239,23 @@ fn validate_message_hash(
 
 pub fn validate_fname(input: &String) -> Result<(), ValidationError> {
     if input.len() == 0 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::FnameIsMissing);
     }
 
     // FNAME_MAX_LENGTH - ".eth".length
     if input.len() > 16 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::FnameExceedsLength(input.clone()));
     }
 
-    if !Regex::new("^[a-z0-9][a-z0-9-]{0,15}$")
+    if !Regex::new(FNAME_REGEX)
         .unwrap()
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
     {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::FnameDoesntMatch(
+            input.clone(),
+            FNAME_REGEX.to_string(),
+        ));
     }
 
     Ok(())
@@ -257,24 +263,35 @@ pub fn validate_fname(input: &String) -> Result<(), ValidationError> {
 
 pub fn validate_ens_name(input: &String) -> Result<(), ValidationError> {
     if !input.ends_with(".eth") {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::EnsNameDoesntEndWith(
+            input.clone(),
+            ".eth".to_string(),
+        ));
     }
 
     let name_parts: Vec<&str> = input.split('.').collect();
+
+    if name_parts.len() > 2 {
+        return Err(ValidationError::EnsNameUnsupportedSubdomain(input.clone()));
+    }
+
     if name_parts.len() != 2 || name_parts[0].is_empty() {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::EnsNameNotValid(input.clone()));
     }
 
     if input.len() > 20 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::EnsNameExceedsLength(input.clone()));
     }
 
-    if !Regex::new("^[a-z0-9][a-z0-9-]{0,15}$")
+    if !Regex::new(FNAME_REGEX)
         .unwrap()
         .is_match(name_parts[0])
         .map_err(|_| ValidationError::InvalidData)?
     {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::EnsNameDoesntMatch(
+            input.clone(),
+            FNAME_REGEX.to_string(),
+        ));
     }
 
     Ok(())
@@ -282,7 +299,10 @@ pub fn validate_ens_name(input: &String) -> Result<(), ValidationError> {
 
 pub fn validate_base_name(input: &String) -> Result<(), ValidationError> {
     if !input.ends_with(".base.eth") {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::EnsNameDoesntEndWith(
+            input.clone(),
+            ".base.eth".to_string(),
+        ));
     }
 
     let name_parts: Vec<&str> = input.split('.').collect();
@@ -292,15 +312,18 @@ pub fn validate_base_name(input: &String) -> Result<(), ValidationError> {
 
     if input.len() > 25 {
         // 16 for fname + 9 for ".base.eth"
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::EnsNameExceedsLength(input.clone()));
     }
 
-    if !Regex::new("^[a-z0-9][a-z0-9-]{0,15}$")
+    if !Regex::new(FNAME_REGEX)
         .unwrap()
         .is_match(&name_parts[0])
         .map_err(|_| ValidationError::InvalidData)?
     {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::EnsNameDoesntMatch(
+            input.clone(),
+            FNAME_REGEX.to_string(),
+        ));
     }
 
     Ok(())
@@ -308,15 +331,18 @@ pub fn validate_base_name(input: &String) -> Result<(), ValidationError> {
 
 pub fn validate_twitter_username(input: &String) -> Result<(), ValidationError> {
     if input.len() > 15 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::UsernameExceedsLength(input.clone(), 15));
     }
 
-    if !Regex::new("^[a-z0-9_]{0,15}$")
+    if !Regex::new(TWITTER_USERNAME_REGEX)
         .unwrap()
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
     {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::UsernameDoesntMatch(
+            input.clone(),
+            TWITTER_USERNAME_REGEX.to_string(),
+        ));
     }
 
     Ok(())
@@ -324,15 +350,18 @@ pub fn validate_twitter_username(input: &String) -> Result<(), ValidationError> 
 
 pub fn validate_github_username(input: &String) -> Result<(), ValidationError> {
     if input.len() > 38 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::UsernameExceedsLength(input.clone(), 38));
     }
 
-    if !Regex::new("^[a-zA-Z\\d](?:[a-zA-Z\\d]|-(?!-)){0,38}$")
+    if !Regex::new(GITHUB_USERNAME_REGEX)
         .unwrap()
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
     {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::UsernameDoesntMatch(
+            input.clone(),
+            GITHUB_USERNAME_REGEX.to_string(),
+        ));
     }
 
     Ok(())
@@ -341,14 +370,14 @@ pub fn validate_github_username(input: &String) -> Result<(), ValidationError> {
 fn validate_number(value: &str) -> Result<f64, ValidationError> {
     return value
         .parse::<f64>()
-        .map_err(|_| ValidationError::InvalidData);
+        .map_err(|_| ValidationError::InvalidLocationString);
 }
 
 fn validate_latitude(value: &str) -> Result<(), ValidationError> {
     let number = validate_number(value)?;
 
     if number < -90.0 || number > 90.0 {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::LatitudeOutOfRange);
     }
 
     Ok(())
@@ -358,7 +387,7 @@ fn validate_longitude(value: &str) -> Result<(), ValidationError> {
     let number = validate_number(value)?;
 
     if number < -180.0 || number > 180.0 {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::LongitudeOutOfRange);
     }
 
     Ok(())
@@ -371,7 +400,7 @@ pub fn validate_user_data_primary_address_ethereum(input: &String) -> Result<(),
     }
 
     if !input.starts_with("0x") || input.len() != 42 {
-        return Err(ValidationError::InvalidDataLength);
+        return Err(ValidationError::InvalidEthAddressLength);
     }
 
     let parsed = Address::from_hex(input).map_err(|_| ValidationError::InvalidData)?;
@@ -408,22 +437,22 @@ pub fn validate_user_location(location: &str) -> Result<(), ValidationError> {
     let captures = Regex::new(r"^geo:(-?\d{1,2}\.\d{2}),(-?\d{1,3}\.\d{2})$")
         .unwrap()
         .captures(location)
-        .map_err(|_| ValidationError::InvalidData)?;
+        .map_err(|_| ValidationError::InvalidLocationString)?;
 
     if captures.is_none() {
-        return Err(ValidationError::InvalidData);
+        return Err(ValidationError::InvalidLocationString);
     }
 
     let captured = captures.unwrap();
 
     let latitude = captured
         .get(1)
-        .ok_or_else(|| ValidationError::InvalidData)?;
+        .ok_or_else(|| ValidationError::InvalidLocationString)?;
     validate_latitude(latitude.as_str())?;
 
     let longitude = captured
         .get(2)
-        .ok_or_else(|| ValidationError::InvalidData)?;
+        .ok_or_else(|| ValidationError::InvalidLocationString)?;
     validate_longitude(longitude.as_str())?;
 
     Ok(())
@@ -439,7 +468,7 @@ pub fn validate_user_data_add_body(
     match UserDataType::try_from(body.r#type).map_err(|_| ValidationError::InvalidData)? {
         UserDataType::Pfp => {
             if value_bytes.len() > 256 {
-                return Err(ValidationError::InvalidDataLength);
+                return Err(ValidationError::PfpValueTooLong);
             }
         }
         UserDataType::Banner => {
@@ -447,22 +476,22 @@ pub fn validate_user_data_add_body(
                 return Err(ValidationError::ProUserFeature);
             }
             if value_bytes.len() > 256 {
-                return Err(ValidationError::InvalidDataLength);
+                return Err(ValidationError::BannerValueTooLong);
             }
         }
         UserDataType::Display => {
             if value_bytes.len() > 32 {
-                return Err(ValidationError::InvalidDataLength);
+                return Err(ValidationError::DisplayValueTooLong);
             }
         }
         UserDataType::Bio => {
             if value_bytes.len() > 256 {
-                return Err(ValidationError::InvalidDataLength);
+                return Err(ValidationError::BioValueTooLong);
             }
         }
         UserDataType::Url => {
             if value_bytes.len() > 256 {
-                return Err(ValidationError::InvalidDataLength);
+                return Err(ValidationError::UrlValueTooLong);
             }
         }
         UserDataType::Username => {
@@ -498,7 +527,7 @@ pub fn validate_user_data_add_body(
             }
             validate_user_data_primary_address_solana(&body.value)?;
         }
-        UserDataType::None => return Err(ValidationError::InvalidData),
+        UserDataType::None => return Err(ValidationError::InvalidUserDataType),
     }
 
     Ok(())
