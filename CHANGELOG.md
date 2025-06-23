@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1] - 2025-06-23
+
+### 🚀 Features
+
+- Unified fid address type endpoint (#535)
+- Add Block Confirmed event type as the first event emitted for a block (#549)
+
+### 🐛 Bug Fixes
+
+- Add tier subscriptions to http api (#537)
+- Fix network check on verifications to support testnet (#536)
+- Handle empty page tokens (#539)
+- Restore fname tests using custom signer (#540)
+- Show onchain event type for tier purchase in http api (#543)
+- Mempool should not do duplicate checks for validator messages (#545)
+- Make validation errors more specific (#548)
+
 ## [0.3.0] - 2025-06-09
 
 ### 🚀 Features
