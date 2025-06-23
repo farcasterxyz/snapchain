@@ -21,6 +21,7 @@ service HubService {
 
   rpc GetInfo(GetInfoRequest) returns (GetInfoResponse);
   rpc GetFids(FidsRequest) returns (FidsResponse);
+  rpc GetConnectedPeers(GetConnectedPeersRequest) returns (GetConnectedPeersResponse);
 
   // Events
   rpc Subscribe(SubscribeRequest) returns (stream HubEvent);
