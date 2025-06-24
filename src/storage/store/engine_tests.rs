@@ -3,7 +3,7 @@ mod tests {
     use crate::core::util::{
         calculate_message_hash, from_farcaster_time, get_farcaster_time, FarcasterTime,
     };
-    use crate::proto::{self, CastId, Embed, FarcasterNetwork, ReactionType};
+    use crate::proto::{self, CastId, Embed, FarcasterNetwork, HubEventType, ReactionType};
     use crate::proto::{FnameTransfer, ShardChunk, UserNameProof};
     use crate::proto::{HubEvent, ValidatorMessage};
     use crate::proto::{OnChainEvent, OnChainEventType};
@@ -2804,6 +2804,20 @@ mod tests {
             );
             assert_eq!(body.timestamp, _chunk.header.as_ref().unwrap().timestamp);
             assert_eq!(body.total_events, 4); // BLOCK_CONFIRMED + 3 MergeMessage events
+            assert_eq!(
+                body.total_events_by_type[&(HubEventType::BlockConfirmed as i32)],
+                1
+            );
+            assert_eq!(
+                body.total_events_by_type[&(HubEventType::MergeMessage as i32)],
+                3
+            );
+            // If there are no events for a type, that type does not appear in the mapping
+            assert_eq!(
+                body.total_events_by_type
+                    .get(&(HubEventType::MergeOnChainEvent as i32)),
+                None
+            )
         } else {
             panic!("Expected BlockConfirmedBody");
         }

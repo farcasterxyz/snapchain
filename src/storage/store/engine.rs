@@ -7,11 +7,11 @@ use crate::core::validations;
 use crate::core::validations::verification;
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::message_data::Body;
-use crate::proto::Protocol;
 use crate::proto::UserDataType;
 use crate::proto::UserNameProof;
 use crate::proto::{self, hub_event, Block, MessageType, ShardChunk, Transaction};
 use crate::proto::{FarcasterNetwork, HubEvent};
+use crate::proto::{HubEventType, Protocol};
 use crate::proto::{OnChainEvent, OnChainEventType};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{CastStore, MessagesPage, VerificationStore};
@@ -27,7 +27,7 @@ use informalsystems_malachitebft_core_types::Round;
 use itertools::Itertools;
 use merkle_trie::TrieKey;
 use std::cmp::PartialEq;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::str;
 use std::string::ToString;
 use std::sync::Arc;
@@ -1393,6 +1393,15 @@ impl ShardEngine {
         result
     }
 
+    fn compute_event_counts_by_type(events: &Vec<HubEvent>) -> HashMap<i32, u64> {
+        let mut counts_by_type = HashMap::new();
+        for event in events {
+            let count = counts_by_type.get(&event.r#type).unwrap_or(&0);
+            counts_by_type.insert(event.r#type, count + 1);
+        }
+        counts_by_type
+    }
+
     pub fn commit_and_emit_events(
         &mut self,
         shard_chunk: &ShardChunk,
@@ -1401,6 +1410,8 @@ impl ShardEngine {
     ) {
         let header = shard_chunk.header.as_ref().unwrap();
         let height = header.height.as_ref().unwrap();
+        let mut total_events_by_type = Self::compute_event_counts_by_type(&events);
+        total_events_by_type.insert(HubEventType::BlockConfirmed as i32, 1);
         let mut block_confirmed = HubEvent::from(
             proto::HubEventType::BlockConfirmed,
             proto::hub_event::Body::BlockConfirmedBody(proto::BlockConfirmedBody {
@@ -1409,6 +1420,7 @@ impl ShardEngine {
                 timestamp: header.timestamp,
                 block_hash: shard_chunk.hash.clone(),
                 total_events: (events.len() + 1) as u64, // +1 for BLOCK_CONFIRMED itself
+                total_events_by_type,
             }),
         );
         let _block_confirmed_id = self
