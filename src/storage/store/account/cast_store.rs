@@ -466,7 +466,7 @@ impl CastStore {
 
         let messages = get_many_messages(store.db().borrow(), message_keys)?;
         let next_page_token = if last_key.len() > 0 {
-            Some(last_key[prefix.len()..].to_vec())
+            Some(last_key.to_vec())
         } else {
             None
         };
@@ -512,7 +512,7 @@ impl CastStore {
 
         let messages_bytes = get_many_messages(store.db().borrow(), message_keys)?;
         let next_page_token = if last_key.len() > 0 {
-            Some(last_key[prefix.len()..].to_vec())
+            Some(last_key.to_vec())
         } else {
             None
         };

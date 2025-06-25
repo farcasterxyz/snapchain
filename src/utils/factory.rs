@@ -285,13 +285,14 @@ pub mod messages_factory {
 
     pub mod casts {
         use super::*;
-        use crate::proto::{CastRemoveBody, CastType, Embed};
+        use crate::proto::{self, CastRemoveBody, CastType, Embed};
 
         pub fn create_cast_add_rich(
             fid: u64,
             text: &str,
             cast_type: Option<CastType>,
             embeds: Vec<Embed>,
+            parent: Option<proto::CastId>,
             timestamp: Option<u32>,
             private_key: Option<&SigningKey>,
         ) -> message::Message {
@@ -301,7 +302,7 @@ pub mod messages_factory {
                 embeds_deprecated: vec![],
                 mentions: vec![],
                 mentions_positions: vec![],
-                parent: None,
+                parent: parent.map(|p| proto::cast_add_body::Parent::ParentCastId(p)),
                 r#type: cast_type.unwrap_or(CastType::Cast) as i32,
             };
             create_message_with_data(
@@ -324,6 +325,29 @@ pub mod messages_factory {
                 text,
                 Some(CastType::Cast),
                 vec![],
+                None,
+                timestamp,
+                private_key,
+            )
+        }
+
+        pub fn create_cast_with_parent(
+            fid: u64,
+            text: &str,
+            parent_fid: u64,
+            parent_hash: &Vec<u8>,
+            timestamp: Option<u32>,
+            private_key: Option<&SigningKey>,
+        ) -> message::Message {
+            create_cast_add_rich(
+                fid,
+                text,
+                Some(CastType::Cast),
+                vec![],
+                Some(proto::CastId {
+                    fid: parent_fid,
+                    hash: parent_hash.clone(),
+                }),
                 timestamp,
                 private_key,
             )

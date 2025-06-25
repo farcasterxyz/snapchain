@@ -2652,6 +2652,7 @@ mod tests {
             vec![],
             None,
             None,
+            None,
         );
 
         commit_message_at(&mut engine, &long_cast, &FarcasterTime::current()).await;
@@ -2705,6 +2706,7 @@ mod tests {
                     embed: Some(proto::embed::Embed::Url("jklmn".to_string())),
                 },
             ],
+            None,
             None,
             None,
         );

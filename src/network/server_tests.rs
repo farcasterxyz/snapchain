@@ -1067,6 +1067,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_casts_by_parent_hash() {
+        let (_, _, [mut engine1, mut engine2], service) = make_server(None).await;
+        let engine1 = &mut engine1;
+        let engine2 = &mut engine2;
+        test_helper::register_user(
+            SHARD1_FID,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            engine1,
+        )
+        .await;
+        test_helper::register_user(
+            SHARD2_FID,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            engine2,
+        )
+        .await;
+        let original_cast =
+            messages_factory::casts::create_cast_add(SHARD1_FID, "test", None, None);
+        let timestamp = original_cast.data.as_ref().unwrap().timestamp;
+        let reply_1 = messages_factory::casts::create_cast_with_parent(
+            SHARD1_FID,
+            "reply 1",
+            SHARD1_FID,
+            &original_cast.hash,
+            Some(timestamp + 1),
+            None,
+        );
+        let reply_2 = messages_factory::casts::create_cast_with_parent(
+            SHARD1_FID,
+            "reply 2",
+            SHARD1_FID,
+            &original_cast.hash,
+            Some(timestamp + 2),
+            None,
+        );
+        let reply_3_another_shard = messages_factory::casts::create_cast_with_parent(
+            SHARD2_FID,
+            "reply 3",
+            SHARD1_FID,
+            &original_cast.hash,
+            Some(timestamp + 3),
+            None,
+        );
+        let reply_4_another_shard = messages_factory::casts::create_cast_with_parent(
+            SHARD2_FID,
+            "reply 4",
+            SHARD1_FID,
+            &original_cast.hash,
+            Some(timestamp + 4),
+            None,
+        );
+
+        test_helper::commit_message(engine1, &original_cast).await;
+        test_helper::commit_message(engine1, &reply_1).await;
+        test_helper::commit_message(engine1, &reply_2).await;
+        test_helper::commit_message(engine2, &reply_3_another_shard).await;
+        test_helper::commit_message(engine2, &reply_4_another_shard).await;
+
+        let response = service
+            .get_casts_by_parent(Request::new(proto::CastsByParentRequest {
+                parent: Some(proto::casts_by_parent_request::Parent::ParentCastId(
+                    proto::CastId {
+                        fid: SHARD1_FID,
+                        hash: original_cast.hash.clone(),
+                    },
+                )),
+                page_size: Some(1),
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap();
+        test_helper::assert_contains_all_messages(&response, &[&reply_1, &reply_3_another_shard]);
+
+        let page_token = response.get_ref().next_page_token.clone();
+        let response = service
+            .get_casts_by_parent(Request::new(proto::CastsByParentRequest {
+                parent: Some(proto::casts_by_parent_request::Parent::ParentCastId(
+                    proto::CastId {
+                        fid: SHARD1_FID,
+                        hash: original_cast.hash.clone(),
+                    },
+                )),
+                page_size: Some(2),
+                page_token: page_token,
+                reverse: None,
+            }))
+            .await
+            .unwrap();
+        test_helper::assert_contains_all_messages(&response, &[&reply_2, &reply_4_another_shard]);
+
+        // Test reverse pagination
+        let response = service
+            .get_casts_by_parent(Request::new(proto::CastsByParentRequest {
+                parent: Some(proto::casts_by_parent_request::Parent::ParentCastId(
+                    proto::CastId {
+                        fid: SHARD1_FID,
+                        hash: original_cast.hash.clone(),
+                    },
+                )),
+                page_size: Some(1),
+                page_token: None,
+                reverse: Some(true),
+            }))
+            .await
+            .unwrap();
+
+        let page_token = response.get_ref().next_page_token.clone();
+        let response = service
+            .get_casts_by_parent(Request::new(proto::CastsByParentRequest {
+                parent: Some(proto::casts_by_parent_request::Parent::ParentCastId(
+                    proto::CastId {
+                        fid: SHARD1_FID,
+                        hash: original_cast.hash.clone(),
+                    },
+                )),
+                page_size: Some(2),
+                page_token: page_token.clone(),
+                reverse: Some(true),
+            }))
+            .await
+            .unwrap();
+        test_helper::assert_contains_all_messages(&response, &[&reply_1, &reply_3_another_shard]);
+    }
+
+    #[tokio::test]
     async fn test_storage_limits() {
         // Works with no storage
         let (_, _, [mut engine1, _], service) = make_server(None).await;

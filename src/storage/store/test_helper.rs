@@ -546,6 +546,12 @@ impl MessagesContainer for Result<Response<MessagesResponse>, Status> {
     }
 }
 
+impl MessagesContainer for Response<MessagesResponse> {
+    fn messages(&self) -> &Vec<proto::Message> {
+        &self.get_ref().messages
+    }
+}
+
 impl MessagesContainer for Vec<proto::Message> {
     fn messages(&self) -> &Vec<proto::Message> {
         self
