@@ -469,10 +469,6 @@ pub fn default_custody_address() -> Vec<u8> {
     "000000000000000000".to_string().encode_to_vec()
 }
 
-pub fn generate_signer() -> SigningKey {
-    SigningKey::generate(&mut rand::thread_rng())
-}
-
 #[allow(dead_code)]
 pub fn enable_logging() {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));

@@ -44,7 +44,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     ));
 
     let dir = TempDir::new_in(&args.db_dir)?;
-    let base_path = dir.into_path();
+    let base_path = dir.keep();
 
     let mut handles = Vec::new();
 

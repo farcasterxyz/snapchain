@@ -4,11 +4,11 @@ mod tests {
     use crate::core::validations::message::validate_message;
     use crate::proto::{self, UserNameType};
     use crate::proto::{CastId, FarcasterNetwork};
-    use crate::storage::store::test_helper;
     use crate::storage::util::blake3_20;
     use crate::utils::factory::frame_action_factory::create_frame_action;
     use crate::utils::factory::messages_factory::links::create_link_compact_state;
     use crate::utils::factory::messages_factory::user_data::create_user_data_add;
+    use crate::utils::factory::signers::generate_signer;
     use crate::utils::factory::{messages_factory, time};
     use crate::version::version::EngineVersion;
     use ed25519_dalek::Signer;
@@ -39,7 +39,7 @@ mod tests {
     fn assert_mutated_valid(msg: &mut proto::Message) {
         // Recalculate hash and signature based on the new data
         msg.hash = calculate_message_hash(&msg.data.as_ref().unwrap().encode_to_vec());
-        let signer = test_helper::generate_signer();
+        let signer = generate_signer();
         msg.signer = signer.verifying_key().to_bytes().to_vec();
         msg.signature = signer.sign(&msg.hash).to_bytes().to_vec();
         let result = validate_message(
@@ -221,10 +221,7 @@ mod tests {
 
         assert_validation_error(&msg, ValidationError::MissingOrInvalidSigner);
 
-        msg.signer = test_helper::generate_signer()
-            .verifying_key()
-            .to_bytes()
-            .to_vec();
+        msg.signer = generate_signer().verifying_key().to_bytes().to_vec();
         assert_validation_error(&msg, ValidationError::InvalidSignature);
     }
 

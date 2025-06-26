@@ -9,10 +9,13 @@ use message::{CastAddBody, FarcasterNetwork, MessageData};
 use prost::Message;
 
 pub mod signers {
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{SigningKey, SECRET_KEY_LENGTH};
+    use rand::Rng;
 
     pub fn generate_signer() -> SigningKey {
-        SigningKey::generate(&mut rand::thread_rng())
+        let mut rng = rand::thread_rng();
+        let bytes: [u8; SECRET_KEY_LENGTH] = rng.gen();
+        SigningKey::from_bytes(&bytes)
     }
 }
 

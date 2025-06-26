@@ -26,9 +26,10 @@ mod tests {
     use crate::storage::store::account::{HubEventIdGenerator, SEQUENCE_BITS};
     use crate::storage::store::engine::{Senders, ShardEngine};
     use crate::storage::store::stores::Stores;
-    use crate::storage::store::test_helper::{commit_event, generate_signer, register_user};
+    use crate::storage::store::test_helper::{commit_event, register_user};
     use crate::storage::store::{test_helper, BlockStore};
     use crate::storage::trie::merkle_trie;
+    use crate::utils::factory::signers::generate_signer;
     use crate::utils::factory::{events_factory, messages_factory};
     use crate::utils::statsd_wrapper::StatsdClientWrapper;
     use futures::future;
