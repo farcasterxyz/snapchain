@@ -23,6 +23,7 @@ mod tests {
     use crate::version::version::{EngineVersion, ProtocolFeature};
     use base64::prelude::*;
     use ed25519_dalek::{Signer, SigningKey};
+    use informalsystems_malachitebft_core_types::Round;
     use prost::Message;
 
     fn from_hex(s: &str) -> Vec<u8> {
@@ -2303,6 +2304,9 @@ mod tests {
         );
         commit_message(&mut engine, &remove_message).await;
 
+        let current_height = engine.get_confirmed_height().increment();
+        engine.start_round(current_height, Round::Nil);
+
         // We can't use assert_commit_fails here, because it checks against existence in the trie, and duplicate will exist already
         let state_change = engine.propose_state_change(
             1,
@@ -2315,6 +2319,12 @@ mod tests {
             &remove_message,
             "bad_request.duplicate",
             "message has already been merged",
+        );
+
+        // We had a bug where all merge failure events were missing event ids
+        assert_eq!(
+            state_change.events[0].id,
+            HubEventIdGenerator::make_event_id_for_block_number(current_height.block_number) + 1 // 0 is reserved for block confirmed
         );
 
         let conflicting_message = messages_factory::casts::create_cast_remove(
