@@ -774,7 +774,12 @@ impl ShardEngine {
                                 );
                             }
                             validation_errors.push(err.clone());
-                            events.push(HubEvent::from_validation_error(err, msg));
+                            let mut merge_failure = HubEvent::from_validation_error(err, msg);
+                            let _ = self
+                                .stores
+                                .event_handler
+                                .commit_transaction(txn_batch, &mut merge_failure);
+                            events.push(merge_failure);
                         }
                     }
                 }
@@ -788,7 +793,12 @@ impl ShardEngine {
                         );
                     }
                     validation_errors.push(err.clone());
-                    events.push(HubEvent::from_validation_error(err, msg));
+                    let mut merge_failure = HubEvent::from_validation_error(err, msg);
+                    let _ = self
+                        .stores
+                        .event_handler
+                        .commit_transaction(txn_batch, &mut merge_failure);
+                    events.push(merge_failure);
                 }
             }
         }
