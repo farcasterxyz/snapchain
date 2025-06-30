@@ -1841,6 +1841,11 @@ impl BlockEngine {
                 .unwrap()
                 .block_number,
         );
+        let block_timestamp = block.header.as_ref().unwrap().timestamp;
+        self.gauge(
+            "block_delay_seconds",
+            FarcasterTime::current().to_u64() - block_timestamp,
+        );
         self.count(
             "block_shards",
             block
