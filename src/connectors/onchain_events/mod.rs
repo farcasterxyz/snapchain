@@ -14,9 +14,9 @@ use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
-use tokio::time::Instant;
 use tracing::{error, info, warn};
 
 use crate::core::error::HubError;
@@ -502,7 +502,11 @@ impl Subscriber {
             &format!("latest_block_number_on_{}", self.chain.to_string()),
             block_number as u64,
         );
-        let delay = Instant::now().elapsed().as_millis() as u64 - (event.block_timestamp * 1000);
+        let delay = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            - (event.block_timestamp * 1000);
         self.gauge("on_chain_to_ingest_delay", delay);
         if let Err(err) = self
             .mempool_tx
