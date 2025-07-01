@@ -268,7 +268,7 @@ impl Fetcher {
     async fn retry_fid(&mut self, fid: u64) -> Result<(), FetchError> {
         info!(fid, "Retrying fname events for fid");
 
-        let url = format!("{}/transfers?fid={}", self.cfg.url, fid);
+        let url = format!("{}?fid={}", self.cfg.url, fid);
         debug!(%url, "fetching current transfer for retry");
 
         let response = reqwest::get(&url).await?.json::<TransfersData>().await?;
@@ -296,7 +296,7 @@ impl Fetcher {
     async fn retry_fname(&mut self, fname: &str) -> Result<(), FetchError> {
         info!(fname, "Retrying fname events for fname");
 
-        let url = format!("{}/transfers?fname={}", self.cfg.url, fname);
+        let url = format!("{}?fname={}", self.cfg.url, fname);
         debug!(%url, "fetching current transfer for retry");
 
         let response = reqwest::get(&url).await?.json::<TransfersData>().await?;
