@@ -20,7 +20,7 @@ message RetryOnchainEventsRequest {
 message RetryFnameRequest {
   oneof kind {
     uint64 fid = 1;
-    // May want to allow retrying by fname in the future
+    string fname = 2;
   }
 }
 

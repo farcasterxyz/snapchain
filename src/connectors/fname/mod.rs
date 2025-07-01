@@ -35,6 +35,7 @@ impl Default for Config {
 #[derive(Clone)]
 pub enum FnameRequest {
     RetryFid(u64),
+    RetryFname(String),
 }
 
 #[derive(Deserialize, Debug)]
@@ -267,9 +268,6 @@ impl Fetcher {
     async fn retry_fid(&mut self, fid: u64) -> Result<(), FetchError> {
         info!(fid, "Retrying fname events for fid");
 
-        // For fname, we need to refetch transfers for a specific FID
-        // Since we don't have a direct API to get transfers by FID,
-        // we'll scan through recent transfers to find ones for this FID
         let url = format!("{}/transfers?fid={}", self.cfg.url, fid);
         debug!(%url, "fetching current transfer for retry");
 
@@ -285,6 +283,34 @@ impl Fetcher {
             if let Err(e) = self.submit_transfer(&t).await {
                 error!(
                     fid,
+                    transfer_id = t.id,
+                    err = e.to_string(),
+                    "Error processing fname transfer during retry"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn retry_fname(&mut self, fname: &str) -> Result<(), FetchError> {
+        info!(fname, "Retrying fname events for fname");
+
+        let url = format!("{}/transfers?fname={}", self.cfg.url, fname);
+        debug!(%url, "fetching current transfer for retry");
+
+        let response = reqwest::get(&url).await?.json::<TransfersData>().await?;
+
+        for t in response.transfers {
+            info!(
+                fid = t.to,
+                transfer_id = t.id,
+                username = t.username,
+                "Retrying fname transfer"
+            );
+            if let Err(e) = self.submit_transfer(&t).await {
+                error!(
+                    fid = t.to,
                     transfer_id = t.id,
                     err = e.to_string(),
                     "Error processing fname transfer during retry"
@@ -322,6 +348,11 @@ impl Fetcher {
                                 FnameRequest::RetryFid(retry_fid) => {
                                     if let Err(err) = self.retry_fid(retry_fid).await {
                                         error!(fid = retry_fid, "Unable to retry fid: {}", err.to_string())
+                                    }
+                                },
+                                FnameRequest::RetryFname(fname) => {
+                                    if let Err(err) = self.retry_fname(fname.as_str()).await {
+                                        error!(fname, "Unable to retry fname: {}", err.to_string())
                                     }
                                 }
                             }

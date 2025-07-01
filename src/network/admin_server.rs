@@ -249,6 +249,12 @@ impl AdminService for MyAdminService {
                         .send(FnameRequest::RetryFid(fid))
                         .map_err(|_| Status::internal("unable to handle request"))?;
                 }
+                proto::retry_fname_request::Kind::Fname(fname) => {
+                    info!("Retrying Fname events for fname: {}", fname);
+                    self.fname_request_tx
+                        .send(FnameRequest::RetryFname(fname))
+                        .map_err(|_| Status::internal("unable to handle request"))?;
+                }
             },
         }
         Ok(Response::new(Empty {}))
