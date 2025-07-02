@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.2] - 2025-07-02
+
+### 🚀 Features
+
+- Add event counts per event type to BlockConfirmed (#555)
+- Add admin endpoint to retry fname transfers (#546)
+
+### 🐛 Bug Fixes
+
+- Fix pagination bug for certain api endpoints (#556)
+- Populate event ids for merge failure events (#558)
+- Calculate onchain events delay metric correctly (#565)
+
+### ⚙️ Miscellaneous Tasks
+
+- Emit block delay metric (#562)
+- Record new onchain event metric (#564)
+
 ## [0.3.1] - 2025-06-23
 
 ### 🚀 Features
