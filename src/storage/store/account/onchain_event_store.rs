@@ -496,7 +496,13 @@ impl OnchainEventStore {
                 None => false,
                 Some(body) => match body {
                     on_chain_event::Body::SignerEventBody(signer_event_body) => {
-                        Self::is_signer_key(signer_event_body)
+                        if let Ok(active_signer) =
+                            self.get_active_signer(onchain_event.fid, signer_event_body.key.clone())
+                        {
+                            active_signer.is_some() && Self::is_signer_key(signer_event_body)
+                        } else {
+                            false
+                        }
                     }
                     _ => false,
                 },
