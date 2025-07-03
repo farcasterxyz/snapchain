@@ -1563,6 +1563,28 @@ mod tests {
         // Register user to create signer event
         test_helper::register_user(fid, signer.clone(), owner.clone(), &mut engine1).await;
 
+        let removed_signer = generate_signer();
+        let add_signer_event = events_factory::create_signer_event(
+            fid,
+            removed_signer.clone(),
+            proto::SignerEventType::Add,
+            None,
+            None,
+        );
+        commit_event(&mut engine1, &add_signer_event).await;
+
+        // Remove 1 signer
+        let mut remove_signer_event = events_factory::create_signer_event(
+            fid,
+            removed_signer,
+            proto::SignerEventType::Remove,
+            None,
+            None,
+        );
+        remove_signer_event.block_number = add_signer_event.block_number + 1;
+        remove_signer_event.block_timestamp = add_signer_event.block_timestamp + 1;
+        commit_event(&mut engine1, &remove_signer_event).await;
+
         let signer_event = events_factory::create_signer_event(
             fid,
             generate_signer(),
@@ -1605,7 +1627,7 @@ mod tests {
         });
         let response = service.get_on_chain_signers_by_fid(request).await.unwrap();
         let events = response.get_ref().events.clone();
-        // only 2 keys total, non-signer key is not returned
+        // only 2 keys total, non-signer key is not returned, removed key is not returned
         assert_eq!(events.len(), 1);
         assert!(events
             .iter()
