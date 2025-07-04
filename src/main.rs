@@ -77,6 +77,7 @@ async fn start_servers(
         app_config.fc_network,
         Box::new(routing::ShardRouter {}),
         mempool_tx.clone(),
+        gossip.tx.clone(),
         chain_clients,
         VERSION.unwrap_or("unknown").to_string(),
         gossip.swarm.local_peer_id().to_string(),
