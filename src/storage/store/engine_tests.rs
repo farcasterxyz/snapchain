@@ -13,7 +13,7 @@ mod tests {
     use crate::storage::store::stores::StoreLimits;
     use crate::storage::store::test_helper::{
         self, commit_event, commit_event_at, commit_message_at, commit_messages,
-        default_custody_address, key_exists_in_trie, EngineOptions, FID3_FOR_TEST,
+        default_custody_address, key_exists_in_trie, limits, EngineOptions, FID3_FOR_TEST,
     };
     use crate::storage::store::test_helper::{
         commit_message, message_exists_in_trie, register_user, FID2_FOR_TEST, FID_FOR_TEST,
@@ -2279,10 +2279,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_failure_event() {
-        let single_message_limit = StoreLimits {
-            limits: test_helper::limits::one(),
-            legacy_limits: test_helper::limits::zero(),
-        };
+        let single_message_limit = StoreLimits::new(limits::one(), limits::zero(), limits::zero());
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             limits: Some(single_message_limit),
             ..Default::default()

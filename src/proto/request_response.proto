@@ -177,6 +177,7 @@ enum StoreType {
 enum StorageUnitType {
   UNIT_TYPE_LEGACY = 0;
   UNIT_TYPE_2024 = 1;
+  UNIT_TYPE_2025 = 2;
 }
 
 message StorageUnitDetails {

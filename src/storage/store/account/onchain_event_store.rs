@@ -17,7 +17,8 @@ use thiserror::Error;
 
 static PAGE_SIZE: usize = 1000;
 
-const LEGACY_STORAGE_UNIT_CUTOFF_TIMESTAMP: u32 = 1724889600;
+const UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP: u32 = 1724889600; // 2024-08-29 Midnight UTC
+const UNIT_TYPE_2024_CUTOFF_TIMESTAMP: u32 = 1752685200; // 2025-07-16 5PM UTC (Engine version 6)
 const ONE_YEAR_IN_SECONDS: u32 = 365 * 24 * 60 * 60;
 const SUPPORTED_SIGNER_KEY_TYPE: u32 = 1;
 
@@ -351,17 +352,32 @@ where
 
 #[derive(Clone, Debug)]
 pub struct StorageSlot {
-    pub legacy_units: u32,
-    pub units: u32,
+    units_legacy: u32,
+    units_2024: u32,
+    units_2025: u32,
     pub invalidate_at: u32,
 }
 
 impl StorageSlot {
-    pub fn new(legacy_units: u32, units: u32, invalidate_at: u32) -> StorageSlot {
+    pub fn new(
+        units_legacy: u32,
+        units_2024: u32,
+        units_2025: u32,
+        invalidate_at: u32,
+    ) -> StorageSlot {
         StorageSlot {
-            legacy_units,
-            units,
+            units_legacy,
+            units_2024,
+            units_2025,
             invalidate_at,
+        }
+    }
+
+    pub fn units_for(&self, unit_type: proto::StorageUnitType) -> u32 {
+        match unit_type {
+            proto::StorageUnitType::UnitTypeLegacy => self.units_legacy,
+            proto::StorageUnitType::UnitType2024 => self.units_2024,
+            proto::StorageUnitType::UnitType2025 => self.units_2025,
         }
     }
 
@@ -372,14 +388,24 @@ impl StorageSlot {
             return match body {
                 on_chain_event::Body::StorageRentEventBody(storage_rent_event) => {
                     let slot;
-                    if onchain_event.block_timestamp < LEGACY_STORAGE_UNIT_CUTOFF_TIMESTAMP as u64 {
+                    if onchain_event.block_timestamp < UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP as u64 {
                         slot = StorageSlot::new(
                             storage_rent_event.units,
                             0,
+                            0,
                             onchain_event.block_timestamp as u32 + (ONE_YEAR_IN_SECONDS * 2),
+                        );
+                    } else if onchain_event.block_timestamp < UNIT_TYPE_2024_CUTOFF_TIMESTAMP as u64
+                    {
+                        slot = StorageSlot::new(
+                            0,
+                            storage_rent_event.units,
+                            0,
+                            onchain_event.block_timestamp as u32 + ONE_YEAR_IN_SECONDS,
                         );
                     } else {
                         slot = StorageSlot::new(
+                            0,
                             0,
                             storage_rent_event.units,
                             onchain_event.block_timestamp as u32 + ONE_YEAR_IN_SECONDS,
@@ -409,8 +435,9 @@ impl StorageSlot {
             *self = other.clone();
             return true;
         }
-        self.legacy_units += other.legacy_units;
-        self.units += other.units;
+        self.units_legacy += other.units_legacy;
+        self.units_2024 += other.units_2024;
+        self.units_2025 += other.units_2025;
         self.invalidate_at = std::cmp::min(self.invalidate_at, other.invalidate_at);
         true
     }
@@ -613,7 +640,7 @@ impl OnchainEventStore {
     ) -> Result<StorageSlot, OnchainEventStorageError> {
         let rent_events =
             self.get_onchain_events(OnChainEventType::EventTypeStorageRent, Some(fid))?;
-        let mut storage_slot = StorageSlot::new(0, 0, 0);
+        let mut storage_slot = StorageSlot::new(0, 0, 0, 0);
         for rent_event in rent_events {
             storage_slot.merge(&StorageSlot::from_event(&rent_event)?);
         }

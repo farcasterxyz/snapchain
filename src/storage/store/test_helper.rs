@@ -103,12 +103,13 @@ pub mod limits {
         }
     }
 
+    pub fn unlimited_store_limits() -> crate::storage::store::stores::StoreLimits {
+        crate::storage::store::stores::StoreLimits::new(unlimited(), unlimited(), unlimited())
+    }
+
     #[cfg(test)]
     pub fn test_store_limits() -> crate::storage::store::stores::StoreLimits {
-        crate::storage::store::stores::StoreLimits {
-            limits: test(),
-            legacy_limits: legacy(),
-        }
+        crate::storage::store::stores::StoreLimits::new(test(), test(), legacy())
     }
 }
 
@@ -156,10 +157,11 @@ pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile
         Some(db) => db,
     };
 
-    let test_limits = options.limits.unwrap_or(StoreLimits {
-        limits: limits::test(),
-        legacy_limits: limits::zero(),
-    });
+    let test_limits = options.limits.unwrap_or(StoreLimits::new(
+        limits::test(),
+        limits::test(),
+        limits::zero(),
+    ));
 
     (
         ShardEngine::new(

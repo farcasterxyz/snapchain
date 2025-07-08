@@ -1,5 +1,5 @@
 use super::account::{
-    EventsPage, ReactionStore, ReactionStoreDef, UserDataStore, UserDataStoreDef,
+    EventsPage, ReactionStore, ReactionStoreDef, StorageSlot, UserDataStore, UserDataStoreDef,
     VerificationStore, VerificationStoreDef,
 };
 use crate::core::error::HubError;
@@ -72,25 +72,45 @@ pub struct Limits {
 
 impl Limits {
     pub fn default() -> Limits {
-        Limits {
-            casts: 2000,
-            links: 1000,
-            reactions: 1000,
-            user_data: 50,
-            user_name_proofs: 5,
-            verifications: 25,
+        Self::of_type(StorageUnitType::UnitType2025)
+    }
+
+    pub fn of_type(unit_type: StorageUnitType) -> Limits {
+        match unit_type {
+            // Original limits, units rented before Aug 24, 2024
+            StorageUnitType::UnitTypeLegacy => Limits {
+                casts: 5000,
+                links: 2500,
+                reactions: 2500,
+                user_data: 50,
+                user_name_proofs: 5,
+                verifications: 25,
+            },
+            // Extended Storage limits https://github.com/farcasterxyz/protocol/discussions/191
+            // Units rented after Aug 24, 2024
+            StorageUnitType::UnitType2024 => Limits {
+                casts: 2000,
+                links: 1000,
+                reactions: 1000,
+                user_data: 50,
+                user_name_proofs: 5,
+                verifications: 25,
+            },
+            // Storage Redenomination FIP: https://github.com/farcasterxyz/protocol/discussions/229
+            // Units rented after Jul 16, 2025
+            StorageUnitType::UnitType2025 => Limits {
+                casts: 100,
+                links: 200,
+                reactions: 200,
+                user_data: 25,
+                user_name_proofs: 2,
+                verifications: 5,
+            },
         }
     }
 
     pub fn legacy() -> Limits {
-        Limits {
-            casts: 5000,
-            links: 2500,
-            reactions: 2500,
-            user_data: 50,
-            user_name_proofs: 5,
-            verifications: 25,
-        }
+        Self::of_type(StorageUnitType::UnitTypeLegacy)
     }
 
     #[cfg(test)]
@@ -150,22 +170,48 @@ impl Limits {
 
 #[derive(Clone, Debug)]
 pub struct StoreLimits {
-    pub limits: Limits,
-    pub legacy_limits: Limits,
+    limits_2025: Limits,
+    limits_2024: Limits,
+    limits_legacy: Limits,
 }
 
 impl StoreLimits {
-    pub fn max_messages(&self, units: u32, legacy_units: u32, store_type: StoreType) -> u32 {
-        units * self.limits.for_store_type(store_type)
-            + legacy_units * self.legacy_limits.for_store_type(store_type)
+    pub fn new(limits_2025: Limits, limits_2024: Limits, limits_legacy: Limits) -> StoreLimits {
+        StoreLimits {
+            limits_2025,
+            limits_2024,
+            limits_legacy,
+        }
+    }
+
+    pub fn max_messages(&self, slot: &StorageSlot, store_type: StoreType) -> u32 {
+        [
+            StorageUnitType::UnitType2025,
+            StorageUnitType::UnitType2024,
+            StorageUnitType::UnitTypeLegacy,
+        ]
+        .iter()
+        .map(|&unit_type| {
+            self.for_type(unit_type).for_store_type(store_type) * slot.units_for(unit_type)
+        })
+        .sum()
+    }
+
+    pub fn for_type(&self, unit_type: StorageUnitType) -> &Limits {
+        match unit_type {
+            StorageUnitType::UnitTypeLegacy => &self.limits_legacy,
+            StorageUnitType::UnitType2024 => &self.limits_2024,
+            StorageUnitType::UnitType2025 => &self.limits_2025,
+        }
     }
 }
 
 impl StoreLimits {
     pub fn default() -> StoreLimits {
         StoreLimits {
-            limits: Limits::default(),
-            legacy_limits: Limits::legacy(),
+            limits_legacy: Limits::of_type(StorageUnitType::UnitTypeLegacy),
+            limits_2024: Limits::of_type(StorageUnitType::UnitType2024),
+            limits_2025: Limits::of_type(StorageUnitType::UnitType2025),
         }
     }
 }
@@ -220,9 +266,7 @@ impl Stores {
             .onchain_event_store
             .get_storage_slot_for_fid(fid)
             .map_err(|e| StoresError::OnchainEventError(e))?;
-        let max_messages =
-            self.store_limits
-                .max_messages(slot.units, slot.legacy_units, store_type);
+        let max_messages = self.store_limits.max_messages(&slot, store_type);
 
         Ok((message_count, max_messages))
     }
@@ -275,9 +319,7 @@ impl Stores {
             StoreType::UsernameProofs,
         ] {
             let used = self.get_usage_by_store_type(fid, store_type, txn_batch);
-            let max_messages =
-                self.store_limits
-                    .max_messages(slot.units, slot.legacy_units, store_type);
+            let max_messages = self.store_limits.max_messages(&slot, store_type);
             let name = match store_type {
                 StoreType::None => "NONE",
                 StoreType::Casts => "CASTS",
@@ -300,15 +342,21 @@ impl Stores {
 
         let response = StorageLimitsResponse {
             limits,
-            units: slot.units + slot.legacy_units,
+            units: slot.units_for(StorageUnitType::UnitTypeLegacy)
+                + slot.units_for(StorageUnitType::UnitType2024)
+                + slot.units_for(StorageUnitType::UnitType2025),
             unit_details: vec![
                 StorageUnitDetails {
                     unit_type: StorageUnitType::UnitTypeLegacy as i32,
-                    unit_size: slot.legacy_units,
+                    unit_size: slot.units_for(StorageUnitType::UnitTypeLegacy),
                 },
                 StorageUnitDetails {
                     unit_type: StorageUnitType::UnitType2024 as i32,
-                    unit_size: slot.units,
+                    unit_size: slot.units_for(StorageUnitType::UnitType2024),
+                },
+                StorageUnitDetails {
+                    unit_type: StorageUnitType::UnitType2025 as i32,
+                    unit_size: slot.units_for(StorageUnitType::UnitType2025),
                 },
             ],
             tier_subscriptions: vec![TierDetails {
@@ -533,6 +581,17 @@ mod tests {
     #[test]
     fn test_default_limits() {
         let limits = Limits::default();
+        assert_eq!(limits.casts, 100);
+        assert_eq!(limits.links, 200);
+        assert_eq!(limits.reactions, 200);
+        assert_eq!(limits.user_data, 25);
+        assert_eq!(limits.user_name_proofs, 2);
+        assert_eq!(limits.verifications, 5);
+    }
+
+    #[test]
+    fn test_2024_limits() {
+        let limits = Limits::of_type(StorageUnitType::UnitType2024);
         assert_eq!(limits.casts, 2000);
         assert_eq!(limits.links, 1000);
         assert_eq!(limits.reactions, 1000);
@@ -555,11 +614,11 @@ mod tests {
     #[test]
     fn test_limit_for_message() {
         let limits = Limits::default();
-        assert_eq!(limits.for_message_type(MessageType::CastAdd), 2000);
-        assert_eq!(limits.for_message_type(MessageType::CastRemove), 2000);
-        assert_eq!(limits.for_message_type(MessageType::ReactionAdd), 1000);
-        assert_eq!(limits.for_message_type(MessageType::ReactionRemove), 1000);
-        assert_eq!(limits.for_message_type(MessageType::LinkCompactState), 1000);
+        assert_eq!(limits.for_message_type(MessageType::CastAdd), 100);
+        assert_eq!(limits.for_message_type(MessageType::CastRemove), 100);
+        assert_eq!(limits.for_message_type(MessageType::ReactionAdd), 200);
+        assert_eq!(limits.for_message_type(MessageType::ReactionRemove), 200);
+        assert_eq!(limits.for_message_type(MessageType::LinkCompactState), 200);
         assert_eq!(limits.for_message_type(MessageType::FrameAction), 0);
         assert_eq!(limits.for_message_type(MessageType::None), 0);
     }
@@ -567,22 +626,31 @@ mod tests {
     #[test]
     fn test_max_messages() {
         let store_limits = &StoreLimits::default();
-        let legacy_limits = &store_limits.legacy_limits;
-        let limits = &store_limits.limits;
+        let limits_legacy = &store_limits.limits_legacy;
+        let limits_2024 = &store_limits.limits_2024;
+        let limits = &store_limits.limits_2025;
+        let storage_slot_legacy = StorageSlot::new(1, 0, 0, 0);
+        let storage_slot_2025 = StorageSlot::new(0, 0, 1, 0);
+        let storage_slot_mixed = StorageSlot::new(3, 2, 1, 0);
+        let storage_slot_none = StorageSlot::new(0, 0, 0, 0);
+
         assert_eq!(
-            store_limits.max_messages(1, 0, StoreType::Casts),
+            store_limits.max_messages(&storage_slot_2025, StoreType::Casts),
             limits.casts * 1
         );
         assert_eq!(
-            store_limits.max_messages(0, 1, StoreType::Casts),
-            legacy_limits.casts * 1
+            store_limits.max_messages(&storage_slot_legacy, StoreType::Casts),
+            limits_legacy.casts * 1
         );
 
         assert_eq!(
-            store_limits.max_messages(3, 2, StoreType::Links),
-            (limits.links * 3) + (legacy_limits.links * 2)
+            store_limits.max_messages(&storage_slot_mixed, StoreType::Links),
+            (limits_legacy.links * 3) + (limits_2024.links * 2) + (limits.links * 1)
         );
 
-        assert_eq!(store_limits.max_messages(0, 0, StoreType::Links), 0);
+        assert_eq!(
+            store_limits.max_messages(&storage_slot_none, StoreType::Links),
+            0
+        );
     }
 }

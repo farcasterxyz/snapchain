@@ -17,17 +17,7 @@ mod tests {
 
     fn setup(limits: Limits) -> (ShardEngine, HashMap<u32, Stores>) {
         let (engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
-            limits: Some(StoreLimits {
-                limits,
-                legacy_limits: Limits {
-                    casts: 0,
-                    links: 0,
-                    reactions: 0,
-                    user_data: 0,
-                    user_name_proofs: 0,
-                    verifications: 0,
-                },
-            }),
+            limits: Some(StoreLimits::new(limits.clone(), limits, limits::zero())),
             ..Default::default()
         });
         let mut shard_stores = HashMap::new();

@@ -1210,9 +1210,10 @@ mod tests {
             assert_eq!(limit.limit, 0);
             assert_eq!(limit.used, 0);
         }
-        assert_eq!(response.get_ref().unit_details.len(), 2);
+        assert_eq!(response.get_ref().unit_details.len(), 3);
         assert_eq!(response.get_ref().unit_details[0].unit_size, 0);
         assert_eq!(response.get_ref().unit_details[1].unit_size, 0);
+        assert_eq!(response.get_ref().unit_details[2].unit_size, 0);
 
         test_helper::register_user(
             SHARD1_FID,
@@ -1260,7 +1261,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.get_ref().units, 3);
-        assert_eq!(response.get_ref().unit_details.len(), 2);
+        assert_eq!(response.get_ref().unit_details.len(), 3);
         assert_eq!(response.get_ref().unit_details[0].unit_size, 1);
         assert_eq!(
             response.get_ref().unit_details[0].unit_type,
@@ -1271,6 +1272,11 @@ mod tests {
             proto::StorageUnitType::UnitType2024 as i32
         );
         assert_eq!(response.get_ref().unit_details[1].unit_size, 2);
+        assert_eq!(
+            response.get_ref().unit_details[2].unit_type,
+            proto::StorageUnitType::UnitType2025 as i32
+        );
+        assert_eq!(response.get_ref().unit_details[2].unit_size, 0);
 
         let casts_limit = response
             .get_ref()
@@ -1281,7 +1287,13 @@ mod tests {
         let configured_limits = engine1.get_stores().store_limits;
         assert_eq!(
             casts_limit.limit as u32,
-            (configured_limits.limits.casts * 2) + (configured_limits.legacy_limits.casts)
+            (configured_limits
+                .for_type(proto::StorageUnitType::UnitType2024)
+                .casts
+                * 2)
+                + (configured_limits
+                    .for_type(proto::StorageUnitType::UnitTypeLegacy)
+                    .casts)
         );
         assert_eq!(casts_limit.used, 2); // Cast remove counts as 1
         assert_eq!(casts_limit.name, "CASTS");

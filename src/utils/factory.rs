@@ -100,10 +100,13 @@ pub mod events_factory {
                 panic!("New units cannot be expired until 1 year from legacy cutoff");
             }
         }
+        create_rent_event_with_timestamp(fid, rent_units, timestamp)
+    }
 
+    pub fn create_rent_event_with_timestamp(fid: u64, units: u32, timestamp: u32) -> OnChainEvent {
         let rent_event_body = proto::StorageRentEventBody {
             expiry: 0, // This field is ignored, we use block_timestamp to calculate expiry
-            units: rent_units,
+            units,
             payer: rand::random::<[u8; 32]>().to_vec(),
         };
         let random_number_under_1000 = rand::random::<u32>() % 1000;
