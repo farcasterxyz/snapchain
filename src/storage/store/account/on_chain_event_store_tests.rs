@@ -35,7 +35,7 @@ mod tests {
         assert_eq!(slot.units_for(StorageUnitType::UnitType2025), 0);
         assert_eq!(
             slot.invalidate_at,
-            expired_legacy_rent_event.block_timestamp as u32 + one_year_in_seconds * 2
+            expired_legacy_rent_event.block_timestamp as u32 + one_year_in_seconds * 3
         );
 
         let valid_legacy_rent_event =
@@ -47,7 +47,7 @@ mod tests {
         assert_eq!(slot.units_for(StorageUnitType::UnitType2025), 0);
         assert_eq!(
             slot.invalidate_at,
-            valid_legacy_rent_event.block_timestamp as u32 + one_year_in_seconds * 2
+            valid_legacy_rent_event.block_timestamp as u32 + one_year_in_seconds * 3
         );
 
         let valid_2024_rent_event =
@@ -59,7 +59,20 @@ mod tests {
         assert_eq!(slot.units_for(StorageUnitType::UnitType2025), 0);
         assert_eq!(
             slot.invalidate_at,
-            valid_2024_rent_event.block_timestamp as u32 + one_year_in_seconds
+            valid_2024_rent_event.block_timestamp as u32 + one_year_in_seconds * 2
+        );
+
+        let sep_1_2025 = 1756710000;
+        let valid_2025_rent_event =
+            factory::events_factory::create_rent_event_with_timestamp(11, 3, sep_1_2025);
+        let slot = StorageSlot::from_event(&valid_2025_rent_event).unwrap();
+        assert_eq!(slot.is_active(), true);
+        assert_eq!(slot.units_for(StorageUnitType::UnitTypeLegacy), 0);
+        assert_eq!(slot.units_for(StorageUnitType::UnitType2024), 0);
+        assert_eq!(slot.units_for(StorageUnitType::UnitType2025), 3);
+        assert_eq!(
+            slot.invalidate_at,
+            valid_2025_rent_event.block_timestamp as u32 + one_year_in_seconds
         );
     }
 

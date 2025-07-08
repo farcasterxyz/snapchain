@@ -388,12 +388,21 @@ impl StorageSlot {
             return match body {
                 on_chain_event::Body::StorageRentEventBody(storage_rent_event) => {
                     let slot;
+
+                    // NOTE(Jul 2025): We have 3 types of storages units based on when they were rented.
+                    // As part of the storage redenomination FIP, we're also extended the expiry of all
+                    // previously rented storage units by 1 year, in addition to the previous 1-year extension.
+                    // So legacy units are valid for 3 years (original 1 year validity + 2 extensions),
+                    // 2024 units for 2 years (one extension), and 2025 units for 1 year (no extensions).
+                    // Original Storage Extension: https://github.com/farcasterxyz/protocol/discussions/191
+                    // Storage Redenomination: https://github.com/farcasterxyz/protocol/discussions/229
+
                     if onchain_event.block_timestamp < UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP as u64 {
                         slot = StorageSlot::new(
                             storage_rent_event.units,
                             0,
                             0,
-                            onchain_event.block_timestamp as u32 + (ONE_YEAR_IN_SECONDS * 2),
+                            onchain_event.block_timestamp as u32 + (ONE_YEAR_IN_SECONDS * 3),
                         );
                     } else if onchain_event.block_timestamp < UNIT_TYPE_2024_CUTOFF_TIMESTAMP as u64
                     {
@@ -401,7 +410,7 @@ impl StorageSlot {
                             0,
                             storage_rent_event.units,
                             0,
-                            onchain_event.block_timestamp as u32 + ONE_YEAR_IN_SECONDS,
+                            onchain_event.block_timestamp as u32 + (ONE_YEAR_IN_SECONDS * 2),
                         );
                     } else {
                         slot = StorageSlot::new(
