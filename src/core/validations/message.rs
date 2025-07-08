@@ -73,8 +73,11 @@ pub fn validate_timestamp(
 ) -> Result<(), ValidationError> {
     if engine_version.is_enabled(ProtocolFeature::FutureTimestampValidation) {
         let current_time = get_farcaster_time()? as u32;
-        if message_timestamp - current_time > ALLOWED_CLOCK_SKEW_SECONDS {
-            return Err(ValidationError::TimestampTooFarInFuture);
+        // Using checked_sub to manage message timestamps from the past correctly. The times are all represented as u32 so with regular subtraction this code will panic on underflow.
+        if let Some(difference) = message_timestamp.checked_sub(current_time) {
+            if difference > ALLOWED_CLOCK_SKEW_SECONDS {
+                return Err(ValidationError::TimestampTooFarInFuture);
+            }
         }
     }
     Ok(())
