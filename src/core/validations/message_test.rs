@@ -33,7 +33,6 @@ mod tests {
             false,
             EngineVersion::latest(),
         );
-        println!("result: {:#?}", result);
         assert!(result.is_ok());
     }
 
