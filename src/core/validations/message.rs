@@ -1,3 +1,4 @@
+use crate::core::util::get_farcaster_time;
 use crate::core::validations::error::ValidationError;
 use crate::core::validations::validate_cast_id;
 use crate::proto::{
@@ -21,6 +22,8 @@ const EMBEDS_V1_CUTOFF: u32 = 73612800;
 const TWITTER_USERNAME_REGEX: &str = "^[a-z0-9_]{0,15}$";
 const FNAME_REGEX: &str = "^[a-z0-9][a-z0-9-]{0,15}$";
 const GITHUB_USERNAME_REGEX: &str = "^[a-zA-Z\\d](?:[a-zA-Z\\d]|-(?!-)){0,38}$";
+/** Number of seconds (10 minutes) that is appropriate for clock skew */
+const ALLOWED_CLOCK_SKEW_SECONDS: u32 = 10 * 60;
 
 pub fn validate_message_type(message_type: i32) -> Result<(), ValidationError> {
     MessageType::try_from(message_type)
@@ -61,6 +64,19 @@ fn validate_frame_action_body(body: &FrameActionBody) -> Result<(), ValidationEr
         validate_cast_id(cast_id)?;
     }
 
+    Ok(())
+}
+
+pub fn validate_timestamp(
+    message_timestamp: u32,
+    engine_version: EngineVersion,
+) -> Result<(), ValidationError> {
+    if engine_version.is_enabled(ProtocolFeature::FutureTimestampValidation) {
+        let current_time = get_farcaster_time()? as u32;
+        if message_timestamp - current_time > ALLOWED_CLOCK_SKEW_SECONDS {
+            return Err(ValidationError::TimestampTooFarInFuture);
+        }
+    }
     Ok(())
 }
 
@@ -130,6 +146,7 @@ pub fn validate_message(
         &message.signature,
         &message.signer,
     )?;
+    validate_timestamp(message_data.timestamp, version)?;
 
     match &message_data.body {
         Some(proto::message_data::Body::UserDataBody(user_data)) => {

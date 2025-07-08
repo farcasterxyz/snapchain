@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::core::error::HubError;
+
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum ValidationError {
     #[error("data is missing")]
@@ -140,4 +142,8 @@ pub enum ValidationError {
     DataBytesTooLong(u64),
     #[error("embed is missing")]
     MissingEmbed,
+    #[error("timestamp more than 10 mins in the future")]
+    TimestampTooFarInFuture,
+    #[error(transparent)]
+    HubError(#[from] HubError),
 }

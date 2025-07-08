@@ -33,6 +33,7 @@ mod tests {
             false,
             EngineVersion::latest(),
         );
+        println!("result: {:#?}", result);
         assert!(result.is_ok());
     }
 
@@ -223,6 +224,24 @@ mod tests {
 
         msg.signer = generate_signer().verifying_key().to_bytes().to_vec();
         assert_validation_error(&msg, ValidationError::InvalidSignature);
+    }
+    #[test]
+    fn validates_timestamp() {
+        let msg = messages_factory::casts::create_cast_add(
+            1234,
+            "test",
+            Some(time::farcaster_time_with_offset(60 * 10)),
+            None,
+        );
+        assert_valid(&msg);
+
+        let msg = messages_factory::casts::create_cast_add(
+            1234,
+            "test",
+            Some(time::farcaster_time_with_offset(60 * 11)),
+            None,
+        );
+        assert_validation_error(&msg, ValidationError::TimestampTooFarInFuture);
     }
 
     #[test]

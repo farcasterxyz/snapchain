@@ -13,6 +13,7 @@ pub enum EngineVersion {
     V3 = 3,
     V4 = 4,
     V5 = 5,
+    V6 = 6,
 }
 
 pub enum ProtocolFeature {
@@ -23,6 +24,7 @@ pub enum ProtocolFeature {
     MessageLengthCheckFix,
     PrimaryAddresses,
     UsernameShardRoutingFix,
+    FutureTimestampValidation,
 }
 
 pub struct VersionSchedule {
@@ -54,6 +56,10 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
     VersionSchedule {
         active_at: 1750093200, // 2025-06-16 5PM UTC
         version: EngineVersion::V5,
+    },
+    VersionSchedule {
+        active_at: 1752685200, // 2025-07-16 5PM UTC
+        version: EngineVersion::V6,
     },
 ]
 .as_slice();
@@ -112,6 +118,7 @@ impl EngineVersion {
             | ProtocolFeature::MessageLengthCheckFix
             | ProtocolFeature::UsernameShardRoutingFix
             | ProtocolFeature::PrimaryAddresses => self >= &EngineVersion::V5,
+            ProtocolFeature::FutureTimestampValidation => self >= &EngineVersion::V6,
         }
     }
 
@@ -122,7 +129,7 @@ impl EngineVersion {
             | EngineVersion::V2
             | EngineVersion::V3
             | EngineVersion::V4 => 1,
-            EngineVersion::V5 => LATEST_PROTOCOL_VERSION,
+            EngineVersion::V5 | EngineVersion::V6 => LATEST_PROTOCOL_VERSION,
         }
     }
 
@@ -230,13 +237,13 @@ mod version_test {
         let time = FarcasterTime::new(0);
         assert_eq!(
             EngineVersion::version_for(&time, FarcasterNetwork::Devnet),
-            EngineVersion::V5
+            EngineVersion::latest()
         );
 
         let time = FarcasterTime::current();
         assert_eq!(
             EngineVersion::version_for(&time, FarcasterNetwork::Devnet),
-            EngineVersion::V5
+            EngineVersion::latest()
         );
     }
 
@@ -266,7 +273,7 @@ mod version_test {
 
     #[test]
     fn test_latest() {
-        assert_eq!(EngineVersion::latest(), EngineVersion::V5);
+        assert_eq!(EngineVersion::latest(), EngineVersion::V6);
         assert_eq!(
             EngineVersion::version_for(&FarcasterTime::current(), FarcasterNetwork::Devnet),
             EngineVersion::latest()
