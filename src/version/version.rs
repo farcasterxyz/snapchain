@@ -73,12 +73,16 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
         active_at: 1748970000, // 2025-06-3 5PM UTC
         version: EngineVersion::V5,
     },
+    VersionSchedule {
+        active_at: 1752080400, // 2025-07-09 5PM UTC
+        version: EngineVersion::V6,
+    },
 ]
 .as_slice();
 
 const ENGINE_VERSION_SCHEDULE_DEVNET: &[VersionSchedule] = [VersionSchedule {
     active_at: 0,
-    version: EngineVersion::V5,
+    version: EngineVersion::V6,
 }]
 .as_slice();
 
