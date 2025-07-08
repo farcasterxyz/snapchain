@@ -753,6 +753,7 @@ impl LinksByTargetRequest {
 pub enum StorageUnitType {
     UnitTypeLegacy = 0,
     UnitType2024 = 1,
+    UnitType2025 = 2,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2506,6 +2507,7 @@ impl HubHttpService for HubHttpServiceImpl {
                 .map(|u: &proto::StorageUnitDetails| StorageUnitDetails {
                     unit_size: u.unit_size,
                     unit_type: match u.unit_type {
+                        2 => StorageUnitType::UnitType2025,
                         1 => StorageUnitType::UnitType2024,
                         _ => StorageUnitType::UnitTypeLegacy,
                     },
