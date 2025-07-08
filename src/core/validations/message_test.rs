@@ -36,6 +36,15 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    fn assert_validation_result_at_version(
+        msg: &proto::Message,
+        expected_result: Result<(), ValidationError>,
+        version: EngineVersion,
+    ) {
+        let result = validate_message(msg, FarcasterNetwork::Testnet, false, version);
+        assert_eq!(result, expected_result);
+    }
+
     fn assert_mutated_valid(msg: &mut proto::Message) {
         // Recalculate hash and signature based on the new data
         msg.hash = calculate_message_hash(&msg.data.as_ref().unwrap().encode_to_vec());
@@ -240,7 +249,12 @@ mod tests {
             Some(time::farcaster_time_with_offset(60 * 11)),
             None,
         );
-        assert_validation_error(&msg, ValidationError::TimestampTooFarInFuture);
+        assert_validation_result_at_version(&msg, Ok(()), EngineVersion::V5);
+        assert_validation_result_at_version(
+            &msg,
+            Err(ValidationError::TimestampTooFarInFuture),
+            EngineVersion::latest(),
+        );
     }
 
     #[test]
