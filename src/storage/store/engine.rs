@@ -579,7 +579,7 @@ impl ShardEngine {
         Ok(events)
     }
 
-    fn replay_snapchain_txn(
+    pub(crate) fn replay_snapchain_txn(
         &mut self,
         trie_ctx: &merkle_trie::Context,
         snapchain_txn: &Transaction,
