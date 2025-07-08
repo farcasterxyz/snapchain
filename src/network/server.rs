@@ -1205,6 +1205,7 @@ impl HubService for MyHubService {
             &request,
             self.network,
             is_pro_user,
+            &FarcasterTime::current(),
             EngineVersion::current(self.network),
         )
         .map_or_else(|_| false, |_| true);

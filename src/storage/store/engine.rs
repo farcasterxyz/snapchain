@@ -1210,7 +1210,13 @@ impl ShardEngine {
             .stores
             .is_pro_user(message.fid(), timestamp)
             .map_err(|err| HubError::internal_db_error(&err.to_string()))?;
-        validations::message::validate_message(message, self.network, is_pro_user, version)?;
+        validations::message::validate_message(
+            message,
+            self.network,
+            is_pro_user,
+            timestamp,
+            version,
+        )?;
 
         // Check that the user has a custody address
         self.stores

@@ -1,4 +1,4 @@
-use crate::core::util::get_farcaster_time;
+use crate::core::util::FarcasterTime;
 use crate::core::validations::error::ValidationError;
 use crate::core::validations::validate_cast_id;
 use crate::proto::{
@@ -23,7 +23,7 @@ const TWITTER_USERNAME_REGEX: &str = "^[a-z0-9_]{0,15}$";
 const FNAME_REGEX: &str = "^[a-z0-9][a-z0-9-]{0,15}$";
 const GITHUB_USERNAME_REGEX: &str = "^[a-zA-Z\\d](?:[a-zA-Z\\d]|-(?!-)){0,38}$";
 /** Number of seconds (10 minutes) that is appropriate for clock skew */
-const ALLOWED_CLOCK_SKEW_SECONDS: u32 = 10 * 60;
+const ALLOWED_CLOCK_SKEW_SECONDS: u64 = 10 * 60;
 
 pub fn validate_message_type(message_type: i32) -> Result<(), ValidationError> {
     MessageType::try_from(message_type)
@@ -69,12 +69,12 @@ fn validate_frame_action_body(body: &FrameActionBody) -> Result<(), ValidationEr
 
 pub fn validate_timestamp(
     message_timestamp: u32,
+    block_timestamp: &FarcasterTime,
     engine_version: EngineVersion,
 ) -> Result<(), ValidationError> {
     if engine_version.is_enabled(ProtocolFeature::FutureTimestampValidation) {
-        let current_time = get_farcaster_time()? as u32;
-        // Using checked_sub to manage message timestamps from the past correctly. The times are all represented as u32 so with regular subtraction this code will panic on underflow.
-        if let Some(difference) = message_timestamp.checked_sub(current_time) {
+        // Using checked_sub to manage message timestamps from the past correctly. The times are all represented as uints so with regular subtraction this code will panic on underflow.
+        if let Some(difference) = (message_timestamp as u64).checked_sub(block_timestamp.to_u64()) {
             if difference > ALLOWED_CLOCK_SKEW_SECONDS {
                 return Err(ValidationError::TimestampTooFarInFuture);
             }
@@ -87,6 +87,7 @@ pub fn validate_message(
     message: &proto::Message,
     current_network: proto::FarcasterNetwork,
     is_pro_user: bool,
+    block_timestamp: &FarcasterTime,
     version: EngineVersion,
 ) -> Result<(), ValidationError> {
     let data_bytes;
@@ -149,7 +150,7 @@ pub fn validate_message(
         &message.signature,
         &message.signer,
     )?;
-    validate_timestamp(message_data.timestamp, version)?;
+    validate_timestamp(message_data.timestamp, block_timestamp, version)?;
 
     match &message_data.body {
         Some(proto::message_data::Body::UserDataBody(user_data)) => {
