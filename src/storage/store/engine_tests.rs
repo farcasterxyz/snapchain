@@ -1052,6 +1052,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_commit_username_proofs_with_usernames() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            network: Some(FarcasterNetwork::Testnet), // To test basename support
+            ..Default::default()
+        });
+        let owner = "owner".to_string().encode_to_vec();
+        let signature = "signature".to_string();
+        let signer = test_helper::default_signer();
+
+        test_helper::register_user(
+            FID_FOR_TEST,
+            signer.clone(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let username_proof_add = messages_factory::username_proof::create_username_proof(
+            FID_FOR_TEST as u64,
+            proto::UserNameType::UsernameTypeEnsL1,
+            "username.eth".to_string().clone(),
+            owner.clone(),
+            signature.clone(),
+            timestamp as u64,
+            Some(&signer),
+        );
+
+        // Allows setting the proof as the username
+        let userdata_add = messages_factory::user_data::create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::Username,
+            &"username.eth".to_string(),
+            Some(timestamp + 1),
+            Some(&signer),
+        );
+
+        commit_messages(&mut engine, vec![username_proof_add, userdata_add]).await;
+    }
+
+    #[tokio::test]
     async fn test_account_roots() {
         let cast = messages_factory::casts::create_cast_add(FID_FOR_TEST, "msg1", None, None);
         let (mut engine, _tmpdir) = test_helper::new_engine();
