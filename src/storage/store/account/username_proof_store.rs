@@ -3,13 +3,13 @@ use super::{
     store::{Store, StoreDef},
     IntoU8, MessagesPage, StoreEventHandler, TS_HASH_LENGTH,
 };
-use crate::core::error::HubError;
 use crate::proto::message_data::Body;
 use crate::proto::{self, HubEvent, HubEventType, MergeUserNameProofBody, Message, MessageType};
 use crate::storage::constants::{RootPrefix, UserPostfix};
 use crate::storage::db::PageOptions;
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::util;
+use crate::{core::error::HubError, storage::store::account::message_decode};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -374,10 +374,11 @@ impl UsernameProofStore {
 
     pub fn get_username_proof(
         store: &Store<UsernameProofStoreDef>,
+        txn: &mut RocksDbTransactionBatch,
         name: &Vec<u8>,
     ) -> Result<Option<Message>, HubError> {
         let by_name_key = UsernameProofStoreDef::make_username_proof_by_name_key(name);
-        let fid_result = store.db().get(by_name_key.as_slice())?;
+        let fid_result = get_from_db_or_txn(&store.db(), txn, &by_name_key)?;
         if fid_result.is_none() {
             return Err(HubError {
                 code: "not_found".to_string(),
@@ -389,19 +390,12 @@ impl UsernameProofStore {
         }
 
         let fid = read_fid_key(&fid_result.unwrap(), 0);
-        let partial_message = Message {
-            data: Some(proto::MessageData {
-                fid,
-                body: Some(Body::UsernameProofBody(proto::UserNameProof {
-                    name: name.clone(),
-                    ..Default::default()
-                })),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        store.get_add(&partial_message)
+        let by_fid_key = UsernameProofStoreDef::make_username_proof_by_fid_key(fid, name);
+        if let Some(bytes) = get_from_db_or_txn(&store.db(), txn, &by_fid_key)? {
+            return Ok(Some(message_decode(&bytes)?));
+        } else {
+            return Ok(None);
+        }
     }
 
     pub fn get_username_proofs_by_fid(

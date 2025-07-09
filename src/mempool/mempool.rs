@@ -12,6 +12,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
+use crate::proto::message_data::Body;
 use crate::proto::{FarcasterNetwork, OnChainEventType};
 use crate::{
     core::types::SnapchainValidatorContext,
@@ -216,6 +217,7 @@ pub enum MempoolRequest {
         Option<oneshot::Sender<Result<(), HubError>>>,
     ),
     GetSize(oneshot::Sender<HashMap<u32, u64>>),
+    GetRecentUsernameProof(u64, String, oneshot::Sender<bool>),
 }
 
 impl MempoolMessage {
@@ -240,6 +242,7 @@ pub struct ReadNodeMempool {
     mempool_rx: mpsc::Receiver<MempoolRequest>,
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     statsd_client: StatsdClientWrapper,
+    recent_username_proof_cache: Cache<(u64, String), bool>,
 }
 
 impl ReadNodeMempool {
@@ -257,6 +260,10 @@ impl ReadNodeMempool {
             message_router: Box::new(ShardRouter {}),
             gossip_tx,
             statsd_client,
+            recent_username_proof_cache: CacheBuilder::new(1_000)
+                .time_to_idle(Duration::from_secs(10))
+                .eviction_policy(EvictionPolicy::lru())
+                .build(),
         }
     }
 
@@ -335,6 +342,28 @@ impl ReadNodeMempool {
         Ok(())
     }
 
+    fn record_username_proof(&mut self, message: &MempoolMessage) {
+        if let MempoolMessage::UserMessage(message) = &message {
+            match &message.data.as_ref().unwrap().body {
+                Some(Body::UsernameProofBody(body)) => {
+                    let name = std::str::from_utf8(&body.name).unwrap().to_string();
+                    self.recent_username_proof_cache
+                        .insert((body.fid, name), true);
+                }
+                _ => {}
+            }
+        }
+        if let MempoolMessage::ValidatorMessage(inner_message) = &message {
+            if let Some(fname_transfer) = &inner_message.fname_transfer {
+                let name = std::str::from_utf8(&fname_transfer.proof.as_ref().unwrap().name)
+                    .unwrap()
+                    .to_string();
+                self.recent_username_proof_cache
+                    .insert((fname_transfer.id, name), true);
+            }
+        }
+    }
+
     pub async fn run(&mut self) {
         while let Some(message_request) = self.mempool_rx.recv().await {
             match message_request {
@@ -343,6 +372,7 @@ impl ReadNodeMempool {
                         .count("read_mempool.messages_received", 1);
                     let result = self.message_is_valid(&message);
                     if result.is_ok() {
+                        self.record_username_proof(&message);
                         self.gossip_message(message, source).await;
                         self.statsd_client
                             .count("read_mempool.messages_published", 1);
@@ -357,6 +387,13 @@ impl ReadNodeMempool {
                     // Read nodes don't have a local mempool, so the size is always 0
                     if let Err(_) = reply_to.send(HashMap::new()) {
                         error!("Unable to reply to message size request from mempool");
+                    }
+                }
+                MempoolRequest::GetRecentUsernameProof(fid, name, reply_to) => {
+                    let found_recent_username_proof =
+                        self.recent_username_proof_cache.get(&(fid, name));
+                    if let Err(_) = reply_to.send(found_recent_username_proof.is_some()) {
+                        error!("Unable to reply to recent username proof request");
                     }
                 }
             }
@@ -492,9 +529,11 @@ impl Mempool {
             .insert_into_shard(original_shard_id, message.clone(), source.clone())
             .await;
 
+        self.read_node_mempool.record_username_proof(&message);
+
         // Fname transfers are mirrored to both the sender and receiver shard.
         if let MempoolMessage::ValidatorMessage(inner_message) = &message {
-            if let Some(_fname_transfer) = &inner_message.fname_transfer {
+            if let Some(_) = &inner_message.fname_transfer {
                 let version = EngineVersion::current(self.network);
                 // Send the username transfer to all other shards, transfers from a->b->c are
                 // correctly tracked. Due to current limitations of the engine, if we transfer from
@@ -636,6 +675,13 @@ impl Mempool {
                                     }
                                     if let Err(_) = reply_to.send(sizes) {
                                         error!("Unable to reply to message size request from mempool");
+                                    }
+                                }
+                                Ok(MempoolRequest::GetRecentUsernameProof(fid, name, reply_to) )=> {
+                                    let found_recent_username_proof =
+                                        self.read_node_mempool.recent_username_proof_cache.get(&(fid, name));
+                                    if let Err(_) = reply_to.send(found_recent_username_proof.is_some()) {
+                                        error!("Unable to reply to recent username proof request");
                                     }
                                 }
                                 Err(mpsc::error::TryRecvError::Disconnected) => {
