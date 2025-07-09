@@ -3,7 +3,7 @@ use crate::proto::FarcasterNetwork;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
-const LATEST_PROTOCOL_VERSION: u32 = 2;
+const LATEST_PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, EnumIter)]
 pub enum EngineVersion {
@@ -133,7 +133,8 @@ impl EngineVersion {
             | EngineVersion::V2
             | EngineVersion::V3
             | EngineVersion::V4 => 1,
-            EngineVersion::V5 | EngineVersion::V6 => LATEST_PROTOCOL_VERSION,
+            EngineVersion::V5 => 2,
+            EngineVersion::V6 => LATEST_PROTOCOL_VERSION,
         }
     }
 
