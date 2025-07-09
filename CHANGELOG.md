@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2025-07-09
+
+### 🚀 Features
+
+- Storage redenomination (#570)
+
+### 🐛 Bug Fixes
+
+- Make GetOnChainSignersByFid endpoint only return active signers (#567)
+- Check for timestamp being too far in the future (#569)
+- Use correct rpc client for validating verifications (#571)
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump protocol version for storage re-denomination (#573)
+
 ## [0.3.2] - 2025-07-02
 
 ### 🚀 Features
