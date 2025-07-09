@@ -160,6 +160,18 @@ pub trait ChainAPI: Send + Sync {
 pub enum Chain {
     EthMainnet,
     BaseMainnet,
+    OptimismMainnet,
+}
+
+impl Chain {
+    pub fn from_chain_id(chain_id: u32) -> Option<Self> {
+        match chain_id {
+            1 => Some(Chain::EthMainnet),
+            10 => Some(Chain::OptimismMainnet),
+            8453 => Some(Chain::BaseMainnet),
+            _ => None,
+        }
+    }
 }
 
 pub struct ChainClients {
@@ -171,7 +183,8 @@ impl ChainClients {
         let mut chain_api_map = HashMap::new();
         if !app_config.l1_rpc_url.is_empty() {
             let client: Box<dyn ChainAPI> = Box::new(
-                RealL1Client::new(app_config.l1_rpc_url.clone(), ETH_L1_ENS_REGISTRY).unwrap(),
+                RealL1Client::new(app_config.l1_rpc_url.clone(), Some(ETH_L1_ENS_REGISTRY))
+                    .unwrap(),
             );
             chain_api_map.insert(Chain::EthMainnet, client);
         }
@@ -179,11 +192,17 @@ impl ChainClients {
             let client: Box<dyn ChainAPI> = Box::new(
                 RealL1Client::new(
                     app_config.base_onchain_events.rpc_url.clone(),
-                    BASE_MAINNET_ENS_REGISTRY,
+                    Some(BASE_MAINNET_ENS_REGISTRY),
                 )
                 .unwrap(),
             );
             chain_api_map.insert(Chain::BaseMainnet, client);
+        }
+        if !app_config.onchain_events.rpc_url.is_empty() {
+            let client: Box<dyn ChainAPI> = Box::new(
+                RealL1Client::new(app_config.onchain_events.rpc_url.clone(), None).unwrap(),
+            );
+            chain_api_map.insert(Chain::OptimismMainnet, client);
         }
 
         ChainClients { chain_api_map }
@@ -201,13 +220,13 @@ impl ChainClients {
 
 pub struct RealL1Client {
     provider: RootProvider<Http<Client>>,
-    ens_resolver_address: Address,
+    ens_resolver_address: Option<Address>,
 }
 
 impl RealL1Client {
     pub fn new(
         rpc_url: String,
-        ens_resolver_address: Address,
+        ens_resolver_address: Option<Address>,
     ) -> Result<RealL1Client, SubscribeError> {
         if rpc_url.is_empty() {
             return Err(SubscribeError::EmptyRpcUrl);
@@ -226,8 +245,10 @@ impl ChainAPI for RealL1Client {
     async fn resolve_ens_name(&self, name: String) -> Result<Address, EnsError> {
         // Copied from foundry_common::ens so we can support both ETH and Base mainnet
         let node = namehash(name.as_str());
-
-        let registry = EnsRegistry::new(self.ens_resolver_address, self.provider.clone());
+        let ens_resolver_address = self.ens_resolver_address.ok_or(EnsError::ResolverNotFound(
+            "no resolver address configured for chain".to_string(),
+        ))?;
+        let registry = EnsRegistry::new(ens_resolver_address, self.provider.clone());
         let address = registry
             .resolver(node)
             .call()

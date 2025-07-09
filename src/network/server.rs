@@ -303,7 +303,9 @@ impl MyHubService {
         claim: VerificationAddressClaim,
         body: &VerificationAddAddressBody,
     ) -> Result<(), HubError> {
-        let client = &self.chain_clients.for_chain(Chain::EthMainnet)?;
+        let chain = Chain::from_chain_id(body.chain_id)
+            .ok_or(HubError::validation_failure("invalid chain id"))?;
+        let client = &self.chain_clients.for_chain(chain)?;
         client
             .verify_contract_signature(claim, body)
             .await
