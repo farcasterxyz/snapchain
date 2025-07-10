@@ -740,7 +740,7 @@ impl HubService for MyHubService {
                 num_messages: shard_num_messages,
                 num_fid_registrations: shard_fid_registrations,
                 approx_size: shard_approx_size,
-                block_delay: current_time - max_block_time,
+                block_delay: current_time.saturating_sub(max_block_time),
                 // If there is no value in the map, it likely means we could not communicate with the mempool
                 // Returning 0 would mean the clients would think the mempool is empty
                 // So, return a high value
