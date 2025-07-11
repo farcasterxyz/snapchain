@@ -360,7 +360,7 @@ impl Fetcher {
                     }
                 }
 
-                _ = sleep(Duration::from_secs(5)) => {
+                _ = sleep(Duration::from_secs(2)) => {
                     let result = self.fetch().await;
 
                     if let Err(e) = result {

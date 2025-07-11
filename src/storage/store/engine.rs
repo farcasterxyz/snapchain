@@ -1262,6 +1262,7 @@ impl ShardEngine {
         if name.ends_with(".eth") {
             let proof_message = UsernameProofStore::get_username_proof(
                 &self.stores.username_proof_store,
+                txn,
                 &name.as_bytes().to_vec(),
             )
             .map_err(|e| MessageValidationError::StoreError(e))?;

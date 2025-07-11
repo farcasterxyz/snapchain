@@ -154,7 +154,6 @@ impl MyHubService {
     async fn submit_message_internal(
         &self,
         message: proto::Message,
-        bypass_validation: bool,
     ) -> Result<proto::Message, HubError> {
         let fid = message.fid();
         if fid == 0 {
@@ -168,73 +167,98 @@ impl MyHubService {
             None => return Err(HubError::invalid_parameter("shard not found for fid")),
         };
 
-        if !bypass_validation {
-            // TODO: This is a hack to get around the fact that self cannot be made mutable
-            let mut readonly_engine = ShardEngine::new(
-                stores.db.clone(),
-                self.network,
-                stores.trie.clone(),
-                1,
-                stores.store_limits.clone(),
-                self.statsd_client.clone(),
-                100,
-                None,
-                None,
-            );
-            let result = readonly_engine.simulate_message(&message);
-
-            if let Err(err) = result {
-                return match err {
-                    MessageValidationError::StoreError(hub_error) => {
-                        // Forward hub errors as is, otherwise we end up wrapping them
-                        Err(hub_error)
+        let mut bypass_username_validation = false;
+        if let Some(message_data) = &message.data {
+            match &message_data.body {
+                Some(proto::message_data::Body::UserDataBody(user_data)) => {
+                    let (tx, rx) = oneshot::channel();
+                    if let Ok(()) =
+                        self.mempool_tx
+                            .try_send(MempoolRequest::GetRecentUsernameProof(
+                                fid,
+                                user_data.value.clone(),
+                                tx,
+                            ))
+                    {
+                        if let Ok(was_recent_proof) = rx.await {
+                            bypass_username_validation = was_recent_proof;
+                        }
                     }
-                    _ => Err(HubError::validation_failure(&err.to_string())),
-                };
+                }
+                _ => {}
             }
+        }
 
-            // We're doing the ens and address validations here for now because we don't want L1 interactions to be on the consensus critical path. Eventually this will move to the fname server.
-            if let Some(message_data) = &message.data {
-                match &message_data.body {
-                    Some(proto::message_data::Body::UserDataBody(user_data)) => {
-                        if user_data.r#type() == proto::UserDataType::Username {
-                            if user_data.value.ends_with(".eth") {
-                                self.validate_ens_username(fid, user_data.value.to_string())
-                                    .await?;
+        // TODO: This is a hack to get around the fact that self cannot be made mutable
+        let mut readonly_engine = ShardEngine::new(
+            stores.db.clone(),
+            self.network,
+            stores.trie.clone(),
+            1,
+            stores.store_limits.clone(),
+            self.statsd_client.clone(),
+            100,
+            None,
+            None,
+        );
+        let result = readonly_engine.simulate_message(&message);
+
+        if let Err(err) = result {
+            match err {
+                MessageValidationError::MissingFname => {
+                    if !bypass_username_validation {
+                        return Err(HubError::validation_failure(&err.to_string()));
+                    }
+                }
+                MessageValidationError::StoreError(hub_error) => {
+                    // Forward hub errors as is, otherwise we end up wrapping them
+                    return Err(hub_error);
+                }
+                _ => return Err(HubError::validation_failure(&err.to_string())),
+            };
+        }
+
+        // We're doing the ens and address validations here for now because we don't want L1 interactions to be on the consensus critical path. Eventually this will move to the fname server.
+        if let Some(message_data) = &message.data {
+            match &message_data.body {
+                Some(proto::message_data::Body::UserDataBody(user_data)) => {
+                    if user_data.r#type() == proto::UserDataType::Username {
+                        if user_data.value.ends_with(".eth") && !bypass_username_validation {
+                            self.validate_ens_username(fid, user_data.value.to_string())
+                                .await?;
+                        }
+                    };
+                }
+                Some(proto::message_data::Body::UsernameProofBody(proof)) => {
+                    self.validate_ens_username_proof(fid, &proof).await?;
+                }
+                Some(proto::message_data::Body::VerificationAddAddressBody(body)) => {
+                    if body.verification_type == 1 {
+                        let claim_result =
+                            validations::verification::make_verification_address_claim(
+                                message_data.fid,
+                                &body.address,
+                                self.network,
+                                &body.block_hash,
+                                proto::Protocol::Ethereum,
+                            );
+                        match claim_result {
+                            Ok(claim) => {
+                                self.validate_contract_signature(claim, body).await?;
                             }
-                        };
-                    }
-                    Some(proto::message_data::Body::UsernameProofBody(proof)) => {
-                        self.validate_ens_username_proof(fid, &proof).await?;
-                    }
-                    Some(proto::message_data::Body::VerificationAddAddressBody(body)) => {
-                        if body.verification_type == 1 {
-                            let claim_result =
-                                validations::verification::make_verification_address_claim(
-                                    message_data.fid,
-                                    &body.address,
-                                    self.network,
-                                    &body.block_hash,
-                                    proto::Protocol::Ethereum,
-                                );
-                            match claim_result {
-                                Ok(claim) => {
-                                    self.validate_contract_signature(claim, body).await?;
-                                }
-                                Err(err) => {
-                                    return Err(HubError::validation_failure(
-                                        format!(
-                                            "could not create verification address claim: {}",
-                                            err.to_string()
-                                        )
-                                        .as_str(),
-                                    ))
-                                }
+                            Err(err) => {
+                                return Err(HubError::validation_failure(
+                                    format!(
+                                        "could not create verification address claim: {}",
+                                        err.to_string()
+                                    )
+                                    .as_str(),
+                                ))
                             }
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
 
@@ -415,6 +439,7 @@ impl MyHubService {
             .map_err(|_| HubError::invalid_parameter("stores not found for fid"))?;
         let proof_message = UsernameProofStore::get_username_proof(
             &stores.username_proof_store,
+            &mut RocksDbTransactionBatch::new(),
             &name.as_bytes().to_vec(),
         )?;
         match proof_message {
@@ -541,7 +566,7 @@ impl HubService for MyHubService {
         message_bytes_decode(&mut message);
         let fid = message.fid();
         let msg_type = message.msg_type().into_i32();
-        let result = self.submit_message_internal(message, false).await;
+        let result = self.submit_message_internal(message).await;
 
         self.statsd_client.time(
             "rpc.submit_message.duration",
@@ -1578,6 +1603,7 @@ impl HubService for MyHubService {
             let proof_opt = self.shard_stores.iter().find_map(|(_shard_entry, stores)| {
                 match UsernameProofStore::get_username_proof(
                     &stores.username_proof_store,
+                    &mut RocksDbTransactionBatch::new(),
                     &req.name,
                 ) {
                     Ok(Some(message)) => message.data.and_then(|data| {
