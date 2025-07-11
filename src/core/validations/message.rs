@@ -13,6 +13,7 @@ use alloy_primitives::hex::FromHex;
 use alloy_primitives::Address;
 use ed25519_dalek::{Signature, VerifyingKey};
 use fancy_regex::Regex;
+use lazy_static::lazy_static;
 use prost::Message;
 
 const MAX_DATA_BYTES: usize = 2048;
@@ -24,6 +25,13 @@ const FNAME_REGEX: &str = "^[a-z0-9][a-z0-9-]{0,15}$";
 const GITHUB_USERNAME_REGEX: &str = "^[a-zA-Z\\d](?:[a-zA-Z\\d]|-(?!-)){0,38}$";
 /** Number of seconds (10 minutes) that is appropriate for clock skew */
 const ALLOWED_CLOCK_SKEW_SECONDS: u64 = 10 * 60;
+
+lazy_static! {
+    static ref FNAME_REGEX_COMPILED: Regex = Regex::new(FNAME_REGEX).unwrap();
+    static ref TWITTER_USERNAME_REGEX_COMPILED: Regex = Regex::new(TWITTER_USERNAME_REGEX).unwrap();
+    static ref GITHUB_USERNAME_REGEX_COMPILED: Regex = Regex::new(GITHUB_USERNAME_REGEX).unwrap();
+    static ref GEO_REGEX: Regex = Regex::new(r"^geo:(-?\d{1,2}\.\d{2}),(-?\d{1,3}\.\d{2})$").unwrap();
+}
 
 pub fn validate_message_type(message_type: i32) -> Result<(), ValidationError> {
     MessageType::try_from(message_type)
@@ -268,8 +276,7 @@ pub fn validate_fname(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::FnameExceedsLength(input.clone()));
     }
 
-    if !Regex::new(FNAME_REGEX)
-        .unwrap()
+    if !FNAME_REGEX_COMPILED
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
     {
@@ -304,8 +311,7 @@ pub fn validate_ens_name(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::EnsNameExceedsLength(input.clone()));
     }
 
-    if !Regex::new(FNAME_REGEX)
-        .unwrap()
+    if !FNAME_REGEX_COMPILED
         .is_match(name_parts[0])
         .map_err(|_| ValidationError::InvalidData)?
     {
@@ -336,8 +342,7 @@ pub fn validate_base_name(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::EnsNameExceedsLength(input.clone()));
     }
 
-    if !Regex::new(FNAME_REGEX)
-        .unwrap()
+    if !FNAME_REGEX_COMPILED
         .is_match(&name_parts[0])
         .map_err(|_| ValidationError::InvalidData)?
     {
@@ -355,8 +360,7 @@ pub fn validate_twitter_username(input: &String) -> Result<(), ValidationError> 
         return Err(ValidationError::UsernameExceedsLength(input.clone(), 15));
     }
 
-    if !Regex::new(TWITTER_USERNAME_REGEX)
-        .unwrap()
+    if !TWITTER_USERNAME_REGEX_COMPILED
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
     {
@@ -374,8 +378,7 @@ pub fn validate_github_username(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::UsernameExceedsLength(input.clone(), 38));
     }
 
-    if !Regex::new(GITHUB_USERNAME_REGEX)
-        .unwrap()
+    if !GITHUB_USERNAME_REGEX_COMPILED
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
     {
@@ -455,8 +458,7 @@ pub fn validate_user_location(location: &str) -> Result<(), ValidationError> {
         return Ok(());
     }
 
-    let captures = Regex::new(r"^geo:(-?\d{1,2}\.\d{2}),(-?\d{1,3}\.\d{2})$")
-        .unwrap()
+    let captures = GEO_REGEX
         .captures(location)
         .map_err(|_| ValidationError::InvalidLocationString)?;
 
