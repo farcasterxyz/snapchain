@@ -585,7 +585,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 );
                 let timestamp = chrono::Utc::now().timestamp_millis();
                 dbs.iter().for_each(|(shard_id, db)| {
-                    RocksDB::backup_db(
+                    snapchain::storage::db::backup::backup_db(
                         db.clone(),
                         &app_config.snapshot.backup_dir,
                         *shard_id,

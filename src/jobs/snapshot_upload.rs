@@ -20,7 +20,7 @@ async fn backup_and_upload(
     statsd_client: StatsdClientWrapper,
 ) -> Result<(), SnapshotError> {
     let backup_dir = snapshot_config.backup_dir.clone();
-    let tar_gz_path = RocksDB::backup_db(db, &backup_dir, shard_id, now)?;
+    let tar_gz_path = storage::db::backup::backup_db(db, &backup_dir, shard_id, now)?;
     storage::db::snapshot::upload_to_s3(
         fc_network,
         tar_gz_path,
