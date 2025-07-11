@@ -5,6 +5,7 @@ import "blocks.proto";
 import "hub_event.proto";
 import "username_proof.proto";
 import "onchain_event.proto";
+import "gossip.proto";
 
 
 message BlocksRequest {
@@ -303,4 +304,11 @@ message FidAddressTypeResponse {
   bool is_custody = 1;
   bool is_auth = 2;
   bool is_verified = 3;
+}
+
+message GetConnectedPeersRequest {
+}
+
+message GetConnectedPeersResponse {
+  repeated ContactInfoBody contacts = 1;
 }

@@ -19,7 +19,8 @@ use crate::proto::{
 };
 use crate::proto::{
     casts_by_parent_request, hub_event, link_request, links_by_target_request, on_chain_event,
-    reaction_request, reactions_by_target_request, Protocol,
+    reaction_request, reactions_by_target_request, GetConnectedPeersRequest,
+    GetConnectedPeersResponse, Protocol,
 };
 use crate::storage::store::account::message_decode;
 
@@ -2104,6 +2105,10 @@ pub trait HubHttpService {
         &self,
         req: IdRegistryEventByAddressRequest,
     ) -> Result<OnChainEvent, ErrorResponse>;
+    async fn get_connected_peers(
+        &self,
+        req: GetConnectedPeersRequest,
+    ) -> Result<GetConnectedPeersResponse, ErrorResponse>;
 }
 
 #[async_trait]
@@ -2793,6 +2798,22 @@ impl HubHttpService for HubHttpServiceImpl {
             is_verified: proto_resp.is_verified,
         })
     }
+
+    async fn get_connected_peers(
+        &self,
+        _req: GetConnectedPeersRequest,
+    ) -> Result<GetConnectedPeersResponse, ErrorResponse> {
+        let service = &self.service;
+        let grpc_req = tonic::Request::new(GetConnectedPeersRequest {});
+        let response = service
+            .get_connected_peers(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get connected peers".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+        Ok(response.into_inner())
+    }
 }
 
 // Router implementation
@@ -3001,6 +3022,13 @@ impl Router {
                 self.handle_request::<EventRequest, HubEvent, _>(req, |service, req| {
                     Box::pin(async move { service.get_event_by_id(req).await })
                 })
+                .await
+            }
+            (&Method::GET, "/v1/currentPeers") => {
+                self.handle_request::<GetConnectedPeersRequest, GetConnectedPeersResponse, _>(
+                    req,
+                    |service, req| Box::pin(async move { service.get_connected_peers(req).await }),
+                )
                 .await
             }
             _ => Ok(Response::builder()

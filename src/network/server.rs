@@ -1,11 +1,13 @@
 use super::rpc_extensions::{authenticate_request, AsMessagesResponse, AsSingleMessageResponse};
 use crate::connectors::onchain_events::{Chain, ChainClients};
 use crate::core::error::HubError;
+use crate::core::types::SnapchainValidatorContext;
 use crate::core::util::{get_farcaster_time, FarcasterTime};
 use crate::core::validations;
 use crate::core::validations::verification::VerificationAddressClaim;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::mempool::routing;
+use crate::network::gossip::GossipEvent;
 use crate::proto::hub_service_server::HubService;
 use crate::proto::link_body;
 use crate::proto::links_by_target_request;
@@ -41,8 +43,8 @@ use crate::proto::{cast_add_body, Height};
 use crate::proto::{casts_by_parent_request, ShardChunk};
 use crate::proto::{Block, CastId, DbStats};
 use crate::proto::{
-    BlocksRequest, EventRequest, EventsRequest, EventsResponse, ShardChunksRequest,
-    ShardChunksResponse, SubscribeRequest,
+    BlocksRequest, EventRequest, EventsRequest, EventsResponse, GetConnectedPeersRequest,
+    GetConnectedPeersResponse, ShardChunksRequest, ShardChunksResponse, SubscribeRequest,
 };
 use crate::proto::{FidAddressTypeRequest, FidAddressTypeResponse};
 use crate::proto::{FidRequest, FidTimestampRequest};
@@ -81,7 +83,7 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
 
 pub const MEMPOOL_ADD_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
-const MEMPOOL_SIZE_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
 
 pub struct MyHubService {
     allowed_users: HashMap<String, String>,
@@ -93,6 +95,7 @@ pub struct MyHubService {
     statsd_client: StatsdClientWrapper,
     chain_clients: ChainClients,
     mempool_tx: mpsc::Sender<MempoolRequest>,
+    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     network: proto::FarcasterNetwork,
     version: String,
     peer_id: String,
@@ -110,6 +113,7 @@ impl MyHubService {
         network: proto::FarcasterNetwork,
         message_router: Box<dyn routing::MessageRouter>,
         mempool_tx: mpsc::Sender<MempoolRequest>,
+        gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         chain_clients: ChainClients,
         version: String,
         peer_id: String,
@@ -144,6 +148,7 @@ impl MyHubService {
             num_shards,
             chain_clients,
             mempool_tx,
+            gossip_tx,
             version,
             peer_id,
             id_registry_cache,
@@ -701,7 +706,7 @@ impl HubService for MyHubService {
         };
         shard_infos.push(block_info);
 
-        let mempool_size = match timeout(MEMPOOL_SIZE_REQUEST_TIMEOUT, size_res).await {
+        let mempool_size = match timeout(DEFAULT_REQUEST_TIMEOUT, size_res).await {
             Ok(Ok(size)) => size,
             Ok(Err(err)) => {
                 error!(
@@ -2012,5 +2017,37 @@ impl HubService for MyHubService {
             hash: trie_node.hash,
             children,
         }))
+    }
+
+    async fn get_connected_peers(
+        &self,
+        _request: Request<GetConnectedPeersRequest>,
+    ) -> Result<Response<GetConnectedPeersResponse>, Status> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .gossip_tx
+            .send(GossipEvent::GetConnectedPeers(tx))
+            .await
+            .map_err(|err| {
+                error!(
+                    { err = err.to_string() },
+                    "[get_connected_peers] error sending connected peers request"
+                );
+            });
+
+        match timeout(DEFAULT_REQUEST_TIMEOUT, rx).await {
+            Ok(Ok(peers)) => Ok(Response::new(GetConnectedPeersResponse { contacts: peers })),
+            Ok(Err(err)) => {
+                error!(
+                    { err = err.to_string() },
+                    "[get_connected_peers] error receiving connected peers response"
+                );
+                Err(Status::internal("Unable to retrieve connected peers."))
+            }
+            Err(_) => {
+                error!("[get_connected_peers] timeout receiving connected peers response");
+                Err(Status::internal("Unable to retrieve connected peers."))
+            }
+        }
     }
 }
