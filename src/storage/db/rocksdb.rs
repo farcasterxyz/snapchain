@@ -1,14 +1,13 @@
 use crate::core::error::HubError;
-use crate::storage::db::multi_chunk_writer::MultiChunkWriter;
 use crate::storage::util::increment_vec_u8;
 use rocksdb::{Options, TransactionDB, DB};
 use std::collections::HashMap;
 use std::fs::{self};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use thiserror::Error;
 use tokio::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
 use walkdir::WalkDir;
 
 #[derive(Error, Debug)]
@@ -24,6 +23,9 @@ pub enum RocksdbError {
 
     #[error(transparent)]
     BackupError(#[from] std::io::Error),
+
+    #[error("DB is read only")]
+    ReadOnly,
 }
 
 /** Hold a transaction. List of key/value pairs that will be committed together */
@@ -63,9 +65,15 @@ pub struct IteratorOptions {
     pub reverse: bool,
 }
 
+pub enum DBProvider {
+    Transaction(TransactionDB),
+    ReadOnly(DB),
+}
+
 #[derive(Default)]
 pub struct RocksDB {
-    pub db: RwLock<Option<rocksdb::TransactionDB>>,
+    inner: RwLock<Option<DBProvider>>,
+
     pub path: String,
 }
 
@@ -87,7 +95,7 @@ impl RocksDB {
         info!({ path }, "Opening RocksDB database");
 
         RocksDB {
-            db: RwLock::new(None),
+            inner: RwLock::new(None),
             path: path.to_string(),
         }
     }
@@ -104,129 +112,8 @@ impl RocksDB {
         Arc::new(db)
     }
 
-    pub fn backup_db(
-        db: Arc<RocksDB>,
-        backup_dir: &str,
-        shard_id: u32,
-        timestamp_ms: i64,
-    ) -> Result<String, RocksdbError> {
-        let now = chrono::DateTime::from_timestamp_millis(timestamp_ms)
-            .unwrap()
-            .naive_utc();
-        let backup_path = Path::new(backup_dir).join(format!("shard-{}", shard_id));
-        let span = tracing::span!(
-            tracing::Level::INFO,
-            "backup_db",
-            path = backup_path.to_str().unwrap()
-        );
-        let _enter = span.enter();
-        info!("Backing up db to {:?}", backup_path);
-        if backup_path.exists() {
-            warn!("Backup path already exists, removing it");
-            fs::remove_dir_all(&backup_path).map_err(|e| RocksdbError::BackupError(e))?;
-        }
-        let backup_path = backup_path.into_os_string().into_string().unwrap();
-
-        let mut backup_db_options = Options::default();
-        backup_db_options.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        backup_db_options.create_if_missing(true);
-
-        let backup_db = DB::open(&backup_db_options, &backup_path)
-            .map_err(|e| RocksdbError::InternalError(e))?;
-        let mut write_options = rocksdb::WriteOptions::default();
-        write_options.disable_wal(true); // Significantly faster, WAL doesn't provide benefits for backups
-        let mut write_batch = rocksdb::WriteBatch::default();
-
-        let backup_thread = std::thread::spawn(move || {
-            let main_db = db.db();
-            let main_db_snapshot = main_db.as_ref().unwrap().snapshot();
-
-            let iterator = main_db_snapshot.iterator(rocksdb::IteratorMode::Start);
-            let mut count = 0;
-            for item in iterator {
-                let (key, value) = item.unwrap();
-                write_batch.put(key, value);
-                if write_batch.len() >= 10_000 {
-                    backup_db.write_opt(write_batch, &write_options).unwrap();
-                    write_batch = rocksdb::WriteBatch::default();
-                }
-
-                count += 1;
-                if count % 1_000_000 == 0 {
-                    backup_db.flush().unwrap();
-                    info!("Snapshot backup progress: {}M keys", count / 1_000_000);
-                }
-            }
-
-            // write any leftover keys
-            backup_db.write_opt(write_batch, &write_options).unwrap();
-
-            info!("Backup completed: {}", count);
-            drop(main_db_snapshot);
-            drop(backup_db);
-        });
-
-        backup_thread.join().unwrap();
-        info!(
-            "Backup completed, time taken = {:?}",
-            chrono::Utc::now().naive_utc() - now
-        );
-        let output_file = Self::create_tar_gzip(&backup_path, backup_dir, shard_id)?;
-        fs::remove_dir_all(&backup_path).map_err(|e| RocksdbError::BackupError(e))?;
-
-        Ok(output_file)
-    }
-
-    pub fn create_tar_gzip(
-        input_dir: &str,
-        output_dir: &str,
-        shard_id: u32,
-    ) -> Result<String, RocksdbError> {
-        let base_name = Path::new(input_dir)
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap();
-
-        let chunked_output_dir = Path::new(output_dir)
-            .join(format!("{}-{}.tar.gz", base_name, shard_id.to_string()))
-            .as_os_str()
-            .to_str()
-            .unwrap()
-            .to_string();
-
-        let start = std::time::SystemTime::now();
-        info!(
-            output_file_path = &chunked_output_dir,
-            base_name = &base_name,
-            "Creating chunked tar.gz snapshot for directory: {}",
-            input_dir
-        );
-
-        let mut multi_chunk_writer = MultiChunkWriter::new(
-            PathBuf::from(chunked_output_dir.clone()),
-            100 * 1024 * 1024, // 100MB, this is the max size recommended for the S3 [put_object] API
-        );
-
-        let mut tar = tar::Builder::new(&mut multi_chunk_writer);
-        tar.append_dir_all(base_name, input_dir)?;
-        tar.finish()?;
-        drop(tar); // Needed so we can call multi_chunk_writer.finish() next
-        multi_chunk_writer.finish()?;
-
-        let metadata = fs::metadata(&chunked_output_dir)?;
-        let time_taken = start.elapsed().expect("Time went backwards");
-        info!(
-            "Created chunked tar.gz archive for snapshot: path = {}, size = {} bytes, time taken = {:?}",
-            chunked_output_dir,
-            metadata.len(),
-            time_taken
-        );
-
-        Ok(chunked_output_dir)
-    }
-
     pub fn open(&self) -> Result<(), RocksdbError> {
-        let mut db_lock = self.db.write().unwrap();
+        let mut inner = self.inner.write().unwrap();
 
         // Create RocksDB options
         let mut opts = Options::default();
@@ -238,7 +125,7 @@ impl RocksDB {
 
         // Open the database with multi-threaded support
         let db = rocksdb::TransactionDB::open(&opts, &tx_db_opts, &self.path)?;
-        *db_lock = Some(db);
+        *inner = Some(DBProvider::Transaction(db));
 
         // We put the db in a RwLock to make the compiler happy, but it is strictly not required.
         // We can use unsafe to replace the value directly, and this will work fine, and shave off
@@ -252,14 +139,30 @@ impl RocksDB {
         Ok(())
     }
 
-    pub fn location(&self) -> String {
-        self.path.clone()
+    pub fn open_read_only(&self) -> Result<Self, RocksdbError> {
+        let _wl = self.inner.write().unwrap();
+
+        let mut opts = Options::default();
+        opts.create_if_missing(false); // Creates a database if it does not exist
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+
+        match rocksdb::DB::open_for_read_only(&opts, self.path.clone(), true) {
+            Ok(db) => {
+                let provider = DBProvider::ReadOnly(db);
+                let rdb = RocksDB {
+                    inner: RwLock::new(Some(provider)),
+                    path: self.path.clone(),
+                };
+                Ok(rdb)
+            }
+            Err(e) => Err(RocksdbError::InternalError(e)),
+        }
     }
 
     pub fn close(&self) {
-        let mut db_lock = self.db.write().unwrap();
-        if db_lock.is_some() {
-            let db = db_lock.take().unwrap();
+        let mut inner = self.inner.write().unwrap();
+        if inner.is_some() {
+            let db = inner.take().unwrap();
             drop(db);
         }
 
@@ -290,34 +193,44 @@ impl RocksDB {
         Ok(())
     }
 
-    pub fn db(&self) -> RwLockReadGuard<'_, Option<TransactionDB>> {
-        self.db.read().unwrap()
+    pub fn db(&self) -> RwLockReadGuard<'_, Option<DBProvider>> {
+        self.inner.read().unwrap()
+    }
+
+    pub fn location(&self) -> String {
+        self.path.clone()
     }
 
     pub fn keys_exist(&self, keys: &Vec<Vec<u8>>) -> Vec<bool> {
-        let db = self.db();
-        let db = db.as_ref().unwrap();
-
-        db.multi_get(keys)
-            .into_iter()
-            .map(|r| match r {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
-                Err(_) => false,
-            })
-            .collect::<Vec<_>>()
+        match self.db().as_ref() {
+            Some(DBProvider::Transaction(db)) => db.multi_get(keys),
+            Some(DBProvider::ReadOnly(db)) => db.multi_get(keys),
+            None => vec![],
+        }
+        .into_iter()
+        .map(|result| match result {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(_) => false,
+        })
+        .collect()
     }
 
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, RocksdbError> {
-        self.db()
-            .as_ref()
-            .unwrap()
-            .get(key)
-            .map_err(|e| RocksdbError::InternalError(e))
+        match self.db().as_ref() {
+            Some(DBProvider::Transaction(db)) => db.get(key),
+            Some(DBProvider::ReadOnly(db)) => db.get(key),
+            None => return Err(RocksdbError::DbNotOpen),
+        }
+        .map_err(|e| RocksdbError::InternalError(e))
     }
 
     pub fn get_many(&self, keys: &Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>, RocksdbError> {
-        let results = self.db().as_ref().unwrap().multi_get(keys);
+        let results = match self.db().as_ref() {
+            Some(DBProvider::Transaction(db)) => db.multi_get(keys),
+            Some(DBProvider::ReadOnly(db)) => db.multi_get(keys),
+            None => return Err(RocksdbError::DbNotOpen),
+        };
 
         // If any of the results are Errors, return an error
         let results = results.into_iter().collect::<Result<Vec<_>, _>>()?;
@@ -330,19 +243,21 @@ impl RocksDB {
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<(), RocksdbError> {
-        self.db()
-            .as_ref()
-            .unwrap()
-            .put(key, value)
-            .map_err(|e| RocksdbError::InternalError(e))
+        match self.db().as_ref() {
+            Some(DBProvider::Transaction(db)) => db.put(key, value),
+            Some(DBProvider::ReadOnly(_)) => return Err(RocksdbError::ReadOnly),
+            None => return Err(RocksdbError::DbNotOpen),
+        }
+        .map_err(|e| RocksdbError::InternalError(e))
     }
 
     pub fn del(&self, key: &[u8]) -> Result<(), RocksdbError> {
-        self.db()
-            .as_ref()
-            .unwrap()
-            .delete(key)
-            .map_err(|e| RocksdbError::InternalError(e))
+        match self.db().as_ref() {
+            Some(DBProvider::Transaction(db)) => db.delete(key),
+            Some(DBProvider::ReadOnly(_)) => return Err(RocksdbError::ReadOnly),
+            None => return Err(RocksdbError::DbNotOpen),
+        }
+        .map_err(|e| RocksdbError::InternalError(e))
     }
 
     pub fn txn(&self) -> RocksDbTransactionBatch {
@@ -350,21 +265,23 @@ impl RocksDB {
     }
 
     pub fn commit(&self, batch: RocksDbTransactionBatch) -> Result<(), RocksdbError> {
-        let db = self.db();
-        if db.is_none() {
-            return Err(RocksdbError::DbNotOpen);
-        }
+        match self.db().as_ref() {
+            Some(DBProvider::Transaction(db)) => {
+                let txn = db.transaction();
 
-        let txn = db.as_ref().unwrap().transaction();
-        for (key, value) in batch.batch {
-            if value.is_none() {
-                txn.delete(key)?;
-            } else {
-                txn.put(key, value.unwrap())?;
+                for (key, value) in batch.batch {
+                    if value.is_none() {
+                        txn.delete(key)?;
+                    } else {
+                        txn.put(key, value.unwrap())?;
+                    }
+                }
+
+                txn.commit().map_err(|e| RocksdbError::InternalError(e))
             }
+            Some(DBProvider::ReadOnly(_)) => Err(RocksdbError::ReadOnly),
+            None => Err(RocksdbError::DbNotOpen),
         }
-
-        txn.commit().map_err(|e| RocksdbError::InternalError(e))
     }
 
     fn get_iterator_options(
@@ -428,41 +345,82 @@ impl RocksDB {
     {
         let iter_opts = RocksDB::get_iterator_options(start_prefix, stop_prefix, page_options);
 
-        let db = self.db();
-        let mut iter = db.as_ref().unwrap().raw_iterator_opt(iter_opts.opts);
+        // TODO: maybe write a generic function to handle both branches
+        match self.db().as_ref() {
+            Some(DBProvider::Transaction(db)) => {
+                let mut iter = db.raw_iterator_opt(iter_opts.opts);
 
-        if iter_opts.reverse {
-            iter.seek_to_last();
-        } else {
-            iter.seek_to_first();
-        }
-
-        let mut all_done = true;
-        let mut count = 0;
-
-        while iter.valid() {
-            if let Some((key, value)) = iter.item() {
-                if f(&key, &value)? {
-                    all_done = false;
-                    break;
+                if iter_opts.reverse {
+                    iter.seek_to_last();
+                } else {
+                    iter.seek_to_first();
                 }
-                if page_options.page_size.is_some() {
-                    count += 1;
-                    if count >= page_options.page_size.unwrap() {
-                        all_done = true;
-                        break;
+
+                let mut all_done = true;
+                let mut count = 0;
+
+                while iter.valid() {
+                    if let Some((key, value)) = iter.item() {
+                        if f(&key, &value)? {
+                            all_done = false;
+                            break;
+                        }
+                        if page_options.page_size.is_some() {
+                            count += 1;
+                            if count >= page_options.page_size.unwrap() {
+                                all_done = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if iter_opts.reverse {
+                        iter.prev();
+                    } else {
+                        iter.next();
                     }
                 }
-            }
 
-            if iter_opts.reverse {
-                iter.prev();
-            } else {
-                iter.next();
+                Ok(all_done)
             }
+            Some(DBProvider::ReadOnly(db)) => {
+                let mut iter = db.raw_iterator_opt(iter_opts.opts);
+
+                if iter_opts.reverse {
+                    iter.seek_to_last();
+                } else {
+                    iter.seek_to_first();
+                }
+
+                let mut all_done = true;
+                let mut count = 0;
+
+                while iter.valid() {
+                    if let Some((key, value)) = iter.item() {
+                        if f(&key, &value)? {
+                            all_done = false;
+                            break;
+                        }
+                        if page_options.page_size.is_some() {
+                            count += 1;
+                            if count >= page_options.page_size.unwrap() {
+                                all_done = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if iter_opts.reverse {
+                        iter.prev();
+                    } else {
+                        iter.next();
+                    }
+                }
+
+                Ok(all_done)
+            }
+            None => return Err(RocksdbError::DbNotOpen.into()),
         }
-
-        Ok(all_done)
     }
 
     // Same as for_each_iterator_by_prefix above, but does not limit by page size. To be used in
@@ -501,14 +459,26 @@ impl RocksDB {
 
             // Iterate over all keys and delete them
             let mut txn = self.txn();
-            let db = self.db();
 
-            for item in db.as_ref().unwrap().iterator(rocksdb::IteratorMode::Start) {
-                if let Ok((key, _)) = item {
-                    txn.delete(key.to_vec());
-                    deleted += 1;
+            match self.db().as_ref() {
+                Some(DBProvider::Transaction(db)) => {
+                    for item in db.iterator(rocksdb::IteratorMode::Start) {
+                        if let Ok((key, _)) = item {
+                            txn.delete(key.to_vec());
+                            deleted += 1;
+                        }
+                    }
                 }
-            }
+                Some(DBProvider::ReadOnly(db)) => {
+                    for item in db.iterator(rocksdb::IteratorMode::Start) {
+                        if let Ok((key, _)) = item {
+                            txn.delete(key.to_vec());
+                            deleted += 1;
+                        }
+                    }
+                }
+                None => return Err(RocksdbError::DbNotOpen),
+            };
 
             self.commit(txn)?;
 
@@ -541,16 +511,27 @@ impl RocksDB {
             &PageOptions::default(),
         );
 
-        let db = self.db();
-        let mut iter = db.as_ref().unwrap().raw_iterator_opt(iter_opts.opts);
-
         let mut count = 0;
-        iter.seek_to_first();
-        while iter.valid() {
-            count += 1;
 
-            iter.next();
-        }
+        match self.db().as_ref() {
+            Some(DBProvider::Transaction(db)) => {
+                let mut iter = db.raw_iterator_opt(iter_opts.opts);
+                iter.seek_to_first();
+                while iter.valid() {
+                    count += 1;
+                    iter.next();
+                }
+            }
+            Some(DBProvider::ReadOnly(db)) => {
+                let mut iter = db.raw_iterator_opt(iter_opts.opts);
+                iter.seek_to_first();
+                while iter.valid() {
+                    count += 1;
+                    iter.next();
+                }
+            }
+            None => return Err(RocksdbError::DbNotOpen.into()),
+        };
 
         Ok(count)
     }
