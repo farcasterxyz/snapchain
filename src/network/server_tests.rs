@@ -211,6 +211,7 @@ mod tests {
             1,
             merkle_trie::MerkleTrie::new(16).unwrap(),
             limits.clone(),
+            proto::FarcasterNetwork::Devnet,
             test_helper::statsd_client(),
         );
         let shard1_senders = engine1.get_senders();
@@ -220,6 +221,7 @@ mod tests {
             2,
             merkle_trie::MerkleTrie::new(16).unwrap(),
             limits.clone(),
+            proto::FarcasterNetwork::Devnet,
             test_helper::statsd_client(),
         );
         let shard2_senders = engine2.get_senders();
