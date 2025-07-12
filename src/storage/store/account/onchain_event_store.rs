@@ -6,8 +6,8 @@ use super::{get_from_db_or_txn, make_fid_key, StoreEventHandler};
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
 use crate::proto::{
-    self, on_chain_event, IdRegisterEventBody, IdRegisterEventType, OnChainEvent, OnChainEventType,
-    SignerEventBody, SignerEventType, TierType,
+    self, on_chain_event, FarcasterNetwork, IdRegisterEventBody, IdRegisterEventType, OnChainEvent,
+    OnChainEventType, SignerEventBody, SignerEventType, TierType,
 };
 use crate::proto::{HubEvent, HubEventType, MergeOnChainEventBody};
 use crate::storage::constants::{OnChainEventPostfix, RootPrefix, PAGE_SIZE_MAX};
@@ -19,6 +19,7 @@ static PAGE_SIZE: usize = 1000;
 
 const UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP: u32 = 1724889600; // 2024-08-29 Midnight UTC
 const UNIT_TYPE_2024_CUTOFF_TIMESTAMP: u32 = 1752685200; // 2025-07-16 5PM UTC (Engine version 6)
+const UNIT_TYPE_2024_CUTOFF_TIMESTAMP_TESTNET: u32 = 1752426000; // 2025-07-13 5PM UTC (a few days earlier than mainnet)
 const ONE_YEAR_IN_SECONDS: u32 = 365 * 24 * 60 * 60;
 const SUPPORTED_SIGNER_KEY_TYPE: u32 = 1;
 
@@ -383,11 +384,18 @@ impl StorageSlot {
 
     pub fn from_event(
         onchain_event: &OnChainEvent,
+        network: FarcasterNetwork,
     ) -> Result<StorageSlot, OnchainEventStorageError> {
         if let Some(body) = &onchain_event.body {
             return match body {
                 on_chain_event::Body::StorageRentEventBody(storage_rent_event) => {
                     let slot;
+
+                    let unit_type_2024_cutoff_timestamp = if network == FarcasterNetwork::Mainnet {
+                        UNIT_TYPE_2024_CUTOFF_TIMESTAMP
+                    } else {
+                        UNIT_TYPE_2024_CUTOFF_TIMESTAMP_TESTNET
+                    };
 
                     // NOTE(Jul 2025): We have 3 types of storages units based on when they were rented.
                     // As part of the storage redenomination FIP, we're also extended the expiry of all
@@ -404,7 +412,7 @@ impl StorageSlot {
                             0,
                             onchain_event.block_timestamp as u32 + (ONE_YEAR_IN_SECONDS * 3),
                         );
-                    } else if onchain_event.block_timestamp < UNIT_TYPE_2024_CUTOFF_TIMESTAMP as u64
+                    } else if onchain_event.block_timestamp < unit_type_2024_cutoff_timestamp as u64
                     {
                         slot = StorageSlot::new(
                             0,
@@ -646,12 +654,13 @@ impl OnchainEventStore {
     pub fn get_storage_slot_for_fid(
         &self,
         fid: u64,
+        network: FarcasterNetwork,
     ) -> Result<StorageSlot, OnchainEventStorageError> {
         let rent_events =
             self.get_onchain_events(OnChainEventType::EventTypeStorageRent, Some(fid))?;
         let mut storage_slot = StorageSlot::new(0, 0, 0, 0);
         for rent_event in rent_events {
-            storage_slot.merge(&StorageSlot::from_event(&rent_event)?);
+            storage_slot.merge(&StorageSlot::from_event(&rent_event, network)?);
         }
         Ok(storage_slot)
     }

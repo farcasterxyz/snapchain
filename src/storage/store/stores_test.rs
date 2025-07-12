@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::core::util::get_farcaster_time;
+    use crate::proto;
     use crate::proto::ReactionType;
     use crate::storage::store::{stores, test_helper};
     use crate::storage::{db, trie};
@@ -24,7 +25,14 @@ mod tests {
             test_helper::limits::zero(),
         );
 
-        stores::Stores::new(Arc::new(db), 1, trie, limits, test_helper::statsd_client())
+        stores::Stores::new(
+            Arc::new(db),
+            1,
+            trie,
+            limits,
+            proto::FarcasterNetwork::Devnet,
+            test_helper::statsd_client(),
+        )
     }
 
     pub fn create_events(stores: &stores::Stores) {

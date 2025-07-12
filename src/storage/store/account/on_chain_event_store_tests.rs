@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::core::util::FarcasterTime;
-    use crate::proto::{StorageUnitType, TierType};
+    use crate::proto::{FarcasterNetwork, StorageUnitType, TierType};
     use crate::storage::db;
     use crate::storage::db::RocksDbTransactionBatch;
     use crate::storage::store::account::{OnchainEventStore, StorageSlot, StoreEventHandler};
@@ -28,7 +28,8 @@ mod tests {
 
         let expired_legacy_rent_event =
             factory::events_factory::create_rent_event(10, Some(1), None, true);
-        let slot = StorageSlot::from_event(&expired_legacy_rent_event).unwrap();
+        let slot =
+            StorageSlot::from_event(&expired_legacy_rent_event, FarcasterNetwork::Mainnet).unwrap();
         assert_eq!(slot.is_active(), false);
         assert_eq!(slot.units_for(StorageUnitType::UnitTypeLegacy), 1);
         assert_eq!(slot.units_for(StorageUnitType::UnitType2024), 0);
@@ -40,7 +41,8 @@ mod tests {
 
         let valid_legacy_rent_event =
             factory::events_factory::create_rent_event(10, Some(5), None, false);
-        let slot = StorageSlot::from_event(&valid_legacy_rent_event).unwrap();
+        let slot =
+            StorageSlot::from_event(&valid_legacy_rent_event, FarcasterNetwork::Mainnet).unwrap();
         assert_eq!(slot.is_active(), true);
         assert_eq!(slot.units_for(StorageUnitType::UnitTypeLegacy), 5);
         assert_eq!(slot.units_for(StorageUnitType::UnitType2024), 0);
@@ -52,7 +54,8 @@ mod tests {
 
         let valid_2024_rent_event =
             factory::events_factory::create_rent_event(10, None, Some(9), false);
-        let slot = StorageSlot::from_event(&valid_2024_rent_event).unwrap();
+        let slot =
+            StorageSlot::from_event(&valid_2024_rent_event, FarcasterNetwork::Mainnet).unwrap();
         assert_eq!(slot.is_active(), true);
         assert_eq!(slot.units_for(StorageUnitType::UnitTypeLegacy), 0);
         assert_eq!(slot.units_for(StorageUnitType::UnitType2024), 9);
@@ -65,7 +68,8 @@ mod tests {
         let sep_1_2025 = 1756710000;
         let valid_2025_rent_event =
             factory::events_factory::create_rent_event_with_timestamp(11, 3, sep_1_2025);
-        let slot = StorageSlot::from_event(&valid_2025_rent_event).unwrap();
+        let slot =
+            StorageSlot::from_event(&valid_2025_rent_event, FarcasterNetwork::Mainnet).unwrap();
         assert_eq!(slot.is_active(), true);
         assert_eq!(slot.units_for(StorageUnitType::UnitTypeLegacy), 0);
         assert_eq!(slot.units_for(StorageUnitType::UnitType2024), 0);
@@ -132,7 +136,9 @@ mod tests {
     fn test_storage_slot_when_no_units() {
         let (store, _dir) = store();
 
-        let storage_slot = store.get_storage_slot_for_fid(10).unwrap();
+        let storage_slot = store
+            .get_storage_slot_for_fid(10, FarcasterNetwork::Mainnet)
+            .unwrap();
         assert_eq!(storage_slot.is_active(), false);
         assert_eq!(storage_slot.units_for(StorageUnitType::UnitTypeLegacy), 0);
         assert_eq!(storage_slot.units_for(StorageUnitType::UnitType2024), 0);
@@ -178,7 +184,9 @@ mod tests {
         }
         store.db.commit(txn).unwrap();
 
-        let storage_slot_different_fid = store.get_storage_slot_for_fid(11).unwrap();
+        let storage_slot_different_fid = store
+            .get_storage_slot_for_fid(11, FarcasterNetwork::Mainnet)
+            .unwrap();
         assert_eq!(storage_slot_different_fid.is_active(), true);
         assert_eq!(
             storage_slot_different_fid.units_for(StorageUnitType::UnitTypeLegacy),
@@ -193,12 +201,16 @@ mod tests {
             0
         );
 
-        let storage_slot = store.get_storage_slot_for_fid(10).unwrap();
+        let storage_slot = store
+            .get_storage_slot_for_fid(10, FarcasterNetwork::Mainnet)
+            .unwrap();
         assert_eq!(storage_slot.is_active(), true);
         assert_eq!(storage_slot.units_for(StorageUnitType::UnitTypeLegacy), 12); // 5 + 7
         assert_eq!(storage_slot.units_for(StorageUnitType::UnitType2024), 20); // 9 + 11
 
-        let storage_slot_2025 = store.get_storage_slot_for_fid(12).unwrap();
+        let storage_slot_2025 = store
+            .get_storage_slot_for_fid(12, FarcasterNetwork::Mainnet)
+            .unwrap();
         assert_eq!(storage_slot_2025.is_active(), true);
         assert_eq!(
             storage_slot_2025.units_for(StorageUnitType::UnitTypeLegacy),

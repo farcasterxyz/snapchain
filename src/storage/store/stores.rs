@@ -58,6 +58,7 @@ pub struct Stores {
     pub shard_id: u32,
     pub statsd: StatsdClientWrapper,
     prune_lock: Arc<RwLock<bool>>,
+    pub network: proto::FarcasterNetwork,
 }
 
 #[derive(Clone, Debug)]
@@ -222,6 +223,7 @@ impl Stores {
         shard_id: u32,
         mut trie: merkle_trie::MerkleTrie,
         store_limits: StoreLimits,
+        network: proto::FarcasterNetwork,
         statsd: StatsdClientWrapper,
     ) -> Stores {
         trie.initialize(&db).unwrap();
@@ -249,6 +251,7 @@ impl Stores {
             db: db.clone(),
             store_limits,
             event_handler,
+            network,
             statsd,
             prune_lock: Arc::new(RwLock::new(false)),
         }
@@ -264,7 +267,7 @@ impl Stores {
         let message_count = self.get_usage_by_store_type(fid, store_type, txn_batch);
         let slot = self
             .onchain_event_store
-            .get_storage_slot_for_fid(fid)
+            .get_storage_slot_for_fid(fid, self.network)
             .map_err(|e| StoresError::OnchainEventError(e))?;
         let max_messages = self.store_limits.max_messages(&slot, store_type);
 
@@ -305,7 +308,7 @@ impl Stores {
     pub fn get_storage_limits(&self, fid: u64) -> Result<StorageLimitsResponse, StoresError> {
         let slot = self
             .onchain_event_store
-            .get_storage_slot_for_fid(fid)
+            .get_storage_slot_for_fid(fid, self.network)
             .map_err(|e| StoresError::OnchainEventError(e))?;
 
         let txn_batch = &mut RocksDbTransactionBatch::new();

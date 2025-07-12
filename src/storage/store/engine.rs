@@ -203,6 +203,7 @@ impl ShardEngine {
                 shard_id,
                 trie,
                 store_limits,
+                network,
                 statsd_client.clone(),
             ),
             senders: Senders::new(),
@@ -367,7 +368,7 @@ impl ShardEngine {
             let storage_slot = self
                 .stores
                 .onchain_event_store
-                .get_storage_slot_for_fid(fid)?;
+                .get_storage_slot_for_fid(fid, self.network)?;
             for msg in messages {
                 match msg {
                     MempoolMessage::ValidatorMessage(msg) => {
