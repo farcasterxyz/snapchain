@@ -2429,7 +2429,7 @@ impl HubHttpService for HubHttpServiceImpl {
         req: LinksByTargetRequest,
     ) -> Result<PagedResponse, ErrorResponse> {
         let service = &self.service;
-        let target = if req.link_type.is_some() {
+        let target = if req.target_fid.is_some() {
             links_by_target_request::Target::TargetFid(req.target_fid.unwrap())
         } else {
             return Err(ErrorResponse {
