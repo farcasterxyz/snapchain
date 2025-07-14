@@ -37,38 +37,10 @@ import {
   ID_REGISTRY_ADDRESS,
   idRegistryABI,
   FarcasterNetwork,
-  makeUserDataAdd,
-  makeCastAdd,
-  UserDataType,
-  CastType,
-  Message,
-  HubAsyncResult,
-  NobleEd25519Signer,
-  ViemLocalEip712Signer,
-  getSSLHubRpcClient,
-  getInsecureHubRpcClient,
-  makeUserNameProofClaim,
-} from '@farcaster/hub-nodejs';
-import { 
-  createWalletClient, 
-  createPublicClient, 
-  http, 
-  toHex, 
-  fromHex,
-  decodeEventLog,
-  getBalance,
-  LocalAccount,
-  readContract,
-  simulateContract,
-  writeContract,
-  waitForTransactionReceipt,
-  Hex
-} from 'viem';
-import { zeroAddress, bytesToHex } from 'viem';
+} from '@farcaster/hub-web';
+import { zeroAddress } from 'viem';
 import { optimism } from 'viem/chains';
 import { generatePrivateKey, privateKeyToAccount, toAccount } from "viem/accounts";
-import { ed25519 } from '@noble/curves/ed25519';
-import axios from 'axios';
 
 /**
  * Populate the following constants with your own values
@@ -113,25 +85,6 @@ and return early if so.
 If you don't have a funded account you can use, note the address and private key pair that's logged. Transfer funds to the address and use the same private key as the `CUSTODY_PRIVATE_KEY` for the next run of the script. 
 
 ```typescript
-// Create wallet and public clients
-const account = privateKeyToAccount(CUSTODY_PRIVATE_KEY as `0x${string}`);
-const accountPrivateKey = CUSTODY_PRIVATE_KEY === '<REQUIRED>' ? generatePrivateKey() : CUSTODY_PRIVATE_KEY;
-const walletClient = createWalletClient({
-  account,
-  chain: CHAIN,
-  transport: http(OP_PROVIDER_URL),
-});
-const publicClient = createPublicClient({
-  chain: CHAIN,
-  transport: http(OP_PROVIDER_URL),
-});
-
-
-// Create hub client
-const hubClient = USE_SSL
-  ? getSSLHubRpcClient(HUB_URL, { username: HUB_USERNAME, password: HUB_PASS })
-  : getInsecureHubRpcClient(HUB_URL);
-
 const getOrRegisterFid = async (): Promise<number> => {
   const balance = await getBalance(walletClient, { address: account.address });
   const existingFid = (await readContract(walletClient, {
@@ -229,7 +182,7 @@ const getOrRegisterSigner = async (fid: number) => {
 };
 
 
-const signerPrivateKey = await getOrRegisterSigner(fid);
+const signer = await getOrRegisterSigner(fid);
 ```
 
 ## 4. Register an fname
@@ -293,7 +246,7 @@ const submitMessage = async (resultPromise: HubAsyncResult<Message>) => {
   if (result.isErr()) {
     throw new Error(`Error creating message: ${result.error}`);
   }
-  const messageSubmitResult = await hubClient.submitMessage(result.value);
+  const messageSubmitResult = await hubClient.submitMessage(result.value, metadata);
   if (messageSubmitResult.isErr()) {
     throw new Error(`Error submitting message to node: ${messageSubmitResult.error}`);
   }

@@ -19,7 +19,7 @@ Snapchain is designed to be a drop-in replacement for [Hubble](https://github.co
 
 Messages once submitted must be included in blocks, similar to blockchain transactions. The `submitMessage` has two main differences from Hubble: 
 
-1. `submitMessage` requests can optionally include `dataBytes` for better performance. If not provided, Snapchain will automatically encode the `data` field. The `hub-nodejs` builders handle this optimization in all versions `>=0.13.0`. If you want to manually optimize this:
+1. `submitMessage` requests must all contain `dataBytes` for Snapchain. The `hub-nodejs` builders handle this in all versions `>=0.13.0`, but if you're not using those you will need to manually update this like so:
     ```typescript
     if (message.dataBytes === undefined) {
         message.dataBytes = protobufs.MessageData.encode(message.data).finish();
