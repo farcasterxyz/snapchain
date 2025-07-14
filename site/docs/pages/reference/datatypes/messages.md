@@ -30,7 +30,7 @@ Farcaster messages. It also contains a body whose type is determined by the Mess
 | fid       | uint64                                                                                                                                                                                                                                                                                                                                  |       | Farcaster ID of the user producing the message |
 | timestamp | uint32                                                                                                                                                                                                                                                                                                                                  |       | Farcaster epoch timestamp in seconds           |
 | network   | [FarcasterNetwork](#FarcasterNetwork)                                                                                                                                                                                                                                                                                                   |       | Farcaster network the message is intended for  |
-| body      | [CastAddBody](#CastAddBody), <br /> [CastRemoveBody](#CastRemoveBody), <br /> [ReactionBody](#ReactionBody), <br />[VerificationAddEthAddressBody](#VerificationAddEthAddressBody), <br />[VerificationRemoveBody](#VerificationRemoveBody), <br /> [UserDataBody](#UserDataBody),<br /> [LinkBody](#LinkBody),<br /> [UserNameProof](#UserNameProof) | oneOf | Properties specific to the MessageType         |
+| body      | [CastAddBody](#CastAddBody), <br /> [CastRemoveBody](#CastRemoveBody), <br /> [ReactionBody](#ReactionBody), <br />[VerificationAddAddressBody](#VerificationAddAddressBody), <br />[VerificationRemoveBody](#VerificationRemoveBody), <br /> [UserDataBody](#UserDataBody),<br /> [LinkBody](#LinkBody),<br /> [UserNameProof](#UserNameProof),<br /> [FrameActionBody](#FrameActionBody),<br /> [LinkCompactStateBody](#LinkCompactStateBody) | oneOf | Properties specific to the MessageType         |
 
 ### 1.2 HashScheme
 
@@ -64,10 +64,12 @@ Type of the MessageBody
 | MESSAGE_TYPE_REACTION_REMOVE              | 4      | Remove a Reaction from a Cast             |
 | MESSAGE_TYPE_LINK_ADD                     | 5      | Add a Link to a target                    |
 | MESSAGE_TYPE_LINK_REMOVE                  | 6      | Remove a Link from a target               |
-| MESSAGE_TYPE_VERIFICATION_ADD_ETH_ADDRESS | 7      | Add a Verification of an Ethereum Address |
+| MESSAGE_TYPE_VERIFICATION_ADD_ETH_ADDRESS | 7      | Add a Verification of an Address          |
 | MESSAGE_TYPE_VERIFICATION_REMOVE          | 8      | Remove a Verification                     |
 | MESSAGE_TYPE_USER_DATA_ADD                | 11     | Add metadata about a user                 |
 | MESSAGE_TYPE_USERNAME_PROOF               | 12     | Add or replace a username proof           |
+| MESSAGE_TYPE_FRAME_ACTION                 | 13     | Frame action (not stored)                 |
+| MESSAGE_TYPE_LINK_COMPACT_STATE           | 14     | Compact state for links                   |
 
 ### 1.5 Farcaster Network
 
@@ -97,17 +99,20 @@ Body of a UserData message
 
 Type of UserData message
 
-| Name                    | Number | Description                           |
-| ----------------------- | ------ | ------------------------------------- |
-| USER_DATA_TYPE_NONE     | 0      | Invalid default value                 |
-| USER_DATA_TYPE_PFP      | 1      | Profile Picture for the user          |
-| USER_DATA_TYPE_DISPLAY  | 2      | Display Name for the user             |
-| USER_DATA_TYPE_BIO      | 3      | Bio for the user                      |
-| USER_DATA_TYPE_URL      | 5      | URL of the user                       |
-| USER_DATA_TYPE_USERNAME | 6      | Preferred Farcaster Name for the user |
-| USER_DATA_TYPE_LOCATION | 7      | Location for the user                 |
-| USER_DATA_TYPE_TWITTER  | 8      | Twitter username for the user         |
-| USER_DATA_TYPE_GITHUB   | 9      | GitHub username for the user          |
+| Name                               | Number | Description                           |
+| ---------------------------------- | ------ | ------------------------------------- |
+| USER_DATA_TYPE_NONE                | 0      | Invalid default value                 |
+| USER_DATA_TYPE_PFP                 | 1      | Profile Picture for the user          |
+| USER_DATA_TYPE_DISPLAY             | 2      | Display Name for the user             |
+| USER_DATA_TYPE_BIO                 | 3      | Bio for the user                      |
+| USER_DATA_TYPE_URL                 | 5      | URL of the user                       |
+| USER_DATA_TYPE_USERNAME            | 6      | Preferred Farcaster Name for the user |
+| USER_DATA_TYPE_LOCATION            | 7      | Location for the user                 |
+| USER_DATA_TYPE_TWITTER             | 8      | Twitter username for the user         |
+| USER_DATA_TYPE_GITHUB              | 9      | GitHub username for the user          |
+| USER_DATA_TYPE_BANNER              | 10     | Banner image for the user             |
+| USER_DATA_PRIMARY_ADDRESS_ETHEREUM | 11     | Primary Ethereum address              |
+| USER_DATA_PRIMARY_ADDRESS_SOLANA   | 12     | Primary Solana address                |
 
 See [FIP-196](https://github.com/farcasterxyz/protocol/discussions/196) for more information on Location.
 See [FIP-19](https://github.com/farcasterxyz/protocol/discussions/199) for more information on Twitter/X and Github usernames.
@@ -120,15 +125,16 @@ A Cast message is a public post from a user.
 
 Adds a new Cast message.
 
-| Field              | Type              | Label    | Description                                 |
-| ------------------ | ----------------- | -------- | ------------------------------------------- |
-| embeds_deprecated  | string            | repeated | URLs to be embedded in the cast             |
-| mentions           | uint64            | repeated | Fids mentioned in the cast                  |
-| parent_cast_id     | [CastId](#CastId) |          | Parent cast of the cast                     |
-| parent_url         | string            |          | Parent URL of the cast                      |
-| text               | string            |          | Text of the cast                            |
-| mentions_positions | uint32            | repeated | Positions of the mentions in the text       |
-| embeds             | [Embed](#Embed)   | repeated | URLs or cast ids to be embedded in the cast |
+| Field              | Type                  | Label    | Description                                 |
+| ------------------ | --------------------- | -------- | ------------------------------------------- |
+| embeds_deprecated  | string                | repeated | URLs to be embedded in the cast             |
+| mentions           | uint64                | repeated | Fids mentioned in the cast                  |
+| parent_cast_id     | [CastId](#CastId)     | oneOf parent | Parent cast of the cast                |
+| parent_url         | string                | oneOf parent | Parent URL of the cast                 |
+| text               | string                |          | Text of the cast                            |
+| mentions_positions | uint32                | repeated | Positions of the mentions in the text       |
+| embeds             | [Embed](#Embed)       | repeated | URLs or cast ids to be embedded in the cast |
+| type               | [CastType](#CastType) |          | Type of cast (regular, long, etc.)          |
 
 #### Embed
 
@@ -196,15 +202,18 @@ Adds or removes a Link
 
 A Verification message is a proof of ownership of something.
 
-### 6.1 VerificationAddEthAddressBody
+### 6.1 VerificationAddAddressBody
 
-Adds a bi-directional signature proving that an fid has control over an Ethereum address.
+Adds a bi-directional signature proving that an fid has control over an address (supports multiple protocols).
 
-| Field         | Type  | Label | Description                                                   |
-| ------------- | ----- | ----- | ------------------------------------------------------------- |
-| address       | bytes |       | Ethereum address being verified                               |
-| eth_signature | bytes |       | Signature produced by the user&#39;s Ethereum address         |
-| block_hash    | bytes |       | Hash of the latest Ethereum block when the claim was produced |
+| Field               | Type                      | Label | Description                                                   |
+| ------------------- | ------------------------- | ----- | ------------------------------------------------------------- |
+| address             | bytes                     |       | Address being verified                                        |
+| claim_signature     | bytes                     |       | Signature produced by the user&#39;s address                  |
+| block_hash          | bytes                     |       | Hash of the latest block when the claim was produced         |
+| verification_type   | uint32                    |       | Type of verification (0 = EOA, 1 = contract)                  |
+| chain_id            | uint32                    |       | Chain ID of the verification                                  |
+| protocol            | [Protocol](#Protocol)     |       | Protocol of the address (Ethereum, Solana, etc.)             |
 
 ### 6.2 VerificationRemoveBody
 
@@ -223,10 +232,40 @@ only validated.
 
 A user action on a frame
 
-| Field        | Type              | Label | Description                                           |
-| ------------ | ----------------- | ----- | ----------------------------------------------------- |
-| url          | bytes             |       | The original url of the frame as embedded in the cast |
-| button_index | uint32            |       | The button that was pressed (indexed from 1)          |
-| cast_id      | [CastId](#CastId) |       | The cast id that hosted the frame                     |
-| input_text   | bytes             |       | Any text the user input as part of the action         |
-| state        | bytes             |       | Serialized state passed from frame to server          |
+| Field          | Type              | Label | Description                                           |
+| -------------- | ----------------- | ----- | ----------------------------------------------------- |
+| url            | bytes             |       | The original url of the frame as embedded in the cast |
+| button_index   | uint32            |       | The button that was pressed (indexed from 1)          |
+| cast_id        | [CastId](#CastId) |       | The cast id that hosted the frame                     |
+| input_text     | bytes             |       | Any text the user input as part of the action         |
+| state          | bytes             |       | Serialized state passed from frame to server          |
+| transaction_id | bytes             |       | Transaction ID for transaction frames                 |
+| address        | bytes             |       | Address involved in the frame action                  |
+
+## 8. Protocol
+
+Type of protocol for addresses
+
+| Name              | Number | Description     |
+| ----------------- | ------ | --------------- |
+| PROTOCOL_ETHEREUM | 0      | Ethereum        |
+| PROTOCOL_SOLANA   | 1      | Solana          |
+
+## 9. CastType
+
+Type of cast
+
+| Name      | Number | Description                    |
+| --------- | ------ | ------------------------------ |
+| CAST      | 0      | Regular cast                   |
+| LONG_CAST | 1      | Extended length cast           |
+| TEN_K_CAST| 2      | Ten thousand character cast    |
+
+## 10. LinkCompactStateBody
+
+Compact state representation for links
+
+| Field          | Type              | Label    | Description                       |
+| -------------- | ----------------- | -------- | --------------------------------- |
+| type           | [string](#string) |          | Type of link                      |
+| target_fids    | [uint64](#uint64) | repeated | Array of target fids              |
