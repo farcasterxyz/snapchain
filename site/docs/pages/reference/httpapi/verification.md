@@ -9,6 +9,9 @@ Get a list of verifications provided by an FID
 | --------- | ------------------------------------- | ---------------------------------------------------- |
 | fid       | The FID being requested               | `fid=2`                                              |
 | address   | The optional ETH address to filter by | `address=0x91031dcfdea024b4d51e775486111d2b2a715871` |
+| pageSize  | Optional page size (default: 1000)   | `pageSize=100`                                       |
+| pageToken | Optional page token for pagination   | `pageToken=DAEDAAAGlQ...`                            |
+| reverse   | Optional reverse order flag          | `reverse=true`                                       |
 
 **Example**
 

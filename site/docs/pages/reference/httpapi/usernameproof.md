@@ -33,9 +33,12 @@ curl http://127.0.0.1:3381/v1/userNameProofByName?name=adityapk
 Get a list of proofs provided by an FID
 
 **Query Parameters**
-| Parameter | Description             | Example |
-| --------- | ----------------------- | ------- |
-| fid       | The FID being requested | `fid=2` |
+| Parameter | Description                         | Example               |
+| --------- | ----------------------------------- | --------------------- |
+| fid       | The FID being requested             | `fid=2`               |
+| pageSize  | Optional page size (default: 1000) | `pageSize=100`        |
+| pageToken | Optional page token for pagination | `pageToken=DAEDAAAGlQ...` |
+| reverse   | Optional reverse order flag        | `reverse=true`        |
 
 **Example**
 

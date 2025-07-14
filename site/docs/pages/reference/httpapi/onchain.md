@@ -9,6 +9,9 @@ Get a list of account keys (signers) provided by an FID
 | --------- | ----------- | ------- |
 | fid | The FID being requested | `fid=2` |
 | signer | The optional key of signer | `signer=0x0852c07b5695ff94138b025e3f9b4788e06133f04e254f0ea0eb85a06e999cdd` |
+| pageSize | Optional page size (default: 1000) | `pageSize=100` |
+| pageToken | Optional page token for pagination | `pageToken=DAEDAAAGlQ...` |
+| reverse | Optional reverse order flag | `reverse=true` |
 
 **Example**
 
@@ -51,21 +54,26 @@ Get a list of account keys provided by an FID
 | Parameter | Description | Example |
 | --------- | ----------- | ------- |
 | fid | The FID being requested | `fid=2` |
-| event_type | The numeric of string value of the event type being requested. This parameter is required | `event_type=1` OR `event_type=EVENT_TYPE_STORAGE_RENT` |
+| event_type | The string value of the event type being requested. This parameter is required | `event_type=EVENT_TYPE_SIGNER` OR `event_type=EVENT_TYPE_STORAGE_RENT` |
+| pageSize | Optional page size (default: 1000) | `pageSize=100` |
+| pageToken | Optional page token for pagination | `pageToken=DAEDAAAGlQ...` |
+| reverse | Optional reverse order flag | `reverse=true` |
 
 The onChainEventsByFid API will accept the following values for the `event_type` field.
 
-| String                     | Numerical value |
-| -------------------------- | --------------- |
-| EVENT_TYPE_SIGNER          | 1               |
-| EVENT_TYPE_SIGNER_MIGRATED | 2               |
-| EVENT_TYPE_ID_REGISTER     | 3               |
-| EVENT_TYPE_STORAGE_RENT    | 4               |
+| String                     |
+| -------------------------- |
+| EVENT_TYPE_NONE            |
+| EVENT_TYPE_SIGNER          |
+| EVENT_TYPE_SIGNER_MIGRATED |
+| EVENT_TYPE_ID_REGISTER     |
+| EVENT_TYPE_STORAGE_RENT    |
+| EVENT_TYPE_TIER_PURCHASE   |
 
 **Example**
 
 ```bash
-curl http://127.0.0.1:3381/v1/onChainEventsByFid?fid=3&event_type=1
+curl http://127.0.0.1:3381/v1/onChainEventsByFid?fid=3&event_type=EVENT_TYPE_SIGNER
 ```
 
 **Response**

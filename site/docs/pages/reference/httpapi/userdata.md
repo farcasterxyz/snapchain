@@ -25,6 +25,9 @@ Get UserData for a FID.
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
 | fid            | The FID that's being requested                                                                                               | `fid=6833`                                                    |
 | user_data_type | The type of user data, either as a numerical value or type string. If this is omitted, all user data for the FID is returned | `user_data_type=1` OR `user_data_type=USER_DATA_TYPE_DISPLAY` |
+| pageSize       | Optional page size (default: 1000)                                                                                          | `pageSize=100`                                                |
+| pageToken      | Optional page token for pagination                                                                                          | `pageToken=DAEDAAAGlQ...`                                     |
+| reverse        | Optional reverse order flag                                                                                                 | `reverse=true`                                                |
 
 **Example**
 

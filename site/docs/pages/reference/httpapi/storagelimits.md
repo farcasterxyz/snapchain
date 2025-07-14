@@ -21,28 +21,73 @@ curl http://127.0.0.1:3381/v1/storageLimitsByFid?fid=6833
 {
   "limits": [
     {
-      "storeType": "STORE_TYPE_CASTS",
-      "limit": 10000
+      "storeType": "Casts",
+      "name": "CASTS",
+      "limit": 77000,
+      "used": 10510,
+      "earliestTimestamp": 0,
+      "earliestHash": []
     },
     {
-      "storeType": "STORE_TYPE_LINKS",
-      "limit": 5000
+      "storeType": "Links",
+      "name": "LINKS",
+      "limit": 38500,
+      "used": 1742,
+      "earliestTimestamp": 0,
+      "earliestHash": []
     },
     {
-      "storeType": "STORE_TYPE_REACTIONS",
-      "limit": 5000
+      "storeType": "Reactions",
+      "name": "REACTIONS",
+      "limit": 38500,
+      "used": 19578,
+      "earliestTimestamp": 0,
+      "earliestHash": []
     },
     {
-      "storeType": "STORE_TYPE_USER_DATA",
-      "limit": 100
+      "storeType": "UserData",
+      "name": "USER_DATA",
+      "limit": 800,
+      "used": 8,
+      "earliestTimestamp": 0,
+      "earliestHash": []
     },
     {
-      "storeType": "STORE_TYPE_USERNAME_PROOFS",
-      "limit": 10
+      "storeType": "Verifications",
+      "name": "VERIFICATIONS",
+      "limit": 400,
+      "used": 7,
+      "earliestTimestamp": 0,
+      "earliestHash": []
     },
     {
-      "storeType": "STORE_TYPE_VERIFICATIONS",
-      "limit": 50
+      "storeType": "UsernameProofs",
+      "name": "USERNAME_PROOFS",
+      "limit": 80,
+      "used": 1,
+      "earliestTimestamp": 0,
+      "earliestHash": []
+    }
+  ],
+  "units": 515,
+  "unit_details": [
+    {
+      "unitType": "UnitTypeLegacy",
+      "unitSize": 15
+    },
+    {
+      "unitType": "UnitType2024",
+      "unitSize": 1
+    },
+    {
+      "unitType": "UnitType2025",
+      "unitSize": 0
+    }
+  ],
+  "tier_subscriptions": [
+    {
+      "tier_type": "Pro",
+      "expires_at": 1781630485
     }
   ]
 }

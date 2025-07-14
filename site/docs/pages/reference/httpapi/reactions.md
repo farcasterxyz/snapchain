@@ -17,7 +17,7 @@ Get a reaction by its created FID and target Cast.
 | fid | The FID of the reaction's creator | `fid=6833` |
 | target_fid | The FID of the cast's creator | `target_fid=2` |
 | target_hash | The cast's hash | `target_hash=0xa48dd46161d8e57725f5e26e34ec19c13ff7f3b9` |
-| reaction_type | The type of reaction, either as a numerical enum value or string representation | `reaction_type=1` OR `reaction_type=REACTION_TYPE_LIKE` |
+| reaction_type | The type of reaction, use string representation | `reaction_type=Like` OR `reaction_type=Recast` |
 
 **Example**
 
@@ -58,7 +58,10 @@ Get all reactions by an FID
 | Parameter | Description | Example |
 | --------- | ----------- | ------- |
 | fid | The FID of the reaction's creator | `fid=6833` |
-| reaction_type | The type of reaction, either as a numerical enum value or string representation | `reaction_type=1` OR `reaction_type=REACTION_TYPE_LIKE` |
+| reaction_type | The type of reaction, use string representation | `reaction_type=Like` OR `reaction_type=Recast` |
+| pageSize | Optional page size (default: 1000) | `pageSize=100` |
+| pageToken | Optional page token for pagination | `pageToken=DAEDAAAGlQ...` |
+| reverse | Optional reverse order flag | `reverse=true` |
 
 **Example**
 
@@ -103,9 +106,12 @@ Get all reactions to a cast
 **Query Parameters**
 | Parameter | Description | Example |
 | --------- | ----------- | ------- |
-| target_fid | The FID of the cast's creator | `fid=6833` |
-| target_hash | The hash of the cast | `target_hash=`0x7363f449bfb0e7f01c5a1cc0054768ed5146abc0`|
-| reaction_type | The type of reaction, either as a numerical enum value or string representation |`reaction_type=1`OR`reaction_type=REACTION_TYPE_LIKE` |
+| target_fid | The FID of the cast's creator | `target_fid=6833` |
+| target_hash | The hash of the cast | `target_hash=0x7363f449bfb0e7f01c5a1cc0054768ed5146abc0` |
+| reaction_type | The type of reaction, use string representation | `reaction_type=Like` OR `reaction_type=Recast` |
+| pageSize | Optional page size (default: 1000) | `pageSize=100` |
+| pageToken | Optional page token for pagination | `pageToken=DAEDAAAGlQ...` |
+| reverse | Optional reverse order flag | `reverse=true` |
 
 **Example**
 
@@ -151,7 +157,7 @@ Get all reactions to cast's target URL
 | Parameter | Description | Example |
 | --------- | ----------- | ------- |
 | url | The URL of the parent cast | url=chain://eip155:1/erc721:0x39d89b649ffa044383333d297e325d42d31329b2 |
-| reaction_type | The type of reaction, either as a numerical enum value or string representation | `reaction_type=1` OR `reaction_type=REACTION_TYPE_LIKE` |
+| reaction_type | The type of reaction, use string representation | `reaction_type=Like` OR `reaction_type=Recast` |
 
 **Example**
 
