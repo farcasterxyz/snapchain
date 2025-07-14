@@ -15,6 +15,7 @@ Used to retrieve a list of all fids
 | page_size  | [uint32](#uint32) | optional |             |
 | page_token | [bytes](#bytes)   | optional |             |
 | reverse    | [bool](#bool)     | optional |             |
+| shard_id   | [uint32](#uint32) | required |             |
 
 ## Fids Response
 
