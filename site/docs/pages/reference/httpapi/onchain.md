@@ -139,3 +139,29 @@ curl http://127.0.0.1:3381/v1/onChainIdRegistryEventByAddress?address=0x74232bf6
   "txIndex": 0
 }
 ```
+
+## fidAddressType
+
+Get the address type information for a given FID and address
+
+**Query Parameters**
+| Parameter | Description | Example |
+| --------- | ----------- | ------- |
+| fid | The FID being requested | `fid=2` |
+| address | The ETH address to check | `address=0x91031dcfdea024b4d51e775486111d2b2a715871` |
+
+**Example**
+
+```bash
+curl http://127.0.0.1:3381/v1/fidAddressType?fid=2&address=0x91031dcfdea024b4d51e775486111d2b2a715871
+```
+
+**Response**
+
+```json
+{
+  "is_custody": false,
+  "is_auth": false,
+  "is_verified": true
+}
+```
