@@ -5,10 +5,10 @@
 Get a cast by its FID and Hash.
 
 **Query Parameters**
-| Parameter | Description | Example |
-| --------- | ----------- | ------- |
-| fid | The FID of the cast's creator | `fid=6833` |
-| hash | The cast's hash | `hash=0xa48dd46161d8e57725f5e26e34ec19c13ff7f3b9` |
+| Parameter | Description                   | Example                                           |
+| --------- | ----------------------------- | ------------------------------------------------- |
+| fid       | The FID of the cast's creator | `fid=6833`                                        |
+| hash      | The cast's hash               | `hash=0xa48dd46161d8e57725f5e26e34ec19c13ff7f3b9` |
 
 **Example**
 
@@ -50,14 +50,14 @@ curl http://127.0.0.1:3381/v1/castById?fid=2&hash=0xd2b1ddc6c88e865a33cb1a565e00
 Fetch all casts for authored by an FID.
 
 **Query Parameters**
-| Parameter | Description | Example |
-| --------- | ----------- | ------- |
-| fid | The FID of the cast's creator | `fid=6833` |
-| pageSize | Optional page size (default: 1000) | `pageSize=100` |
-| pageToken | Optional page token for pagination | `pageToken=DAEDAAAGlQ...` |
-| reverse | Optional reverse order flag | `reverse=true` |
-| startTimestamp | Optional start timestamp filter | `startTimestamp=1640995200` |
-| stopTimestamp | Optional stop timestamp filter | `stopTimestamp=1640995200` |
+| Parameter      | Description                        | Example                     |
+| -------------- | ---------------------------------- | --------------------------- |
+| fid            | The FID of the cast's creator      | `fid=6833`                  |
+| pageSize       | Optional page size (default: 1000) | `pageSize=100`              |
+| pageToken      | Optional page token for pagination | `pageToken=DAEDAAAGlQ...`   |
+| reverse        | Optional reverse order flag        | `reverse=true`              |
+| startTimestamp | Optional start timestamp filter    | `startTimestamp=1640995200` |
+| stopTimestamp  | Optional stop timestamp filter     | `stopTimestamp=1640995200`  |
 
 **Example**
 
@@ -98,14 +98,14 @@ curl http://127.0.0.1:3381/v1/castsByFid?fid=2
 Fetch all casts by parent cast's FID and Hash OR by the parent's URL
 
 **Query Parameters**
-| Parameter | Description | Example |
-| --------- | ----------- | ------- |
-| fid | The FID of the parent cast | `fid=6833` |
-| hash | The parent cast's hash | `hash=0xa48dd46161d8e57725f5e26e34ec19c13ff7f3b9` |
-| url | The URL of the parent cast | `url=chain://eip155:1/erc721:0x39d89b649ffa044383333d297e325d42d31329b2` |
-| pageSize | Optional page size (default: 1000) | `pageSize=100` |
-| pageToken | Optional page token for pagination | `pageToken=DAEDAAAGlQ...` |
-| reverse | Optional reverse order flag | `reverse=true` |
+| Parameter | Description                        | Example                                                                  |
+| --------- | ---------------------------------- | ------------------------------------------------------------------------ |
+| fid       | The FID of the parent cast         | `fid=6833`                                                               |
+| hash      | The parent cast's hash             | `hash=0xa48dd46161d8e57725f5e26e34ec19c13ff7f3b9`                        |
+| url       | The URL of the parent cast         | `url=chain://eip155:1/erc721:0x39d89b649ffa044383333d297e325d42d31329b2` |
+| pageSize  | Optional page size (default: 1000) | `pageSize=100`                                                           |
+| pageToken | Optional page token for pagination | `pageToken=DAEDAAAGlQ...`                                                |
+| reverse   | Optional reverse order flag        | `reverse=true`                                                           |
 
 **Note**
 You can use either `?fid=...&hash=...` OR `?url=...` to query this endpoint
@@ -155,12 +155,12 @@ curl http://127.0.0.1:3381/v1/castsByParent?fid=226&hash=0xa48dd46161d8e57725f5e
 Fetch all casts that mention an FID
 
 **Query Parameters**
-| Parameter | Description | Example |
-| --------- | ----------- | ------- |
-| fid | The FID that is mentioned in a cast | `fid=6833` |
-| pageSize | Optional page size (default: 1000) | `pageSize=100` |
-| pageToken | Optional page token for pagination | `pageToken=DAEDAAAGlQ...` |
-| reverse | Optional reverse order flag | `reverse=true` |
+| Parameter | Description                         | Example                   |
+| --------- | ----------------------------------- | ------------------------- |
+| fid       | The FID that is mentioned in a cast | `fid=6833`                |
+| pageSize  | Optional page size (default: 1000)  | `pageSize=100`            |
+| pageToken | Optional page token for pagination  | `pageToken=DAEDAAAGlQ...` |
+| reverse   | Optional reverse order flag         | `reverse=true`            |
 
 **Note**
 Use the `mentionsPositions` to extract the offset in the cast text where the FID was mentioned

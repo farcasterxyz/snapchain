@@ -5,12 +5,12 @@
 Get a list of all the FIDs
 
 **Query Parameters**
-| Parameter | Description                         | Example |
-| --------- | ----------------------------------- | ------- |
-| shard_id  | Required shard ID to query          | `shard_id=1` |
-| pageSize  | Optional page size (default: 1000)  | `pageSize=100` |
-| pageToken | Optional page token for pagination  | `pageToken=DAEDAAAGlQ...` |
-| reverse   | Optional reverse order flag         | `reverse=true` |
+| Parameter | Description                        | Example                   |
+| --------- | ---------------------------------- | ------------------------- |
+| shard_id  | Required shard ID to query         | `shard_id=1`              |
+| pageSize  | Optional page size (default: 1000) | `pageSize=100`            |
+| pageToken | Optional page token for pagination | `pageToken=DAEDAAAGlQ...` |
+| reverse   | Optional reverse order flag        | `reverse=true`            |
 
 **Example**
 

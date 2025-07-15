@@ -52,13 +52,13 @@ curl http://127.0.0.1:3381/v1/linkById?fid=6833&target_fid=2&link_type=follow
 Get all links from a source FID
 
 **Query Parameters**
-| Parameter | Description                         | Example            |
-| --------- | ----------------------------------- | ------------------ |
-| fid       | The FID of the link's creator       | `fid=6833`         |
-| link_type | The type of link, as a string value | `link_type=follow` |
-| pageSize  | Optional page size (default: 1000) | `pageSize=100`     |
-| pageToken | Optional page token for pagination | `pageToken=DAEDAAAGlQ...` |
-| reverse   | Optional reverse order flag        | `reverse=true`     |
+| Parameter | Description                         | Example                   |
+| --------- | ----------------------------------- | ------------------------- |
+| fid       | The FID of the link's creator       | `fid=6833`                |
+| link_type | The type of link, as a string value | `link_type=follow`        |
+| pageSize  | Optional page size (default: 1000)  | `pageSize=100`            |
+| pageToken | Optional page token for pagination  | `pageToken=DAEDAAAGlQ...` |
+| reverse   | Optional reverse order flag         | `reverse=true`            |
 
 **Example**
 
@@ -98,13 +98,13 @@ curl http://127.0.0.1:3381/v1/linksByFid?fid=6833
 Get all links to a target FID
 
 **Query Parameters**
-| Parameter  | Description                         | Example            |
-| ---------- | ----------------------------------- | ------------------ |
-| target_fid | The FID of the link's target        | `target_fid=6833`  |
-| link_type  | The type of link, as a string value | `link_type=follow` |
-| pageSize   | Optional page size (default: 1000) | `pageSize=100`     |
-| pageToken  | Optional page token for pagination | `pageToken=DAEDAAAGlQ...` |
-| reverse    | Optional reverse order flag        | `reverse=true`     |
+| Parameter  | Description                         | Example                   |
+| ---------- | ----------------------------------- | ------------------------- |
+| target_fid | The FID of the link's target        | `target_fid=6833`         |
+| link_type  | The type of link, as a string value | `link_type=follow`        |
+| pageSize   | Optional page size (default: 1000)  | `pageSize=100`            |
+| pageToken  | Optional page token for pagination  | `pageToken=DAEDAAAGlQ...` |
+| reverse    | Optional reverse order flag         | `reverse=true`            |
 
 **Example**
 

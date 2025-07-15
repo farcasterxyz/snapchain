@@ -7,10 +7,10 @@ The events API returns events as they are merged into the Hub, which can be used
 Get an event by its Id
 
 **Query Parameters**
-| Parameter | Description | Example |
-| --------- | ----------- | ------- |
-| event_id | The Hub Id of the event | `event_id=350909155450880` |
-| shard_index | The shard index for the event | `shard_index=1` |
+| Parameter   | Description                   | Example                    |
+| ----------- | ----------------------------- | -------------------------- |
+| event_id    | The Hub Id of the event       | `event_id=350909155450880` |
+| shard_index | The shard index for the event | `shard_index=1`            |
 
 **Example**
 
@@ -42,14 +42,14 @@ curl http://127.0.0.1:3381/v1/eventById?event_id=151622205440&shard_index=1
 Get a page of Hub events
 
 **Query Parameters**
-| Parameter | Description | Example |
-| --------- | ----------- | ------- |
+| Parameter     | Description                                                                                  | Example                         |
+| ------------- | -------------------------------------------------------------------------------------------- | ------------------------------- |
 | from_event_id | An optional Hub Id to start getting events from. Set it to `0` to start from the first event | `from_event_id=350909155450880` |
-| shard_index | Optional shard index to query | `shard_index=1` |
-| stop_id | Optional stop event ID | `stop_id=350909170294785` |
-| pageSize | Optional page size (default: 1000) | `pageSize=100` |
-| pageToken | Optional page token for pagination | `pageToken=DAEDAAAGlQ...` |
-| reverse | Optional reverse order flag | `reverse=true` |
+| shard_index   | Optional shard index to query                                                                | `shard_index=1`                 |
+| stop_id       | Optional stop event ID                                                                       | `stop_id=350909170294785`       |
+| pageSize      | Optional page size (default: 1000)                                                           | `pageSize=100`                  |
+| pageToken     | Optional page token for pagination                                                           | `pageToken=DAEDAAAGlQ...`       |
+| reverse       | Optional reverse order flag                                                                  | `reverse=true`                  |
 
 **Note**
 Hubs prune events older than 3 days, so not all historical events can be fetched via this API
