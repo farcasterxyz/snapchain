@@ -4,18 +4,18 @@ Events represent state changes, like a new message or contract event.
 
 Snapchain nodes emit events whenever they observe a state change. Clients can subscribe to a node using the [Events API](../grpcapi/events.md) to get a live stream of changes.
 
-Snapchain keeps events around for 3 days after which they are deleted to save space. To get older data, use the [GRPC](../grpcapi/grpcapi.md) or [HTTP](../httpapi/httpapi.mdx) APIs.
+Snapchain keeps events around for 3 days after which they are deleted to save space. To get older data, use the [GRPC](../grpcapi/grpcapi.md) or [HTTP](../httpapi/httpapi.md) APIs.
 
 ## HubEvent
 
-| Field        | Type                                                                                                                                                                                                                                                                                                                                       | Label | Description                                                       |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----- | ----------------------------------------------------------------- |
-| type         | [HubEventType](#HubEventType)                                                                                                                                                                                                                                                                                                              |       | The type of event                                                 |
-| id           | [uint64](#uint64)                                                                                                                                                                                                                                                                                                                          |       | Unique identifier for the event that encodes block height ordering |
-| block_number | [uint64](#uint64)                                                                                                                                                                                                                                                                                                                          |       | The block number when the event was created                      |
-| shard_index  | [uint32](#uint32)                                                                                                                                                                                                                                                                                                                          |       | The shard index where the event occurred                          |
-| timestamp    | [uint64](#uint64)                                                                                                                                                                                                                                                                                                                          |       | The timestamp when the event was created                          |
-| body         | [MergeMessageBody](#mergemessagebody), <br /> [PruneMessageBody](#prunemessagebody), <br /> [RevokeMessageBody](#revokemessagebody), <br />[MergeUserNameProofBody](#mergeusernameproofbody), <br />[MergeOnChainEventBody](#mergeonchaineventbody), <br />[MergeFailureBody](#mergefailurebody), <br />[BlockConfirmedBody](#blockconfirmedbody) | oneOf | The event payload                                                 |
+| Field        | Type                                                                                                                                                                                                                                                                                                                                              | Label | Description                                                        |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- | ------------------------------------------------------------------ |
+| type         | [HubEventType](#HubEventType)                                                                                                                                                                                                                                                                                                                     |       | The type of event                                                  |
+| id           | [uint64](#uint64)                                                                                                                                                                                                                                                                                                                                 |       | Unique identifier for the event that encodes block height ordering |
+| block_number | [uint64](#uint64)                                                                                                                                                                                                                                                                                                                                 |       | The block number when the event was created                        |
+| shard_index  | [uint32](#uint32)                                                                                                                                                                                                                                                                                                                                 |       | The shard index where the event occurred                           |
+| timestamp    | [uint64](#uint64)                                                                                                                                                                                                                                                                                                                                 |       | The timestamp when the event was created                           |
+| body         | [MergeMessageBody](#mergemessagebody), <br /> [PruneMessageBody](#prunemessagebody), <br /> [RevokeMessageBody](#revokemessagebody), <br />[MergeUserNameProofBody](#mergeusernameproofbody), <br />[MergeOnChainEventBody](#mergeonchaineventbody), <br />[MergeFailureBody](#mergefailurebody), <br />[BlockConfirmedBody](#blockconfirmedbody) | oneOf | The event payload                                                  |
 
 ### Event ID Construction
 
@@ -86,18 +86,18 @@ This design allows clients to determine which events occurred in the same block 
 
 ## OnChainEvent
 
-| Field            | Type                                                                                                                                                                                               | Label | Description                          |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- | ------------------------------------ |
-| type             | [OnChainEventType](#OnChainEventType)                                                                                                                                                              |       | The type of onchain event            |
-| chain_id         | [uint32](#)                                                                                                                                                                                        |       | The chain id for the event           |
-| block_number     | [uint32](#)                                                                                                                                                                                        |       | The block number for the event       |
-| block_hash       | [bytes](#)                                                                                                                                                                                         |       | The block hash for the event         |
-| block_timestamp  | [uint64](#)                                                                                                                                                                                        |       | The block timestamp for the event    |
-| transaction_hash | [bytes](#)                                                                                                                                                                                         |       | The transaction hash for the event   |
-| log_index        | [uint32](#)                                                                                                                                                                                        |       | The log index for the event          |
-| fid              | [uint64](#)                                                                                                                                                                                        |       | The fid the event is associated with |
+| Field            | Type                                                                                                                                                                                                                                                  | Label | Description                          |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- | ------------------------------------ |
+| type             | [OnChainEventType](#OnChainEventType)                                                                                                                                                                                                                 |       | The type of onchain event            |
+| chain_id         | [uint32](#)                                                                                                                                                                                                                                           |       | The chain id for the event           |
+| block_number     | [uint32](#)                                                                                                                                                                                                                                           |       | The block number for the event       |
+| block_hash       | [bytes](#)                                                                                                                                                                                                                                            |       | The block hash for the event         |
+| block_timestamp  | [uint64](#)                                                                                                                                                                                                                                           |       | The block timestamp for the event    |
+| transaction_hash | [bytes](#)                                                                                                                                                                                                                                            |       | The transaction hash for the event   |
+| log_index        | [uint32](#)                                                                                                                                                                                                                                           |       | The log index for the event          |
+| fid              | [uint64](#)                                                                                                                                                                                                                                           |       | The fid the event is associated with |
 | body             | [SignerEventBody](#signereventbody), <br /> [SignerMigratedEventBody](#signermigratedeventbody), <br /> [IdRegisterEventBody](#idregistereventbody), <br />[StorageRentEventBody](#storagerenteventbody), <br />[TierPurchaseBody](#tierpurchasebody) | oneOf |                                      |
-| tx_index         | [uint32](#)                                                                                                                                                                                        |       | The tx index for the event           |
+| tx_index         | [uint32](#)                                                                                                                                                                                                                                           |       | The tx index for the event           |
 
 <a name="-OnChainEventType"></a>
 
@@ -139,20 +139,20 @@ This design allows clients to determine which events occurred in the same block 
 
 ## SignerMigratedEventBody
 
-| Field      | Type        | Label | Description                                             |
-| ---------- | ----------- | ----- | ------------------------------------------------------- |
+| Field      | Type        | Label | Description                                              |
+| ---------- | ----------- | ----- | -------------------------------------------------------- |
 | migratedAt | [uint32](#) |       | The timestamp at which nodes were migrated to OP mainnet |
 
 <a name="-IdRegisterEventBody"></a>
 
 ## IdRegisterEventBody
 
-| Field            | Type                                        | Label | Description                                      |
-| ---------------- | ------------------------------------------- | ----- | ------------------------------------------------ |
+| Field            | Type                                        | Label | Description                                       |
+| ---------------- | ------------------------------------------- | ----- | ------------------------------------------------- |
 | to               | [bytes](#)                                  |       | The address the fid was registered/transferred to |
-| event_type       | [IdRegisterEventType](#IdRegisterEventType) |       | The type of the id register event                |
-| from             | [bytes](#)                                  |       | The address the transfer originated from         |
-| recovery_address | [bytes](#)                                  |       | The recovery address for the fid                 |
+| event_type       | [IdRegisterEventType](#IdRegisterEventType) |       | The type of the id register event                 |
+| from             | [bytes](#)                                  |       | The address the transfer originated from          |
+| recovery_address | [bytes](#)                                  |       | The recovery address for the fid                  |
 
 <a name="-IdRegisterEventType"></a>
 
@@ -179,28 +179,28 @@ This design allows clients to determine which events occurred in the same block 
 
 ## TierPurchaseBody
 
-| Field     | Type        | Label | Description                       |
-| --------- | ----------- | ----- | --------------------------------- |
-| purchaser | [bytes](#)  |       | The address of the purchaser      |
-| tier      | [uint32](#) |       | The tier number purchased         |
-| units     | [uint32](#) |       | The number of units purchased     |
+| Field     | Type        | Label | Description                         |
+| --------- | ----------- | ----- | ----------------------------------- |
+| purchaser | [bytes](#)  |       | The address of the purchaser        |
+| tier      | [uint32](#) |       | The tier number purchased           |
+| units     | [uint32](#) |       | The number of units purchased       |
 | expiry    | [uint32](#) |       | The timestamp at which tier expires |
 
 <a name="-MergeFailureBody"></a>
 
 ## MergeFailureBody
 
-| Field   | Type                | Label | Description                         |
-| ------- | ------------------- | ----- | ----------------------------------- |
-| message | [Message](#Message) |       | The message that failed to merge    |
-| error   | [string](#string)   |       | The reason for the merge failure    |
+| Field   | Type                | Label | Description                      |
+| ------- | ------------------- | ----- | -------------------------------- |
+| message | [Message](#Message) |       | The message that failed to merge |
+| error   | [string](#string)   |       | The reason for the merge failure |
 
 <a name="-BlockConfirmedBody"></a>
 
 ## BlockConfirmedBody
 
-| Field        | Type              | Label | Description                                  |
-| ------------ | ----------------- | ----- | -------------------------------------------- |
-| block_number | [uint64](#uint64) |       | The block number that has been confirmed     |
-| block_hash   | [bytes](#bytes)   |       | The hash of the confirmed block              |
-| shard_index  | [uint32](#uint32) |       | The shard index of the confirmed block       |
+| Field        | Type              | Label | Description                              |
+| ------------ | ----------------- | ----- | ---------------------------------------- |
+| block_number | [uint64](#uint64) |       | The block number that has been confirmed |
+| block_hash   | [bytes](#bytes)   |       | The hash of the confirmed block          |
+| shard_index  | [uint32](#uint32) |       | The shard index of the confirmed block   |
