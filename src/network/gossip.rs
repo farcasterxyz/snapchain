@@ -51,6 +51,7 @@ pub struct Config {
     pub address: String,
     pub announce_address: String,
     pub bootstrap_peers: String,
+    pub trusted_peers: String,
     pub contact_info_interval: Duration,
     pub bootstrap_reconnect_interval: Duration,
     pub enable_autodiscovery: bool,
@@ -66,6 +67,7 @@ impl Default for Config {
             address: address.clone(),
             announce_address: "".to_string(),
             bootstrap_peers: "".to_string(),
+            trusted_peers: "".to_string(),
             contact_info_interval: Duration::from_secs(300),
             bootstrap_reconnect_interval: Duration::from_secs(30),
             enable_autodiscovery: false,
@@ -118,6 +120,13 @@ impl Config {
             .map(|s| s.trim().to_string())
             .collect()
     }
+
+    pub fn trusted_addrs(&self) -> Vec<String> {
+        self.trusted_peers
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect()
+    }
 }
 
 pub enum GossipEvent<Ctx: SnapchainContext> {
@@ -162,7 +171,9 @@ pub struct SnapchainGossip {
     read_node: bool,
     enable_autodiscovery: bool,
     bootstrap_addrs: HashSet<String>,
+    trusted_addrs: HashSet<String>,
     connected_bootstrap_addrs: HashSet<String>,
+    connected_trusted_addrs: HashSet<String>,
     announce_address: String,
     fc_network: FarcasterNetwork,
     contact_info_interval: Duration,
@@ -253,6 +264,10 @@ impl SnapchainGossip {
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
             .build();
 
+        for addr in config.trusted_addrs() {
+            let _ = Self::dial(&mut swarm, &addr);
+        }
+
         for addr in config.bootstrap_addrs() {
             let _ = Self::dial(&mut swarm, &addr);
         }
@@ -306,12 +321,14 @@ impl SnapchainGossip {
             sync_channels: HashMap::new(),
             read_node,
             bootstrap_addrs: config.bootstrap_addrs().into_iter().collect(),
+            trusted_addrs: config.trusted_addrs().into_iter().collect(),
             announce_address,
             fc_network,
             contact_info_interval: config.contact_info_interval,
             bootstrap_reconnect_interval: config.bootstrap_reconnect_interval,
             statsd_client,
             connected_bootstrap_addrs: HashSet::new(),
+            connected_trusted_addrs: HashSet::new(),
             enable_autodiscovery: config.enable_autodiscovery,
             peers: BTreeMap::new(),
         })
@@ -364,7 +381,19 @@ impl SnapchainGossip {
         Ok(())
     }
 
-    pub async fn check_and_reconnect_to_bootstrap_peers(&mut self) {
+    pub async fn check_and_reconnect_to_important_peers(&mut self) {
+        // All nodes should stay connected to all trusted peers
+        for addr in &self.trusted_addrs {
+            if !self.connected_trusted_addrs.contains(addr) {
+                warn!("Attempting to reconnect to trusted peer: {}", addr);
+                if let Err(err) = Self::dial(&mut self.swarm, &addr) {
+                    warn!("Failed to re-dial trusted peer: {}. Error: {}", addr, err);
+                } else {
+                    info!("Re-dialed trusted peer: {}", addr);
+                };
+            }
+        }
+
         let connected_peers_count = self.swarm.connected_peers().count();
         // Validators should stay connected to all bootstrap peers. Read nodes should only try to connect if they're connected to too few peers
         if !self.read_node || (self.read_node && connected_peers_count < self.bootstrap_addrs.len())
@@ -372,7 +401,11 @@ impl SnapchainGossip {
             for addr in &self.bootstrap_addrs {
                 if !self.connected_bootstrap_addrs.contains(addr) {
                     warn!("Attempting to reconnect to bootstrap peer: {}", addr);
-                    let _ = Self::dial(&mut self.swarm, &addr);
+                    if let Err(err) = Self::dial(&mut self.swarm, &addr) {
+                        warn!("Failed to re-dial bootstrap peer: {}. Error: {}", addr, err);
+                    } else {
+                        info!("Re-dialed bootstrap peer: {}", addr);
+                    }
                 }
             }
         }
@@ -409,7 +442,7 @@ impl SnapchainGossip {
         loop {
             tokio::select! {
                 _ = reconnect_timer.tick() => {
-                    self.check_and_reconnect_to_bootstrap_peers().await;
+                    self.check_and_reconnect_to_important_peers().await;
                     self.statsd_client.gauge("gossip.connected_peers", self.swarm.connected_peers().count() as u64);
                 },
                 _ = publish_contact_info_timer.tick() => {
@@ -432,7 +465,9 @@ impl SnapchainGossip {
                                     if self.bootstrap_addrs.contains(&address.to_string()) {
                                         self.connected_bootstrap_addrs.insert(address.to_string());
                                     }
-
+                                    if self.trusted_addrs.contains(&address.to_string()) {
+                                        self.connected_trusted_addrs.insert(address.to_string());
+                                    }
                                 },
                                 libp2p::core::ConnectedPoint::Listener { .. } => {},
                             };
@@ -446,7 +481,10 @@ impl SnapchainGossip {
                             }
                             match endpoint {
                                 libp2p::core::ConnectedPoint::Dialer { address, ..} => {
-                                    self.connected_bootstrap_addrs.remove(&address.to_string());
+                                    let address_str = address.to_string();
+
+                                    self.connected_bootstrap_addrs.remove(&address_str);
+                                    self.connected_trusted_addrs.remove(&address_str);
                                 },
                                 libp2p::core::ConnectedPoint::Listener { .. } => {},
                             };
