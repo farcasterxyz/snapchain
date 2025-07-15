@@ -90,7 +90,7 @@ mod tests {
         let gossip_msg = gossip_rx.recv().await.unwrap();
         match gossip_msg {
             GossipEvent::BroadcastStatus(status) => {
-                assert_eq!(status.height, expected_height);
+                assert_eq!(status.tip_height, expected_height);
             }
             _ => panic!("Unexpected gossip message"),
         }
@@ -272,19 +272,19 @@ mod tests {
             .unwrap();
 
         actors
-            .cast_network_event(MalachiteNetworkEvent::Message(
+            .cast_network_event(MalachiteNetworkEvent::ConsensusMessage(
                 Channel::Sync,
                 peer,
                 Bytes::from(
                     (StatusMessage {
                         peer_id: peer.to_libp2p().to_bytes(),
-                        height: Some(Height {
+                        tip_height: Some(Height {
                             shard_index: read_node_engine.shard_id(),
                             block_number: 10,
                         }),
                         min_height: Some(Height {
                             shard_index: read_node_engine.shard_id(),
-                            block_number: 1,
+                            block_number: 0,
                         }),
                     })
                     .encode_to_vec(),
@@ -305,7 +305,6 @@ mod tests {
                             read_node_engine.get_confirmed_height().increment()
                         );
                     }
-                    _ => panic!("Expected value request"),
                 }
             }
             _ => {

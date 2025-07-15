@@ -131,14 +131,14 @@ impl ReadValidator {
             .map(|validator| validator.public_key.to_bytes());
 
         if !ThresholdParams::default().quorum.is_met(
-            certificate.aggregated_signature.signatures.len() as u64,
+            certificate.commit_signatures.len() as u64,
             expected_pubkeys.len() as u64,
         ) {
             error!(%certificate.height, last_height = %self.last_height, "Block did not have quorum");
             return false;
         }
 
-        for signature in certificate.aggregated_signature.signatures {
+        for signature in certificate.commit_signatures {
             let address_bytes = &signature.address.0;
             if !expected_pubkeys.contains(address_bytes) {
                 error!(%certificate.height, last_height = %self.last_height, "Block contained signatures from unexpected signers");
