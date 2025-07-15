@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+import "blocks.proto";
+
+service ReplicationService {
+  rpc GetReplicationTransactions(GetReplicationTransactionsRequest) returns (GetReplicationTransactionsResponse);
+}
+
+message GetReplicationTransactionsRequest {
+  uint32 shard_id = 1;
+  uint64 block_number = 2;
+  bytes page_token = 3;
+}
+
+message GetReplicationTransactionsResponse {
+  repeated Transaction system_transactions = 1;
+  repeated Transaction user_transactions = 2;
+  bytes next_page_token = 3;
+}

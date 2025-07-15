@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "src/proto/node_state.proto",
             "src/proto/gossip.proto",
             "src/proto/request_response.proto",
+            "src/proto/replication.proto",
         ],
         &["src/proto"],
     )?;

@@ -143,7 +143,7 @@ impl RocksDB {
         let _wl = self.inner.write().unwrap();
 
         let mut opts = Options::default();
-        opts.create_if_missing(false); // Creates a database if it does not exist
+        opts.create_if_missing(false);
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
 
         match rocksdb::DB::open_for_read_only(&opts, self.path.clone(), true) {
