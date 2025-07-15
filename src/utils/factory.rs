@@ -51,7 +51,7 @@ pub mod time {
 
 pub mod events_factory {
     use super::*;
-    use crate::proto::{self, TierPurchaseBody, TierType};
+    use crate::proto::{self, StorageUnitType, TierPurchaseBody, TierType};
 
     pub fn create_onchain_event(fid: u64) -> OnChainEvent {
         OnChainEvent {
@@ -71,33 +71,30 @@ pub mod events_factory {
 
     pub fn create_rent_event(
         fid: u64,
-        legacy_units: Option<u32>,
-        units: Option<u32>,
+        rent_units: u32,
+        unit_type: StorageUnitType,
         expired: bool,
     ) -> OnChainEvent {
-        if legacy_units.is_some() && units.is_some() {
-            panic!("Cannot have both legacy_units and units");
-        }
         let one_year_in_seconds = 365 * 24 * 60 * 60;
-        let rent_units;
         let mut timestamp = time::current_timestamp_with_offset(-10);
-        if legacy_units.is_some() {
-            rent_units = legacy_units.unwrap();
-            if expired {
-                timestamp = timestamp - one_year_in_seconds * 3;
-            } else {
-                timestamp = timestamp - one_year_in_seconds;
+        match unit_type {
+            StorageUnitType::UnitTypeLegacy => {
+                if expired {
+                    timestamp = 1724889599 - (3 * one_year_in_seconds);
+                } else {
+                    timestamp = 1724889599;
+                }
             }
-        } else if units.is_some() {
-            rent_units = units.unwrap();
-            if expired {
-                panic!("New units cannot be expired until 1 year from legacy cutoff");
+            StorageUnitType::UnitType2024 => {
+                timestamp = 1752685199;
+                if expired {
+                    panic!("2024 storage units can't be expired");
+                }
             }
-        } else {
-            // random number between 1 and 10
-            rent_units = rand::random::<u32>() % 10 + 1;
-            if expired {
-                panic!("New units cannot be expired until 1 year from legacy cutoff");
+            StorageUnitType::UnitType2025 => {
+                if expired {
+                    panic!("2025 storage units can't be expired");
+                }
             }
         }
         create_rent_event_with_timestamp(fid, rent_units, timestamp)

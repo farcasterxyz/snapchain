@@ -26,8 +26,12 @@ mod tests {
     fn test_storage_slot_from_rent_event() {
         let one_year_in_seconds = 365 * 24 * 60 * 60;
 
-        let expired_legacy_rent_event =
-            factory::events_factory::create_rent_event(10, Some(1), None, true);
+        let expired_legacy_rent_event = factory::events_factory::create_rent_event(
+            10,
+            1,
+            StorageUnitType::UnitTypeLegacy,
+            true,
+        );
         let slot =
             StorageSlot::from_event(&expired_legacy_rent_event, FarcasterNetwork::Mainnet).unwrap();
         assert_eq!(slot.is_active(), false);
@@ -39,8 +43,12 @@ mod tests {
             expired_legacy_rent_event.block_timestamp as u32 + one_year_in_seconds * 3
         );
 
-        let valid_legacy_rent_event =
-            factory::events_factory::create_rent_event(10, Some(5), None, false);
+        let valid_legacy_rent_event = factory::events_factory::create_rent_event(
+            10,
+            5,
+            StorageUnitType::UnitTypeLegacy,
+            false,
+        );
         let slot =
             StorageSlot::from_event(&valid_legacy_rent_event, FarcasterNetwork::Mainnet).unwrap();
         assert_eq!(slot.is_active(), true);
@@ -53,7 +61,7 @@ mod tests {
         );
 
         let valid_2024_rent_event =
-            factory::events_factory::create_rent_event(10, None, Some(9), false);
+            factory::events_factory::create_rent_event(10, 9, StorageUnitType::UnitType2024, false);
         let slot =
             StorageSlot::from_event(&valid_2024_rent_event, FarcasterNetwork::Mainnet).unwrap();
         assert_eq!(slot.is_active(), true);
@@ -150,20 +158,40 @@ mod tests {
     fn test_storage_slot_with_mix_of_units() {
         let (store, _dir) = store();
 
-        let expired_legacy_rent_event =
-            factory::events_factory::create_rent_event(10, Some(1), None, true);
+        let expired_legacy_rent_event = factory::events_factory::create_rent_event(
+            10,
+            1,
+            StorageUnitType::UnitTypeLegacy,
+            true,
+        );
 
-        let valid_legacy_rent_event =
-            factory::events_factory::create_rent_event(10, Some(5), None, false);
-        let another_valid_legacy_rent_event =
-            factory::events_factory::create_rent_event(10, Some(7), None, false);
+        let valid_legacy_rent_event = factory::events_factory::create_rent_event(
+            10,
+            5,
+            StorageUnitType::UnitTypeLegacy,
+            false,
+        );
+        let another_valid_legacy_rent_event = factory::events_factory::create_rent_event(
+            10,
+            7,
+            StorageUnitType::UnitTypeLegacy,
+            false,
+        );
         let valid_2024_rent_event =
-            factory::events_factory::create_rent_event(10, None, Some(9), false);
-        let another_valid_2024_rent_event =
-            factory::events_factory::create_rent_event(10, None, Some(11), false);
+            factory::events_factory::create_rent_event(10, 9, StorageUnitType::UnitType2024, false);
+        let another_valid_2024_rent_event = factory::events_factory::create_rent_event(
+            10,
+            11,
+            StorageUnitType::UnitType2024,
+            false,
+        );
 
-        let valid_rent_event_different_fid =
-            factory::events_factory::create_rent_event(11, None, Some(13), false);
+        let valid_rent_event_different_fid = factory::events_factory::create_rent_event(
+            11,
+            13,
+            StorageUnitType::UnitType2024,
+            false,
+        );
 
         // Get timestamp for a date in Aug 2025
         let sep_1_2025 = 1756710000;

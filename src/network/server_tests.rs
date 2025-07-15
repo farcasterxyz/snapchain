@@ -18,7 +18,7 @@ mod tests {
     use crate::proto::hub_service_server::HubService;
     use crate::proto::{
         self, EventRequest, EventsRequest, HubEvent, HubEventType, OnChainEventType, ShardChunk,
-        UserDataType, UserNameProof, UserNameType, UsernameProofRequest,
+        StorageUnitType, UserDataType, UserNameProof, UserNameType, UsernameProofRequest,
         VerificationAddAddressBody,
     };
     use crate::proto::{FidRequest, SubscribeRequest};
@@ -1225,15 +1225,20 @@ mod tests {
             &mut engine1,
         )
         .await;
-        // register_user will give the user a single unit of storage, let add one more legacy unit and a 2024 unit for a total of 1 legacy and 2 2024 units
+        // register_user will give the user a single unit of 2025 storage, let add one more legacy unit and a 2024 unit for 1 of each.
         test_helper::commit_event(
             &mut engine1,
-            &events_factory::create_rent_event(SHARD1_FID, Some(1), None, false),
+            &events_factory::create_rent_event(
+                SHARD1_FID,
+                1,
+                StorageUnitType::UnitTypeLegacy,
+                false,
+            ),
         )
         .await;
         test_helper::commit_event(
             &mut engine1,
-            &events_factory::create_rent_event(SHARD1_FID, None, Some(1), false),
+            &events_factory::create_rent_event(SHARD1_FID, 1, StorageUnitType::UnitType2024, false),
         )
         .await;
         let cast_add = &messages_factory::casts::create_cast_add(SHARD1_FID, "test", None, None);
@@ -1274,12 +1279,12 @@ mod tests {
             response.get_ref().unit_details[1].unit_type,
             proto::StorageUnitType::UnitType2024 as i32
         );
-        assert_eq!(response.get_ref().unit_details[1].unit_size, 2);
+        assert_eq!(response.get_ref().unit_details[1].unit_size, 1);
         assert_eq!(
             response.get_ref().unit_details[2].unit_type,
             proto::StorageUnitType::UnitType2025 as i32
         );
-        assert_eq!(response.get_ref().unit_details[2].unit_size, 0);
+        assert_eq!(response.get_ref().unit_details[2].unit_size, 1);
 
         let casts_limit = response
             .get_ref()

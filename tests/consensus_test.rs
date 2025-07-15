@@ -15,7 +15,7 @@ use snapchain::network::server::MyHubService;
 use snapchain::node::snapchain_node::SnapchainNode;
 use snapchain::node::snapchain_read_node::SnapchainReadNode;
 use snapchain::proto::hub_service_server::HubServiceServer;
-use snapchain::proto::{self, Height};
+use snapchain::proto::{self, Height, StorageUnitType};
 use snapchain::proto::{Block, FarcasterNetwork, IdRegisterEventType, SignerEventType};
 use snapchain::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use snapchain::storage::store::account::{CastStore, OnchainEventStore, UserDataStore};
@@ -590,7 +590,12 @@ impl TestNetwork {
         let address = factory::address::generate_random_address();
 
         let on_chain_events = vec![
-            factory::events_factory::create_rent_event(fid, None, None, false),
+            factory::events_factory::create_rent_event(
+                fid,
+                100,
+                StorageUnitType::UnitType2025,
+                false,
+            ),
             factory::events_factory::create_signer_event(
                 fid,
                 signer.clone(),

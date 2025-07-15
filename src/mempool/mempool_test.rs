@@ -126,7 +126,12 @@ mod tests {
     #[tokio::test]
     async fn test_duplicate_onchain_event_is_valid() {
         let (mut engine, _, mut mempool, _, _, _, _) = setup(None, false).await;
-        let onchain_event = events_factory::create_rent_event(1234, Some(10), None, false);
+        let onchain_event = events_factory::create_rent_event(
+            1234,
+            10,
+            proto::StorageUnitType::UnitType2025,
+            false,
+        );
         let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
             on_chain_event: Some(onchain_event.clone()),
             fname_transfer: None,
@@ -251,7 +256,8 @@ mod tests {
 
         let fid = 1234;
         // Cast has lower timestamp and arrives first, but onchain event is still processed first
-        let onchain_event = events_factory::create_rent_event(fid, None, Some(1), false);
+        let onchain_event =
+            events_factory::create_rent_event(fid, 1, proto::StorageUnitType::UnitType2025, false);
 
         let cast = create_cast_add(
             fid,
