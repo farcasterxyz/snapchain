@@ -1,11 +1,16 @@
 #[cfg(test)]
 mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
     use crate::{
         proto,
         storage::{
+            db::{RocksDB, RocksdbError},
             store::{
                 account::UserDataStore,
                 engine::{MempoolMessage, ShardEngine},
+                replication::{replication_stores::ReplicationStores, replicator::Replicator},
+                stores::Stores,
                 test_helper::{self, EngineOptions},
             },
             trie::merkle_trie::TrieKey,
@@ -13,9 +18,26 @@ mod tests {
         utils::factory::{self, messages_factory, username_factory},
     };
 
-    fn new_engine_with_fname_signer() -> (alloy_signer_local::PrivateKeySigner, ShardEngine) {
+    fn opendb(path: &str) -> Result<Arc<RocksDB>, RocksdbError> {
+        let milliseconds_timestamp: u128 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let path = format!("{}/{}", path, milliseconds_timestamp);
+        let db = RocksDB::new(&path);
+        db.open()?;
+        Ok(Arc::new(db))
+    }
+
+    fn new_engine_with_fname_signer(
+        tmp: &tempfile::TempDir,
+    ) -> (alloy_signer_local::PrivateKeySigner, ShardEngine) {
         let signer = alloy_signer_local::PrivateKeySigner::random();
+
+        let db = opendb(tmp.path().to_str().unwrap()).expect("Failed to open RocksDB");
+
         let (engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            db: Some(db),
             fname_signer_address: Some(signer.address()),
             ..EngineOptions::default()
         });
@@ -208,12 +230,52 @@ mod tests {
         link
     }
 
+    fn replicator_and_stores(
+        shard_stores: HashMap<u32, Stores>,
+    ) -> (Replicator, Arc<ReplicationStores>) {
+        let statsd_client = crate::utils::statsd_wrapper::StatsdClientWrapper::new(
+            cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
+            true,
+        );
+        let stores = Arc::new(ReplicationStores::new(
+            shard_stores.clone(),
+            16,
+            statsd_client.clone(),
+        ));
+        let replicator = Replicator::new(stores.clone());
+        (replicator, stores)
+    }
+
     fn replicate_fids(
         source_engine: &ShardEngine,
         dest_engine: &mut ShardEngine,
         fids_to_sync: &Vec<u64>,
     ) {
-        let (sys, user) = source_engine.transactions_for_fids(fids_to_sync);
+        let mut stores = HashMap::new();
+        stores.insert(source_engine.shard_id(), source_engine.get_stores().clone());
+        let (replicator, replication_stores) = replicator_and_stores(stores);
+
+        // Capture a read-only snaphot
+        let height = source_engine.get_confirmed_height().block_number;
+        let snap_result = replication_stores.open_snapshot(height, source_engine.shard_id());
+        assert!(
+            snap_result.is_ok(),
+            "Failed to open snapshot: {}",
+            snap_result.unwrap_err()
+        );
+
+        let min = *fids_to_sync.iter().min().unwrap();
+        let max = *fids_to_sync.iter().max().unwrap();
+
+        let (sys, user) =
+            match replicator.transactions_for_fid_range(height, source_engine.shard_id(), min, max)
+            {
+                Ok(transactions) => transactions,
+                Err(e) => {
+                    panic!("Error fetching transactions for fid range: {}", e);
+                }
+            };
+
         dest_engine
             .replay_fid_transactions(sys, user)
             .expect("Failed to replay transactions for fid");
@@ -235,8 +297,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_replication() {
-        let (signer, mut engine) = new_engine_with_fname_signer(); // source engine
-        let (_, mut new_engine) = new_engine_with_fname_signer(); // engine to replicate to
+        // open tmp dir for database
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+
+        let (signer, mut engine) = new_engine_with_fname_signer(&tmp_dir); // source engine
+        let (_, mut new_engine) = new_engine_with_fname_signer(&tmp_dir); // engine to replicate to
 
         // Note: we're using FID3_FOR_TEST here because the address verification message contains
         // that FID.
