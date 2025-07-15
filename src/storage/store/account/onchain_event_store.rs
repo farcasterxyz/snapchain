@@ -17,7 +17,7 @@ use thiserror::Error;
 
 static PAGE_SIZE: usize = 1000;
 
-const UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP: u32 = 1724889600; // 2024-08-29 Midnight UTC
+pub const UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP: u32 = 1724889600; // 2024-08-29 Midnight UTC
 const UNIT_TYPE_2024_CUTOFF_TIMESTAMP: u32 = 1752685200; // 2025-07-16 5PM UTC (Engine version 6)
 const UNIT_TYPE_2024_CUTOFF_TIMESTAMP_TESTNET: u32 = 1752426000; // 2025-07-13 5PM UTC (a few days earlier than mainnet)
 const ONE_YEAR_IN_SECONDS: u32 = 365 * 24 * 60 * 60;
@@ -382,6 +382,14 @@ impl StorageSlot {
         }
     }
 
+    pub fn unit_type_2024_cutoff(network: FarcasterNetwork) -> u32 {
+        if network == FarcasterNetwork::Mainnet {
+            UNIT_TYPE_2024_CUTOFF_TIMESTAMP
+        } else {
+            UNIT_TYPE_2024_CUTOFF_TIMESTAMP_TESTNET
+        }
+    }
+
     pub fn from_event(
         onchain_event: &OnChainEvent,
         network: FarcasterNetwork,
@@ -391,11 +399,7 @@ impl StorageSlot {
                 on_chain_event::Body::StorageRentEventBody(storage_rent_event) => {
                     let slot;
 
-                    let unit_type_2024_cutoff_timestamp = if network == FarcasterNetwork::Mainnet {
-                        UNIT_TYPE_2024_CUTOFF_TIMESTAMP
-                    } else {
-                        UNIT_TYPE_2024_CUTOFF_TIMESTAMP_TESTNET
-                    };
+                    let unit_type_2024_cutoff_timestamp = Self::unit_type_2024_cutoff(network);
 
                     // NOTE(Jul 2025): We have 3 types of storages units based on when they were rented.
                     // As part of the storage redenomination FIP, we're also extended the expiry of all

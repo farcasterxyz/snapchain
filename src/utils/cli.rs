@@ -1,6 +1,6 @@
 use crate::proto::admin_service_client::AdminServiceClient;
 use crate::proto::hub_service_client::HubServiceClient;
-use crate::proto::{self, Block};
+use crate::proto::{self, Block, FarcasterNetwork};
 use crate::proto::{OnChainEvent, StorageUnitType};
 use crate::utils::factory::messages_factory;
 use base64::Engine;
@@ -55,7 +55,13 @@ pub async fn send_on_chain_event(
 }
 
 pub fn compose_rent_event(fid: u64) -> OnChainEvent {
-    factory::events_factory::create_rent_event(fid, 10, StorageUnitType::UnitType2025, false)
+    factory::events_factory::create_rent_event(
+        fid,
+        10,
+        StorageUnitType::UnitType2025,
+        false,
+        FarcasterNetwork::Devnet,
+    )
 }
 
 pub fn compose_message(

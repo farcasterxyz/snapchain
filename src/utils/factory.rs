@@ -51,7 +51,10 @@ pub mod time {
 
 pub mod events_factory {
     use super::*;
-    use crate::proto::{self, StorageUnitType, TierPurchaseBody, TierType};
+    use crate::{
+        proto::{self, StorageUnitType, TierPurchaseBody, TierType},
+        storage::store::account::{StorageSlot, UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP},
+    };
 
     pub fn create_onchain_event(fid: u64) -> OnChainEvent {
         OnChainEvent {
@@ -74,24 +77,26 @@ pub mod events_factory {
         rent_units: u32,
         unit_type: StorageUnitType,
         expired: bool,
+        network: FarcasterNetwork,
     ) -> OnChainEvent {
         let one_year_in_seconds = 365 * 24 * 60 * 60;
-        let mut timestamp = time::current_timestamp_with_offset(-10);
+        let timestamp;
         match unit_type {
             StorageUnitType::UnitTypeLegacy => {
                 if expired {
-                    timestamp = 1724889599 - (3 * one_year_in_seconds);
+                    timestamp = UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP - (3 * one_year_in_seconds);
                 } else {
-                    timestamp = 1724889599;
+                    timestamp = UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP - 1;
                 }
             }
             StorageUnitType::UnitType2024 => {
-                timestamp = 1752685199;
+                timestamp = StorageSlot::unit_type_2024_cutoff(network) - 1;
                 if expired {
                     panic!("2024 storage units can't be expired");
                 }
             }
             StorageUnitType::UnitType2025 => {
+                timestamp = StorageSlot::unit_type_2024_cutoff(network) + 1;
                 if expired {
                     panic!("2025 storage units can't be expired");
                 }

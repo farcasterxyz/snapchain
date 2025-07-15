@@ -17,9 +17,9 @@ mod tests {
     use crate::network::server::MyHubService;
     use crate::proto::hub_service_server::HubService;
     use crate::proto::{
-        self, EventRequest, EventsRequest, HubEvent, HubEventType, OnChainEventType, ShardChunk,
-        StorageUnitType, UserDataType, UserNameProof, UserNameType, UsernameProofRequest,
-        VerificationAddAddressBody,
+        self, EventRequest, EventsRequest, FarcasterNetwork, HubEvent, HubEventType,
+        OnChainEventType, ShardChunk, StorageUnitType, UserDataType, UserNameProof, UserNameType,
+        UsernameProofRequest, VerificationAddAddressBody,
     };
     use crate::proto::{FidRequest, SubscribeRequest};
     use crate::storage::db::{self, RocksDB, RocksDbTransactionBatch};
@@ -1233,12 +1233,19 @@ mod tests {
                 1,
                 StorageUnitType::UnitTypeLegacy,
                 false,
+                FarcasterNetwork::Devnet,
             ),
         )
         .await;
         test_helper::commit_event(
             &mut engine1,
-            &events_factory::create_rent_event(SHARD1_FID, 1, StorageUnitType::UnitType2024, false),
+            &events_factory::create_rent_event(
+                SHARD1_FID,
+                1,
+                StorageUnitType::UnitType2024,
+                false,
+                FarcasterNetwork::Devnet,
+            ),
         )
         .await;
         let cast_add = &messages_factory::casts::create_cast_add(SHARD1_FID, "test", None, None);

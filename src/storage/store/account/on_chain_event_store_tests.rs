@@ -31,6 +31,7 @@ mod tests {
             1,
             StorageUnitType::UnitTypeLegacy,
             true,
+            FarcasterNetwork::Mainnet,
         );
         let slot =
             StorageSlot::from_event(&expired_legacy_rent_event, FarcasterNetwork::Mainnet).unwrap();
@@ -48,6 +49,7 @@ mod tests {
             5,
             StorageUnitType::UnitTypeLegacy,
             false,
+            FarcasterNetwork::Mainnet,
         );
         let slot =
             StorageSlot::from_event(&valid_legacy_rent_event, FarcasterNetwork::Mainnet).unwrap();
@@ -60,8 +62,13 @@ mod tests {
             valid_legacy_rent_event.block_timestamp as u32 + one_year_in_seconds * 3
         );
 
-        let valid_2024_rent_event =
-            factory::events_factory::create_rent_event(10, 9, StorageUnitType::UnitType2024, false);
+        let valid_2024_rent_event = factory::events_factory::create_rent_event(
+            10,
+            9,
+            StorageUnitType::UnitType2024,
+            false,
+            FarcasterNetwork::Mainnet,
+        );
         let slot =
             StorageSlot::from_event(&valid_2024_rent_event, FarcasterNetwork::Mainnet).unwrap();
         assert_eq!(slot.is_active(), true);
@@ -163,6 +170,7 @@ mod tests {
             1,
             StorageUnitType::UnitTypeLegacy,
             true,
+            FarcasterNetwork::Mainnet,
         );
 
         let valid_legacy_rent_event = factory::events_factory::create_rent_event(
@@ -170,20 +178,28 @@ mod tests {
             5,
             StorageUnitType::UnitTypeLegacy,
             false,
+            FarcasterNetwork::Mainnet,
         );
         let another_valid_legacy_rent_event = factory::events_factory::create_rent_event(
             10,
             7,
             StorageUnitType::UnitTypeLegacy,
             false,
+            FarcasterNetwork::Mainnet,
         );
-        let valid_2024_rent_event =
-            factory::events_factory::create_rent_event(10, 9, StorageUnitType::UnitType2024, false);
+        let valid_2024_rent_event = factory::events_factory::create_rent_event(
+            10,
+            9,
+            StorageUnitType::UnitType2024,
+            false,
+            FarcasterNetwork::Mainnet,
+        );
         let another_valid_2024_rent_event = factory::events_factory::create_rent_event(
             10,
             11,
             StorageUnitType::UnitType2024,
             false,
+            FarcasterNetwork::Mainnet,
         );
 
         let valid_rent_event_different_fid = factory::events_factory::create_rent_event(
@@ -191,6 +207,7 @@ mod tests {
             13,
             StorageUnitType::UnitType2024,
             false,
+            FarcasterNetwork::Mainnet,
         );
 
         // Get timestamp for a date in Aug 2025

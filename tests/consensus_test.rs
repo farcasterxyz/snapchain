@@ -595,6 +595,7 @@ impl TestNetwork {
                 100,
                 StorageUnitType::UnitType2025,
                 false,
+                FarcasterNetwork::Testnet,
             ),
             factory::events_factory::create_signer_event(
                 fid,

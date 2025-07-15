@@ -131,6 +131,7 @@ mod tests {
             10,
             proto::StorageUnitType::UnitType2025,
             false,
+            proto::FarcasterNetwork::Devnet,
         );
         let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
             on_chain_event: Some(onchain_event.clone()),
@@ -256,8 +257,13 @@ mod tests {
 
         let fid = 1234;
         // Cast has lower timestamp and arrives first, but onchain event is still processed first
-        let onchain_event =
-            events_factory::create_rent_event(fid, 1, proto::StorageUnitType::UnitType2025, false);
+        let onchain_event = events_factory::create_rent_event(
+            fid,
+            1,
+            proto::StorageUnitType::UnitType2025,
+            false,
+            proto::FarcasterNetwork::Devnet,
+        );
 
         let cast = create_cast_add(
             fid,

@@ -380,7 +380,13 @@ pub fn validate_and_commit_state_change(
 }
 
 pub fn default_storage_event(fid: u64) -> OnChainEvent {
-    events_factory::create_rent_event(fid, 1, proto::StorageUnitType::UnitType2025, false)
+    events_factory::create_rent_event(
+        fid,
+        1,
+        proto::StorageUnitType::UnitType2025,
+        false,
+        proto::FarcasterNetwork::Devnet,
+    )
 }
 
 pub async fn register_user(
