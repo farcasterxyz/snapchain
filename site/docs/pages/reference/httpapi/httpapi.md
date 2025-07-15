@@ -37,31 +37,6 @@ try {
 }
 ```
 
-## Available Endpoints
-
-| Endpoint                    | Description                                           | Parameters                                               |
-|-----------------------------|-------------------------------------------------------|----------------------------------------------------------|
-| `/v1/info`                  | Get node information                                  | None                                                     |
-| `/v1/castById`              | Get a cast by ID                                      | `fid`, `hash`                                            |
-| `/v1/castsByFid`            | Get all casts by FID                                  | `fid`, `pageSize`, `pageToken`, `reverse`, `startTimestamp`, `stopTimestamp` |
-| `/v1/castsByMention`        | Get casts that mention a specific FID                 | `fid`, `pageSize`, `pageToken`, `reverse`                |
-| `/v1/castsByParent`         | Get cast replies to a parent cast or URL              | `fid`, `hash` OR `url`, `pageSize`, `pageToken`, `reverse` |
-| `/v1/reactionById`          | Get a specific reaction                               | `fid`, `reactionType`, `targetCastId` OR `targetUrl`    |
-| `/v1/reactionsByFid`        | Get reactions by FID                                  | `fid`, `reactionType`, `pageSize`, `pageToken`, `reverse` |
-| `/v1/reactionsByCast`       | Get reactions to a cast (deprecated)                  | `targetCastId` OR `targetUrl`, `reactionType`, `pageSize`, `pageToken`, `reverse` |
-| `/v1/reactionsByTarget`     | Get reactions to a target (cast or URL)               | `targetCastId` OR `targetUrl`, `reactionType`, `pageSize`, `pageToken`, `reverse` |
-| `/v1/linkById`              | Get a link by ID                                      | `fid`, `linkType`, `targetFid`                           |
-| `/v1/linksByFid`            | Get links created by an FID                           | `fid`, `linkType`, `pageSize`, `pageToken`, `reverse`    |
-| `/v1/linksByTargetFid`      | Get links targeting an FID                            | `targetFid`, `linkType`, `pageSize`, `pageToken`, `reverse` |
-| `/v1/userDataByFid`         | Get user data by FID                                  | `fid`, `pageSize`, `pageToken`, `reverse`                |
-| `/v1/storageLimitsByFid`    | Get storage limits for an FID                         | `fid`                                                    |
-| `/v1/usernameProofByName`   | Get username proof by name                            | `name`                                                   |
-| `/v1/usernameProofsByFid`   | Get username proofs by FID                            | `fid`, `pageSize`, `pageToken`, `reverse`                |
-| `/v1/validateMessage`       | Validate a message                                    | Message object                                           |
-| `/v1/verificationsByFid`    | Get verifications by FID                              | `fid`, `pageSize`, `pageToken`, `reverse`                |
-| `/v1/onChainSignersByFid`   | Get on-chain signers by FID                           | `fid`, `pageSize`, `pageToken`, `reverse`                |
-| `/v1/onChainEventsByFid`    | Get on-chain events by FID                            | `fid`, `eventType`, `pageSize`, `pageToken`, `reverse`   |
-
 ## Response encoding
 
 Responses from the API are encoded as `application/json`, and can be parsed as normal JSON objects.
@@ -122,10 +97,10 @@ do {
 
 Some endpoints support filtering by timestamp, allowing you to retrieve results within a specific time range:
 
-| Parameter      | Description                                       | Example                |
-| -------------- | ------------------------------------------------- | ---------------------- |
-| startTimestamp | Start of the time range (inclusive)               | `startTimestamp=1000`  |
-| stopTimestamp  | End of the time range (inclusive)                 | `stopTimestamp=2000`   |
+| Parameter      | Description                         | Example               |
+| -------------- | ----------------------------------- | --------------------- |
+| startTimestamp | Start of the time range (inclusive) | `startTimestamp=1000` |
+| stopTimestamp  | End of the time range (inclusive)   | `stopTimestamp=2000`  |
 
 Example:
 ```bash
