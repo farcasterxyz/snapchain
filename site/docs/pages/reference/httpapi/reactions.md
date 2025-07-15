@@ -1,28 +1,28 @@
 # Reactions API
 
-The Reactions API will accept the following values (either the string representation or the numerical value) for the `reaction_type` field.
+The Reactions API will accept the following values for the `reaction_type` field.
 
-| String               | Numerical value | Description                              |
-| -------------------- | --------------- | ---------------------------------------- |
-| REACTION_TYPE_LIKE   | 1               | Like the target cast                     |
-| REACTION_TYPE_RECAST | 2               | Share target cast to the user's audience |
+| String | Description                              |
+| ------ | ---------------------------------------- |
+| Like   | Like the target cast                     |
+| Recast | Share target cast to the user's audience |
 
 ## reactionById
 
 Get a reaction by its created FID and target Cast.
 
 **Query Parameters**
-| Parameter | Description | Example |
-| --------- | ----------- | ------- |
-| fid | The FID of the reaction's creator | `fid=6833` |
-| target_fid | The FID of the cast's creator | `target_fid=2` |
-| target_hash | The cast's hash | `target_hash=0xa48dd46161d8e57725f5e26e34ec19c13ff7f3b9` |
-| reaction_type | The type of reaction, use string representation | `reaction_type=Like` OR `reaction_type=Recast` |
+| Parameter     | Description                                     | Example                                                  |
+| ------------- | ----------------------------------------------- | -------------------------------------------------------- |
+| fid           | The FID of the reaction's creator               | `fid=6833`                                               |
+| target_fid    | The FID of the cast's creator                   | `target_fid=2`                                           |
+| target_hash   | The cast's hash                                 | `target_hash=0xa48dd46161d8e57725f5e26e34ec19c13ff7f3b9` |
+| reaction_type | The type of reaction, use string representation | `reaction_type=Like` OR `reaction_type=Recast`           |
 
 **Example**
 
 ```bash
-curl http://127.0.0.1:3381/v1/reactionById?fid=2&reaction_type=1&target_fid=1795&target_hash=0x7363f449bfb0e7f01c5a1cc0054768ed5146abc0
+curl http://127.0.0.1:3381/v1/reactionById?fid=2&reaction_type=Like&target_fid=1795&target_hash=0x7363f449bfb0e7f01c5a1cc0054768ed5146abc0
 ```
 
 **Response**
@@ -55,18 +55,18 @@ curl http://127.0.0.1:3381/v1/reactionById?fid=2&reaction_type=1&target_fid=1795
 Get all reactions by an FID
 
 **Query Parameters**
-| Parameter | Description | Example |
-| --------- | ----------- | ------- |
-| fid | The FID of the reaction's creator | `fid=6833` |
+| Parameter     | Description                                     | Example                                        |
+| ------------- | ----------------------------------------------- | ---------------------------------------------- |
+| fid           | The FID of the reaction's creator               | `fid=6833`                                     |
 | reaction_type | The type of reaction, use string representation | `reaction_type=Like` OR `reaction_type=Recast` |
-| pageSize | Optional page size (default: 1000) | `pageSize=100` |
-| pageToken | Optional page token for pagination | `pageToken=DAEDAAAGlQ...` |
-| reverse | Optional reverse order flag | `reverse=true` |
+| pageSize      | Optional page size (default: 1000)              | `pageSize=100`                                 |
+| pageToken     | Optional page token for pagination              | `pageToken=DAEDAAAGlQ...`                      |
+| reverse       | Optional reverse order flag                     | `reverse=true`                                 |
 
 **Example**
 
 ```bash
-curl http://127.0.0.1:3381/v1/reactionsByFid?fid=2&reaction_type=1
+curl http://127.0.0.1:3381/v1/reactionsByFid?fid=2&reaction_type=Like
 ```
 
 **Response**
@@ -104,19 +104,19 @@ curl http://127.0.0.1:3381/v1/reactionsByFid?fid=2&reaction_type=1
 Get all reactions to a cast
 
 **Query Parameters**
-| Parameter | Description | Example |
-| --------- | ----------- | ------- |
-| target_fid | The FID of the cast's creator | `target_fid=6833` |
-| target_hash | The hash of the cast | `target_hash=0x7363f449bfb0e7f01c5a1cc0054768ed5146abc0` |
-| reaction_type | The type of reaction, use string representation | `reaction_type=Like` OR `reaction_type=Recast` |
-| pageSize | Optional page size (default: 1000) | `pageSize=100` |
-| pageToken | Optional page token for pagination | `pageToken=DAEDAAAGlQ...` |
-| reverse | Optional reverse order flag | `reverse=true` |
+| Parameter     | Description                                     | Example                                                  |
+| ------------- | ----------------------------------------------- | -------------------------------------------------------- |
+| target_fid    | The FID of the cast's creator                   | `target_fid=6833`                                        |
+| target_hash   | The hash of the cast                            | `target_hash=0x7363f449bfb0e7f01c5a1cc0054768ed5146abc0` |
+| reaction_type | The type of reaction, use string representation | `reaction_type=Like` OR `reaction_type=Recast`           |
+| pageSize      | Optional page size (default: 1000)              | `pageSize=100`                                           |
+| pageToken     | Optional page token for pagination              | `pageToken=DAEDAAAGlQ...`                                |
+| reverse       | Optional reverse order flag                     | `reverse=true`                                           |
 
 **Example**
 
 ```bash
-curl http://127.0.0.1:3381/v1/reactionsByCast?target_fid=2&reaction_type=1&target_hash=0x7363f449bfb0e7f01c5a1cc0054768ed5146abc0
+curl http://127.0.0.1:3381/v1/reactionsByCast?target_fid=2&reaction_type=Like&target_hash=0x7363f449bfb0e7f01c5a1cc0054768ed5146abc0
 ```
 
 **Response**
@@ -154,10 +154,10 @@ curl http://127.0.0.1:3381/v1/reactionsByCast?target_fid=2&reaction_type=1&targe
 Get all reactions to cast's target URL
 
 **Query Parameters**
-| Parameter | Description | Example |
-| --------- | ----------- | ------- |
-| url | The URL of the parent cast | url=chain://eip155:1/erc721:0x39d89b649ffa044383333d297e325d42d31329b2 |
-| reaction_type | The type of reaction, use string representation | `reaction_type=Like` OR `reaction_type=Recast` |
+| Parameter     | Description                                     | Example                                                                  |
+| ------------- | ----------------------------------------------- | ------------------------------------------------------------------------ |
+| url           | The URL of the parent cast                      | `url=chain://eip155:1/erc721:0x39d89b649ffa044383333d297e325d42d31329b2` |
+| reaction_type | The type of reaction, use string representation | `reaction_type=Like` OR `reaction_type=Recast`                           |
 
 **Example**
 
