@@ -143,6 +143,22 @@ impl EngineVersion {
             .max()
             .expect("Version list can't be empty")
     }
+
+    pub fn next_version_timestamp_for(
+        time: &FarcasterTime,
+        network: FarcasterNetwork,
+    ) -> Option<u64> {
+        let schedule = match network {
+            FarcasterNetwork::Mainnet => &ENGINE_VERSION_SCHEDULE_MAINNET,
+            FarcasterNetwork::Testnet => &ENGINE_VERSION_SCHEDULE_TESTNET,
+            _ => &ENGINE_VERSION_SCHEDULE_DEVNET,
+        };
+
+        schedule
+            .iter()
+            .find(|schedule_entry| schedule_entry.active_at > time.to_unix_seconds())
+            .map(|schedule_entry| schedule_entry.active_at)
+    }
 }
 
 #[cfg(test)]
@@ -286,6 +302,39 @@ mod version_test {
         assert_eq!(
             EngineVersion::latest().protocol_version(),
             LATEST_PROTOCOL_VERSION
+        );
+    }
+
+    #[test]
+    fn test_next_version_timestamp_for() {
+        let time = FarcasterTime::from_unix_seconds(1747333000);
+        assert_eq!(
+            EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
+            Some(1747333800)
+        );
+
+        let time = FarcasterTime::from_unix_seconds(1747333800);
+        assert_eq!(
+            EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
+            Some(1747352400)
+        );
+
+        let time = FarcasterTime::from_unix_seconds(1752685200);
+        assert_eq!(
+            EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
+            None
+        );
+
+        let time = FarcasterTime::from_unix_seconds(1640995200); // January 1, 2022 UTC
+        assert_eq!(
+            EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Testnet),
+            Some(1748970000)
+        );
+
+        let time = FarcasterTime::from_unix_seconds(1640995200); // January 1, 2022 UTC
+        assert_eq!(
+            EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Devnet),
+            None
         );
     }
 }
