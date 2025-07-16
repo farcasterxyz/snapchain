@@ -314,6 +314,8 @@ pub struct InfoResponse {
     pub version: String,
     #[serde(rename = "peer_id")]
     pub peer_id: String,
+    #[serde(rename = "nextEngineVersionTimestamp")]
+    pub next_engine_version_timestamp: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1286,6 +1288,7 @@ fn map_get_info_response_to_json_info_response(
         num_shards: info_response.num_shards,
         peer_id: info_response.peer_id,
         version: info_response.version,
+        next_engine_version_timestamp: info_response.next_engine_version_timestamp,
         shard_infos: info_response
             .shard_infos
             .iter()
