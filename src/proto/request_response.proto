@@ -57,6 +57,7 @@ message GetInfoResponse {
   string peerId = 6;
   uint32 num_shards = 8;
   repeated ShardInfo shard_infos = 9;
+  uint64 next_engine_version_timestamp = 10;
 }
 
 message EventRequest {
