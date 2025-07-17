@@ -137,7 +137,7 @@ mod tests {
             panic!("Failed to propose message");
         }
 
-        let chunk = test_helper::validate_and_commit_state_change(engine, &state_change);
+        let chunk = test_helper::validate_and_commit_state_change(engine, &state_change).await;
         assert_eq!(
             state_change.new_state_root,
             chunk.header.as_ref().unwrap().shard_root
@@ -228,7 +228,7 @@ mod tests {
 
         chunk.header.as_mut().unwrap().shard_root = invalid_hash;
 
-        engine.commit_shard_chunk(&chunk);
+        engine.commit_shard_chunk(&chunk).await;
     }
 
     #[tokio::test]
@@ -286,7 +286,7 @@ mod tests {
         let state_change = engine.propose_state_change(1, vec![], None);
         let expected_roots = vec![""];
 
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         assert_eq!(expected_roots[0], to_hex(&engine.trie_root_hash()));
 
@@ -339,7 +339,7 @@ mod tests {
         let casts_result = engine.get_casts_by_fid(msg1.fid());
         test_helper::assert_messages_empty(&casts_result);
 
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         // commit does write to the store
         let casts_result = engine.get_casts_by_fid(msg1.fid());
@@ -1107,7 +1107,7 @@ mod tests {
             assert_ne!(previous_root, to_hex(&state_change.new_state_root));
             previous_root = to_hex(&state_change.new_state_root);
 
-            test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+            test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
             assert_eq!(previous_root, to_hex(&engine.trie_root_hash()));
 
@@ -1133,7 +1133,7 @@ mod tests {
             assert_ne!(previous_root, to_hex(&state_change.new_state_root));
             previous_root = to_hex(&state_change.new_state_root);
 
-            test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+            test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
             assert_eq!(previous_root, to_hex(&engine.trie_root_hash()));
 
@@ -1178,7 +1178,7 @@ mod tests {
             assert_ne!(previous_root, to_hex(&state_change.new_state_root));
             previous_root = to_hex(&state_change.new_state_root);
 
-            test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+            test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
             // Committed state root is the same as what was proposed
             assert_eq!(previous_root, to_hex(&engine.trie_root_hash()));
@@ -1221,7 +1221,7 @@ mod tests {
             MempoolMessage::UserMessage(cast3.clone()),
         ];
         let state_change = engine.propose_state_change(1, messages, None);
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         // We merged an add, a remove and a second remove which should win over the first (later timestamp)
         // In the end, the add and the intermediate remove should not exist
@@ -1273,7 +1273,7 @@ mod tests {
         assert_eq!(0, events.events.len());
         assert!(event_rx.try_recv().is_err());
 
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         let height = engine.get_confirmed_height();
         assert_eq!(height.shard_index, 1);
@@ -1325,7 +1325,7 @@ mod tests {
             ],
             None,
         );
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         let cast3 = default_message("cast3");
         let cast4 = default_message("cast4");
@@ -1337,7 +1337,7 @@ mod tests {
             ],
             None,
         );
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         // Ignore first 3 blocks which are user registration events
         let events = HubEvent::get_events(
@@ -1530,7 +1530,7 @@ mod tests {
             MempoolMessage::UserMessage(cast3.clone()),
         ];
         let state_change = engine.propose_state_change(1, messages, None);
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
         assert_merge_event(&event_rx.try_recv().unwrap(), &cast1, 0);
         assert_merge_event(&event_rx.try_recv().unwrap(), &cast2, 1);
         assert_merge_event(&event_rx.try_recv().unwrap(), &cast3, 2);
@@ -1542,7 +1542,7 @@ mod tests {
             MempoolMessage::UserMessage(cast6.clone()),
         ];
         let state_change = engine.propose_state_change(1, messages, None);
-        let chunk = test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        let chunk = test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
         assert_merge_event(&event_rx.try_recv().unwrap(), &cast4, 0);
         assert_merge_event(&event_rx.try_recv().unwrap(), &cast5, 1);
         assert_merge_event(&event_rx.try_recv().unwrap(), &cast6, 2);
@@ -1714,7 +1714,7 @@ mod tests {
             })],
             None,
         );
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         // Emits a hub event for the user name proof
         let transfer_event = &event_rx.try_recv().unwrap();
@@ -1772,7 +1772,7 @@ mod tests {
             })],
             None,
         );
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         // Emits a hub event for the user name proof
         let transfer_event = &event_rx.try_recv().unwrap();
@@ -1808,7 +1808,7 @@ mod tests {
             })],
             None,
         );
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         let transfer_event = &event_rx.try_recv().unwrap();
         assert_eq!(
@@ -2281,7 +2281,7 @@ mod tests {
             None,
         );
 
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         // When fname is owned by a different fid, message is not merged
         {
@@ -2646,5 +2646,59 @@ mod tests {
 
         commit_message_at(&mut engine, &banner, &FarcasterTime::current()).await;
         assert!(engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&banner)),);
+    }
+
+    #[tokio::test]
+    async fn test_post_commit() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let mut handles = vec![];
+
+        // Set the post commit channel, and start listening for post-commit hooks while
+        // comitting a cast message.
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        engine.set_post_commit_tx(tx);
+
+        let handle = tokio::spawn(async move {
+            let result =
+                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
+
+            assert!(
+                result.is_ok() && result.as_ref().unwrap().is_some(),
+                "Did not receive a successful post-commit hook"
+            );
+
+            let value = result.unwrap().unwrap();
+
+            assert!(
+                value.channel.send(true).is_ok(),
+                "Failed to send post-commit callback"
+            );
+        });
+        handles.push(handle);
+
+        let handle = tokio::spawn(async move {
+            let cast = messages_factory::casts::create_cast_add(
+                FID_FOR_TEST,
+                "test",
+                Some(timestamp),
+                None,
+            );
+            commit_message(&mut engine, &cast).await;
+        });
+        handles.push(handle);
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
     }
 }
