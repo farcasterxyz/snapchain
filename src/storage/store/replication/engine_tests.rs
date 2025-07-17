@@ -1,7 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
-
     use crate::{
         proto,
         storage::{
@@ -9,14 +7,18 @@ mod tests {
             store::{
                 account::UserDataStore,
                 engine::{MempoolMessage, ShardEngine},
-                replication::{replication_stores::ReplicationStores, replicator::Replicator},
-                stores::Stores,
+                replication::{
+                    post_commit_handler::PostCommitHandler,
+                    replication_stores::ReplicationStores,
+                    replicator::{Replicator, ReplicatorSnapshotOptions},
+                },
                 test_helper::{self, EngineOptions},
             },
             trie::merkle_trie::TrieKey,
         },
         utils::factory::{self, messages_factory, username_factory},
     };
+    use std::{collections::HashMap, sync::Arc};
 
     fn opendb(path: &str) -> Result<Arc<RocksDB>, RocksdbError> {
         let milliseconds_timestamp: u128 = std::time::SystemTime::now()
@@ -44,7 +46,7 @@ mod tests {
         (signer, engine)
     }
 
-    fn commit_message(engine: &mut ShardEngine, message: &proto::Message) {
+    async fn commit_message(engine: &mut ShardEngine, message: &proto::Message) {
         let state_change = engine.propose_state_change(
             1,
             vec![MempoolMessage::UserMessage(message.clone())],
@@ -55,7 +57,7 @@ mod tests {
             panic!("Failed to propose message");
         }
 
-        let chunk = test_helper::validate_and_commit_state_change(engine, &state_change);
+        let chunk = test_helper::validate_and_commit_state_change(engine, &state_change).await;
 
         assert_eq!(
             state_change.new_state_root,
@@ -114,7 +116,7 @@ mod tests {
             timestamp,
             signing_key,
         );
-        commit_message(engine, &username_message);
+        commit_message(engine, &username_message).await;
     }
 
     async fn transfer_fname(
@@ -144,7 +146,7 @@ mod tests {
         assert!(has_fname(engine, new_fid, Some(fname)));
     }
 
-    fn send_cast(
+    async fn send_cast(
         engine: &mut ShardEngine,
         fid: u64,
         signer: Option<&ed25519_dalek::SigningKey>,
@@ -152,11 +154,11 @@ mod tests {
         timestamp: Option<u32>,
     ) -> proto::Message {
         let cast = messages_factory::casts::create_cast_add(fid, content, timestamp, signer);
-        commit_message(engine, &cast);
+        commit_message(engine, &cast).await;
         cast
     }
 
-    fn like_cast(
+    async fn like_cast(
         engine: &mut ShardEngine,
         fid: u64,
         signer: Option<&ed25519_dalek::SigningKey>,
@@ -177,11 +179,11 @@ mod tests {
             timestamp,
             signer,
         );
-        commit_message(engine, &like);
+        commit_message(engine, &like).await;
         like
     }
 
-    fn set_bio(
+    async fn set_bio(
         engine: &mut ShardEngine,
         fid: u64,
         signer: Option<&ed25519_dalek::SigningKey>,
@@ -195,11 +197,11 @@ mod tests {
             timestamp,
             signer,
         );
-        commit_message(engine, &user_data_add);
+        commit_message(engine, &user_data_add).await;
         user_data_add
     }
 
-    fn create_link(
+    async fn create_link(
         engine: &mut ShardEngine,
         fid: u64,
         signer: Option<&ed25519_dalek::SigningKey>,
@@ -208,11 +210,11 @@ mod tests {
     ) -> proto::Message {
         let link =
             messages_factory::links::create_link_add(fid, "follow", target_fid, timestamp, signer);
-        commit_message(engine, &link);
+        commit_message(engine, &link).await;
         link
     }
 
-    fn create_compact_link(
+    async fn create_compact_link(
         engine: &mut ShardEngine,
         fid: u64,
         signer: Option<&ed25519_dalek::SigningKey>,
@@ -226,44 +228,46 @@ mod tests {
             timestamp,
             signer,
         );
-        commit_message(engine, &link);
+        commit_message(engine, &link).await;
         link
     }
 
-    fn replicator_and_stores(
-        shard_stores: HashMap<u32, Stores>,
-    ) -> (Replicator, Arc<ReplicationStores>) {
+    fn setup_replicator(engine: &mut ShardEngine) -> (Arc<Replicator>, PostCommitHandler) {
         let statsd_client = crate::utils::statsd_wrapper::StatsdClientWrapper::new(
             cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
             true,
         );
-        let stores = Arc::new(ReplicationStores::new(
+
+        let mut shard_stores = HashMap::new();
+        shard_stores.insert(engine.shard_id(), engine.get_stores().clone());
+
+        let replication_stores = Arc::new(ReplicationStores::new(
             shard_stores.clone(),
             16,
             statsd_client.clone(),
         ));
-        let replicator = Replicator::new(stores.clone());
-        (replicator, stores)
+
+        let replicator = Arc::new(Replicator::new_with_options(
+            replication_stores.clone(),
+            ReplicatorSnapshotOptions {
+                interval: 1,
+                max_age: 10,
+            },
+        ));
+        let post_commit_handler = PostCommitHandler::spawn(replicator.clone());
+
+        engine.set_post_commit_tx(post_commit_handler.sender.clone());
+
+        (replicator, post_commit_handler)
     }
 
     fn replicate_fids(
         source_engine: &ShardEngine,
         dest_engine: &mut ShardEngine,
+        replicator: Arc<Replicator>,
         fids_to_sync: &Vec<u64>,
     ) {
-        let mut stores = HashMap::new();
-        stores.insert(source_engine.shard_id(), source_engine.get_stores().clone());
-        let (replicator, replication_stores) = replicator_and_stores(stores);
-
-        // Capture a read-only snaphot
         let height = source_engine.get_confirmed_height().block_number;
-        let snap_result = replication_stores.open_snapshot(height, source_engine.shard_id());
-        assert!(
-            snap_result.is_ok(),
-            "Failed to open snapshot: {}",
-            snap_result.unwrap_err()
-        );
-
         let min = *fids_to_sync.iter().min().unwrap();
         let max = *fids_to_sync.iter().max().unwrap();
 
@@ -303,6 +307,8 @@ mod tests {
         let (signer, mut engine) = new_engine_with_fname_signer(&tmp_dir); // source engine
         let (_, mut new_engine) = new_engine_with_fname_signer(&tmp_dir); // engine to replicate to
 
+        let (replicator, _post_commit_handler) = setup_replicator(&mut engine);
+
         // Note: we're using FID3_FOR_TEST here because the address verification message contains
         // that FID.
         let fid = test_helper::FID3_FOR_TEST;
@@ -334,7 +340,8 @@ mod tests {
             Some(&fid2_signer),
             &"hello".to_string(),
             Some(timestamp),
-        );
+        )
+        .await;
 
         timestamp += 1;
 
@@ -357,25 +364,28 @@ mod tests {
             Some(&fid_signer),
             "hello world",
             Some(timestamp),
-        );
+        )
+        .await;
 
         timestamp += 1;
 
-        create_link(&mut engine, fid, Some(&fid_signer), fid2, Some(timestamp));
+        create_link(&mut engine, fid, Some(&fid_signer), fid2, Some(timestamp)).await;
         create_compact_link(
             &mut engine,
             fid2,
             Some(&fid2_signer),
             vec![fid],
             Some(timestamp),
-        );
+        )
+        .await;
         like_cast(
             &mut engine,
             fid2,
             Some(&fid2_signer),
             &cast,
             Some(timestamp),
-        );
+        )
+        .await;
 
         timestamp += 1;
 
@@ -390,7 +400,7 @@ mod tests {
             Some(&fid_signer),
         );
 
-        commit_message(&mut engine, &address_verification_add);
+        commit_message(&mut engine, &address_verification_add).await;
 
         timestamp += 1;
 
@@ -404,8 +414,8 @@ mod tests {
             Some(&fid_signer),
         );
 
-        commit_message(&mut engine, &username_proof_add);
+        commit_message(&mut engine, &username_proof_add).await;
 
-        replicate_fids(&engine, &mut new_engine, &vec![fid, fid2]);
+        replicate_fids(&engine, &mut new_engine, replicator, &vec![fid, fid2]);
     }
 }

@@ -103,7 +103,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
         // TODO: need block height below
         let chunk = state_change_to_shard_chunk(1, 1, &state_change);
-        engine.commit_shard_chunk(&chunk);
+        engine.commit_shard_chunk(&chunk).await;
 
         println!("{}", engine.trie_num_items());
     }

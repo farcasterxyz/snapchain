@@ -194,7 +194,7 @@ pub async fn commit_event(engine: &mut ShardEngine, event: &OnChainEvent) -> Sha
         None,
     );
 
-    validate_and_commit_state_change(engine, &state_change)
+    validate_and_commit_state_change(engine, &state_change).await
 }
 
 pub async fn commit_event_at(
@@ -210,7 +210,7 @@ pub async fn commit_event_at(
         })],
         Some(timestamp.clone()),
     );
-    validate_and_commit_state_change(engine, &state_change)
+    validate_and_commit_state_change(engine, &state_change).await
 }
 
 pub async fn sign_chunk(keypair: &Keypair, mut shard_chunk: ShardChunk) -> ShardChunk {
@@ -248,7 +248,7 @@ pub async fn commit_message(engine: &mut ShardEngine, msg: &proto::Message) -> S
         panic!("Failed to propose message");
     }
 
-    let chunk = validate_and_commit_state_change(engine, &state_change);
+    let chunk = validate_and_commit_state_change(engine, &state_change).await;
     assert_eq!(
         state_change.new_state_root,
         chunk.header.as_ref().unwrap().shard_root
@@ -273,7 +273,7 @@ pub async fn commit_message_at(
         panic!("Failed to propose message");
     }
 
-    let chunk = validate_and_commit_state_change(engine, &state_change);
+    let chunk = validate_and_commit_state_change(engine, &state_change).await;
     assert_eq!(
         state_change.new_state_root,
         chunk.header.as_ref().unwrap().shard_root
@@ -297,7 +297,7 @@ pub async fn commit_messages(engine: &mut ShardEngine, msgs: Vec<proto::Message>
         panic!("Failed to propose message");
     }
 
-    let chunk = validate_and_commit_state_change(engine, &state_change);
+    let chunk = validate_and_commit_state_change(engine, &state_change).await;
     assert_eq!(
         state_change.new_state_root,
         chunk.header.as_ref().unwrap().shard_root
@@ -363,7 +363,7 @@ pub fn state_change_to_shard_chunk(
     chunk
 }
 
-pub fn validate_and_commit_state_change(
+pub async fn validate_and_commit_state_change(
     engine: &mut ShardEngine,
     state_change: &ShardStateChange,
 ) -> ShardChunk {
@@ -374,7 +374,7 @@ pub fn validate_and_commit_state_change(
     assert!(valid);
 
     let chunk = state_change_to_shard_chunk(1, height.block_number + 1, state_change);
-    engine.commit_shard_chunk(&chunk);
+    engine.commit_shard_chunk(&chunk).await;
     assert_eq!(state_change.new_state_root, engine.trie_root_hash());
     chunk
 }
@@ -419,7 +419,7 @@ pub async fn commit_fname_transfer(engine: &mut ShardEngine, transfer: &FnameTra
         None,
     );
 
-    validate_and_commit_state_change(engine, &state_change);
+    validate_and_commit_state_change(engine, &state_change).await;
 
     // let proof = transfer.proof.as_ref().unwrap();
     // let name = String::from_utf8(proof.name.clone()).unwrap();
@@ -457,7 +457,7 @@ pub async fn register_fname(
         None,
     );
 
-    validate_and_commit_state_change(engine, &state_change);
+    validate_and_commit_state_change(engine, &state_change).await;
 
     // Ensure the key exists in the trie as this can fail silently otherwise
     assert!(key_exists_in_trie(

@@ -48,11 +48,11 @@ impl ReadValidator {
         }
     }
 
-    fn commit_decided_value(&mut self, value: &DecidedValue, height: Height) {
+    async fn commit_decided_value(&mut self, value: &DecidedValue, height: Height) {
         match &mut self.engine {
             Engine::ShardEngine(shard_engine) => match &value.value {
                 Some(proto::decided_value::Value::Shard(shard_chunk)) => {
-                    shard_engine.commit_shard_chunk(&shard_chunk);
+                    shard_engine.commit_shard_chunk(&shard_chunk).await;
                     info!(
                         %height,
                         hash = hex::encode(&shard_chunk.hash),
@@ -80,12 +80,12 @@ impl ReadValidator {
         self.last_height = height;
     }
 
-    fn process_buffered_blocks(&mut self) -> u64 {
+    async fn process_buffered_blocks(&mut self) -> u64 {
         let mut num_blocks_processed = 0;
         // This works only because [buffered_blocks] is ordered by height. It's important to maintain this property
         while let Some((height, value)) = self.buffered_blocks.pop_first() {
             if height == self.last_height.increment() {
-                self.commit_decided_value(&value, height);
+                self.commit_decided_value(&value, height).await;
                 num_blocks_processed += 1;
             } else if height > self.last_height.increment() {
                 self.buffered_blocks.insert(height, value);
@@ -193,7 +193,7 @@ impl ReadValidator {
         true
     }
 
-    pub fn process_decided_value(&mut self, value: DecidedValue) -> u64 {
+    pub async fn process_decided_value(&mut self, value: DecidedValue) -> u64 {
         let height = Self::get_decided_value_height(&value);
         let verified = self.verify_signatures(&value);
         if !verified {
@@ -216,8 +216,8 @@ impl ReadValidator {
                 0
             }
         } else if height == self.last_height.increment() {
-            self.commit_decided_value(&value, height);
-            let num_buffered_blocks_processed = self.process_buffered_blocks();
+            self.commit_decided_value(&value, height).await;
+            let num_buffered_blocks_processed = self.process_buffered_blocks().await;
             num_buffered_blocks_processed + 1
         } else {
             debug!(%height, last_height = %self.last_height, "Dropping decided block because height is too low");

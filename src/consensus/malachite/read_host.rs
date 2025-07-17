@@ -77,7 +77,7 @@ impl ReadHost {
             }
 
             ReadHostMsg::ProcessDecidedValue { value, sync } => {
-                let num_values_processed = state.validator.process_decided_value(value);
+                let num_values_processed = state.validator.process_decided_value(value).await;
                 if num_values_processed > 0 {
                     sync.cast(read_sync::Msg::Decided(state.validator.last_height))?
                 }

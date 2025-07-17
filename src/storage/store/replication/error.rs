@@ -4,6 +4,7 @@ pub enum ReplicationError {
     ShardStoreNotFound(u32),
     StoreNotFound(u64, u32, String),
     InternalError(String),
+    InvalidMessage(String),
 }
 
 impl From<ReplicationError> for tonic::Status {
@@ -19,6 +20,9 @@ impl From<ReplicationError> for tonic::Status {
                 ))
             }
             ReplicationError::InternalError(msg) => tonic::Status::internal(msg),
+            ReplicationError::InvalidMessage(msg) => {
+                tonic::Status::invalid_argument(format!("Invalid message: {}", msg))
+            }
         }
     }
 }
@@ -37,6 +41,7 @@ impl Display for ReplicationError {
                 )
             }
             ReplicationError::InternalError(msg) => write!(f, "Internal error: {}", msg),
+            ReplicationError::InvalidMessage(msg) => write!(f, "Invalid message: {}", msg),
         }
     }
 }

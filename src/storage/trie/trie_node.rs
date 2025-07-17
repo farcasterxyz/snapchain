@@ -21,7 +21,7 @@ const MAX_VALUES_RETURNED_PER_CALL: usize = 1024;
 pub struct Context<'a> {
     db_read_count: atomic::AtomicU64,
     mem_read_count: atomic::AtomicU64,
-    on_drop: Option<Box<dyn FnOnce((u64, u64)) + 'a>>,
+    on_drop: Option<Box<dyn FnOnce((u64, u64)) + Send + 'a>>,
 }
 
 impl<'a> Context<'a> {
@@ -35,7 +35,7 @@ impl<'a> Context<'a> {
 
     pub fn with_callback<F>(callback: F) -> Self
     where
-        F: FnOnce((u64, u64)) + 'a,
+        F: FnOnce((u64, u64)) + Send + 'a,
     {
         Self {
             db_read_count: atomic::AtomicU64::new(0),

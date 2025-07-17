@@ -38,7 +38,7 @@ mod tests {
         let (mut read_node_engine, _) = test_helper::new_engine();
         for _ in 0..num_already_decided_blocks {
             let shard_chunk = commit_shard_chunk(&mut proposer_engine, &proposer_keypair).await;
-            read_node_engine.commit_shard_chunk(&shard_chunk);
+            read_node_engine.commit_shard_chunk(&shard_chunk).await;
         }
         let read_keypair = Keypair::generate();
         let (gossip_tx, gossip_rx) = mpsc::channel(100);

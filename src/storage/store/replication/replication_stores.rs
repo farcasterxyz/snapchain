@@ -81,6 +81,13 @@ impl ReplicationStores {
         self.read_only_stores.write().unwrap().remove(&height);
     }
 
+    pub fn close_snapshots_below(&self, height: u64) {
+        self.read_only_stores
+            .write()
+            .unwrap()
+            .retain(|&h, _| h >= height);
+    }
+
     fn close_all_snapshots(&mut self) {
         self.read_only_stores.write().unwrap().clear();
     }

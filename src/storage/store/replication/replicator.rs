@@ -1,27 +1,54 @@
-use std::sync::Arc;
-
 use crate::{
     proto,
     storage::{
         db::{PageOptions, RocksDbTransactionBatch},
         store::{
             account::{MessagesPage, Store, StoreDef, UserDataStore, UsernameProofStore},
+            engine::PostCommitMessage,
             replication::{error::ReplicationError, replication_stores::ReplicationStores},
             stores::Stores,
         },
         trie::merkle_trie::TrieKey,
     },
 };
+use std::sync::Arc;
 
+#[derive(Clone)]
+pub struct ReplicatorSnapshotOptions {
+    pub interval: u64, // Interval in blocks to take snapshots
+    pub max_age: u64,  // Maximum age of snapshots in blocks
+}
+
+impl Default for ReplicatorSnapshotOptions {
+    fn default() -> Self {
+        ReplicatorSnapshotOptions {
+            interval: 1000,  // Default to taking a snapshot every 1000 blocks
+            max_age: 10_000, // Default to keeping snapshots for 10000 blocks
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Replicator {
     stores: Arc<ReplicationStores>,
+    snapshot_options: ReplicatorSnapshotOptions,
 }
 
 type ReplicationTransactions = (Vec<proto::Transaction>, Vec<proto::Transaction>);
 
 impl Replicator {
     pub fn new(stores: Arc<ReplicationStores>) -> Self {
-        Replicator { stores }
+        Self::new_with_options(stores, ReplicatorSnapshotOptions::default())
+    }
+
+    pub fn new_with_options(
+        stores: Arc<ReplicationStores>,
+        snapshot_options: ReplicatorSnapshotOptions,
+    ) -> Self {
+        Replicator {
+            stores,
+            snapshot_options,
+        }
     }
 
     // Fetches a set of system and user transactions that represent the current
@@ -57,6 +84,32 @@ impl Replicator {
         }
 
         Ok((sys, user))
+    }
+
+    pub fn handle_post_commit_message(
+        &self,
+        msg: &PostCommitMessage,
+    ) -> Result<(), ReplicationError> {
+        let block_number = match msg.header.height {
+            Some(height) => height.block_number,
+            None => {
+                return Err(ReplicationError::InvalidMessage(
+                    "PostCommitMessage must contain a block number".to_string(),
+                ));
+            }
+        };
+
+        // Clean up old snapshots
+        let expiration_block = block_number.saturating_sub(self.snapshot_options.max_age);
+        self.stores.close_snapshots_below(expiration_block);
+
+        // Check if we can take a snapshot
+        if block_number % self.snapshot_options.interval != 0 {
+            return Ok(());
+        }
+
+        // Open a snapshot
+        self.stores.open_snapshot(block_number, msg.shard_id)
     }
 }
 
