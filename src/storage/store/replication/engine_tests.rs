@@ -1,17 +1,15 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        mempool::routing,
         proto,
         storage::{
             db::{RocksDB, RocksdbError},
             store::{
                 account::UserDataStore,
-                engine::{MempoolMessage, ShardEngine},
+                engine::{MempoolMessage, PostCommitMessage, ShardEngine},
                 replication::{
-                    post_commit_handler::PostCommitHandler,
                     replication_stores::ReplicationStores,
-                    replicator::{Replicator, ReplicatorSnapshotOptions},
+                    replicator::{self, Replicator, ReplicatorSnapshotOptions},
                 },
                 test_helper::{self, EngineOptions},
             },
@@ -34,6 +32,7 @@ mod tests {
 
     fn new_engine_with_fname_signer(
         tmp: &tempfile::TempDir,
+        post_commit_tx: Option<tokio::sync::mpsc::Sender<PostCommitMessage>>,
     ) -> (alloy_signer_local::PrivateKeySigner, ShardEngine) {
         let signer = alloy_signer_local::PrivateKeySigner::random();
 
@@ -42,6 +41,7 @@ mod tests {
         let (engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             db: Some(db),
             fname_signer_address: Some(signer.address()),
+            post_commit_tx,
             ..EngineOptions::default()
         });
         (signer, engine)
@@ -233,7 +233,7 @@ mod tests {
         link
     }
 
-    fn setup_replicator(engine: &mut ShardEngine) -> (Arc<Replicator>, PostCommitHandler) {
+    fn setup_replicator(engine: &mut ShardEngine) -> Arc<Replicator> {
         let statsd_client = crate::utils::statsd_wrapper::StatsdClientWrapper::new(
             cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
             true,
@@ -250,18 +250,13 @@ mod tests {
 
         let replicator = Arc::new(Replicator::new_with_options(
             replication_stores.clone(),
-            // Box::new(routing::ShardRouter {}),
-            // 1,
             ReplicatorSnapshotOptions {
                 interval: 1,
                 max_age: 10,
             },
         ));
-        let post_commit_handler = PostCommitHandler::spawn(replicator.clone());
 
-        engine.set_post_commit_tx(post_commit_handler.sender.clone());
-
-        (replicator, post_commit_handler)
+        replicator
     }
 
     fn replicate_fids(
@@ -307,10 +302,16 @@ mod tests {
         // open tmp dir for database
         let tmp_dir = tempfile::TempDir::new().unwrap();
 
-        let (signer, mut engine) = new_engine_with_fname_signer(&tmp_dir); // source engine
-        let (_, mut new_engine) = new_engine_with_fname_signer(&tmp_dir); // engine to replicate to
+        let (post_commit_tx, post_commit_rx) = tokio::sync::mpsc::channel::<PostCommitMessage>(1);
 
-        let (replicator, _post_commit_handler) = setup_replicator(&mut engine);
+        let (signer, mut engine) = new_engine_with_fname_signer(&tmp_dir, Some(post_commit_tx)); // source engine
+        let (_, mut new_engine) = new_engine_with_fname_signer(&tmp_dir, None); // engine to replicate to
+
+        let replicator = setup_replicator(&mut engine);
+        let spawned_replicator = replicator.clone();
+        tokio::spawn(async move {
+            replicator::run(spawned_replicator, post_commit_rx).await;
+        });
 
         // Note: we're using FID3_FOR_TEST here because the address verification message contains
         // that FID.

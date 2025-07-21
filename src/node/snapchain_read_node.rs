@@ -7,7 +7,7 @@ use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::network::gossip::GossipEvent;
 use crate::proto;
 use crate::storage::db::RocksDB;
-use crate::storage::store::engine::{BlockEngine, Senders, ShardEngine};
+use crate::storage::store::engine::{BlockEngine, PostCommitMessage, Senders, ShardEngine};
 use crate::storage::store::stores::StoreLimits;
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
@@ -44,6 +44,7 @@ impl SnapchainReadNode {
         trie_branching_factor: u32,
         farcaster_network: proto::FarcasterNetwork,
         registry: &SharedRegistry,
+        engine_post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
     ) -> Self {
         let validator_address = Address(keypair.public().to_bytes());
 
@@ -74,6 +75,7 @@ impl SnapchainReadNode {
                 config.max_messages_per_block,
                 Some(messages_request_tx.clone()),
                 None,
+                engine_post_commit_tx.clone(),
             );
 
             shard_senders.insert(shard_id, engine.get_senders());

@@ -265,6 +265,7 @@ impl ReadNodeForTest {
             16,
             fc_network,
             registry,
+            None,
         )
         .await;
 
@@ -366,6 +367,7 @@ impl NodeForTest {
             16,
             fc_network,
             registry,
+            None,
         )
         .await;
 

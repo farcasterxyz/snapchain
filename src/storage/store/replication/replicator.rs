@@ -1,3 +1,6 @@
+use tokio::select;
+use tracing::error;
+
 use crate::{
     proto,
     storage::{
@@ -13,6 +16,26 @@ use crate::{
 };
 use std::sync::Arc;
 
+pub async fn run(
+    replicator: Arc<Replicator>,
+    mut receive: tokio::sync::mpsc::Receiver<PostCommitMessage>,
+) {
+    loop {
+        select! {
+            Some(msg) = receive.recv() => {
+                if let Err(e) = replicator.handle_post_commit_message(&msg) {
+                    error!("Failed to handle post commit message: {}", e);
+                }
+
+                if let Err(e) = msg.channel.send(true) {
+                    error!("Failed to send post commit response: {}", e);
+                }
+            }
+            else => break, // Exit loop if the channel is closed
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ReplicatorSnapshotOptions {
     pub interval: u64, // Interval in blocks to take snapshots
@@ -22,7 +45,7 @@ pub struct ReplicatorSnapshotOptions {
 impl Default for ReplicatorSnapshotOptions {
     fn default() -> Self {
         ReplicatorSnapshotOptions {
-            interval: 1000,  // Default to taking a snapshot every 1000 blocks
+            interval: 1_000, // Default to taking a snapshot every 1000 blocks
             max_age: 10_000, // Default to keeping snapshots for 10000 blocks
         }
     }

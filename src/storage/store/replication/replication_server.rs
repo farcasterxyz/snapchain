@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tonic::{Request, Response, Status};
 
 use crate::mempool::routing;
@@ -5,7 +7,7 @@ use crate::proto;
 use crate::storage::store::replication::replicator::Replicator;
 
 pub struct ReplicationServer {
-    replicator: Replicator,
+    replicator: Arc<Replicator>,
     message_router: Box<dyn routing::MessageRouter>,
     num_shards: u32,
 }
@@ -14,7 +16,7 @@ impl ReplicationServer {
     const FID_RANGE: u64 = 10_000;
 
     pub fn new(
-        replicator: Replicator,
+        replicator: Arc<Replicator>,
         message_router: Box<dyn routing::MessageRouter>,
         num_shards: u32,
     ) -> Self {

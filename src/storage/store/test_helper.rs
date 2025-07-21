@@ -22,7 +22,7 @@ use crate::proto::{
 };
 use crate::proto::{MessagesResponse, OnChainEvent};
 use crate::storage::store::account::MessagesPage;
-use crate::storage::store::engine::{MempoolMessage, ShardStateChange};
+use crate::storage::store::engine::{MempoolMessage, PostCommitMessage, ShardStateChange};
 #[allow(unused_imports)] // Used by cfg(test)
 use crate::storage::trie::merkle_trie::TrieKey;
 use crate::storage::util::bytes_compare;
@@ -120,6 +120,7 @@ pub struct EngineOptions {
     pub network: Option<proto::FarcasterNetwork>,
     pub fname_signer_address: Option<alloy_primitives::Address>,
     pub shard_id: u32,
+    pub post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
 }
 
 impl Default for EngineOptions {
@@ -131,6 +132,7 @@ impl Default for EngineOptions {
             network: None,
             fname_signer_address: None,
             shard_id: 1,
+            post_commit_tx: None,
         }
     }
 }
@@ -174,6 +176,7 @@ pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile
             256,
             options.messages_request_tx,
             options.fname_signer_address,
+            options.post_commit_tx,
         ),
         dir,
     )

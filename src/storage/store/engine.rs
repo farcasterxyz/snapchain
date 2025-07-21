@@ -201,6 +201,7 @@ impl ShardEngine {
         max_messages_per_block: u32,
         messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
         fname_signer_address: Option<alloy_primitives::Address>,
+        post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
     ) -> ShardEngine {
         // TODO: adding the trie here introduces many calls that want to return errors. Rethink unwrap strategy.
         ShardEngine {
@@ -221,7 +222,7 @@ impl ShardEngine {
             messages_request_tx,
             pending_txn: None,
             fname_signer_address,
-            post_commit_tx: None,
+            post_commit_tx,
         }
     }
 
@@ -1512,10 +1513,6 @@ impl ShardEngine {
         self.gauge("max_messages_per_block", self.max_messages_per_block as u64);
 
         Ok(())
-    }
-
-    pub fn set_post_commit_tx(&mut self, post_commit_tx: mpsc::Sender<PostCommitMessage>) {
-        self.post_commit_tx = Some(post_commit_tx);
     }
 
     async fn post_commit(&mut self, header: proto::ShardHeader) {

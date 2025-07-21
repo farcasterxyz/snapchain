@@ -54,6 +54,23 @@ impl Default for PruningConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct ReplicationConfig {
+    pub enable: bool,
+    pub snapshot_interval: u64, // Interval, in blocks, at which snapshots are created
+    pub snapshot_max_age: u64,  // Maximum age of snapshots, in blocks
+}
+
+impl Default for ReplicationConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            snapshot_interval: 1_000,
+            snapshot_max_age: 10_000,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     pub log_format: String,
     pub fnames: connectors::fname::Config,
@@ -76,6 +93,7 @@ pub struct Config {
     pub read_node: bool,
     pub pruning: PruningConfig,
     pub http_server: http_server::Config,
+    pub replication: ReplicationConfig,
 }
 
 impl Default for Config {
@@ -102,6 +120,7 @@ impl Default for Config {
             read_node: false,
             pruning: PruningConfig::default(),
             http_server: http_server::Config::default(),
+            replication: ReplicationConfig::default(),
         }
     }
 }

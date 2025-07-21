@@ -15,10 +15,12 @@ use snapchain::node::snapchain_node::SnapchainNode;
 use snapchain::node::snapchain_read_node::SnapchainReadNode;
 use snapchain::proto::admin_service_server::AdminServiceServer;
 use snapchain::proto::hub_service_server::HubServiceServer;
+use snapchain::proto::replication_service_server::ReplicationServiceServer;
 use snapchain::storage::db::snapshot::download_snapshots;
 use snapchain::storage::db::RocksDB;
-use snapchain::storage::store::engine::Senders;
+use snapchain::storage::store::engine::{PostCommitMessage, Senders};
 use snapchain::storage::store::node_local_state::{self, LocalStateStore};
+use snapchain::storage::store::replication;
 use snapchain::storage::store::stores::Stores;
 use snapchain::storage::store::BlockStore;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
@@ -51,6 +53,7 @@ async fn start_servers(
     shard_senders: HashMap<u32, Senders>,
     block_store: BlockStore,
     chain_clients: ChainClients,
+    replicator: Option<Arc<replication::replicator::Replicator>>,
 ) {
     let grpc_addr = app_config.rpc_address.clone();
     let grpc_socket_addr: SocketAddr = grpc_addr.parse().unwrap();
@@ -82,8 +85,22 @@ async fn start_servers(
         VERSION.unwrap_or("unknown").to_string(),
         gossip.swarm.local_peer_id().to_string(),
     ));
+
+    let replication_service = if let Some(replicator) = replicator {
+        let server = replication::replication_server::ReplicationServer::new(
+            replicator,
+            Box::new(routing::ShardRouter {}),
+            app_config.consensus.num_shards,
+        );
+        let service = ReplicationServiceServer::new(server);
+        Some(service)
+    } else {
+        None
+    };
+
     let grpc_service = service.clone();
     let grpc_shutdown_tx = shutdown_tx.clone();
+
     tokio::spawn(async move {
         info!(grpc_addr = grpc_addr, "GrpcService listening",);
         let mut server = Server::builder().add_service(HubServiceServer::from_arc(grpc_service));
@@ -91,6 +108,10 @@ async fn start_servers(
         if admin_service.enabled() {
             let admin_service = AdminServiceServer::new(admin_service);
             server = server.add_service(admin_service);
+        }
+
+        if let Some(replication_service) = replication_service {
+            server = server.add_service(replication_service);
         }
 
         let resp = server.serve(grpc_socket_addr).await;
@@ -208,6 +229,26 @@ async fn schedule_background_jobs(
 fn is_dir_empty(path: &str) -> std::io::Result<bool> {
     let mut entries = fs::read_dir(path)?;
     Ok(entries.next().is_none())
+}
+
+fn create_replicator(
+    app_config: &snapchain::cfg::Config,
+    shard_stores: HashMap<u32, Stores>,
+    statsd_client: StatsdClientWrapper,
+) -> Arc<replication::replicator::Replicator> {
+    let replication_stores = Arc::new(replication::replication_stores::ReplicationStores::new(
+        shard_stores,
+        app_config.trie_branching_factor,
+        statsd_client,
+    ));
+    let replicator = replication::replicator::Replicator::new_with_options(
+        replication_stores,
+        replication::replicator::ReplicatorSnapshotOptions {
+            interval: app_config.replication.snapshot_interval,
+            max_age: app_config.replication.snapshot_max_age,
+        },
+    );
+    Arc::new(replicator)
 }
 
 #[tokio::main]
@@ -350,6 +391,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (fname_request_tx, fname_request_rx) = broadcast::channel(100);
 
     if app_config.read_node {
+        // Setup post-commit channel if replication is enabled
+        let (engine_post_commit_tx, engine_post_commit_rx) = if app_config.replication.enable {
+            let (tx, rx) = mpsc::channel::<PostCommitMessage>(1);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
         let node = SnapchainReadNode::create(
             keypair.clone(),
             app_config.consensus.clone(),
@@ -363,6 +412,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_config.trie_branching_factor,
             app_config.fc_network,
             registry,
+            engine_post_commit_tx,
         )
         .await;
 
@@ -384,6 +434,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
         );
         tokio::spawn(async move { mempool.run().await });
 
+        // Setup replication if enabled
+        let replicator: Option<Arc<replication::replicator::Replicator>> = if app_config
+            .replication
+            .enable
+        {
+            let replicator = create_replicator(
+                &app_config,
+                node.shard_stores.clone(),
+                statsd_client.clone(),
+            );
+
+            let spawned_replicator = replicator.clone();
+            tokio::spawn(async move {
+                replication::replicator::run(spawned_replicator, engine_post_commit_rx.unwrap())
+                    .await;
+            });
+
+            Some(replicator.clone())
+        } else {
+            None
+        };
+
         start_servers(
             &app_config,
             gossip,
@@ -396,6 +468,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.shard_senders.clone(),
             block_store.clone(),
             chains_clients,
+            replicator,
         )
         .await;
 
@@ -453,6 +526,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } else {
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
 
+        // Setup post-commit channel if replication is enabled
+        let (engine_post_commit_tx, engine_post_commit_rx) = if app_config.replication.enable {
+            let (tx, rx) = mpsc::channel::<PostCommitMessage>(1);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
         let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
         let local_state_store = LocalStateStore::new(global_db);
 
@@ -471,6 +552,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_config.trie_branching_factor,
             app_config.fc_network,
             registry,
+            engine_post_commit_tx,
         )
         .await;
 
@@ -552,6 +634,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
             });
         }
 
+        // Setup replication if enabled
+        let replicator: Option<Arc<replication::replicator::Replicator>> = if app_config
+            .replication
+            .enable
+        {
+            let replicator = create_replicator(
+                &app_config,
+                node.shard_stores.clone(),
+                statsd_client.clone(),
+            );
+
+            let spawned_replicator = replicator.clone();
+            tokio::spawn(async move {
+                replication::replicator::run(spawned_replicator, engine_post_commit_rx.unwrap())
+                    .await;
+            });
+
+            Some(replicator.clone())
+        } else {
+            None
+        };
+
         start_servers(
             &app_config,
             gossip,
@@ -564,6 +668,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.shard_senders.clone(),
             block_store.clone(),
             chains_clients,
+            replicator,
         )
         .await;
 

@@ -2929,8 +2929,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_commit() {
-        let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            post_commit_tx: Some(tx),
+            ..Default::default()
+        });
+
         test_helper::register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -2940,12 +2944,6 @@ mod tests {
         .await;
 
         let mut handles = vec![];
-
-        // Set the post commit channel, and start listening for post-commit hooks while
-        // comitting a cast message.
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        engine.set_post_commit_tx(tx);
 
         let handle = tokio::spawn(async move {
             let result =
@@ -2966,6 +2964,7 @@ mod tests {
         handles.push(handle);
 
         let handle = tokio::spawn(async move {
+            let timestamp = messages_factory::farcaster_time();
             let cast = messages_factory::casts::create_cast_add(
                 FID_FOR_TEST,
                 "test",
