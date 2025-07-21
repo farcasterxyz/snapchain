@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::{
+        mempool::routing,
         proto,
         storage::{
             db::{RocksDB, RocksdbError},
@@ -249,6 +250,8 @@ mod tests {
 
         let replicator = Arc::new(Replicator::new_with_options(
             replication_stores.clone(),
+            // Box::new(routing::ShardRouter {}),
+            // 1,
             ReplicatorSnapshotOptions {
                 interval: 1,
                 max_age: 10,

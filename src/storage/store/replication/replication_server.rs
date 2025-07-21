@@ -1,17 +1,28 @@
-use crate::proto;
 use tonic::{Request, Response, Status};
 
+use crate::mempool::routing;
+use crate::proto;
 use crate::storage::store::replication::replicator::Replicator;
 
 pub struct ReplicationServer {
     replicator: Replicator,
+    message_router: Box<dyn routing::MessageRouter>,
+    num_shards: u32,
 }
 
 impl ReplicationServer {
     const FID_RANGE: u64 = 10_000;
 
-    pub fn new(replicator: Replicator) -> Self {
-        ReplicationServer { replicator }
+    pub fn new(
+        replicator: Replicator,
+        message_router: Box<dyn routing::MessageRouter>,
+        num_shards: u32,
+    ) -> Self {
+        ReplicationServer {
+            replicator,
+            message_router,
+            num_shards,
+        }
     }
 
     fn parse_page_token(page_token: Vec<u8>) -> Result<u64, Status> {
@@ -57,5 +68,26 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
             next_page_token,
             ..Default::default()
         }))
+    }
+
+    // IMPORTANT: this is a temporary endpoint for debugging purposes only. It will eventually be
+    // removed, and SHOULD NOT be used for production purposes.
+    async fn get_replication_transactions_by_fid(
+        &self,
+        request: Request<proto::GetReplicationTransactionsByFidRequest>,
+    ) -> Result<Response<proto::GetReplicationTransactionsByFidResponse>, Status> {
+        let request = request.into_inner();
+        let shard = self.message_router.route_fid(request.fid, self.num_shards);
+        let (sys, user) = self
+            .replicator
+            .latest_transactions_for_fid(shard, request.fid)?;
+
+        Ok(Response::new(
+            proto::GetReplicationTransactionsByFidResponse {
+                system_transaction: sys,
+                user_transaction: user,
+                ..Default::default()
+            },
+        ))
     }
 }

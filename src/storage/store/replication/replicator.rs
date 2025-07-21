@@ -35,6 +35,7 @@ pub struct Replicator {
 }
 
 type ReplicationTransactions = (Vec<proto::Transaction>, Vec<proto::Transaction>);
+type ReplicationTransaction = (Option<proto::Transaction>, Option<proto::Transaction>);
 
 impl Replicator {
     pub fn new(stores: Arc<ReplicationStores>) -> Self {
@@ -51,15 +52,12 @@ impl Replicator {
         }
     }
 
-    // Fetches a set of system and user transactions that represent the current
-    // state of the given fid range. Start and end are inclusive, i.e. [start, end].
-    pub fn transactions_for_fid_range(
+    fn transactions_for_fid(
         &self,
         height: u64,
         shard: u32,
-        start_fid: u64,
-        end_fid: u64,
-    ) -> Result<ReplicationTransactions, ReplicationError> {
+        fid: u64,
+    ) -> Result<ReplicationTransaction, ReplicationError> {
         let stores = match self.stores.get(height, shard) {
             Some(stores) => stores,
             None => {
@@ -71,16 +69,51 @@ impl Replicator {
             }
         };
 
-        // TODO: validate fid range
+        // Build system and user transactions for the given fid
+        let sys_tx = build_system_transaction(&stores, fid);
+        let user_tx = build_user_transaction(&stores, fid);
 
+        Ok((sys_tx, user_tx))
+    }
+
+    pub fn latest_transactions_for_fid(
+        &self,
+        shard: u32,
+        fid: u64,
+    ) -> Result<ReplicationTransaction, ReplicationError> {
+        let height = self.stores.max_height_for_shard(shard).ok_or_else(|| {
+            ReplicationError::StoreNotFound(
+                0,
+                shard,
+                "No stores found for the given shard".to_string(),
+            )
+        })?;
+
+        self.transactions_for_fid(height, shard, fid)
+    }
+
+    // Fetches a set of system and user transactions that represent the current
+    // state of the given fid range. Start and end are inclusive, i.e. [start, end].
+    pub fn transactions_for_fid_range(
+        &self,
+        height: u64,
+        shard: u32,
+        start_fid: u64,
+        end_fid: u64,
+    ) -> Result<ReplicationTransactions, ReplicationError> {
         let mut sys = vec![];
         let mut user = vec![];
 
         for fid in start_fid..=end_fid {
-            let sys_tx = build_system_transaction(&stores, fid);
-            let user_tx = build_user_transaction(&stores, fid);
-            sys.push(sys_tx);
-            user.push(user_tx);
+            let (sys_tx, user_tx) = self.transactions_for_fid(height, shard, fid)?;
+
+            if let Some(sys_tx) = sys_tx {
+                sys.push(sys_tx);
+            }
+
+            if let Some(user_tx) = user_tx {
+                user.push(user_tx);
+            }
         }
 
         Ok((sys, user))
@@ -185,13 +218,20 @@ fn account_root_for_fid(stores: &Stores, fid: u64) -> Vec<u8> {
     )
 }
 
-fn build_user_transaction(stores: &Stores, fid: u64) -> proto::Transaction {
-    proto::Transaction {
+fn build_user_transaction(stores: &Stores, fid: u64) -> Option<proto::Transaction> {
+    let user_messages = build_user_messages_for_fid(stores, fid);
+    let account_root = account_root_for_fid(stores, fid);
+
+    if user_messages.is_empty() && account_root.is_empty() {
+        return None;
+    }
+
+    Some(proto::Transaction {
         fid,
         user_messages: build_user_messages_for_fid(stores, fid),
         account_root: account_root_for_fid(stores, fid),
         ..Default::default()
-    }
+    })
 }
 
 fn build_on_chain_event_validator_messages_for_fid(
@@ -297,10 +337,15 @@ fn build_system_messages_for_fid(stores: &Stores, fid: u64) -> Vec<proto::Valida
     messages
 }
 
-fn build_system_transaction(stores: &Stores, fid: u64) -> proto::Transaction {
-    proto::Transaction {
+fn build_system_transaction(stores: &Stores, fid: u64) -> Option<proto::Transaction> {
+    let messages = build_system_messages_for_fid(stores, fid);
+    if messages.is_empty() {
+        return None;
+    }
+
+    Some(proto::Transaction {
         fid,
         system_messages: build_system_messages_for_fid(stores, fid),
         ..Default::default()
-    }
+    })
 }

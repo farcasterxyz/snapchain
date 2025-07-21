@@ -41,6 +41,16 @@ impl ReplicationStores {
             .and_then(|stores| stores.get(&shard).cloned())
     }
 
+    pub fn max_height_for_shard(&self, shard_id: u32) -> Option<u64> {
+        self.read_only_stores
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(_block_height, shards)| shards.contains_key(&shard_id))
+            .map(|(block_height, _)| *block_height)
+            .max()
+    }
+
     pub fn open_snapshot(&self, height: u64, shard: u32) -> Result<(), ReplicationError> {
         match self.shard_stores.get(&shard) {
             Some(stores) => match stores.db.open_read_only() {
