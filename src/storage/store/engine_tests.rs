@@ -2935,14 +2935,6 @@ mod tests {
             ..Default::default()
         });
 
-        test_helper::register_user(
-            FID_FOR_TEST,
-            test_helper::default_signer(),
-            test_helper::default_custody_address(),
-            &mut engine,
-        )
-        .await;
-
         let mut handles = vec![];
 
         let handle = tokio::spawn(async move {
@@ -2964,19 +2956,43 @@ mod tests {
         handles.push(handle);
 
         let handle = tokio::spawn(async move {
-            let timestamp = messages_factory::farcaster_time();
-            let cast = messages_factory::casts::create_cast_add(
+            test_helper::register_user(
                 FID_FOR_TEST,
-                "test",
-                Some(timestamp),
-                None,
-            );
-            commit_message(&mut engine, &cast).await;
+                test_helper::default_signer(),
+                test_helper::default_custody_address(),
+                &mut engine,
+            )
+            .await;
         });
         handles.push(handle);
 
         for handle in handles {
-            handle.await.unwrap();
+            if let Err(e) = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await {
+                panic!("Task failed: {:?}", e);
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn test_post_commit_does_not_block_on_receiver() {
+        let (tx, mut _rx) = tokio::sync::mpsc::channel(1);
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            post_commit_tx: Some(tx),
+            ..Default::default()
+        });
+
+        let commit_future = test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        );
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), commit_future).await;
+
+        assert!(
+            result.is_ok(),
+            "Post-commit hook should not block on receiver"
+        );
     }
 }

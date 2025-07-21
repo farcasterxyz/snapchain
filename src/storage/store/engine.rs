@@ -1519,19 +1519,30 @@ impl ShardEngine {
         match &mut self.post_commit_tx {
             None => return,
             Some(tx) => {
-                let (oneshot_tx, oneshot_rx) = oneshot::channel();
-                let _ = tx
-                    .send(PostCommitMessage {
-                        shard_id: self.shard_id,
-                        header: header,
-                        channel: oneshot_tx,
-                    })
-                    .await;
+                // Attempt to send the post commit message and wait for a response,
+                // but don't block indefinitely in case the receiver is not ready, unavailable,
+                // or too slow.
 
+                let (oneshot_tx, oneshot_rx) = oneshot::channel();
+                let send_future = tx.send(PostCommitMessage {
+                    shard_id: self.shard_id,
+                    header: header,
+                    channel: oneshot_tx,
+                });
+
+                if let Err(err) =
+                    tokio::time::timeout(Duration::from_millis(200), send_future).await
+                {
+                    error!("Post commit hook send failed: {}", err);
+                    return;
+                }
+
+                // Attempt to wait for the receiver to process the message, but don't block
+                // indefinitely in case the receiver is not ready or available.
                 match tokio::time::timeout(Duration::from_millis(200), oneshot_rx).await {
                     Ok(Ok(_)) => {} // success
                     Ok(Err(err)) => error!("Post commit hook failed: {}", err),
-                    Err(err) => error!("Post commit hook failed: {}", err),
+                    Err(err) => error!("Post commit hook receive failed: {}", err),
                 }
             }
         }
