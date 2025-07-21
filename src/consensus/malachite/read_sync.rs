@@ -20,7 +20,6 @@ use crate::proto::{self, Height};
 use informalsystems_malachitebft_engine::network::{NetworkEvent, NetworkMsg, NetworkRef, Status};
 use informalsystems_malachitebft_engine::util::ticker::ticker;
 use informalsystems_malachitebft_engine::util::timers::{TimeoutElapsed, TimerScheduler};
-use informalsystems_malachitebft_sync::scoring::ema::ExponentialMovingAverage;
 
 use super::read_host::{ReadHostMsg, ReadHostRef};
 
@@ -167,11 +166,12 @@ impl ReadSync {
         gossip: NetworkRef<SnapchainValidatorContext>,
         host: ReadHostRef,
         params: ReadParams,
+        config: sync::Config,
         metrics: sync::Metrics,
         span: tracing::Span,
     ) -> Result<SyncRef, ractor::SpawnErr> {
         let actor = Self::new(ctx, gossip, host, params, metrics, span);
-        let (actor_ref, _) = Actor::spawn(None, actor, ()).await?;
+        let (actor_ref, _) = Actor::spawn(None, actor, config).await?;
         Ok(actor_ref)
     }
 
@@ -437,12 +437,12 @@ impl ReadSync {
 impl Actor for ReadSync {
     type Msg = Msg;
     type State = State;
-    type Arguments = ();
+    type Arguments = sync::Config;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _args: Self::Arguments,
+        args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         self.gossip
             .cast(NetworkMsg::Subscribe(Box::new(myself.clone())))?;
@@ -454,10 +454,9 @@ impl Actor for ReadSync {
         ));
 
         let rng = Box::new(rand::rngs::StdRng::from_entropy());
-        let scoring_strategy = ExponentialMovingAverage::default();
 
         Ok(State {
-            sync: sync::State::new(rng, scoring_strategy, None),
+            sync: sync::State::new(rng, args),
             timers: Timers::new(Box::new(myself.clone())),
             inflight: HashMap::new(),
             connected_peers: HashSet::new(),
