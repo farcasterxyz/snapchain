@@ -1,6 +1,7 @@
 use crate::core::error::HubError;
 use crate::proto;
-use crate::proto::{consensus_message, ConsensusMessage, HubEvent, MessageType};
+use crate::proto::liveness_message::Message;
+use crate::proto::{consensus_message, ConsensusMessage, HubEvent, LivenessMessage, MessageType};
 use crate::storage::store::engine::MessageValidationError;
 
 impl proto::Message {
@@ -70,6 +71,21 @@ impl ConsensusMessage {
             }
         }
         Err("Could not determine shard id for ConsensusMessage".to_string())
+    }
+}
+
+impl LivenessMessage {
+    pub fn shard_id(&self) -> Result<u32, String> {
+        match &self.message {
+            None => {
+                return Err("LivenessMessage has no message".to_string());
+            }
+            Some(msg) => match msg {
+                Message::Vote(vote) => vote.shard_id(),
+                Message::PolkaCertificate(cert) => Ok(cert.height.unwrap().shard_index),
+                Message::RoundCertificate(cert) => Ok(cert.height.unwrap().shard_index),
+            },
+        }
     }
 }
 
