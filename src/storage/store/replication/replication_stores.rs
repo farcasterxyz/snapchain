@@ -4,9 +4,12 @@ use std::{
 };
 
 use crate::{
+    proto,
     storage::{
-        store::replication::error::ReplicationError,
-        store::stores::{StoreLimits, Stores},
+        store::{
+            replication::error::ReplicationError,
+            stores::{StoreLimits, Stores},
+        },
         trie::merkle_trie,
     },
     utils::statsd_wrapper::StatsdClientWrapper,
@@ -17,6 +20,7 @@ pub struct ReplicationStores {
     read_only_stores: RwLock<HashMap<u64, HashMap<u32, Stores>>>,
     trie_branching_factor: u32,
     statsd_client: StatsdClientWrapper,
+    network: proto::FarcasterNetwork,
 }
 
 impl ReplicationStores {
@@ -24,12 +28,14 @@ impl ReplicationStores {
         shard_stores: HashMap<u32, Stores>,
         trie_branching_factor: u32,
         statsd_client: StatsdClientWrapper,
+        network: proto::FarcasterNetwork,
     ) -> Self {
         ReplicationStores {
             shard_stores,
             trie_branching_factor,
             statsd_client: statsd_client,
             read_only_stores: RwLock::new(HashMap::new()),
+            network,
         }
     }
 
@@ -71,6 +77,7 @@ impl ReplicationStores {
                         shard,
                         trie,
                         StoreLimits::default(),
+                        self.network.clone(),
                         self.statsd_client.clone(),
                     );
 

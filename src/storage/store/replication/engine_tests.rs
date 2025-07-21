@@ -246,6 +246,7 @@ mod tests {
             shard_stores.clone(),
             16,
             statsd_client.clone(),
+            engine.network.clone(),
         ));
 
         let replicator = Arc::new(Replicator::new_with_options(

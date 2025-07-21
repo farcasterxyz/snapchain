@@ -240,6 +240,7 @@ fn create_replicator(
         shard_stores,
         app_config.trie_branching_factor,
         statsd_client,
+        app_config.fc_network.clone(),
     ));
     let replicator = replication::replicator::Replicator::new_with_options(
         replication_stores,
