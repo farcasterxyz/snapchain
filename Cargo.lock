@@ -4404,14 +4404,14 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-codec"
-version = "0.3.0-pre"
+version = "0.4.0"
 dependencies = [
  "bytes",
 ]
 
 [[package]]
 name = "informalsystems-malachitebft-config"
-version = "0.3.0-pre"
+version = "0.4.0"
 dependencies = [
  "bytesize",
  "config",
@@ -4423,7 +4423,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-core-consensus"
-version = "0.3.0-pre"
+version = "0.4.0"
 dependencies = [
  "async-recursion",
  "derive-where",
@@ -4439,7 +4439,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-core-driver"
-version = "0.3.0-pre"
+version = "0.4.0"
 dependencies = [
  "derive-where",
  "informalsystems-malachitebft-core-state-machine",
@@ -4450,7 +4450,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-core-state-machine"
-version = "0.3.0-pre"
+version = "0.4.0"
 dependencies = [
  "derive-where",
  "displaydoc",
@@ -4459,7 +4459,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-core-types"
-version = "0.3.0-pre"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "derive-where",
@@ -4469,7 +4469,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-core-votekeeper"
-version = "0.3.0-pre"
+version = "0.4.0"
 dependencies = [
  "derive-where",
  "informalsystems-malachitebft-core-types",
@@ -4478,7 +4478,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-discovery"
-version = "0.3.0-pre"
+version = "0.4.0"
 dependencies = [
  "either",
  "informalsystems-malachitebft-metrics",
@@ -4491,7 +4491,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-engine"
-version = "0.3.0-pre"
+version = "0.4.0"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -4516,7 +4516,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-metrics"
-version = "0.3.0-pre"
+version = "0.4.0"
 dependencies = [
  "informalsystems-malachitebft-core-state-machine",
  "prometheus-client",
@@ -4524,7 +4524,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-network"
-version = "0.3.0-pre"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "either",
@@ -4544,7 +4544,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-peer"
-version = "0.3.0-pre"
+version = "0.4.0"
 dependencies = [
  "bs58",
  "multihash",
@@ -4553,7 +4553,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-sync"
-version = "0.3.0-pre"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4573,7 +4573,7 @@ dependencies = [
 
 [[package]]
 name = "informalsystems-malachitebft-wal"
-version = "0.3.0-pre"
+version = "0.4.0"
 dependencies = [
  "advisory-lock",
  "bytes",

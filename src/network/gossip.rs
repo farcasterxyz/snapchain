@@ -720,7 +720,8 @@ impl SnapchainGossip {
                         malachite_peer_id,
                         bytes,
                     );
-                    let shard = MalachiteEventShard::None;
+                    let shard_result = liveness_msg.shard_id();
+                    let shard = MalachiteEventShard::Shard(shard_result.unwrap());
                     Some(SystemMessage::MalachiteNetwork(shard, event))
                 }
                 Some(proto::gossip_message::GossipMessage::Status(status)) => {
