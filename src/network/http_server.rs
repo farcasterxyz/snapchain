@@ -4,6 +4,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::header::HeaderValue;
 use hyper::{body::Bytes, Method};
 use hyper::{HeaderMap, Request, Response, StatusCode};
+use libp2p::PeerId;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::convert::Infallible;
 use std::future::Future;
@@ -19,8 +20,7 @@ use crate::proto::{
 };
 use crate::proto::{
     casts_by_parent_request, hub_event, link_request, links_by_target_request, on_chain_event,
-    reaction_request, reactions_by_target_request, GetConnectedPeersRequest,
-    GetConnectedPeersResponse, Protocol,
+    reaction_request, reactions_by_target_request, GetConnectedPeersRequest, Protocol,
 };
 use crate::storage::store::account::message_decode;
 
@@ -1200,6 +1200,53 @@ impl IdRegistryEventByAddressRequest {
         proto::IdRegistryEventByAddressRequest {
             address: self.address,
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContactInfoBody {
+    gossip_address: String,
+    peer_id: String,
+    snapchain_version: String,
+    network: FarcasterNetwork,
+    timestamp: u64,
+}
+
+impl TryFrom<proto::ContactInfoBody> for ContactInfoBody {
+    type Error = ErrorResponse;
+
+    fn try_from(value: proto::ContactInfoBody) -> Result<Self, Self::Error> {
+        Ok(ContactInfoBody {
+            gossip_address: value.gossip_address.clone(),
+            peer_id: PeerId::from_bytes(&value.peer_id)
+                .map_err(|err| ErrorResponse {
+                    error: "Invalid peer id".to_string(),
+                    error_detail: Some(err.to_string()),
+                })?
+                .to_string(),
+            snapchain_version: value.snapchain_version.clone(),
+            network: value.network(),
+            timestamp: value.timestamp,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GetConnectedPeersResponse {
+    contacts: Vec<ContactInfoBody>,
+}
+
+impl TryFrom<proto::GetConnectedPeersResponse> for GetConnectedPeersResponse {
+    type Error = ErrorResponse;
+
+    fn try_from(value: proto::GetConnectedPeersResponse) -> Result<Self, Self::Error> {
+        Ok(GetConnectedPeersResponse {
+            contacts: value
+                .contacts
+                .into_iter()
+                .map(ContactInfoBody::try_from)
+                .collect::<Result<_, _>>()?,
+        })
     }
 }
 
@@ -2812,7 +2859,7 @@ impl HubHttpService for HubHttpServiceImpl {
                 error: "Failed to get connected peers".to_string(),
                 error_detail: Some(e.to_string()),
             })?;
-        Ok(response.into_inner())
+        Ok(GetConnectedPeersResponse::try_from(response.into_inner())?)
     }
 }
 
