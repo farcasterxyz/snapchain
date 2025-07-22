@@ -43,10 +43,10 @@ jobs:
           ref: ${{ env.MALACHITE_GIT_REF }}
           path: ./malachite
 
-      - name: Install Rust 1.85.0
+      - name: Install Rust 1.86.0
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: 1.85.0
+          toolchain: 1.86.0
           profile: default 
           override: true
 
