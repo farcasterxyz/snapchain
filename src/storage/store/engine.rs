@@ -1596,7 +1596,6 @@ impl ShardEngine {
                 count_fn("trie.mem_get_count.for_commit", read_count.1);
             };
             let trie_ctx = &merkle_trie::Context::with_callback(count_callback);
-            // let trie_ctx = &merkle_trie::Context::new();
 
             match self.replay_proposal(
                 trie_ctx,

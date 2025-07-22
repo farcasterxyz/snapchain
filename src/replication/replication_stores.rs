@@ -28,6 +28,8 @@ pub struct ReplicationStores {
 }
 
 impl ReplicationStores {
+    const SNAPSHOT_METRIC_NAME: &'static str = "replication.snapshot.count";
+
     pub fn new(
         shard_stores: HashMap<u32, Stores>,
         trie_branching_factor: u32,
@@ -115,6 +117,8 @@ impl ReplicationStores {
             .unwrap()
             .insert(height, timestamped_store);
 
+        self.capture_snapshot_metrics(&stores);
+
         Ok(())
     }
 
@@ -152,10 +156,28 @@ impl ReplicationStores {
             }
             None => error!("Shard {} not found in read_only_stores", shard),
         }
+
+        self.capture_snapshot_metrics(&stores);
     }
 
     fn close_all_snapshots(&mut self) {
-        self.read_only_stores.write().unwrap().clear();
+        let stores = self.read_only_stores.write();
+        if stores.is_err() {
+            error!("Failed to acquire write lock on read_only_stores");
+            return;
+        }
+        let mut stores = stores.unwrap();
+        stores.clear();
+    }
+
+    fn capture_snapshot_metrics(&self, stores: &HashMap<u32, HashMap<u64, TimestampedStore>>) {
+        for (shard, heights) in stores.iter() {
+            self.statsd_client.gauge_with_shard(
+                shard.clone(),
+                Self::SNAPSHOT_METRIC_NAME,
+                heights.len() as u64,
+            );
+        }
     }
 }
 
