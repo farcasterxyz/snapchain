@@ -56,16 +56,20 @@ impl Default for PruningConfig {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ReplicationConfig {
     pub enable: bool,
-    pub snapshot_interval: u64, // Interval, in blocks, at which snapshots are created
-    pub snapshot_max_age: u64,  // Maximum age of snapshots, in blocks
+
+    #[serde(skip)] // Skip (de)serialization as this is hard-coded
+    pub snapshot_interval: u64, // Specified in number of blocks
+
+    #[serde(skip)] // Skip (de)serialization as this is hard-coded
+    pub snapshot_max_age: Duration,
 }
 
 impl Default for ReplicationConfig {
     fn default() -> Self {
         Self {
             enable: false,
-            snapshot_interval: 1_000,
-            snapshot_max_age: 10_000,
+            snapshot_interval: (60 * 60 * 2), // every ~2 hours (in number of blocks)
+            snapshot_max_age: Duration::from_secs(60 * 60 * 24), // keep snapshots for 24 hours
         }
     }
 }

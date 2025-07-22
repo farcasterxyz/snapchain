@@ -2,6 +2,7 @@ use tokio::select;
 use tracing::error;
 
 use crate::{
+    core::util,
     proto,
     storage::{
         db::{PageOptions, RocksDbTransactionBatch},
@@ -14,7 +15,7 @@ use crate::{
         trie::merkle_trie::TrieKey,
     },
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 pub async fn run(
     replicator: Arc<Replicator>,
@@ -38,15 +39,15 @@ pub async fn run(
 
 #[derive(Clone)]
 pub struct ReplicatorSnapshotOptions {
-    pub interval: u64, // Interval in blocks to take snapshots
-    pub max_age: u64,  // Maximum age of snapshots in blocks
+    pub interval: u64,     // Interval in blocks to take snapshots
+    pub max_age: Duration, // Maximum age of snapshots to keep
 }
 
 impl Default for ReplicatorSnapshotOptions {
     fn default() -> Self {
         ReplicatorSnapshotOptions {
             interval: 1_000, // Default to taking a snapshot every 1000 blocks
-            max_age: 10_000, // Default to keeping snapshots for 10000 blocks
+            max_age: Duration::from_secs(60 * 60 * 24 * 7),
         }
     }
 }
@@ -81,12 +82,12 @@ impl Replicator {
         shard: u32,
         fid: u64,
     ) -> Result<ReplicationTransaction, ReplicationError> {
-        let stores = match self.stores.get(height, shard) {
+        let stores = match self.stores.get(shard, height) {
             Some(stores) => stores,
             None => {
                 return Err(ReplicationError::StoreNotFound(
-                    height,
                     shard,
+                    height,
                     "No stores found for the given height and shard".to_string(),
                 ));
             }
@@ -106,8 +107,8 @@ impl Replicator {
     ) -> Result<ReplicationTransaction, ReplicationError> {
         let height = self.stores.max_height_for_shard(shard).ok_or_else(|| {
             ReplicationError::StoreNotFound(
-                0,
                 shard,
+                0,
                 "No stores found for the given shard".to_string(),
             )
         })?;
@@ -142,6 +143,22 @@ impl Replicator {
         Ok((sys, user))
     }
 
+    // Calculates the oldest timestamp that is still valid for snapshots.
+    fn oldest_valid_timestamp(&self) -> Result<u64, ReplicationError> {
+        let current_time = match util::get_farcaster_time() {
+            Ok(time) => time,
+            Err(e) => {
+                return Err(ReplicationError::InternalError(format!(
+                    "Failed to get current Farcaster time: {}",
+                    e
+                )));
+            }
+        };
+
+        let oldest_timestamp = current_time.saturating_sub(self.snapshot_options.max_age.as_secs());
+        Ok(oldest_timestamp)
+    }
+
     pub fn handle_post_commit_message(
         &self,
         msg: &PostCommitMessage,
@@ -155,17 +172,26 @@ impl Replicator {
             }
         };
 
-        // Clean up old snapshots
-        let expiration_block = block_number.saturating_sub(self.snapshot_options.max_age);
-        self.stores.close_snapshots_below(expiration_block);
+        let timestamp = msg.header.timestamp;
+        let oldest_valid_timestamp = self.oldest_valid_timestamp()?;
 
-        // Check if we can take a snapshot
+        // Clean up old snapshots
+        self.stores
+            .close_aged_snapshots(msg.shard_id, oldest_valid_timestamp);
+
+        // Check if we can take a snapshot of this block
         if block_number % self.snapshot_options.interval != 0 {
             return Ok(());
         }
 
+        // Check if the timestamp is expired
+        if timestamp < oldest_valid_timestamp {
+            return Ok(());
+        }
+
         // Open a snapshot
-        self.stores.open_snapshot(block_number, msg.shard_id)
+        self.stores
+            .open_snapshot(msg.shard_id, block_number, timestamp)
     }
 }
 

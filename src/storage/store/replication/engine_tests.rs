@@ -17,7 +17,7 @@ mod tests {
         },
         utils::factory::{self, messages_factory, username_factory},
     };
-    use std::{collections::HashMap, sync::Arc};
+    use std::{collections::HashMap, sync::Arc, time::Duration};
 
     fn opendb(path: &str) -> Result<Arc<RocksDB>, RocksdbError> {
         let milliseconds_timestamp: u128 = std::time::SystemTime::now()
@@ -253,7 +253,7 @@ mod tests {
             replication_stores.clone(),
             ReplicatorSnapshotOptions {
                 interval: 1,
-                max_age: 10,
+                max_age: Duration::from_secs(10),
             },
         ));
 
