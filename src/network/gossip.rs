@@ -30,6 +30,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::str::FromStr;
 use std::time::Duration;
 use tokio::io;
 use tokio::sync::mpsc::Sender;
@@ -54,6 +55,7 @@ pub struct Config {
     pub contact_info_interval: Duration,
     pub bootstrap_reconnect_interval: Duration,
     pub enable_autodiscovery: bool,
+    pub direct_peers: String,
 }
 
 impl Default for Config {
@@ -69,6 +71,7 @@ impl Default for Config {
             contact_info_interval: Duration::from_secs(300),
             bootstrap_reconnect_interval: Duration::from_secs(30),
             enable_autodiscovery: false,
+            direct_peers: "".to_string(),
         }
     }
 }
@@ -116,6 +119,13 @@ impl Config {
         self.bootstrap_peers
             .split(',')
             .map(|s| s.trim().to_string())
+            .collect()
+    }
+
+    pub fn direct_peers(&self) -> Vec<PeerId> {
+        self.direct_peers
+            .split(",")
+            .filter_map(|s| PeerId::from_str(s.trim()).ok())
             .collect()
     }
 }
@@ -226,10 +236,15 @@ impl SnapchainGossip {
                     .map_err(|msg| io::Error::new(io::ErrorKind::Other, msg))?; // Temporary hack because `build` does not return a proper `std::error::Error`.
 
                 // build a gossipsub network behaviour
-                let gossipsub = gossipsub::Behaviour::new(
+                let mut gossipsub = gossipsub::Behaviour::new(
                     gossipsub::MessageAuthenticity::Signed(key.clone()),
                     gossipsub_config,
                 )?;
+
+                for peer_id in config.direct_peers() {
+                    info!(peer_id = peer_id.to_string(), "Adding direct peer");
+                    gossipsub.add_explicit_peer(&peer_id);
+                }
 
                 let rpc = sync::Behaviour::new(
                     sync::Config::default().with_request_timeout(Duration::from_secs(5)),
