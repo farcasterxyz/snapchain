@@ -2,15 +2,15 @@
 mod tests {
     use crate::{
         proto,
+        replication::{
+            replication_stores::ReplicationStores,
+            replicator::{self, Replicator, ReplicatorSnapshotOptions},
+        },
         storage::{
             db::{RocksDB, RocksdbError},
             store::{
                 account::UserDataStore,
                 engine::{MempoolMessage, PostCommitMessage, ShardEngine},
-                replication::{
-                    replication_stores::ReplicationStores,
-                    replicator::{self, Replicator, ReplicatorSnapshotOptions},
-                },
                 test_helper::{self, EngineOptions},
             },
             trie::merkle_trie::TrieKey,

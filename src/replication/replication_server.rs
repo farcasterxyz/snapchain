@@ -4,7 +4,7 @@ use tonic::{Request, Response, Status};
 
 use crate::mempool::routing;
 use crate::proto;
-use crate::storage::store::replication::replicator::Replicator;
+use crate::replication::replicator::Replicator;
 
 pub struct ReplicationServer {
     replicator: Arc<Replicator>,

@@ -4,12 +4,12 @@ use tracing::error;
 use crate::{
     core::util,
     proto,
+    replication::{error::ReplicationError, replication_stores::ReplicationStores},
     storage::{
         db::{PageOptions, RocksDbTransactionBatch},
         store::{
             account::{MessagesPage, Store, StoreDef, UserDataStore, UsernameProofStore},
             engine::PostCommitMessage,
-            replication::{error::ReplicationError, replication_stores::ReplicationStores},
             stores::Stores,
         },
         trie::merkle_trie::TrieKey,

@@ -16,11 +16,11 @@ use snapchain::node::snapchain_read_node::SnapchainReadNode;
 use snapchain::proto::admin_service_server::AdminServiceServer;
 use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::proto::replication_service_server::ReplicationServiceServer;
+use snapchain::replication;
 use snapchain::storage::db::snapshot::download_snapshots;
 use snapchain::storage::db::RocksDB;
 use snapchain::storage::store::engine::{PostCommitMessage, Senders};
 use snapchain::storage::store::node_local_state::{self, LocalStateStore};
-use snapchain::storage::store::replication;
 use snapchain::storage::store::stores::Stores;
 use snapchain::storage::store::BlockStore;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
@@ -235,16 +235,16 @@ fn create_replicator(
     app_config: &snapchain::cfg::Config,
     shard_stores: HashMap<u32, Stores>,
     statsd_client: StatsdClientWrapper,
-) -> Arc<replication::replicator::Replicator> {
-    let replication_stores = Arc::new(replication::replication_stores::ReplicationStores::new(
+) -> Arc<replication::Replicator> {
+    let replication_stores = Arc::new(replication::ReplicationStores::new(
         shard_stores,
         app_config.trie_branching_factor,
         statsd_client,
         app_config.fc_network.clone(),
     ));
-    let replicator = replication::replicator::Replicator::new_with_options(
+    let replicator = replication::Replicator::new_with_options(
         replication_stores,
-        replication::replicator::ReplicatorSnapshotOptions {
+        replication::ReplicatorSnapshotOptions {
             interval: app_config.replication.snapshot_interval,
             max_age: app_config.replication.snapshot_max_age,
         },
@@ -436,10 +436,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         tokio::spawn(async move { mempool.run().await });
 
         // Setup replication if enabled
-        let replicator: Option<Arc<replication::replicator::Replicator>> = if app_config
-            .replication
-            .enable
-        {
+        let replicator: Option<Arc<replication::Replicator>> = if app_config.replication.enable {
             let replicator = create_replicator(
                 &app_config,
                 node.shard_stores.clone(),
@@ -636,10 +633,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
 
         // Setup replication if enabled
-        let replicator: Option<Arc<replication::replicator::Replicator>> = if app_config
-            .replication
-            .enable
-        {
+        let replicator: Option<Arc<replication::Replicator>> = if app_config.replication.enable {
             let replicator = create_replicator(
                 &app_config,
                 node.shard_stores.clone(),

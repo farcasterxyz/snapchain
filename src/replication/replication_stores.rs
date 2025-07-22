@@ -1,20 +1,16 @@
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
-    time::Duration,
 };
 
 use tracing::error;
 
 use crate::{
-    core::util,
     proto,
+    replication::error::ReplicationError,
     storage::{
         db::RocksDB,
-        store::{
-            replication::error::ReplicationError,
-            stores::{StoreLimits, Stores},
-        },
+        store::stores::{StoreLimits, Stores},
         trie::merkle_trie,
     },
     utils::statsd_wrapper::StatsdClientWrapper,

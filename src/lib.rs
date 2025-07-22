@@ -7,6 +7,7 @@ pub mod mempool;
 pub mod network;
 pub mod node;
 pub mod perf;
+pub mod replication;
 pub mod storage;
 pub mod utils;
 pub mod version;
