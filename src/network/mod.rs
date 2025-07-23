@@ -8,3 +8,6 @@ pub mod server;
 mod gossip_test;
 #[cfg(test)]
 mod server_tests;
+
+#[cfg(test)]
+mod http_server_test;

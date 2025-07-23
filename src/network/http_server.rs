@@ -24,8 +24,6 @@ use crate::proto::{
 };
 use crate::storage::store::account::message_decode;
 
-use super::server::MyHubService;
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
     cors_origin: String,
@@ -1264,9 +1262,16 @@ pub struct ErrorResponse {
 }
 
 // Implementation struct
-#[derive(Clone)]
-pub struct HubHttpServiceImpl {
-    pub service: Arc<MyHubService>,
+pub struct HubHttpServiceImpl<T: HubService> {
+    pub service: Arc<T>,
+}
+
+impl<T: HubService> Clone for HubHttpServiceImpl<T> {
+    fn clone(&self) -> Self {
+        HubHttpServiceImpl {
+            service: Arc::clone(&self.service),
+        }
+    }
 }
 
 fn map_get_info_response_to_json_info_response(
@@ -2159,7 +2164,10 @@ pub trait HubHttpService {
 }
 
 #[async_trait]
-impl HubHttpService for HubHttpServiceImpl {
+impl<T> HubHttpService for HubHttpServiceImpl<T>
+where
+    T: HubService,
+{
     async fn get_info(&self, _request: InfoRequest) -> Result<InfoResponse, ErrorResponse> {
         let response = self
             .service
@@ -2864,12 +2872,15 @@ impl HubHttpService for HubHttpServiceImpl {
 }
 
 // Router implementation
-pub struct Router {
-    service: Arc<HubHttpServiceImpl>,
+pub struct Router<Service: HubService> {
+    service: Arc<HubHttpServiceImpl<Service>>,
 }
 
-impl Router {
-    pub fn new(service: HubHttpServiceImpl) -> Self {
+impl<Service> Router<Service>
+where
+    Service: HubService,
+{
+    pub fn new(service: HubHttpServiceImpl<Service>) -> Self {
         Self {
             service: Arc::new(service),
         }
@@ -3097,7 +3108,11 @@ impl Router {
     async fn handle_protobuf_request<Resp, F>(
         &self,
         req: Request<hyper::body::Incoming>,
-        handler: impl FnOnce(Arc<HubHttpServiceImpl>, HeaderMap<HeaderValue>, proto::Message) -> F,
+        handler: impl FnOnce(
+            Arc<HubHttpServiceImpl<Service>>,
+            HeaderMap<HeaderValue>,
+            proto::Message,
+        ) -> F,
     ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible>
     where
         Resp: Serialize,
@@ -3164,7 +3179,7 @@ impl Router {
     async fn handle_request<Req, Resp, F>(
         &self,
         req: Request<hyper::body::Incoming>,
-        handler: impl FnOnce(Arc<HubHttpServiceImpl>, Req) -> F,
+        handler: impl FnOnce(Arc<HubHttpServiceImpl<Service>>, Req) -> F,
     ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible>
     where
         Req: DeserializeOwned,
