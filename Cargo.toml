@@ -22,7 +22,6 @@ futures-core = "0.3.31"
 parking_lot = "0.12.1"
 tokio-retry2 = { version = "0.5", features = ["jitter", "tracing"] }
 clap = { version = "4.3.0", features = ["derive"] }
-yamux = "=0.13.5"
 libp2p = { version = "0.55.0", features = ["tokio", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux", "quic", "request-response"] }
 async-trait = "0.1.68"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt", "json"] }

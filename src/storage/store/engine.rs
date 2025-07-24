@@ -623,7 +623,7 @@ impl ShardEngine {
         let mut pruned_messages_count = 0;
         let mut revoked_messages_count = 0;
         let mut events = vec![];
-        let mut message_types = HashMap::new();
+        let mut message_types = HashSet::new();
         let mut revoked_signers = HashSet::new();
 
         let mut validation_errors = vec![];
@@ -786,9 +786,14 @@ impl ShardEngine {
                             self.update_trie(trie_ctx, &event, txn_batch)?;
                             events.push(event.clone());
                             user_messages_count += 1;
-                            let message_type_count =
-                                message_types.get(&msg.msg_type()).unwrap_or(&0);
-                            message_types.insert(msg.msg_type(), message_type_count + 1);
+                            message_types.insert(msg.msg_type());
+                            if source != ProposalSource::Simulate {
+                                self.count(
+                                    "messages_merged",
+                                    1,
+                                    vec![("message_type", &(msg.msg_type() as i32).to_string())],
+                                );
+                            }
                         }
                         Err(err) => {
                             if source != ProposalSource::Simulate {
@@ -829,9 +834,9 @@ impl ShardEngine {
             }
         }
 
-        for msg_type in message_types.keys() {
+        for msg_type in message_types {
             let fid = snapchain_txn.fid;
-            let result = self.prune_messages(fid, *msg_type, txn_batch, &version);
+            let result = self.prune_messages(fid, msg_type, txn_batch, &version);
             match result {
                 Ok(pruned_events) => {
                     for event in pruned_events {
@@ -896,13 +901,6 @@ impl ShardEngine {
         if source != ProposalSource::Simulate {
             self.count("messages_pruned", pruned_messages_count, vec![]);
             self.count("messaged_revoked", revoked_messages_count, vec![]);
-            for (msg_type, count) in message_types {
-                self.count(
-                    "messages_merged",
-                    count,
-                    vec![("message_type", &(msg_type as i32).to_string())],
-                );
-            }
         }
 
         // Return the new account root hash

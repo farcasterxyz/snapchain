@@ -30,7 +30,7 @@ EOF
 # since the Cargo configuration references files in src.
 # This means we'll re-fetch all crates every time the source code changes,
 # which isn't ideal.
-COPY Cargo.toml build.rs ./
+COPY Cargo.lock Cargo.toml build.rs ./
 COPY src ./src
 
 ENV RUST_BACKTRACE=full
