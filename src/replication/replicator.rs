@@ -1,5 +1,5 @@
 use tokio::select;
-use tracing::{error, info};
+use tracing::error;
 
 use crate::{
     core::util,
