@@ -23,12 +23,23 @@ impl StatsdClientWrapper {
         }
     }
 
-    pub fn count_with_shard(&self, shard_id: u32, key: &str, value: u64) {
+    pub fn count_with_shard(
+        &self,
+        shard_id: u32,
+        key: &str,
+        value: u64,
+        extra_tags: Vec<(&str, &str)>,
+    ) {
         if self.use_tags {
-            self.client
+            let shard_id_str = shard_id.to_string();
+            let mut metric = self
+                .client
                 .count_with_tags(key, value)
-                .with_tag("shard", format!("{}", shard_id).as_str())
-                .send()
+                .with_tag("shard", &shard_id_str);
+            for (key, value) in extra_tags {
+                metric = metric.with_tag(key, value);
+            }
+            metric.send();
         } else {
             let key = format!("shard{}.{}", shard_id, key);
             _ = self.client.count(key.as_str(), value)

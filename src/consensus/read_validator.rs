@@ -232,6 +232,7 @@ impl ReadValidator {
             self.shard_id,
             "read_validator.num_commited_values",
             num_committed_values,
+            vec![],
         );
         num_committed_values
     }

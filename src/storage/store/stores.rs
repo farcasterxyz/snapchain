@@ -503,7 +503,7 @@ impl Stores {
             elapsed.as_secs()
         );
         self.statsd
-            .count_with_shard(self.shard_id, "prune.events", count as u64);
+            .count_with_shard(self.shard_id, "prune.events", count as u64, vec![]);
         self.statsd.time_with_shard(
             self.shard_id,
             "prune.events_time_ms",
@@ -566,7 +566,7 @@ impl Stores {
             elapsed.as_millis() as u64,
         );
         self.statsd
-            .count_with_shard(self.shard_id, "prune.shard_chunks", count as u64);
+            .count_with_shard(self.shard_id, "prune.shard_chunks", count as u64, vec![]);
         info!(
             "Pruning shard chunks complete for shard {}. Pruned {} chunks in {} seconds",
             self.shard_id,

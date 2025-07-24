@@ -383,7 +383,7 @@ pub async fn upload_to_s3(
                 .await?;
         }
         info!(key, "Finished uploading snapshot to s3");
-        statsd_client.count_with_shard(shard_id, "snapshots.successful_upload", 1);
+        statsd_client.count_with_shard(shard_id, "snapshots.successful_upload", 1, vec![]);
 
         file_names.push(file_name)
     }

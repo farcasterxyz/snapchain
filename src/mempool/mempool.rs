@@ -468,7 +468,7 @@ impl Mempool {
         }
         if self.message_exceeds_rate_limits(shard, message) {
             self.statsd_client
-                .count_with_shard(shard, "mempool.rate_limit_hit", 1);
+                .count_with_shard(shard, "mempool.rate_limit_hit", 1, vec![]);
             return Err(HubError::rate_limited(&format!(
                 "rate limit exceeded for FID {}",
                 message.fid()
@@ -559,7 +559,7 @@ impl Mempool {
             }
 
             self.statsd_client
-                .count_with_shard(shard_id, "mempool.insert.success", 1);
+                .count_with_shard(shard_id, "mempool.insert.success", 1, vec![]);
 
             self.read_node_mempool.gossip_message(message, source).await;
         } else {
@@ -589,7 +589,7 @@ impl Mempool {
                                 for transaction in chunk.transactions {
                                     for user_message in transaction.user_messages {
                                         mempool.remove(&user_message.mempool_key());
-                                        self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
+                                        self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1, vec![]);
                                     }
                                     for system_message in transaction.system_messages {
                                         mempool.remove(&system_message.mempool_key());
@@ -603,7 +603,7 @@ impl Mempool {
 
                                             }
                                         }
-                                       self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
+                                       self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1, vec![]);
                                     }
                                 }
                             }

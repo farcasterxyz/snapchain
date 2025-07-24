@@ -231,10 +231,10 @@ impl ShardEngine {
     }
 
     // statsd
-    fn count(&self, key: &str, count: u64) {
+    fn count(&self, key: &str, count: u64, extra_tags: Vec<(&str, &str)>) {
         let key = format!("engine.{}", key);
         self.statsd_client
-            .count_with_shard(self.shard_id, key.as_str(), count);
+            .count_with_shard(self.shard_id, key.as_str(), count, extra_tags);
     }
 
     // statsd
@@ -312,7 +312,11 @@ impl ShardEngine {
         messages: Vec<MempoolMessage>,
         timestamp: &FarcasterTime,
     ) -> Result<ShardStateChange, EngineError> {
-        self.count("prepare_proposal.recv_messages", messages.len() as u64);
+        self.count(
+            "prepare_proposal.recv_messages",
+            messages.len() as u64,
+            vec![],
+        );
 
         let mut snapchain_txns = self.create_transactions_from_mempool(messages)?;
         let mut events = vec![];
@@ -334,12 +338,21 @@ impl ShardEngine {
 
         let count = Self::txn_counts(&snapchain_txns);
 
-        self.count("prepare_proposal.transactions", count.transactions);
-        self.count("prepare_proposal.user_messages", count.user_messages);
-        self.count("prepare_proposal.system_messages", count.system_messages);
+        self.count("prepare_proposal.transactions", count.transactions, vec![]);
+        self.count(
+            "prepare_proposal.user_messages",
+            count.user_messages,
+            vec![],
+        );
+        self.count(
+            "prepare_proposal.system_messages",
+            count.system_messages,
+            vec![],
+        );
         self.count(
             "prepare_proposal.validation_errors",
             validation_error_count as u64,
+            vec![],
         );
 
         let new_root_hash = self.stores.trie.root_hash()?;
@@ -423,10 +436,10 @@ impl ShardEngine {
 
         let count_fn = Self::make_count_fn(self.statsd_client.clone(), self.shard_id);
         let count_callback = move |read_count: (u64, u64)| {
-            count_fn("trie.db_get_count.total", read_count.0);
-            count_fn("trie.db_get_count.for_propose", read_count.0);
-            count_fn("trie.mem_get_count.total", read_count.1);
-            count_fn("trie.mem_get_count.for_propose", read_count.1);
+            count_fn("trie.db_get_count.total", read_count.0, vec![]);
+            count_fn("trie.db_get_count.for_propose", read_count.0, vec![]);
+            count_fn("trie.mem_get_count.total", read_count.1, vec![]);
+            count_fn("trie.mem_get_count.for_propose", read_count.1, vec![]);
         };
         let timestamp = timestamp.unwrap_or_else(FarcasterTime::current);
         let result = self
@@ -450,7 +463,7 @@ impl ShardEngine {
         let proposal_duration = now.elapsed();
         self.time_with_shard("propose_time", proposal_duration.as_millis() as u64);
 
-        self.count("propose.invoked", 1);
+        self.count("propose.invoked", 1, vec![]);
         result
     }
 
@@ -610,7 +623,7 @@ impl ShardEngine {
         let mut pruned_messages_count = 0;
         let mut revoked_messages_count = 0;
         let mut events = vec![];
-        let mut message_types = HashSet::new();
+        let mut message_types = HashMap::new();
         let mut revoked_signers = HashSet::new();
 
         let mut validation_errors = vec![];
@@ -773,7 +786,9 @@ impl ShardEngine {
                             self.update_trie(trie_ctx, &event, txn_batch)?;
                             events.push(event.clone());
                             user_messages_count += 1;
-                            message_types.insert(msg.msg_type());
+                            let message_type_count =
+                                message_types.get(&msg.msg_type()).unwrap_or(&0);
+                            message_types.insert(msg.msg_type(), message_type_count + 1);
                         }
                         Err(err) => {
                             if source != ProposalSource::Simulate {
@@ -814,9 +829,9 @@ impl ShardEngine {
             }
         }
 
-        for msg_type in message_types {
+        for msg_type in message_types.keys() {
             let fid = snapchain_txn.fid;
-            let result = self.prune_messages(fid, msg_type, txn_batch, &version);
+            let result = self.prune_messages(fid, *msg_type, txn_batch, &version);
             match result {
                 Ok(pruned_events) => {
                     for event in pruned_events {
@@ -877,6 +892,18 @@ impl ShardEngine {
         );
         let elapsed = now.elapsed();
         self.time_with_shard("replay_txn_time_us", elapsed.as_micros() as u64);
+
+        if source != ProposalSource::Simulate {
+            self.count("messages_pruned", pruned_messages_count, vec![]);
+            self.count("messaged_revoked", revoked_messages_count, vec![]);
+            for (msg_type, count) in message_types {
+                self.count(
+                    "messages_merged",
+                    count,
+                    vec![("message_type", &(msg_type as i32).to_string())],
+                );
+            }
+        }
 
         // Return the new account root hash
         Ok((account_root, events, validation_errors))
@@ -1375,10 +1402,10 @@ impl ShardEngine {
 
         let count_fn = Self::make_count_fn(self.statsd_client.clone(), self.shard_id);
         let count_callback = move |read_count: (u64, u64)| {
-            count_fn("trie.db_get_count.total", read_count.0);
-            count_fn("trie.db_get_count.for_validate", read_count.0);
-            count_fn("trie.mem_get_count.total", read_count.1);
-            count_fn("trie.mem_get_count.for_validate", read_count.1);
+            count_fn("trie.db_get_count.total", read_count.0, vec![]);
+            count_fn("trie.db_get_count.for_validate", read_count.0, vec![]);
+            count_fn("trie.mem_get_count.total", read_count.1, vec![]);
+            count_fn("trie.mem_get_count.for_validate", read_count.1, vec![]);
         };
 
         let proposal_result = self.replay_proposal(
@@ -1410,11 +1437,11 @@ impl ShardEngine {
         self.time_with_shard("validate_time", elapsed.as_millis() as u64);
 
         if result {
-            self.count("validate.true", 1);
-            self.count("validate.false", 0);
+            self.count("validate.true", 1, vec![]);
+            self.count("validate.false", 0, vec![]);
         } else {
-            self.count("validate.false", 1);
-            self.count("validate.true", 0);
+            self.count("validate.false", 1, vec![]);
+            self.count("validate.true", 0, vec![]);
         }
 
         result
@@ -1479,7 +1506,7 @@ impl ShardEngine {
     }
 
     fn emit_commit_metrics(&mut self, shard_chunk: &&ShardChunk) -> Result<(), EngineError> {
-        self.count("commit.invoked", 1);
+        self.count("commit.invoked", 1, vec![]);
 
         let block_number = &shard_chunk
             .header
@@ -1501,9 +1528,9 @@ impl ShardEngine {
 
         let counts = Self::txn_counts(&shard_chunk.transactions);
 
-        self.count("commit.transactions", counts.transactions);
-        self.count("commit.user_messages", counts.user_messages);
-        self.count("commit.system_messages", counts.system_messages);
+        self.count("commit.transactions", counts.transactions, vec![]);
+        self.count("commit.user_messages", counts.user_messages, vec![]);
+        self.count("commit.system_messages", counts.system_messages, vec![]);
 
         // useful to see on perf test dashboards
         self.gauge(
@@ -1553,10 +1580,13 @@ impl ShardEngine {
         }
     }
 
-    pub fn make_count_fn(statsd_client: StatsdClientWrapper, shard_id: u32) -> impl Fn(&str, u64) {
-        move |key: &str, count: u64| {
+    pub fn make_count_fn(
+        statsd_client: StatsdClientWrapper,
+        shard_id: u32,
+    ) -> impl Fn(&str, u64, Vec<(&str, &str)>) {
+        move |key: &str, count: u64, extra_tags: Vec<(&str, &str)>| {
             let key = format!("engine.{}", key);
-            statsd_client.count_with_shard(shard_id, &key, count);
+            statsd_client.count_with_shard(shard_id, &key, count, extra_tags);
         }
     }
 
@@ -1595,10 +1625,10 @@ impl ShardEngine {
 
             let count_fn = Self::make_count_fn(self.statsd_client.clone(), self.shard_id);
             let count_callback = move |read_count: (u64, u64)| {
-                count_fn("trie.db_get_count.total", read_count.0);
-                count_fn("trie.db_get_count.for_commit", read_count.0);
-                count_fn("trie.mem_get_count.total", read_count.1);
-                count_fn("trie.mem_get_count.for_commit", read_count.1);
+                count_fn("trie.db_get_count.total", read_count.0, vec![]);
+                count_fn("trie.db_get_count.for_commit", read_count.0, vec![]);
+                count_fn("trie.mem_get_count.total", read_count.1, vec![]);
+                count_fn("trie.mem_get_count.for_commit", read_count.1, vec![]);
             };
             let trie_ctx = &merkle_trie::Context::with_callback(count_callback);
 
@@ -1878,7 +1908,8 @@ impl BlockEngine {
     // statsd
     fn count(&self, key: &str, count: u64) {
         let key = format!("engine.{}", key);
-        self.statsd_client.count_with_shard(0, key.as_str(), count);
+        self.statsd_client
+            .count_with_shard(0, key.as_str(), count, vec![]);
     }
 
     // statsd
