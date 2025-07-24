@@ -1,5 +1,5 @@
 use tokio::select;
-use tracing::error;
+use tracing::{error, info};
 
 use crate::{
     core::util,
@@ -70,6 +70,10 @@ impl Replicator {
         stores: Arc<ReplicationStores>,
         snapshot_options: ReplicatorSnapshotOptions,
     ) -> Self {
+        if snapshot_options.interval == 0 {
+            panic!("Snapshot interval cannot be zero");
+        }
+
         Replicator {
             stores,
             snapshot_options,
@@ -180,7 +184,7 @@ impl Replicator {
             .close_aged_snapshots(msg.shard_id, oldest_valid_timestamp);
 
         // Check if we can take a snapshot of this block
-        if block_number % self.snapshot_options.interval != 0 {
+        if block_number > 0 && block_number % self.snapshot_options.interval != 0 {
             return Ok(());
         }
 

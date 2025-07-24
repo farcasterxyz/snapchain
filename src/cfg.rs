@@ -57,10 +57,11 @@ impl Default for PruningConfig {
 pub struct ReplicationConfig {
     pub enable: bool,
 
-    #[serde(skip)] // Skip (de)serialization as this is hard-coded
+    // Note: you shouldn't set these values in the config file, they are
+    // intended to be statically defined across the whole network.
     pub snapshot_interval: u64, // Specified in number of blocks
-
-    #[serde(skip)] // Skip (de)serialization as this is hard-coded
+    //
+    #[serde(with = "humantime_serde")]
     pub snapshot_max_age: Duration,
 }
 

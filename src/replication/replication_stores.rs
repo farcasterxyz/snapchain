@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::{
     proto,
@@ -154,7 +154,7 @@ impl ReplicationStores {
             Some(shard_stores) => {
                 shard_stores.retain(|&_, &mut (timestamp, _)| timestamp >= min_timestamp)
             }
-            None => error!("Shard {} not found in read_only_stores", shard),
+            None => warn!("Shard {} not found in read_only_stores", shard),
         }
 
         self.capture_snapshot_metrics(&stores);
