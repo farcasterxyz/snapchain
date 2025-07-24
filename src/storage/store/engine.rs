@@ -787,13 +787,6 @@ impl ShardEngine {
                             events.push(event.clone());
                             user_messages_count += 1;
                             message_types.insert(msg.msg_type());
-                            if source != ProposalSource::Simulate {
-                                self.count(
-                                    "messages_merged",
-                                    1,
-                                    vec![("message_type", &(msg.msg_type() as i32).to_string())],
-                                );
-                            }
                         }
                         Err(err) => {
                             if source != ProposalSource::Simulate {
@@ -897,11 +890,6 @@ impl ShardEngine {
         );
         let elapsed = now.elapsed();
         self.time_with_shard("replay_txn_time_us", elapsed.as_micros() as u64);
-
-        if source != ProposalSource::Simulate {
-            self.count("messages_pruned", pruned_messages_count, vec![]);
-            self.count("messaged_revoked", revoked_messages_count, vec![]);
-        }
 
         // Return the new account root hash
         Ok((account_root, events, validation_errors))
@@ -1481,15 +1469,15 @@ impl ShardEngine {
             .unwrap();
         events.insert(0, block_confirmed);
 
+        _ = self.emit_commit_metrics(&shard_chunk, &events);
+
         let now = std::time::Instant::now();
         self.db.commit(txn).unwrap();
-        for mut event in events {
+        for mut event in events.into_iter() {
             event.timestamp = header.timestamp;
-            let _ = self.senders.events_tx.send(event);
+            let _ = self.senders.events_tx.send(event.clone());
         }
         self.stores.trie.reload(&self.db).unwrap();
-
-        _ = self.emit_commit_metrics(&shard_chunk);
 
         match self.stores.shard_store.put_shard_chunk(shard_chunk) {
             Err(err) => {
@@ -1503,7 +1491,11 @@ impl ShardEngine {
             .await;
     }
 
-    fn emit_commit_metrics(&mut self, shard_chunk: &&ShardChunk) -> Result<(), EngineError> {
+    fn emit_commit_metrics(
+        &mut self,
+        shard_chunk: &&ShardChunk,
+        events: &Vec<HubEvent>,
+    ) -> Result<(), EngineError> {
         self.count("commit.invoked", 1, vec![]);
 
         let block_number = &shard_chunk
@@ -1536,6 +1528,28 @@ impl ShardEngine {
             self.stores.trie.branching_factor() as u64,
         );
         self.gauge("max_messages_per_block", self.max_messages_per_block as u64);
+
+        for event in events {
+            self.count(
+                "commit.emitted_event",
+                1,
+                vec![("event_type", &event.r#type.to_string())],
+            );
+            if event.r#type() == HubEventType::MergeMessage {
+                match &event.body {
+                    Some(hub_event::Body::MergeMessageBody(body)) => {
+                        if let Some(message) = &body.message {
+                            self.count(
+                                "commit.merged_message",
+                                1,
+                                vec![("message_type", &(message.msg_type() as i32).to_string())],
+                            )
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         Ok(())
     }
