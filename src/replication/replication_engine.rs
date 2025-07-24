@@ -40,7 +40,9 @@ impl ShardEngine {
                     &tx,
                     &mut tx_batch,
                     ProposalSource::Commit,
-                    EngineVersion::V5,
+                    // TODO: consider making this more precise w/:
+                    // EngineVersion::version_for(snapshot_block_timestamp, network)
+                    EngineVersion::current(self.network),
                     &FarcasterTime::current(),
                 )
                 .unwrap();

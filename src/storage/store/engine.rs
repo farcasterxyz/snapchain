@@ -1519,6 +1519,8 @@ impl ShardEngine {
         match &mut self.post_commit_tx {
             None => return,
             Some(tx) => {
+                let now = std::time::Instant::now();
+
                 // Attempt to send the post commit message and wait for a response,
                 // but don't block indefinitely in case the receiver is not ready, unavailable,
                 // or too slow.
@@ -1544,6 +1546,9 @@ impl ShardEngine {
                     Ok(Err(err)) => error!("Post commit hook failed: {}", err),
                     Err(err) => error!("Post commit hook receive failed: {}", err),
                 }
+
+                let elapsed = now.elapsed();
+                self.time_with_shard("post_commit_time", elapsed.as_millis() as u64);
             }
         }
     }

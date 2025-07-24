@@ -394,6 +394,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if app_config.read_node {
         // Setup post-commit channel if replication is enabled
         let (engine_post_commit_tx, engine_post_commit_rx) = if app_config.replication.enable {
+            // TODO: consider increasing the buffer size to prevent blocking across multiple shards
             let (tx, rx) = mpsc::channel::<PostCommitMessage>(1);
             (Some(tx), Some(rx))
         } else {
@@ -526,6 +527,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         // Setup post-commit channel if replication is enabled
         let (engine_post_commit_tx, engine_post_commit_rx) = if app_config.replication.enable {
+            // TODO: consider increasing the buffer size to prevent blocking across multiple shards
             let (tx, rx) = mpsc::channel::<PostCommitMessage>(1);
             (Some(tx), Some(rx))
         } else {

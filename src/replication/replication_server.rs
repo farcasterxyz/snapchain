@@ -13,7 +13,7 @@ pub struct ReplicationServer {
 }
 
 impl ReplicationServer {
-    const FID_RANGE: u64 = 10_000;
+    const FID_RANGE: u64 = 1_000;
 
     pub fn new(
         replicator: Arc<Replicator>,
