@@ -7741,6 +7741,7 @@ dependencies = [
  "tracing-test",
  "url",
  "walkdir",
+ "yamux 0.13.5",
 ]
 
 [[package]]
