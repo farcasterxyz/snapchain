@@ -289,7 +289,11 @@ impl<T: StoreDef + Clone> Store<T> {
         self.store_def.postfix()
     }
 
-    pub fn get_add(&self, partial_message: &Message) -> Result<Option<Message>, HubError> {
+    pub fn get_add(
+        &self,
+        txn: &mut RocksDbTransactionBatch,
+        partial_message: &Message,
+    ) -> Result<Option<Message>, HubError> {
         // First check the fid
         if partial_message.data.is_none() || partial_message.data.as_ref().unwrap().fid == 0 {
             return Err(HubError {
@@ -298,7 +302,6 @@ impl<T: StoreDef + Clone> Store<T> {
             });
         }
 
-        let txn = &mut RocksDbTransactionBatch::new();
         let adds_key = self.store_def.make_add_key(partial_message)?;
         let message_ts_hash = get_from_db_or_txn(&self.db, txn, &adds_key)?;
 

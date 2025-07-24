@@ -390,7 +390,7 @@ impl CastStore {
             ..Default::default()
         };
 
-        store.get_add(&partial_message)
+        store.get_add(&mut RocksDbTransactionBatch::new(), &partial_message)
     }
 
     pub fn get_cast_remove(
