@@ -758,7 +758,7 @@ impl HubService for MyHubService {
             total_approx_size += shard_approx_size;
         }
 
-        let current_farcaster_time = FarcasterTime::from_unix_seconds(current_time);
+        let current_farcaster_time = FarcasterTime::new(current_time);
         let next_engine_version_timestamp =
             EngineVersion::next_version_timestamp_for(&current_farcaster_time, self.network)
                 .unwrap_or(0);
