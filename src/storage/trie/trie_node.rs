@@ -65,8 +65,8 @@ pub struct TrieNode {
     key: Option<Vec<u8>>,
 }
 
-// An empty struct that represents a serialized trie node, which will need to be loaded from the db
-// TODO: since SerializedTrieNode is now empty, do we need it at all?
+// An empty struct that represents a serialized trie node. It does not contain any data, but it is used to indicate that
+// a node exists in the trie and needs to be loaded from the database when accessed.
 #[derive(Debug, Clone)]
 pub struct SerializedTrieNode {}
 
@@ -654,18 +654,6 @@ impl TrieNode {
     fn delete_to_txn(&self, txn: &mut RocksDbTransactionBatch, prefix: &[u8]) {
         let key = Self::make_primary_key(prefix, None);
         txn.delete(key);
-    }
-
-    #[allow(dead_code)] // TODO
-    pub fn unload_children(&mut self) {
-        let mut serialized_children = HashMap::new();
-        for (char, child) in self.children.iter_mut() {
-            if let TrieNodeType::Node(_) = child {
-                serialized_children
-                    .insert(*char, TrieNodeType::Serialized(SerializedTrieNode::new()));
-            }
-        }
-        self.children = serialized_children;
     }
 
     pub fn get_all_values<'a>(
