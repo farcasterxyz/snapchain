@@ -303,17 +303,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         info!("Downloading snapshots");
         let mut shard_ids = app_config.consensus.shard_ids.clone();
         shard_ids.push(0);
-        for shard_id in shard_ids {
-            // Raise if the download fails. If there's a persistent issue, disable snapshot download.
-            download_snapshots(
-                app_config.fc_network,
-                &app_config.snapshot,
-                app_config.rocksdb_dir.clone(),
-                shard_id,
-            )
-            .await
-            .unwrap();
-        }
+        // Raise if the download fails. If there's a persistent issue, disable snapshot download.
+        download_snapshots(
+            app_config.fc_network,
+            &app_config.snapshot,
+            app_config.rocksdb_dir.clone(),
+            shard_ids,
+        )
+        .await
+        .unwrap();
     };
 
     if app_config.statsd.prefix == "" {

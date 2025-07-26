@@ -19,6 +19,7 @@ use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::{self, BufReader, Read};
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 use tar::Archive;
@@ -249,62 +250,90 @@ pub async fn download_snapshots(
     network: FarcasterNetwork,
     snapshot_config: &Config,
     db_dir: String,
-    shard_id: u32,
+    shard_ids: Vec<u32>,
 ) -> Result<(), SnapshotError> {
     let snapshot_dir = snapshot_config.snapshot_download_dir.clone();
     std::fs::create_dir_all(snapshot_dir.clone())?;
 
-    let metadata_json = download_metadata(network, shard_id, snapshot_config).await?;
-    let base_path = metadata_json.key_base;
+    // First, fetch metadata for all shards
+    let mut all_metadata = HashMap::new();
+    for &shard_id in &shard_ids {
+        let metadata = download_metadata(network, shard_id, snapshot_config).await?;
+        all_metadata.insert(shard_id.to_string(), metadata);
+    }
 
-    let mut local_chunks = vec![];
-    for chunk in metadata_json.chunks {
-        info!("Downloading zipped snapshot chunk {}", chunk);
-        let download_path = format!(
-            "{}/{}/{}",
-            snapshot_config.snapshot_download_url, base_path, chunk
-        );
+    // Persist metadata.json file
+    let metadata_file_path = format!("{}/metadata.json", snapshot_dir);
+    let metadata_json = serde_json::to_string_pretty(&all_metadata)?;
+    std::fs::write(&metadata_file_path, metadata_json)?;
+    info!("Persisted metadata to {}", metadata_file_path);
 
-        let filename = format!("{}/{}", snapshot_dir, chunk);
-        let retry_strategy = tokio_retry2::strategy::FixedInterval::from_millis(10_000).take(5);
-        let result = Retry::spawn(retry_strategy, async || {
-            let result = download_file(download_path.as_str(), filename.as_str()).await;
-            match result {
-                Ok(_) => Ok(()),
-                Err(e) => {
-                    warn!("Failed to download {} due to error: {}", filename, e);
-                    RetryError::to_transient(e)
+    // Process each shard
+    for &shard_id in &shard_ids {
+        let metadata_json = &all_metadata[&shard_id.to_string()];
+        let base_path = &metadata_json.key_base;
+
+        std::fs::create_dir_all(format!("{}/shard-{}", snapshot_dir, shard_id))?;
+
+        let mut local_chunks = vec![];
+        for chunk in &metadata_json.chunks {
+            info!(
+                "Downloading zipped snapshot chunk {} for shard {}",
+                chunk, shard_id
+            );
+            let download_path = format!(
+                "{}/{}/{}",
+                snapshot_config.snapshot_download_url, base_path, chunk
+            );
+
+            let filename = format!("{}/shard-{}/{}", snapshot_dir, shard_id, chunk);
+            let retry_strategy = tokio_retry2::strategy::FixedInterval::from_millis(10_000).take(5);
+            let result = Retry::spawn(retry_strategy, async || {
+                let result = download_file(download_path.as_str(), filename.as_str()).await;
+                match result {
+                    Ok(_) => Ok(()),
+                    Err(e) => {
+                        warn!("Failed to download {} due to error: {}", filename, e);
+                        RetryError::to_transient(e)
+                    }
                 }
+            })
+            .await;
+
+            if let Err(e) = result {
+                error!("Failed to download snapshot chunk {}: {}", filename, e);
+                return Err(SnapshotError::from(e));
             }
-        })
-        .await;
-
-        if let Err(e) = result {
-            error!("Failed to download snapshot chunk {}: {}", filename, e);
-            return Err(SnapshotError::from(e));
+            local_chunks.push(filename);
         }
-        local_chunks.push(filename);
+
+        let tar_filename = format!("{}/shard_{}_snapshot.tar", snapshot_dir, shard_id);
+        let mut tar_file = BufWriter::new(tokio::fs::File::create(tar_filename.clone()).await?);
+
+        for filename in local_chunks {
+            info!(
+                "Unzipping snapshot chunk {} for shard {}",
+                filename, shard_id
+            );
+            let file = std::fs::File::open(filename)?;
+            let reader = BufReader::new(file);
+            let mut gz_decoder = GzDecoder::new(reader);
+            let mut buffer = Vec::new();
+            // These files are small, 100MB max each
+            gz_decoder.read_to_end(&mut buffer)?;
+            tar_file.write_all(&buffer).await?;
+        }
+        tar_file.flush().await?;
+
+        let file = std::fs::File::open(tar_filename.clone())?;
+        info!(
+            "Unpacking snapshot file {} for shard {}",
+            tar_filename, shard_id
+        );
+        let mut archive = Archive::new(file);
+        std::fs::create_dir_all(&db_dir)?;
+        archive.unpack(&db_dir)?;
     }
-
-    let tar_filename = format!("{}/snapshot.tar", snapshot_dir);
-    let mut tar_file = BufWriter::new(tokio::fs::File::create(tar_filename.clone()).await?);
-
-    for filename in local_chunks {
-        info!("Unzipping snapshot chunk {}", filename);
-        let file = std::fs::File::open(filename)?;
-        let reader = BufReader::new(file);
-        let mut gz_decoder = GzDecoder::new(reader);
-        let mut buffer = Vec::new();
-        // These files are small, 100MB max each
-        gz_decoder.read_to_end(&mut buffer)?;
-        tar_file.write_all(&buffer).await?;
-    }
-    tar_file.flush().await?;
-
-    let file = std::fs::File::open(tar_filename.clone())?;
-    info!("Unpacking snapshot file {}", tar_filename);
-    let mut archive = Archive::new(file);
-    archive.unpack(&db_dir)?;
 
     std::fs::remove_dir_all(snapshot_dir)?;
     Ok(())
@@ -313,11 +342,30 @@ pub async fn download_snapshots(
 async fn download_file(url: &str, filename: &str) -> Result<(), SnapshotError> {
     let mut file = BufWriter::new(tokio::fs::File::create(filename).await?);
     let download_response = reqwest::get(url).await?;
+    let content_length = download_response.content_length();
     let mut byte_stream = download_response.bytes_stream();
     while let Some(piece) = byte_stream.next().await {
         file.write_all(&piece?).await?;
     }
     file.flush().await?;
+    // Ensure downloaded file size matches content length
+    let file_size = tokio::fs::metadata(filename).await?.len();
+    if let Some(content_length) = content_length {
+        if file_size != content_length {
+            return Err(SnapshotError::IoError(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Downloaded file size {} does not match content length {}",
+                    file_size, content_length
+                ),
+            )));
+        }
+    } else {
+        warn!(
+            "Downloaded file size {} does not match content length, which is unknown",
+            file_size
+        );
+    }
     Ok(())
 }
 
