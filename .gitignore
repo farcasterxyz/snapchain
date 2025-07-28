@@ -11,7 +11,7 @@ target/
 *.pdb
 
 .rocks/
-.rocks.testnet/
+.rocks.*/
 nodes/
 Procfile
 .vscode/
