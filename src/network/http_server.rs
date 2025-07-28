@@ -1251,6 +1251,27 @@ impl TryFrom<proto::GetConnectedPeersResponse> for GetConnectedPeersResponse {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SubmitBulkMessagesResponse {
+    pub messages: Vec<BulkMessageResponse>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum BulkMessageResponse {
+    Message(Message),
+    Error(MessageError),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MessageError {
+    #[serde(with = "serdehex")]
+    pub hash: Vec<u8>,
+    #[serde(rename = "errCode")]
+    pub err_code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ValidationResult {
     pub valid: bool,
     pub message: Option<Message>,
@@ -2138,6 +2159,11 @@ pub trait HubHttpService {
         req: proto::Message,
         headers: HeaderMap<HeaderValue>,
     ) -> Result<Message, ErrorResponse>;
+    async fn submit_bulk_messages(
+        &self,
+        req: proto::SubmitBulkMessagesRequest,
+        headers: HeaderMap<HeaderValue>,
+    ) -> Result<SubmitBulkMessagesResponse, ErrorResponse>;
     async fn get_verifications_by_fid(
         &self,
         req: FidRequest,
@@ -2710,6 +2736,68 @@ where
         map_proto_message_to_json_message(proto_resp)
     }
 
+    // POST /v1/submitBulkMessages
+    async fn submit_bulk_messages(
+        &self,
+        req: proto::SubmitBulkMessagesRequest,
+        headers: HeaderMap<HeaderValue>,
+    ) -> Result<SubmitBulkMessagesResponse, ErrorResponse> {
+        let service = &self.service;
+        let mut grpc_req = tonic::Request::new(req);
+
+        // Forward authorization header if present
+        if let Some(auth) = headers.get("authorization") {
+            match auth.to_str() {
+                Err(err) => {
+                    return Err(ErrorResponse {
+                        error: "Invalid auth header".to_string(),
+                        error_detail: Some(err.to_string()),
+                    })
+                }
+                Ok(auth) => {
+                    grpc_req
+                        .metadata_mut()
+                        .append("authorization", MetadataValue::from_str(auth).unwrap());
+                }
+            }
+        };
+
+        let response = service
+            .submit_bulk_messages(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to submit bulk messages".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+
+        let proto_resp = response.into_inner();
+
+        let mapped_responses = proto_resp
+            .messages
+            .into_iter()
+            .map(|bulk_resp| match bulk_resp.response {
+                Some(proto::bulk_message_response::Response::Message(msg)) => {
+                    map_proto_message_to_json_message(msg).map(BulkMessageResponse::Message)
+                }
+                Some(proto::bulk_message_response::Response::MessageError(err)) => {
+                    Ok(BulkMessageResponse::Error(MessageError {
+                        hash: err.hash,
+                        err_code: err.err_code,
+                        message: err.message,
+                    }))
+                }
+                None => Err(ErrorResponse {
+                    error: "Invalid bulk message response from server".to_string(),
+                    error_detail: None,
+                }),
+            })
+            .collect::<Result<Vec<BulkMessageResponse>, _>>()?;
+
+        Ok(SubmitBulkMessagesResponse {
+            messages: mapped_responses,
+        })
+    }
+
     /// GET /v1/verificationsByFid
     async fn get_verifications_by_fid(
         &self,
@@ -2979,8 +3067,6 @@ where
                 .await
             }
             (&Method::GET, "/v1/linksByTargetFid") => {
-                // For linksByTargetFid we assume that the service uses a FidTimestampRequest
-                // (similar to castsByFid) to return all link messages for a target fid.
                 self.handle_request::<LinksByTargetRequest, PagedResponse, _>(
                     req,
                     |service, req| {
@@ -2989,7 +3075,6 @@ where
                 )
                 .await
             }
-            // missing user_data_type
             (&Method::GET, "/v1/userDataByFid") => {
                 self.handle_request::<FidRequest, PagedResponse, _>(req, |service, req| {
                     Box::pin(async move { service.get_user_data_by_fid(req).await })
@@ -3032,14 +3117,21 @@ where
                 })
                 .await
             }
-            // Missing address
+            (&Method::POST, "/v1/submitBulkMessages") => {
+                self.handle_bulk_protobuf_request::<SubmitBulkMessagesResponse, _>(
+                    req,
+                    |service, headers, req| {
+                        Box::pin(async move { service.submit_bulk_messages(req, headers).await })
+                    },
+                )
+                .await
+            }
             (&Method::GET, "/v1/verificationsByFid") => {
                 self.handle_request::<FidRequest, PagedResponse, _>(req, |service, req| {
                     Box::pin(async move { service.get_verifications_by_fid(req).await })
                 })
                 .await
             }
-            // Missing signer
             (&Method::GET, "/v1/onChainSignersByFid") => {
                 self.handle_request::<FidRequest, OnChainEventResponse, _>(req, |service, req| {
                     Box::pin(async move { service.get_on_chain_signers_by_fid(req).await })
@@ -3213,6 +3305,78 @@ where
                 .body(Full::new(Bytes::from(serde_json::to_vec(&err).unwrap())).boxed())
                 .unwrap()),
         }
+    }
+
+    async fn handle_bulk_protobuf_request<Resp, F>(
+        &self,
+        req: Request<hyper::body::Incoming>,
+        handler: impl FnOnce(
+            Arc<HubHttpServiceImpl<Service>>,
+            HeaderMap<HeaderValue>,
+            proto::SubmitBulkMessagesRequest,
+        ) -> F,
+    ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible>
+    where
+        Resp: Serialize,
+        F: Future<Output = Result<Resp, ErrorResponse>>,
+    {
+        if req
+            .headers()
+            .get("content-type")
+            .map_or(true, |v| v != "application/octet-stream")
+        {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(
+                    Full::new(Bytes::from(
+                        "Invalid content-type. Must be application/octet-stream",
+                    ))
+                    .boxed(),
+                )
+                .unwrap());
+        }
+
+        let headers = req.headers().clone();
+
+        let req_obj = match self.parse_bulk_protobuf_request(req).await {
+            Ok(req) => req,
+            Err(resp) => return Ok(resp.map(|b| Full::new(b).boxed())),
+        };
+
+        match handler(self.service.clone(), headers, req_obj).await {
+            Ok(resp) => Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Full::new(Bytes::from(serde_json::to_vec(&resp).unwrap())).boxed())
+                .unwrap()),
+            Err(err) => Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header("content-type", "application/json")
+                .body(Full::new(Bytes::from(serde_json::to_vec(&err).unwrap())).boxed())
+                .unwrap()),
+        }
+    }
+
+    // Add this new parser for the bulk request body
+    async fn parse_bulk_protobuf_request(
+        &self,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<proto::SubmitBulkMessagesRequest, Response<Bytes>> {
+        use prost::Message;
+
+        let body_bytes = req.collect().await.map_err(|e| {
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Bytes::from(format!("Internal server error: {}", e)))
+                .unwrap()
+        })?;
+
+        proto::SubmitBulkMessagesRequest::decode(body_bytes.to_bytes()).map_err(|e| {
+            Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Bytes::from(format!("Invalid protobuf data: {}", e)))
+                .unwrap()
+        })
     }
 
     async fn parse_protobuf_request(

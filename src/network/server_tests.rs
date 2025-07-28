@@ -18,7 +18,8 @@ mod tests {
     use crate::proto::hub_service_server::HubService;
     use crate::proto::{
         self, EventRequest, EventsRequest, FarcasterNetwork, HubEvent, HubEventType,
-        OnChainEventType, ShardChunk, StorageUnitType, UserDataType, UserNameProof, UserNameType,
+        OnChainEventType, ShardChunk, StorageUnitType, SubmitBulkMessagesRequest,
+        SubmitBulkMessagesResponse, UserDataType, UserNameProof, UserNameType,
         UsernameProofRequest, VerificationAddAddressBody,
     };
     use crate::proto::{FidRequest, SubscribeRequest};
@@ -177,6 +178,15 @@ mod tests {
         let mut request = Request::new(message);
         add_auth_header(&mut request, USER_NAME, PASSWORD);
         service.submit_message(request).await
+    }
+
+    async fn submit_bulk_messages(
+        service: &MyHubService,
+        messages: Vec<proto::Message>,
+    ) -> Result<tonic::Response<SubmitBulkMessagesResponse>, tonic::Status> {
+        let mut request = Request::new(SubmitBulkMessagesRequest { messages });
+        add_auth_header(&mut request, USER_NAME, PASSWORD);
+        service.submit_bulk_messages(request).await
     }
 
     async fn make_server(
@@ -629,6 +639,115 @@ mod tests {
             response.message(),
             "bad_request.validation_failure/unknown fid"
         );
+    }
+
+    // Tests for submit_bulk_messages RPC endpoint
+
+    #[tokio::test]
+    async fn test_submit_bulk_messages_empty() {
+        let (_stores, _senders, _, service) = make_server(None).await;
+
+        // Test submitting 0 messages
+        let response = submit_bulk_messages(&service, vec![]).await.unwrap();
+        let messages = response.into_inner().messages;
+        assert_eq!(messages.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_submit_bulk_messages_valid() {
+        let (_stores, _senders, [mut engine1, _], service) = make_server(None).await;
+
+        // Register a user
+        register_user(
+            SHARD1_FID,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine1,
+        )
+        .await;
+
+        // Create 2 valid messages with different text to avoid duplicates
+        let message1 = messages_factory::casts::create_cast_add(SHARD1_FID, "test1", None, None);
+        let message2 = messages_factory::casts::create_cast_add(SHARD1_FID, "test2", None, None);
+        let messages = vec![message1, message2];
+
+        let response = submit_bulk_messages(&service, messages).await.unwrap();
+        let responses = response.into_inner().messages;
+
+        assert_eq!(responses.len(), 2);
+
+        // We're expecting both messages to succeed (upto adding to the mempool, which isn't setup in this test here)
+        // So, we assert for "unavailable - Error adding to mempool"
+        for (i, response) in responses.iter().enumerate() {
+            assert!(response.response.is_some());
+            match response.response.as_ref().unwrap() {
+                proto::bulk_message_response::Response::Message(_) => {
+                    // Succeeds
+                }
+                proto::bulk_message_response::Response::MessageError(err) => {
+                    // We expect mempool error for valid messages in this test setup
+                    assert_eq!(err.err_code, "unavailable");
+                    assert!(
+                        err.message.contains("Error adding to mempool"),
+                        "Message {} should fail with mempool error, got: {}",
+                        i,
+                        err.message
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_submit_bulk_messages_mixed() {
+        let (_stores, _senders, [mut engine1, _], service) = make_server(None).await;
+
+        // Register a user for the valid message
+        register_user(
+            SHARD1_FID,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine1,
+        )
+        .await;
+
+        // Create 1 valid message and 1 invalid message (unknown fid)
+        let valid_message =
+            messages_factory::casts::create_cast_add(SHARD1_FID, "test", None, None);
+        let invalid_message = messages_factory::casts::create_cast_add(123, "test", None, None);
+        let messages = vec![valid_message, invalid_message];
+
+        let response = submit_bulk_messages(&service, messages).await.unwrap();
+        let responses = response.into_inner().messages;
+
+        assert_eq!(responses.len(), 2);
+
+        // First message should fail with mempool error (but passes validation)
+        assert!(responses[0].response.is_some());
+        match &responses[0].response {
+            Some(proto::bulk_message_response::Response::Message(_)) => {
+                // Succeeds
+            }
+            Some(proto::bulk_message_response::Response::MessageError(error)) => {
+                // Should fail with mempool error, not validation error
+                assert_eq!(error.err_code, "unavailable");
+                assert!(error.message.contains("Error adding to mempool"));
+            }
+            None => panic!("Response should not be None"),
+        }
+
+        // Second message should fail
+        assert!(responses[1].response.is_some());
+        match &responses[1].response {
+            Some(proto::bulk_message_response::Response::MessageError(error)) => {
+                assert_eq!(error.err_code, "bad_request.validation_failure");
+                assert_eq!(error.message, "unknown fid");
+            }
+            Some(proto::bulk_message_response::Response::Message(_)) => {
+                panic!("Expected second message to fail");
+            }
+            None => panic!("Response should not be None"),
+        }
     }
 
     #[tokio::test]

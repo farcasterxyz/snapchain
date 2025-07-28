@@ -33,6 +33,14 @@ mod tests {
             Ok(Response::new(message))
         }
 
+        async fn submit_bulk_messages(
+            &self,
+            _request: Request<SubmitBulkMessagesRequest>,
+        ) -> Result<Response<SubmitBulkMessagesResponse>, Status> {
+            let response = SubmitBulkMessagesResponse::default();
+            Ok(Response::new(response))
+        }
+
         async fn validate_message(
             &self,
             _request: Request<Message>,

@@ -591,6 +591,51 @@ impl HubService for MyHubService {
         }
     }
 
+    async fn submit_bulk_messages(
+        &self,
+        request: Request<proto::SubmitBulkMessagesRequest>,
+    ) -> Result<Response<proto::SubmitBulkMessagesResponse>, Status> {
+        authenticate_request(&request, &self.allowed_users)?;
+
+        let messages = request.into_inner().messages;
+        let num_messages = messages.len();
+        info!(
+            "Received call to [submit_bulk_messages] RPC with {} messages",
+            num_messages
+        );
+
+        let mut results = Vec::with_capacity(num_messages);
+        for mut msg in messages {
+            // Ensure data_bytes are decoded before processing
+            message_bytes_decode(&mut msg);
+            let message_hash_for_error = msg.hash.clone();
+
+            // The `submit_message_internal` is async, so we await it so messages are processed sequentially.
+            // We don't want to do parallel processing here, as some message may depend on a previous message.
+            let result = self.submit_message_internal(msg, false).await;
+
+            let response = match result {
+                Ok(message) => proto::BulkMessageResponse {
+                    response: Some(proto::bulk_message_response::Response::Message(message)),
+                },
+                Err(err) => proto::BulkMessageResponse {
+                    response: Some(proto::bulk_message_response::Response::MessageError(
+                        proto::MessageError {
+                            hash: message_hash_for_error,
+                            err_code: err.code,
+                            message: err.message,
+                        },
+                    )),
+                },
+            };
+            results.push(response);
+        }
+
+        Ok(Response::new(proto::SubmitBulkMessagesResponse {
+            messages: results,
+        }))
+    }
+
     type GetBlocksStream = ReceiverStream<Result<Block, Status>>;
 
     async fn get_blocks(

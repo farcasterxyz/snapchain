@@ -10,7 +10,7 @@ import "request_response.proto";
 service HubService {
   // Write API
   rpc SubmitMessage(Message) returns (Message);
-//  rpc SubmitBulkMessages(SubmitBulkMessagesRequest) returns (SubmitBulkMessagesResponse);
+  rpc SubmitBulkMessages(SubmitBulkMessagesRequest) returns (SubmitBulkMessagesResponse);
 
   // Validation Methods
   rpc ValidateMessage(Message) returns (ValidationResponse);
