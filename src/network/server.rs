@@ -9,49 +9,20 @@ use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::mempool::routing;
 use crate::network::gossip::GossipEvent;
 use crate::proto::hub_service_server::HubService;
-use crate::proto::link_body;
-use crate::proto::links_by_target_request;
-use crate::proto::message_data;
-use crate::proto::on_chain_event::Body;
-use crate::proto::reaction_body;
-use crate::proto::reactions_by_target_request;
-use crate::proto::CastsByParentRequest;
-use crate::proto::FidsRequest;
-use crate::proto::FidsResponse;
-use crate::proto::GetInfoResponse;
-use crate::proto::HubEvent;
-use crate::proto::IdRegistryEventByAddressRequest;
-use crate::proto::LinksByTargetRequest;
-use crate::proto::MessageType;
-use crate::proto::OnChainEvent;
-use crate::proto::OnChainEventRequest;
-use crate::proto::OnChainEventResponse;
-use crate::proto::ReactionType;
-use crate::proto::ReactionsByTargetRequest;
-use crate::proto::SignerEventType;
-use crate::proto::SignerRequest;
-use crate::proto::TrieNodeMetadataRequest;
-use crate::proto::TrieNodeMetadataResponse;
-use crate::proto::UserNameProof;
-use crate::proto::UserNameType;
-use crate::proto::UsernameProofRequest;
-use crate::proto::UsernameProofsResponse;
-use crate::proto::ValidationResponse;
-use crate::proto::VerificationAddAddressBody;
-use crate::proto::{self};
-use crate::proto::{cast_add_body, Height};
-use crate::proto::{casts_by_parent_request, ShardChunk};
-use crate::proto::{Block, CastId, DbStats};
 use crate::proto::{
-    BlocksRequest, EventRequest, EventsRequest, EventsResponse, GetConnectedPeersRequest,
-    GetConnectedPeersResponse, ShardChunksRequest, ShardChunksResponse, SubscribeRequest,
-};
-use crate::proto::{FidAddressTypeRequest, FidAddressTypeResponse};
-use crate::proto::{FidRequest, FidTimestampRequest};
-use crate::proto::{GetInfoRequest, StorageLimitsResponse};
-use crate::proto::{
-    LinkRequest, LinksByFidRequest, Message, MessagesResponse, ReactionRequest,
-    ReactionsByFidRequest, UserDataRequest, VerificationRequest,
+    self, cast_add_body, casts_by_parent_request, link_body, links_by_target_request, message_data,
+    on_chain_event::Body, reaction_body, reactions_by_target_request, Block, BlocksRequest, CastId,
+    CastsByParentRequest, DbStats, EventRequest, EventsRequest, EventsResponse,
+    FidAddressTypeRequest, FidAddressTypeResponse, FidRequest, FidTimestampRequest, FidsRequest,
+    FidsResponse, GetConnectedPeersRequest, GetConnectedPeersResponse, GetInfoRequest,
+    GetInfoResponse, Height, HubEvent, IdRegistryEventByAddressRequest, LinkRequest,
+    LinksByFidRequest, LinksByTargetRequest, Message, MessageType, MessagesResponse, OnChainEvent,
+    OnChainEventRequest, OnChainEventResponse, ReactionRequest, ReactionType,
+    ReactionsByFidRequest, ReactionsByTargetRequest, ShardChunk, ShardChunksRequest,
+    ShardChunksResponse, SignerEventType, SignerRequest, StorageLimitsResponse, SubscribeRequest,
+    TrieNodeMetadataRequest, TrieNodeMetadataResponse, UserDataRequest, UserNameProof,
+    UserNameType, UsernameProofRequest, UsernameProofsResponse, ValidationResponse,
+    VerificationAddAddressBody, VerificationRequest,
 };
 use crate::storage::constants::OnChainEventPostfix;
 use crate::storage::constants::RootPrefix;
@@ -159,7 +130,6 @@ impl MyHubService {
     async fn submit_message_internal(
         &self,
         message: proto::Message,
-        bypass_validation: bool,
     ) -> Result<proto::Message, HubError> {
         let fid = message.fid();
         if fid == 0 {
@@ -173,7 +143,7 @@ impl MyHubService {
             None => return Err(HubError::invalid_parameter("shard not found for fid")),
         };
 
-        if !bypass_validation {
+        let result = {
             // TODO: This is a hack to get around the fact that self cannot be made mutable
             let mut readonly_engine = ShardEngine::new(
                 stores.db.clone(),
@@ -187,60 +157,60 @@ impl MyHubService {
                 None,
                 None,
             );
-            let result = readonly_engine.simulate_message(&message);
+            readonly_engine.simulate_message(&message)
+        };
 
-            if let Err(err) = result {
-                return match err {
-                    MessageValidationError::StoreError(hub_error) => {
-                        // Forward hub errors as is, otherwise we end up wrapping them
-                        Err(hub_error)
-                    }
-                    _ => Err(HubError::validation_failure(&err.to_string())),
-                };
-            }
+        if let Err(err) = result {
+            return match err {
+                MessageValidationError::StoreError(hub_error) => {
+                    // Forward hub errors as is, otherwise we end up wrapping them
+                    Err(hub_error)
+                }
+                _ => Err(HubError::validation_failure(&err.to_string())),
+            };
+        }
 
-            // We're doing the ens and address validations here for now because we don't want L1 interactions to be on the consensus critical path. Eventually this will move to the fname server.
-            if let Some(message_data) = &message.data {
-                match &message_data.body {
-                    Some(proto::message_data::Body::UserDataBody(user_data)) => {
-                        if user_data.r#type() == proto::UserDataType::Username {
-                            if user_data.value.ends_with(".eth") {
-                                self.validate_ens_username(fid, user_data.value.to_string())
-                                    .await?;
+        // We're doing the ens and address validations here for now because we don't want L1 interactions to be on the consensus critical path. Eventually this will move to the fname server.
+        if let Some(message_data) = &message.data {
+            match &message_data.body {
+                Some(proto::message_data::Body::UserDataBody(user_data)) => {
+                    if user_data.r#type() == proto::UserDataType::Username {
+                        if user_data.value.ends_with(".eth") {
+                            self.validate_ens_username(fid, user_data.value.to_string())
+                                .await?;
+                        }
+                    };
+                }
+                Some(proto::message_data::Body::UsernameProofBody(proof)) => {
+                    self.validate_ens_username_proof(fid, &proof).await?;
+                }
+                Some(proto::message_data::Body::VerificationAddAddressBody(body)) => {
+                    if body.verification_type == 1 {
+                        let claim_result =
+                            validations::verification::make_verification_address_claim(
+                                message_data.fid,
+                                &body.address,
+                                self.network,
+                                &body.block_hash,
+                                proto::Protocol::Ethereum,
+                            );
+                        match claim_result {
+                            Ok(claim) => {
+                                self.validate_contract_signature(claim, body).await?;
                             }
-                        };
-                    }
-                    Some(proto::message_data::Body::UsernameProofBody(proof)) => {
-                        self.validate_ens_username_proof(fid, &proof).await?;
-                    }
-                    Some(proto::message_data::Body::VerificationAddAddressBody(body)) => {
-                        if body.verification_type == 1 {
-                            let claim_result =
-                                validations::verification::make_verification_address_claim(
-                                    message_data.fid,
-                                    &body.address,
-                                    self.network,
-                                    &body.block_hash,
-                                    proto::Protocol::Ethereum,
-                                );
-                            match claim_result {
-                                Ok(claim) => {
-                                    self.validate_contract_signature(claim, body).await?;
-                                }
-                                Err(err) => {
-                                    return Err(HubError::validation_failure(
-                                        format!(
-                                            "could not create verification address claim: {}",
-                                            err.to_string()
-                                        )
-                                        .as_str(),
-                                    ))
-                                }
+                            Err(err) => {
+                                return Err(HubError::validation_failure(
+                                    format!(
+                                        "could not create verification address claim: {}",
+                                        err.to_string()
+                                    )
+                                    .as_str(),
+                                ))
                             }
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
 
@@ -547,7 +517,7 @@ impl HubService for MyHubService {
         message_bytes_decode(&mut message);
         let fid = message.fid();
         let msg_type = message.msg_type().into_i32();
-        let result = self.submit_message_internal(message, false).await;
+        let result = self.submit_message_internal(message).await;
 
         self.statsd_client.time(
             "rpc.submit_message.duration",
@@ -612,7 +582,7 @@ impl HubService for MyHubService {
 
             // The `submit_message_internal` is async, so we await it so messages are processed sequentially.
             // We don't want to do parallel processing here, as some message may depend on a previous message.
-            let result = self.submit_message_internal(msg, false).await;
+            let result = self.submit_message_internal(msg).await;
 
             let response = match result {
                 Ok(message) => proto::BulkMessageResponse {
