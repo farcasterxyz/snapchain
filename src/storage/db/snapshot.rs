@@ -286,6 +286,7 @@ pub async fn download_snapshots(
 
     // Check if we're in a TTY environment - if not, disable progress bars
     let use_progress_bars = atty::is(atty::Stream::Stdout);
+    let global_start = SystemTime::now();
     if !use_progress_bars {
         info!("No TTY detected, progress will be logged instead of shown as progress bars");
         info!(
@@ -299,18 +300,33 @@ pub async fn download_snapshots(
     for &shard_id in &shard_ids {
         let metadata_json = &all_metadata[&shard_id.to_string()];
         let base_path = &metadata_json.key_base;
+        let shard_start = SystemTime::now();
 
         std::fs::create_dir_all(format!("{}/shard-{}", snapshot_dir, shard_id))?;
 
         let mut local_chunks = vec![];
         // Process each chunk sequentially within the shard
         for (chunk_index, chunk) in metadata_json.chunks.iter().enumerate() {
+            let eta_str = if !use_progress_bars && chunk_index > 0 {
+                let elapsed = shard_start.elapsed().unwrap_or_default().as_secs();
+                let remaining_chunks = metadata_json.chunks.len() - chunk_index;
+                let eta_seconds = (elapsed * remaining_chunks as u64) / chunk_index as u64;
+                format!(
+                    "Shard ETA: {}h{}m",
+                    eta_seconds / 3600,
+                    (eta_seconds % 3600) / 60
+                )
+            } else {
+                String::new()
+            };
+
             info!(
-                "Downloading zipped snapshot chunk {} for shard {} ({}/{} chunks in shard)",
+                "Downloading zipped snapshot chunk {} for shard {} ({}/{} chunks in shard) {}",
                 chunk,
                 shard_id,
                 chunk_index + 1,
-                metadata_json.chunks.len()
+                metadata_json.chunks.len(),
+                eta_str
             );
             let download_path = format!(
                 "{}/{}/{}",
@@ -340,6 +356,7 @@ pub async fn download_snapshots(
                         chunk_pb_clone,
                         main_pb_clone,
                         use_progress_bars,
+                        global_start,
                     )
                     .await;
                     match result {
@@ -402,6 +419,7 @@ async fn download_file(
     chunk_pb: indicatif::ProgressBar,
     main_pb: indicatif::ProgressBar,
     use_progress_bars: bool,
+    global_start: SystemTime,
 ) -> Result<(), SnapshotError> {
     let mut file = BufWriter::new(tokio::fs::File::create(filename).await?);
     let download_response = reqwest::get(url).await?.error_for_status()?;
@@ -427,32 +445,14 @@ async fn download_file(
     chunk_pb.set_message(filename.split('/').last().unwrap_or(filename).to_string());
 
     let mut byte_stream = download_response.bytes_stream();
-    let mut downloaded_bytes = 0u64;
-    let mut last_log_bytes = 0u64;
-    let log_interval = content_length.map(|len| len / 10).unwrap_or(10_000_000); // Log every 10% or 10MB
 
     while let Some(piece) = byte_stream.next().await {
         let chunk = piece?;
         file.write_all(&chunk).await?;
         let chunk_len = chunk.len() as u64;
-        downloaded_bytes += chunk_len;
 
         // Update only the individual chunk progress bar during download
         chunk_pb.inc(chunk_len);
-
-        // Log progress periodically if not using progress bars
-        if !use_progress_bars && downloaded_bytes - last_log_bytes >= log_interval {
-            if let Some(total) = content_length {
-                let percent = (downloaded_bytes * 100) / total;
-                info!(
-                    "Download progress: {}% ({} / {} bytes)",
-                    percent, downloaded_bytes, total
-                );
-            } else {
-                info!("Downloaded {} bytes", downloaded_bytes);
-            }
-            last_log_bytes = downloaded_bytes;
-        }
     }
     file.flush().await?;
 
@@ -481,8 +481,24 @@ async fn download_file(
     if !use_progress_bars {
         let current_chunk = main_pb.position();
         let total_chunks = main_pb.length().unwrap_or(0);
+
+        // Calculate global ETA based on overall progress
+        let global_eta_str = if current_chunk > 0 {
+            let global_elapsed = global_start.elapsed().unwrap_or_default().as_secs();
+            let remaining_chunks = total_chunks - current_chunk;
+            let global_eta_seconds = (global_elapsed * remaining_chunks) / current_chunk;
+            let eta_formatted = format!(
+                "{}h{}m",
+                global_eta_seconds / 3600,
+                (global_eta_seconds % 3600) / 60
+            );
+            format!(" (ETA: {})", eta_formatted)
+        } else {
+            String::new()
+        };
+
         info!(
-            "Completed download of {} ({} bytes). Progress: {}/{} chunks ({}%)",
+            "Completed download of {} ({} bytes). Progress: {}/{} chunks ({}%){}",
             filename.split('/').last().unwrap_or(filename),
             file_size,
             current_chunk,
@@ -491,7 +507,8 @@ async fn download_file(
                 (current_chunk * 100) / total_chunks
             } else {
                 0
-            }
+            },
+            global_eta_str
         );
     }
 
