@@ -23,4 +23,6 @@ mod username_proof_store;
 mod verification_store;
 
 #[cfg(test)]
+mod cast_store_test;
+#[cfg(test)]
 mod on_chain_event_store_tests;
