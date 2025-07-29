@@ -42,6 +42,27 @@ mod tests {
         assert_eq!(error.message, err_message);
     }
 
+    fn merge_message_with_conflicts(
+        store: &Store<CastStoreDef>,
+        db: &Arc<RocksDB>,
+        message: &message::Message,
+        deleted_messages: Vec<message::Message>,
+    ) {
+        let mut txn = RocksDbTransactionBatch::new();
+        let result = store.merge(message, &mut txn).unwrap();
+        assert_eq!(result.r#type(), HubEventType::MergeMessage);
+        match &result.body {
+            Some(hub_event::Body::MergeMessageBody(body)) => {
+                assert_eq!(*body.message.as_ref().unwrap(), *message);
+                assert_eq!(*body.deleted_messages, deleted_messages);
+            }
+            _ => {
+                panic!("Unexpected event")
+            }
+        }
+        db.commit(txn).unwrap();
+    }
+
     fn merge_messages(
         store: &Store<CastStoreDef>,
         db: &Arc<RocksDB>,
@@ -904,7 +925,8 @@ mod tests {
         );
 
         // First merge the cast add
-        merge_messages(&store, &db, vec![&cast_add, &cast_remove]);
+        merge_messages(&store, &db, vec![&cast_add]);
+        merge_message_with_conflicts(&store, &db, &cast_remove, vec![cast_add.clone()]);
 
         // Verify the remove was stored and the add was removed
         let remove_result = CastStore::get_cast_remove(&store, FID_FOR_TEST, cast_add.hash.clone());
@@ -934,7 +956,8 @@ mod tests {
         );
 
         // First merge the cast add
-        merge_messages(&store, &db, vec![&cast_add, &cast_remove]);
+        merge_messages(&store, &db, vec![&cast_add]);
+        merge_message_with_conflicts(&store, &db, &cast_remove, vec![cast_add.clone()]);
 
         // Verify the remove was stored and the add was removed
         let remove_result = CastStore::get_cast_remove(&store, FID_FOR_TEST, cast_add.hash.clone());
@@ -993,7 +1016,8 @@ mod tests {
         );
 
         // Merge add first
-        merge_messages(&store, &db, vec![&cast_add, &cast_remove]);
+        merge_messages(&store, &db, vec![&cast_add]);
+        merge_message_with_conflicts(&store, &db, &cast_remove, vec![cast_add.clone()]);
 
         // Verify remove exists and add is gone
         let remove_result = CastStore::get_cast_remove(&store, FID_FOR_TEST, cast_add.hash.clone());
@@ -1062,7 +1086,8 @@ mod tests {
         );
 
         // Merge first remove
-        merge_messages(&store, &db, vec![&cast_remove1, &cast_remove2]);
+        merge_messages(&store, &db, vec![&cast_remove1]);
+        merge_message_with_conflicts(&store, &db, &cast_remove2, vec![cast_remove1.clone()]);
 
         // Verify the second remove replaced the first
         let retrieved_remove = CastStore::get_cast_remove(&store, FID_FOR_TEST, target_hash)
@@ -1127,7 +1152,8 @@ mod tests {
         cast_remove2.hash = vec![255; 20]; // Lexicographically later hash
 
         // Merge first remove
-        merge_messages(&store, &db, vec![&cast_remove1, &cast_remove2]);
+        merge_messages(&store, &db, vec![&cast_remove1]);
+        merge_message_with_conflicts(&store, &db, &cast_remove2, vec![cast_remove1.clone()]);
 
         // Verify the second remove replaced the first
         let retrieved_remove = CastStore::get_cast_remove(&store, FID_FOR_TEST, target_hash)
@@ -1262,7 +1288,8 @@ mod tests {
         cast_remove.hash = vec![0; 20];
 
         // Merge add first
-        merge_messages(&store, &db, vec![&cast_add, &cast_remove]);
+        merge_messages(&store, &db, vec![&cast_add]);
+        merge_message_with_conflicts(&store, &db, &cast_remove, vec![cast_add.clone()]);
 
         // Verify remove exists and add is gone
         let remove_result = CastStore::get_cast_remove(&store, FID_FOR_TEST, cast_add.hash.clone());
@@ -1293,7 +1320,8 @@ mod tests {
         cast_remove.hash = vec![255; 20];
 
         // Merge add first
-        merge_messages(&store, &db, vec![&cast_add, &cast_remove]);
+        merge_messages(&store, &db, vec![&cast_add]);
+        merge_message_with_conflicts(&store, &db, &cast_remove, vec![cast_add.clone()]);
 
         // Verify remove exists and add is gone
         let remove_result = CastStore::get_cast_remove(&store, FID_FOR_TEST, cast_add.hash.clone());
@@ -1329,7 +1357,6 @@ mod tests {
             messages_factory::casts::create_cast_add(FID_FOR_TEST, "Test cast", None, None);
 
         merge_messages(&store, &db, vec![&cast_add]);
-
         revoke_message(&store, &db, &cast_add);
 
         let get_result = CastStore::get_cast_add(&store, FID_FOR_TEST, cast_add.hash.clone());
