@@ -14,6 +14,7 @@ pub enum EngineVersion {
     V4 = 4,
     V5 = 5,
     V6 = 6,
+    V7 = 7,
 }
 
 pub enum ProtocolFeature {
@@ -25,6 +26,7 @@ pub enum ProtocolFeature {
     PrimaryAddresses,
     UsernameShardRoutingFix,
     FutureTimestampValidation,
+    DependentMessagesInBulkSubmit,
 }
 
 pub struct VersionSchedule {
@@ -60,6 +62,10 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
     VersionSchedule {
         active_at: 1752685200, // 2025-07-16 5PM UTC
         version: EngineVersion::V6,
+    },
+    VersionSchedule {
+        active_at: 1769925600, // TODO: Pick a date for release. Placeholder is 2026-01-01 UTC
+        version: EngineVersion::V7,
     },
 ]
 .as_slice();
@@ -123,6 +129,7 @@ impl EngineVersion {
             | ProtocolFeature::UsernameShardRoutingFix
             | ProtocolFeature::PrimaryAddresses => self >= &EngineVersion::V5,
             ProtocolFeature::FutureTimestampValidation => self >= &EngineVersion::V6,
+            ProtocolFeature::DependentMessagesInBulkSubmit => self >= &EngineVersion::V7,
         }
     }
 
@@ -135,6 +142,7 @@ impl EngineVersion {
             | EngineVersion::V4 => 1,
             EngineVersion::V5 => 2,
             EngineVersion::V6 => LATEST_PROTOCOL_VERSION,
+            EngineVersion::V7 => LATEST_PROTOCOL_VERSION,
         }
     }
 

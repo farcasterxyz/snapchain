@@ -39,7 +39,7 @@ use crate::storage::store::engine::{MempoolMessage, MessageValidationError, Send
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
-use crate::version::version::EngineVersion;
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use hex::ToHex;
 use moka::policy::EvictionPolicy;
 use moka::sync::{Cache, CacheBuilder};
@@ -578,6 +578,13 @@ impl HubService for MyHubService {
         &self,
         request: Request<proto::SubmitBulkMessagesRequest>,
     ) -> Result<Response<proto::SubmitBulkMessagesResponse>, Status> {
+        let version = EngineVersion::current(self.network);
+        if !version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
+            return Err(Status::invalid_argument(
+                "Dependent messages are not supported in this version",
+            ));
+        }
+
         authenticate_request(&request, &self.allowed_users)?;
 
         let mut messages = request.into_inner().messages;
