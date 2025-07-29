@@ -78,8 +78,8 @@ jobs:
           RUSTFLAGS: "-Dwarnings"
         run: cargo fmt --all --check
 
-      - working-directory: ./snapchain/src/core/validations/client_parity_tests
+      - working-directory: ./snapchain/tests/client_parity_tests
         run: yarn install 
 
-      - working-directory: ./snapchain/src/core/validations/client_parity_tests
+      - working-directory: ./snapchain/tests/client_parity_tests
         run: yarn test 

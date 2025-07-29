@@ -24,9 +24,6 @@ mod reaction_test;
 #[cfg(test)]
 mod link_test;
 
-#[cfg(test)]
-mod client_parity_tests;
-
 pub fn validate_fid(fid: u64) -> Result<(), ValidationError> {
     match fid {
         0 => Err(ValidationError::FidIsMissing),
