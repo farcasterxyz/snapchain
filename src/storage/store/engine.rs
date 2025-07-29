@@ -1287,6 +1287,7 @@ impl ShardEngine {
             let proof_message = UsernameProofStore::get_username_proof(
                 &self.stores.username_proof_store,
                 &name.as_bytes().to_vec(),
+                txn,
             )
             .map_err(|e| MessageValidationError::StoreError(e))?;
             match proof_message {
@@ -1703,6 +1704,86 @@ impl ShardEngine {
                 Err(MessageValidationError::StoreError(
                     HubError::invalid_internal_state(&*err.to_string()),
                 ))
+            }
+        }
+    }
+
+    pub fn simulate_bulk_messages(
+        &mut self,
+        messages: &[proto::Message],
+    ) -> Vec<Result<(), MessageValidationError>> {
+        use std::collections::HashMap;
+
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        let trie_ctx = merkle_trie::Context::new();
+        let version = self.version_for(&FarcasterTime::current());
+        let timestamp = FarcasterTime::current();
+
+        // Group messages by FID and track their original positions
+        let mut messages_by_fid: HashMap<u64, Vec<(usize, &proto::Message)>> = HashMap::new();
+        for (index, message) in messages.iter().enumerate() {
+            let fid = message.fid() as u64;
+            messages_by_fid
+                .entry(fid)
+                .or_insert_with(Vec::new)
+                .push((index, message));
+        }
+
+        // Initialize results vector with placeholder values
+        let mut results: Vec<Result<(), MessageValidationError>> = vec![Ok(()); messages.len()];
+
+        // Process each FID group
+        for (fid, fid_messages) in messages_by_fid {
+            // Create a single transaction for all messages from this FID
+            let user_messages: Vec<proto::Message> =
+                fid_messages.iter().map(|(_, msg)| (*msg).clone()).collect();
+            let snapchain_txn = Transaction {
+                fid,
+                account_root: vec![], // Not used for simulation
+                system_messages: vec![],
+                user_messages,
+            };
+
+            // Process the transaction for this FID
+            match self.replay_snapchain_txn(
+                &trie_ctx,
+                &snapchain_txn,
+                &mut txn_batch,
+                ProposalSource::Simulate,
+                version,
+                &timestamp,
+            ) {
+                Ok((_, _, validation_errors)) => {
+                    // If there are any validation errors, assign them to the results
+                    if !validation_errors.is_empty() {
+                        let error = validation_errors[0].clone();
+                        for (original_index, _) in fid_messages {
+                            results[original_index] = Err(error.clone());
+                        }
+                    }
+                }
+                Err(err) => {
+                    // If replay_snapchain_txn fails, all messages for this FID fail
+                    let error = MessageValidationError::StoreError(
+                        HubError::invalid_internal_state(&*err.to_string()),
+                    );
+                    for (original_index, _) in fid_messages {
+                        results[original_index] = Err(error.clone());
+                    }
+                }
+            }
+        }
+
+        // The simulation was successful. We must now discard all in-memory changes
+        // to the trie and the transaction batch, as we are not committing state here.
+        match self.stores.trie.reload(&self.db) {
+            Ok(()) => results,
+            Err(e) => {
+                let trie_error = MessageValidationError::StoreError(
+                    HubError::invalid_internal_state(&*e.to_string()),
+                );
+                // If trie reload fails, return the trie error for all messages
+                vec![Err(trie_error); messages.len()]
             }
         }
     }

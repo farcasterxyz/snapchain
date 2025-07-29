@@ -170,7 +170,18 @@ impl MyHubService {
             };
         }
 
-        // We're doing the ens and address validations here for now because we don't want L1 interactions to be on the consensus critical path. Eventually this will move to the fname server.
+        // Process the submitted message
+        self.submit_message_to_mempool(message).await
+    }
+
+    async fn submit_message_to_mempool(
+        &self,
+        message: proto::Message,
+    ) -> Result<proto::Message, HubError> {
+        let fid = message.fid();
+
+        // We're doing the ens and address validations here for now because we don't want L1 interactions to be on the consensus critical path.
+        // Eventually this will move to the fname server.
         if let Some(message_data) = &message.data {
             match &message_data.body {
                 Some(proto::message_data::Body::UserDataBody(user_data)) => {
@@ -392,6 +403,7 @@ impl MyHubService {
         let proof_message = UsernameProofStore::get_username_proof(
             &stores.username_proof_store,
             &name.as_bytes().to_vec(),
+            &mut RocksDbTransactionBatch::new(),
         )?;
         match proof_message {
             Some(message) => match message.data {
@@ -561,44 +573,116 @@ impl HubService for MyHubService {
         }
     }
 
+    // Submit multiple messages in a single RPC call
     async fn submit_bulk_messages(
         &self,
         request: Request<proto::SubmitBulkMessagesRequest>,
     ) -> Result<Response<proto::SubmitBulkMessagesResponse>, Status> {
         authenticate_request(&request, &self.allowed_users)?;
 
-        let messages = request.into_inner().messages;
+        let mut messages = request.into_inner().messages;
         let num_messages = messages.len();
-        info!(
+        debug!(
             "Received call to [submit_bulk_messages] RPC with {} messages",
             num_messages
         );
 
+        // Helper to create error responses
+        fn create_error_response(hash: Vec<u8>, err: HubError) -> proto::BulkMessageResponse {
+            proto::BulkMessageResponse {
+                response: Some(proto::bulk_message_response::Response::MessageError(
+                    proto::MessageError {
+                        hash,
+                        err_code: err.code,
+                        message: err.message,
+                    },
+                )),
+            }
+        }
+
+        // Decode all message data_bytes fields first
+        for msg in &mut messages {
+            message_bytes_decode(msg);
+        }
+
+        // 1. Group messages by their destination shard
+        let mut messages_by_shard: HashMap<u32, Vec<proto::Message>> = HashMap::new();
+        for msg in messages {
+            let shard_id = self.message_router.route_fid(msg.fid(), self.num_shards);
+            messages_by_shard.entry(shard_id).or_default().push(msg);
+        }
+
         let mut results = Vec::with_capacity(num_messages);
-        for mut msg in messages {
-            // Ensure data_bytes are decoded before processing
-            message_bytes_decode(&mut msg);
-            let message_hash_for_error = msg.hash.clone();
 
-            // The `submit_message_internal` is async, so we await it so messages are processed sequentially.
-            // We don't want to do parallel processing here, as some message may depend on a previous message.
-            let result = self.submit_message_internal(msg).await;
-
-            let response = match result {
-                Ok(message) => proto::BulkMessageResponse {
-                    response: Some(proto::bulk_message_response::Response::Message(message)),
-                },
-                Err(err) => proto::BulkMessageResponse {
-                    response: Some(proto::bulk_message_response::Response::MessageError(
-                        proto::MessageError {
-                            hash: message_hash_for_error,
-                            err_code: err.code,
-                            message: err.message,
-                        },
-                    )),
-                },
+        // 2. Process each shard's batch transactionally for validation
+        for (shard_id, batch) in messages_by_shard {
+            let stores = match self.shard_stores.get(&shard_id) {
+                Some(s) => s,
+                None => {
+                    // If shard doesn't exist, fail all messages for this shard
+                    for msg in batch {
+                        results.push(create_error_response(
+                            msg.hash,
+                            HubError::invalid_parameter("invalid shard for fid"),
+                        ));
+                    }
+                    continue;
+                }
             };
-            results.push(response);
+
+            // Create a temporary, mutable engine for simulation
+            // TODO: This is a hack to get around the fact that self cannot be made mutable
+            let mut engine = ShardEngine::new(
+                stores.db.clone(),
+                self.network,
+                stores.trie.clone(),
+                shard_id,
+                stores.store_limits.clone(),
+                self.statsd_client.clone(),
+                100,
+                None,
+                None,
+                None,
+            );
+
+            // 3. Simulate the entire batch for the shard
+            self.statsd_client
+                .count("rpc.submit_message_in_flight", batch.len() as i64);
+            let sim_results = engine.simulate_bulk_messages(&batch);
+
+            // 4. Process simulation results
+            for (sim_result, msg) in sim_results.into_iter().zip(batch.into_iter()) {
+                match sim_result {
+                    Ok(()) => {
+                        // 4a. If simulation succeeds, submit the message to the mempool
+                        let message_hash_for_error = msg.hash.clone();
+                        let result = self.submit_message_to_mempool(msg).await;
+                        results.push(match result {
+                            Ok(message) => {
+                                self.statsd_client.count("rpc.submit_message.success", 1);
+                                self.statsd_client.count("rpc.submit_message_in_flight", -1);
+                                proto::BulkMessageResponse {
+                                    response: Some(
+                                        proto::bulk_message_response::Response::Message(message),
+                                    ),
+                                }
+                            }
+                            Err(err) => {
+                                self.statsd_client.count("rpc.submit_message.failure", 1);
+                                self.statsd_client.count("rpc.submit_message_in_flight", -1);
+                                create_error_response(message_hash_for_error, err)
+                            }
+                        });
+                    }
+                    Err(validation_err) => {
+                        // 4b. If simulation fails, create an error response for the message
+                        results.push(create_error_response(
+                            msg.hash,
+                            HubError::validation_failure(&validation_err.to_string()),
+                        ));
+                    }
+                }
+            }
         }
 
         Ok(Response::new(proto::SubmitBulkMessagesResponse {
@@ -1606,6 +1690,7 @@ impl HubService for MyHubService {
                 match UsernameProofStore::get_username_proof(
                     &stores.username_proof_store,
                     &req.name,
+                    &mut RocksDbTransactionBatch::new(),
                 ) {
                     Ok(Some(message)) => message.data.and_then(|data| {
                         if let Some(message_data::Body::UsernameProofBody(user_name_proof)) =

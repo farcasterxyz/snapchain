@@ -302,7 +302,7 @@ impl ReactionStore {
             ..Default::default()
         };
 
-        store.get_add(&partial_message)
+        store.get_add(&partial_message, None)
     }
 
     pub fn get_reaction_remove(
