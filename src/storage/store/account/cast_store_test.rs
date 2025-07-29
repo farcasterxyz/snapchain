@@ -21,6 +21,18 @@ mod tests {
         (store, db.clone(), temp_dir)
     }
 
+    fn merge_messages(
+        store: &Store<CastStoreDef>,
+        db: &Arc<RocksDB>,
+        messages: Vec<&message::Message>,
+    ) {
+        let mut txn = RocksDbTransactionBatch::new();
+        for message in messages {
+            store.merge(message, &mut txn).unwrap();
+        }
+        db.commit(txn).unwrap();
+    }
+
     #[tokio::test]
     async fn test_get_cast_add_fails_if_missing() {
         let (store, _db, _temp_dir) = create_test_store();
@@ -40,9 +52,7 @@ mod tests {
         let cast_add =
             messages_factory::casts::create_cast_add(FID_FOR_TEST, "Test cast", None, None);
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let _result = store.merge(&cast_add, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        merge_messages(&store, &db, vec![&cast_add]);
 
         // Test with invalid fid
         let invalid_fid = 999999;
@@ -51,7 +61,9 @@ mod tests {
         assert!(result.unwrap().is_none());
 
         // Test with invalid hash
-        let invalid_hash = vec![1, 2, 3, 4, 5];
+        let invalid_hash = vec![
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        ];
         let result = CastStore::get_cast_add(&store, FID_FOR_TEST, invalid_hash);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
@@ -64,9 +76,7 @@ mod tests {
         let cast_add =
             messages_factory::casts::create_cast_add(FID_FOR_TEST, "Test cast", None, None);
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let _result = store.merge(&cast_add, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        merge_messages(&store, &db, vec![&cast_add]);
         let result = CastStore::get_cast_add(&store, FID_FOR_TEST, cast_add.hash.clone());
         assert!(result.is_ok());
         let retrieved_cast = result.unwrap().unwrap();
@@ -92,9 +102,7 @@ mod tests {
         let cast_remove =
             messages_factory::casts::create_cast_remove(FID_FOR_TEST, &target_hash, None, None);
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let _result = store.merge(&cast_remove, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        merge_messages(&store, &db, vec![&cast_remove]);
 
         // Test with invalid fid
         let invalid_fid = 999999;
@@ -103,7 +111,9 @@ mod tests {
         assert!(result.unwrap().is_none());
 
         // Test with invalid hash
-        let invalid_hash = vec![1, 2, 3, 4, 5];
+        let invalid_hash = vec![
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        ];
         let result = CastStore::get_cast_remove(&store, FID_FOR_TEST, invalid_hash);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
@@ -117,9 +127,7 @@ mod tests {
         let cast_remove =
             messages_factory::casts::create_cast_remove(FID_FOR_TEST, &target_hash, None, None);
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let _result = store.merge(&cast_remove, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        merge_messages(&store, &db, vec![&cast_remove]);
 
         let result = CastStore::get_cast_remove(&store, FID_FOR_TEST, target_hash);
         assert!(result.is_ok());
@@ -135,9 +143,7 @@ mod tests {
         let cast_add =
             messages_factory::casts::create_cast_add(FID_FOR_TEST, "Test cast", None, None);
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let _result = store.merge(&cast_add, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        merge_messages(&store, &db, vec![&cast_add]);
 
         let result = CastStore::get_cast_adds_by_fid(&store, FID_FOR_TEST, &PageOptions::default());
 
@@ -155,9 +161,7 @@ mod tests {
         let cast_add =
             messages_factory::casts::create_cast_add(FID_FOR_TEST, "Test cast", None, None);
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let _result = store.merge(&cast_add, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        merge_messages(&store, &db, vec![&cast_add]);
 
         let invalid_fid = 999999;
         let result = CastStore::get_cast_adds_by_fid(&store, invalid_fid, &PageOptions::default());
@@ -207,11 +211,7 @@ mod tests {
             None,
         );
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let _result = store.merge(&cast_remove, &mut txn).unwrap();
-        let _result1 = store.merge(&cast_add1, &mut txn).unwrap();
-        let _result2 = store.merge(&cast_add2, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        merge_messages(&store, &db, vec![&cast_remove, &cast_add1, &cast_add2]);
 
         // Test getting all results
         let result = CastStore::get_cast_adds_by_fid(&store, FID_FOR_TEST, &PageOptions::default());
@@ -265,9 +265,7 @@ mod tests {
             None,
         );
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let _result = store.merge(&cast_remove, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        merge_messages(&store, &db, vec![&cast_remove]);
 
         let invalid_fid = 999999;
         let result =
@@ -319,11 +317,7 @@ mod tests {
             None,
         );
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let _result1 = store.merge(&cast_remove1, &mut txn).unwrap();
-        let _result2 = store.merge(&cast_remove2, &mut txn).unwrap();
-        let _result3 = store.merge(&cast_add1, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        merge_messages(&store, &db, vec![&cast_remove1, &cast_remove2, &cast_add1]);
 
         let result =
             CastStore::get_cast_removes_by_fid(&store, FID_FOR_TEST, &PageOptions::default());
@@ -368,7 +362,9 @@ mod tests {
 
         let parent_cast_id = message::CastId {
             fid: 1234,
-            hash: vec![1, 2, 3, 4, 5],
+            hash: vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+            ],
         };
         let parent = message::cast_add_body::Parent::ParentCastId(parent_cast_id);
 
@@ -387,7 +383,9 @@ mod tests {
         // Create a cast with a parent
         let parent_cast_id = message::CastId {
             fid: 1234,
-            hash: vec![1, 2, 3, 4, 5],
+            hash: vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+            ],
         };
 
         let cast_with_parent = messages_factory::casts::create_cast_add_rich(
@@ -400,14 +398,14 @@ mod tests {
             None,
         );
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let _result = store.merge(&cast_with_parent, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        merge_messages(&store, &db, vec![&cast_with_parent]);
 
         // Query with a different parent
         let different_parent = message::CastId {
             fid: 5678,
-            hash: vec![6, 7, 8, 9, 10],
+            hash: vec![
+                6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+            ],
         };
         let parent = message::cast_add_body::Parent::ParentCastId(different_parent);
 
@@ -434,7 +432,9 @@ mod tests {
 
         let parent_cast_id = message::CastId {
             fid: 1234,
-            hash: vec![1, 2, 3, 4, 5],
+            hash: vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+            ],
         };
 
         let cast1 = messages_factory::casts::create_cast_add_rich(
@@ -457,10 +457,7 @@ mod tests {
             None,
         );
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let _result1 = store.merge(&cast1, &mut txn).unwrap();
-        let _result2 = store.merge(&cast2, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        merge_messages(&store, &db, vec![&cast1, &cast2]);
 
         let parent = message::cast_add_body::Parent::ParentCastId(parent_cast_id);
         let page_options = PageOptions {
@@ -564,10 +561,7 @@ mod tests {
             ));
         }
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let _result1 = store.merge(&cast1_with_parent, &mut txn).unwrap();
-        let _result2 = store.merge(&cast2_with_parent, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        merge_messages(&store, &db, vec![&cast1_with_parent, &cast2_with_parent]);
 
         let parent = message::cast_add_body::Parent::ParentUrl(parent_url);
         let result = CastStore::get_casts_by_parent(&store, &parent, &PageOptions::default());
@@ -637,9 +631,7 @@ mod tests {
         let cast_add =
             messages_factory::casts::create_cast_add(FID_FOR_TEST, "Test cast", None, None);
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let _result = store.merge(&cast_add, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        merge_messages(&store, &db, vec![&cast_add]);
 
         let different_mention_fid = 9999;
         let result =
@@ -696,10 +688,11 @@ mod tests {
             cast_body.mentions = vec![mention_fid];
         }
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let _result1 = store.merge(&cast1_with_mentions, &mut txn).unwrap();
-        let _result2 = store.merge(&cast2_with_mentions, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        merge_messages(
+            &store,
+            &db,
+            vec![&cast1_with_mentions, &cast2_with_mentions],
+        );
 
         let result = CastStore::get_casts_by_mention(&store, mention_fid, &PageOptions::default());
 
@@ -775,10 +768,24 @@ mod tests {
         let cast_add =
             messages_factory::casts::create_cast_add(FID_FOR_TEST, "Test cast", None, None);
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&cast_add, &mut txn);
-        assert!(result.is_ok());
-        db.commit(txn).unwrap();
+        merge_messages(&store, &db, vec![&cast_add]);
+
+        // Verify the cast was stored
+        let retrieved = CastStore::get_cast_add(&store, FID_FOR_TEST, cast_add.hash.clone());
+        assert!(retrieved.is_ok());
+        assert!(retrieved.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_merge_cast_add_succeeds_for_long_cast() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        // Create a long cast message (320 characters)
+        let long_text = "a".repeat(320);
+        let cast_add =
+            messages_factory::casts::create_cast_add(FID_FOR_TEST, &long_text, None, None);
+
+        merge_messages(&store, &db, vec![&cast_add]);
 
         // Verify the cast was stored
         let retrieved = CastStore::get_cast_add(&store, FID_FOR_TEST, cast_add.hash.clone());
@@ -793,10 +800,7 @@ mod tests {
         let cast_add =
             messages_factory::casts::create_cast_add(FID_FOR_TEST, "Test cast", None, None);
 
-        let mut txn1 = RocksDbTransactionBatch::new();
-        let result1 = store.merge(&cast_add, &mut txn1);
-        assert!(result1.is_ok());
-        db.commit(txn1).unwrap();
+        merge_messages(&store, &db, vec![&cast_add]);
 
         let mut txn2 = RocksDbTransactionBatch::new();
         let result2 = store.merge(&cast_add, &mut txn2);
@@ -804,6 +808,140 @@ mod tests {
         let error = result2.unwrap_err();
         assert_eq!(error.code, "bad_request.duplicate");
         assert_eq!(error.message, "message has already been merged");
+    }
+
+    #[tokio::test]
+    async fn test_merge_cast_add_fails_conflicting_cast_remove_with_later_timestamp() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let timestamp1 = time::farcaster_time();
+
+        let cast_add = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "Test cast",
+            Some(timestamp1 + 1), // Later timestamp
+            None,
+        );
+
+        // Create cast remove with earlier timestamp
+        let cast_remove = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &cast_add.hash,
+            Some(timestamp1), // Earlier timestamp
+            None,
+        );
+
+        // Merge remove first
+        merge_messages(&store, &db, vec![&cast_remove]);
+
+        // Try to merge add with later timestamp - should fail due to remove wins
+        let mut txn2 = RocksDbTransactionBatch::new();
+        let result2 = store.merge(&cast_add, &mut txn2);
+        assert!(result2.is_err());
+        let error = result2.unwrap_err();
+        assert_eq!(error.code, "bad_request.conflict");
+        assert_eq!(error.message, "message conflicts with a more recent remove");
+    }
+
+    #[tokio::test]
+    async fn test_merge_cast_add_fails_with_conflicting_cast_remove_with_later_timestamp() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let timestamp1 = time::farcaster_time();
+
+        let cast_add = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "Test cast",
+            Some(timestamp1), // Earlier timestamp
+            None,
+        );
+
+        // Create cast remove with later timestamp
+        let cast_remove = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &cast_add.hash,
+            Some(timestamp1 + 1), // Later timestamp
+            None,
+        );
+
+        // Merge remove first
+        merge_messages(&store, &db, vec![&cast_remove]);
+
+        // Try to merge add with earlier timestamp - should fail due to remove with later timestamp
+        let mut txn2 = RocksDbTransactionBatch::new();
+        let result2 = store.merge(&cast_add, &mut txn2);
+        assert!(result2.is_err());
+        let error = result2.unwrap_err();
+        assert_eq!(error.code, "bad_request.conflict");
+        assert_eq!(error.message, "message conflicts with a more recent remove");
+    }
+
+    #[tokio::test]
+    async fn test_merge_cast_add_fails_with_conflicting_cast_remove_with_later_hash() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let timestamp = time::farcaster_time();
+        let cast_add = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "Test cast",
+            Some(timestamp),
+            None,
+        );
+
+        // Create cast remove with same timestamp but later hash (lexicographically)
+        let mut cast_remove = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &cast_add.hash,
+            Some(timestamp), // Same timestamp
+            None,
+        );
+        // Make sure remove has later hash than add
+        cast_remove.hash = vec![255; 20];
+
+        // Merge remove first
+        merge_messages(&store, &db, vec![&cast_remove]);
+
+        // Try to merge add - should fail due to conflicting remove with later hash
+        let mut txn2 = RocksDbTransactionBatch::new();
+        let result2 = store.merge(&cast_add, &mut txn2);
+        assert!(result2.is_err());
+        let error = result2.unwrap_err();
+        assert_eq!(error.code, "bad_request.conflict");
+        assert_eq!(error.message, "message conflicts with a more recent remove");
+    }
+
+    #[tokio::test]
+    async fn test_merge_cast_add_fails_with_conflicting_cast_remove_with_earlier_hash() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let timestamp = time::farcaster_time();
+        let cast_add = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "Test cast",
+            Some(timestamp),
+            None,
+        );
+
+        // Create cast remove with same timestamp but earlier hash (lexicographically)
+        let mut cast_remove = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &cast_add.hash,
+            Some(timestamp), // Same timestamp
+            None,
+        );
+        // Make sure remove has earlier hash than add
+        cast_remove.hash = vec![0; 20];
+
+        // Merge remove first
+        merge_messages(&store, &db, vec![&cast_remove]);
+
+        // Try to merge add - should fail due to conflicting remove with earlier hash (remove wins)
+        let mut txn2 = RocksDbTransactionBatch::new();
+        let result2 = store.merge(&cast_add, &mut txn2);
+        assert!(result2.is_err());
+        let error = result2.unwrap_err();
+        assert_eq!(error.code, "bad_request.conflict");
+        assert_eq!(error.message, "message conflicts with a more recent remove");
     }
 
     #[tokio::test]
@@ -825,15 +963,39 @@ mod tests {
         );
 
         // First merge the cast add
-        let mut txn = RocksDbTransactionBatch::new();
-        let _result = store.merge(&cast_add, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        merge_messages(&store, &db, vec![&cast_add, &cast_remove]);
 
-        // Then merge the cast remove
-        let mut txn2 = RocksDbTransactionBatch::new();
-        let result = store.merge(&cast_remove, &mut txn2);
-        assert!(result.is_ok());
-        db.commit(txn2).unwrap();
+        // Verify the remove was stored and the add was removed
+        let remove_result = CastStore::get_cast_remove(&store, FID_FOR_TEST, cast_add.hash.clone());
+        assert!(remove_result.is_ok());
+        assert!(remove_result.unwrap().is_some());
+
+        let add_result = CastStore::get_cast_add(&store, FID_FOR_TEST, cast_add.hash.clone());
+        assert!(add_result.is_ok());
+        assert!(add_result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_merge_cast_remove_succeeds_for_long_cast() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let timestamp = time::farcaster_time();
+        let long_text = "a".repeat(320);
+        let cast_add = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            &long_text,
+            Some(timestamp),
+            None,
+        );
+        let cast_remove = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &cast_add.hash,
+            Some(timestamp + 1),
+            None,
+        );
+
+        // First merge the cast add
+        merge_messages(&store, &db, vec![&cast_add, &cast_remove]);
 
         // Verify the remove was stored and the add was removed
         let remove_result = CastStore::get_cast_remove(&store, FID_FOR_TEST, cast_add.hash.clone());
@@ -874,6 +1036,203 @@ mod tests {
         let error = result2.unwrap_err();
         assert_eq!(error.code, "bad_request.duplicate");
         assert_eq!(error.message, "message has already been merged");
+    }
+
+    #[tokio::test]
+    async fn test_cast_remove_succeeds_with_later_timestamp() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let timestamp1 = time::farcaster_time();
+        let timestamp2 = timestamp1 + 1;
+
+        let cast_add = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "Test cast",
+            Some(timestamp1),
+            None,
+        );
+        let cast_remove = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &cast_add.hash,
+            Some(timestamp2),
+            None,
+        );
+
+        // Merge add first
+        merge_messages(&store, &db, vec![&cast_add, &cast_remove]);
+
+        // Verify remove exists and add is gone
+        let remove_result = CastStore::get_cast_remove(&store, FID_FOR_TEST, cast_add.hash.clone());
+        assert!(remove_result.is_ok());
+        assert!(remove_result.unwrap().is_some());
+
+        let add_result = CastStore::get_cast_add(&store, FID_FOR_TEST, cast_add.hash.clone());
+        assert!(add_result.is_ok());
+        assert!(add_result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cast_remove_fails_with_earlier_timestamp() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let timestamp1 = time::farcaster_time();
+        let timestamp2 = timestamp1 - 1;
+
+        let cast_remove1 = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+            ],
+            Some(timestamp1),
+            None,
+        );
+        let cast_remove2 = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+            ],
+            Some(timestamp2),
+            None,
+        );
+
+        // Merge first remove
+        merge_messages(&store, &db, vec![&cast_remove1]);
+
+        // Try to merge second remove with earlier timestamp - should fail
+        let mut txn2 = RocksDbTransactionBatch::new();
+        let result2 = store.merge(&cast_remove2, &mut txn2);
+        assert!(result2.is_err());
+        let error = result2.unwrap_err();
+        assert_eq!(error.code, "bad_request.conflict");
+    }
+
+    #[tokio::test]
+    async fn test_cast_remove_succeeds_with_later_timestamp_vs_cast_remove() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let timestamp1 = time::farcaster_time();
+
+        let target_hash = vec![
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        ];
+        let cast_remove1 = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &target_hash,
+            Some(timestamp1),
+            None,
+        );
+        let cast_remove2 = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &target_hash,
+            Some(timestamp1 + 1), // Later timestamp
+            None,
+        );
+
+        // Merge first remove
+        merge_messages(&store, &db, vec![&cast_remove1, &cast_remove2]);
+
+        // Verify the second remove replaced the first
+        let retrieved = CastStore::get_cast_remove(&store, FID_FOR_TEST, target_hash);
+        assert!(retrieved.is_ok());
+        let retrieved_remove = retrieved.unwrap().unwrap();
+        assert_eq!(retrieved_remove, cast_remove2);
+    }
+
+    #[tokio::test]
+    async fn test_cast_remove_fails_with_earlier_timestamp_vs_cast_remove() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let timestamp1 = time::farcaster_time();
+        let timestamp2 = timestamp1 - 1;
+
+        let target_hash = vec![
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        ];
+        let cast_remove1 = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &target_hash,
+            Some(timestamp1),
+            None,
+        );
+        let cast_remove2 = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &target_hash,
+            Some(timestamp2), // Earlier timestamp
+            None,
+        );
+
+        // Merge first remove (later timestamp)
+        merge_messages(&store, &db, vec![&cast_remove1]);
+
+        // Try to merge second remove with earlier timestamp - should fail
+        let mut txn2 = RocksDbTransactionBatch::new();
+        let result2 = store.merge(&cast_remove2, &mut txn2);
+        assert!(result2.is_err());
+        let error = result2.unwrap_err();
+        assert_eq!(error.code, "bad_request.conflict");
+        assert_eq!(error.message, "message conflicts with a more recent remove");
+    }
+
+    #[tokio::test]
+    async fn test_cast_remove_succeeds_with_later_hash_vs_cast_remove() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let timestamp = time::farcaster_time();
+        let target_hash = vec![
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        ];
+
+        let cast_remove1 = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &target_hash,
+            Some(timestamp),
+            None,
+        );
+
+        // Create second remove with same timestamp but later hash (lexicographically)
+        let mut cast_remove2 = cast_remove1.clone();
+        cast_remove2.hash = vec![255; 20]; // Lexicographically later hash
+
+        // Merge first remove
+        merge_messages(&store, &db, vec![&cast_remove1, &cast_remove2]);
+
+        // Verify the second remove replaced the first
+        let retrieved = CastStore::get_cast_remove(&store, FID_FOR_TEST, target_hash);
+        assert!(retrieved.is_ok());
+        let retrieved_remove = retrieved.unwrap().unwrap();
+        assert_eq!(retrieved_remove, cast_remove2);
+    }
+
+    #[tokio::test]
+    async fn test_cast_remove_fails_with_earlier_hash_vs_cast_remove() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let timestamp = time::farcaster_time();
+        let target_hash = vec![
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        ];
+
+        let cast_remove1 = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &target_hash,
+            Some(timestamp),
+            None,
+        );
+
+        // Create second remove with same timestamp but earlier hash (lexicographically)
+        let mut cast_remove2 = cast_remove1.clone();
+        cast_remove2.hash = vec![0; 20]; // Lexicographically earlier hash
+
+        // Merge first remove (with later hash)
+        merge_messages(&store, &db, vec![&cast_remove1]);
+
+        // Try to merge second remove with earlier hash - should fail
+        let mut txn2 = RocksDbTransactionBatch::new();
+        let result2 = store.merge(&cast_remove2, &mut txn2);
+        assert!(result2.is_err());
+        let error = result2.unwrap_err();
+        assert_eq!(error.code, "bad_request.conflict");
+        assert_eq!(error.message, "message conflicts with a more recent remove");
     }
 
     #[tokio::test]
@@ -934,9 +1293,7 @@ mod tests {
             None,
         );
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let _result = store.merge(&cast_remove, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        merge_messages(&store, &db, vec![&cast_remove]);
 
         let mut txn2 = RocksDbTransactionBatch::new();
         let result = store.merge(&cast_add, &mut txn2);
@@ -946,6 +1303,72 @@ mod tests {
         assert_eq!(error.message, "message conflicts with a more recent remove");
 
         // Verify the remove still exists and add doesn't
+        let remove_result = CastStore::get_cast_remove(&store, FID_FOR_TEST, cast_add.hash.clone());
+        assert!(remove_result.is_ok());
+        assert!(remove_result.unwrap().is_some());
+
+        let add_result = CastStore::get_cast_add(&store, FID_FOR_TEST, cast_add.hash.clone());
+        assert!(add_result.is_ok());
+        assert!(add_result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cast_remove_vs_cast_add_succeeds_with_earlier_hash() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let timestamp = time::farcaster_time();
+        let cast_add = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "Test cast",
+            Some(timestamp),
+            None,
+        );
+        let mut cast_remove = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &cast_add.hash,
+            Some(timestamp), // Same timestamp
+            None,
+        );
+        // Make sure remove has earlier hash than add (lexicographically)
+        cast_remove.hash = vec![0; 20];
+
+        // Merge add first
+        merge_messages(&store, &db, vec![&cast_add, &cast_remove]);
+
+        // Verify remove exists and add is gone
+        let remove_result = CastStore::get_cast_remove(&store, FID_FOR_TEST, cast_add.hash.clone());
+        assert!(remove_result.is_ok());
+        assert!(remove_result.unwrap().is_some());
+
+        let add_result = CastStore::get_cast_add(&store, FID_FOR_TEST, cast_add.hash.clone());
+        assert!(add_result.is_ok());
+        assert!(add_result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cast_remove_vs_cast_add_succeeds_with_later_hash() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let timestamp = time::farcaster_time();
+        let cast_add = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "Test cast",
+            Some(timestamp),
+            None,
+        );
+        let mut cast_remove = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &cast_add.hash,
+            Some(timestamp), // Same timestamp
+            None,
+        );
+        // Make sure remove has later hash than add (lexicographically)
+        cast_remove.hash = vec![255; 20];
+
+        // Merge add first
+        merge_messages(&store, &db, vec![&cast_add, &cast_remove]);
+
+        // Verify remove exists and add is gone
         let remove_result = CastStore::get_cast_remove(&store, FID_FOR_TEST, cast_add.hash.clone());
         assert!(remove_result.is_ok());
         assert!(remove_result.unwrap().is_some());
@@ -982,9 +1405,7 @@ mod tests {
         let cast_add =
             messages_factory::casts::create_cast_add(FID_FOR_TEST, "Test cast", None, None);
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let _result = store.merge(&cast_add, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        merge_messages(&store, &db, vec![&cast_add]);
 
         let mut txn2 = RocksDbTransactionBatch::new();
         let result = store.revoke(&cast_add, &mut txn2);
@@ -1014,9 +1435,7 @@ mod tests {
             None,
         );
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let _result = store.merge(&cast_remove, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        merge_messages(&store, &db, vec![&cast_remove]);
 
         let mut txn2 = RocksDbTransactionBatch::new();
         let result = store.revoke(&cast_remove, &mut txn2);
@@ -1044,6 +1463,85 @@ mod tests {
         let get_result = CastStore::get_cast_add(&store, FID_FOR_TEST, cast_add.hash.clone());
         assert!(get_result.is_ok());
         assert!(get_result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_revoke_deletes_all_keys_relating_to_cast_with_parent_url() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let timestamp = time::farcaster_time();
+        let parent_url = "https://example.com/post/123".to_string();
+        let mention_fid = 5678u64;
+
+        // Create a cast with parent URL and mentions
+        let cast_add = messages_factory::casts::create_cast_add_rich(
+            FID_FOR_TEST,
+            "Cast with parent URL and mentions",
+            Some(CastType::Cast),
+            vec![],
+            None,
+            Some(timestamp),
+            None,
+        );
+
+        // Manually set the parent URL and mentions
+        let mut cast_with_parent_and_mentions = cast_add.clone();
+        if let Some(message::MessageData {
+            body: Some(message::message_data::Body::CastAddBody(ref mut cast_body)),
+            ..
+        }) = &mut cast_with_parent_and_mentions.data
+        {
+            cast_body.parent = Some(message::cast_add_body::Parent::ParentUrl(
+                parent_url.clone(),
+            ));
+            cast_body.mentions = vec![mention_fid];
+        }
+
+        // Merge the cast
+        merge_messages(&store, &db, vec![&cast_with_parent_and_mentions]);
+
+        // Verify cast exists
+        let result = CastStore::get_cast_add(&store, FID_FOR_TEST, cast_add.hash.clone());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
+
+        // Verify cast is found by parent URL
+        let parent = message::cast_add_body::Parent::ParentUrl(parent_url);
+        let parent_result =
+            CastStore::get_casts_by_parent(&store, &parent, &PageOptions::default());
+        assert!(parent_result.is_ok());
+        assert_eq!(parent_result.unwrap().messages.len(), 1);
+
+        // Verify cast is found by mention
+        let mention_result =
+            CastStore::get_casts_by_mention(&store, mention_fid, &PageOptions::default());
+        assert!(mention_result.is_ok());
+        assert_eq!(mention_result.unwrap().messages.len(), 1);
+
+        // Revoke the cast
+        let mut txn2 = RocksDbTransactionBatch::new();
+        let revoke_result = store.revoke(&cast_with_parent_and_mentions, &mut txn2);
+        assert!(revoke_result.is_ok());
+        db.commit(txn2).unwrap();
+
+        // Verify cast no longer exists
+        let result = CastStore::get_cast_add(&store, FID_FOR_TEST, cast_add.hash.clone());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+
+        // Verify cast is no longer found by parent URL
+        let parent =
+            message::cast_add_body::Parent::ParentUrl("https://example.com/post/123".to_string());
+        let parent_result =
+            CastStore::get_casts_by_parent(&store, &parent, &PageOptions::default());
+        assert!(parent_result.is_ok());
+        assert_eq!(parent_result.unwrap().messages.len(), 0);
+
+        // Verify cast is no longer found by mention
+        let mention_result =
+            CastStore::get_casts_by_mention(&store, mention_fid, &PageOptions::default());
+        assert!(mention_result.is_ok());
+        assert_eq!(mention_result.unwrap().messages.len(), 0);
     }
 
     #[tokio::test]
@@ -1081,11 +1579,7 @@ mod tests {
         }
 
         // Merge all messages
-        for cast_add in &cast_adds {
-            let mut txn = RocksDbTransactionBatch::new();
-            let _result = store.merge(cast_add, &mut txn).unwrap();
-            db.commit(txn).unwrap();
-        }
+        merge_messages(&store, &db, cast_adds.iter().collect());
 
         // Prune messages (requires current_count, max_count, and transaction)
         let mut txn = RocksDbTransactionBatch::new();
@@ -1129,5 +1623,212 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 0); // No messages pruned
         db.commit(txn).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_prune_messages_earliest_add_messages_with_bundles() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = RocksDB::new(db_path.to_str().unwrap());
+        db.open().unwrap();
+        let db = Arc::new(db);
+
+        let event_handler = StoreEventHandler::new();
+        let store = CastStore::new(db.clone(), event_handler.clone(), 3); // Size limit of 3
+
+        let timestamp = time::farcaster_time();
+
+        // Create 5 cast add messages with different timestamps
+        let mut cast_adds = vec![];
+        for i in 0..5 {
+            let cast_add = messages_factory::casts::create_cast_add(
+                FID_FOR_TEST,
+                &format!("Bundle cast message {}", i),
+                Some(timestamp + i),
+                None,
+            );
+            cast_adds.push(cast_add);
+        }
+
+        // Merge all messages in a single transaction (simulating bundle)
+        merge_messages(&store, &db, cast_adds.iter().collect());
+
+        // Prune messages
+        let mut txn = RocksDbTransactionBatch::new();
+        let result = store.prune_messages(FID_FOR_TEST, 5, 3, &mut txn);
+        assert!(result.is_ok());
+        db.commit(txn).unwrap();
+
+        // Verify that only the latest 3 messages remain
+        let page_options = PageOptions::default();
+        let remaining_messages =
+            CastStore::get_cast_adds_by_fid(&store, FID_FOR_TEST, &page_options);
+        assert!(remaining_messages.is_ok());
+        let page = remaining_messages.unwrap();
+        assert_eq!(page.messages.len(), 3);
+
+        // Verify the earliest 2 messages were pruned
+        for i in 0..2 {
+            let result = CastStore::get_cast_add(&store, FID_FOR_TEST, cast_adds[i].hash.clone());
+            assert!(result.is_ok());
+            assert!(result.unwrap().is_none());
+        }
+
+        // Verify the latest 3 messages still exist
+        for i in 2..5 {
+            let result = CastStore::get_cast_add(&store, FID_FOR_TEST, cast_adds[i].hash.clone());
+            assert!(result.is_ok());
+            assert!(result.unwrap().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prune_messages_earliest_remove_messages() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = RocksDB::new(db_path.to_str().unwrap());
+        db.open().unwrap();
+        let db = Arc::new(db);
+
+        let event_handler = StoreEventHandler::new();
+        let store = CastStore::new(db.clone(), event_handler.clone(), 3); // Size limit of 3
+
+        let timestamp = time::farcaster_time();
+
+        // Create 5 cast remove messages with different timestamps
+        let mut cast_removes = vec![];
+        for i in 0..5 {
+            let target_hash: Vec<u8> = (0..20).map(|j| (i * 20 + j) as u8).collect();
+            let cast_remove = messages_factory::casts::create_cast_remove(
+                FID_FOR_TEST,
+                &target_hash,
+                Some(timestamp + i),
+                None,
+            );
+            cast_removes.push(cast_remove);
+        }
+
+        // Merge all remove messages
+        merge_messages(&store, &db, cast_removes.iter().collect());
+
+        // Prune messages
+        let mut txn = RocksDbTransactionBatch::new();
+        let result = store.prune_messages(FID_FOR_TEST, 5, 3, &mut txn);
+        assert!(result.is_ok());
+        db.commit(txn).unwrap();
+
+        // Verify that only the latest 3 messages remain
+        let page_options = PageOptions::default();
+        let remaining_messages =
+            CastStore::get_cast_removes_by_fid(&store, FID_FOR_TEST, &page_options);
+        assert!(remaining_messages.is_ok());
+        let page = remaining_messages.unwrap();
+        assert_eq!(page.messages.len(), 3);
+
+        // Verify the earliest 2 remove messages were pruned
+        for i in 0..2 {
+            let target_hash: Vec<u8> = (0..20).map(|j| (i * 20 + j) as u8).collect();
+            let result = CastStore::get_cast_remove(&store, FID_FOR_TEST, target_hash);
+            assert!(result.is_ok());
+            assert!(result.unwrap().is_none());
+        }
+
+        // Verify the latest 3 remove messages still exist
+        for i in 2..5 {
+            let target_hash: Vec<u8> = (0..20).map(|j| (i * 20 + j) as u8).collect();
+            let result = CastStore::get_cast_remove(&store, FID_FOR_TEST, target_hash);
+            assert!(result.is_ok());
+            assert!(result.unwrap().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prune_messages_earliest_mixed_messages() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = RocksDB::new(db_path.to_str().unwrap());
+        db.open().unwrap();
+        let db = Arc::new(db);
+
+        let event_handler = StoreEventHandler::new();
+        let store = CastStore::new(db.clone(), event_handler.clone(), 3); // Size limit of 3
+
+        let timestamp = time::farcaster_time();
+
+        // Create mix of add and remove messages
+        let cast_add1 = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "Mixed message 1",
+            Some(timestamp + 1),
+            None,
+        );
+        let cast_remove1 = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+            ],
+            Some(timestamp + 2),
+            None,
+        );
+        let cast_add2 = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "Mixed message 2",
+            Some(timestamp + 3),
+            None,
+        );
+        let cast_remove2 = messages_factory::casts::create_cast_remove(
+            FID_FOR_TEST,
+            &vec![
+                6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+            ],
+            Some(timestamp + 4),
+            None,
+        );
+        let cast_add3 = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "Mixed message 3",
+            Some(timestamp + 5),
+            None,
+        );
+
+        // Merge all messages
+        let messages = vec![
+            &cast_add1,
+            &cast_remove1,
+            &cast_add2,
+            &cast_remove2,
+            &cast_add3,
+        ];
+        merge_messages(&store, &db, messages);
+
+        // Prune messages (keep only 3)
+        let mut txn = RocksDbTransactionBatch::new();
+        let result = store.prune_messages(FID_FOR_TEST, 5, 3, &mut txn);
+        assert!(result.is_ok());
+        db.commit(txn).unwrap();
+
+        // Verify total remaining messages
+        let add_page =
+            CastStore::get_cast_adds_by_fid(&store, FID_FOR_TEST, &PageOptions::default()).unwrap();
+        let remove_page =
+            CastStore::get_cast_removes_by_fid(&store, FID_FOR_TEST, &PageOptions::default())
+                .unwrap();
+        let total_remaining = add_page.messages.len() + remove_page.messages.len();
+        assert_eq!(total_remaining, 3);
+
+        // Verify the earliest messages were pruned (add1 and remove1)
+        let add1_result = CastStore::get_cast_add(&store, FID_FOR_TEST, cast_add1.hash);
+        assert!(add1_result.is_ok());
+        assert!(add1_result.unwrap().is_none());
+
+        let remove1_result = CastStore::get_cast_remove(
+            &store,
+            FID_FOR_TEST,
+            vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+            ],
+        );
+        assert!(remove1_result.is_ok());
+        assert!(remove1_result.unwrap().is_none());
     }
 }
