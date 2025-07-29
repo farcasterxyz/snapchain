@@ -2659,6 +2659,7 @@ mod tests {
             Some(proto::CastType::TenKCast),
             vec![],
             None,
+            vec![],
             None,
             None,
         );
@@ -2715,6 +2716,7 @@ mod tests {
                 },
             ],
             None,
+            vec![],
             None,
             None,
         );
