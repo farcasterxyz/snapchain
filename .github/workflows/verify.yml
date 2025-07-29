@@ -55,6 +55,10 @@ jobs:
           repository: CassOnMars/eth-signature-verifier
           path: ./eth-signature-verifier
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22 
+
       - uses: actions/checkout@v4
         with:
           path: ./snapchain
@@ -73,3 +77,9 @@ jobs:
         env:
           RUSTFLAGS: "-Dwarnings"
         run: cargo fmt --all --check
+
+      - working-directory: ./snapchain/tests/client_parity_tests
+        run: yarn install 
+
+      - working-directory: ./snapchain/tests/client_parity_tests
+        run: yarn test 

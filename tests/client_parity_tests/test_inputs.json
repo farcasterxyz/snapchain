@@ -1,0 +1,26 @@
+[
+  {
+    "message_file": "input_messages/valid_cast_add.bin",
+    "is_valid": true
+  },
+  {
+    "message_file": "input_messages/valid_user_data_add.bin",
+    "is_valid": true
+  },
+  {
+    "message_file": "input_messages/valid_reaction_add.bin",
+    "is_valid": true
+  },
+  {
+    "message_file": "input_messages/valid_link_add.bin",
+    "is_valid": true
+  },
+  {
+    "message_file": "input_messages/invalid_signature.bin",
+    "is_valid": false
+  },
+  {
+    "message_file": "input_messages/invalid_hash.bin",
+    "is_valid": false
+  }
+]

@@ -16,3 +16,4 @@ nodes/
 Procfile
 .vscode/
 /.idea
+node_modules
