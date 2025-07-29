@@ -1,14 +1,20 @@
 #[cfg(test)]
 mod tests {
     use super::super::super::test_helper::FID_FOR_TEST;
-    use crate::proto::{self as message, CastType};
+    use crate::proto::{self as message, hub_event, CastType, HubEventType};
     use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{CastStore, CastStoreDef, Store, StoreEventHandler};
-    use crate::utils::factory::{events_factory, messages_factory, time};
+    use crate::utils::factory::{messages_factory, time};
     use std::sync::Arc;
     use tempfile::TempDir;
 
     fn create_test_store() -> (Store<CastStoreDef>, Arc<RocksDB>, TempDir) {
+        create_test_store_with_prune_limit(10)
+    }
+
+    fn create_test_store_with_prune_limit(
+        prune_size_limit: u32,
+    ) -> (Store<CastStoreDef>, Arc<RocksDB>, TempDir) {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let db = RocksDB::new(db_path.to_str().unwrap());
@@ -16,7 +22,7 @@ mod tests {
         let db = Arc::new(db);
 
         let event_handler = StoreEventHandler::new();
-        let store = CastStore::new(db.clone(), event_handler.clone(), 10);
+        let store = CastStore::new(db.clone(), event_handler.clone(), prune_size_limit);
 
         (store, db.clone(), temp_dir)
     }
@@ -28,7 +34,32 @@ mod tests {
     ) {
         let mut txn = RocksDbTransactionBatch::new();
         for message in messages {
-            store.merge(message, &mut txn).unwrap();
+            let result = store.merge(message, &mut txn).unwrap();
+            assert_eq!(result.r#type(), HubEventType::MergeMessage);
+            match &result.body {
+                Some(hub_event::Body::MergeMessageBody(body)) => {
+                    assert_eq!(*body.message.as_ref().unwrap(), *message)
+                }
+                _ => {
+                    panic!("Unexpected event")
+                }
+            }
+        }
+        db.commit(txn).unwrap();
+    }
+
+    fn revoke_message(store: &Store<CastStoreDef>, db: &Arc<RocksDB>, message: &message::Message) {
+        let mut txn = RocksDbTransactionBatch::new();
+
+        let result = store.revoke(message, &mut txn).unwrap();
+        assert_eq!(result.r#type(), HubEventType::RevokeMessage);
+        match &result.body {
+            Some(hub_event::Body::RevokeMessageBody(body)) => {
+                assert_eq!(*body.message.as_ref().unwrap(), *message)
+            }
+            _ => {
+                panic!("Unexpected event")
+            }
         }
         db.commit(txn).unwrap();
     }
@@ -1407,10 +1438,7 @@ mod tests {
 
         merge_messages(&store, &db, vec![&cast_add]);
 
-        let mut txn2 = RocksDbTransactionBatch::new();
-        let result = store.revoke(&cast_add, &mut txn2);
-        assert!(result.is_ok());
-        db.commit(txn2).unwrap();
+        revoke_message(&store, &db, &cast_add);
 
         let get_result = CastStore::get_cast_add(&store, FID_FOR_TEST, cast_add.hash.clone());
         assert!(get_result.is_ok());
@@ -1436,11 +1464,7 @@ mod tests {
         );
 
         merge_messages(&store, &db, vec![&cast_remove]);
-
-        let mut txn2 = RocksDbTransactionBatch::new();
-        let result = store.revoke(&cast_remove, &mut txn2);
-        assert!(result.is_ok());
-        db.commit(txn2).unwrap();
+        revoke_message(&store, &db, &cast_remove);
 
         let get_result = CastStore::get_cast_remove(&store, FID_FOR_TEST, cast_add.hash.clone());
         assert!(get_result.is_ok());
@@ -1455,10 +1479,7 @@ mod tests {
             messages_factory::casts::create_cast_add(FID_FOR_TEST, "Test cast", None, None);
 
         // Don't merge the message first
-        let mut txn = RocksDbTransactionBatch::new();
-        let result = store.revoke(&cast_add, &mut txn);
-        assert!(result.is_ok());
-        db.commit(txn).unwrap();
+        revoke_message(&store, &db, &cast_add);
 
         let get_result = CastStore::get_cast_add(&store, FID_FOR_TEST, cast_add.hash.clone());
         assert!(get_result.is_ok());
@@ -1519,10 +1540,7 @@ mod tests {
         assert_eq!(mention_result.unwrap().messages.len(), 1);
 
         // Revoke the cast
-        let mut txn2 = RocksDbTransactionBatch::new();
-        let revoke_result = store.revoke(&cast_with_parent_and_mentions, &mut txn2);
-        assert!(revoke_result.is_ok());
-        db.commit(txn2).unwrap();
+        revoke_message(&store, &db, &cast_with_parent_and_mentions);
 
         // Verify cast no longer exists
         let result = CastStore::get_cast_add(&store, FID_FOR_TEST, cast_add.hash.clone());
@@ -1546,23 +1564,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_prune_messages_with_size_limit() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let db = RocksDB::new(db_path.to_str().unwrap());
-        db.open().unwrap();
-        let db = Arc::new(db);
-
-        let event_handler = StoreEventHandler::new();
-        let store = CastStore::new(db.clone(), event_handler.clone(), 3); // Size limit of 3
-
-        // Create storage rent event for the fid
-        let _rent_event = events_factory::create_rent_event(
-            FID_FOR_TEST,
-            1,
-            message::StorageUnitType::UnitType2025,
-            false,
-            message::FarcasterNetwork::Devnet,
-        );
+        let (store, db, _temp_dir) = create_test_store_with_prune_limit(3);
 
         let timestamp = time::farcaster_time();
 
@@ -1626,15 +1628,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prune_messages_earliest_add_messages_with_bundles() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let db = RocksDB::new(db_path.to_str().unwrap());
-        db.open().unwrap();
-        let db = Arc::new(db);
+    async fn test_merge_accepts_message_which_would_be_immediately_pruned() {
+        let (store, db, _temp_dir) = create_test_store_with_prune_limit(3);
 
-        let event_handler = StoreEventHandler::new();
-        let store = CastStore::new(db.clone(), event_handler.clone(), 3); // Size limit of 3
+        let timestamp = time::farcaster_time();
+
+        // Create and merge 3 cast add messages (at the limit)
+        let mut cast_adds = vec![];
+        for i in 0..3 {
+            let cast_add = messages_factory::casts::create_cast_add(
+                FID_FOR_TEST,
+                &format!("Cast message {}", i),
+                Some(timestamp + i + 10), // Use timestamps well in the future
+                None,
+            );
+            cast_adds.push(cast_add);
+        }
+
+        // Merge all messages
+        merge_messages(&store, &db, cast_adds.iter().collect());
+
+        // Try to merge a message with an older timestamp that would be immediately pruned
+        let old_cast_add = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "Old cast message",
+            Some(timestamp), // Much older timestamp
+            None,
+        );
+
+        let mut txn = RocksDbTransactionBatch::new();
+        let result = store.merge(&old_cast_add, &mut txn);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_prune_messages_earliest_add_messages() {
+        let (store, db, _temp_dir) = create_test_store_with_prune_limit(3);
 
         let timestamp = time::farcaster_time();
 
@@ -1650,7 +1679,7 @@ mod tests {
             cast_adds.push(cast_add);
         }
 
-        // Merge all messages in a single transaction (simulating bundle)
+        // Merge all messages in a single transaction
         merge_messages(&store, &db, cast_adds.iter().collect());
 
         // Prune messages
@@ -1684,14 +1713,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_prune_messages_earliest_remove_messages() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let db = RocksDB::new(db_path.to_str().unwrap());
-        db.open().unwrap();
-        let db = Arc::new(db);
-
-        let event_handler = StoreEventHandler::new();
-        let store = CastStore::new(db.clone(), event_handler.clone(), 3); // Size limit of 3
+        let (store, db, _temp_dir) = create_test_store_with_prune_limit(3);
 
         let timestamp = time::farcaster_time();
 
@@ -1744,14 +1766,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_prune_messages_earliest_mixed_messages() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let db = RocksDB::new(db_path.to_str().unwrap());
-        db.open().unwrap();
-        let db = Arc::new(db);
-
-        let event_handler = StoreEventHandler::new();
-        let store = CastStore::new(db.clone(), event_handler.clone(), 3); // Size limit of 3
+        let (store, db, _temp_dir) = create_test_store_with_prune_limit(3);
 
         let timestamp = time::farcaster_time();
 
