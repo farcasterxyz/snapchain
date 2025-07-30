@@ -258,6 +258,8 @@ impl ShardEngine {
     }
 
     pub fn is_read_only(&self) -> bool {
+        // For a read-only node, we will never pull from the mempool, so Engines are constructed without a
+        // messages_request_tx for read-only nodes
         self.messages_request_tx.is_none()
     }
 
