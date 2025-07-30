@@ -1469,6 +1469,144 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_bulk_username_proof_commit() {
+        // 1. Setup
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let signer = test_helper::default_signer();
+        let owner = test_helper::default_custody_address();
+        let timestamp = time::farcaster_time();
+        let username = "testuser.eth".to_string();
+
+        register_user(FID_FOR_TEST, signer.clone(), owner.clone(), &mut engine).await;
+        let mut event_rx = engine.get_senders().events_tx.subscribe();
+        let initial_root_hash = engine.trie_root_hash();
+
+        // 2. Create a batch: 1. Add UsernameProof, 2. Set username with UserDataAdd
+        let username_proof_add = messages_factory::username_proof::create_username_proof(
+            FID_FOR_TEST,
+            proto::UserNameType::UsernameTypeEnsL1,
+            username.clone(),
+            owner,
+            "signature".to_string(), // Signature is not validated in this path for devnet
+            timestamp as u64,
+            Some(&signer),
+        );
+
+        let user_data_add = messages_factory::user_data::create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::Username,
+            &username,
+            Some(timestamp + 1), // Timestamp must be after the proof
+            Some(&signer),
+        );
+
+        let messages_batch = vec![
+            MempoolMessage::UserMessage(username_proof_add.clone()),
+            MempoolMessage::UserMessage(user_data_add.clone()),
+        ];
+
+        // 3. Propose and commit the batch of messages
+        let state_change = engine.propose_state_change(1, messages_batch, None);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
+
+        // 4. Assertions
+        let final_root_hash = engine.trie_root_hash();
+        assert_ne!(
+            initial_root_hash, final_root_hash,
+            "Trie root should change after a successful commit"
+        );
+        assert_eq!(
+            state_change.new_state_root, final_root_hash,
+            "Final trie root should match the state change root"
+        );
+
+        // Assert that both messages exist in the trie
+        assert!(
+            message_exists_in_trie(&mut engine, &username_proof_add),
+            "UsernameProof message should be in the trie after commit"
+        );
+        assert!(
+            message_exists_in_trie(&mut engine, &user_data_add),
+            "UserDataAdd message should be in the trie after commit"
+        );
+
+        // Assert that both messages exist in their respective stores
+        let proof_result = engine.get_username_proofs_by_fid(FID_FOR_TEST).unwrap();
+        assert_eq!(
+            proof_result.messages.len(),
+            1,
+            "UsernameProof should be in the store"
+        );
+        assert_eq!(proof_result.messages[0].hash, username_proof_add.hash);
+
+        let user_data_result = engine.get_user_data_by_fid(FID_FOR_TEST).unwrap();
+        assert_eq!(
+            user_data_result.messages.len(),
+            1,
+            "UserDataAdd should be in the store"
+        );
+        assert_eq!(user_data_result.messages[0].hash, user_data_add.hash);
+
+        // Assert that the correct events were emitted
+        let block_confirmed_event = recv_next_event(&mut event_rx, false).await;
+        assert_eq!(
+            block_confirmed_event.r#type,
+            HubEventType::BlockConfirmed as i32
+        );
+
+        let event1 = recv_next_event(&mut event_rx, false).await;
+        let event2 = recv_next_event(&mut event_rx, false).await;
+
+        // We need to check for both event types, as their order is not guaranteed.
+        let mut seen_username_proof_event = false;
+        let mut seen_user_data_event = false;
+
+        // Check first event
+        match event1.body.as_ref().unwrap() {
+            proto::hub_event::Body::MergeUsernameProofBody(body) => {
+                assert_eq!(
+                    body.username_proof_message.as_ref().unwrap().hash,
+                    username_proof_add.hash
+                );
+                seen_username_proof_event = true;
+            }
+            proto::hub_event::Body::MergeMessageBody(body) => {
+                assert_eq!(body.message.as_ref().unwrap().hash, user_data_add.hash);
+                seen_user_data_event = true;
+            }
+            _ => panic!("Unexpected event type for event1"),
+        }
+
+        // Check second event
+        match event2.body.as_ref().unwrap() {
+            proto::hub_event::Body::MergeUsernameProofBody(body) => {
+                assert_eq!(
+                    body.username_proof_message.as_ref().unwrap().hash,
+                    username_proof_add.hash
+                );
+                seen_username_proof_event = true;
+            }
+            proto::hub_event::Body::MergeMessageBody(body) => {
+                assert_eq!(body.message.as_ref().unwrap().hash, user_data_add.hash);
+                seen_user_data_event = true;
+            }
+            _ => panic!("Unexpected event type for event2"),
+        }
+
+        assert!(
+            seen_username_proof_event,
+            "MergeUsernameProof event was not seen"
+        );
+        assert!(seen_user_data_event, "MergeMessage event was not seen");
+
+        // Ensure no other events were emitted
+        assert!(
+            try_recv_next_event(&mut event_rx, false).is_err(),
+            "There should be no more events"
+        );
+    }
+
+    #[tokio::test]
     async fn test_add_remove_in_same_tx_respects_crdt_rules() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
         register_user(
