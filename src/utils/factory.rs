@@ -630,13 +630,14 @@ pub mod username_factory {
     use crate::proto::FnameTransfer;
     use crate::proto::UserNameProof;
     use crate::storage::store::test_helper::default_custody_address;
+    use crate::utils::factory::address::generate_random_address;
 
     pub fn create_username_proof(
         fid: u64,
         username_type: crate::proto::UserNameType,
         name: &String,
         timestamp: Option<u64>,
-        owner: Vec<u8>,
+        owner: Option<Vec<u8>>,
     ) -> UserNameProof {
         let timestamp = timestamp
             .map(|t| t as u64)
@@ -644,7 +645,7 @@ pub mod username_factory {
         UserNameProof {
             timestamp,
             name: name.as_bytes().to_vec(),
-            owner,
+            owner: owner.unwrap_or(generate_random_address()),
             signature: rand::random::<[u8; 32]>().to_vec(),
             fid,
             r#type: username_type as i32,
