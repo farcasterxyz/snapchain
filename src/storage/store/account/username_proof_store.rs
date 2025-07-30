@@ -375,17 +375,19 @@ impl UsernameProofStore {
     pub fn get_username_proof(
         store: &Store<UsernameProofStoreDef>,
         name: &Vec<u8>,
+        txn: &mut RocksDbTransactionBatch,
     ) -> Result<Option<Message>, HubError> {
         let by_name_key = UsernameProofStoreDef::make_username_proof_by_name_key(name);
-        let fid_result = store.db().get(by_name_key.as_slice())?;
+        let fid_result = get_from_db_or_txn(&store.db(), txn, by_name_key.as_slice())?;
+
         if fid_result.is_none() {
-            return Err(HubError {
-                code: "not_found".to_string(),
-                message: format!(
+            return Err(HubError::not_found(
+                format!(
                     "NotFound: Username proof not found for name {}",
                     String::from_utf8_lossy(name)
-                ),
-            });
+                )
+                .as_str(),
+            ));
         }
 
         let fid = read_fid_key(&fid_result.unwrap(), 0);
@@ -401,7 +403,7 @@ impl UsernameProofStore {
             ..Default::default()
         };
 
-        store.get_add(&partial_message)
+        store.get_add(&partial_message, Some(txn))
     }
 
     pub fn get_username_proofs_by_fid(
@@ -429,6 +431,6 @@ impl UsernameProofStore {
             ..Default::default()
         };
 
-        store.get_add(&partial_message)
+        store.get_add(&partial_message, None)
     }
 }

@@ -9,7 +9,7 @@ mod tests {
     use crate::proto::{OnChainEvent, OnChainEventType};
     use crate::storage::db::{PageOptions, RocksDbTransactionBatch};
     use crate::storage::store::account::{HubEventIdGenerator, UserDataStore};
-    use crate::storage::store::engine::{MempoolMessage, ShardEngine};
+    use crate::storage::store::engine::{MempoolMessage, MessageValidationError, ShardEngine};
     use crate::storage::store::stores::StoreLimits;
     use crate::storage::store::test_helper::{
         self, commit_event, commit_event_at, commit_message_at, commit_messages,
@@ -1223,6 +1223,387 @@ mod tests {
             assert_eq!(height.shard_index, 1);
             // assert_eq!(height.block_number, 1); // TODO
         }
+    }
+
+    #[tokio::test]
+    async fn test_simulate_bulk_messages_invalid_message_in_batch() {
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+
+        // 1. Register user
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let initial_root_hash = engine.trie_root_hash();
+
+        // 2. Create a batch with a valid message followed by an invalid one.
+        let valid_cast = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "This is a valid message.",
+            None,
+            Some(&test_helper::default_signer()),
+        );
+        let invalid_cast_text = "a".repeat(321); // Exceeds CastAdd limit
+        let invalid_cast = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            &invalid_cast_text,
+            None,
+            Some(&test_helper::default_signer()),
+        );
+
+        let messages_batch = vec![valid_cast.clone(), invalid_cast.clone()];
+
+        // 3. Simulate the batch
+        let result = engine.simulate_bulk_messages(&messages_batch);
+
+        println!("Simulation result: {:?}", result);
+
+        // 4. Assert failure and state integrity
+        assert!(
+            result[0].is_err(),
+            "If there are any errors, the first message should fail"
+        );
+        assert!(
+            result[1].is_err(),
+            "Simulation should fail for second message"
+        );
+
+        let validation_error = result[1].as_ref().unwrap_err();
+        assert!(
+            matches!(
+                validation_error,
+                MessageValidationError::MessageValidationError(
+                    crate::core::validations::error::ValidationError::TextTooLong
+                )
+            ),
+            "Error should be for the invalid message"
+        );
+
+        let final_root_hash = engine.trie_root_hash();
+        assert_eq!(
+            initial_root_hash, final_root_hash,
+            "Trie root should not change after a failed simulation"
+        );
+
+        // Verify that NEITHER message was committed, confirming atomicity
+        assert!(
+            !message_exists_in_trie(&mut engine, &valid_cast),
+            "Valid message should not be in the trie after a failed batch simulation"
+        );
+        assert!(
+            !message_exists_in_trie(&mut engine, &invalid_cast),
+            "Invalid message should not be in the trie"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_simulate_bulk_messages_empty_batch() {
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let initial_root_hash = engine.trie_root_hash();
+
+        let messages_batch: Vec<proto::Message> = vec![];
+
+        let result = engine.simulate_bulk_messages(&messages_batch);
+
+        assert!(
+            result.len() == 0,
+            "Simulating an empty batch should succeed"
+        );
+
+        let final_root_hash = engine.trie_root_hash();
+        assert_eq!(
+            initial_root_hash, final_root_hash,
+            "Trie root should not change after simulating an empty batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_simulate_bulk_messages_valid_batch() {
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+
+        // 1. Register user
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let initial_root_hash = engine.trie_root_hash();
+
+        // 2. Create a batch with a valid message followed by an invalid one.
+        let valid_cast1 = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "This is a valid message.",
+            None,
+            Some(&test_helper::default_signer()),
+        );
+
+        let valid_cast2 = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "This is another valid message.",
+            None,
+            Some(&test_helper::default_signer()),
+        );
+
+        let messages_batch = vec![valid_cast1.clone(), valid_cast2.clone()];
+
+        // 3. Simulate the batch
+        let result = engine.simulate_bulk_messages(&messages_batch);
+
+        // 4. Assert all success and state integrity
+        assert!(
+            result[0].is_ok(),
+            "Simulation should succeed for first message"
+        );
+        assert!(
+            result[1].is_ok(),
+            "Simulation should succeed for second message"
+        );
+
+        let final_root_hash = engine.trie_root_hash();
+        assert_eq!(
+            initial_root_hash, final_root_hash,
+            "Trie root should not change after a failed simulation"
+        );
+
+        // Verify that NEITHER message was committed, confirming atomicity
+        assert!(
+            !message_exists_in_trie(&mut engine, &valid_cast1),
+            "Valid message should not be in the trie after a simulation"
+        );
+        assert!(
+            !message_exists_in_trie(&mut engine, &valid_cast2),
+            "Valid message should not be in the trie after a simulation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_simulate_bulk_messages_username_proof_and_set() {
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let signer = test_helper::default_signer();
+        let owner = test_helper::default_custody_address();
+        let timestamp = time::farcaster_time();
+        let username = "testuser.eth".to_string();
+
+        // 1. Register user
+        register_user(FID_FOR_TEST, signer.clone(), owner.clone(), &mut engine).await;
+
+        // Verify that setting the username fails before the proof is available
+        let initial_user_data_add = messages_factory::user_data::create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::Username,
+            &username,
+            Some(timestamp),
+            Some(&signer),
+        );
+        let pre_check_result = engine.simulate_message(&initial_user_data_add);
+        assert!(
+            pre_check_result.is_err(),
+            "Setting username should fail without a proof"
+        );
+
+        let initial_root_hash = engine.trie_root_hash();
+
+        // 2. Create a batch: 1. Add UsernameProof, 2. Set username with UserDataAdd
+        let username_proof_add = messages_factory::username_proof::create_username_proof(
+            FID_FOR_TEST,
+            proto::UserNameType::UsernameTypeEnsL1,
+            username.clone(),
+            owner,
+            "signature".to_string(), // Signature is not validated in this path
+            timestamp as u64,
+            Some(&signer),
+        );
+
+        let user_data_add = messages_factory::user_data::create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::Username,
+            &username,
+            Some(timestamp + 1), // Timestamp must be after the proof
+            Some(&signer),
+        );
+
+        let messages_batch = vec![username_proof_add.clone(), user_data_add.clone()];
+
+        // 3. Simulate the batch
+        let result = engine.simulate_bulk_messages(&messages_batch);
+
+        println!("Simulation result: {:?}", result);
+
+        // 4. Assert success and state integrity
+        assert!(
+            result.iter().all(|r| r.is_ok()),
+            "Simulation of UsernameProof and dependent UserDataAdd should succeed"
+        );
+
+        // 5. Verify that the engine's state has not been modified
+        let final_root_hash = engine.trie_root_hash();
+        assert_eq!(
+            initial_root_hash, final_root_hash,
+            "Trie root should not change after a successful simulation"
+        );
+
+        // Verify that neither message was actually committed to the trie or DB
+        assert!(
+            !message_exists_in_trie(&mut engine, &username_proof_add),
+            "UsernameProof should not be in the trie after simulation"
+        );
+        assert!(
+            !message_exists_in_trie(&mut engine, &user_data_add),
+            "UserDataAdd should not be in the trie after simulation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bulk_username_proof_commit() {
+        // 1. Setup
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let signer = test_helper::default_signer();
+        let owner = test_helper::default_custody_address();
+        let timestamp = time::farcaster_time();
+        let username = "testuser.eth".to_string();
+
+        register_user(FID_FOR_TEST, signer.clone(), owner.clone(), &mut engine).await;
+        let mut event_rx = engine.get_senders().events_tx.subscribe();
+        let initial_root_hash = engine.trie_root_hash();
+
+        // 2. Create a batch: 1. Add UsernameProof, 2. Set username with UserDataAdd
+        let username_proof_add = messages_factory::username_proof::create_username_proof(
+            FID_FOR_TEST,
+            proto::UserNameType::UsernameTypeEnsL1,
+            username.clone(),
+            owner,
+            "signature".to_string(), // Signature is not validated in this path for devnet
+            timestamp as u64,
+            Some(&signer),
+        );
+
+        let user_data_add = messages_factory::user_data::create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::Username,
+            &username,
+            Some(timestamp + 1), // Timestamp must be after the proof
+            Some(&signer),
+        );
+
+        let messages_batch = vec![
+            MempoolMessage::UserMessage(username_proof_add.clone()),
+            MempoolMessage::UserMessage(user_data_add.clone()),
+        ];
+
+        // 3. Propose and commit the batch of messages
+        let state_change = engine.propose_state_change(1, messages_batch, None);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
+
+        // 4. Assertions
+        let final_root_hash = engine.trie_root_hash();
+        assert_ne!(
+            initial_root_hash, final_root_hash,
+            "Trie root should change after a successful commit"
+        );
+        assert_eq!(
+            state_change.new_state_root, final_root_hash,
+            "Final trie root should match the state change root"
+        );
+
+        // Assert that both messages exist in the trie
+        assert!(
+            message_exists_in_trie(&mut engine, &username_proof_add),
+            "UsernameProof message should be in the trie after commit"
+        );
+        assert!(
+            message_exists_in_trie(&mut engine, &user_data_add),
+            "UserDataAdd message should be in the trie after commit"
+        );
+
+        // Assert that both messages exist in their respective stores
+        let proof_result = engine.get_username_proofs_by_fid(FID_FOR_TEST).unwrap();
+        assert_eq!(
+            proof_result.messages.len(),
+            1,
+            "UsernameProof should be in the store"
+        );
+        assert_eq!(proof_result.messages[0].hash, username_proof_add.hash);
+
+        let user_data_result = engine.get_user_data_by_fid(FID_FOR_TEST).unwrap();
+        assert_eq!(
+            user_data_result.messages.len(),
+            1,
+            "UserDataAdd should be in the store"
+        );
+        assert_eq!(user_data_result.messages[0].hash, user_data_add.hash);
+
+        // Assert that the correct events were emitted
+        let block_confirmed_event = recv_next_event(&mut event_rx, false).await;
+        assert_eq!(
+            block_confirmed_event.r#type,
+            HubEventType::BlockConfirmed as i32
+        );
+
+        let event1 = recv_next_event(&mut event_rx, false).await;
+        let event2 = recv_next_event(&mut event_rx, false).await;
+
+        // We need to check for both event types, as their order is not guaranteed.
+        let mut seen_username_proof_event = false;
+        let mut seen_user_data_event = false;
+
+        // Check first event
+        match event1.body.as_ref().unwrap() {
+            proto::hub_event::Body::MergeUsernameProofBody(body) => {
+                assert_eq!(
+                    body.username_proof_message.as_ref().unwrap().hash,
+                    username_proof_add.hash
+                );
+                seen_username_proof_event = true;
+            }
+            proto::hub_event::Body::MergeMessageBody(body) => {
+                assert_eq!(body.message.as_ref().unwrap().hash, user_data_add.hash);
+                seen_user_data_event = true;
+            }
+            _ => panic!("Unexpected event type for event1"),
+        }
+
+        // Check second event
+        match event2.body.as_ref().unwrap() {
+            proto::hub_event::Body::MergeUsernameProofBody(body) => {
+                assert_eq!(
+                    body.username_proof_message.as_ref().unwrap().hash,
+                    username_proof_add.hash
+                );
+                seen_username_proof_event = true;
+            }
+            proto::hub_event::Body::MergeMessageBody(body) => {
+                assert_eq!(body.message.as_ref().unwrap().hash, user_data_add.hash);
+                seen_user_data_event = true;
+            }
+            _ => panic!("Unexpected event type for event2"),
+        }
+
+        assert!(
+            seen_username_proof_event,
+            "MergeUsernameProof event was not seen"
+        );
+        assert!(seen_user_data_event, "MergeMessage event was not seen");
+
+        // Ensure no other events were emitted
+        assert!(
+            try_recv_next_event(&mut event_rx, false).is_err(),
+            "There should be no more events"
+        );
     }
 
     #[tokio::test]

@@ -1,5 +1,4 @@
-use super::account::UsernameProofStore;
-use super::account::{IntoU8, OnchainEventStorageError, UserDataStore};
+use super::account::{IntoU8, OnchainEventStorageError, UserDataStore, UsernameProofStore};
 use crate::core::error::HubError;
 use crate::core::types::Height;
 use crate::core::util::FarcasterTime;
@@ -7,18 +6,15 @@ use crate::core::validations;
 use crate::core::validations::verification;
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::message_data::Body;
-use crate::proto::UserDataType;
-use crate::proto::UserNameProof;
-use crate::proto::{self, hub_event, Block, MessageType, ShardChunk, Transaction};
-use crate::proto::{FarcasterNetwork, HubEvent};
-use crate::proto::{HubEventType, Protocol};
-use crate::proto::{OnChainEvent, OnChainEventType};
+use crate::proto::{
+    self, hub_event, Block, FarcasterNetwork, HubEvent, HubEventType, MessageType, OnChainEvent,
+    OnChainEventType, Protocol, ShardChunk, Transaction, UserDataType, UserNameProof,
+};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{CastStore, MessagesPage, VerificationStore};
 use crate::storage::store::stores::{StoreLimits, Stores};
 use crate::storage::store::BlockStore;
-use crate::storage::trie;
-use crate::storage::trie::merkle_trie;
+use crate::storage::trie::{self, merkle_trie};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::{EngineVersion, ProtocolFeature};
 use alloy_primitives::hex::FromHex;
@@ -33,8 +29,7 @@ use std::string::ToString;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::oneshot;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
@@ -1284,9 +1279,16 @@ impl ShardEngine {
     ) -> Result<Option<UserNameProof>, MessageValidationError> {
         // TODO(aditi): The fnames proofs should live in the username proof store.
         if name.ends_with(".eth") {
+            let version = EngineVersion::current(self.network);
+            let batch_txn = if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
+                txn
+            } else {
+                &mut RocksDbTransactionBatch::new()
+            };
             let proof_message = UsernameProofStore::get_username_proof(
                 &self.stores.username_proof_store,
                 &name.as_bytes().to_vec(),
+                batch_txn,
             )
             .map_err(|e| MessageValidationError::StoreError(e))?;
             match proof_message {
@@ -1703,6 +1705,86 @@ impl ShardEngine {
                 Err(MessageValidationError::StoreError(
                     HubError::invalid_internal_state(&*err.to_string()),
                 ))
+            }
+        }
+    }
+
+    pub fn simulate_bulk_messages(
+        &mut self,
+        messages: &[proto::Message],
+    ) -> Vec<Result<(), MessageValidationError>> {
+        use std::collections::HashMap;
+
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        let trie_ctx = merkle_trie::Context::new();
+        let version = self.version_for(&FarcasterTime::current());
+        let timestamp = FarcasterTime::current();
+
+        // Group messages by FID and track their original positions
+        let mut messages_by_fid: HashMap<u64, Vec<(usize, &proto::Message)>> = HashMap::new();
+        for (index, message) in messages.iter().enumerate() {
+            let fid = message.fid() as u64;
+            messages_by_fid
+                .entry(fid)
+                .or_insert_with(Vec::new)
+                .push((index, message));
+        }
+
+        // Initialize results vector with placeholder values
+        let mut results: Vec<Result<(), MessageValidationError>> = vec![Ok(()); messages.len()];
+
+        // Process each FID group
+        for (fid, fid_messages) in messages_by_fid {
+            // Create a single transaction for all messages from this FID
+            let user_messages: Vec<proto::Message> =
+                fid_messages.iter().map(|(_, msg)| (*msg).clone()).collect();
+            let snapchain_txn = Transaction {
+                fid,
+                account_root: vec![], // Not used for simulation
+                system_messages: vec![],
+                user_messages,
+            };
+
+            // Process the transaction for this FID
+            match self.replay_snapchain_txn(
+                &trie_ctx,
+                &snapchain_txn,
+                &mut txn_batch,
+                ProposalSource::Simulate,
+                version,
+                &timestamp,
+            ) {
+                Ok((_, _, validation_errors)) => {
+                    // If there are any validation errors, assign them to the results
+                    if !validation_errors.is_empty() {
+                        let error = validation_errors[0].clone();
+                        for (original_index, _) in fid_messages {
+                            results[original_index] = Err(error.clone());
+                        }
+                    }
+                }
+                Err(err) => {
+                    // If replay_snapchain_txn fails, all messages for this FID fail
+                    let error = MessageValidationError::StoreError(
+                        HubError::invalid_internal_state(&*err.to_string()),
+                    );
+                    for (original_index, _) in fid_messages {
+                        results[original_index] = Err(error.clone());
+                    }
+                }
+            }
+        }
+
+        // The simulation was successful. We must now discard all in-memory changes
+        // to the trie and the transaction batch, as we are not committing state here.
+        match self.stores.trie.reload(&self.db) {
+            Ok(()) => results,
+            Err(e) => {
+                let trie_error = MessageValidationError::StoreError(
+                    HubError::invalid_internal_state(&*e.to_string()),
+                );
+                // If trie reload fails, return the trie error for all messages
+                vec![Err(trie_error); messages.len()]
             }
         }
     }
