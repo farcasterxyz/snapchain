@@ -3,13 +3,11 @@ use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::spawn_read_node::MalachiteReadNodeActors;
 use crate::consensus::read_validator::Engine;
 use crate::core::types::{Address, ShardId, SnapchainShard, SnapchainValidatorContext};
-use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::network::gossip::GossipEvent;
 use crate::proto;
 use crate::storage::db::RocksDB;
 use crate::storage::store::engine::{BlockEngine, PostCommitMessage, Senders, ShardEngine};
-use crate::storage::store::stores::StoreLimits;
-use crate::storage::store::stores::Stores;
+use crate::storage::store::stores::{StoreLimits, Stores};
 use crate::storage::store::BlockStore;
 use crate::storage::trie::merkle_trie;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
@@ -37,7 +35,6 @@ impl SnapchainReadNode {
         local_peer_id: PeerId,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         system_tx: mpsc::Sender<SystemMessage>,
-        messages_request_tx: mpsc::Sender<MempoolMessagesRequest>,
         block_store: BlockStore,
         rocksdb_dir: String,
         statsd_client: StatsdClientWrapper,
@@ -73,7 +70,7 @@ impl SnapchainReadNode {
                 StoreLimits::default(),
                 statsd_client.clone(),
                 config.max_messages_per_block,
-                Some(messages_request_tx.clone()),
+                None, // For a read-only node, we will never pull from the mempool
                 None,
                 engine_post_commit_tx.clone(),
             );
