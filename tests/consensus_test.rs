@@ -251,14 +251,13 @@ impl ReadNodeForTest {
         let db = Arc::new(RocksDB::new(data_dir));
         db.open().unwrap();
         let block_store = BlockStore::new(db.clone());
-        let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
+        let (_, messages_request_rx) = mpsc::channel(100);
         let node = SnapchainReadNode::create(
             keypair.clone(),
             consensus_config,
             peer_id,
             gossip_tx.clone(),
             system_tx.clone(),
-            messages_request_tx,
             block_store.clone(),
             make_tmp_path(),
             statsd_client.clone(),

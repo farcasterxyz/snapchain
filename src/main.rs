@@ -405,7 +405,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             local_peer_id,
             gossip_tx.clone(),
             system_tx.clone(),
-            messages_request_tx,
             block_store.clone(),
             app_config.rocksdb_dir.clone(),
             statsd_client.clone(),

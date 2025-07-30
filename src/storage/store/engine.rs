@@ -257,6 +257,10 @@ impl ShardEngine {
         self.stores.trie.root_hash().unwrap()
     }
 
+    pub fn is_read_only(&self) -> bool {
+        self.messages_request_tx.is_none()
+    }
+
     pub(crate) async fn pull_messages(
         &mut self,
         max_wait: Duration,
@@ -1627,11 +1631,13 @@ impl ShardEngine {
         }
 
         if !applied_cached_txn {
-            warn!(
-                shard_id = self.shard_id,
-                shard_root = hex::encode(shard_root),
-                "No valid cached transaction to apply. Replaying proposal"
-            );
+            if !self.is_read_only() {
+                warn!(
+                    shard_id = self.shard_id,
+                    shard_root = hex::encode(shard_root),
+                    "No valid cached transaction to apply. Replaying proposal"
+                );
+            }
             let header = &shard_chunk.header.as_ref().unwrap();
             let block_number = header.height.unwrap().block_number;
             self.stores.event_handler.set_current_height(block_number);
