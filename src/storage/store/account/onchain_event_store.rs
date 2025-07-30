@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use prost::{DecodeError, Message};
@@ -676,5 +677,91 @@ impl OnchainEventStore {
             None => Ok(false),
             Some(_) => Ok(true),
         }
+    }
+}
+
+pub struct FIDIterator {
+    db: Arc<RocksDB>,
+    last_fid: u64,
+    fids: VecDeque<u64>,
+    done: bool,
+}
+
+impl FIDIterator {
+    const PAGE_SIZE_MAX: usize = 100;
+
+    pub fn new(db: Arc<RocksDB>, start_fid: u64) -> Self {
+        FIDIterator {
+            db,
+            last_fid: start_fid,
+            fids: VecDeque::new(),
+            done: false,
+        }
+    }
+
+    fn fetch(&mut self, fid: u64) -> Result<Option<u64>, OnchainEventStorageError> {
+        let mut start_prefix =
+            make_onchain_event_type_prefix(OnChainEventType::EventTypeIdRegister);
+        let stop_prefix = increment_vec_u8(&start_prefix);
+        start_prefix.extend(make_fid_key(fid));
+
+        let page_options = PageOptions {
+            page_size: Some(Self::PAGE_SIZE_MAX),
+            page_token: None,
+            reverse: false,
+        };
+
+        let mut last_fid: u64 = 0;
+
+        self.db
+            .for_each_iterator_by_prefix_paged(
+                Some(start_prefix),
+                Some(stop_prefix),
+                &page_options,
+                |_key, value| {
+                    let onchain_event =
+                        OnChainEvent::decode(value).map_err(|e| HubError::from(e))?;
+
+                    self.fids.push_back(onchain_event.fid);
+                    last_fid = onchain_event.fid;
+
+                    if self.fids.len() >= page_options.page_size.unwrap_or(PAGE_SIZE_MAX) {
+                        return Ok(true); // Stop iterating
+                    }
+
+                    Ok(false) // Continue iterating
+                },
+            )
+            .map_err(|e| OnchainEventStorageError::HubError(e))?;
+
+        let ref_fid = if last_fid > 0 { Some(last_fid) } else { None };
+        Ok(ref_fid)
+    }
+}
+
+impl Iterator for FIDIterator {
+    type Item = u64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+
+        if self.fids.is_empty() {
+            match self.fetch(self.last_fid + 1) {
+                Ok(None) | Err(_) => {
+                    self.done = true;
+                    return None;
+                }
+                Ok(Some(_fid)) => {}
+            }
+        }
+
+        if let Some(fid) = self.fids.pop_front() {
+            self.last_fid = fid;
+            return Some(fid);
+        }
+
+        None
     }
 }
