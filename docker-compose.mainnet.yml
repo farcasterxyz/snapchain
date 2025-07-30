@@ -1,5 +1,5 @@
 services:
-  snap_read:
+  snapchain:
     image: farcasterxyz/snapchain:latest
     pull_policy: always
     #    build: # For testing
@@ -49,6 +49,45 @@ services:
     volumes:
       - .rocks:/app/.rocks
       - .rocks.snapshot:/app/.rocks.snapshot
+    networks:
+      - snapchain
+
+  # Start this if you want perf metrics for your hubble node. Remember to start `grafana` as well.
+  statsd:
+    image: graphiteapp/graphite-statsd:1.1.10-5
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-zv", "localhost", "8126"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 1m
+    ports:
+      # - '80:80' # Graphite web
+      # - '2003:2003' # Carbon line receiver
+      # - '2004:2004' # Carbon pickle receiver
+      # - '7002:7002' # Carbon cache query
+      - '${STATSD_PUBLISH:-8125}:8125/udp' # StatsD
+      - '${STATSD_ADMIN_PUBLISH:-8126}:8126' # StatsD admin
+    networks:
+      - snapchain
+
+  # Start this if you want to see perf metrics for your hubble node. Remember to start `statsd` as well.
+  grafana:
+    image: grafana/grafana:10.0.3
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 1m
+    # Mount the grafana config file
+    volumes:
+      - ./grafana/grafana.ini:/etc/grafana/grafana.ini
+      - ./grafana/data:/var/lib/grafana  # Persistent Grafana data
+    ports:
+      - '3000:3000' # Grafana web
     networks:
       - snapchain
 

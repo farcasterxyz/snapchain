@@ -40,8 +40,7 @@ chmod +x get-docker.sh
 
 # Start Snapchain
 mkdir snapchain && cd snapchain
-curl https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/docker-compose.mainnet.yml -o docker-compose.yml
-sudo docker compose up # -d to run in background, if you set up rootless docker remove sudo
+curl -sSL https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/scripts/snapchain-bootstrap.sh | bash
 ```
 
 Follow the remaining steps in [Getting Started](/getting-started) to validate and query your node.
