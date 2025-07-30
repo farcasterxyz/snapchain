@@ -64,7 +64,7 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
         version: EngineVersion::V6,
     },
     VersionSchedule {
-        active_at: 1755536400, // 2026-08-18 5PM UTC
+        active_at: 1756141200, // 2026-08-25 5PM UTC
         version: EngineVersion::V7,
     },
 ]
@@ -327,7 +327,7 @@ mod version_test {
             Some(1747352400)
         );
 
-        let time = FarcasterTime::from_unix_seconds(1755536400);
+        let time = FarcasterTime::from_unix_seconds(1756141200);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
             None
