@@ -319,10 +319,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Err("statsd prefix must be specified in config".into());
     }
 
-    // TODO: parsing to SocketAddr only allows for IPs, DNS names won't work
-    let (statsd_host, statsd_port) = match app_config.statsd.addr.parse::<SocketAddr>() {
-        Ok(addr) => Ok((addr.ip().to_string(), addr.port())),
-        Err(e) => Err(format!("invalid statsd address: {}", e)),
+    let (statsd_host, statsd_port) = match app_config.statsd.addr.split_once(':') {
+        Some((host, port)) => {
+            if host.is_empty() || port.is_empty() {
+                return Err("statsd address must be in the format host:port".into());
+            }
+            Ok((host.to_string(), port.parse::<u16>()?))
+        }
+        None => Err(format!(
+            "invalid statsd address: {}",
+            app_config.statsd.addr
+        )),
     }?;
 
     let host = (statsd_host, statsd_port);

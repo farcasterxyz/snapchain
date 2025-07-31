@@ -115,10 +115,10 @@ self_upgrade() {
 # Fetch the docker-compose.yml and grafana-dashboard.json files
 fetch_latest_docker_compose_and_dashboard() {
     fetch_file_from_repo "$DOCKER_COMPOSE_FILE_PATH" "docker-compose.yml"
-#    fetch_file_from_repo "$GRAFANA_DASHBOARD_JSON_PATH" "grafana-dashboard.json"
-#    mkdir -p grafana
-#    chmod 777 grafana
-#    fetch_file_from_repo "$GRAFANA_INI_PATH" "grafana/grafana.ini"
+    fetch_file_from_repo "$GRAFANA_DASHBOARD_JSON_PATH" "grafana-dashboard.json"
+    mkdir -p grafana
+    chmod 777 grafana
+    fetch_file_from_repo "$GRAFANA_INI_PATH" "grafana/grafana.ini"
 }
 
 # Prompt for hub operator agreement
@@ -582,7 +582,7 @@ if [ "$1" == "upgrade" ]; then
     fetch_latest_docker_compose_and_dashboard
 
     # Setup the Grafana dashboard
-    # setup_grafana
+    setup_grafana
 
     setup_crontab
 
@@ -627,7 +627,7 @@ if [ "$1" == "autoupgrade" ]; then
     # Upgrade this script itself, fetch the latest docker-compose.yml, and restart the containers
     self_upgrade "$@"
     fetch_latest_docker_compose_and_dashboard
-    # ensure_grafana
+    ensure_grafana
     start_snapchain
     sleep 5
     cleanup
