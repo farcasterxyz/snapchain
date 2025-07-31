@@ -22,9 +22,9 @@ services:
         read_node = true
 
         [statsd]
-        prefix="snap_read"
-        addr="127.0.0.1:8125"
-        use_tags=false
+        prefix="snapchain"
+        addr="statsd:8125"
+        use_tags=true
 
         [gossip]
         address="/ip4/0.0.0.0/udp/3382/quic-v1"
