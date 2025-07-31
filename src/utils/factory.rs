@@ -460,13 +460,13 @@ pub mod messages_factory {
         pub fn create_reaction_add(
             fid: u64,
             reaction_type: ReactionType,
-            target_url: String,
+            target: Target,
             timestamp: Option<u32>,
             private_key: Option<&SigningKey>,
         ) -> message::Message {
             let reaction_body = ReactionBody {
                 r#type: reaction_type as i32,
-                target: Some(Target::TargetUrl(target_url)),
+                target: Some(target),
             };
             create_message_with_data(
                 fid,
@@ -480,13 +480,13 @@ pub mod messages_factory {
         pub fn create_reaction_remove(
             fid: u64,
             reaction_type: ReactionType,
-            target_url: String,
+            target: Target,
             timestamp: Option<u32>,
             private_key: Option<&SigningKey>,
         ) -> message::Message {
             let reaction_body = ReactionBody {
                 r#type: reaction_type as i32,
-                target: Some(Target::TargetUrl(target_url)),
+                target: Some(target),
             };
             create_message_with_data(
                 fid,

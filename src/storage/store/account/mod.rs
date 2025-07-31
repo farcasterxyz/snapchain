@@ -27,4 +27,6 @@ mod cast_store_test;
 #[cfg(test)]
 mod on_chain_event_store_tests;
 #[cfg(test)]
+mod reaction_store_test;
+#[cfg(test)]
 mod user_data_store_test;
