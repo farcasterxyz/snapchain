@@ -444,6 +444,7 @@ impl ShardEngine {
             // Second pass: filter user_messages based on the look-ahead storage check
             for msg in messages {
                 if let MempoolMessage::UserMessage(user_msg) = msg {
+                    // Only include messages for users that have storage
                     if storage_slot.is_active() {
                         transaction.user_messages.push(user_msg.clone());
                     }
@@ -1331,7 +1332,6 @@ impl ShardEngine {
         }
 
         // 2. Check that the user has a valid signer
-
         match txn_onchain_state.get_effective_signer_state(message_data.fid, &message.signer) {
             Some(proto::SignerEventType::Add) => {
                 // Signer was added in this batch, validation passes for this check.
