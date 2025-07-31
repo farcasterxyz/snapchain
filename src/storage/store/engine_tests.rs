@@ -1824,6 +1824,191 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_bulk_register_add_signer_and_cast_commit() {
+        // 1. Setup
+        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let mut event_rx = engine.get_senders().events_tx.subscribe();
+
+        let new_fid = FID3_FOR_TEST;
+        let new_signer = generate_signer();
+        let custody_address = default_custody_address();
+        let timestamp = time::farcaster_time();
+
+        let initial_root_hash = engine.trie_root_hash();
+
+        // 2. Create a batch of dependent on-chain events and a message
+        //    Event 1: Register the new FID
+        let id_register_event = events_factory::create_id_register_event(
+            new_fid,
+            proto::IdRegisterEventType::Register,
+            custody_address,
+            None,
+        );
+
+        //    Event 2: Add a new signer for this FID
+        let signer_add_event = events_factory::create_signer_event(
+            new_fid,
+            new_signer.clone(),
+            proto::SignerEventType::Add,
+            None,
+            None,
+        );
+
+        //    Message 3: Create a cast signed by the new signer
+        let cast_add = messages_factory::casts::create_cast_add(
+            new_fid,
+            "Hello, Farcaster!",
+            Some(timestamp),
+            Some(&new_signer),
+        );
+
+        let messages_batch = vec![
+            MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
+                on_chain_event: Some(test_helper::default_storage_event(new_fid)),
+                fname_transfer: None,
+            }),
+            MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
+                on_chain_event: Some(id_register_event.clone()),
+                fname_transfer: None,
+            }),
+            MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
+                on_chain_event: Some(signer_add_event.clone()),
+                fname_transfer: None,
+            }),
+            MempoolMessage::UserMessage(cast_add.clone()),
+        ];
+
+        // 3. Propose and commit the entire batch
+        let state_change = engine.propose_state_change(1, messages_batch, None);
+        let chunk = test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
+
+        // 4. Assertions
+
+        // 4a. Assert state integrity
+        let final_root_hash = engine.trie_root_hash();
+        assert_ne!(
+            initial_root_hash, final_root_hash,
+            "Trie root should change after a successful commit"
+        );
+        assert_eq!(
+            state_change.new_state_root, final_root_hash,
+            "Final trie root should match the state change root"
+        );
+        assert_eq!(
+            chunk.header.as_ref().unwrap().shard_root,
+            final_root_hash,
+            "ShardChunk root hash should match the final trie root"
+        );
+
+        // 4b. Assert existence in stores and trie
+        let stores = engine.get_stores();
+
+        // Verify ID registration
+        let stored_id_event = stores
+            .onchain_event_store
+            .get_id_register_event_by_fid(new_fid)
+            .unwrap();
+        assert!(
+            stored_id_event.is_some(),
+            "ID Register event should be in the store"
+        );
+        assert_eq!(
+            stored_id_event.unwrap().transaction_hash,
+            id_register_event.transaction_hash
+        );
+        assert!(key_exists_in_trie(
+            &mut engine,
+            &TrieKey::for_onchain_event(&id_register_event)
+        ));
+
+        // Verify signer registration
+        let stored_signer = stores
+            .onchain_event_store
+            .get_active_signer(new_fid, new_signer.verifying_key().to_bytes().to_vec())
+            .unwrap();
+
+        assert!(
+            stored_signer.is_some(),
+            "Signer should be active in the store"
+        );
+        assert!(key_exists_in_trie(
+            &mut engine,
+            &TrieKey::for_onchain_event(&signer_add_event)
+        ));
+
+        // Verify Cast message
+        let stored_casts = stores
+            .cast_store
+            .get_adds_by_fid::<fn(&proto::Message) -> bool>(new_fid, &PageOptions::default(), None)
+            .unwrap();
+
+        assert_eq!(
+            stored_casts.messages.len(),
+            1,
+            "CastAdd message should be in the store"
+        );
+        assert_eq!(stored_casts.messages[0].hash, cast_add.hash);
+        assert!(message_exists_in_trie(&mut engine, &cast_add));
+
+        // 4c. Assert event emission
+        let block_confirmed_event = recv_next_event(&mut event_rx, false).await;
+        assert_eq!(
+            block_confirmed_event.r#type,
+            HubEventType::BlockConfirmed as i32
+        );
+
+        let event1 = recv_next_event(&mut event_rx, false).await;
+        let event2 = recv_next_event(&mut event_rx, false).await;
+        let event3 = recv_next_event(&mut event_rx, false).await;
+        let event4 = recv_next_event(&mut event_rx, false).await;
+
+        let mut seen_storage_event = false;
+        let mut seen_id_register = false;
+        let mut seen_signer_add = false;
+        let mut seen_cast_add = false;
+
+        for event in [event1, event2, event3, event4] {
+            match event.body.as_ref().unwrap() {
+                proto::hub_event::Body::MergeOnChainEventBody(body) => {
+                    let event_body = body.on_chain_event.as_ref().unwrap();
+                    if event_body.r#type() == proto::OnChainEventType::EventTypeStorageRent {
+                        seen_storage_event = true;
+                    } else if event_body.transaction_hash == id_register_event.transaction_hash {
+                        seen_id_register = true;
+                    } else if event_body.transaction_hash == signer_add_event.transaction_hash {
+                        seen_signer_add = true;
+                    }
+                }
+                proto::hub_event::Body::MergeMessageBody(body) => {
+                    if body.message.as_ref().unwrap().hash == cast_add.hash {
+                        seen_cast_add = true;
+                    }
+                }
+                _ => panic!("Unexpected event type received: {:?}", event.r#type),
+            }
+        }
+
+        assert!(
+            seen_storage_event,
+            "MergeOnChainEvent for storage rent was not seen"
+        );
+        assert!(
+            seen_id_register,
+            "MergeOnChainEvent for ID registration was not seen"
+        );
+        assert!(
+            seen_signer_add,
+            "MergeOnChainEvent for signer add was not seen"
+        );
+        assert!(seen_cast_add, "MergeMessage for CastAdd was not seen");
+
+        assert!(
+            try_recv_next_event(&mut event_rx, false).is_err(),
+            "There should be no more events"
+        );
+    }
+
+    #[tokio::test]
     async fn test_add_remove_in_same_tx_respects_crdt_rules() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
         register_user(

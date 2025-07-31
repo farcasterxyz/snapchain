@@ -171,6 +171,29 @@ struct CachedTransaction {
     txn: RocksDbTransactionBatch,
 }
 
+// The temporary(cached) state for on-chain events and signers while they are being processed in a transaction
+#[derive(Default)]
+pub(crate) struct TxnOnchainState {
+    id_registers: HashMap<u64, OnChainEvent>,
+    signers: HashMap<(u64, Vec<u8>), OnChainEvent>, // Key: (fid, signer_key)
+}
+
+impl TxnOnchainState {
+    /// Checks the temporary state for the latest status of a signer.
+    fn get_effective_signer_state(
+        &self,
+        fid: u64,
+        signer: &[u8],
+    ) -> Option<proto::SignerEventType> {
+        if let Some(event) = self.signers.get(&(fid, signer.to_vec())) {
+            if let Some(proto::on_chain_event::Body::SignerEventBody(body)) = &event.body {
+                return proto::SignerEventType::try_from(body.event_type).ok();
+            }
+        }
+        None
+    }
+}
+
 pub struct ShardEngine {
     shard_id: u32,
     pub network: FarcasterNetwork,
@@ -389,23 +412,44 @@ impl ShardEngine {
                 system_messages: vec![],
                 user_messages: vec![],
             };
-            let storage_slot = self
-                .stores
-                .onchain_event_store
-                .get_storage_slot_for_fid(fid, self.network)?;
+
+            // First pass: collect all system_messages for this FID
+            for msg in &messages {
+                if let MempoolMessage::ValidatorMessage(validator_msg) = msg {
+                    transaction.system_messages.push(validator_msg.clone());
+                }
+            }
+
+            // Extract just the OnChainEvents from the collected system messages
+            let pending_onchain_events: Vec<OnChainEvent> = transaction
+                .system_messages
+                .iter()
+                .filter_map(|vm| vm.on_chain_event.clone())
+                .collect();
+
+            let version = EngineVersion::current(self.network);
+            let maybe_onchainevents =
+                if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
+                    Some(pending_onchain_events.as_slice())
+                } else {
+                    None
+                };
+
+            let storage_slot = self.stores.onchain_event_store.get_storage_slot_for_fid(
+                fid,
+                self.network,
+                maybe_onchainevents,
+            )?;
+
+            // Second pass: filter user_messages based on the look-ahead storage check
             for msg in messages {
-                match msg {
-                    MempoolMessage::ValidatorMessage(msg) => {
-                        transaction.system_messages.push(msg.clone());
-                    }
-                    MempoolMessage::UserMessage(msg) => {
-                        // Only include messages for users that have storage
-                        if storage_slot.is_active() {
-                            transaction.user_messages.push(msg.clone());
-                        }
+                if let MempoolMessage::UserMessage(user_msg) = msg {
+                    if storage_slot.is_active() {
+                        transaction.user_messages.push(user_msg.clone());
                     }
                 }
             }
+
             if !transaction.user_messages.is_empty() || !transaction.system_messages.is_empty() {
                 transactions.push(transaction);
             }
@@ -629,6 +673,8 @@ impl ShardEngine {
 
         let mut validation_errors = vec![];
 
+        let mut txn_onchain_state = TxnOnchainState::default();
+
         // System messages first, then user messages and finally prunes
         for msg in &snapchain_txn.system_messages {
             if let Some(onchain_event) = &msg.on_chain_event {
@@ -655,6 +701,21 @@ impl ShardEngine {
                                 if Self::should_revoke_signer(&signer_event, version) {
                                     revoked_signers.insert(signer_event.key.clone());
                                 }
+                            }
+                            _ => {}
+                        }
+                        // On success, cache the onchain event in the temporary state
+                        match &onchain_event.body {
+                            Some(proto::on_chain_event::Body::IdRegisterEventBody(_)) => {
+                                txn_onchain_state
+                                    .id_registers
+                                    .insert(onchain_event.fid, onchain_event.clone());
+                            }
+                            Some(proto::on_chain_event::Body::SignerEventBody(body)) => {
+                                txn_onchain_state.signers.insert(
+                                    (onchain_event.fid, body.key.clone()),
+                                    onchain_event.clone(),
+                                );
                             }
                             _ => {}
                         }
@@ -776,9 +837,21 @@ impl ShardEngine {
             }
         }
 
+        let mut txn_onchain_state =
+            if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
+                txn_onchain_state
+            } else {
+                TxnOnchainState::default() // Empty state if the feature is not enabled
+            };
         for msg in &snapchain_txn.user_messages {
             // Errors are validated based on the shard root
-            match self.validate_user_message(msg, timestamp, version, txn_batch) {
+            match self.validate_user_message(
+                msg,
+                timestamp,
+                version,
+                txn_batch,
+                &mut txn_onchain_state,
+            ) {
                 Ok(()) => {
                     let result = self.merge_message(msg, txn_batch);
                     match result {
@@ -1223,6 +1296,7 @@ impl ShardEngine {
         timestamp: &FarcasterTime,
         version: EngineVersion,
         txn_batch: &mut RocksDbTransactionBatch,
+        txn_onchain_state: &mut TxnOnchainState,
     ) -> Result<(), MessageValidationError> {
         let now = std::time::Instant::now();
         // Ensure message data is present
@@ -1243,19 +1317,38 @@ impl ShardEngine {
             version,
         )?;
 
-        // Check that the user has a custody address
-        self.stores
-            .onchain_event_store
-            .get_id_register_event_by_fid(message_data.fid)
-            .map_err(|_| MessageValidationError::MissingFid)?
-            .ok_or(MessageValidationError::MissingFid)?;
+        // 1. Check that the user has a custody address
+        if !txn_onchain_state
+            .id_registers
+            .contains_key(&message_data.fid)
+        {
+            // If not in the temp cache, fall back to the DB
+            self.stores
+                .onchain_event_store
+                .get_id_register_event_by_fid(message_data.fid)
+                .map_err(|_| MessageValidationError::MissingFid)?
+                .ok_or(MessageValidationError::MissingFid)?;
+        }
 
-        // Check that signer is valid
-        self.stores
-            .onchain_event_store
-            .get_active_signer(message_data.fid, message.signer.clone())
-            .map_err(|_| MessageValidationError::MissingSigner)?
-            .ok_or(MessageValidationError::MissingSigner)?;
+        // 2. Check that the user has a valid signer
+
+        match txn_onchain_state.get_effective_signer_state(message_data.fid, &message.signer) {
+            Some(proto::SignerEventType::Add) => {
+                // Signer was added in this batch, validation passes for this check.
+            }
+            Some(proto::SignerEventType::Remove) | Some(proto::SignerEventType::AdminReset) => {
+                // Signer was removed in this batch, validation fails.
+                return Err(MessageValidationError::MissingSigner);
+            }
+            _ => {
+                // Not in the temp cache, fall back to the DB
+                self.stores
+                    .onchain_event_store
+                    .get_active_signer(message_data.fid, message.signer.clone())
+                    .map_err(|_| MessageValidationError::MissingSigner)?
+                    .ok_or(MessageValidationError::MissingSigner)?;
+            }
+        }
 
         let txn_batch = if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
             txn_batch
