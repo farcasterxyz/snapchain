@@ -645,12 +645,16 @@ mod tests {
         let verification_result = engine.get_verifications_by_fid(FID3_FOR_TEST);
         assert_eq!(1, verification_result.unwrap().messages.len());
 
+        // Empty transaction batch
+        let mut txn_batch = RocksDbTransactionBatch::new();
+
         // Now validate the Ethereum address verification
         let eth_address_bytes = hex::decode(eth_address).unwrap();
         let result = engine.verify_fid_owns_address(
             FID3_FOR_TEST,
             proto::Protocol::Ethereum,
             &eth_address_bytes,
+            &mut txn_batch,
         );
         assert!(result.is_ok(), "Ethereum address validation should succeed");
 
@@ -660,6 +664,7 @@ mod tests {
             wrong_fid,
             proto::Protocol::Ethereum,
             &eth_address_bytes,
+            &mut txn_batch,
         );
         assert!(
             wrong_fid_result.is_err(),
@@ -676,6 +681,7 @@ mod tests {
             FID3_FOR_TEST,
             proto::Protocol::Solana,
             &eth_address_bytes,
+            &mut txn_batch,
         );
         assert!(
             wrong_protocol_result.is_err(),
@@ -1392,7 +1398,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_simulate_bulk_messages_username_proof_and_set() {
+    async fn test_simulate_bulk_messages_username_proof_and_user_data_add() {
         let (mut engine, _tmpdir) = test_helper::new_engine();
         let signer = test_helper::default_signer();
         let owner = test_helper::default_custody_address();
@@ -1469,7 +1475,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bulk_username_proof_commit() {
+    async fn test_bulk_username_proof_and_user_data_add_commit() {
         // 1. Setup
         let (mut engine, _tmpdir) = test_helper::new_engine();
         let signer = test_helper::default_signer();
@@ -1600,6 +1606,217 @@ mod tests {
         assert!(seen_user_data_event, "MergeMessage event was not seen");
 
         // Ensure no other events were emitted
+        assert!(
+            try_recv_next_event(&mut event_rx, false).is_err(),
+            "There should be no more events"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_simulate_verification_and_user_name_proof() {
+        // 1. Setup
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            network: Some(FarcasterNetwork::Testnet), // To test ENS support
+            ..Default::default()
+        });
+        let signer = test_helper::default_signer();
+        let custody_address = test_helper::default_custody_address();
+        let timestamp = time::farcaster_time();
+        let username = "testuser.eth".to_string();
+
+        register_user(FID3_FOR_TEST, signer.clone(), custody_address, &mut engine).await;
+
+        let initial_root_hash = engine.trie_root_hash();
+
+        // 2. Create a batch:
+        //    - Message 1: Verify the owner_address for the FID
+        //    - Message 2: Add a UsernameProof for an ENS name owned by owner_address
+        let owner_address = hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap();
+        let verification_add = messages_factory::verifications::create_verification_add(
+            FID3_FOR_TEST,
+            0, // EOA verification
+            owner_address.clone(),
+            hex::decode("b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c").unwrap(),
+            hex::decode("d74860c4bbf574d5ad60f03a478a30f990e05ac723e138a5c860cdb3095f4296").unwrap(),
+            Some(timestamp),
+            Some(&signer),
+        );
+
+        let username_proof_add = messages_factory::username_proof::create_username_proof(
+            FID3_FOR_TEST,
+            proto::UserNameType::UsernameTypeEnsL1,
+            username.clone(),
+            owner_address,
+            "signature".to_string(), // Signature is not validated in this path for devnet
+            (timestamp + 1) as u64,
+            Some(&signer),
+        );
+
+        let messages_batch = vec![verification_add.clone(), username_proof_add.clone()];
+
+        // 3. Simulate the batch
+        let result = engine.simulate_bulk_messages(&messages_batch);
+
+        // 4. Assert success and state integrity
+        assert!(
+            result.iter().all(|r| r.is_ok()),
+            "Simulation of verification and dependent username proof should succeed"
+        );
+
+        // 5. Verify that the engine's state has not been modified
+        let final_root_hash = engine.trie_root_hash();
+        assert_eq!(
+            initial_root_hash, final_root_hash,
+            "Trie root should not change after a successful simulation"
+        );
+
+        // Verify that neither message was actually committed to the trie or DB
+        assert!(
+            !message_exists_in_trie(&mut engine, &verification_add),
+            "Verification should not be in the trie after simulation"
+        );
+        assert!(
+            !message_exists_in_trie(&mut engine, &username_proof_add),
+            "UsernameProof should not be in the trie after simulation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bulk_verification_and_user_name_proof() {
+        // 1. Setup
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            network: Some(FarcasterNetwork::Testnet), // To test ENS support
+            ..Default::default()
+        });
+        let signer = test_helper::default_signer();
+        let custody_address = test_helper::default_custody_address();
+        let timestamp = time::farcaster_time();
+        let username = "testuser.eth".to_string();
+
+        register_user(FID3_FOR_TEST, signer.clone(), custody_address, &mut engine).await;
+        let mut event_rx = engine.get_senders().events_tx.subscribe();
+        let initial_root_hash = engine.trie_root_hash();
+
+        // 2. Create a batch:
+        //    - Message 1: Verify the owner_address for the FID
+        //    - Message 2: Add a UsernameProof for an ENS name owned by owner_address
+        let owner_address = hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap();
+        let verification_add = messages_factory::verifications::create_verification_add(
+            FID3_FOR_TEST,
+            0, // EOA verification
+            owner_address.clone(),
+            hex::decode("b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c").unwrap(),
+            hex::decode("d74860c4bbf574d5ad60f03a478a30f990e05ac723e138a5c860cdb3095f4296").unwrap(),
+            Some(timestamp),
+            Some(&signer),
+        );
+
+        let username_proof_add = messages_factory::username_proof::create_username_proof(
+            FID3_FOR_TEST,
+            proto::UserNameType::UsernameTypeEnsL1,
+            username.clone(),
+            owner_address,
+            "signature".to_string(), // Signature is not validated in this path for devnet
+            (timestamp + 1) as u64,
+            Some(&signer),
+        );
+
+        let messages_batch = vec![
+            MempoolMessage::UserMessage(verification_add.clone()),
+            MempoolMessage::UserMessage(username_proof_add.clone()),
+        ];
+
+        // 3. Propose and commit the batch of messages
+        let state_change = engine.propose_state_change(1, messages_batch, None);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
+
+        // 4. Assertions
+        let final_root_hash = engine.trie_root_hash();
+        assert_ne!(
+            initial_root_hash, final_root_hash,
+            "Trie root should change after a successful commit"
+        );
+        assert_eq!(
+            state_change.new_state_root, final_root_hash,
+            "Final trie root should match the state change root"
+        );
+
+        // Assert that both messages exist in the trie (i.e., both succeeded and were committed)
+        assert!(
+            message_exists_in_trie(&mut engine, &verification_add),
+            "VerificationAdd message should be in the trie after commit"
+        );
+        assert!(
+            message_exists_in_trie(&mut engine, &username_proof_add),
+            "UsernameProof message should be in the trie after commit"
+        );
+
+        // Assert that both messages exist in their respective stores
+        let verification_result = engine.get_verifications_by_fid(FID3_FOR_TEST).unwrap();
+        assert_eq!(
+            verification_result.messages.len(),
+            1,
+            "Verification should be in the store"
+        );
+        assert_eq!(verification_result.messages[0].hash, verification_add.hash);
+
+        let proof_result = engine.get_username_proofs_by_fid(FID3_FOR_TEST).unwrap();
+        assert_eq!(
+            proof_result.messages.len(),
+            1,
+            "UsernameProof should be in the store"
+        );
+        assert_eq!(proof_result.messages[0].hash, username_proof_add.hash);
+
+        // Assert that the correct events were emitted
+        let block_confirmed_event = recv_next_event(&mut event_rx, false).await;
+        assert_eq!(
+            block_confirmed_event.r#type,
+            HubEventType::BlockConfirmed as i32
+        );
+
+        let event1 = recv_next_event(&mut event_rx, false).await;
+        let event2 = recv_next_event(&mut event_rx, false).await;
+
+        let mut seen_verification_event = false;
+        let mut seen_username_proof_event = false;
+
+        match event1.body.as_ref().unwrap() {
+            proto::hub_event::Body::MergeMessageBody(body) => {
+                if body.message.as_ref().unwrap().hash == verification_add.hash {
+                    seen_verification_event = true;
+                }
+            }
+            proto::hub_event::Body::MergeUsernameProofBody(body) => {
+                if body.username_proof_message.as_ref().unwrap().hash == username_proof_add.hash {
+                    seen_username_proof_event = true;
+                }
+            }
+            _ => panic!("Unexpected event type for event1"),
+        }
+        match event2.body.as_ref().unwrap() {
+            proto::hub_event::Body::MergeMessageBody(body) => {
+                if body.message.as_ref().unwrap().hash == verification_add.hash {
+                    seen_verification_event = true;
+                }
+            }
+            proto::hub_event::Body::MergeUsernameProofBody(body) => {
+                if body.username_proof_message.as_ref().unwrap().hash == username_proof_add.hash {
+                    seen_username_proof_event = true;
+                }
+            }
+            _ => panic!("Unexpected event type for event2"),
+        }
+
+        assert!(
+            seen_verification_event,
+            "MergeMessage for verification event was not seen"
+        );
+        assert!(
+            seen_username_proof_event,
+            "MergeUsernameProof event was not seen"
+        );
+
         assert!(
             try_recv_next_event(&mut event_rx, false).is_err(),
             "There should be no more events"

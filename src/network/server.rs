@@ -335,6 +335,7 @@ impl MyHubService {
                                 &stores.verification_store,
                                 fid,
                                 &resolved_ens_address,
+                                None,
                             )?;
 
                             match verification {
@@ -1346,6 +1347,7 @@ impl HubService for MyHubService {
             &stores.verification_store,
             request.fid,
             &request.address,
+            None,
         )
         .as_response()
     }
@@ -2004,9 +2006,12 @@ impl HubService for MyHubService {
             }
 
             // Check verified addresses
-            if let Ok(Some(_verification)) =
-                VerificationStore::get_verification_add(&store.verification_store, fid, &address)
-            {
+            if let Ok(Some(_verification)) = VerificationStore::get_verification_add(
+                &store.verification_store,
+                fid,
+                &address,
+                None,
+            ) {
                 is_verified = true;
             }
 

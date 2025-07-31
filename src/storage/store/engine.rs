@@ -1257,6 +1257,11 @@ impl ShardEngine {
             .map_err(|_| MessageValidationError::MissingSigner)?
             .ok_or(MessageValidationError::MissingSigner)?;
 
+        let txn_batch = if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
+            txn_batch
+        } else {
+            &mut RocksDbTransactionBatch::new()
+        };
         // State-dependent verifications:
         match &message_data.body {
             Some(proto::message_data::Body::UserDataBody(user_data)) => {
@@ -1264,10 +1269,18 @@ impl ShardEngine {
                     self.validate_username(message_data.fid, &user_data.value, txn_batch)?;
                 }
                 if user_data.r#type == proto::UserDataType::UserDataPrimaryAddressEthereum as i32 {
-                    self.validate_ethereum_address_ownership(message_data.fid, &user_data.value)?;
+                    self.validate_ethereum_address_ownership(
+                        message_data.fid,
+                        &user_data.value,
+                        txn_batch,
+                    )?;
                 }
                 if user_data.r#type == proto::UserDataType::UserDataPrimaryAddressSolana as i32 {
-                    self.validate_solana_address_ownership(message_data.fid, &user_data.value)?;
+                    self.validate_solana_address_ownership(
+                        message_data.fid,
+                        &user_data.value,
+                        txn_batch,
+                    )?;
                 }
             }
             _ => {}
@@ -1322,6 +1335,7 @@ impl ShardEngine {
         &self,
         fid: u64,
         address: &str,
+        txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<(), MessageValidationError> {
         if address.is_empty() {
             return Ok(());
@@ -1329,7 +1343,12 @@ impl ShardEngine {
         // Decode Ethereum address into bytes
         let address_instance: Address = Address::from_hex(address)
             .map_err(|_| MessageValidationError::InvalidEthereumAddress)?;
-        self.verify_fid_owns_address(fid, Protocol::Ethereum, address_instance.as_ref())?;
+        self.verify_fid_owns_address(
+            fid,
+            Protocol::Ethereum,
+            address_instance.as_ref(),
+            txn_batch,
+        )?;
         Ok(())
     }
 
@@ -1337,6 +1356,7 @@ impl ShardEngine {
         &self,
         fid: u64,
         address: &str,
+        txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<(), MessageValidationError> {
         if address.is_empty() {
             return Ok(());
@@ -1348,7 +1368,7 @@ impl ShardEngine {
         if address_bytes.len() != 32 {
             return Err(MessageValidationError::InvalidSolanaAddress);
         }
-        self.verify_fid_owns_address(fid, Protocol::Solana, &address_bytes)?;
+        self.verify_fid_owns_address(fid, Protocol::Solana, &address_bytes, txn_batch)?;
         Ok(())
     }
 
@@ -1908,14 +1928,19 @@ impl ShardEngine {
         fid: u64,
         protocol: Protocol,
         address: &[u8],
+        txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<(), MessageValidationError> {
-        let page_result =
-            VerificationStore::get_verification_add(&self.stores.verification_store, fid, address)
-                .map_err(|_| {
-                    MessageValidationError::StoreError(HubError::invalid_internal_state(
-                        "Unable to get verifications by fid",
-                    ))
-                })?;
+        let page_result = VerificationStore::get_verification_add(
+            &self.stores.verification_store,
+            fid,
+            address,
+            Some(txn_batch),
+        )
+        .map_err(|_| {
+            MessageValidationError::StoreError(HubError::invalid_internal_state(
+                "Unable to get verifications by fid",
+            ))
+        })?;
         match page_result {
             Some(message) => {
                 let verification = match &message.data.as_ref().unwrap().body.as_ref().unwrap() {
