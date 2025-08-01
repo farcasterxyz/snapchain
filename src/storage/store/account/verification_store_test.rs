@@ -118,7 +118,7 @@ mod tests {
         let (store, _db, _temp_dir) = create_test_store();
         let address = address::generate_random_address();
 
-        let result = VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address);
+        let result = VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address, None);
         assert!(result.unwrap().is_none());
     }
 
@@ -139,7 +139,8 @@ mod tests {
 
         merge_message_success(&store, &db, &verification_add);
 
-        let retrieved = VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address);
+        let retrieved =
+            VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address, None);
         assert_eq!(retrieved.unwrap().unwrap(), verification_add);
     }
 
@@ -289,7 +290,8 @@ mod tests {
         merge_message_success(&store, &db, &verification_add);
 
         // Verify the message exists
-        let retrieved = VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address);
+        let retrieved =
+            VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address, None);
         assert_eq!(retrieved.unwrap().unwrap(), verification_add);
     }
 
@@ -317,7 +319,8 @@ mod tests {
         );
 
         // Verify the message still exists
-        let retrieved = VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address);
+        let retrieved =
+            VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address, None);
         assert_eq!(retrieved.unwrap().unwrap(), verification_add);
     }
 
@@ -350,7 +353,8 @@ mod tests {
         merge_message_with_conflicts(&store, &db, &verification_add_later, vec![verification_add]);
 
         // Verify the later message exists
-        let retrieved = VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address);
+        let retrieved =
+            VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address, None);
         assert_eq!(retrieved.unwrap().unwrap(), verification_add_later);
     }
 
@@ -388,7 +392,8 @@ mod tests {
         );
 
         // Verify the later message still exists
-        let retrieved = VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address);
+        let retrieved =
+            VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address, None);
         assert_eq!(retrieved.unwrap().unwrap(), verification_add_later);
     }
 
@@ -415,7 +420,8 @@ mod tests {
         merge_message_with_conflicts(&store, &db, &verification_add_later, vec![verification_add]);
 
         // Verify the higher hash message exists
-        let retrieved = VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address);
+        let retrieved =
+            VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address, None);
         assert_eq!(retrieved.unwrap().unwrap(), verification_add_later);
     }
 
@@ -447,7 +453,8 @@ mod tests {
         );
 
         // Verify the higher hash message still exists
-        let retrieved = VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address);
+        let retrieved =
+            VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address, None);
         assert_eq!(retrieved.unwrap().unwrap(), verification_add_later);
     }
 
@@ -483,7 +490,8 @@ mod tests {
         );
 
         // Verify the add message exists
-        let retrieved = VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address);
+        let retrieved =
+            VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address, None);
         assert_eq!(retrieved.unwrap().unwrap(), verification_add);
 
         // Verify the remove message is gone
@@ -801,7 +809,8 @@ mod tests {
         assert_eq!(retrieved.unwrap().unwrap(), verification_remove);
 
         // Verify the add message is gone
-        let retrieved_add = VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address);
+        let retrieved_add =
+            VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address, None);
         assert!(retrieved_add.unwrap().is_none());
     }
 
@@ -836,7 +845,8 @@ mod tests {
         );
 
         // Verify the add message exists
-        let retrieved = VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address);
+        let retrieved =
+            VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address, None);
         assert_eq!(retrieved.unwrap().unwrap(), verification_add_later);
     }
 
@@ -878,7 +888,8 @@ mod tests {
         assert_eq!(retrieved.unwrap().unwrap(), verification_remove);
 
         // Verify the add message is gone
-        let retrieved_add = VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address);
+        let retrieved_add =
+            VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address, None);
         assert!(retrieved_add.unwrap().is_none());
     }
 
@@ -918,7 +929,8 @@ mod tests {
         revoke_message_success(&store, &db, &verification_add);
 
         // Verify the message is gone
-        let retrieved = VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address);
+        let retrieved =
+            VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address, None);
         assert!(retrieved.unwrap().is_none());
     }
 
@@ -961,7 +973,8 @@ mod tests {
         revoke_message_success(&store, &db, &verification_add);
 
         // Verify the message doesn't exist
-        let retrieved = VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address);
+        let retrieved =
+            VerificationStore::get_verification_add(&store, FID_FOR_TEST, &address, None);
         assert!(retrieved.unwrap().is_none());
     }
 
