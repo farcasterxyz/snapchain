@@ -16,6 +16,9 @@ use crate::{
 };
 use std::{sync::Arc, time::Duration};
 
+// Default page size to use when fetching messages
+const DEFAULT_FETCH_PAGE_SIZE: usize = 1_000;
+
 pub async fn run(
     replicator: Arc<Replicator>,
     mut receive: tokio::sync::mpsc::Receiver<PostCommitMessage>,
@@ -215,7 +218,7 @@ impl Replicator {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum MessageType {
     OnchainEventsSigner = 1,
     OnchainEventsSignerMigrated = 2,
@@ -257,31 +260,85 @@ impl TryFrom<u8> for MessageType {
     }
 }
 
+// Note: if you receive a compile error here, you will need to add the event type into the
+// implementation below for fetching on-chain events (build_validator_messages).
+impl Into<MessageType> for proto::OnChainEventType {
+    fn into(self) -> MessageType {
+        match self {
+            proto::OnChainEventType::EventTypeSigner => MessageType::OnchainEventsSigner,
+            proto::OnChainEventType::EventTypeSignerMigrated => {
+                MessageType::OnchainEventsSignerMigrated
+            }
+            proto::OnChainEventType::EventTypeIdRegister => MessageType::OnchainEventsIdRegister,
+            proto::OnChainEventType::EventTypeStorageRent => MessageType::OnchainEventsStorageRent,
+            proto::OnChainEventType::EventTypeTierPurchase => {
+                MessageType::OnchainEventsTierPurchase
+            }
+            proto::OnChainEventType::EventTypeNone => {
+                panic!("EventTypeNone is not a replicated on-chain event type")
+            }
+        }
+    }
+}
+
+// Note: if you receive a compile error here, you will need to add the event type into the
+// implementation below for fetching messages (build_user_messages_for_fid).
+impl Into<MessageType> for proto::MessageType {
+    fn into(self) -> MessageType {
+        match self {
+            proto::MessageType::CastAdd => MessageType::CastMessages,
+            proto::MessageType::CastRemove => panic!("CastRemove is not a replicated message type"),
+            proto::MessageType::ReactionAdd => MessageType::ReactionMessages,
+            proto::MessageType::ReactionRemove => {
+                panic!("ReactionRemove is not a replicated message type")
+            }
+            proto::MessageType::LinkAdd => MessageType::LinkMessages,
+            proto::MessageType::LinkCompactState => MessageType::LinkCompactState,
+            proto::MessageType::LinkRemove => panic!("LinkRemove is not a replicated message type"),
+            proto::MessageType::VerificationAddEthAddress => MessageType::VerificationMessages,
+            proto::MessageType::VerificationRemove => {
+                panic!("VerificationRemove is not a replicated message type")
+            }
+            proto::MessageType::UserDataAdd => MessageType::UserDataMessages,
+            proto::MessageType::UsernameProof => MessageType::UsernameProofsMessages,
+            proto::MessageType::FrameAction => {
+                panic!("FrameAction is not a replicated message type")
+            }
+            proto::MessageType::None => {
+                panic!("None is not a replicated message type")
+            }
+        }
+    }
+}
+
 struct Token {
     // Cursor token format [fid, message_type, cursor]
-    // 8 bytes for fid
+    // 4 bytes for fid
     // 1 byte for message type
     // ... variable length for cursor
     inner: Vec<u8>,
 }
 
 impl Token {
+    const MESSAGE_TYPE_BYTES: usize = 1;
+
     fn new_for_fid(fid: u64) -> Self {
-        let mut token = Vec::with_capacity(8);
-        token.extend_from_slice(&fid.to_be_bytes());
+        let mut token = Vec::with_capacity(account::FID_BYTES);
+        token.extend_from_slice(&account::make_fid_key(fid));
         Token { inner: token }
     }
 
     fn new_with_message_type(fid: u64, message_type: MessageType) -> Self {
-        let mut token = Vec::with_capacity(8 + 1);
-        token.extend_from_slice(&fid.to_be_bytes());
+        let mut token = Vec::with_capacity(account::FID_BYTES + Self::MESSAGE_TYPE_BYTES);
+        token.extend_from_slice(&account::make_fid_key(fid));
         token.push(message_type as u8);
         Token { inner: token }
     }
 
     fn new(fid: u64, message_type: MessageType, cursor: Vec<u8>) -> Self {
-        let mut token = Vec::with_capacity(8 + 1 + cursor.len());
-        token.extend_from_slice(&fid.to_be_bytes());
+        let mut token =
+            Vec::with_capacity(account::FID_BYTES + Self::MESSAGE_TYPE_BYTES + cursor.len());
+        token.extend_from_slice(&account::make_fid_key(fid));
         token.push(message_type as u8);
         token.extend_from_slice(&cursor);
         Token { inner: token }
@@ -292,17 +349,15 @@ impl Token {
     }
 
     fn fid(&self) -> u64 {
-        let mut buf = [0; 8];
-        buf.copy_from_slice(&self.inner[..8]);
-        u64::from_be_bytes(buf)
+        account::read_fid_key(&self.inner, 0)
     }
 
     fn message_type(&self) -> Option<MessageType> {
-        if self.inner.len() < 9 {
+        if self.inner.len() < (account::FID_BYTES + Self::MESSAGE_TYPE_BYTES) {
             return None;
         }
 
-        let message_type_byte = self.inner[8];
+        let message_type_byte = self.inner[account::FID_BYTES];
         match MessageType::try_from(message_type_byte) {
             Ok(message_type) => Some(message_type),
             Err(_) => None,
@@ -310,11 +365,11 @@ impl Token {
     }
 
     fn page_token(&self) -> Option<Vec<u8>> {
-        if self.inner.len() <= 9 {
+        if self.inner.len() <= (account::FID_BYTES + Self::MESSAGE_TYPE_BYTES) {
             return None;
         }
 
-        Some(self.inner[9..].to_vec())
+        Some(self.inner[(account::FID_BYTES + Self::MESSAGE_TYPE_BYTES)..].to_vec())
     }
 }
 
@@ -357,8 +412,6 @@ fn collect_messages_with_cursor<
     message_type: MessageType,
     f: F,
 ) -> Result<Vec<T>, ReplicationError> {
-    const PAGE_SIZE: usize = 1_000;
-
     let mut page_options = PageOptions::default();
 
     // Handle the cursor/token
@@ -397,8 +450,8 @@ fn collect_messages_with_cursor<
     let mut messages = vec![];
 
     loop {
-        // Only attempt to fetch up to the remaining limit or PAGE_SIZE, whichever is smaller
-        page_options.page_size = Some(std::cmp::min(cursor.limit, PAGE_SIZE));
+        // Only attempt to fetch up to the remaining limit or DEFAULT_FETCH_PAGE_SIZE, whichever is smaller
+        page_options.page_size = Some(std::cmp::min(cursor.limit, DEFAULT_FETCH_PAGE_SIZE));
 
         let (results, next_page_token) = match f(&page_options, cursor) {
             Ok(r) => r,
@@ -601,30 +654,16 @@ fn build_validator_messages(
 
     // onchain events
 
-    let fetch_pairs = vec![
-        (
-            MessageType::OnchainEventsSigner,
-            proto::OnChainEventType::EventTypeSigner,
-        ),
-        (
-            MessageType::OnchainEventsSignerMigrated,
-            proto::OnChainEventType::EventTypeSignerMigrated,
-        ),
-        (
-            MessageType::OnchainEventsIdRegister,
-            proto::OnChainEventType::EventTypeIdRegister,
-        ),
-        (
-            MessageType::OnchainEventsStorageRent,
-            proto::OnChainEventType::EventTypeStorageRent,
-        ),
-        (
-            MessageType::OnchainEventsTierPurchase,
-            proto::OnChainEventType::EventTypeTierPurchase,
-        ),
+    let event_types = vec![
+        proto::OnChainEventType::EventTypeSigner,
+        proto::OnChainEventType::EventTypeSignerMigrated,
+        proto::OnChainEventType::EventTypeIdRegister,
+        proto::OnChainEventType::EventTypeStorageRent,
+        proto::OnChainEventType::EventTypeTierPurchase,
     ];
 
-    for (message_type, event_type) in fetch_pairs {
+    for event_type in event_types {
+        let message_type: MessageType = event_type.into();
         let result = collect_onchain_events_with_cursor(stores, cursor, message_type, event_type);
         match result {
             Ok(mut msgs) => messages.append(&mut msgs),
@@ -666,106 +705,60 @@ fn build_user_messages_for_fid(
     stores: &Stores,
     cursor: &mut Cursor,
 ) -> Result<Vec<proto::Message>, ReplicationError> {
-    let mut messages = vec![];
-
     // IMPORTANT: changing the order of these calls will affect the cursor token, and
     // be a backwards-incompatible change!
 
-    // casts
+    let message_types = vec![
+        proto::MessageType::CastAdd,
+        proto::MessageType::LinkCompactState,
+        proto::MessageType::LinkAdd,
+        proto::MessageType::ReactionAdd,
+        proto::MessageType::UserDataAdd,
+        proto::MessageType::VerificationAddEthAddress,
+        proto::MessageType::UsernameProof,
+    ];
 
-    match collect_messages(&stores.cast_store, cursor, MessageType::CastMessages) {
-        Ok(mut msgs) => messages.append(&mut msgs),
-        Err(e) => {
-            return Err(ReplicationError::InternalError(format!(
-                "Failed to collect cast messages: {}",
-                e
-            )));
-        }
-    }
+    let mut messages = vec![];
 
-    // links
+    for message_type in message_types {
+        let result = match message_type {
+            proto::MessageType::CastAdd => {
+                collect_messages(&stores.cast_store, cursor, message_type.into())
+            }
+            proto::MessageType::LinkCompactState => {
+                collect_compact_state(&stores.link_store, cursor, message_type.into())
+            }
+            proto::MessageType::LinkAdd => {
+                collect_messages(&stores.link_store, cursor, message_type.into())
+            }
+            proto::MessageType::ReactionAdd => {
+                collect_messages(&stores.reaction_store, cursor, message_type.into())
+            }
+            proto::MessageType::UserDataAdd => {
+                collect_messages(&stores.user_data_store, cursor, message_type.into())
+            }
+            proto::MessageType::VerificationAddEthAddress => {
+                collect_messages(&stores.verification_store, cursor, message_type.into())
+            }
+            proto::MessageType::UsernameProof => {
+                collect_messages(&stores.username_proof_store, cursor, message_type.into())
+            }
+            _ => {
+                return Err(ReplicationError::InternalError(format!(
+                    "Unsupported message type for user messages: {:?}",
+                    message_type
+                )));
+            }
+        };
 
-    match collect_compact_state(&stores.link_store, cursor, MessageType::LinkCompactState) {
-        Ok(mut msgs) => messages.append(&mut msgs),
-        Err(e) => {
-            return Err(ReplicationError::InternalError(format!(
-                "Failed to collect link compact state: {}",
-                e
-            )));
-        }
-    }
-
-    match collect_messages(&stores.link_store, cursor, MessageType::LinkMessages) {
-        Ok(mut msgs) => messages.append(&mut msgs),
-        Err(e) => {
-            return Err(ReplicationError::InternalError(format!(
-                "Failed to collect link messages: {}",
-                e
-            )));
-        }
-    }
-
-    // reactions
-
-    match collect_messages(
-        &stores.reaction_store,
-        cursor,
-        MessageType::ReactionMessages,
-    ) {
-        Ok(mut msgs) => messages.append(&mut msgs),
-        Err(e) => {
-            return Err(ReplicationError::InternalError(format!(
-                "Failed to collect reaction messages: {}",
-                e
-            )));
-        }
-    }
-
-    // user data
-
-    match collect_messages(
-        &stores.user_data_store,
-        cursor,
-        MessageType::UserDataMessages,
-    ) {
-        Ok(mut msgs) => messages.append(&mut msgs),
-        Err(e) => {
-            return Err(ReplicationError::InternalError(format!(
-                "Failed to collect user data messages: {}",
-                e
-            )));
-        }
-    }
-
-    // verifications
-
-    match collect_messages(
-        &stores.verification_store,
-        cursor,
-        MessageType::VerificationMessages,
-    ) {
-        Ok(mut msgs) => messages.append(&mut msgs),
-        Err(e) => {
-            return Err(ReplicationError::InternalError(format!(
-                "Failed to collect verification messages: {}",
-                e
-            )));
-        }
-    }
-
-    // username proofs
-
-    match collect_messages(
-        &stores.username_proof_store,
-        cursor,
-        MessageType::UsernameProofsMessages,
-    ) {
-        Ok(mut msgs) => messages.append(&mut msgs),
-        Err(e) => {
-            return Err(ReplicationError::InternalError(format!(
-                "Failed to collect username proofs messages: {}",
-                e
-            )));
+        match result {
+            Ok(mut msgs) => messages.append(&mut msgs),
+            Err(e) => {
+                return Err(ReplicationError::InternalError(format!(
+                    "Failed to collect messages for {:?}: {}",
+                    message_type, e
+                )));
+            }
         }
     }
 
@@ -809,4 +802,232 @@ fn build_transaction_for_fid(
         user_messages,
         ..Default::default()
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fetch_from_array<T>(
+        data: Vec<T>,
+        page_options: &PageOptions,
+    ) -> Result<(Vec<T>, Option<Vec<u8>>), String>
+    where
+        T: Clone,
+    {
+        let start = match page_options.page_token {
+            Some(ref token) if !token.is_empty() => token[0] as usize,
+            _ => 0,
+        };
+
+        if start >= data.len() {
+            return Ok((vec![], None));
+        }
+
+        let page_size = page_options.page_size.unwrap_or(10);
+        let end = std::cmp::min(start + page_size, data.len());
+
+        let results = data[start..end].to_vec();
+
+        let next_page_token = if end < data.len() {
+            Some(vec![end as u8])
+        } else {
+            None
+        };
+
+        Ok((results, next_page_token))
+    }
+
+    #[tokio::test]
+    async fn test_collect_messages_with_cursor() {
+        let limit = 10;
+        let mut cursor = Cursor::new_for_fid(1, limit);
+
+        let test_data = (1..=20).collect::<Vec<_>>();
+
+        let results = collect_messages_with_cursor(
+            &mut cursor,
+            MessageType::CastMessages,
+            |page_options, _| fetch_from_array(test_data.clone(), page_options),
+        );
+
+        assert!(results.is_ok());
+
+        let messages = results.unwrap();
+
+        assert_eq!(messages, test_data[0..limit].to_vec());
+        assert_eq!(cursor.token.fid(), 1);
+        assert_eq!(cursor.token.message_type(), Some(MessageType::CastMessages));
+        assert_eq!(cursor.token.page_token(), Some(vec![10]));
+        assert_eq!(cursor.limit, 0);
+
+        // Fetch remaining
+
+        cursor.limit = limit; // Reset limit to fetch next page
+
+        let results = collect_messages_with_cursor(
+            &mut cursor,
+            MessageType::CastMessages,
+            |page_options, _| fetch_from_array(test_data.clone(), page_options),
+        );
+
+        assert!(results.is_ok());
+
+        let messages = results.unwrap();
+
+        assert_eq!(messages, test_data[10..20].to_vec());
+        assert_eq!(cursor.token.fid(), 1);
+        assert_eq!(cursor.token.message_type(), None);
+        assert_eq!(cursor.token.page_token(), None);
+        assert_eq!(cursor.limit, 0);
+    }
+
+    #[tokio::test]
+    async fn test_collect_messages_with_cursor_multiple_stores() {
+        let limit = 30;
+        let mut cursor = Cursor::new_for_fid(1, limit);
+
+        let test_data1 = (1..=20).collect::<Vec<_>>();
+        let test_data2 = (21..=40).collect::<Vec<_>>();
+
+        let mut all_results = vec![];
+
+        // First pass of fetching
+
+        let results = collect_messages_with_cursor(
+            &mut cursor,
+            MessageType::CastMessages,
+            |page_options, _| fetch_from_array(test_data1.clone(), page_options),
+        );
+        assert!(results.is_ok());
+        all_results.extend(results.unwrap());
+
+        let results = collect_messages_with_cursor(
+            &mut cursor,
+            MessageType::LinkMessages,
+            |page_options, _| fetch_from_array(test_data2.clone(), page_options),
+        );
+        assert!(results.is_ok());
+        all_results.extend(results.unwrap());
+
+        // Assert results
+
+        let expected_results = test_data1[0..20]
+            .to_vec()
+            .into_iter()
+            .chain(test_data2[0..10].to_vec())
+            .collect::<Vec<_>>();
+
+        assert_eq!(all_results, expected_results);
+        assert_eq!(cursor.token.fid(), 1);
+        assert_eq!(cursor.token.message_type(), Some(MessageType::LinkMessages));
+        assert_eq!(cursor.token.page_token(), Some(vec![10]));
+        assert_eq!(cursor.limit, 0);
+
+        // Fetch remaining on second pass
+
+        cursor.limit = limit;
+
+        let mut all_results = vec![];
+        let results = collect_messages_with_cursor(
+            &mut cursor,
+            MessageType::CastMessages,
+            |page_options, _| fetch_from_array(test_data1.clone(), page_options),
+        );
+        assert!(results.is_ok());
+        all_results.extend(results.unwrap());
+
+        let results = collect_messages_with_cursor(
+            &mut cursor,
+            MessageType::LinkMessages,
+            |page_options, _| fetch_from_array(test_data2.clone(), page_options),
+        );
+        assert!(results.is_ok());
+        all_results.extend(results.unwrap());
+
+        // Assert final results
+
+        let expected_results = test_data2[10..20].to_vec();
+
+        assert_eq!(all_results, expected_results);
+        assert_eq!(cursor.token.fid(), 1);
+        assert_eq!(cursor.token.message_type(), None);
+        assert_eq!(cursor.token.page_token(), None);
+        assert_eq!(cursor.limit, 20); // Remaining limit after fetching the last 10 in store 2
+    }
+
+    // Similar to test_collect_messages_with_cursor_multiple_stores, but this test
+    // exercises the scenario where the limit is exhausted at the end of the first store.
+    // In this case, we want to ensure that the cursor is updated correctly to reflect The
+    // next store's messsage type.
+    #[tokio::test]
+    async fn test_collect_messages_with_cursor_multiple_stores_cursor_edge() {
+        let limit = 20;
+        let mut cursor = Cursor::new_for_fid(1, limit);
+
+        let test_data1 = (1..=20).collect::<Vec<_>>();
+        let test_data2 = (21..=40).collect::<Vec<_>>();
+
+        let mut all_results = vec![];
+
+        // First pass of fetching
+
+        let results = collect_messages_with_cursor(
+            &mut cursor,
+            MessageType::CastMessages,
+            |page_options, _| fetch_from_array(test_data1.clone(), page_options),
+        );
+        assert!(results.is_ok());
+        all_results.extend(results.unwrap());
+
+        let results = collect_messages_with_cursor(
+            &mut cursor,
+            MessageType::LinkMessages,
+            |page_options, _| fetch_from_array(test_data2.clone(), page_options),
+        );
+        assert!(results.is_ok());
+        all_results.extend(results.unwrap());
+
+        // Assert results
+
+        let expected_results = test_data1.clone();
+
+        assert_eq!(all_results, expected_results);
+        assert_eq!(cursor.token.fid(), 1);
+        assert_eq!(cursor.token.message_type(), Some(MessageType::LinkMessages));
+        assert_eq!(cursor.token.page_token(), None); // None because we haven't fetching anything
+                                                     // here yet
+        assert_eq!(cursor.limit, 0);
+
+        // Fetch remaining on second pass
+
+        cursor.limit = limit;
+
+        let mut all_results = vec![];
+        let results = collect_messages_with_cursor(
+            &mut cursor,
+            MessageType::CastMessages,
+            |page_options, _| fetch_from_array(test_data1.clone(), page_options),
+        );
+        assert!(results.is_ok());
+        all_results.extend(results.unwrap());
+
+        let results = collect_messages_with_cursor(
+            &mut cursor,
+            MessageType::LinkMessages,
+            |page_options, _| fetch_from_array(test_data2.clone(), page_options),
+        );
+        assert!(results.is_ok());
+        all_results.extend(results.unwrap());
+
+        // Assert final results
+
+        let expected_results = test_data2.clone();
+
+        assert_eq!(all_results, expected_results);
+        assert_eq!(cursor.token.fid(), 1);
+        assert_eq!(cursor.token.message_type(), None);
+        assert_eq!(cursor.token.page_token(), None);
+        assert_eq!(cursor.limit, 0);
+    }
 }
