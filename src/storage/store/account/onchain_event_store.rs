@@ -127,7 +127,7 @@ fn build_secondary_indices_for_id_register(
         return Ok(());
     }
     let id_register_by_fid_key = make_id_register_by_fid_key(onchain_event.fid);
-    match get_event_by_secondary_key(db, id_register_by_fid_key.clone())? {
+    match get_event_by_secondary_key(db, id_register_by_fid_key.clone(), Some(txn))? {
         Some(existing_event) => {
             if existing_event.block_number > onchain_event.block_number {
                 return Ok(());
@@ -148,7 +148,7 @@ fn build_secondary_indices_for_signer(
 ) -> Result<(), OnchainEventStorageError> {
     let signer_key =
         make_signer_onchain_event_by_signer_key(onchain_event.fid, signer_event_body.key.clone());
-    match get_event_by_secondary_key(db, signer_key.clone())? {
+    match get_event_by_secondary_key(db, signer_key.clone(), Some(txn))? {
         Some(existing_event) => {
             if existing_event.block_number > onchain_event.block_number {
                 return Ok(());
@@ -242,9 +242,15 @@ fn build_secondary_indices(
 fn get_event_by_secondary_key(
     db: &RocksDB,
     secondary_key: Vec<u8>,
+    txn_batch: Option<&RocksDbTransactionBatch>,
 ) -> Result<Option<OnChainEvent>, OnchainEventStorageError> {
-    match db.get(&secondary_key)? {
-        Some(event_primary_key) => match db.get(&event_primary_key)? {
+    let txn_batch = if let Some(txn_batch) = txn_batch {
+        txn_batch
+    } else {
+        &mut RocksDbTransactionBatch::new()
+    };
+    match get_from_db_or_txn(db, txn_batch, &secondary_key)? {
+        Some(event_primary_key) => match get_from_db_or_txn(db, txn_batch, &event_primary_key)? {
             Some(onchain_event) => {
                 let onchain_event = OnChainEvent::decode(onchain_event.as_slice())?;
                 Ok(Some(onchain_event))
@@ -540,9 +546,11 @@ impl OnchainEventStore {
                 None => false,
                 Some(body) => match body {
                     on_chain_event::Body::SignerEventBody(signer_event_body) => {
-                        if let Ok(active_signer) =
-                            self.get_active_signer(onchain_event.fid, signer_event_body.key.clone())
-                        {
+                        if let Ok(active_signer) = self.get_active_signer(
+                            onchain_event.fid,
+                            signer_event_body.key.clone(),
+                            None,
+                        ) {
                             active_signer.is_some()
                         } else {
                             false
@@ -579,17 +587,19 @@ impl OnchainEventStore {
     pub fn get_id_register_event_by_fid(
         &self,
         fid: u64,
+        txn_batch: Option<&RocksDbTransactionBatch>,
     ) -> Result<Option<OnChainEvent>, OnchainEventStorageError> {
-        get_event_by_secondary_key(&self.db, make_id_register_by_fid_key(fid))
+        get_event_by_secondary_key(&self.db, make_id_register_by_fid_key(fid), txn_batch)
     }
 
     pub fn get_active_signer(
         &self,
         fid: u64,
         signer: Vec<u8>,
+        txn_batch: Option<&RocksDbTransactionBatch>,
     ) -> Result<Option<OnChainEvent>, OnchainEventStorageError> {
         let signer_key = make_signer_onchain_event_by_signer_key(fid, signer);
-        let signer = get_event_by_secondary_key(&self.db, signer_key)
+        let signer = get_event_by_secondary_key(&self.db, signer_key, txn_batch)
             .map_err(|e| OnchainEventStorageError::from(e))?;
         if let Some(signer) = signer {
             if let Some(body) = &signer.body {

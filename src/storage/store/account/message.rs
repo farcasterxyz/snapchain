@@ -171,7 +171,7 @@ pub fn make_cast_id_key(cast_id: &CastId) -> Vec<u8> {
 #[inline]
 pub fn get_message(
     db: &RocksDB,
-    txn: &mut RocksDbTransactionBatch,
+    txn: &RocksDbTransactionBatch,
     fid: u64,
     set: u8,
     ts_hash: &[u8; TS_HASH_LENGTH],
@@ -184,7 +184,7 @@ pub fn get_message(
 // We need to check against the transaction batch first. e.g. A cast add and a cast remove for the same cast_id in the same transaction should not both be merged
 pub fn get_from_db_or_txn(
     db: &RocksDB,
-    txn: &mut RocksDbTransactionBatch,
+    txn: &RocksDbTransactionBatch,
     key: &[u8],
 ) -> Result<Option<Vec<u8>>, HubError> {
     if let Some(value) = txn.batch.get(key) {
@@ -196,7 +196,7 @@ pub fn get_from_db_or_txn(
 
 pub fn get_message_by_key(
     db: &RocksDB,
-    txn: &mut RocksDbTransactionBatch,
+    txn: &RocksDbTransactionBatch,
     key: &[u8],
 ) -> Result<Option<MessageProto>, HubError> {
     match get_from_db_or_txn(db, txn, &key)? {

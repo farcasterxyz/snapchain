@@ -258,7 +258,7 @@ impl VerificationStore {
         store: &Store<VerificationStoreDef>,
         fid: u64,
         address: &[u8],
-        maybe_txn: Option<&mut RocksDbTransactionBatch>,
+        maybe_txn: Option<&RocksDbTransactionBatch>,
     ) -> Result<Option<Message>, HubError> {
         let partial_message = Message {
             data: Some(MessageData {

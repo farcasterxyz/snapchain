@@ -88,7 +88,7 @@ pub trait StoreDef: Send + Sync {
     fn get_merge_conflicts(
         &self,
         db: &RocksDB,
-        txn: &mut RocksDbTransactionBatch,
+        txn: &RocksDbTransactionBatch,
         message: &Message,
         ts_hash: &[u8; TS_HASH_LENGTH],
     ) -> Result<Vec<Message>, HubError> {
@@ -292,7 +292,7 @@ impl<T: StoreDef + Clone> Store<T> {
     pub fn get_add(
         &self,
         partial_message: &Message,
-        maybe_txn: Option<&mut RocksDbTransactionBatch>,
+        maybe_txn: Option<&RocksDbTransactionBatch>,
     ) -> Result<Option<Message>, HubError> {
         // First check the fid
         if partial_message.data.is_none() || partial_message.data.as_ref().unwrap().fid == 0 {
@@ -304,7 +304,7 @@ impl<T: StoreDef + Clone> Store<T> {
 
         let txn = match maybe_txn {
             Some(txn) => txn,
-            None => &mut RocksDbTransactionBatch::new(),
+            None => &RocksDbTransactionBatch::new(),
         };
         let adds_key = self.store_def.make_add_key(partial_message)?;
         let message_ts_hash = get_from_db_or_txn(&self.db, txn, &adds_key)?;
@@ -338,7 +338,7 @@ impl<T: StoreDef + Clone> Store<T> {
             });
         }
 
-        let txn = &mut RocksDbTransactionBatch::new();
+        let txn = &RocksDbTransactionBatch::new();
         let removes_key = self.store_def.make_remove_key(partial_message)?;
         let message_ts_hash = get_from_db_or_txn(&self.db, txn, &removes_key)?;
 

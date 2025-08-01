@@ -1906,7 +1906,7 @@ mod tests {
         // Verify ID registration
         let stored_id_event = stores
             .onchain_event_store
-            .get_id_register_event_by_fid(new_fid)
+            .get_id_register_event_by_fid(new_fid, None)
             .unwrap();
         assert!(
             stored_id_event.is_some(),
@@ -1924,7 +1924,11 @@ mod tests {
         // Verify signer registration
         let stored_signer = stores
             .onchain_event_store
-            .get_active_signer(new_fid, new_signer.verifying_key().to_bytes().to_vec())
+            .get_active_signer(
+                new_fid,
+                new_signer.verifying_key().to_bytes().to_vec(),
+                None,
+            )
             .unwrap();
 
         assert!(
