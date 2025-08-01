@@ -30,3 +30,5 @@ mod on_chain_event_store_tests;
 mod reaction_store_test;
 #[cfg(test)]
 mod user_data_store_test;
+#[cfg(test)]
+mod verification_store_test;
