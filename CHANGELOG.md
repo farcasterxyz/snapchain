@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.1] - 2025-08-01
+
+### 🚀 Features
+
+- Activate the storage unit redenomination a few days earlier on testnet (#577)
+- Add endpoint for connected peers (#541)
+- Add direct peers config for gossip (#590)
+- Expose next engine version timestamp in GetInfo API (#595)
+- Make snapshot metadata compatible with snapdown (#597)
+- Add SubmitBulkMessages rpc/http API (#600)
+- Port install and autoupgrade script from hubble (#596)
+- Allow multi message simulation with dependent messages (#602)
+- Add Grafana to install script (#605)
+
+### 🐛 Bug Fixes
+
+- Properly validate `targetFid` param in `linksByTargetFid` (#579)
+- Fix broken storage unit related tests (#585)
+- Resolve grpc and http api docs inconsistencies (#580)
+- Make peer id legible in the currentPeers endpoint (#591)
+- Cleanup dead code and comments in trie code (#594)
+- Add progress info to snapshot download (#599)
+- Suppress the "No valid cached transaction to apply" warning for read-only nodes (#603)
+
+### ⚙️ Miscellaneous Tasks
+
+- /v1/info response with values out of bounds (#575)
+- Add more metrics for events emitted (#593)
+- Add tests to ensure that snapchain validations are in sync with client validations (#598)
+- Add cast store tests (#601)
+- Add tests for the user data store (#604)
+- Add reaction store tests (#607)
+- Add verification store tests (#609)
+- Add username proof store tests (#610)
+
 ## [0.4.0] - 2025-07-09
 
 ### 🚀 Features
