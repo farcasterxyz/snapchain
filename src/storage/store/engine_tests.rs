@@ -3,6 +3,7 @@ mod tests {
     use crate::core::util::{
         calculate_message_hash, from_farcaster_time, get_farcaster_time, FarcasterTime,
     };
+    use crate::proto::reaction_body::Target;
     use crate::proto::{self, CastId, Embed, FarcasterNetwork, HubEventType, ReactionType};
     use crate::proto::{FnameTransfer, ShardChunk, UserNameProof};
     use crate::proto::{HubEvent, ValidatorMessage};
@@ -523,7 +524,7 @@ mod tests {
         let reaction_add = messages_factory::reactions::create_reaction_add(
             FID_FOR_TEST,
             ReactionType::Like,
-            target_url.clone(),
+            Target::TargetUrl(target_url.clone()),
             Some(timestamp),
             None,
         );
@@ -536,7 +537,7 @@ mod tests {
         let reaction_remove = messages_factory::reactions::create_reaction_remove(
             FID_FOR_TEST,
             ReactionType::Like,
-            target_url.clone(),
+            Target::TargetUrl(target_url.clone()),
             Some(timestamp),
             None,
         );

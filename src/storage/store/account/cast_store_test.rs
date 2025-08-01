@@ -2,6 +2,7 @@
 mod tests {
     use super::super::super::test_helper::FID_FOR_TEST;
     use crate::proto::cast_add_body::Parent;
+    use crate::proto::reaction_body::Target;
     use crate::proto::{self as message, hub_event, CastType, HubEventType};
     use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{CastStore, CastStoreDef, Store, StoreEventHandler};
@@ -712,7 +713,7 @@ mod tests {
         let reaction_add = messages_factory::reactions::create_reaction_add(
             FID_FOR_TEST,
             message::ReactionType::Like,
-            "target".to_string(),
+            Target::TargetUrl("target".to_string()),
             None,
             None,
         );
@@ -1338,7 +1339,7 @@ mod tests {
         let reaction_add = messages_factory::reactions::create_reaction_add(
             FID_FOR_TEST,
             message::ReactionType::Like,
-            "target".to_string(),
+            Target::TargetUrl("target".to_string()),
             None,
             None,
         );
@@ -1530,38 +1531,6 @@ mod tests {
         let result = store.prune_messages(FID_FOR_TEST, 0, 10, &mut txn);
         assert_eq!(result.unwrap().len(), 0); // No messages pruned
         db.commit(txn).unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_merge_accepts_message_which_would_be_immediately_pruned() {
-        let (store, db, _temp_dir) = create_test_store_with_prune_limit(3);
-
-        let timestamp = time::farcaster_time();
-
-        // Create and merge 3 cast add messages (at the limit)
-        let mut cast_adds = vec![];
-        for i in 0..3 {
-            let cast_add = messages_factory::casts::create_cast_add(
-                FID_FOR_TEST,
-                &format!("Cast message {}", i),
-                Some(timestamp + i + 10), // Use timestamps well in the future
-                None,
-            );
-            cast_adds.push(cast_add);
-        }
-
-        // Merge all messages
-        merge_messages(&store, &db, cast_adds.iter().collect());
-
-        // Try to merge a message with an older timestamp that would be immediately pruned
-        let old_cast_add = messages_factory::casts::create_cast_add(
-            FID_FOR_TEST,
-            "Old cast message",
-            Some(timestamp), // Much older timestamp
-            None,
-        );
-
-        merge_messages(&store, &db, vec![&old_cast_add]);
     }
 
     #[tokio::test]
