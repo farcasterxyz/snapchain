@@ -32,3 +32,6 @@ mod reaction_store_test;
 mod user_data_store_test;
 #[cfg(test)]
 mod verification_store_test;
+
+#[cfg(test)]
+mod username_proof_store_test;
