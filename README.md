@@ -130,5 +130,5 @@ make clean
 4. Commit the change and create and merge the PR
 5. Ensure you have the release commit `git checkout main && git pull`
 6. Tag the commit using `git tag v0.x.y`, and push it with `git push origin HEAD --tags` to trigger the docker build
-7. Also tag with @latest using `git tag latest`, and push it (with --force) so install scripts will use the latest version
+7. Also tag with @latest using `git tag -f @latest`, and push it (with --force) so install scripts will use the latest version
 8. Once automated build is complete, confirm the Docker image was [published](https://hub.docker.com/r/farcasterxyz/snapchain)
