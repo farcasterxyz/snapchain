@@ -1,9 +1,7 @@
 use super::account::{IntoU8, OnchainEventStorageError, UserDataStore, UsernameProofStore};
-use crate::core::error::HubError;
-use crate::core::types::Height;
-use crate::core::util::FarcasterTime;
-use crate::core::validations;
-use crate::core::validations::verification;
+use crate::core::{
+    error::HubError, types::Height, util::FarcasterTime, validations, validations::verification,
+};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::message_data::Body;
 use crate::proto::{
@@ -22,7 +20,7 @@ use alloy_primitives::Address;
 use informalsystems_malachitebft_core_types::Round;
 use itertools::Itertools;
 use merkle_trie::TrieKey;
-use std::cmp::PartialEq;
+use std::cmp::{Ordering, PartialEq};
 use std::collections::{HashMap, HashSet};
 use std::str;
 use std::string::ToString;
@@ -652,7 +650,23 @@ impl ShardEngine {
         let mut validation_errors = vec![];
 
         // System messages first, then user messages and finally prunes
-        for msg in &snapchain_txn.system_messages {
+
+        // Sort system_messages to process OnChainEvents first in their canonical order,
+        // followed by FnameTransfers sorted by timestamp.
+        let mut sorted_system_messages = snapchain_txn.system_messages.clone();
+        sorted_system_messages.sort_by(|a, b| {
+            match (&a.on_chain_event, &b.on_chain_event) {
+                (Some(event_a), Some(event_b)) => {
+                    // Both are OnChainEvents, sort by block_number then log_index.
+                    (event_a.block_number, event_a.log_index)
+                        .cmp(&(event_b.block_number, event_b.log_index))
+                }
+                (Some(_), None) => Ordering::Less, // OnChainEvents come before FnameTransfers.
+                (None, Some(_)) => Ordering::Greater, // FnameTransfers come after OnChainEvents.
+                (None, None) => Ordering::Equal,   // Both are FnameTransfers, sort equal
+            }
+        });
+        for msg in sorted_system_messages {
             if let Some(onchain_event) = &msg.on_chain_event {
                 if onchain_event.r#type() == OnChainEventType::EventTypeTierPurchase
                     && !version.is_enabled(ProtocolFeature::FarcasterPro)
@@ -798,7 +812,44 @@ impl ShardEngine {
             }
         }
 
-        for msg in &snapchain_txn.user_messages {
+        // Sort the user messages so that all dependent messages are processed in order
+        let mut sorted_user_messages = snapchain_txn.user_messages.clone();
+        sorted_user_messages.sort_by(|a, b| {
+            fn get_message_priority(msg: &proto::Message) -> u8 {
+                let msg_type = msg.msg_type();
+                match msg_type {
+                    MessageType::VerificationAddEthAddress => 1,
+                    MessageType::UsernameProof => 2,
+                    MessageType::UserDataAdd => {
+                        if let Some(Body::UserDataBody(body)) = &msg.data.as_ref().unwrap().body {
+                            let user_data_type = body.r#type();
+                            if user_data_type == UserDataType::Username
+                                || user_data_type == UserDataType::UserDataPrimaryAddressEthereum
+                                || user_data_type == UserDataType::UserDataPrimaryAddressSolana
+                            {
+                                return 3; // Dependent UserData types
+                            }
+                        }
+                        4 // Other UserDataAdd types
+                    }
+                    _ => 5, // All other message types
+                }
+            }
+
+            let priority_a = get_message_priority(a);
+            let priority_b = get_message_priority(b);
+
+            // Message priority first, then timestamp
+            priority_a.cmp(&priority_b).then_with(|| {
+                a.data
+                    .as_ref()
+                    .unwrap()
+                    .timestamp
+                    .cmp(&b.data.as_ref().unwrap().timestamp)
+            })
+        });
+
+        for msg in &sorted_user_messages {
             // Errors are validated based on the shard root
             match self.validate_user_message(msg, timestamp, version, txn_batch) {
                 Ok(()) => {

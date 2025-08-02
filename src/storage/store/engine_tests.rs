@@ -1508,8 +1508,8 @@ mod tests {
         );
 
         let messages_batch = vec![
-            MempoolMessage::UserMessage(username_proof_add.clone()),
             MempoolMessage::UserMessage(user_data_add.clone()),
+            MempoolMessage::UserMessage(username_proof_add.clone()),
         ];
 
         // 3. Propose and commit the batch of messages
