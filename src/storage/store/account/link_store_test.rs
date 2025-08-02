@@ -2,7 +2,7 @@
 mod tests {
     use super::super::super::test_helper::FID_FOR_TEST;
     use crate::proto::link_body::Target;
-    use crate::proto::{self as message, hub_event, HubEventType, MessageType};
+    use crate::proto::{self as message, hub_event, HubEventType};
     use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{LinkStore, Store, StoreEventHandler};
     use crate::utils::factory::messages_factory;
@@ -74,7 +74,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert_eq!(err.code, err_code);
-        assert!(err.message.contains(err_message));
+        assert_eq!(err.message, err_message);
     }
 
     fn revoke_message_success(
@@ -627,7 +627,7 @@ mod tests {
             FID_FOR_TEST,
             LINK_TYPE_FOLLOW,
             TARGET_FID,
-            None,
+            Some(1),
             None,
         );
 
@@ -635,7 +635,7 @@ mod tests {
             FID_FOR_TEST,
             LINK_TYPE_ENDORSE,
             TARGET_FID + 1,
-            None,
+            Some(2),
             None,
         );
 
@@ -720,7 +720,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             all_results.messages,
-            vec![link_add1.clone(), link_remove.clone(), link_add2.clone()]
+            vec![link_add1.clone(), link_add2.clone()]
         );
         assert!(all_results.next_page_token.is_none());
 
@@ -752,7 +752,7 @@ mod tests {
             &page2_options,
         )
         .unwrap();
-        assert_eq!(page2_results.messages, vec![link_remove, link_add2]);
+        assert_eq!(page2_results.messages, vec![link_add2]);
         assert!(page2_results.next_page_token.is_none());
     }
 
@@ -926,5 +926,1161 @@ mod tests {
         .unwrap();
         assert_eq!(page2_results.messages, vec![link_add2]);
         assert!(page2_results.next_page_token.is_none());
+    }
+
+    // Merge conflict resolution tests
+
+    #[test]
+    fn test_merge_fails_with_invalid_message_type() {
+        let (store, _db, _temp_dir) = create_test_store();
+
+        let cast_add =
+            messages_factory::casts::create_cast_add(FID_FOR_TEST, "Hello world", None, None);
+
+        merge_message_failure(
+            &store,
+            &cast_add,
+            "bad_request.validation_failure",
+            "invalid message type",
+        );
+    }
+
+    #[test]
+    fn test_merge_link_add_succeeds() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let link_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            None,
+            None,
+        );
+
+        merge_message_success(&store, &db, &link_add);
+
+        // Verify the message was stored
+        let retrieved = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, link_add);
+    }
+
+    #[test]
+    fn test_merge_link_add_fails_if_merged_twice() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let link_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            None,
+            None,
+        );
+
+        merge_message_success(&store, &db, &link_add);
+        merge_message_failure(
+            &store,
+            &link_add,
+            "bad_request.duplicate",
+            "message has already been merged",
+        );
+
+        // Verify only one message is stored
+        let retrieved = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, link_add);
+    }
+
+    #[test]
+    fn test_merge_link_add_succeeds_with_a_later_timestamp() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let current_time = 1640995200;
+
+        let link_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+
+        let link_add_later = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time + 10),
+            None,
+        );
+
+        merge_message_success(&store, &db, &link_add);
+        merge_message_with_conflicts(&store, &db, &link_add_later, vec![link_add]);
+
+        // Verify the later message is stored
+        let retrieved = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, link_add_later);
+    }
+
+    #[test]
+    fn test_merge_link_add_fails_with_an_earlier_timestamp() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let current_time = 1640995200;
+
+        let link_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time + 10),
+            None,
+        );
+
+        let link_add_earlier = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+
+        merge_message_success(&store, &db, &link_add);
+        merge_message_failure(
+            &store,
+            &link_add_earlier,
+            "bad_request.conflict",
+            "message conflicts with a more recent add",
+        );
+
+        // Verify the original message is still stored
+        let retrieved = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, link_add);
+    }
+
+    #[test]
+    fn test_merge_link_add_succeeds_with_a_higher_hash() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let current_time = 1640995200;
+
+        let link_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+
+        let mut link_add_higher = link_add.clone();
+        // Ensure higher hash by incrementing the last byte
+        let mut hash = link_add_higher.hash.clone();
+        if let Some(last) = hash.last_mut() {
+            *last = last.wrapping_add(1);
+        }
+        link_add_higher.hash = hash;
+
+        merge_message_success(&store, &db, &link_add);
+        merge_message_with_conflicts(&store, &db, &link_add_higher, vec![link_add]);
+
+        // Verify the higher hash message is stored
+        let retrieved = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, link_add_higher);
+    }
+
+    #[test]
+    fn test_merge_link_add_fails_with_a_lower_hash() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let current_time = 1640995200;
+
+        let link_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+
+        let mut link_add_higher = link_add.clone();
+        // Ensure higher hash by incrementing the last byte
+        let mut hash = link_add_higher.hash.clone();
+        if let Some(last) = hash.last_mut() {
+            *last = last.wrapping_add(1);
+        }
+        link_add_higher.hash = hash;
+
+        merge_message_success(&store, &db, &link_add_higher);
+        merge_message_failure(
+            &store,
+            &link_add,
+            "bad_request.conflict",
+            "message conflicts with a more recent add",
+        );
+
+        // Verify the higher hash message is still stored
+        let retrieved = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, link_add_higher);
+    }
+
+    #[test]
+    fn test_merge_link_add_succeeds_with_a_later_timestamp_vs_link_remove() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let current_time = 1640995200;
+
+        let link_remove_earlier = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+
+        let link_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time + 10),
+            None,
+        );
+
+        merge_message_success(&store, &db, &link_remove_earlier);
+        merge_message_with_conflicts(&store, &db, &link_add, vec![link_remove_earlier]);
+
+        // Verify the link add is stored and remove is gone
+        let retrieved_add = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved_add, link_add);
+
+        let retrieved_remove = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert!(retrieved_remove.is_none());
+    }
+
+    #[test]
+    fn test_merge_link_add_fails_with_an_earlier_timestamp_vs_link_remove() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let current_time = 1640995200;
+
+        let link_remove = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time + 10),
+            None,
+        );
+
+        let link_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+
+        merge_message_success(&store, &db, &link_remove);
+        merge_message_failure(
+            &store,
+            &link_add,
+            "bad_request.conflict",
+            "message conflicts with a more recent remove",
+        );
+
+        // Verify the link remove is still stored and add is not
+        let retrieved_remove = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved_remove, link_remove);
+
+        let retrieved_add = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert!(retrieved_add.is_none());
+    }
+
+    #[test]
+    fn test_merge_link_add_fails_if_remove_has_a_higher_hash() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let current_time = 1640995200;
+
+        let link_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+
+        let mut link_remove_higher = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+        // Give remove a higher hash than add
+        let mut hash = link_add.hash.clone();
+        if let Some(last) = hash.last_mut() {
+            *last = last.wrapping_add(1);
+        }
+        link_remove_higher.hash = hash;
+
+        merge_message_success(&store, &db, &link_remove_higher);
+        merge_message_failure(
+            &store,
+            &link_add,
+            "bad_request.conflict",
+            "message conflicts with a more recent remove",
+        );
+
+        // Verify remove-over-add priority: remove wins even with higher hash
+        let retrieved_remove = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved_remove, link_remove_higher);
+
+        let retrieved_add = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert!(retrieved_add.is_none());
+    }
+
+    #[test]
+    fn test_merge_link_add_fails_if_remove_has_a_lower_hash() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let current_time = 1640995200;
+
+        let link_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+
+        let mut link_remove_lower = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+        // Give remove a lower hash than add by giving add a higher hash
+        let mut hash = link_add.hash.clone();
+        if let Some(last) = hash.last_mut() {
+            *last = last.wrapping_sub(1);
+        }
+        link_remove_lower.hash = hash;
+
+        merge_message_success(&store, &db, &link_remove_lower);
+        merge_message_failure(
+            &store,
+            &link_add,
+            "bad_request.conflict",
+            "message conflicts with a more recent remove",
+        );
+
+        // Verify remove-over-add priority: remove wins even with lower hash
+        let retrieved_remove = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved_remove, link_remove_lower);
+
+        let retrieved_add = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert!(retrieved_add.is_none());
+    }
+
+    // LinkRemove merge tests
+
+    #[test]
+    fn test_merge_link_remove_succeeds() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let link_remove = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            None,
+            None,
+        );
+
+        merge_message_success(&store, &db, &link_remove);
+
+        // Verify the message was stored
+        let retrieved = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, link_remove);
+    }
+
+    #[test]
+    fn test_merge_link_remove_fails_if_merged_twice() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let link_remove = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            None,
+            None,
+        );
+
+        merge_message_success(&store, &db, &link_remove);
+        merge_message_failure(
+            &store,
+            &link_remove,
+            "bad_request.duplicate",
+            "message has already been merged",
+        );
+
+        // Verify only one message is stored
+        let retrieved = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, link_remove);
+    }
+
+    #[test]
+    fn test_merge_link_remove_succeeds_with_a_later_timestamp() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let current_time = 1640995200;
+
+        let link_remove = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+
+        let link_remove_later = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time + 10),
+            None,
+        );
+
+        merge_message_success(&store, &db, &link_remove);
+        merge_message_with_conflicts(&store, &db, &link_remove_later, vec![link_remove]);
+
+        // Verify the later message is stored
+        let retrieved = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, link_remove_later);
+    }
+
+    #[test]
+    fn test_merge_link_remove_fails_with_an_earlier_timestamp() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let current_time = 1640995200;
+
+        let link_remove_later = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time + 10),
+            None,
+        );
+
+        let link_remove = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+
+        merge_message_success(&store, &db, &link_remove_later);
+        merge_message_failure(
+            &store,
+            &link_remove,
+            "bad_request.conflict",
+            "message conflicts with a more recent remove",
+        );
+
+        // Verify the later message is still stored
+        let retrieved = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, link_remove_later);
+    }
+
+    #[test]
+    fn test_merge_link_remove_succeeds_with_a_higher_hash() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let current_time = 1640995200;
+
+        let link_remove = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+
+        let mut link_remove_higher = link_remove.clone();
+        // Ensure higher hash by incrementing the last byte
+        let mut hash = link_remove_higher.hash.clone();
+        if let Some(last) = hash.last_mut() {
+            *last = last.wrapping_add(1);
+        }
+        link_remove_higher.hash = hash;
+
+        merge_message_success(&store, &db, &link_remove);
+        merge_message_with_conflicts(&store, &db, &link_remove_higher, vec![link_remove]);
+
+        // Verify the higher hash message is stored
+        let retrieved = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, link_remove_higher);
+    }
+
+    #[test]
+    fn test_merge_link_remove_fails_with_a_lower_hash() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let current_time = 1640995200;
+
+        let link_remove = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+
+        let mut link_remove_higher = link_remove.clone();
+        // Ensure higher hash by incrementing the last byte
+        let mut hash = link_remove_higher.hash.clone();
+        if let Some(last) = hash.last_mut() {
+            *last = last.wrapping_add(1);
+        }
+        link_remove_higher.hash = hash;
+
+        merge_message_success(&store, &db, &link_remove_higher);
+        merge_message_failure(
+            &store,
+            &link_remove,
+            "bad_request.conflict",
+            "message conflicts with a more recent remove",
+        );
+
+        // Verify the higher hash message is still stored
+        let retrieved = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, link_remove_higher);
+    }
+
+    #[test]
+    fn test_merge_link_remove_succeeds_with_a_later_timestamp_vs_link_add() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let current_time = 1640995200;
+
+        let link_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+
+        let link_remove = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time + 10),
+            None,
+        );
+
+        merge_message_success(&store, &db, &link_add);
+        merge_message_with_conflicts(&store, &db, &link_remove, vec![link_add]);
+
+        // Verify the link remove is stored and add is gone
+        let retrieved_remove = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved_remove, link_remove);
+
+        let retrieved_add = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert!(retrieved_add.is_none());
+    }
+
+    #[test]
+    fn test_merge_link_remove_fails_with_an_earlier_timestamp_vs_link_add() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let current_time = 1640995200;
+
+        let link_add_later = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time + 10),
+            None,
+        );
+
+        let link_remove = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+
+        merge_message_success(&store, &db, &link_add_later);
+        merge_message_failure(
+            &store,
+            &link_remove,
+            "bad_request.conflict",
+            "message conflicts with a more recent add",
+        );
+
+        // Verify the link add is still stored and remove is not
+        let retrieved_add = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved_add, link_add_later);
+
+        let retrieved_remove = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert!(retrieved_remove.is_none());
+    }
+
+    #[test]
+    fn test_merge_link_remove_succeeds_with_a_lower_hash_vs_link_add() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let current_time = 1640995200;
+
+        let link_add_later = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+
+        let link_remove = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+
+        merge_message_success(&store, &db, &link_add_later);
+        merge_message_with_conflicts(&store, &db, &link_remove, vec![link_add_later]);
+
+        // Verify remove-over-add priority: remove wins even with lower hash
+        let retrieved_remove = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved_remove, link_remove);
+
+        let retrieved_add = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert!(retrieved_add.is_none());
+    }
+
+    #[test]
+    fn test_merge_link_remove_succeeds_with_a_higher_hash_vs_link_add() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let current_time = 1640995200;
+
+        let link_add_earlier = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+
+        let link_remove = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+
+        merge_message_success(&store, &db, &link_add_earlier);
+        merge_message_with_conflicts(&store, &db, &link_remove, vec![link_add_earlier]);
+
+        // Verify remove-over-add priority: remove wins even with higher hash
+        let retrieved_remove = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved_remove, link_remove);
+
+        let retrieved_add = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert!(retrieved_add.is_none());
+    }
+
+    #[test]
+    fn test_handles_conflicting_messages_when_type_is_max_length() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let max_type_link_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            "follower", // 8 bytes, max length
+            TARGET_FID,
+            Some(1640995200),
+            None,
+        );
+
+        let later_max_type_link_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            "follower",
+            TARGET_FID,
+            Some(1640995201),
+            None,
+        );
+
+        merge_message_success(&store, &db, &max_type_link_add);
+        merge_message_with_conflicts(
+            &store,
+            &db,
+            &later_max_type_link_add,
+            vec![max_type_link_add],
+        );
+
+        let retrieved = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            "follower".to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, later_max_type_link_add);
+    }
+
+    // Tests 57-61: Revoke message tests
+    #[test]
+    fn test_revoke_fails_with_invalid_message_type() {
+        let (store, _db, _temp_dir) = create_test_store();
+
+        let cast_add =
+            messages_factory::casts::create_cast_add(FID_FOR_TEST, "Hello world", None, None);
+
+        revoke_message_failure(
+            &store,
+            &cast_add,
+            "bad_request.invalid_param",
+            "invalid message type",
+        );
+    }
+
+    #[test]
+    fn test_revoke_deletes_all_keys_relating_to_the_link() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let link_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            None,
+            None,
+        );
+
+        merge_message_success(&store, &db, &link_add);
+        revoke_message_success(&store, &db, &link_add);
+
+        // The message should no longer be retrievable via any API
+        let result = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert!(result.is_none());
+
+        // Should not appear in get_link_adds_by_fid
+        let adds_result = LinkStore::get_link_adds_by_fid(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            &PageOptions::default(),
+        )
+        .unwrap();
+        assert!(adds_result.messages.is_empty());
+
+        // Should not appear in get_all_messages_by_fid
+        let all_result = store
+            .get_all_messages_by_fid(FID_FOR_TEST, None, None, &PageOptions::default())
+            .unwrap();
+        assert!(all_result.messages.is_empty());
+
+        // Should not appear in get_links_by_target
+        let target_result = LinkStore::get_links_by_target(
+            &store,
+            &Target::TargetFid(TARGET_FID),
+            LINK_TYPE_FOLLOW.to_string(),
+            &PageOptions::default(),
+        )
+        .unwrap();
+        assert!(target_result.messages.is_empty());
+    }
+
+    #[test]
+    fn test_revoke_succeeds_with_link_add() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let link_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            None,
+            None,
+        );
+
+        merge_message_success(&store, &db, &link_add);
+        revoke_message_success(&store, &db, &link_add);
+
+        // The message should no longer be retrievable
+        let result = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_revoke_succeeds_with_link_remove() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let link_remove = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            None,
+            None,
+        );
+
+        merge_message_success(&store, &db, &link_remove);
+        revoke_message_success(&store, &db, &link_remove);
+
+        // The message should no longer be retrievable
+        let result = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_revoke_succeeds_with_unmerged_message() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let link_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            None,
+            None,
+        );
+
+        // Revoke without merging first
+        revoke_message_success(&store, &db, &link_add);
+
+        // The message should not be retrievable
+        let result = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    // Tests 62 and 65: Prune message tests
+    #[test]
+    fn test_prune_messages_no_ops_when_no_messages_have_been_merged() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = RocksDB::new(db_path.to_str().unwrap());
+        db.open().unwrap();
+        let db = Arc::new(db);
+
+        let event_handler = StoreEventHandler::new();
+        let store = LinkStore::new(db.clone(), event_handler.clone(), 3); // size limit = 3
+
+        let mut txn = RocksDbTransactionBatch::new();
+        let result = store.prune_messages(FID_FOR_TEST, 0, 2, &mut txn).unwrap();
+        assert_eq!(result.len(), 0);
+        db.commit(txn).unwrap();
+    }
+
+    #[test]
+    fn test_prune_messages_prunes_earliest_messages() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = RocksDB::new(db_path.to_str().unwrap());
+        db.open().unwrap();
+        let db = Arc::new(db);
+
+        let event_handler = StoreEventHandler::new();
+        let store = LinkStore::new(db.clone(), event_handler.clone(), 3);
+
+        let current_time = 1640995200;
+
+        let add1 = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(current_time + 1),
+            None,
+        );
+        let remove2 = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID + 1,
+            Some(current_time + 2),
+            None,
+        );
+        let add3 = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID + 2,
+            Some(current_time + 3),
+            None,
+        );
+        let remove4 = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID + 3,
+            Some(current_time + 4),
+            None,
+        );
+        let add5 = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID + 4,
+            Some(current_time + 5),
+            None,
+        );
+
+        merge_message_success(&store, &db, &add1);
+        merge_message_success(&store, &db, &remove2);
+        merge_message_success(&store, &db, &add3);
+        merge_message_success(&store, &db, &remove4);
+        merge_message_success(&store, &db, &add5);
+
+        let mut txn = RocksDbTransactionBatch::new();
+        let pruned_events = store.prune_messages(FID_FOR_TEST, 5, 3, &mut txn).unwrap();
+        assert_eq!(pruned_events.len(), 2);
+
+        // Extract messages from pruned events and verify they are the earliest ones
+        let mut pruned_messages = Vec::new();
+        for event in &pruned_events {
+            if let Some(hub_event::Body::PruneMessageBody(body)) = &event.body {
+                pruned_messages.push(body.message.as_ref().unwrap().clone());
+            }
+        }
+
+        assert_eq!(pruned_messages, vec![add1.clone(), remove2.clone()]);
+
+        db.commit(txn).unwrap();
+
+        // Verify the pruned messages are no longer retrievable
+        let result1 = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert!(result1.is_none());
+
+        let result2 = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID + 1)),
+        )
+        .unwrap();
+        assert!(result2.is_none());
+
+        // Verify remaining messages are still accessible
+        let result3 = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID + 2)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result3, add3);
     }
 }
