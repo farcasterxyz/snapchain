@@ -6,6 +6,7 @@ mod tests {
     use crate::storage::store::account::{
         message_bytes_decode, ReactionStore, ReactionStoreDef, Store, StoreEventHandler,
     };
+    use crate::storage::util::{decrement_vec_u8, increment_vec_u8};
     use crate::utils::factory::messages_factory;
     use prost::Message;
     use std::sync::Arc;
@@ -1469,11 +1470,7 @@ mod tests {
             None,
         );
         let mut reaction_add_higher = reaction_add.clone();
-
-        // Ensure higher hash by incrementing the last byte
-        if let Some(last) = reaction_add_higher.hash.last_mut() {
-            *last = last.wrapping_add(1);
-        }
+        reaction_add_higher.hash = increment_vec_u8(&reaction_add.hash);
 
         merge_message_success(&store, &db, &reaction_add);
         merge_message_with_conflicts(
@@ -1514,11 +1511,7 @@ mod tests {
             None,
         );
         let mut reaction_add_lower = reaction_add_higher.clone();
-
-        // Ensure lower hash by decrementing from the higher hash
-        if let Some(last) = reaction_add_lower.hash.last_mut() {
-            *last = last.wrapping_sub(1);
-        }
+        reaction_add_lower.hash = decrement_vec_u8(&reaction_add_higher.hash);
 
         merge_message_success(&store, &db, &reaction_add_higher);
 
@@ -1733,11 +1726,7 @@ mod tests {
             None,
         );
         let mut reaction_remove_higher = reaction_remove.clone();
-
-        // Ensure higher hash by incrementing the last byte
-        if let Some(last) = reaction_remove_higher.hash.last_mut() {
-            *last = last.wrapping_add(1);
-        }
+        reaction_remove_higher.hash = increment_vec_u8(&reaction_remove.hash);
 
         merge_message_success(&store, &db, &reaction_remove);
         merge_message_with_conflicts(
@@ -1778,11 +1767,7 @@ mod tests {
             None,
         );
         let mut reaction_remove_lower = reaction_remove_higher.clone();
-
-        // Ensure lower hash by decrementing from the higher hash
-        if let Some(last) = reaction_remove_lower.hash.last_mut() {
-            *last = last.wrapping_sub(1);
-        }
+        reaction_remove_lower.hash = decrement_vec_u8(&reaction_remove_lower.hash);
 
         merge_message_success(&store, &db, &reaction_remove_higher);
 
@@ -2063,11 +2048,7 @@ mod tests {
         );
 
         // Ensure ReactionAdd has lower hash by decrementing from remove hash
-        let mut lower_hash = reaction_remove.hash.clone();
-        if let Some(last) = lower_hash.last_mut() {
-            *last = last.wrapping_sub(1);
-        }
-        reaction_add_lower.hash = lower_hash;
+        reaction_add_lower.hash = decrement_vec_u8(&reaction_remove.hash.clone());
 
         merge_message_success(&store, &db, &reaction_remove);
 
@@ -2124,11 +2105,7 @@ mod tests {
         );
 
         // Ensure ReactionAdd has higher hash by incrementing from remove hash
-        let mut higher_hash = reaction_remove_lower.hash.clone();
-        if let Some(last) = higher_hash.last_mut() {
-            *last = last.wrapping_add(1);
-        }
-        reaction_add_higher.hash = higher_hash;
+        reaction_add_higher.hash = increment_vec_u8(&reaction_remove_lower.hash);
 
         merge_message_success(&store, &db, &reaction_remove_lower);
 
@@ -2185,11 +2162,7 @@ mod tests {
         );
 
         // Ensure ReactionRemove has lower hash by decrementing from add hash
-        let mut lower_hash = reaction_add_higher.hash.clone();
-        if let Some(last) = lower_hash.last_mut() {
-            *last = last.wrapping_sub(1);
-        }
-        reaction_remove_lower.hash = lower_hash;
+        reaction_remove_lower.hash = decrement_vec_u8(&reaction_add_higher.hash);
 
         merge_message_success(&store, &db, &reaction_add_higher);
         merge_message_with_conflicts(
@@ -2253,11 +2226,7 @@ mod tests {
         );
 
         // Ensure ReactionRemove has higher hash by incrementing from add hash
-        let mut higher_hash = reaction_add_lower.hash.clone();
-        if let Some(last) = higher_hash.last_mut() {
-            *last = last.wrapping_add(1);
-        }
-        reaction_remove_higher.hash = higher_hash;
+        reaction_remove_higher.hash = increment_vec_u8(&reaction_add_lower.hash);
 
         merge_message_success(&store, &db, &reaction_add_lower);
         merge_message_with_conflicts(

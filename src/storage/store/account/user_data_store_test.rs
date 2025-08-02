@@ -6,6 +6,7 @@ mod tests {
     use crate::storage::store::account::{
         Store, StoreEventHandler, UserDataStore, UserDataStoreDef,
     };
+    use crate::storage::util::{decrement_vec_u8, increment_vec_u8};
     use crate::utils::factory::{messages_factory, username_factory};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -812,11 +813,7 @@ mod tests {
             None,
         );
         // Ensure higher hash by incrementing the last byte
-        let mut hash = add_pfp.hash.clone();
-        if let Some(last) = hash.last_mut() {
-            *last = last.wrapping_add(1);
-        }
-        add_pfp_higher.hash = hash;
+        add_pfp_higher.hash = increment_vec_u8(&add_pfp.hash);
 
         merge_message_with_conflicts(&store, &db, &add_pfp_higher, vec![add_pfp.clone()]);
 
@@ -852,11 +849,7 @@ mod tests {
             None,
         );
         // Ensure lower hash by decrementing from the higher hash
-        let mut lower_hash = add_pfp_higher.hash.clone();
-        if let Some(last) = lower_hash.last_mut() {
-            *last = last.wrapping_sub(1);
-        }
-        add_pfp.hash = lower_hash;
+        add_pfp.hash = decrement_vec_u8(&add_pfp_higher.hash);
 
         merge_message_failure(
             &store,

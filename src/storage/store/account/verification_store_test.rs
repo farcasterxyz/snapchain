@@ -6,6 +6,7 @@ mod tests {
     use crate::storage::store::account::{
         Store, StoreEventHandler, VerificationStore, VerificationStoreDef,
     };
+    use crate::storage::util::{decrement_vec_u8, increment_vec_u8};
     use crate::utils::factory::{address, messages_factory};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -409,7 +410,7 @@ mod tests {
 
         let mut verification_add_later = verification_add.clone();
         // Increment hash to make it higher
-        verification_add_later.hash[19] = verification_add_later.hash[19].wrapping_add(1);
+        verification_add_later.hash = increment_vec_u8(&verification_add.hash);
 
         merge_message_success(&store, &db, &verification_add);
         merge_message_with_conflicts(&store, &db, &verification_add_later, vec![verification_add]);
@@ -436,7 +437,7 @@ mod tests {
 
         let mut verification_add_later = verification_add.clone();
         // Increment hash to make it higher
-        verification_add_later.hash[19] = verification_add_later.hash[19].wrapping_add(1);
+        verification_add_later.hash = increment_vec_u8(&verification_add.hash);
 
         merge_message_success(&store, &db, &verification_add_later);
         merge_message_failure(
@@ -550,7 +551,7 @@ mod tests {
                 None,
             );
         // Increment hash to make it higher
-        verification_remove_later.hash[19] = verification_remove_later.hash[19].wrapping_add(1);
+        verification_remove_later.hash = increment_vec_u8(&verification_add.hash);
 
         merge_message_success(&store, &db, &verification_remove_later);
         merge_message_failure(
@@ -570,7 +571,7 @@ mod tests {
         let (store, db, _temp_dir) = create_test_store();
         let address = address::generate_random_address();
 
-        let mut verification_add = messages_factory::verifications::create_verification_add(
+        let verification_add = messages_factory::verifications::create_verification_add(
             FID_FOR_TEST,
             0, // verification_type
             address.clone(),
@@ -579,16 +580,15 @@ mod tests {
             Some(1),
             None,
         );
-        // Increment hash to make it higher
-        verification_add.hash[19] = verification_add.hash[19].wrapping_add(1);
 
-        let verification_remove_earlier =
+        let mut verification_remove_earlier =
             messages_factory::verifications::create_verification_remove(
                 FID_FOR_TEST,
                 address.clone(),
                 Some(1), // same timestamp
                 None,
             );
+        verification_remove_earlier.hash = decrement_vec_u8(&verification_add.hash);
 
         merge_message_success(&store, &db, &verification_remove_earlier);
         merge_message_failure(
@@ -727,7 +727,7 @@ mod tests {
 
         let mut verification_remove_later = verification_remove.clone();
         // Increment hash to make it higher
-        verification_remove_later.hash[19] = verification_remove_later.hash[19].wrapping_add(1);
+        verification_remove_later.hash = increment_vec_u8(&verification_remove.hash);
 
         merge_message_success(&store, &db, &verification_remove);
         merge_message_with_conflicts(
@@ -756,7 +756,7 @@ mod tests {
 
         let mut verification_remove_later = verification_remove.clone();
         // Increment hash to make it higher
-        verification_remove_later.hash[19] = verification_remove_later.hash[19].wrapping_add(1);
+        verification_remove_later.hash = increment_vec_u8(&verification_remove.hash);
 
         merge_message_success(&store, &db, &verification_remove_later);
         merge_message_failure(
@@ -845,25 +845,23 @@ mod tests {
         let (store, db, _temp_dir) = create_test_store();
         let address = address::generate_random_address();
 
-        let mut verification_add_same_time =
-            messages_factory::verifications::create_verification_add(
-                FID_FOR_TEST,
-                0, // verification_type
-                address.clone(),
-                vec![], // claim_signature
-                vec![], // block_hash
-                Some(1),
-                None,
-            );
-        // Increment hash to make it higher
-        verification_add_same_time.hash[19] = verification_add_same_time.hash[19].wrapping_add(1);
+        let verification_add_same_time = messages_factory::verifications::create_verification_add(
+            FID_FOR_TEST,
+            0, // verification_type
+            address.clone(),
+            vec![], // claim_signature
+            vec![], // block_hash
+            Some(1),
+            None,
+        );
 
-        let verification_remove = messages_factory::verifications::create_verification_remove(
+        let mut verification_remove = messages_factory::verifications::create_verification_remove(
             FID_FOR_TEST,
             address.clone(),
             Some(1), // same timestamp
             None,
         );
+        verification_remove.hash = decrement_vec_u8(&verification_add_same_time.hash);
 
         merge_message_success(&store, &db, &verification_add_same_time);
         merge_message_with_conflicts(
