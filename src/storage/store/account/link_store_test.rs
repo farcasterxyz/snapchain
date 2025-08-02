@@ -5,6 +5,7 @@ mod tests {
     use crate::proto::{self as message, hub_event, HubEventType};
     use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{LinkStore, Store, StoreEventHandler};
+    use crate::storage::util::{decrement_vec_u8, increment_vec_u8};
     use crate::utils::factory::messages_factory;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1098,11 +1099,7 @@ mod tests {
 
         let mut link_add_higher = link_add.clone();
         // Ensure higher hash by incrementing the last byte
-        let mut hash = link_add_higher.hash.clone();
-        if let Some(last) = hash.last_mut() {
-            *last = last.wrapping_add(1);
-        }
-        link_add_higher.hash = hash;
+        link_add_higher.hash = increment_vec_u8(&link_add.hash);
 
         merge_message_success(&store, &db, &link_add);
         merge_message_with_conflicts(&store, &db, &link_add_higher, vec![link_add]);
@@ -1135,11 +1132,7 @@ mod tests {
 
         let mut link_add_higher = link_add.clone();
         // Ensure higher hash by incrementing the last byte
-        let mut hash = link_add_higher.hash.clone();
-        if let Some(last) = hash.last_mut() {
-            *last = last.wrapping_add(1);
-        }
-        link_add_higher.hash = hash;
+        link_add_higher.hash = increment_vec_u8(&link_add.hash);
 
         merge_message_success(&store, &db, &link_add_higher);
         merge_message_failure(
@@ -1280,11 +1273,7 @@ mod tests {
             None,
         );
         // Give remove a higher hash than add
-        let mut hash = link_add.hash.clone();
-        if let Some(last) = hash.last_mut() {
-            *last = last.wrapping_add(1);
-        }
-        link_remove_higher.hash = hash;
+        link_remove_higher.hash = increment_vec_u8(&link_add.hash);
 
         merge_message_success(&store, &db, &link_remove_higher);
         merge_message_failure(
@@ -1337,11 +1326,7 @@ mod tests {
             None,
         );
         // Give remove a lower hash than add by giving add a higher hash
-        let mut hash = link_add.hash.clone();
-        if let Some(last) = hash.last_mut() {
-            *last = last.wrapping_sub(1);
-        }
-        link_remove_lower.hash = hash;
+        link_remove_lower.hash = decrement_vec_u8(&link_add.hash);
 
         merge_message_success(&store, &db, &link_remove_lower);
         merge_message_failure(
@@ -1527,11 +1512,7 @@ mod tests {
 
         let mut link_remove_higher = link_remove.clone();
         // Ensure higher hash by incrementing the last byte
-        let mut hash = link_remove_higher.hash.clone();
-        if let Some(last) = hash.last_mut() {
-            *last = last.wrapping_add(1);
-        }
-        link_remove_higher.hash = hash;
+        link_remove_higher.hash = increment_vec_u8(&link_remove.hash);
 
         merge_message_success(&store, &db, &link_remove);
         merge_message_with_conflicts(&store, &db, &link_remove_higher, vec![link_remove]);
@@ -1564,11 +1545,7 @@ mod tests {
 
         let mut link_remove_higher = link_remove.clone();
         // Ensure higher hash by incrementing the last byte
-        let mut hash = link_remove_higher.hash.clone();
-        if let Some(last) = hash.last_mut() {
-            *last = last.wrapping_add(1);
-        }
-        link_remove_higher.hash = hash;
+        link_remove_higher.hash = increment_vec_u8(&link_remove.hash);
 
         merge_message_success(&store, &db, &link_remove_higher);
         merge_message_failure(
