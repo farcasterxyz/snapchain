@@ -321,7 +321,7 @@ impl MyHubService {
 
         let id_register = stores
             .onchain_event_store
-            .get_id_register_event_by_fid(fid)
+            .get_id_register_event_by_fid(fid, None)
             .map_err(|_| HubError::internal_db_error("Could not fetch id registration"))?;
 
         match id_register {
@@ -335,6 +335,7 @@ impl MyHubService {
                                 &stores.verification_store,
                                 fid,
                                 &resolved_ens_address,
+                                None,
                             )?;
 
                             match verification {
@@ -1346,6 +1347,7 @@ impl HubService for MyHubService {
             &stores.verification_store,
             request.fid,
             &request.address,
+            None,
         )
         .as_response()
     }
@@ -1832,7 +1834,7 @@ impl HubService for MyHubService {
         let maybe_event = self.shard_stores.iter().find_map(|(_shard_id, stores)| {
             match stores
                 .onchain_event_store
-                .get_active_signer(fid, signer.clone())
+                .get_active_signer(fid, signer.clone(), None)
             {
                 Ok(Some(event)) => Some(Ok(event)),
                 Ok(None) => None,
@@ -1910,7 +1912,10 @@ impl HubService for MyHubService {
         let fid = req.fid;
 
         let maybe_event = self.shard_stores.iter().find_map(|(_shard_id, stores)| {
-            match stores.onchain_event_store.get_id_register_event_by_fid(fid) {
+            match stores
+                .onchain_event_store
+                .get_id_register_event_by_fid(fid, None)
+            {
                 Ok(Some(event)) => Some(Ok(event)),
                 Ok(None) => None,
                 Err(e) => Some(Err(Status::internal(format!("Store error: {:?}", e)))),
@@ -1975,7 +1980,9 @@ impl HubService for MyHubService {
         // Check if the address is a custody address (from IdRegistry)
         for store in self.shard_stores.values() {
             // Check IdRegistry for custody address
-            if let Ok(Some(id_event)) = store.onchain_event_store.get_id_register_event_by_fid(fid)
+            if let Ok(Some(id_event)) = store
+                .onchain_event_store
+                .get_id_register_event_by_fid(fid, None)
             {
                 if let Some(Body::IdRegisterEventBody(body)) = &id_event.body {
                     if body.to == address {
@@ -2004,9 +2011,12 @@ impl HubService for MyHubService {
             }
 
             // Check verified addresses
-            if let Ok(Some(_verification)) =
-                VerificationStore::get_verification_add(&store.verification_store, fid, &address)
-            {
+            if let Ok(Some(_verification)) = VerificationStore::get_verification_add(
+                &store.verification_store,
+                fid,
+                &address,
+                None,
+            ) {
                 is_verified = true;
             }
 

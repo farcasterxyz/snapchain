@@ -30,7 +30,7 @@ pub fn make_fname_username_proof_by_fid_key(fid: u64) -> Vec<u8> {
 
 pub fn get_username_proof(
     db: &RocksDB,
-    txn: &mut RocksDbTransactionBatch,
+    txn: &RocksDbTransactionBatch,
     name: &[u8],
 ) -> Result<Option<UserNameProof>, HubError> {
     let key = make_fname_username_proof_key(name);

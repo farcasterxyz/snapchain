@@ -185,7 +185,7 @@ impl StoreDef for UsernameProofStoreDef {
     fn get_merge_conflicts(
         &self,
         db: &RocksDB,
-        txn: &mut RocksDbTransactionBatch,
+        txn: &RocksDbTransactionBatch,
         message: &Message,
         ts_hash: &[u8; TS_HASH_LENGTH],
     ) -> Result<Vec<Message>, HubError> {
@@ -375,7 +375,7 @@ impl UsernameProofStore {
     pub fn get_username_proof(
         store: &Store<UsernameProofStoreDef>,
         name: &Vec<u8>,
-        txn: &mut RocksDbTransactionBatch,
+        txn: &RocksDbTransactionBatch,
     ) -> Result<Option<Message>, HubError> {
         let by_name_key = UsernameProofStoreDef::make_username_proof_by_name_key(name);
         let fid_result = get_from_db_or_txn(&store.db(), txn, by_name_key.as_slice())?;
