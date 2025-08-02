@@ -3,8 +3,8 @@ syntax = "proto3";
 import "blocks.proto";
 
 service ReplicationService {
-  rpc GetReplicationTransactions(GetReplicationTransactionsRequest)
-    returns (GetReplicationTransactionsResponse);
+  rpc GetShardSnapshotMetadata(GetShardSnapshotMetadataRequest) returns (GetShardSnapshotMetadataResponse);
+  rpc GetShardTransactions(GetShardTransactionsRequest) returns (GetShardTransactionsResponse);
 
   // IMPORTANT: this is a temporary endpoint for debugging purposes only. It will eventually be
   // removed, and SHOULD NOT be used for production purposes.
@@ -12,16 +12,29 @@ service ReplicationService {
     returns (GetReplicationTransactionsByFidResponse);
 }
 
-message GetReplicationTransactionsRequest {
+message GetShardSnapshotMetadataRequest {
   uint32 shard_id = 1;
-  uint64 block_number = 2;
-  bytes page_token = 3;
 }
 
-message GetReplicationTransactionsResponse {
-  repeated Transaction system_transactions = 1;
-  repeated Transaction user_transactions = 2;
-  bytes next_page_token = 3;
+message ShardSnapshotMetadata {
+  uint32 shard_id = 1;
+  uint64 height = 2;
+  uint64 timestamp = 3;
+}
+
+message GetShardSnapshotMetadataResponse {
+  repeated ShardSnapshotMetadata snapshots = 1;
+}
+
+message GetShardTransactionsRequest {
+  uint32 shard_id = 1;
+  uint64 height = 2;
+  optional bytes page_token = 3;
+}
+
+message GetShardTransactionsResponse {
+  repeated Transaction transactions = 1;
+  optional bytes next_page_token = 2;
 }
 
 message GetReplicationTransactionsByFidRequest {
@@ -29,6 +42,5 @@ message GetReplicationTransactionsByFidRequest {
 }
 
 message GetReplicationTransactionsByFidResponse {
-  Transaction system_transaction = 1;
-  Transaction user_transaction = 2;
+  Transaction transaction = 1;
 }

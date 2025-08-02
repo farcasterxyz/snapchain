@@ -58,6 +58,28 @@ impl ReplicationStores {
         }
     }
 
+    // Returns a list of (height, farcaster timestamp) pairs for the given shard.
+    pub fn get_metadata(&self, shard: u32) -> Result<Vec<(u64, u64)>, ReplicationError> {
+        let results = match self.read_only_stores.read() {
+            Ok(stores) => stores.get(&shard).map(|snapshots| {
+                snapshots
+                    .iter()
+                    .map(|(&height, (timestamp, _))| (height, *timestamp))
+                    .collect()
+            }),
+            Err(_) => {
+                return Err(ReplicationError::InternalError(
+                    "Failed to acquire read lock on read_only_stores".to_string(),
+                ));
+            }
+        };
+
+        match results {
+            Some(metadata) => Ok(metadata),
+            None => Err(ReplicationError::ShardStoreNotFound(shard)),
+        }
+    }
+
     pub fn max_height_for_shard(&self, shard_id: u32) -> Option<u64> {
         match self.read_only_stores.read() {
             Ok(stores) => stores

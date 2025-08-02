@@ -1,5 +1,6 @@
 use std::fmt::Display;
 
+#[derive(Debug)]
 pub enum ReplicationError {
     ShardStoreNotFound(u32),         // shard
     StoreNotFound(u32, u64, String), // shard, height, message

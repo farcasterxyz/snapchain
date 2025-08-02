@@ -13,7 +13,7 @@ pub struct ReplicationServer {
 }
 
 impl ReplicationServer {
-    const FID_RANGE: u64 = 1_000;
+    const MESSAGE_LIMIT: usize = 1_000; // Maximum number of messages to fetch per page
 
     pub fn new(
         replicator: Arc<Replicator>,
@@ -26,50 +26,65 @@ impl ReplicationServer {
             num_shards,
         }
     }
-
-    fn parse_page_token(page_token: Vec<u8>) -> Result<u64, Status> {
-        if page_token.is_empty() {
-            return Ok(1);
-        }
-        if page_token.len() != 8 {
-            return Err(Status::invalid_argument("Invalid page token length"));
-        }
-        let mut buf = [0; 8];
-        buf.copy_from_slice(page_token.as_slice());
-        Ok(u64::from_be_bytes(buf))
-    }
 }
 
 #[tonic::async_trait]
 impl proto::replication_service_server::ReplicationService for ReplicationServer {
-    async fn get_replication_transactions(
+    async fn get_shard_snapshot_metadata(
         &self,
-        request: Request<proto::GetReplicationTransactionsRequest>,
-    ) -> Result<Response<proto::GetReplicationTransactionsResponse>, Status> {
+        request: Request<proto::GetShardSnapshotMetadataRequest>,
+    ) -> Result<Response<proto::GetShardSnapshotMetadataResponse>, Status> {
         let request = request.into_inner();
-        let start_fid: u64 = Self::parse_page_token(request.page_token)?;
-        let end_fid = start_fid + Self::FID_RANGE - 1;
 
-        let (sys, user) = self.replicator.transactions_for_fid_range(
-            request.block_number,
-            request.shard_id,
-            start_fid,
-            end_fid,
-        )?;
-
-        let next_page_token = if sys.is_empty() {
-            vec![]
-        } else {
-            let next_fid = end_fid + 1;
-            next_fid.to_be_bytes().to_vec()
+        let snapshots = match self.replicator.get_snapshot_metadata(request.shard_id) {
+            Ok(metadata) => metadata
+                .into_iter()
+                .map(|(height, timestamp)| proto::ShardSnapshotMetadata {
+                    shard_id: request.shard_id,
+                    height,
+                    timestamp,
+                })
+                .collect(),
+            Err(e) => {
+                return Err(Status::internal(format!(
+                    "Failed to get snapshot metadata: {}",
+                    e
+                )));
+            }
         };
 
-        Ok(Response::new(proto::GetReplicationTransactionsResponse {
-            system_transactions: sys,
-            user_transactions: user,
-            next_page_token,
-            ..Default::default()
+        Ok(Response::new(proto::GetShardSnapshotMetadataResponse {
+            snapshots,
         }))
+    }
+
+    async fn get_shard_transactions(
+        &self,
+        request: Request<proto::GetShardTransactionsRequest>,
+    ) -> Result<Response<proto::GetShardTransactionsResponse>, Status> {
+        let request = request.into_inner();
+
+        let results = self.replicator.transactions_for_shard_and_height(
+            request.shard_id,
+            request.height,
+            request.page_token.clone(),
+            Self::MESSAGE_LIMIT,
+        );
+
+        let response = match results {
+            Ok((transactions, page_token)) => proto::GetShardTransactionsResponse {
+                transactions,
+                next_page_token: page_token,
+            },
+            Err(e) => {
+                return Err(Status::internal(format!(
+                    "Failed to get transactions: {}",
+                    e
+                )));
+            }
+        };
+
+        Ok(Response::new(response))
     }
 
     // IMPORTANT: this is a temporary endpoint for debugging purposes only. It will eventually be
@@ -80,14 +95,13 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
     ) -> Result<Response<proto::GetReplicationTransactionsByFidResponse>, Status> {
         let request = request.into_inner();
         let shard = self.message_router.route_fid(request.fid, self.num_shards);
-        let (sys, user) = self
+        let transaction = self
             .replicator
             .latest_transactions_for_fid(shard, request.fid)?;
 
         Ok(Response::new(
             proto::GetReplicationTransactionsByFidResponse {
-                system_transaction: sys,
-                user_transaction: user,
+                transaction: transaction,
                 ..Default::default()
             },
         ))
