@@ -1005,8 +1005,10 @@ impl Subscriber {
                     }
                  }
                  events = stream.next() => {
+                     self.count(&format!("polled_stream_{}", self.chain.to_string()), 1);
                      match events {
                          None => {
+                            error!(chain = self.chain.to_string(), "Stream subscription returned None unexpectedly");
                             // We want to trigger a retry here
                              break;
                          },
