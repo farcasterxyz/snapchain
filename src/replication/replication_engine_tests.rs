@@ -309,7 +309,7 @@ mod tests {
             &replicator,
             source_engine.shard_id(),
             height,
-            2, // intentionally using a small limit to exercise pagination
+            1, // intentionally using a small limit to exercise pagination
         );
 
         // TODO: this is temporary: we're breaking down the transactions into system and user
