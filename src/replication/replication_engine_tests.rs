@@ -17,7 +17,11 @@ mod tests {
         },
         utils::factory::{self, messages_factory, username_factory},
     };
-    use std::{collections::HashMap, sync::Arc, time::Duration};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+        time::Duration,
+    };
 
     fn opendb(path: &str) -> Result<Arc<RocksDB>, RocksdbError> {
         let milliseconds_timestamp: u128 = std::time::SystemTime::now()
@@ -298,11 +302,10 @@ mod tests {
         transactions
     }
 
-    fn replicate_fids(
+    fn replicate_engine(
         source_engine: &ShardEngine,
         dest_engine: &mut ShardEngine,
         replicator: Arc<Replicator>,
-        fids_to_sync: &Vec<u64>,
     ) {
         let height = source_engine.get_confirmed_height().block_number;
         let transactions = fetch_transactions(
@@ -317,6 +320,8 @@ mod tests {
         // messages
         let mut sys = vec![];
         let mut user = vec![];
+        let mut synced_fids = HashSet::new();
+
         for tx in &transactions {
             let sys_tx = proto::Transaction {
                 fid: tx.fid,
@@ -331,6 +336,8 @@ mod tests {
                 ..Default::default()
             };
             user.push(user_tx);
+
+            synced_fids.insert(tx.fid);
         }
 
         // Replay the system and user transactions
@@ -339,18 +346,18 @@ mod tests {
             .expect("Failed to replay transactions");
 
         // Check the account roots match for both engines
-        for fid in fids_to_sync {
-            let root1 = source_engine.account_root_for_fid(*fid);
-            let root2 = dest_engine.account_root_for_fid(*fid);
+        for fid in synced_fids {
+            let root1 = source_engine.account_root_for_fid(fid);
+            let root2 = dest_engine.account_root_for_fid(fid);
 
-            println!(
-                "Account root for fid {}: {} vs {}",
+            assert_eq!(
+                root1,
+                root2,
+                "Account roots do not match for fid {}, source root: {} vs replicated root: {}",
                 fid,
                 hex::encode(&root1),
                 hex::encode(&root2)
             );
-
-            assert_eq!(root1, root2, "Account roots do not match for fid {}", fid);
         }
     }
 
@@ -477,6 +484,6 @@ mod tests {
 
         commit_message(&mut engine, &username_proof_add).await;
 
-        replicate_fids(&engine, &mut new_engine, replicator, &vec![fid, fid2]);
+        replicate_engine(&engine, &mut new_engine, replicator);
     }
 }

@@ -684,7 +684,6 @@ pub struct FIDIterator {
     db: Arc<RocksDB>,
     last_fid: u64,
     fids: VecDeque<u64>,
-    done: bool,
 }
 
 impl FIDIterator {
@@ -695,15 +694,14 @@ impl FIDIterator {
             db,
             last_fid: start_fid,
             fids: VecDeque::new(),
-            done: false,
         }
     }
 
-    fn fetch(&mut self, fid: u64) -> Result<Option<u64>, OnchainEventStorageError> {
+    fn fetch(&mut self) -> Result<Option<u64>, OnchainEventStorageError> {
         let mut start_prefix =
             make_onchain_event_type_prefix(OnChainEventType::EventTypeIdRegister);
         let stop_prefix = increment_vec_u8(&start_prefix);
-        start_prefix.extend(make_fid_key(fid));
+        start_prefix.extend(make_fid_key(self.last_fid + 1));
 
         let page_options = PageOptions {
             page_size: Some(Self::PAGE_SIZE_MAX),
@@ -743,14 +741,10 @@ impl Iterator for FIDIterator {
     type Item = u64;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
-        }
-
         if self.fids.is_empty() {
-            match self.fetch(self.last_fid + 1) {
+            match self.fetch() {
                 Ok(None) | Err(_) => {
-                    self.done = true;
+                    // Done fetching, no more FIDs
                     return None;
                 }
                 Ok(Some(_fid)) => {}
