@@ -110,9 +110,11 @@ trait Node {
 
     fn fid_registered(&self, fid: u64) -> Option<proto::OnChainEvent> {
         for stores in self.shard_stores().values() {
-            if let Ok(result) =
-                OnchainEventStore::get_id_register_event_by_fid(&stores.onchain_event_store, fid)
-            {
+            if let Ok(result) = OnchainEventStore::get_id_register_event_by_fid(
+                &stores.onchain_event_store,
+                fid,
+                None,
+            ) {
                 if result.is_some() {
                     return Some(result.unwrap());
                 }

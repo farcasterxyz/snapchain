@@ -228,7 +228,7 @@ impl UserDataStore {
 
     pub fn get_username_proof(
         store: &Store<UserDataStoreDef>,
-        txn: &mut RocksDbTransactionBatch,
+        txn: &RocksDbTransactionBatch,
         name: &[u8],
     ) -> Result<Option<UserNameProof>, HubError> {
         get_username_proof(&store.db(), txn, name)

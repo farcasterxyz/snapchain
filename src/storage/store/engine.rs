@@ -1,9 +1,7 @@
 use super::account::{IntoU8, OnchainEventStorageError, UserDataStore, UsernameProofStore};
-use crate::core::error::HubError;
-use crate::core::types::Height;
-use crate::core::util::FarcasterTime;
-use crate::core::validations;
-use crate::core::validations::verification;
+use crate::core::{
+    error::HubError, types::Height, util::FarcasterTime, validations, validations::verification,
+};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::message_data::Body;
 use crate::proto::{
@@ -22,7 +20,7 @@ use alloy_primitives::Address;
 use informalsystems_malachitebft_core_types::Round;
 use itertools::Itertools;
 use merkle_trie::TrieKey;
-use std::cmp::PartialEq;
+use std::cmp::{Ordering, PartialEq};
 use std::collections::{HashMap, HashSet};
 use std::str;
 use std::string::ToString;
@@ -389,23 +387,45 @@ impl ShardEngine {
                 system_messages: vec![],
                 user_messages: vec![],
             };
-            let storage_slot = self
-                .stores
-                .onchain_event_store
-                .get_storage_slot_for_fid(fid, self.network)?;
+
+            // First pass: collect all system_messages for this FID
+            for msg in &messages {
+                if let MempoolMessage::ValidatorMessage(validator_msg) = msg {
+                    transaction.system_messages.push(validator_msg.clone());
+                }
+            }
+
+            // Extract just the OnChainEvents from the collected system messages
+            let pending_onchain_events: Vec<OnChainEvent> = transaction
+                .system_messages
+                .iter()
+                .filter_map(|vm| vm.on_chain_event.clone())
+                .collect();
+
+            let version = EngineVersion::current(self.network);
+            let maybe_onchainevents =
+                if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
+                    Some(pending_onchain_events.as_slice())
+                } else {
+                    None
+                };
+
+            let storage_slot = self.stores.onchain_event_store.get_storage_slot_for_fid(
+                fid,
+                self.network,
+                maybe_onchainevents,
+            )?;
+
+            // Second pass: filter user_messages based on the look-ahead storage check
             for msg in messages {
-                match msg {
-                    MempoolMessage::ValidatorMessage(msg) => {
-                        transaction.system_messages.push(msg.clone());
-                    }
-                    MempoolMessage::UserMessage(msg) => {
-                        // Only include messages for users that have storage
-                        if storage_slot.is_active() {
-                            transaction.user_messages.push(msg.clone());
-                        }
+                if let MempoolMessage::UserMessage(user_msg) = msg {
+                    // Only include messages for users that have storage
+                    if storage_slot.is_active() {
+                        transaction.user_messages.push(user_msg.clone());
                     }
                 }
             }
+
             if !transaction.user_messages.is_empty() || !transaction.system_messages.is_empty() {
                 transactions.push(transaction);
             }
@@ -630,7 +650,23 @@ impl ShardEngine {
         let mut validation_errors = vec![];
 
         // System messages first, then user messages and finally prunes
-        for msg in &snapchain_txn.system_messages {
+
+        // Sort system_messages to process OnChainEvents first in their canonical order,
+        // followed by FnameTransfers sorted by timestamp.
+        let mut sorted_system_messages = snapchain_txn.system_messages.clone();
+        sorted_system_messages.sort_by(|a, b| {
+            match (&a.on_chain_event, &b.on_chain_event) {
+                (Some(event_a), Some(event_b)) => {
+                    // Both are OnChainEvents, sort by block_number then log_index.
+                    (event_a.block_number, event_a.log_index)
+                        .cmp(&(event_b.block_number, event_b.log_index))
+                }
+                (Some(_), None) => Ordering::Less, // OnChainEvents come before FnameTransfers.
+                (None, Some(_)) => Ordering::Greater, // FnameTransfers come after OnChainEvents.
+                (None, None) => Ordering::Equal,   // Both are FnameTransfers, sort equal
+            }
+        });
+        for msg in sorted_system_messages {
             if let Some(onchain_event) = &msg.on_chain_event {
                 if onchain_event.r#type() == OnChainEventType::EventTypeTierPurchase
                     && !version.is_enabled(ProtocolFeature::FarcasterPro)
@@ -776,7 +812,44 @@ impl ShardEngine {
             }
         }
 
-        for msg in &snapchain_txn.user_messages {
+        // Sort the user messages so that all dependent messages are processed in order
+        let mut sorted_user_messages = snapchain_txn.user_messages.clone();
+        sorted_user_messages.sort_by(|a, b| {
+            fn get_message_priority(msg: &proto::Message) -> u8 {
+                let msg_type = msg.msg_type();
+                match msg_type {
+                    MessageType::VerificationAddEthAddress => 1,
+                    MessageType::UsernameProof => 2,
+                    MessageType::UserDataAdd => {
+                        if let Some(Body::UserDataBody(body)) = &msg.data.as_ref().unwrap().body {
+                            let user_data_type = body.r#type();
+                            if user_data_type == UserDataType::Username
+                                || user_data_type == UserDataType::UserDataPrimaryAddressEthereum
+                                || user_data_type == UserDataType::UserDataPrimaryAddressSolana
+                            {
+                                return 3; // Dependent UserData types
+                            }
+                        }
+                        4 // Other UserDataAdd types
+                    }
+                    _ => 5, // All other message types
+                }
+            }
+
+            let priority_a = get_message_priority(a);
+            let priority_b = get_message_priority(b);
+
+            // Message priority first, then timestamp
+            priority_a.cmp(&priority_b).then_with(|| {
+                a.data
+                    .as_ref()
+                    .unwrap()
+                    .timestamp
+                    .cmp(&b.data.as_ref().unwrap().timestamp)
+            })
+        });
+
+        for msg in &sorted_user_messages {
             // Errors are validated based on the shard root
             match self.validate_user_message(msg, timestamp, version, txn_batch) {
                 Ok(()) => {
@@ -1222,9 +1295,16 @@ impl ShardEngine {
         message: &proto::Message,
         timestamp: &FarcasterTime,
         version: EngineVersion,
-        txn_batch: &mut RocksDbTransactionBatch,
+        txn_batch: &RocksDbTransactionBatch,
     ) -> Result<(), MessageValidationError> {
         let now = std::time::Instant::now();
+
+        let txn_batch = if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
+            txn_batch
+        } else {
+            &RocksDbTransactionBatch::new()
+        };
+
         // Ensure message data is present
         let message_data = message
             .data
@@ -1243,17 +1323,18 @@ impl ShardEngine {
             version,
         )?;
 
-        // Check that the user has a custody address
+        // 1. Check that the user has a custody address
+        // If not in the temp cache, fall back to the DB
         self.stores
             .onchain_event_store
-            .get_id_register_event_by_fid(message_data.fid)
+            .get_id_register_event_by_fid(message_data.fid, Some(txn_batch))
             .map_err(|_| MessageValidationError::MissingFid)?
             .ok_or(MessageValidationError::MissingFid)?;
 
-        // Check that signer is valid
+        // 2. Check that the user has a valid signer
         self.stores
             .onchain_event_store
-            .get_active_signer(message_data.fid, message.signer.clone())
+            .get_active_signer(message_data.fid, message.signer.clone(), Some(txn_batch))
             .map_err(|_| MessageValidationError::MissingSigner)?
             .ok_or(MessageValidationError::MissingSigner)?;
 
@@ -1264,10 +1345,18 @@ impl ShardEngine {
                     self.validate_username(message_data.fid, &user_data.value, txn_batch)?;
                 }
                 if user_data.r#type == proto::UserDataType::UserDataPrimaryAddressEthereum as i32 {
-                    self.validate_ethereum_address_ownership(message_data.fid, &user_data.value)?;
+                    self.validate_ethereum_address_ownership(
+                        message_data.fid,
+                        &user_data.value,
+                        txn_batch,
+                    )?;
                 }
                 if user_data.r#type == proto::UserDataType::UserDataPrimaryAddressSolana as i32 {
-                    self.validate_solana_address_ownership(message_data.fid, &user_data.value)?;
+                    self.validate_solana_address_ownership(
+                        message_data.fid,
+                        &user_data.value,
+                        txn_batch,
+                    )?;
                 }
             }
             _ => {}
@@ -1281,7 +1370,7 @@ impl ShardEngine {
     fn get_username_proof(
         &self,
         name: String,
-        txn: &mut RocksDbTransactionBatch,
+        txn: &RocksDbTransactionBatch,
     ) -> Result<Option<UserNameProof>, MessageValidationError> {
         // TODO(aditi): The fnames proofs should live in the username proof store.
         if name.ends_with(".eth") {
@@ -1289,7 +1378,7 @@ impl ShardEngine {
             let batch_txn = if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
                 txn
             } else {
-                &mut RocksDbTransactionBatch::new()
+                &RocksDbTransactionBatch::new()
             };
             let proof_message = UsernameProofStore::get_username_proof(
                 &self.stores.username_proof_store,
@@ -1322,6 +1411,7 @@ impl ShardEngine {
         &self,
         fid: u64,
         address: &str,
+        txn_batch: &RocksDbTransactionBatch,
     ) -> Result<(), MessageValidationError> {
         if address.is_empty() {
             return Ok(());
@@ -1329,7 +1419,12 @@ impl ShardEngine {
         // Decode Ethereum address into bytes
         let address_instance: Address = Address::from_hex(address)
             .map_err(|_| MessageValidationError::InvalidEthereumAddress)?;
-        self.verify_fid_owns_address(fid, Protocol::Ethereum, address_instance.as_ref())?;
+        self.verify_fid_owns_address(
+            fid,
+            Protocol::Ethereum,
+            address_instance.as_ref(),
+            txn_batch,
+        )?;
         Ok(())
     }
 
@@ -1337,6 +1432,7 @@ impl ShardEngine {
         &self,
         fid: u64,
         address: &str,
+        txn_batch: &RocksDbTransactionBatch,
     ) -> Result<(), MessageValidationError> {
         if address.is_empty() {
             return Ok(());
@@ -1348,7 +1444,7 @@ impl ShardEngine {
         if address_bytes.len() != 32 {
             return Err(MessageValidationError::InvalidSolanaAddress);
         }
-        self.verify_fid_owns_address(fid, Protocol::Solana, &address_bytes)?;
+        self.verify_fid_owns_address(fid, Protocol::Solana, &address_bytes, txn_batch)?;
         Ok(())
     }
 
@@ -1356,7 +1452,7 @@ impl ShardEngine {
         &self,
         fid: u64,
         name: &str,
-        txn: &mut RocksDbTransactionBatch,
+        txn: &RocksDbTransactionBatch,
     ) -> Result<(), MessageValidationError> {
         if name.is_empty() {
             // Setting an empty username is allowed, no need to validate the proof
@@ -1908,14 +2004,19 @@ impl ShardEngine {
         fid: u64,
         protocol: Protocol,
         address: &[u8],
+        txn_batch: &RocksDbTransactionBatch,
     ) -> Result<(), MessageValidationError> {
-        let page_result =
-            VerificationStore::get_verification_add(&self.stores.verification_store, fid, address)
-                .map_err(|_| {
-                    MessageValidationError::StoreError(HubError::invalid_internal_state(
-                        "Unable to get verifications by fid",
-                    ))
-                })?;
+        let page_result = VerificationStore::get_verification_add(
+            &self.stores.verification_store,
+            fid,
+            address,
+            Some(txn_batch),
+        )
+        .map_err(|_| {
+            MessageValidationError::StoreError(HubError::invalid_internal_state(
+                "Unable to get verifications by fid",
+            ))
+        })?;
         match page_result {
             Some(message) => {
                 let verification = match &message.data.as_ref().unwrap().body.as_ref().unwrap() {
