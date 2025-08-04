@@ -1092,8 +1092,13 @@ impl Subscriber {
         let live_sync_block;
         match self.start_block_number {
             None => {
-                // By default, start from the first block or the latest block in the db. Whichever is higher
-                live_sync_block = Some(Self::first_block(self.chain).max(latest_block_in_db));
+                if self.chain == node_local_state::Chain::Base {
+                    // The events Base are really rare so it's wasteful to retry all the missed blocks. Assume all events will be picked up via some validator.
+                    live_sync_block = Some(latest_block_on_chain)
+                } else {
+                    // By default, start from the first block or the latest block in the db. Whichever is higher
+                    live_sync_block = Some(Self::first_block(self.chain).max(latest_block_in_db));
+                }
             }
             Some(start_block_number) => {
                 let historical_sync_start_block = latest_block_in_db.max(start_block_number);
