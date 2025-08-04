@@ -16,9 +16,6 @@ use crate::{
 };
 use std::{sync::Arc, time::Duration};
 
-// Default page size to use when fetching messages
-const DEFAULT_FETCH_PAGE_SIZE: usize = 1_000;
-
 pub async fn run(
     replicator: Arc<Replicator>,
     mut receive: tokio::sync::mpsc::Receiver<PostCommitMessage>,
@@ -450,8 +447,8 @@ fn collect_messages_with_cursor<
     let mut messages = vec![];
 
     loop {
-        // Only attempt to fetch up to the remaining limit or DEFAULT_FETCH_PAGE_SIZE, whichever is smaller
-        page_options.page_size = Some(std::cmp::min(cursor.limit, DEFAULT_FETCH_PAGE_SIZE));
+        // Only attempt to fetch up to the remaining limit
+        page_options.page_size = Some(cursor.limit);
 
         let (results, next_page_token) = match f(&page_options, cursor) {
             Ok(r) => r,
@@ -481,7 +478,7 @@ fn collect_messages_with_cursor<
 
         // If we have reached the limit, set the token so that we can continue
         // fetching results from here on a subsequent call.
-        if cursor.limit <= 0 {
+        if cursor.limit == 0 {
             cursor.token = Token::new(
                 cursor.token.fid(),
                 message_type,
