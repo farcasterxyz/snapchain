@@ -1,6 +1,3 @@
-use tokio::select;
-use tracing::error;
-
 use crate::{
     core::util,
     proto,
@@ -15,6 +12,8 @@ use crate::{
     },
 };
 use std::{sync::Arc, time::Duration};
+use tokio::select;
+use tracing::error;
 
 pub async fn run(
     replicator: Arc<Replicator>,
@@ -152,6 +151,7 @@ impl Replicator {
             }
 
             if cursor.limit == 0 {
+                // The limit was reached. Return the current set of transactions and the cursor token.
                 return Ok((transactions, Some(cursor.token.into())));
             }
         }
@@ -215,7 +215,7 @@ impl Replicator {
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum MessageType {
     OnchainEventsSigner = 1,
     OnchainEventsSignerMigrated = 2,
@@ -426,21 +426,25 @@ fn collect_messages_with_cursor<
 
         // When the cursor token is for this message type, set the page token to continue
         // fetching results from where we left off.
-        Some(cursor_message_type) if message_type == cursor_message_type => {
-            // This shouldn't happen in practice, but if the limit is 0, we
-            // can return an empty vector immediately as the cursor is already set to
-            // return here on a subsequent call.
-            if cursor.limit == 0 {
+        Some(cursor_message_type) => {
+            if cursor_message_type > message_type {
+                // If the cursor is already past the current message type, we have already
+                // processed this type for this FID. Skip it.
                 return Ok(vec![]);
             }
 
-            page_options.page_token = cursor.token.page_token();
-        }
+            if cursor_message_type == message_type {
+                // If the cursor is for the *same* message type, we are continuing
+                // pagination. Use the page token from the cursor.
+                if cursor.limit == 0 {
+                    return Ok(vec![]);
+                }
+                page_options.page_token = cursor.token.page_token();
+            }
 
-        // When the cursor token is for a different message type, we should
-        // exit early and not fetch any results
-        Some(_other) => {
-            return Ok(vec![]);
+            // If cursor_message_type < message_type, it means we have finished the previous
+            // type and are now starting this new one. We proceed with a fresh page_token (None),
+            // which is the default.
         }
     }
 
@@ -460,34 +464,30 @@ fn collect_messages_with_cursor<
             }
         };
 
+        // If no results are returned, we are done with this message type for this FID.
         if results.is_empty() {
-            // All results have been fetched, clear out the token
-            cursor.token = Token::new_for_fid(cursor.token.fid());
             break;
         }
 
-        // Decrement the cursor limit by the number of results fetched
+        // Decrement the cursor limit by the number of results fetched.
         cursor.limit = cursor.limit.saturating_sub(results.len());
         messages.extend(results);
 
-        if next_page_token.is_none() {
-            // All results have been fetched, clear out the token
-            cursor.token = Token::new_for_fid(cursor.token.fid());
+        if let Some(next_token) = next_page_token {
+            // The request limit is exhausted mid-page.
+            // Create a token that saves our exact position and break.
+            if cursor.limit == 0 {
+                cursor.token = Token::new(cursor.token.fid(), message_type, next_token);
+                break;
+            }
+            // Otherwise, continue to the next page in the next iteration of this loop.
+            page_options.page_token = Some(next_token);
+        } else {
+            // The last page for this message type has been fetched.
+            // Simply break the loop. Do not modify the cursor. This signals to the
+            // calling function that it can proceed to the next message type for this FID.
             break;
         }
-
-        // If we have reached the limit, set the token so that we can continue
-        // fetching results from here on a subsequent call.
-        if cursor.limit == 0 {
-            cursor.token = Token::new(
-                cursor.token.fid(),
-                message_type,
-                next_page_token.clone().unwrap_or_default(),
-            );
-            break;
-        }
-
-        page_options.page_token = next_page_token;
     }
 
     Ok(messages)
@@ -668,13 +668,12 @@ fn build_validator_messages(
                 return Err(ReplicationError::InternalError(format!(
                     "Failed to collect on-chain events for {:?}: {}",
                     event_type, e
-                )))
+                )));
             }
         }
     }
 
     // username proofs
-
     match build_username_proof_events(stores, cursor) {
         Ok(mut msgs) => messages.append(&mut msgs),
         Err(e) => {
@@ -874,8 +873,8 @@ mod tests {
 
         assert_eq!(messages, test_data[10..20].to_vec());
         assert_eq!(cursor.token.fid(), 1);
-        assert_eq!(cursor.token.message_type(), None);
-        assert_eq!(cursor.token.page_token(), None);
+        assert_eq!(cursor.token.message_type(), Some(MessageType::CastMessages));
+        assert_eq!(cursor.token.page_token(), Some(vec![10]));
         assert_eq!(cursor.limit, 0);
     }
 
@@ -948,8 +947,8 @@ mod tests {
 
         assert_eq!(all_results, expected_results);
         assert_eq!(cursor.token.fid(), 1);
-        assert_eq!(cursor.token.message_type(), None);
-        assert_eq!(cursor.token.page_token(), None);
+        assert_eq!(cursor.token.message_type(), Some(MessageType::LinkMessages));
+        assert_eq!(cursor.token.page_token(), Some(vec![10]));
         assert_eq!(cursor.limit, 20); // Remaining limit after fetching the last 10 in store 2
     }
 
@@ -1023,7 +1022,7 @@ mod tests {
 
         assert_eq!(all_results, expected_results);
         assert_eq!(cursor.token.fid(), 1);
-        assert_eq!(cursor.token.message_type(), None);
+        assert_eq!(cursor.token.message_type(), Some(MessageType::LinkMessages));
         assert_eq!(cursor.token.page_token(), None);
         assert_eq!(cursor.limit, 0);
     }
