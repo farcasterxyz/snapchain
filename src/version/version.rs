@@ -80,8 +80,12 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
         version: EngineVersion::V5,
     },
     VersionSchedule {
-        active_at: 1752080400, // 2025-07-09 5PM UTC
+        active_at: 1752099060, // 2025-07-09 ~10PM UTC
         version: EngineVersion::V6,
+    },
+    VersionSchedule {
+        active_at: 1756141200, // 2026-08-25 5PM UTC
+        version: EngineVersion::V7,
     },
 ]
 .as_slice();
@@ -255,6 +259,16 @@ mod version_test {
         assert_eq!(
             EngineVersion::version_for(&time, FarcasterNetwork::Testnet),
             EngineVersion::V5
+        );
+    }
+
+    #[test]
+    fn test_latest_version_for_mainnet_matches_testnet() {
+        let latest_mainnet_version = ENGINE_VERSION_SCHEDULE_MAINNET.last();
+        let latest_testnet_version = ENGINE_VERSION_SCHEDULE_TESTNET.last();
+        assert_eq!(
+            latest_mainnet_version.map(|v| v.version),
+            latest_testnet_version.map(|v| v.version)
         );
     }
 
