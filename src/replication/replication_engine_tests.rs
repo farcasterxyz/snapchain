@@ -17,7 +17,11 @@ mod tests {
         },
         utils::factory::{self, messages_factory, username_factory},
     };
-    use std::{collections::HashMap, sync::Arc, time::Duration};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+        time::Duration,
+    };
 
     fn opendb(path: &str) -> Result<Arc<RocksDB>, RocksdbError> {
         let milliseconds_timestamp: u128 = std::time::SystemTime::now()
@@ -260,41 +264,100 @@ mod tests {
         replicator
     }
 
-    fn replicate_fids(
-        source_engine: &ShardEngine,
-        dest_engine: &mut ShardEngine,
-        replicator: Arc<Replicator>,
-        fids_to_sync: &Vec<u64>,
-    ) {
-        let height = source_engine.get_confirmed_height().block_number;
-        let min = *fids_to_sync.iter().min().unwrap();
-        let max = *fids_to_sync.iter().max().unwrap();
+    fn fetch_transactions(
+        replicator: &Arc<Replicator>,
+        shard_id: u32,
+        height: u64,
+        message_limit: usize,
+    ) -> Vec<proto::Transaction> {
+        let mut next_page_token = None;
+        let mut transactions = vec![];
 
-        let (sys, user) =
-            match replicator.transactions_for_fid_range(height, source_engine.shard_id(), min, max)
-            {
-                Ok(transactions) => transactions,
+        loop {
+            let results = replicator.transactions_for_shard_and_height(
+                shard_id,
+                height,
+                next_page_token.clone(),
+                message_limit,
+            );
+
+            let (results, next_page) = match results {
+                Ok(res) => res,
                 Err(e) => {
-                    panic!("Error fetching transactions for fid range: {}", e);
+                    panic!(
+                        "Error fetching transactions for shard {} and height {}: {}",
+                        shard_id, height, e
+                    );
                 }
             };
 
+            transactions.extend(results);
+            next_page_token = next_page;
+
+            if next_page_token.is_none() {
+                break;
+            }
+        }
+
+        transactions
+    }
+
+    fn replicate_engine(
+        source_engine: &ShardEngine,
+        dest_engine: &mut ShardEngine,
+        replicator: Arc<Replicator>,
+    ) {
+        let height = source_engine.get_confirmed_height().block_number;
+        let transactions = fetch_transactions(
+            &replicator,
+            source_engine.shard_id(),
+            height,
+            1, // intentionally using a small limit to exercise pagination
+        );
+
+        // TODO: this is temporary: we're breaking down the transactions into system and user
+        // messages, but this should eventually be handled by the engine's ability to sort
+        // messages
+        let mut sys = vec![];
+        let mut user = vec![];
+        let mut synced_fids = HashSet::new();
+
+        for tx in &transactions {
+            let sys_tx = proto::Transaction {
+                fid: tx.fid,
+                system_messages: tx.system_messages.clone(),
+                ..Default::default()
+            };
+            sys.push(sys_tx);
+
+            let user_tx = proto::Transaction {
+                fid: tx.fid,
+                user_messages: tx.user_messages.clone(),
+                ..Default::default()
+            };
+            user.push(user_tx);
+
+            synced_fids.insert(tx.fid);
+        }
+
+        // Replay the system and user transactions
         dest_engine
             .replay_fid_transactions(sys, user)
-            .expect("Failed to replay transactions for fid");
+            .expect("Failed to replay transactions");
 
-        for fid in fids_to_sync {
-            let root1 = source_engine.account_root_for_fid(*fid);
-            let root2 = dest_engine.account_root_for_fid(*fid);
+        // Check the account roots match for both engines
+        for fid in synced_fids {
+            let root1 = source_engine.account_root_for_fid(fid);
+            let root2 = dest_engine.account_root_for_fid(fid);
 
-            println!(
-                "Account root for fid {}: {} vs {}",
+            assert_eq!(
+                root1,
+                root2,
+                "Account roots do not match for fid {}, source root: {} vs replicated root: {}",
                 fid,
                 hex::encode(&root1),
                 hex::encode(&root2)
             );
-
-            assert_eq!(root1, root2, "Account roots do not match for fid {}", fid);
         }
     }
 
@@ -421,6 +484,6 @@ mod tests {
 
         commit_message(&mut engine, &username_proof_add).await;
 
-        replicate_fids(&engine, &mut new_engine, replicator, &vec![fid, fid2]);
+        replicate_engine(&engine, &mut new_engine, replicator);
     }
 }
