@@ -76,6 +76,8 @@ const RENT_EXPIRY_IN_SECONDS: u64 = 365 * 24 * 60 * 60; // One year
 
 const RETRY_TIMEOUT_SECONDS: u64 = 10;
 
+const BASE_BLOCK_PAGE_SIZE: u64 = 8000; // Alchemy max is 10K
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub rpc_url: String,
@@ -788,7 +790,7 @@ impl Subscriber {
                 let TierRegistryAbi::PurchasedTier {
                     fid,
                     tier,
-                    forDays,
+                    forDays: for_days,
                     payer,
                 } = event.log_decode()?.inner.data;
                 add_event(
@@ -796,7 +798,7 @@ impl Subscriber {
                     OnChainEventType::EventTypeTierPurchase,
                     on_chain_event::Body::TierPurchaseEventBody(TierPurchaseBody {
                         tier_type: tier.try_into()?,
-                        for_days: forDays.try_into()?,
+                        for_days: for_days.try_into()?,
                         payer: payer.to_vec(),
                     }),
                 )
@@ -916,6 +918,60 @@ impl Subscriber {
         }
     }
 
+    // We're running into issues using getFilterChanges for this, possibly because the events are
+    // so rare. Or perhaps due to an alchemy issue. We weren't getting any events. So swtich to raw
+    // polling. We're only seeing a few events per day, so this should be fine.
+    async fn poll_tier_registry_events(
+        &mut self,
+        tier_registry: &Contract,
+        from_block: &mut u64,
+    ) -> Result<(), SubscribeError> {
+        // Get the current block number
+        let current_block = self.latest_block_on_chain().await?;
+
+        // If there are new blocks to process
+        while *from_block <= current_block {
+            let mut to_block = match self.stop_block_number {
+                Some(stop_block) => stop_block.min(current_block),
+                None => current_block,
+            };
+
+            // Paginate through blocks in batches
+            to_block = to_block.min(*from_block + BASE_BLOCK_PAGE_SIZE);
+
+            // Create filter for tier_registry events
+            let filter = Filter::new()
+                .address(tier_registry.address)
+                .from_block(*from_block)
+                .to_block(to_block);
+
+            info!(
+                from_block = *from_block,
+                to_block,
+                chain = self.chain.to_string(),
+                "Polling tier_registry events"
+            );
+
+            // Get and process logs
+            match self.get_logs(&filter, tier_registry.event_kind()).await {
+                Ok(_) => {
+                    // Update the last processed block
+                    *from_block = to_block + 1;
+                    self.record_block_number(to_block);
+                }
+                Err(err) => {
+                    error!(
+                        chain = self.chain.to_string(),
+                        "Error getting tier_registry logs: {}", err
+                    );
+                    return Err(err);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn latest_block_on_chain(&mut self) -> Result<u64, SubscribeError> {
         let mut retry_count = 0;
         loop {
@@ -960,22 +1016,53 @@ impl Subscriber {
             chain = self.chain.to_string(),
             "Starting live sync"
         );
-        let contract_addresses: Vec<Address> = self
-            .contracts()
-            .iter()
-            .map(|contract| contract.address)
-            .collect();
-        let filter = Filter::new()
-            .address(contract_addresses)
-            .from_block(start_block_number);
 
-        let filter = match self.stop_block_number {
-            None => filter,
-            Some(stop_block) => filter.to_block(stop_block),
+        // Separate tier_registry from other contracts
+        let mut tier_registry_contract: Option<Contract> = None;
+        let mut other_contracts: Vec<Contract> = Vec::new();
+
+        for contract in self.contracts() {
+            match contract.kind {
+                ContractKind::TierRegistry => {
+                    tier_registry_contract = Some(contract);
+                }
+                _ => {
+                    other_contracts.push(contract);
+                }
+            }
+        }
+
+        // Set up streaming for non-tier_registry contracts if any exist
+        let mut stream = if !other_contracts.is_empty() {
+            let contract_addresses: Vec<Address> = other_contracts
+                .iter()
+                .map(|contract| contract.address)
+                .collect();
+            let filter = Filter::new()
+                .address(contract_addresses)
+                .from_block(start_block_number);
+
+            let filter = match self.stop_block_number {
+                None => filter,
+                Some(stop_block) => filter.to_block(stop_block),
+            };
+
+            let subscription = self.provider.watch_logs(&filter).await?;
+            Some(subscription.into_stream())
+        } else {
+            None
         };
 
-        let subscription = self.provider.watch_logs(&filter).await?;
-        let mut stream = subscription.into_stream();
+        // Set up polling for tier_registry if it exists
+        let mut tier_registry_poll_interval = if tier_registry_contract.is_some() {
+            Some(tokio::time::interval(tokio::time::Duration::from_secs(30)))
+        } else {
+            None
+        };
+
+        // Track the last block polled for tier_registry
+        let mut tier_registry_last_block = start_block_number;
+
         loop {
             tokio::select! {
                  biased;
@@ -1004,7 +1091,32 @@ impl Subscriber {
                         }
                     }
                  }
-                 events = stream.next() => {
+                 _ = async {
+                     if let Some(ref mut interval) = tier_registry_poll_interval {
+                         interval.tick().await;
+                     } else {
+                         // If no tier_registry, wait forever
+                         futures_util::future::pending::<()>().await;
+                     }
+                 } => {
+                     if let Some(ref tier_registry) = tier_registry_contract {
+                         // Poll tier_registry events
+                         if let Err(err) = self.poll_tier_registry_events(tier_registry, &mut tier_registry_last_block).await {
+                             error!(
+                                 chain = self.chain.to_string(),
+                                 "Error polling tier_registry events: {}", err
+                             );
+                         }
+                     }
+                 }
+                 events = async {
+                     if let Some(ref mut s) = stream {
+                         s.next().await
+                     } else {
+                         // If no stream, wait forever
+                         futures_util::future::pending().await
+                     }
+                 } => {
                      match events {
                          None => {
                             // We want to trigger a retry here
