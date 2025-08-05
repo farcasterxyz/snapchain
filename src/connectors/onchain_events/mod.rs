@@ -916,7 +916,7 @@ impl Subscriber {
         }
     }
 
-    async fn latest_block_on_chain(&mut self) -> Result<u64, SubscribeError> {
+    async fn latest_block_on_chain(&self) -> Result<u64, SubscribeError> {
         let mut retry_count = 0;
         loop {
             match self
@@ -1078,29 +1078,33 @@ impl Subscriber {
         Ok(())
     }
 
-    pub async fn run(&mut self) -> Result<(), SubscribeError> {
+    pub async fn live_sync_start_block(&self) -> Result<u64, SubscribeError> {
         let latest_block_on_chain = self.latest_block_on_chain().await?;
         let latest_block_in_db = self.latest_block_in_db();
+        if self.chain == node_local_state::Chain::Base {
+            // The events Base are really rare so it's wasteful to retry all the missed blocks. Assume all events will be picked up via some validator.
+            Ok(latest_block_on_chain)
+        } else {
+            // By default, start from the first block or the latest block in the db. Whichever is higher
+            Ok(Self::first_block(self.chain).max(latest_block_in_db))
+        }
+    }
+
+    pub async fn run(&mut self) -> Result<(), SubscribeError> {
         info!(
             start_block_number = self.start_block_number,
             stop_block_numer = self.stop_block_number,
-            latest_block_on_chain,
-            latest_block_in_db,
             chain = self.chain.to_string(),
             "Starting l2 events subscription"
         );
-        let live_sync_block;
+        let mut live_sync_block;
         match self.start_block_number {
             None => {
-                if self.chain == node_local_state::Chain::Base {
-                    // The events Base are really rare so it's wasteful to retry all the missed blocks. Assume all events will be picked up via some validator.
-                    live_sync_block = Some(latest_block_on_chain)
-                } else {
-                    // By default, start from the first block or the latest block in the db. Whichever is higher
-                    live_sync_block = Some(Self::first_block(self.chain).max(latest_block_in_db));
-                }
+                live_sync_block = Some(self.live_sync_start_block().await?);
             }
             Some(start_block_number) => {
+                let latest_block_on_chain = self.latest_block_on_chain().await?;
+                let latest_block_in_db = self.latest_block_in_db();
                 let historical_sync_start_block = latest_block_in_db.max(start_block_number);
                 let historical_sync_stop_block = latest_block_on_chain
                     .min(self.stop_block_number.unwrap_or(latest_block_on_chain));
@@ -1151,6 +1155,8 @@ impl Subscriber {
                     );
                 }
             }
+            // Recompute the live sync start block so you don't start from the original block which is way far back.
+            live_sync_block = Some(self.live_sync_start_block().await?);
             tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_TIMEOUT_SECONDS)).await;
         }
     }
