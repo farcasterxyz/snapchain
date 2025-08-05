@@ -624,6 +624,12 @@ impl ShardEngine {
         Ok(events)
     }
 
+    // Reset the event id generator to 0. This is used when doing replication, when we're merging in events from another node
+    // and not from blocks (so no blockheight to use)
+    pub(crate) fn reset_event_id(&mut self) {
+        self.stores.event_handler.set_current_height(0);
+    }
+
     pub(crate) fn replay_snapchain_txn(
         &mut self,
         trie_ctx: &merkle_trie::Context,
@@ -884,6 +890,7 @@ impl ShardEngine {
                                 warn!(
                                     fid = msg.fid(),
                                     hash = msg.hex_hash(),
+                                    msg_type = msg.msg_type().as_str_name(),
                                     "Error merging message: {:?}",
                                     err
                                 );

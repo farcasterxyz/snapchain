@@ -1,3 +1,4 @@
+pub mod bootstrap;
 pub mod cfg;
 pub mod connectors;
 pub mod consensus;
@@ -11,7 +12,6 @@ pub mod replication;
 pub mod storage;
 pub mod utils;
 pub mod version;
-pub mod bootstrap;
 
 mod tests;
 

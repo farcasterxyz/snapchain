@@ -32,7 +32,8 @@ pub async fn bootstrap_from_replication(app_config: &Config) -> Result<(), Box<d
     };
 
     // Fetch metadata and determine target height
-    let target_height = 11383200; //        determine_target_height(&mut client, &app_config.consensus.shard_ids).await?;
+    let target_height =
+        determine_target_height(&mut client, &app_config.consensus.shard_ids).await?;
     info!("Target height for bootstrap: {}", target_height);
 
     // Initialize databases and replay transactions for each shard
@@ -169,6 +170,9 @@ fn replay_transaction(
     let trie_ctx = merkle_trie::Context::new();
     let timestamp = FarcasterTime::current(); // TODO: Use proper timestamp from transaction/block
     let version = EngineVersion::current(engine.network);
+
+    // Set the block height to 0 (by resetting the event id) for bootstrap
+    engine.reset_event_id();
 
     match engine.replay_snapchain_txn(
         &trie_ctx,
