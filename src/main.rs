@@ -609,9 +609,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             tokio::spawn(async move {
                 let result = onchain_events_subscriber.run().await;
                 match result {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        error!(
+                            chain = node_local_state::Chain::Optimism.to_string(), "Unexpectedly exited optimism onchain events subscription without error");
+                    }
                     Err(e) => {
-                        error!("Error subscribing to on chain events on optimism {:#?}", e);
+                        error!(
+                            chain = node_local_state::Chain::Optimism.to_string(),
+                            "Error subscribing to on chain events on optimism {:#?}", e
+                        );
                     }
                 }
             });
@@ -630,9 +636,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             tokio::spawn(async move {
                 let result = onchain_events_subscriber.run().await;
                 match result {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        error!(
+                            chain = node_local_state::Chain::Base.to_string(),
+                            "Unexpectedly exited base onchain events subscription without error"
+                        );
+                    }
                     Err(e) => {
-                        error!("Error subscribing to on chain events on base {:#?}", e);
+                        error!(
+                            chain = node_local_state::Chain::Base.to_string(),
+                            "Error subscribing to onchain events on base {:#?}", e
+                        );
                     }
                 }
             });
