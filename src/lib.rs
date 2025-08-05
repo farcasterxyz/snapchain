@@ -11,6 +11,7 @@ pub mod replication;
 pub mod storage;
 pub mod utils;
 pub mod version;
+pub mod bootstrap;
 
 mod tests;
 

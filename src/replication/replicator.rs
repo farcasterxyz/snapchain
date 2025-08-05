@@ -1,5 +1,5 @@
 use tokio::select;
-use tracing::error;
+use tracing::{error, info};
 
 use crate::{
     core::util,
@@ -210,8 +210,22 @@ impl Replicator {
         }
 
         // Open a snapshot
-        self.stores
-            .open_snapshot(msg.shard_id, block_number, timestamp)
+        let open_result = self
+            .stores
+            .open_snapshot(msg.shard_id, block_number, timestamp);
+        if let Ok(_) = open_result {
+            info!(
+                "Opened replicator snapshot for shard {} at height {} with timestamp {}",
+                msg.shard_id, block_number, timestamp
+            );
+        } else {
+            error!(
+                "Failed to open replicator snapshot for shard {} at height {} with timestamp {}: {:?}",
+                msg.shard_id, block_number, timestamp, open_result
+            );
+        }
+
+        open_result
     }
 }
 

@@ -650,6 +650,12 @@ impl ShardEngine {
         let mut validation_errors = vec![];
 
         // System messages first, then user messages and finally prunes
+        info!(
+            "Replaying transaction for FID: {}, user_messages: {}, system_messages: {}",
+            snapchain_txn.fid,
+            snapchain_txn.user_messages.len(),
+            snapchain_txn.system_messages.len()
+        );
 
         // Sort system_messages to process OnChainEvents first in their canonical order,
         // followed by FnameTransfers sorted by timestamp.
@@ -694,6 +700,11 @@ impl ShardEngine {
                             }
                             _ => {}
                         }
+                        info!(
+                            fid = snapchain_txn.fid,
+                            "Merged onchain event of type: {}",
+                            onchain_event.r#type().as_str_name()
+                        );
                     }
                     Err(err) => {
                         if source != ProposalSource::Simulate {
@@ -861,6 +872,12 @@ impl ShardEngine {
                             events.push(event.clone());
                             user_messages_count += 1;
                             message_types.insert(msg.msg_type());
+                            info!(
+                                fid = msg.fid(),
+                                hash = msg.hex_hash(),
+                                "Merged user message of type: {}",
+                                msg.msg_type().as_str_name()
+                            );
                         }
                         Err(err) => {
                             if source != ProposalSource::Simulate {
