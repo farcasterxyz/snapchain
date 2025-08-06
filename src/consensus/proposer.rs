@@ -368,7 +368,15 @@ impl BlockProposer {
         height: Height,
         timeout: Duration,
     ) -> Vec<ShardChunkWitness> {
-        let requested_height = height.block_number;
+        let last_block = self
+            .engine
+            .get_block_by_height(height.decrement().unwrap())
+            .unwrap();
+        let mut last_shard_witnesses_by_shard = HashMap::new();
+        for shard_witness in last_block.shard_witness.unwrap().shard_chunk_witnesses {
+            let shard = shard_witness.height.unwrap().shard_index;
+            last_shard_witnesses_by_shard.insert(shard, shard_witness);
+        }
 
         let mut poll_interval = time::interval(Duration::from_millis(100));
         let mut chunks = BTreeMap::new();
@@ -383,7 +391,8 @@ impl BlockProposer {
                         if chunks.contains_key(shard_id) {
                             continue;
                         }
-                        let result = store.shard_store.get_chunk_by_height(requested_height);
+                        let desired_height = last_shard_witnesses_by_shard.get(&shard_id).unwrap().height.unwrap().increment();
+                        let result = store.shard_store.get_chunk_by_height(desired_height.block_number);
                         match result {
                             Ok(Some(chunk)) => {
                                 let header = chunk.header.as_ref().unwrap();
@@ -410,15 +419,19 @@ impl BlockProposer {
             }
         }
 
-        if chunks.values().len() == self.num_shards as usize {
-            chunks.values().cloned().collect()
-        } else {
-            warn!(
-                "Block validator did not receive all shard chunks for height: {:?}",
-                requested_height
-            );
-            vec![]
+        for shard_id in self.shard_stores.keys() {
+            if !chunks.contains_key(&shard_id) {
+                chunks.insert(
+                    *shard_id,
+                    last_shard_witnesses_by_shard
+                        .get(&shard_id)
+                        .unwrap()
+                        .clone(),
+                );
+            }
         }
+
+        chunks.values().cloned().collect()
     }
 
     async fn publish_new_block(&self, block: Block) {
