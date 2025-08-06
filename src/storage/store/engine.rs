@@ -6,7 +6,8 @@ use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::message_data::Body;
 use crate::proto::{
     self, hub_event, Block, FarcasterNetwork, HubEvent, HubEventType, MessageType, OnChainEvent,
-    OnChainEventType, Protocol, ShardChunk, Transaction, UserDataType, UserNameProof,
+    OnChainEventType, Protocol, ShardChunk, ShardChunkWitness, Transaction, UserDataType,
+    UserNameProof,
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{CastStore, MessagesPage, VerificationStore};
@@ -2198,5 +2199,20 @@ impl BlockEngine {
             // In case of no blocks, return height 1
             Err(_) => Height::new(shard_index, 1),
         }
+    }
+
+    pub fn get_last_shard_witness(
+        &self,
+        height: Height,
+        shard_id: u32,
+    ) -> Option<ShardChunkWitness> {
+        let previous_height = height.decrement()?;
+        let previous_block = self.get_block_by_height(previous_height)?;
+        let previous_shard_witness = previous_block.shard_witness?;
+        previous_shard_witness
+            .shard_chunk_witnesses
+            .iter()
+            .find(|witness| witness.height.unwrap().shard_index == shard_id)
+            .cloned()
     }
 }
