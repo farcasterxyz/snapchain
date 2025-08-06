@@ -1,19 +1,17 @@
-use std::collections::VecDeque;
-use std::sync::Arc;
-
-use prost::{DecodeError, Message};
-
 use super::{get_from_db_or_txn, make_fid_key, StoreEventHandler};
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
 use crate::proto::{
-    self, on_chain_event, FarcasterNetwork, IdRegisterEventBody, IdRegisterEventType, OnChainEvent,
+    self, on_chain_event, on_chain_event::Body, FarcasterNetwork, HubEvent, HubEventType,
+    IdRegisterEventBody, IdRegisterEventType, MergeOnChainEventBody, OnChainEvent,
     OnChainEventType, SignerEventBody, SignerEventType, TierType,
 };
-use crate::proto::{HubEvent, HubEventType, MergeOnChainEventBody};
 use crate::storage::constants::{OnChainEventPostfix, RootPrefix, PAGE_SIZE_MAX};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch, RocksdbError};
 use crate::storage::util::increment_vec_u8;
+use prost::{DecodeError, Message};
+use std::collections::VecDeque;
+use std::sync::Arc;
 use thiserror::Error;
 
 static PAGE_SIZE: usize = 1000;
@@ -220,7 +218,7 @@ fn build_secondary_indices(
 ) -> Result<(), OnchainEventStorageError> {
     if let Some(body) = &onchain_event.body {
         match body {
-            on_chain_event::Body::IdRegisterEventBody(id_register_event_body) => {
+            Body::IdRegisterEventBody(id_register_event_body) => {
                 build_secondary_indices_for_id_register(
                     db,
                     txn,
@@ -577,6 +575,14 @@ impl OnchainEventStore {
         let fids = onchain_events_page
             .onchain_events
             .iter()
+            .filter(|event| {
+                // Filter out events that are not IdRegisterEventBody.event_type == IdRegisterEventType::Register
+                if let Some(Body::IdRegisterEventBody(body)) = &event.body {
+                    body.event_type() == IdRegisterEventType::Register
+                } else {
+                    false
+                }
+            })
             .map(|event| event.fid)
             .collect();
         let next_page_token = onchain_events_page.next_page_token;
@@ -739,9 +745,17 @@ impl FIDIterator {
                     let onchain_event =
                         OnChainEvent::decode(value).map_err(|e| HubError::from(e))?;
 
+                    // Filter out events that are not IdRegisterEventBody.event_type == IdRegisterEventType::Register
+                    if let Some(Body::IdRegisterEventBody(body)) = &onchain_event.body {
+                        if body.event_type() != IdRegisterEventType::Register {
+                            return Ok(false); // Skip this event
+                        }
+                    } else {
+                        return Ok(false); // Skip this event
+                    }
+
                     self.fids.push_back(onchain_event.fid);
                     last_fid = onchain_event.fid;
-
                     if self.fids.len() >= page_options.page_size.unwrap_or(PAGE_SIZE_MAX) {
                         return Ok(true); // Stop iterating
                     }
