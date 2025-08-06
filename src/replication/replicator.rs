@@ -1,6 +1,3 @@
-use tokio::select;
-use tracing::{error, info};
-
 use crate::{
     core::util,
     proto,
@@ -15,6 +12,10 @@ use crate::{
     },
 };
 use std::{sync::Arc, time::Duration};
+use tokio::select;
+use tokio::select;
+use tracing::{error, info};
+use tracing::{error, info};
 
 pub async fn run(
     replicator: Arc<Replicator>,
@@ -152,6 +153,7 @@ impl Replicator {
             }
 
             if cursor.limit == 0 {
+                // The limit was reached. Return the current set of transactions and the cursor token.
                 return Ok((transactions, Some(cursor.token.into())));
             }
         }
@@ -200,6 +202,7 @@ impl Replicator {
             .close_aged_snapshots(msg.shard_id, oldest_valid_timestamp);
 
         // Check if we can take a snapshot of this block
+
         if block_number > 0 && block_number % self.snapshot_options.interval != 0 {
             return Ok(());
         }
@@ -229,7 +232,7 @@ impl Replicator {
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum MessageType {
     OnchainEventsSigner = 1,
     OnchainEventsSignerMigrated = 2,
@@ -682,13 +685,12 @@ fn build_validator_messages(
                 return Err(ReplicationError::InternalError(format!(
                     "Failed to collect on-chain events for {:?}: {}",
                     event_type, e
-                )))
+                )));
             }
         }
     }
 
     // username proofs
-
     match build_username_proof_events(stores, cursor) {
         Ok(mut msgs) => messages.append(&mut msgs),
         Err(e) => {
