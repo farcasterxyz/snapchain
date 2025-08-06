@@ -760,21 +760,23 @@ impl Iterator for FIDIterator {
     type Item = u64;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.fids.is_empty() {
-            match self.fetch() {
-                Ok(None) | Err(_) => {
-                    // Done fetching, no more FIDs
-                    return None;
+        loop {
+            if self.fids.is_empty() {
+                match self.fetch() {
+                    Ok(None) | Err(_) => {
+                        // Done fetching, no more FIDs
+                        return None;
+                    }
+                    Ok(Some(_fid)) => {}
                 }
-                Ok(Some(_fid)) => {}
+            }
+
+            if let Some(fid) = self.fids.pop_front() {
+                if fid > self.last_fid {
+                    self.last_fid = fid;
+                    return Some(fid);
+                }
             }
         }
-
-        if let Some(fid) = self.fids.pop_front() {
-            self.last_fid = fid;
-            return Some(fid);
-        }
-
-        None
     }
 }
