@@ -17,11 +17,7 @@ mod tests {
         },
         utils::factory::{self, messages_factory, username_factory},
     };
-    use std::{
-        collections::{HashMap, HashSet},
-        sync::Arc,
-        time::Duration,
-    };
+    use std::{collections::HashMap, sync::Arc, time::Duration};
 
     fn opendb(path: &str) -> Result<Arc<RocksDB>, RocksdbError> {
         let milliseconds_timestamp: u128 = std::time::SystemTime::now()
@@ -315,10 +311,10 @@ mod tests {
             1, // intentionally using a small limit to exercise pagination
         );
 
-        let mut synced_fids = HashSet::new();
+        let mut synced_fids = HashMap::new();
 
         for tx in &transactions {
-            synced_fids.insert(tx.fid);
+            synced_fids.insert(tx.fid, tx.account_root.clone());
 
             // Replay the system and user transactions
             dest_engine
@@ -327,7 +323,7 @@ mod tests {
         }
 
         // Check the account roots match for both engines
-        for fid in synced_fids {
+        for (fid, account_root_from_tx) in synced_fids {
             let root1 = source_engine.account_root_for_fid(fid);
             let root2 = dest_engine.account_root_for_fid(fid);
 
@@ -338,6 +334,12 @@ mod tests {
                 fid,
                 hex::encode(&root1),
                 hex::encode(&root2)
+            );
+
+            assert_eq!(
+                account_root_from_tx, root1,
+                "Account root from transaction does not match for fid {}",
+                fid
             );
         }
     }
