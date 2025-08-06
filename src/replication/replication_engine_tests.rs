@@ -315,35 +315,16 @@ mod tests {
             1, // intentionally using a small limit to exercise pagination
         );
 
-        // TODO: this is temporary: we're breaking down the transactions into system and user
-        // messages, but this should eventually be handled by the engine's ability to sort
-        // messages
-        let mut sys = vec![];
-        let mut user = vec![];
         let mut synced_fids = HashSet::new();
 
         for tx in &transactions {
-            let sys_tx = proto::Transaction {
-                fid: tx.fid,
-                system_messages: tx.system_messages.clone(),
-                ..Default::default()
-            };
-            sys.push(sys_tx);
-
-            let user_tx = proto::Transaction {
-                fid: tx.fid,
-                user_messages: tx.user_messages.clone(),
-                ..Default::default()
-            };
-            user.push(user_tx);
-
             synced_fids.insert(tx.fid);
-        }
 
-        // Replay the system and user transactions
-        dest_engine
-            .replay_fid_transactions(sys, user)
-            .expect("Failed to replay transactions");
+            // Replay the system and user transactions
+            dest_engine
+                .replay_transaction(tx)
+                .expect("Failed to replay transactions");
+        }
 
         // Check the account roots match for both engines
         for fid in synced_fids {
