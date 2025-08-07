@@ -350,13 +350,37 @@ impl BlockProposer {
         }
     }
 
+    pub fn get_next_shard_witness(
+        &self,
+        block_height: Height,
+        shard_id: u32,
+        stores: &Stores,
+    ) -> Option<ShardChunkWitness> {
+        let desired_shard_block_number = if block_height.block_number == 1 {
+            1
+        } else {
+            let last_shard_witness = self.engine.get_last_shard_witness(block_height, shard_id)?;
+            last_shard_witness.height.unwrap().increment().block_number
+        };
+
+        let chunk = stores
+            .shard_store
+            .get_chunk_by_height(desired_shard_block_number)
+            .ok()??;
+        let header = chunk.header.as_ref().unwrap();
+        let shard_witness = ShardChunkWitness {
+            height: header.height,
+            shard_hash: chunk.hash.clone(),
+            shard_root: chunk.header.unwrap().shard_root,
+        };
+        Some(shard_witness)
+    }
+
     async fn collect_confirmed_shard_witnesses(
         &mut self,
         height: Height,
         timeout: Duration,
     ) -> Vec<ShardChunkWitness> {
-        let requested_height = height.block_number;
-
         let mut poll_interval = time::interval(Duration::from_millis(100));
         let mut chunks = BTreeMap::new();
 
@@ -370,21 +394,9 @@ impl BlockProposer {
                         if chunks.contains_key(shard_id) {
                             continue;
                         }
-                        let result = store.shard_store.get_chunk_by_height(requested_height);
-                        match result {
-                            Ok(Some(chunk)) => {
-                                let header = chunk.header.as_ref().unwrap();
-                                let shard_witness = ShardChunkWitness {
-                                    height: header.height,
-                                    shard_hash: chunk.hash.clone(),
-                                    shard_root: chunk.header.unwrap().shard_root,
-                                };
-                                chunks.insert(*shard_id, shard_witness);
-                            }
-                            Ok(None) => {}
-                            Err(err) => {
-                                error!(height=height.block_number, shard_id=shard_id, "Error getting confirmed shard chunk: {:?}", err);
-                            }
+
+                        if let Some(next_shard_witness) = self.get_next_shard_witness(height, *shard_id, store) {
+                            chunks.insert(*shard_id, next_shard_witness);
                         }
                     }
                     if chunks.len() == self.num_shards as usize {
@@ -397,15 +409,18 @@ impl BlockProposer {
             }
         }
 
-        if chunks.values().len() == self.num_shards as usize {
-            chunks.values().cloned().collect()
-        } else {
-            warn!(
-                "Block validator did not receive all shard chunks for height: {:?}",
-                requested_height
-            );
-            vec![]
+        for shard_id in self.shard_stores.keys() {
+            if !chunks.contains_key(&shard_id) {
+                // If the next height is not available, record the witness for the previous height.
+                if let Some(last_shard_witness) =
+                    self.engine.get_last_shard_witness(height, *shard_id)
+                {
+                    chunks.insert(*shard_id, last_shard_witness);
+                }
+            }
         }
+
+        chunks.values().cloned().collect()
     }
 
     async fn publish_new_block(&self, block: Block) {
