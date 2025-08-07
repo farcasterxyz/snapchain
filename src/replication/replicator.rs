@@ -3,12 +3,13 @@ use crate::{
     proto,
     replication::{error::ReplicationError, replication_stores::ReplicationStores},
     storage::{
-        db::PageOptions,
+        db::{PageOptions, RocksDbTransactionBatch},
         store::{
             account::{self, FIDIterator, Store, StoreDef, UserDataStore, UsernameProofStore},
             engine::PostCommitMessage,
             stores::Stores,
         },
+        trie::merkle_trie::TrieKey,
     },
 };
 use std::{sync::Arc, time::Duration};
@@ -807,11 +808,18 @@ fn build_transaction_for_fid(
         return Ok(None);
     }
 
+    let fid = cursor.token.fid();
+    let fid_account_root = stores.trie.get_hash(
+        &stores.db,
+        &mut RocksDbTransactionBatch::new(),
+        &TrieKey::for_fid(fid),
+    );
+
     Ok(Some(proto::Transaction {
-        fid: cursor.token.fid(),
+        fid,
         system_messages,
         user_messages,
-        ..Default::default()
+        account_root: fid_account_root,
     }))
 }
 
