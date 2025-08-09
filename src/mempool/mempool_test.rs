@@ -54,7 +54,7 @@ mod tests {
         let (mempool_tx, mempool_rx) = mpsc::channel(100);
         let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
-        let (engine, _) = test_helper::new_engine();
+        let (engine, _) = test_helper::new_engine().await;
         let mut shard_senders = HashMap::new();
         shard_senders.insert(1, engine.get_senders());
         let mut shard_stores = HashMap::new();

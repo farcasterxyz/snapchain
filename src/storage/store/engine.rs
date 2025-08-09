@@ -8,12 +8,9 @@ use crate::proto::{
     self, hub_event, Block, FarcasterNetwork, HubEvent, HubEventType, MessageType, OnChainEvent,
     OnChainEventType, Protocol, ShardChunk, Transaction, UserDataType, UserNameProof,
 };
-use crate::replication::ReplicationError;
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
-use crate::storage::store::account::{
-    make_fname_username_proof_by_fid_key, make_fname_username_proof_key, CastStore, FIDIterator,
-    MessagesPage, VerificationStore,
-};
+use crate::storage::store::account::{CastStore, MessagesPage, VerificationStore};
+use crate::storage::store::migrations::{MigrationContext, MigrationRunner};
 use crate::storage::store::stores::{StoreLimits, Stores};
 use crate::storage::store::BlockStore;
 use crate::storage::trie::{self, merkle_trie};
@@ -188,7 +185,7 @@ pub struct ShardEngine {
 }
 
 impl ShardEngine {
-    pub fn new(
+    pub async fn new(
         db: Arc<RocksDB>,
         network: proto::FarcasterNetwork,
         trie: merkle_trie::MerkleTrie,
@@ -199,19 +196,37 @@ impl ShardEngine {
         messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
         fname_signer_address: Option<alloy_primitives::Address>,
         post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
-    ) -> ShardEngine {
-        // TODO: adding the trie here introduces many calls that want to return errors. Rethink unwrap strategy.
-        ShardEngine {
+    ) -> Result<ShardEngine, HubError> {
+        let stores = Stores::new(
+            db.clone(),
+            shard_id,
+            trie,
+            store_limits,
+            network,
+            statsd_client.clone(),
+        );
+
+        // No migrations on devnet (during tests)
+        if network != proto::FarcasterNetwork::Devnet {
+            let migration_context = MigrationContext {
+                db: db.clone(),
+                stores: stores.clone(),
+            };
+            let runner = MigrationRunner::new(migration_context);
+            let migration_handle = runner.run_pending_migrations().await?;
+
+            // If there are background migrations, we can optionally store the handle
+            // for later checking or cancellation if needed
+            if let Some(_background_handle) = migration_handle {
+                // Background migrations are running, but we don't block startup
+                info!(shard_id, "Background migrations started");
+            }
+        }
+
+        Ok(ShardEngine {
             shard_id,
             network,
-            stores: Stores::new(
-                db.clone(),
-                shard_id,
-                trie,
-                store_limits,
-                network,
-                statsd_client.clone(),
-            ),
+            stores,
             senders: Senders::new(),
             db,
             statsd_client,
@@ -220,126 +235,7 @@ impl ShardEngine {
             pending_txn: None,
             fname_signer_address,
             post_commit_tx,
-        }
-    }
-
-    pub fn fix_fname_secondary_index(&self) -> Result<(), ReplicationError> {
-        let fid_iterator = FIDIterator::new(self.stores.db.clone(), 0);
-
-        for fid in fid_iterator.into_iter() {
-            self.fix_fname_secondary_index_for_fid(fid)?;
-        }
-
-        Ok(())
-    }
-
-    /// Fix the secondary fname index for a given FID by checking the merkle trie
-    /// and ensuring all username proofs have correct secondary keys in the database
-    pub fn fix_fname_secondary_index_for_fid(&self, fid: u64) -> Result<(), ReplicationError> {
-        let mut txn = RocksDbTransactionBatch::new();
-        let stores = &self.stores;
-
-        // Get all username proof keys for this FID from the merkle trie
-        let mut trie = stores.trie.clone();
-        let trie_keys = trie
-            .get_all_values(
-                &merkle_trie::Context::new(),
-                &stores.db,
-                &TrieKey::for_fid(fid),
-            )
-            .map_err(|e| {
-                ReplicationError::InternalError(format!("Failed to get trie keys: {}", e))
-            })?;
-
-        let mut fixed_count = 0;
-
-        for trie_key in trie_keys {
-            // Check if this is a fname proof (type_byte == 7)
-            if trie_key.len() > 5 && trie_key[5] == 7 {
-                // Extract the fname from the trie key
-                let name_bytes = &trie_key[6..];
-                // Remove null byte padding that was added to make all names the same length
-                let name_end = name_bytes
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(name_bytes.len());
-                let name = &name_bytes[..name_end];
-
-                if name.is_empty() {
-                    continue;
-                }
-
-                // Get the username proof from the store
-                match UserDataStore::get_username_proof(
-                    &stores.user_data_store,
-                    &txn,
-                    &name.to_vec(),
-                ) {
-                    Ok(Some(message)) => {
-                        // Compute the secondary key using the functions from name_registry_events
-                        let fid = message.fid;
-                        let secondary_key = make_fname_username_proof_by_fid_key(fid);
-
-                        // Check if the secondary key exists in the database
-                        match stores.db.get(&secondary_key) {
-                            Ok(Some(_)) => {
-                                // Secondary key exists, no need to fix
-                                continue;
-                            }
-                            Ok(None) => {
-                                // Secondary key missing, log error and fix it
-                                info!(
-                                    "Missing secondary fname index for FID {} and name '{}'. Adding it to the database.",
-                                    fid,
-                                    String::from_utf8_lossy(name)
-                                );
-
-                                // Create the primary key
-                                let primary_key = make_fname_username_proof_key(name);
-                                txn.put(secondary_key, primary_key);
-                                fixed_count += 1;
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Failed to check secondary key for FID {} and name '{}': {}",
-                                    fid,
-                                    String::from_utf8_lossy(name),
-                                    e
-                                );
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        error!(
-                            "Username proof not found in store for FID {} and name '{}', but exists in trie",
-                            fid,
-                            String::from_utf8_lossy(name)
-                        );
-                    }
-                    Err(e) => {
-                        error!(
-                            "Failed to get username proof for FID {} and name '{}': {}",
-                            fid,
-                            String::from_utf8_lossy(name),
-                            e
-                        );
-                    }
-                }
-            }
-        }
-
-        // Commit the transaction if we made any fixes
-        if fixed_count > 0 {
-            stores.db.commit(txn).map_err(|e| {
-                ReplicationError::InternalError(format!(" Failed to commit transaction: {}", e))
-            })?;
-            info!(
-                "Fixed {} missing secondary fname indexes for FID {}",
-                fixed_count, fid
-            );
-        }
-
-        Ok(())
+        })
     }
 
     pub fn shard_id(&self) -> u32 {

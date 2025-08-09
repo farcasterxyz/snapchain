@@ -206,11 +206,13 @@ mod tests {
         let (engine1, _) = test_helper::new_engine_with_options(test_helper::EngineOptions {
             limits: Some(limits.clone()),
             ..Default::default()
-        });
+        })
+        .await;
         let (engine2, _) = test_helper::new_engine_with_options(test_helper::EngineOptions {
             limits: Some(limits.clone()),
             ..Default::default()
-        });
+        })
+        .await;
         let db1 = engine1.db.clone();
         let db2 = engine2.db.clone();
 
