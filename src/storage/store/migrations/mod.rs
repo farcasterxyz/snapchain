@@ -1,3 +1,4 @@
+use crate::core::error::HubError;
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::migrations::m1_fix_fname_index::M1FixFnameSecondaryIndex;
 use crate::storage::store::stores::Stores;
@@ -18,6 +19,12 @@ pub enum MigrationError {
 
     #[error("Internal migration error: {0}")]
     InternalError(String),
+}
+
+impl From<MigrationError> for HubError {
+    fn from(err: MigrationError) -> Self {
+        HubError::internal_db_error(&err.to_string())
+    }
 }
 
 /// A context object to pass necessary dependencies to migrations.
@@ -80,7 +87,7 @@ impl MigrationRunner {
             return Ok(None);
         }
 
-        let start_migrations_at = db_version as usize + 1;
+        let start_migrations_at = db_version as usize;
         if start_migrations_at >= all_migrations.len() {
             return Err(MigrationError::InternalError(
                 "Migration list and DB Schema mismatch!".to_string(),

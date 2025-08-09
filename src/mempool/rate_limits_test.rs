@@ -15,11 +15,12 @@ mod tests {
         },
     };
 
-    fn setup(limits: Limits) -> (ShardEngine, HashMap<u32, Stores>) {
+    async fn setup(limits: Limits) -> (ShardEngine, HashMap<u32, Stores>) {
         let (engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             limits: Some(StoreLimits::new(limits.clone(), limits, limits::zero())),
             ..Default::default()
-        });
+        })
+        .await;
         let mut shard_stores = HashMap::new();
         shard_stores.insert(engine.shard_id(), engine.get_stores());
         return (engine, shard_stores);
@@ -35,7 +36,8 @@ mod tests {
             user_data: 10000,
             user_name_proofs: 10000,
             verifications: 10000,
-        });
+        })
+        .await;
 
         register_user(
             FID_FOR_TEST,
@@ -74,7 +76,8 @@ mod tests {
             user_data: 1000,
             user_name_proofs: 1000,
             verifications: 1000,
-        });
+        })
+        .await;
 
         register_user(
             FID_FOR_TEST,
@@ -114,7 +117,8 @@ mod tests {
             user_data: 1000,
             user_name_proofs: 1000,
             verifications: 1000,
-        });
+        })
+        .await;
 
         for fid in FID_FOR_TEST..FID_FOR_TEST + 11 {
             register_user(
@@ -157,7 +161,8 @@ mod tests {
             user_data: 1,
             user_name_proofs: 1,
             verifications: 1,
-        });
+        })
+        .await;
 
         register_user(
             FID_FOR_TEST,
@@ -184,7 +189,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_zero_storage_allowance() {
-        let (mut engine, shard_stores) = setup(limits::zero());
+        let (mut engine, shard_stores) = setup(limits::zero()).await;
 
         register_user(
             FID_FOR_TEST,

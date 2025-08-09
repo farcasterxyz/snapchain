@@ -34,8 +34,8 @@ mod tests {
         Keypair,
     ) {
         let proposer_keypair = Keypair::generate();
-        let (mut proposer_engine, _) = test_helper::new_engine();
-        let (mut read_node_engine, _) = test_helper::new_engine();
+        let (mut proposer_engine, _) = test_helper::new_engine().await;
+        let (mut read_node_engine, _) = test_helper::new_engine().await;
         for _ in 0..num_already_decided_blocks {
             let shard_chunk = commit_shard_chunk(&mut proposer_engine, &proposer_keypair).await;
             read_node_engine.commit_shard_chunk(&shard_chunk).await;
@@ -58,7 +58,8 @@ mod tests {
         let (read_node_engine_clone, _) = new_engine_with_options(EngineOptions {
             db: Some(read_node_engine.db.clone()),
             ..Default::default()
-        });
+        })
+        .await;
         let read_node_actors = MalachiteReadNodeActors::create_and_start(
             SnapchainValidatorContext::new(read_keypair),
             Engine::ShardEngine(read_node_engine_clone),

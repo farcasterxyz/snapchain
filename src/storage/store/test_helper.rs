@@ -144,7 +144,7 @@ pub fn statsd_client() -> StatsdClientWrapper {
     )
 }
 
-pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile::TempDir) {
+pub async fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile::TempDir) {
     let statsd_client = statsd_client();
     let dir = tempfile::TempDir::new().unwrap();
 
@@ -177,14 +177,16 @@ pub fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, tempfile
             options.messages_request_tx,
             options.fname_signer_address,
             options.post_commit_tx,
-        ),
+        )
+        .await
+        .unwrap(),
         dir,
     )
 }
 
 #[cfg(test)]
-pub fn new_engine() -> (ShardEngine, tempfile::TempDir) {
-    new_engine_with_options(EngineOptions::default())
+pub async fn new_engine() -> (ShardEngine, tempfile::TempDir) {
+    new_engine_with_options(EngineOptions::default()).await
 }
 
 pub async fn commit_event(engine: &mut ShardEngine, event: &OnChainEvent) -> ShardChunk {

@@ -70,7 +70,7 @@ impl SnapchainNode {
 
             let db = RocksDB::open_shard_db(rocksdb_dir.clone().as_str(), shard_id);
             let trie = merkle_trie::MerkleTrie::new(trie_branching_factor).unwrap(); //TODO: don't unwrap()
-            let engine = ShardEngine::new(
+            let engine = match ShardEngine::new(
                 db.clone(),
                 network,
                 trie,
@@ -81,7 +81,17 @@ impl SnapchainNode {
                 Some(messages_request_tx.clone()),
                 None,
                 engine_post_commit_tx.clone(),
-            );
+            )
+            .await
+            {
+                Ok(engine) => engine,
+                Err(err) => {
+                    panic!(
+                        "Failed to create shard engine for shard {}: {}",
+                        shard_id, err
+                    );
+                }
+            };
 
             shard_senders.insert(shard_id, engine.get_senders());
             shard_stores.insert(shard_id, engine.get_stores());
