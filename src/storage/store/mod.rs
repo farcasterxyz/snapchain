@@ -8,6 +8,7 @@ pub mod shard;
 pub mod stores;
 pub mod utils;
 
+pub mod migrations;
 pub mod test_helper;
 
 #[cfg(test)]
