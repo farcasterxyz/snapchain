@@ -10,6 +10,7 @@ use crate::proto::{
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{CastStore, MessagesPage, VerificationStore};
+use crate::storage::store::migrations::{MigrationContext, MigrationRunner};
 use crate::storage::store::stores::{StoreLimits, Stores};
 use crate::storage::store::BlockStore;
 use crate::storage::trie::{self, merkle_trie};
@@ -184,7 +185,7 @@ pub struct ShardEngine {
 }
 
 impl ShardEngine {
-    pub fn new(
+    pub async fn new(
         db: Arc<RocksDB>,
         network: proto::FarcasterNetwork,
         trie: merkle_trie::MerkleTrie,
@@ -195,19 +196,37 @@ impl ShardEngine {
         messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
         fname_signer_address: Option<alloy_primitives::Address>,
         post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
-    ) -> ShardEngine {
-        // TODO: adding the trie here introduces many calls that want to return errors. Rethink unwrap strategy.
-        ShardEngine {
+    ) -> Result<ShardEngine, HubError> {
+        let stores = Stores::new(
+            db.clone(),
+            shard_id,
+            trie,
+            store_limits,
+            network,
+            statsd_client.clone(),
+        );
+
+        // No migrations on devnet (during tests)
+        if network != proto::FarcasterNetwork::Devnet {
+            let migration_context = MigrationContext {
+                db: db.clone(),
+                stores: stores.clone(),
+            };
+            let runner = MigrationRunner::new(migration_context);
+            let migration_handle = runner.run_pending_migrations().await?;
+
+            // If there are background migrations, we can optionally store the handle
+            // for later checking or cancellation if needed
+            if let Some(_background_handle) = migration_handle {
+                // Background migrations are running, but we don't block startup
+                info!(shard_id, "Background migrations started");
+            }
+        }
+
+        Ok(ShardEngine {
             shard_id,
             network,
-            stores: Stores::new(
-                db.clone(),
-                shard_id,
-                trie,
-                store_limits,
-                network,
-                statsd_client.clone(),
-            ),
+            stores,
             senders: Senders::new(),
             db,
             statsd_client,
@@ -216,7 +235,7 @@ impl ShardEngine {
             pending_txn: None,
             fname_signer_address,
             post_commit_tx,
-        }
+        })
     }
 
     pub fn shard_id(&self) -> u32 {

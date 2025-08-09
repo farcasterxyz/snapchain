@@ -2,6 +2,7 @@ pub use self::cast_store::*;
 pub use self::event::*;
 pub use self::link_store::*;
 pub use self::message::*;
+pub use self::name_registry_events::*;
 pub use self::onchain_event_store::*;
 pub use self::reaction_store::*;
 pub use self::store::*;
