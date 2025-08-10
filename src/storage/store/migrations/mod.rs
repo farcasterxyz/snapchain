@@ -102,6 +102,17 @@ impl MigrationRunner {
             return Ok(None);
         }
 
+        for (i, migration) in self.all_migrations.iter().enumerate() {
+            if migration.version() as usize != i + 1 {
+                return Err(MigrationError::InternalError(format!(
+                    "Migration version mismatch for '{}': expected {}, found {}",
+                    migration.description(),
+                    i + 1,
+                    migration.version()
+                )));
+            }
+        }
+
         let start_migrations_at = db_version as usize;
         if start_migrations_at >= self.all_migrations.len() {
             return Err(MigrationError::InternalError(
