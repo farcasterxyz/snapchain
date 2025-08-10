@@ -11,7 +11,7 @@ pub struct M1FixFnameSecondaryIndex;
 
 #[async_trait]
 impl AsyncMigration for M1FixFnameSecondaryIndex {
-    fn version(&self) -> u32 {
+    fn to_db_version(&self) -> u32 {
         1
     }
 

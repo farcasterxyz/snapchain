@@ -38,7 +38,7 @@ pub struct MigrationContext {
 #[async_trait]
 pub trait AsyncMigration: Send + Sync {
     /// Returns the schema version this migration upgrades the DB to.
-    fn version(&self) -> u32;
+    fn to_db_version(&self) -> u32;
 
     /// A brief description of what the migration does.
     fn description(&self) -> &str;
@@ -103,12 +103,12 @@ impl MigrationRunner {
         }
 
         for (i, migration) in self.all_migrations.iter().enumerate() {
-            if migration.version() as usize != i + 1 {
+            if migration.to_db_version() as usize != i + 1 {
                 return Err(MigrationError::InternalError(format!(
                     "Migration version mismatch for '{}': expected {}, found {}",
                     migration.description(),
                     i + 1,
-                    migration.version()
+                    migration.to_db_version()
                 )));
             }
         }
@@ -134,7 +134,7 @@ impl MigrationRunner {
             for migration in migrations_to_run {
                 info!(
                     shard_id = self.context.stores.shard_id,
-                    version = migration.version(),
+                    version = migration.to_db_version(),
                     description = migration.description(),
                     "Running blocking migration..."
                 );
@@ -146,12 +146,12 @@ impl MigrationRunner {
                 let mut txn = RocksDbTransactionBatch::new();
                 self.context
                     .stores
-                    .set_schema_version(migration.version(), &mut txn)?;
+                    .set_schema_version(migration.to_db_version(), &mut txn)?;
                 self.context.db.commit(txn)?;
 
                 info!(
                     shard_id = self.context.stores.shard_id,
-                    version = migration.version(),
+                    version = migration.to_db_version(),
                     "Blocking migration completed successfully."
                 );
             }
@@ -165,7 +165,7 @@ impl MigrationRunner {
                 for migration in migrations_to_run {
                     info!(
                         shard_id = context.stores.shard_id,
-                        version = migration.version(),
+                        version = migration.to_db_version(),
                         description = migration.description(),
                         "Starting background migration..."
                     );
@@ -178,12 +178,12 @@ impl MigrationRunner {
                     let mut txn = RocksDbTransactionBatch::new();
                     context
                         .stores
-                        .set_schema_version(migration.version(), &mut txn)?;
+                        .set_schema_version(migration.to_db_version(), &mut txn)?;
                     context.db.commit(txn)?;
 
                     info!(
                         shard_id = context.stores.shard_id,
-                        version = migration.version(),
+                        version = migration.to_db_version(),
                         "Background migration completed successfully."
                     );
                 }
@@ -210,7 +210,7 @@ mod tests {
 
     #[async_trait]
     impl AsyncMigration for TestMigration {
-        fn version(&self) -> u32 {
+        fn to_db_version(&self) -> u32 {
             self.version
         }
 
