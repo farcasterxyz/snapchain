@@ -99,6 +99,13 @@ impl AsyncMigration for M1FixFnameSecondaryIndex {
                     "Committed fname index fixes."
                 );
             }
+
+            // Reload the trie for the next fid. Otherwise this will result in a memory leak
+            context
+                .stores
+                .trie
+                .reload(&context.stores.db)
+                .map_err(|e| MigrationError::InternalError(format!("Trie reload error: {}", e)))?;
         }
         info!(
             shard_id = context.stores.shard_id,
