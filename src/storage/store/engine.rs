@@ -1,27 +1,29 @@
 use super::account::{IntoU8, OnchainEventStorageError, UserDataStore, UsernameProofStore};
+use crate::consensus::proposer::ProposalSource;
 use crate::core::{
     error::HubError, types::Height, util::FarcasterTime, validations, validations::verification,
 };
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::message_data::Body;
 use crate::proto::{
-    self, hub_event, Block, FarcasterNetwork, HubEvent, HubEventType, MessageType, OnChainEvent,
-    OnChainEventType, Protocol, ShardChunk, ShardChunkWitness, Transaction, UserDataType,
-    UserNameProof,
+    self, hub_event, FarcasterNetwork, HubEvent, HubEventType, MessageType, OnChainEvent,
+    OnChainEventType, Protocol, ShardChunk, Transaction, UserDataType, UserNameProof,
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
-use crate::storage::store::account::{CastStore, MessagesPage, VerificationStore};
+use crate::storage::store::account::{
+    BlockEventStorageError, CastStore, MessagesPage, VerificationStore,
+};
+use crate::storage::store::engine_metrics::Metrics;
+use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
 use crate::storage::store::stores::{StoreLimits, Stores};
-use crate::storage::store::BlockStore;
 use crate::storage::trie::{self, merkle_trie};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::{EngineVersion, ProtocolFeature};
 use alloy_primitives::hex::FromHex;
 use alloy_primitives::Address;
 use informalsystems_malachitebft_core_types::Round;
-use itertools::Itertools;
 use merkle_trie::TrieKey;
-use std::cmp::{Ordering, PartialEq};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::str;
 use std::string::ToString;
@@ -29,7 +31,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
 #[derive(Error, Debug)]
@@ -52,19 +53,20 @@ pub enum EngineError {
     #[error("message receive error")]
     MessageReceiveError(#[from] oneshot::error::RecvError),
 
+    #[error("unable to make proposal")]
+    UnableToMakeProposal,
+
     #[error(transparent)]
     MergeOnchainEventError(#[from] OnchainEventStorageError),
 
     #[error(transparent)]
     EngineMessageValidationError(#[from] MessageValidationError),
-}
 
-#[derive(Clone, Debug, PartialEq, strum_macros::Display)]
-pub enum ProposalSource {
-    Simulate,
-    Propose,
-    Validate,
-    Commit,
+    #[error(transparent)]
+    MempoolPollerError(#[from] MempoolPollerError),
+
+    #[error(transparent)]
+    BlockEventStoreError(#[from] BlockEventStorageError),
 }
 
 #[derive(Error, Debug, Clone)]
@@ -98,33 +100,9 @@ pub enum MessageValidationError {
 
     #[error("address is not part of any verification")]
     AddressNotPartOfVerification,
-}
 
-#[derive(Clone, Debug)]
-pub enum MempoolMessage {
-    UserMessage(proto::Message),
-    ValidatorMessage(proto::ValidatorMessage),
-}
-
-impl MempoolMessage {
-    pub fn fid(&self) -> u64 {
-        match self {
-            MempoolMessage::UserMessage(msg) => msg.fid(),
-            MempoolMessage::ValidatorMessage(msg) => msg.fid(),
-        }
-    }
-
-    pub fn to_proto(&self) -> proto::MempoolMessage {
-        let msg = match self {
-            MempoolMessage::UserMessage(msg) => {
-                proto::mempool_message::MempoolMessage::UserMessage(msg.clone())
-            }
-            _ => todo!(),
-        };
-        proto::MempoolMessage {
-            mempool_message: Some(msg),
-        }
-    }
+    #[error("invalid seqnum for block event")]
+    InvalidSeqnumForBlockEvent,
 }
 
 // Shard state root and the transactions
@@ -157,12 +135,6 @@ pub struct PostCommitMessage {
     pub channel: oneshot::Sender<bool>,
 }
 
-struct TransactionCounts {
-    transactions: u64,
-    user_messages: u64,
-    system_messages: u64,
-}
-
 #[derive(Clone)]
 struct CachedTransaction {
     shard_root: Vec<u8>,
@@ -176,12 +148,11 @@ pub struct ShardEngine {
     pub db: Arc<RocksDB>,
     senders: Senders,
     stores: Stores,
-    statsd_client: StatsdClientWrapper,
-    max_messages_per_block: u32,
-    messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
+    metrics: Metrics,
     pending_txn: Option<CachedTransaction>,
     fname_signer_address: Option<alloy_primitives::Address>,
     post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
+    pub mempool_poller: MempoolPoller,
 }
 
 impl ShardEngine {
@@ -198,22 +169,32 @@ impl ShardEngine {
         post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
     ) -> ShardEngine {
         // TODO: adding the trie here introduces many calls that want to return errors. Rethink unwrap strategy.
+        let stores = Stores::new(
+            db.clone(),
+            shard_id,
+            trie,
+            store_limits,
+            network,
+            statsd_client.clone(),
+        );
         ShardEngine {
             shard_id,
             network,
-            stores: Stores::new(
-                db.clone(),
-                shard_id,
-                trie,
-                store_limits,
+            mempool_poller: MempoolPoller {
+                max_messages_per_block,
+                messages_request_tx,
+                onchain_event_store: stores.onchain_event_store.clone(),
                 network,
-                statsd_client.clone(),
-            ),
+                shard_id,
+                statsd_client: statsd_client.clone(),
+            },
+            stores,
             senders: Senders::new(),
             db,
-            statsd_client,
-            max_messages_per_block,
-            messages_request_tx,
+            metrics: Metrics {
+                statsd_client,
+                shard_id,
+            },
             pending_txn: None,
             fname_signer_address,
             post_commit_tx,
@@ -222,26 +203,6 @@ impl ShardEngine {
 
     pub fn shard_id(&self) -> u32 {
         self.shard_id
-    }
-
-    // statsd
-    fn count(&self, key: &str, count: u64, extra_tags: Vec<(&str, &str)>) {
-        let key = format!("engine.{}", key);
-        self.statsd_client
-            .count_with_shard(self.shard_id, key.as_str(), count, extra_tags);
-    }
-
-    // statsd
-    fn gauge(&self, key: &str, value: u64) {
-        let key = format!("engine.{}", key);
-        self.statsd_client
-            .gauge_with_shard(self.shard_id, key.as_str(), value);
-    }
-
-    fn time_with_shard(&self, key: &str, value: u64) {
-        let key = format!("engine.{}", key);
-        self.statsd_client
-            .time_with_shard(self.shard_id, key.as_str(), value);
     }
 
     pub fn get_stores(&self) -> Stores {
@@ -259,49 +220,7 @@ impl ShardEngine {
     pub fn is_read_only(&self) -> bool {
         // For a read-only node, we will never pull from the mempool, so Engines are constructed without a
         // messages_request_tx for read-only nodes
-        self.messages_request_tx.is_none()
-    }
-
-    pub(crate) async fn pull_messages(
-        &mut self,
-        max_wait: Duration,
-    ) -> Result<Vec<MempoolMessage>, EngineError> {
-        let now = std::time::Instant::now();
-        if let Some(messages_request_tx) = &self.messages_request_tx {
-            let (message_tx, message_rx) = oneshot::channel();
-
-            if let Err(err) = messages_request_tx
-                .send(MempoolMessagesRequest {
-                    shard_id: self.shard_id,
-                    message_tx,
-                    max_messages_per_block: self.max_messages_per_block,
-                })
-                .await
-            {
-                error!(
-                    "Could not send request for messages to mempool {}",
-                    err.to_string()
-                )
-            }
-
-            match timeout(max_wait, message_rx).await {
-                Ok(response) => match response {
-                    Ok(new_messages) => {
-                        let elapsed = now.elapsed();
-                        self.time_with_shard("pull_messages", elapsed.as_millis() as u64);
-                        Ok(new_messages)
-                    }
-                    Err(err) => Err(EngineError::from(err)),
-                },
-                Err(_) => {
-                    error!("Did not receive messages from mempool in time");
-                    // Just proceed with no messages
-                    Ok(vec![])
-                }
-            }
-        } else {
-            Ok(vec![])
-        }
+        self.mempool_poller.for_read_node()
     }
 
     fn prepare_proposal(
@@ -312,13 +231,15 @@ impl ShardEngine {
         messages: Vec<MempoolMessage>,
         timestamp: &FarcasterTime,
     ) -> Result<ShardStateChange, EngineError> {
-        self.count(
+        self.metrics.count(
             "prepare_proposal.recv_messages",
             messages.len() as u64,
             vec![],
         );
 
-        let mut snapchain_txns = self.create_transactions_from_mempool(messages)?;
+        let mut snapchain_txns = self
+            .mempool_poller
+            .create_transactions_from_mempool(messages)?;
         let mut events = vec![];
         let mut validation_error_count = 0;
         let version = self.version_for(timestamp);
@@ -336,23 +257,13 @@ impl ShardEngine {
             validation_error_count += validation_errors.len();
         }
 
-        let count = Self::txn_counts(&snapchain_txns);
+        self.metrics
+            .publish_transaction_counts(&snapchain_txns, ProposalSource::Propose);
 
-        self.count("prepare_proposal.transactions", count.transactions, vec![]);
-        self.count(
-            "prepare_proposal.user_messages",
-            count.user_messages,
-            vec![],
-        );
-        self.count(
-            "prepare_proposal.system_messages",
-            count.system_messages,
-            vec![],
-        );
-        self.count(
-            "prepare_proposal.validation_errors",
+        self.metrics.count(
+            "validation_errors",
             validation_error_count as u64,
-            vec![],
+            Metrics::proposal_source_tags(ProposalSource::Propose),
         );
 
         let new_root_hash = self.stores.trie.root_hash()?;
@@ -372,74 +283,6 @@ impl ShardEngine {
         EngineVersion::version_for(timestamp, self.network)
     }
 
-    // Groups messages by fid and creates a transaction for each fid
-    fn create_transactions_from_mempool(
-        &mut self,
-        messages: Vec<MempoolMessage>,
-    ) -> Result<Vec<Transaction>, EngineError> {
-        let mut transactions = vec![];
-
-        let grouped_messages = messages.iter().into_group_map_by(|msg| msg.fid());
-        let unique_fids = grouped_messages.keys().len();
-        for (fid, messages) in grouped_messages {
-            let mut transaction = Transaction {
-                fid: fid as u64,
-                account_root: vec![], // Starts empty, will be updated after replay
-                system_messages: vec![],
-                user_messages: vec![],
-            };
-
-            // First pass: collect all system_messages for this FID
-            for msg in &messages {
-                if let MempoolMessage::ValidatorMessage(validator_msg) = msg {
-                    transaction.system_messages.push(validator_msg.clone());
-                }
-            }
-
-            // Extract just the OnChainEvents from the collected system messages
-            let pending_onchain_events: Vec<OnChainEvent> = transaction
-                .system_messages
-                .iter()
-                .filter_map(|vm| vm.on_chain_event.clone())
-                .collect();
-
-            let version = EngineVersion::current(self.network);
-            let maybe_onchainevents =
-                if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
-                    Some(pending_onchain_events.as_slice())
-                } else {
-                    None
-                };
-
-            let storage_slot = self.stores.onchain_event_store.get_storage_slot_for_fid(
-                fid,
-                self.network,
-                maybe_onchainevents,
-            )?;
-
-            // Second pass: filter user_messages based on the look-ahead storage check
-            for msg in messages {
-                if let MempoolMessage::UserMessage(user_msg) = msg {
-                    // Only include messages for users that have storage
-                    if storage_slot.is_active() {
-                        transaction.user_messages.push(user_msg.clone());
-                    }
-                }
-            }
-
-            if !transaction.user_messages.is_empty() || !transaction.system_messages.is_empty() {
-                transactions.push(transaction);
-            }
-        }
-        info!(
-            transactions = transactions.len(),
-            messages = messages.len(),
-            fids = unique_fids,
-            "Created transactions from mempool"
-        );
-        Ok(transactions)
-    }
-
     pub fn start_round(&mut self, height: Height, _round: Round) {
         self.pending_txn = None;
         self.stores
@@ -456,7 +299,7 @@ impl ShardEngine {
         let now = std::time::Instant::now();
         let mut txn = RocksDbTransactionBatch::new();
 
-        let count_fn = Self::make_count_fn(self.statsd_client.clone(), self.shard_id);
+        let count_fn = self.metrics.make_count_fn();
         let count_callback = move |read_count: (u64, u64)| {
             count_fn("trie.db_get_count.total", read_count.0, vec![]);
             count_fn("trie.db_get_count.for_propose", read_count.0, vec![]);
@@ -483,9 +326,10 @@ impl ShardEngine {
         });
 
         let proposal_duration = now.elapsed();
-        self.time_with_shard("propose_time", proposal_duration.as_millis() as u64);
+        self.metrics
+            .time_with_shard("propose_time", proposal_duration.as_millis() as u64);
 
-        self.count("propose.invoked", 1, vec![]);
+        self.metrics.count("propose.invoked", 1, vec![]);
         result
     }
 
@@ -621,7 +465,8 @@ impl ShardEngine {
         }
 
         let elapsed = now.elapsed();
-        self.time_with_shard("replay_proposal_time", elapsed.as_millis() as u64);
+        self.metrics
+            .time_with_shard("replay_proposal_time", elapsed.as_millis() as u64);
         Ok(events)
     }
 
@@ -649,6 +494,7 @@ impl ShardEngine {
         let mut revoked_signers = HashSet::new();
 
         let mut validation_errors = vec![];
+        let mut last_block_event_seqnum = self.stores.block_event_store.max_seqnum()?;
 
         // System messages first, then user messages and finally prunes
 
@@ -784,6 +630,20 @@ impl ShardEngine {
                             }
                         }
                     }
+                }
+            }
+
+            if let Some(block_event) = &msg.block_event {
+                // TODO(aditi): Validate hash and insert into any other relevant stores and trie if the message is relevant
+                if block_event.seqnum == last_block_event_seqnum + 1 {
+                    if let Err(err) = self.stores.block_event_store.put_block_event(block_event) {
+                        error!(
+                            seqnum = block_event.seqnum.to_string(),
+                            "Error merging block event: {}",
+                            err.to_string()
+                        );
+                    }
+                    last_block_event_seqnum += 1;
                 }
             }
         }
@@ -964,7 +824,8 @@ impl ShardEngine {
             "Replayed transaction"
         );
         let elapsed = now.elapsed();
-        self.time_with_shard("replay_txn_time_us", elapsed.as_micros() as u64);
+        self.metrics
+            .time_with_shard("replay_txn_time_us", elapsed.as_micros() as u64);
 
         // Return the new account root hash
         Ok((account_root, events, validation_errors))
@@ -1107,7 +968,8 @@ impl ShardEngine {
             }
         }?;
         let elapsed = now.elapsed();
-        self.time_with_shard("merge_message_time_us", elapsed.as_micros() as u64);
+        self.metrics
+            .time_with_shard("merge_message_time_us", elapsed.as_micros() as u64);
         Ok(event)
     }
 
@@ -1287,7 +1149,8 @@ impl ShardEngine {
             }
         }
         let elapsed = now.elapsed();
-        self.time_with_shard("update_trie_time_us", elapsed.as_micros() as u64);
+        self.metrics
+            .time_with_shard("update_trie_time_us", elapsed.as_micros() as u64);
         Ok(())
     }
 
@@ -1364,7 +1227,8 @@ impl ShardEngine {
         }
 
         let elapsed = now.elapsed();
-        self.time_with_shard("validate_user_message_time_us", elapsed.as_micros() as u64);
+        self.metrics
+            .time_with_shard("validate_user_message_time_us", elapsed.as_micros() as u64);
         Ok(())
     }
 
@@ -1491,7 +1355,7 @@ impl ShardEngine {
 
         let mut result = true;
 
-        let count_fn = Self::make_count_fn(self.statsd_client.clone(), self.shard_id);
+        let count_fn = self.metrics.make_count_fn();
         let count_callback = move |read_count: (u64, u64)| {
             count_fn("trie.db_get_count.total", read_count.0, vec![]);
             count_fn("trie.db_get_count.for_validate", read_count.0, vec![]);
@@ -1525,14 +1389,15 @@ impl ShardEngine {
 
         self.stores.trie.reload(&self.db).unwrap();
         let elapsed = now.elapsed();
-        self.time_with_shard("validate_time", elapsed.as_millis() as u64);
+        self.metrics
+            .time_with_shard("validate_time", elapsed.as_millis() as u64);
 
         if result {
-            self.count("validate.true", 1, vec![]);
-            self.count("validate.false", 0, vec![]);
+            self.metrics.count("validate.true", 1, vec![]);
+            self.metrics.count("validate.false", 0, vec![]);
         } else {
-            self.count("validate.false", 1, vec![]);
-            self.count("validate.true", 0, vec![]);
+            self.metrics.count("validate.false", 1, vec![]);
+            self.metrics.count("validate.true", 0, vec![]);
         }
 
         result
@@ -1591,7 +1456,8 @@ impl ShardEngine {
             Ok(()) => {}
         }
         let elapsed = now.elapsed();
-        self.time_with_shard("commit_time", elapsed.as_millis() as u64);
+        self.metrics
+            .time_with_shard("commit_time", elapsed.as_millis() as u64);
         self.post_commit(shard_chunk.header.as_ref().unwrap().clone())
             .await;
     }
@@ -1601,7 +1467,7 @@ impl ShardEngine {
         shard_chunk: &&ShardChunk,
         events: &Vec<HubEvent>,
     ) -> Result<(), EngineError> {
-        self.count("commit.invoked", 1, vec![]);
+        self.metrics.count("commit.invoked", 1, vec![]);
 
         let block_number = &shard_chunk
             .header
@@ -1611,31 +1477,27 @@ impl ShardEngine {
             .unwrap()
             .block_number;
 
-        self.gauge("block_height", *block_number);
+        self.metrics.gauge("block_height", *block_number);
         let block_timestamp = shard_chunk.header.as_ref().unwrap().timestamp;
-        self.gauge(
+        self.metrics.gauge(
             "block_delay_seconds",
             FarcasterTime::current().to_u64() - block_timestamp,
         );
 
         let trie_size = self.stores.trie.items()?;
-        self.gauge("trie.num_items", trie_size as u64);
+        self.metrics.gauge("trie.num_items", trie_size as u64);
 
-        let counts = Self::txn_counts(&shard_chunk.transactions);
-
-        self.count("commit.transactions", counts.transactions, vec![]);
-        self.count("commit.user_messages", counts.user_messages, vec![]);
-        self.count("commit.system_messages", counts.system_messages, vec![]);
+        self.metrics
+            .publish_transaction_counts(&shard_chunk.transactions, ProposalSource::Commit);
 
         // useful to see on perf test dashboards
-        self.gauge(
+        self.metrics.gauge(
             "trie.branching_factor",
             self.stores.trie.branching_factor() as u64,
         );
-        self.gauge("max_messages_per_block", self.max_messages_per_block as u64);
 
         for event in events {
-            self.count(
+            self.metrics.count(
                 "commit.emitted_event",
                 1,
                 vec![("event_type", &event.r#type.to_string())],
@@ -1644,7 +1506,7 @@ impl ShardEngine {
                 match &event.body {
                     Some(hub_event::Body::MergeMessageBody(body)) => {
                         if let Some(message) = &body.message {
-                            self.count(
+                            self.metrics.count(
                                 "commit.merged_message",
                                 1,
                                 vec![("message_type", &(message.msg_type() as i32).to_string())],
@@ -1692,18 +1554,9 @@ impl ShardEngine {
                 }
 
                 let elapsed = now.elapsed();
-                self.time_with_shard("post_commit_time", elapsed.as_millis() as u64);
+                self.metrics
+                    .time_with_shard("post_commit_time", elapsed.as_millis() as u64);
             }
-        }
-    }
-
-    pub fn make_count_fn(
-        statsd_client: StatsdClientWrapper,
-        shard_id: u32,
-    ) -> impl Fn(&str, u64, Vec<(&str, &str)>) {
-        move |key: &str, count: u64, extra_tags: Vec<(&str, &str)>| {
-            let key = format!("engine.{}", key);
-            statsd_client.count_with_shard(shard_id, &key, count, extra_tags);
         }
     }
 
@@ -1742,7 +1595,7 @@ impl ShardEngine {
             self.stores.event_handler.set_current_height(block_number);
             let version = self.version_for(&FarcasterTime::new(header.timestamp));
 
-            let count_fn = Self::make_count_fn(self.statsd_client.clone(), self.shard_id);
+            let count_fn = self.metrics.make_count_fn();
             let count_callback = move |read_count: (u64, u64)| {
                 count_fn("trie.db_get_count.total", read_count.0, vec![]);
                 count_fn("trie.db_get_count.for_commit", read_count.0, vec![]);
@@ -2067,22 +1920,6 @@ impl ShardEngine {
             .get_onchain_events(event_type, Some(fid))
     }
 
-    fn txn_counts(txns: &[Transaction]) -> TransactionCounts {
-        let (user_count, system_count) =
-            txns.iter().fold((0, 0), |(user_count, system_count), tx| {
-                (
-                    user_count + tx.user_messages.len(),
-                    system_count + tx.system_messages.len(),
-                )
-            });
-
-        TransactionCounts {
-            transactions: txns.len() as u64,
-            user_messages: user_count as u64,
-            system_messages: system_count as u64,
-        }
-    }
-
     pub fn trie_num_items(&mut self) -> usize {
         self.stores.trie.items().unwrap()
     }
@@ -2093,126 +1930,5 @@ impl ShardEngine {
             return false;
         }
         signer_event.event_type == proto::SignerEventType::Remove as i32
-    }
-}
-
-pub struct BlockEngine {
-    block_store: BlockStore,
-    statsd_client: StatsdClientWrapper,
-}
-
-impl BlockEngine {
-    pub fn new(block_store: BlockStore, statsd_client: StatsdClientWrapper) -> Self {
-        BlockEngine {
-            block_store,
-            statsd_client,
-        }
-    }
-
-    // statsd
-    fn count(&self, key: &str, count: u64) {
-        let key = format!("engine.{}", key);
-        self.statsd_client
-            .count_with_shard(0, key.as_str(), count, vec![]);
-    }
-
-    // statsd
-    fn gauge(&self, key: &str, value: u64) {
-        let key = format!("engine.{}", key);
-        self.statsd_client.gauge_with_shard(0, key.as_str(), value);
-    }
-
-    pub fn commit_block(&mut self, block: &Block) {
-        self.gauge(
-            "block_height",
-            block
-                .header
-                .as_ref()
-                .unwrap()
-                .height
-                .as_ref()
-                .unwrap()
-                .block_number,
-        );
-        let block_timestamp = block.header.as_ref().unwrap().timestamp;
-        self.gauge(
-            "block_delay_seconds",
-            FarcasterTime::current().to_u64() - block_timestamp,
-        );
-        self.count(
-            "block_shards",
-            block
-                .shard_witness
-                .as_ref()
-                .unwrap()
-                .shard_chunk_witnesses
-                .len() as u64,
-        );
-
-        let result = self.block_store.put_block(block);
-        if result.is_err() {
-            error!("Failed to store block: {:?}", result.err());
-        }
-    }
-
-    pub fn get_last_block(&self) -> Option<Block> {
-        match self.block_store.get_last_block() {
-            Ok(block) => block,
-            Err(err) => {
-                error!("Unable to obtain last block {:#?}", err);
-                None
-            }
-        }
-    }
-
-    pub fn get_block_by_height(&self, height: Height) -> Option<Block> {
-        if height.shard_index != 0 {
-            error!(
-                shard_id = 0,
-                requested_shard_id = height.shard_index,
-                "Requested shard chunk from incorrect shard"
-            );
-
-            return None;
-        }
-        match self.block_store.get_block_by_height(height.block_number) {
-            Ok(block) => block,
-            Err(err) => {
-                error!("No block at height {:#?}", err);
-                None
-            }
-        }
-    }
-
-    pub fn get_confirmed_height(&self) -> Height {
-        let shard_index = 0;
-        match self.block_store.max_block_number() {
-            Ok(block_num) => Height::new(shard_index, block_num),
-            Err(_) => Height::new(shard_index, 0),
-        }
-    }
-
-    pub fn get_min_height(&self) -> Height {
-        let shard_index = 0;
-        match self.block_store.min_block_number() {
-            Ok(block_num) => Height::new(shard_index, block_num),
-            // In case of no blocks, return height 1
-            Err(_) => Height::new(shard_index, 1),
-        }
-    }
-
-    pub fn get_last_shard_witness(
-        &self,
-        height: Height,
-        shard_id: u32,
-    ) -> Option<ShardChunkWitness> {
-        let previous_height = height.decrement()?;
-        let previous_block = self.get_block_by_height(previous_height)?;
-        let previous_shard_witness = previous_block.shard_witness?;
-        previous_shard_witness
-            .shard_chunk_witnesses
-            .iter()
-            .find(|witness| witness.height.unwrap().shard_index == shard_id)
-            .cloned()
     }
 }

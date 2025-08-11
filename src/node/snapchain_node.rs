@@ -8,12 +8,13 @@ use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::network::gossip::GossipEvent;
 use crate::proto::{Block, FarcasterNetwork, ShardChunk};
 use crate::storage::db::RocksDB;
-use crate::storage::store::engine::{BlockEngine, PostCommitMessage, Senders, ShardEngine};
+use crate::storage::store::block_engine::BlockEngine;
+use crate::storage::store::engine::{PostCommitMessage, Senders, ShardEngine};
 use crate::storage::store::node_local_state::LocalStateStore;
 use crate::storage::store::stores::StoreLimits;
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
-use crate::storage::trie::merkle_trie;
+use crate::storage::trie::merkle_trie::{self, MerkleTrie};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
@@ -39,7 +40,7 @@ impl SnapchainNode {
         local_peer_id: PeerId,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         shard_decision_tx: broadcast::Sender<ShardChunk>,
-        block_tx: Option<mpsc::Sender<Block>>,
+        block_tx: Option<broadcast::Sender<Block>>,
         messages_request_tx: mpsc::Sender<MempoolMessagesRequest>,
         block_store: BlockStore,
         local_state_store: LocalStateStore,
@@ -127,7 +128,16 @@ impl SnapchainNode {
         let block_shard = SnapchainShard::new(0);
 
         // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
-        let engine = BlockEngine::new(block_store.clone(), statsd_client.clone());
+        let trie = MerkleTrie::new(trie_branching_factor).unwrap();
+        let engine = BlockEngine::new(
+            block_store.clone(),
+            trie,
+            statsd_client.clone(),
+            block_store.db,
+            config.max_messages_per_block,
+            Some(messages_request_tx.clone()),
+            network,
+        );
         let block_proposer = BlockProposer::new(
             validator_address.clone(),
             block_shard.clone(),

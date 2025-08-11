@@ -31,7 +31,8 @@ use crate::{
         SignerEventBody, SignerEventType, SignerMigratedEventBody, StorageRentEventBody,
         ValidatorMessage, VerificationAddAddressBody,
     },
-    storage::store::{engine::MempoolMessage, node_local_state::LocalStateStore},
+    storage::store::mempool_poller::MempoolMessage,
+    storage::store::node_local_state::LocalStateStore,
     utils::statsd_wrapper::StatsdClientWrapper,
 };
 
@@ -534,10 +535,14 @@ impl Subscriber {
         if let Err(err) = self
             .mempool_tx
             .send(MempoolRequest::AddMessage(
-                MempoolMessage::ValidatorMessage(ValidatorMessage {
-                    on_chain_event: Some(event.clone()),
-                    fname_transfer: None,
-                }),
+                MempoolMessage::ValidatorMessage {
+                    for_shard: None,
+                    message: ValidatorMessage {
+                        on_chain_event: Some(event.clone()),
+                        fname_transfer: None,
+                        block_event: None,
+                    },
+                },
                 MempoolSource::Local,
                 None,
             ))

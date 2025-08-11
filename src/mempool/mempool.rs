@@ -23,7 +23,7 @@ use crate::{
             account::{
                 get_message_by_key, make_message_primary_key, make_ts_hash, type_to_set_postfix,
             },
-            engine::MempoolMessage,
+            mempool_poller::MempoolMessage,
             stores::Stores,
         },
     },
@@ -197,6 +197,13 @@ impl proto::ValidatorMessage {
                 hex::encode(&event.transaction_hash) + &event.log_index.to_string(),
             );
         }
+        if let Some(block_event) = &self.block_event {
+            return MempoolKey::new(
+                MempoolMessageKind::ValidatorMessage,
+                block_event.block_timestamp,
+                format!("{}-{}", block_event.block_number, block_event.event_index),
+            );
+        }
         todo!();
     }
 }
@@ -222,7 +229,10 @@ impl MempoolMessage {
     pub fn mempool_key(&self) -> MempoolKey {
         match self {
             MempoolMessage::UserMessage(msg) => msg.mempool_key(),
-            MempoolMessage::ValidatorMessage(msg) => msg.mempool_key(),
+            MempoolMessage::ValidatorMessage {
+                for_shard: _,
+                message,
+            } => message.mempool_key(),
         }
     }
 }
@@ -299,7 +309,7 @@ impl ReadNodeMempool {
                         }
                     }
                 },
-                MempoolMessage::ValidatorMessage(_) => {
+                MempoolMessage::ValidatorMessage { .. } => {
                     // Don't do duplicate checks for validator messages. They are infrequent, and engine can handle duplicates.
                     false
                 }
@@ -423,7 +433,7 @@ impl Mempool {
                     false
                 }
             }
-            MempoolMessage::ValidatorMessage(_) => false,
+            MempoolMessage::ValidatorMessage { .. } => false,
         }
     }
 
@@ -483,42 +493,56 @@ impl Mempool {
         source: MempoolSource,
     ) -> Result<(), HubError> {
         let fid = message.fid();
-        let original_shard_id = self
+
+        let fid_shard = self
             .read_node_mempool
             .message_router
             .route_fid(fid, self.read_node_mempool.num_shards);
 
-        let result = self
-            .insert_into_shard(original_shard_id, message.clone(), source.clone())
-            .await;
-
         // Fname transfers are mirrored to both the sender and receiver shard.
-        if let MempoolMessage::ValidatorMessage(inner_message) = &message {
-            if let Some(_fname_transfer) = &inner_message.fname_transfer {
+        let shard_ids = if let MempoolMessage::ValidatorMessage {
+            for_shard,
+            message: inner_message,
+        } = &message
+        {
+            if let Some(for_shard) = for_shard {
+                // Block events should be sent with this populated
+                vec![*for_shard]
+            } else if let Some(_fname_transfer) = &inner_message.fname_transfer {
                 let version = EngineVersion::current(self.network);
                 // Send the username transfer to all other shards, transfers from a->b->c are
                 // correctly tracked. Due to current limitations of the engine, if we transfer from
                 // shard 1 to shard 2, and then transfer within shard 2, we will keep the transfer
                 // around forever on shard 1. See test_fname_transfer for an example.
                 if version.is_enabled(ProtocolFeature::UsernameShardRoutingFix) {
-                    for copy_shard in 1..self.read_node_mempool.num_shards {
-                        if copy_shard != original_shard_id {
-                            let copy_result = self
-                                .insert_into_shard(copy_shard, message.clone(), source.clone())
-                                .await;
-                            if copy_result.is_err() {
-                                warn!(
-                                    "Failed to insert fname transfer into copy shard {}: {:?}",
-                                    copy_shard, copy_result
-                                );
-                            }
-                        }
-                    }
+                    (1..self.read_node_mempool.num_shards).collect()
+                } else {
+                    vec![fid_shard]
                 }
+            } else if let Some(_onchain_event) = &inner_message.on_chain_event {
+                // All onchain events should also go to shard 0
+                vec![fid_shard, 0]
+            } else {
+                vec![fid_shard]
+            }
+        } else {
+            vec![fid_shard]
+        };
+
+        for shard_id in shard_ids {
+            if let Err(err) = self
+                .insert_into_shard(shard_id, message.clone(), source.clone())
+                .await
+            {
+                error!(
+                    shard_id = shard_id.to_string(),
+                    "Unable to insert message into mempool for shard: {}",
+                    err.to_string()
+                )
             }
         }
 
-        result
+        Ok(())
     }
 
     async fn insert_into_shard(

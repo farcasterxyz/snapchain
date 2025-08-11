@@ -39,6 +39,16 @@ impl proto::ValidatorMessage {
         if let Some(event) = &self.on_chain_event {
             return event.fid;
         }
+
+        if let Some(block_event) = &self.block_event {
+            if let Some(body) = &block_event.body {
+                match body {
+                    proto::block_event::Body::TestEventBody(test_event_body) => {
+                        return test_event_body.fid
+                    }
+                }
+            }
+        }
         0
     }
 }

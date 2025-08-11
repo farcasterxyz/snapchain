@@ -2,7 +2,7 @@ use crate::consensus::consensus::SystemMessage;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::network::gossip::{Config, GossipEvent, SnapchainGossip};
 use crate::proto::{FarcasterNetwork, Message, MessageData};
-use crate::storage::store::engine::MempoolMessage;
+use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::test_helper::statsd_client;
 use crate::utils::factory::messages_factory;
 use libp2p::identity::ed25519::Keypair;

@@ -6,10 +6,11 @@ use crate::core::types::{Address, ShardId, SnapchainShard, SnapchainValidatorCon
 use crate::network::gossip::GossipEvent;
 use crate::proto;
 use crate::storage::db::RocksDB;
-use crate::storage::store::engine::{BlockEngine, PostCommitMessage, Senders, ShardEngine};
+use crate::storage::store::block_engine::BlockEngine;
+use crate::storage::store::engine::{PostCommitMessage, Senders, ShardEngine};
 use crate::storage::store::stores::{StoreLimits, Stores};
 use crate::storage::store::BlockStore;
-use crate::storage::trie::merkle_trie;
+use crate::storage::trie::merkle_trie::{self, MerkleTrie};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
@@ -102,7 +103,16 @@ impl SnapchainReadNode {
         let block_shard = SnapchainShard::new(0);
 
         // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
-        let engine = BlockEngine::new(block_store.clone(), statsd_client.clone());
+        let trie = MerkleTrie::new(trie_branching_factor).unwrap();
+        let engine = BlockEngine::new(
+            block_store.clone(),
+            trie,
+            statsd_client.clone(),
+            block_store.db,
+            config.max_messages_per_block,
+            None,
+            farcaster_network,
+        );
         let ctx = SnapchainValidatorContext::new(keypair.clone());
         let block_actor = MalachiteReadNodeActors::create_and_start(
             ctx,
@@ -139,6 +149,7 @@ impl SnapchainReadNode {
             actor.stop();
         }
     }
+
     pub fn dispatch_decided_value(&self, decided_value: proto::DecidedValue) {
         let shard_id = match decided_value.value.as_ref().unwrap() {
             proto::decided_value::Value::Shard(shard_chunk) => {
