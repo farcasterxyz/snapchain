@@ -275,6 +275,7 @@ mod tests {
                 shard_id,
                 height,
                 next_page_token.clone(),
+                None,
                 message_limit,
             );
 

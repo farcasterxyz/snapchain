@@ -1,5 +1,5 @@
 use crate::{
-    core::util,
+    core::{error::HubError, util},
     proto,
     replication::{error::ReplicationError, replication_stores::ReplicationStores},
     storage::{
@@ -9,9 +9,17 @@ use crate::{
             engine::PostCommitMessage,
             stores::Stores,
         },
-        trie::merkle_trie::TrieKey,
+        trie::merkle_trie::{self, TrieKey},
     },
 };
+use crate::{
+    proto::OnChainEventType,
+    storage::{
+        store::account::{make_message_primary_key, message_decode, type_to_set_postfix},
+        util::increment_vec_u8,
+    },
+};
+use std::collections::{HashMap, HashSet};
 use std::{sync::Arc, time::Duration};
 use tokio::select;
 use tracing::{error, info};
@@ -119,8 +127,16 @@ impl Replicator {
         shard: u32,
         height: u64,
         page_token: Option<Vec<u8>>,
+        start_fid: Option<u64>,
         message_limit: usize,
     ) -> Result<(Vec<proto::Transaction>, Option<Vec<u8>>), ReplicationError> {
+        // Ensure page_token and start_fid are mutually exclusive
+        if page_token.is_some() && start_fid.is_some() {
+            return Err(ReplicationError::InvalidMessage(
+                "page_token and start_fid are mutually exclusive".to_string(),
+            ));
+        }
+
         let stores = match self.stores.get(shard, height) {
             Some(stores) => stores,
             None => {
@@ -132,9 +148,11 @@ impl Replicator {
             }
         };
 
-        let mut cursor = match page_token {
-            Some(token) => Cursor::new(Token::new_raw(token), message_limit),
-            None => Cursor::new_for_fid(0, message_limit),
+        let mut cursor = match (page_token, start_fid) {
+            (Some(token), None) => Cursor::new(Token::new_raw(token), message_limit),
+            (None, Some(fid)) => Cursor::new_for_fid(fid, message_limit),
+            (None, None) => Cursor::new_for_fid(0, message_limit),
+            (Some(_), Some(_)) => unreachable!(), // Already handled above
         };
 
         let iterator_fid = cursor.token.fid().saturating_sub(1);
@@ -142,6 +160,14 @@ impl Replicator {
         let mut transactions = vec![];
 
         for fid in fid_iterator.into_iter() {
+            // This is commented out, but extremely useful for debugging. It diffs the merkle trie and the DB stores to
+            // find message inconsistencies for FIDs
+            // if let Err(e) = check_db_trie_consistency_for_fid(&stores, fid) {
+            //     error!("Inconsistent state for FID {}: {}", fid, e);
+            // } else {
+            //     info!("Consistent state for FID {}", fid);
+            // }
+
             if cursor.token.fid() != fid {
                 cursor.token = Token::new_for_fid(fid);
             }
@@ -411,7 +437,8 @@ impl Cursor {
 // and collection of messages (generic type T) from a store using a cursor. It handles all the
 // pagination logic, including checking the cursor token, fetching results, and updating the
 // cursor for all the various types of messages that need to be queried as part of the replication
-// process.
+// process. It will only fetch one type of messages `message_type`, and will break after the type
+// of messages have been exhausted
 //
 // The function takes a closure `f` that is responsible for fetching the messages from the store.
 // It is expected to return a tuple containing the fetched messages and an optional next page
@@ -547,6 +574,7 @@ fn collect_onchain_events_with_cursor(
     message_type: MessageType,
     event_type: proto::OnChainEventType,
 ) -> Result<Vec<proto::ValidatorMessage>, ReplicationError> {
+    // Collect only `message_Type` messages with the cursor
     collect_messages_with_cursor(cursor, message_type, |page_options, cursor| {
         match account::get_onchain_events(
             &stores.db,
@@ -662,17 +690,15 @@ fn build_validator_messages(
 ) -> Result<Vec<proto::ValidatorMessage>, ReplicationError> {
     let mut messages = vec![];
 
+    // onchain events
     // IMPORTANT: changing the order of these calls will affect the cursor token, and
     // be a backwards-incompatible change!
-
-    // onchain events
-
     let event_types = vec![
-        proto::OnChainEventType::EventTypeSigner,
-        proto::OnChainEventType::EventTypeSignerMigrated,
         proto::OnChainEventType::EventTypeIdRegister,
+        proto::OnChainEventType::EventTypeSigner,
         proto::OnChainEventType::EventTypeStorageRent,
         proto::OnChainEventType::EventTypeTierPurchase,
+        proto::OnChainEventType::EventTypeSignerMigrated,
     ];
 
     for event_type in event_types {
@@ -719,21 +745,30 @@ fn build_user_messages_for_fid(
 ) -> Result<Vec<proto::Message>, ReplicationError> {
     // IMPORTANT: changing the order of these calls will affect the cursor token, and
     // be a backwards-incompatible change!
-
     let message_types = vec![
+        proto::MessageType::VerificationAddEthAddress,
+        proto::MessageType::UsernameProof,
+        proto::MessageType::UserDataAdd,
         proto::MessageType::CastAdd,
         proto::MessageType::LinkCompactState,
         proto::MessageType::LinkAdd,
         proto::MessageType::ReactionAdd,
-        proto::MessageType::UserDataAdd,
-        proto::MessageType::VerificationAddEthAddress,
-        proto::MessageType::UsernameProof,
     ];
 
     let mut messages = vec![];
 
     for message_type in message_types {
         let result = match message_type {
+            proto::MessageType::VerificationAddEthAddress => {
+                collect_messages(&stores.verification_store, cursor, message_type.into())
+            }
+            proto::MessageType::UsernameProof => {
+                collect_messages(&stores.username_proof_store, cursor, message_type.into())
+            }
+
+            proto::MessageType::UserDataAdd => {
+                collect_messages(&stores.user_data_store, cursor, message_type.into())
+            }
             proto::MessageType::CastAdd => {
                 collect_messages(&stores.cast_store, cursor, message_type.into())
             }
@@ -745,15 +780,6 @@ fn build_user_messages_for_fid(
             }
             proto::MessageType::ReactionAdd => {
                 collect_messages(&stores.reaction_store, cursor, message_type.into())
-            }
-            proto::MessageType::UserDataAdd => {
-                collect_messages(&stores.user_data_store, cursor, message_type.into())
-            }
-            proto::MessageType::VerificationAddEthAddress => {
-                collect_messages(&stores.verification_store, cursor, message_type.into())
-            }
-            proto::MessageType::UsernameProof => {
-                collect_messages(&stores.username_proof_store, cursor, message_type.into())
             }
             _ => {
                 return Err(ReplicationError::InternalError(format!(
@@ -821,6 +847,176 @@ fn build_transaction_for_fid(
         user_messages,
         account_root: fid_account_root,
     }))
+}
+
+/// For a given FID, checks that every message in the database is also in the Merkle trie,
+/// and every relevant message key in the Merkle trie is also in the database.
+/// This is intended for debugging replication inconsistencies.
+pub fn check_db_trie_consistency_for_fid(stores: &Stores, fid: u64) -> Result<(), String> {
+    // --- 1. Get all replicated messages from the database for the FID ---
+    // We'll store them in a HashMap mapping the key to a descriptive string.
+    let mut db_messages = HashMap::new();
+
+    // System Messages (On-chain events, username proofs)
+    let mut cursor = Cursor::new_for_fid(fid, usize::MAX);
+    let system_messages =
+        build_validator_messages(stores, &mut cursor).map_err(|e| e.to_string())?;
+    for msg in system_messages {
+        if let Some(event) = msg.on_chain_event {
+            let key = TrieKey::for_onchain_event(&event);
+            let description = format!("OnChainEvent: {:?}", event);
+            db_messages.insert(key, description);
+        }
+        if let Some(fname) = msg.fname_transfer {
+            if let Some(proof) = fname.proof {
+                if let Ok(name) = std::str::from_utf8(&proof.name) {
+                    let key = TrieKey::for_fname(proof.fid, &name.to_string());
+                    let description = format!("FnameProof: {:?}", proof);
+                    db_messages.insert(key, description);
+                }
+            }
+        }
+    }
+
+    // User Messages
+    let mut cursor = Cursor::new_for_fid(fid, usize::MAX);
+    let user_messages =
+        build_user_messages_for_fid(stores, &mut cursor).map_err(|e| e.to_string())?;
+    for msg in user_messages {
+        let key = TrieKey::for_message(&msg);
+        let description = format!("UserMessage: {:?}", msg);
+        db_messages.insert(key, description);
+    }
+
+    // --- 2. Get all keys from the Merkle trie for the FID ---
+    let mut trie = stores.trie.clone();
+    let trie_keys_bytes = trie
+        .get_all_values(
+            &merkle_trie::Context::new(),
+            &stores.db,
+            &TrieKey::for_fid(fid),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let trie_keys: HashSet<Vec<u8>> = trie_keys_bytes.into_iter().collect();
+
+    // --- 3. Compare the two sets ---
+    let mut errors = Vec::new();
+
+    // Check for keys in Trie but not in DB
+    for trie_key in &trie_keys {
+        if !db_messages.contains_key(trie_key) {
+            let decoded_key = decode_trie_key(stores, trie_key).unwrap_or_else(|e| e);
+            errors.push(format!(
+                "Inconsistency Found: Key exists in Merkle Trie but not in DB.\n  - Key: {}\n  - Decoded: {}",
+                hex::encode(trie_key),
+                decoded_key
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n\n"))
+    }
+}
+
+/// Helper to find a message in the DB when only its hash is known.
+fn get_message_by_hash(
+    stores: &Stores,
+    fid: u64,
+    msg_type: proto::MessageType,
+    hash: &[u8],
+) -> Result<Option<proto::Message>, HubError> {
+    let set_postfix = type_to_set_postfix(msg_type)?;
+    let prefix = make_message_primary_key(fid, set_postfix as u8, None);
+
+    let mut found_message: Option<proto::Message> = None;
+
+    stores.db.for_each_iterator_by_prefix(
+        Some(prefix.to_vec()),
+        Some(increment_vec_u8(&prefix)),
+        &PageOptions::default(),
+        |_key, value| {
+            let message = message_decode(value)?;
+            if message.hash == hash {
+                found_message = Some(message);
+                return Ok(true); // Stop iterating
+            }
+            Ok(false) // Continue iterating
+        },
+    )?;
+
+    Ok(found_message)
+}
+
+/// Decodes a raw trie key into a human-readable string for debugging.
+fn decode_trie_key(stores: &Stores, key: &[u8]) -> Result<String, String> {
+    if key.len() < 6 {
+        return Err(format!("Key too short: {}", hex::encode(key)));
+    }
+
+    let fid = account::read_fid_key(key, 1);
+    let type_byte = key[5];
+
+    match type_byte {
+        1..=6 => {
+            // OnChainEvent
+            let event_type = OnChainEventType::try_from(type_byte as i32).unwrap();
+            let tx_hash = &key[6..38]; // 32 bytes
+            let log_index = u32::from_be_bytes(key[38..42].try_into().unwrap());
+            Ok(format!(
+                "OnChainEvent(fid={}, type={:?}, tx_hash=0x{}, log_index={})",
+                fid,
+                event_type.as_str_name(),
+                hex::encode(tx_hash),
+                log_index
+            ))
+        }
+        7 => {
+            // FnameProof
+            let name_bytes = &key[6..];
+            let name = std::str::from_utf8(name_bytes)
+                .unwrap_or_default()
+                .trim_end_matches('\0');
+            Ok(format!("FnameProof(fid={}, name='{}')", fid, name))
+        }
+        _ => {
+            // UserMessage
+            if key.len() != 26 {
+                return Err(format!(
+                    "Invalid user message key length: {}. Key: {}",
+                    key.len(),
+                    hex::encode(key)
+                ));
+            }
+            let msg_type_val = type_byte >> 3;
+            let msg_type = proto::MessageType::try_from(msg_type_val as i32)
+                .map_err(|_| format!("Invalid message type value: {}", msg_type_val))?;
+            let hash = &key[6..];
+
+            // Try to find this message in the DB to print it
+            match get_message_by_hash(stores, fid, msg_type, hash) {
+                Ok(Some(msg)) => Ok(format!(
+                    "UserMessage(type={:?}, hash=0x{}, content: {:?})",
+                    msg_type.as_str_name(),
+                    hex::encode(hash),
+                    msg.data.and_then(|d| d.body)
+                )),
+                Ok(None) => Ok(format!(
+                    "UserMessage(type={:?}, hash=0x{}) - NOT FOUND in DB",
+                    msg_type.as_str_name(),
+                    hex::encode(hash)
+                )),
+                Err(e) => Err(format!(
+                    "Error fetching message with hash 0x{}: {}",
+                    hex::encode(hash),
+                    e
+                )),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

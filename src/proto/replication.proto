@@ -29,7 +29,10 @@ message GetShardSnapshotMetadataResponse {
 message GetShardTransactionsRequest {
   uint32 shard_id = 1;
   uint64 height = 2;
-  optional bytes page_token = 3;
+  oneof cursor {
+    bytes page_token = 3;
+    uint64 start_fid = 4;
+  }
 }
 
 message GetShardTransactionsResponse {
