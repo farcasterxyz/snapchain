@@ -77,10 +77,10 @@ pub async fn bootstrap_from_replication(app_config: &Config) -> Result<(), Box<d
             shard_id,
             StoreLimits::default(),
             statsd_client.clone(),
-            256,  // max_messages_per_block - default value
-            None, // messages_request_tx - None for read-only
-            None, // fname_signer_address
-            None, // post_commit_tx
+            256,
+            None,
+            None,
+            None,
         );
 
         // Replay transactions for this shard

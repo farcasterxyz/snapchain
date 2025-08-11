@@ -312,7 +312,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         process::exit(1);
                     }
                 }
-                exit(0); // TODO: Remove this
             }
             BootstrapMethod::Snapshot => {
                 if app_config.snapshot.force_load_db_from_snapshot
