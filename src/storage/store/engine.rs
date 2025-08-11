@@ -1,4 +1,5 @@
 use super::account::{IntoU8, OnchainEventStorageError, UserDataStore, UsernameProofStore};
+use crate::core::validations::message::validate_message_hash;
 use crate::core::{
     error::HubError, types::Height, util::FarcasterTime, validations, validations::verification,
 };
@@ -17,9 +18,12 @@ use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::{EngineVersion, ProtocolFeature};
 use alloy_primitives::hex::FromHex;
 use alloy_primitives::Address;
+use ed25519_dalek::{Signature, VerifyingKey};
 use informalsystems_malachitebft_core_types::Round;
 use itertools::Itertools;
 use merkle_trie::TrieKey;
+use prost::Message;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::cmp::{Ordering, PartialEq};
 use std::collections::{HashMap, HashSet};
 use std::str;
@@ -64,6 +68,7 @@ pub enum ProposalSource {
     Propose,
     Validate,
     Commit,
+    Replication,
 }
 
 #[derive(Error, Debug, Clone)]
@@ -861,55 +866,166 @@ impl ShardEngine {
             })
         });
 
-        for msg in &sorted_user_messages {
-            // Errors are validated based on the shard root
-            match self.validate_user_message(msg, timestamp, version, txn_batch) {
-                Ok(()) => {
-                    let result = self.merge_message(msg, txn_batch);
-                    match result {
-                        Ok(event) => {
-                            merged_messages_count += 1;
-                            self.update_trie(trie_ctx, &event, txn_batch)?;
-                            events.push(event.clone());
-                            user_messages_count += 1;
-                            message_types.insert(msg.msg_type());
+        if source == ProposalSource::Replication {
+            let mut messages_to_process = Vec::new();
+
+            // Batch hash verification using rayon for parallel processing
+            let (valid_hash_messages, invalid_hash_messages): (Vec<_>, Vec<_>) =
+                sorted_user_messages.par_iter().partition(|msg| {
+                    let data_bytes;
+
+                    if msg.data_bytes.is_some() {
+                        data_bytes = msg.data_bytes.as_ref().unwrap().clone();
+                        if data_bytes.len() == 0 {
+                            return false;
                         }
-                        Err(err) => {
-                            if source != ProposalSource::Simulate {
-                                warn!(
-                                    fid = msg.fid(),
-                                    hash = msg.hex_hash(),
-                                    msg_type = msg.msg_type().as_str_name(),
-                                    "Error merging message: {:?}",
-                                    err
-                                );
-                            }
-                            validation_errors.push(err.clone());
-                            let mut merge_failure = HubEvent::from_validation_error(err, msg);
-                            let _ = self
-                                .stores
-                                .event_handler
-                                .commit_transaction(txn_batch, &mut merge_failure);
-                            events.push(merge_failure);
+                    } else {
+                        if msg.data.is_none() {
+                            return false;
                         }
+                        data_bytes = msg.data.as_ref().unwrap().encode_to_vec();
                     }
-                }
-                Err(err) => {
-                    if source != ProposalSource::Simulate {
+                    validate_message_hash(msg.hash_scheme, &data_bytes, &msg.hash).is_ok()
+                });
+
+            for invalid_msg in invalid_hash_messages {
+                warn!(
+                    fid = invalid_msg.fid(),
+                    hash = invalid_msg.hex_hash(),
+                    "Invalid hash during batch verification"
+                );
+                validation_errors.push(MessageValidationError::MessageValidationError(
+                    validations::error::ValidationError::InvalidHash,
+                ));
+            }
+
+            // Batch signature verification
+            if !valid_hash_messages.is_empty() {
+                let mut messages_for_signature_check =
+                    Vec::with_capacity(valid_hash_messages.len());
+                let mut signatures = Vec::with_capacity(valid_hash_messages.len());
+                let mut verifying_keys = Vec::with_capacity(valid_hash_messages.len());
+                let mut message_hashes = Vec::with_capacity(valid_hash_messages.len());
+
+                for msg in valid_hash_messages {
+                    if let (Ok(sig), Ok(key)) = (
+                        Signature::from_slice(&msg.signature),
+                        VerifyingKey::from_bytes(msg.signer.as_slice().try_into().unwrap()),
+                    ) {
+                        messages_for_signature_check.push(msg);
+                        signatures.push(sig);
+                        verifying_keys.push(key);
+                        message_hashes.push(msg.hash.as_slice());
+                    } else {
                         warn!(
                             fid = msg.fid(),
                             hash = msg.hex_hash(),
-                            "Error validating user message: {:?}",
+                            "Failed to parse signature or key for batch verification"
+                        );
+                        validation_errors.push(MessageValidationError::MessageValidationError(
+                            validations::error::ValidationError::InvalidSignature,
+                        ));
+                    }
+                }
+
+                if !signatures.is_empty() {
+                    match ed25519_dalek::verify_batch(&message_hashes, &signatures, &verifying_keys)
+                    {
+                        Ok(_) => {
+                            // All signatures in the batch are valid.
+                            messages_to_process.extend(messages_for_signature_check);
+                        }
+                        Err(e) => {
+                            warn!("Batch signature verification failed: {}", e);
+                            validation_errors.push(MessageValidationError::MessageValidationError(
+                                validations::error::ValidationError::InvalidSignature,
+                            ));
+                            // Since we cannot know which message failed, we will not process any
+                            // messages in this batch if the verification fails.
+                        }
+                    }
+                }
+            }
+
+            for msg in messages_to_process {
+                // These messages have already been validated, so we can proceed to merge them.
+                match self.merge_message(msg, txn_batch) {
+                    Ok(event) => {
+                        merged_messages_count += 1;
+                        self.update_trie(trie_ctx, &event, txn_batch)?;
+                        events.push(event.clone());
+                        user_messages_count += 1;
+                        message_types.insert(msg.msg_type());
+                    }
+                    Err(err) => {
+                        warn!(
+                            fid = msg.fid(),
+                            hash = msg.hex_hash(),
+                            msg_type = msg.msg_type().as_str_name(),
+                            "Error merging message after batch validation: {:?}",
                             err
                         );
+                        validation_errors.push(err.clone());
+                        let mut merge_failure = HubEvent::from_validation_error(err, msg);
+                        let _ = self
+                            .stores
+                            .event_handler
+                            .commit_transaction(txn_batch, &mut merge_failure);
+                        events.push(merge_failure);
                     }
-                    validation_errors.push(err.clone());
-                    let mut merge_failure = HubEvent::from_validation_error(err, msg);
-                    let _ = self
-                        .stores
-                        .event_handler
-                        .commit_transaction(txn_batch, &mut merge_failure);
-                    events.push(merge_failure);
+                }
+            }
+        } else {
+            for msg in &sorted_user_messages {
+                // Errors are validated based on the shard root
+                match self.validate_user_message(msg, timestamp, version, txn_batch) {
+                    Ok(()) => {
+                        let result = self.merge_message(msg, txn_batch);
+                        match result {
+                            Ok(event) => {
+                                merged_messages_count += 1;
+                                self.update_trie(trie_ctx, &event, txn_batch)?;
+                                events.push(event.clone());
+                                user_messages_count += 1;
+                                message_types.insert(msg.msg_type());
+                            }
+                            Err(err) => {
+                                if source != ProposalSource::Simulate {
+                                    warn!(
+                                        fid = msg.fid(),
+                                        hash = msg.hex_hash(),
+                                        msg_type = msg.msg_type().as_str_name(),
+                                        "Error merging message: {:?}",
+                                        err
+                                    );
+                                }
+                                validation_errors.push(err.clone());
+                                let mut merge_failure = HubEvent::from_validation_error(err, msg);
+                                let _ = self
+                                    .stores
+                                    .event_handler
+                                    .commit_transaction(txn_batch, &mut merge_failure);
+                                events.push(merge_failure);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        if source != ProposalSource::Simulate {
+                            warn!(
+                                fid = msg.fid(),
+                                hash = msg.hex_hash(),
+                                "Error validating user message: {:?}",
+                                err
+                            );
+                        }
+                        validation_errors.push(err.clone());
+                        let mut merge_failure = HubEvent::from_validation_error(err, msg);
+                        let _ = self
+                            .stores
+                            .event_handler
+                            .commit_transaction(txn_batch, &mut merge_failure);
+                        events.push(merge_failure);
+                    }
                 }
             }
         }

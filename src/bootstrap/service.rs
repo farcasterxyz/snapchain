@@ -13,7 +13,7 @@ use crate::version::version::EngineVersion;
 use std::error::Error;
 use std::net;
 use tonic::transport::Channel;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// Bootstrap a node from replication instead of snapshot download
 pub async fn bootstrap_from_replication(app_config: &Config) -> Result<(), Box<dyn Error>> {
@@ -137,15 +137,6 @@ async fn replay_shard_transactions(
                 let tx_first_fid = transactions.first().map_or(0, |tx| tx.fid);
                 let tx_last_fid = transactions.last().map_or(0, |tx| tx.fid);
 
-                let is_page_token_greater_than_last =
-                    response.next_page_token.as_ref().map_or(false, |token| {
-                        token > &page_token.clone().unwrap_or_default()
-                    });
-                if !is_page_token_greater_than_last {
-                    warn!("Page token is not greater than last token for shard {}. Last token: {} next token {}", 
-                    shard_id, hex::encode(&page_token.unwrap_or_default()), hex::encode(response.next_page_token.as_ref().unwrap_or(&vec![])));
-                }
-
                 info!(
                     "Retrieved {} transactions for shard {}. Next page token: {}. Fids: {} to {}.",
                     transactions.len(),
@@ -238,7 +229,7 @@ fn replay_transaction(
         &trie_ctx,
         transaction,
         &mut txn_batch,
-        ProposalSource::Commit, // Using Commit since this is for bootstrap
+        ProposalSource::Replication,
         version,
         &timestamp,
     ) {
