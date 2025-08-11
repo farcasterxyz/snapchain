@@ -706,11 +706,6 @@ impl ShardEngine {
                             }
                             _ => {}
                         }
-                        info!(
-                            fid = snapchain_txn.fid,
-                            "Merged onchain event of type: {}",
-                            onchain_event.r#type().as_str_name()
-                        );
                     }
                     Err(err) => {
                         if source != ProposalSource::Simulate {
@@ -878,12 +873,6 @@ impl ShardEngine {
                             events.push(event.clone());
                             user_messages_count += 1;
                             message_types.insert(msg.msg_type());
-                            info!(
-                                fid = msg.fid(),
-                                hash = msg.hex_hash(),
-                                "Merged user message of type: {}",
-                                msg.msg_type().as_str_name()
-                            );
                         }
                         Err(err) => {
                             if source != ProposalSource::Simulate {

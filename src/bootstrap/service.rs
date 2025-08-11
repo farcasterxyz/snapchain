@@ -1,18 +1,19 @@
 use crate::bootstrap::error::BootstrapError;
 use crate::cfg::Config;
 use crate::core::util::FarcasterTime;
+use crate::proto::get_shard_transactions_request::Cursor;
 use crate::proto::replication_service_client::ReplicationServiceClient;
 use crate::proto::{GetShardSnapshotMetadataRequest, GetShardTransactionsRequest, Transaction};
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::engine::{ProposalSource, ShardEngine};
 use crate::storage::store::stores::StoreLimits;
-use crate::storage::trie::merkle_trie;
+use crate::storage::trie::merkle_trie::{self, TrieKey};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::EngineVersion;
 use std::error::Error;
 use std::net;
 use tonic::transport::Channel;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Bootstrap a node from replication instead of snapshot download
 pub async fn bootstrap_from_replication(app_config: &Config) -> Result<(), Box<dyn Error>> {
@@ -106,12 +107,21 @@ async fn replay_shard_transactions(
 
     let mut page_token: Option<Vec<u8>> = None;
     let mut total_transactions = 0;
+    let mut last_fid = 0;
+    let mut last_fid_account_root = vec![];
+    let start_fid = 0;
 
     loop {
+        let cursor = if let Some(token) = &page_token {
+            Some(Cursor::PageToken(token.clone()))
+        } else {
+            Some(Cursor::StartFid(start_fid))
+        };
+
         let request = GetShardTransactionsRequest {
             shard_id,
             height,
-            page_token: page_token.clone(),
+            cursor,
         };
 
         match client.get_shard_transactions(request).await {
@@ -124,16 +134,64 @@ async fn replay_shard_transactions(
                     break;
                 }
 
+                let tx_first_fid = transactions.first().map_or(0, |tx| tx.fid);
+                let tx_last_fid = transactions.last().map_or(0, |tx| tx.fid);
+
+                let is_page_token_greater_than_last =
+                    response.next_page_token.as_ref().map_or(false, |token| {
+                        token > &page_token.clone().unwrap_or_default()
+                    });
+                if !is_page_token_greater_than_last {
+                    warn!("Page token is not greater than last token for shard {}. Last token: {} next token {}", 
+                    shard_id, hex::encode(&page_token.unwrap_or_default()), hex::encode(response.next_page_token.as_ref().unwrap_or(&vec![])));
+                }
+
                 info!(
-                    "Retrieved {} transactions for shard {} (page)",
+                    "Retrieved {} transactions for shard {}. Next page token: {}. Fids: {} to {}.",
                     transactions.len(),
-                    shard_id
+                    shard_id,
+                    response
+                        .next_page_token
+                        .as_ref()
+                        .map(|t| hex::encode(t))
+                        .unwrap_or_else(|| "<none>".to_string()),
+                    tx_first_fid,
+                    tx_last_fid,
                 );
 
                 // Replay each transaction
                 for transaction in &transactions {
+                    if transaction.fid > last_fid && last_fid != 0 {
+                        // Check the account root for the last FID to see if it matches
+
+                        // Get the account root from the store
+                        let stores_account_root = engine.get_stores().trie.get_hash(
+                            &engine.db,
+                            &mut RocksDbTransactionBatch::new(),
+                            &TrieKey::for_fid(last_fid),
+                        );
+
+                        if stores_account_root != last_fid_account_root {
+                            error!(
+                                "Account root mismatch for FID {}: expected {}, got {}",
+                                last_fid,
+                                hex::encode(last_fid_account_root),
+                                hex::encode(stores_account_root)
+                            );
+                            // TODO: Return Error
+                        } else {
+                            info!(
+                                "Account root for FID {} matches: {}",
+                                last_fid,
+                                hex::encode(last_fid_account_root)
+                            );
+                        }
+                    }
                     replay_transaction(engine, transaction)?;
                     total_transactions += 1;
+
+                    last_fid = transaction.fid;
+                    last_fid_account_root = transaction.account_root.clone();
                 }
 
                 // Check if there are more pages
@@ -141,9 +199,11 @@ async fn replay_shard_transactions(
                     if !next_token.is_empty() {
                         page_token = Some(next_token);
                     } else {
+                        info!("No more pages available for shard {}", shard_id);
                         break;
                     }
                 } else {
+                    info!("No next page token provided for shard {}", shard_id);
                     break;
                 }
             }

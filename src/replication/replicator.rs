@@ -14,8 +14,6 @@ use crate::{
 };
 use std::{sync::Arc, time::Duration};
 use tokio::select;
-use tokio::select;
-use tracing::{error, info};
 use tracing::{error, info};
 
 pub async fn run(
@@ -121,8 +119,16 @@ impl Replicator {
         shard: u32,
         height: u64,
         page_token: Option<Vec<u8>>,
+        start_fid: Option<u64>,
         message_limit: usize,
     ) -> Result<(Vec<proto::Transaction>, Option<Vec<u8>>), ReplicationError> {
+        // Ensure page_token and start_fid are mutually exclusive
+        if page_token.is_some() && start_fid.is_some() {
+            return Err(ReplicationError::InvalidMessage(
+                "page_token and start_fid are mutually exclusive".to_string(),
+            ));
+        }
+
         let stores = match self.stores.get(shard, height) {
             Some(stores) => stores,
             None => {
@@ -134,9 +140,11 @@ impl Replicator {
             }
         };
 
-        let mut cursor = match page_token {
-            Some(token) => Cursor::new(Token::new_raw(token), message_limit),
-            None => Cursor::new_for_fid(0, message_limit),
+        let mut cursor = match (page_token, start_fid) {
+            (Some(token), None) => Cursor::new(Token::new_raw(token), message_limit),
+            (None, Some(fid)) => Cursor::new_for_fid(fid, message_limit),
+            (None, None) => Cursor::new_for_fid(0, message_limit),
+            (Some(_), Some(_)) => unreachable!(), // Already handled above
         };
 
         let iterator_fid = cursor.token.fid().saturating_sub(1);
@@ -668,13 +676,12 @@ fn build_validator_messages(
     // be a backwards-incompatible change!
 
     // onchain events
-
     let event_types = vec![
-        proto::OnChainEventType::EventTypeSigner,
-        proto::OnChainEventType::EventTypeSignerMigrated,
         proto::OnChainEventType::EventTypeIdRegister,
+        proto::OnChainEventType::EventTypeSigner,
         proto::OnChainEventType::EventTypeStorageRent,
         proto::OnChainEventType::EventTypeTierPurchase,
+        proto::OnChainEventType::EventTypeSignerMigrated,
     ];
 
     for event_type in event_types {
@@ -723,13 +730,13 @@ fn build_user_messages_for_fid(
     // be a backwards-incompatible change!
 
     let message_types = vec![
+        proto::MessageType::VerificationAddEthAddress,
+        proto::MessageType::UsernameProof,
+        proto::MessageType::UserDataAdd,
         proto::MessageType::CastAdd,
         proto::MessageType::LinkCompactState,
         proto::MessageType::LinkAdd,
         proto::MessageType::ReactionAdd,
-        proto::MessageType::UserDataAdd,
-        proto::MessageType::VerificationAddEthAddress,
-        proto::MessageType::UsernameProof,
     ];
 
     let mut messages = vec![];
