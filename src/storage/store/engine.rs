@@ -23,7 +23,6 @@ use informalsystems_malachitebft_core_types::Round;
 use itertools::Itertools;
 use merkle_trie::TrieKey;
 use prost::Message;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::cmp::{Ordering, PartialEq};
 use std::collections::{HashMap, HashSet};
 use std::str;
@@ -870,23 +869,30 @@ impl ShardEngine {
             let mut messages_to_process = Vec::new();
 
             // Batch hash verification using rayon for parallel processing
-            let (valid_hash_messages, invalid_hash_messages): (Vec<_>, Vec<_>) =
-                sorted_user_messages.par_iter().partition(|msg| {
-                    let data_bytes;
+            let mut valid_hash_messages = Vec::new();
+            let mut invalid_hash_messages = Vec::new();
 
-                    if msg.data_bytes.is_some() {
-                        data_bytes = msg.data_bytes.as_ref().unwrap().clone();
-                        if data_bytes.len() == 0 {
-                            return false;
-                        }
-                    } else {
-                        if msg.data.is_none() {
-                            return false;
-                        }
-                        data_bytes = msg.data.as_ref().unwrap().encode_to_vec();
+            for msg in &sorted_user_messages {
+                let data_bytes;
+                if msg.data_bytes.is_some() {
+                    data_bytes = msg.data_bytes.as_ref().unwrap().clone();
+                    if data_bytes.len() == 0 {
+                        invalid_hash_messages.push(msg);
+                        continue;
                     }
-                    validate_message_hash(msg.hash_scheme, &data_bytes, &msg.hash).is_ok()
-                });
+                } else {
+                    if msg.data.is_none() {
+                        invalid_hash_messages.push(msg);
+                        continue;
+                    }
+                    data_bytes = msg.data.as_ref().unwrap().encode_to_vec();
+                }
+                if validate_message_hash(msg.hash_scheme, &data_bytes, &msg.hash).is_ok() {
+                    valid_hash_messages.push(msg);
+                } else {
+                    invalid_hash_messages.push(msg);
+                }
+            }
 
             for invalid_msg in invalid_hash_messages {
                 warn!(

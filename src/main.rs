@@ -28,7 +28,7 @@ use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::net::SocketAddr;
-use std::process::{self, exit};
+use std::process;
 use std::sync::Arc;
 use std::{fs, net};
 use tokio::net::TcpListener;
