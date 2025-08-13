@@ -1,5 +1,5 @@
 use crate::core::error::HubError;
-use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
+use crate::storage::db::RocksDB;
 use crate::storage::store::migrations::m1_fix_fname_index::M1FixFnameSecondaryIndex;
 use crate::storage::store::stores::Stores;
 use async_trait::async_trait;
@@ -143,11 +143,9 @@ impl MigrationRunner {
                 migration.run(self.context.clone()).await?;
 
                 // Update the schema version in the DB transactionally with the migration
-                let mut txn = RocksDbTransactionBatch::new();
                 self.context
                     .stores
-                    .set_schema_version(migration.to_db_version(), &mut txn)?;
-                self.context.db.commit(txn)?;
+                    .set_schema_version(migration.to_db_version())?;
 
                 info!(
                     shard_id = self.context.stores.shard_id,
@@ -175,11 +173,9 @@ impl MigrationRunner {
                     migration.run(context.clone()).await?;
 
                     // Update the schema version in the DB transactionally with the migration
-                    let mut txn = RocksDbTransactionBatch::new();
                     context
                         .stores
-                        .set_schema_version(migration.to_db_version(), &mut txn)?;
-                    context.db.commit(txn)?;
+                        .set_schema_version(migration.to_db_version())?;
 
                     info!(
                         shard_id = context.stores.shard_id,

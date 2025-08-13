@@ -1,4 +1,5 @@
 use super::{AsyncMigration, MigrationContext, MigrationError};
+use crate::storage::constants::UserPostfix;
 use crate::storage::db::RocksDbTransactionBatch;
 use crate::storage::store::account::{
     make_fname_username_proof_by_fid_key, make_fname_username_proof_key, FIDIterator, UserDataStore,
@@ -43,45 +44,46 @@ impl AsyncMigration for M1FixFnameSecondaryIndex {
                 .get_all_values(
                     &crate::storage::trie::merkle_trie::Context::new(),
                     &context.stores.db,
-                    &TrieKey::for_fid(fid),
+                    &[
+                        TrieKey::for_fid(fid),
+                        vec![UserPostfix::UsernameProofMessage as u8],
+                    ]
+                    .concat(),
                 )
                 .map_err(|e| MigrationError::InternalError(format!("Trie error: {}", e)))?;
 
             for trie_key in trie_keys {
-                // Check if this is a fname proof (type_byte == 7)
-                if trie_key.len() > 5 && trie_key[5] == 7 {
-                    let name_bytes = &trie_key[6..];
-                    let name_end = name_bytes
-                        .iter()
-                        .position(|&b| b == 0)
-                        .unwrap_or(name_bytes.len());
-                    let name = &name_bytes[..name_end];
+                let name_bytes = &trie_key[6..];
+                let name_end = name_bytes
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(name_bytes.len());
+                let name = &name_bytes[..name_end];
 
-                    if name.is_empty() {
-                        continue;
+                if name.is_empty() {
+                    continue;
+                }
+                let name_str = String::from_utf8_lossy(name).to_string();
+
+                match UserDataStore::get_username_proof(
+                    &context.stores.user_data_store,
+                    &txn,
+                    &name.to_vec(),
+                ) {
+                    Ok(Some(message)) => {
+                        let secondary_key = make_fname_username_proof_by_fid_key(message.fid);
+                        if context.stores.db.get(&secondary_key)?.is_none() {
+                            info!(fid, name_str, "Fixing missing secondary index for fname.");
+                            let primary_key = make_fname_username_proof_key(name);
+                            txn.put(secondary_key, primary_key);
+                            fixed_count += 1;
+                        }
                     }
-                    let name_str = String::from_utf8_lossy(name).to_string();
-
-                    match UserDataStore::get_username_proof(
-                        &context.stores.user_data_store,
-                        &txn,
-                        &name.to_vec(),
-                    ) {
-                        Ok(Some(message)) => {
-                            let secondary_key = make_fname_username_proof_by_fid_key(message.fid);
-                            if context.stores.db.get(&secondary_key)?.is_none() {
-                                info!(fid, name_str, "Fixing missing secondary index for fname.");
-                                let primary_key = make_fname_username_proof_key(name);
-                                txn.put(secondary_key, primary_key);
-                                fixed_count += 1;
-                            }
-                        }
-                        Ok(None) => {
-                            error!(fid, name_str, "Proof in trie but not in store, skipping.");
-                        }
-                        Err(e) => {
-                            error!(fid, name_str, "Failed to get proof: {}", e);
-                        }
+                    Ok(None) => {
+                        error!(fid, name_str, "Proof in trie but not in store, skipping.");
+                    }
+                    Err(e) => {
+                        error!(fid, name_str, "Failed to get proof: {}", e);
                     }
                 }
             }
