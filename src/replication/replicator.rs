@@ -1,4 +1,6 @@
 use crate::proto::OnChainEventType;
+use crate::storage::store::account::FID_BYTES;
+use crate::storage::trie::merkle_trie;
 use crate::{
     core::util,
     proto,
@@ -13,8 +15,6 @@ use crate::{
         trie::merkle_trie::TrieKey,
     },
 };
-use std::collections::{HashMap, HashSet};
-use std::{sync::Arc, time::Duration};
 use tokio::select;
 use tracing::{error, info};
 
@@ -615,7 +615,7 @@ fn collect_onchain_events_with_cursor(
     })
 }
 
-fn build_username_proof_events(
+fn build_ens_username_proofs_events(
     stores: &Stores,
     cursor: &mut Cursor,
 ) -> Result<Vec<proto::ValidatorMessage>, ReplicationError> {
@@ -661,43 +661,95 @@ fn build_username_proof_events(
     )
 }
 
-fn build_username_proof_event(
+fn build_fname_username_proofs_event(
     stores: &Stores,
     cursor: &mut Cursor,
 ) -> Result<Vec<proto::ValidatorMessage>, ReplicationError> {
-    collect_messages_with_cursor(
-        cursor,
-        MessageType::UsernameProof,
-        |_page_options, cursor| {
-            // Fetch the username proof by fid from the user data store
-            match UserDataStore::get_username_proof_by_fid(
-                &stores.user_data_store,
+    // 1 byte Shard ID + 4 bytes of fid key + 1 byte postfix
+    let prefix_len = 1 + FID_BYTES + 1;
+    let fid_fnames_key =
+        TrieKey::for_fname(cursor.token.fid(), &"".to_string())[..prefix_len].to_vec();
+
+    info!(
+        "Building Fname username proofs for FID {} with prefix length {}",
+        cursor.token.fid(),
+        prefix_len
+    );
+
+    // 1. We'll read all this FID's keys for all fname messages from the merkle trie
+    let mut trie = stores.trie.clone();
+    let trie_key_bytes = trie
+        .get_all_values(&merkle_trie::Context::new(), &stores.db, &fid_fnames_key)
+        .map_err(|e| {
+            ReplicationError::InternalError(format!(
+                "Failed to get all values for FID {}: {}",
                 cursor.token.fid(),
-            ) {
-                Ok(None) => {
-                    // If no proof is found, return an empty vector
-                    Ok((vec![], None))
-                }
-                Ok(Some(proof)) => {
-                    let fname_transfer = proto::FnameTransfer {
-                        proof: Some(proof.clone()),
-                        ..Default::default()
-                    };
+                e
+            ))
+        })?;
+    info!(
+        "Trie keys for FID {}: {:?}",
+        cursor.token.fid(),
+        trie_key_bytes
+    );
 
-                    let results = vec![proto::ValidatorMessage {
-                        fname_transfer: Some(fname_transfer),
-                        ..Default::default()
-                    }];
+    // 2. Get all the fnames that we found
+    let fnames = trie_key_bytes
+        .into_iter()
+        .map(|k| k[prefix_len..].to_vec())
+        .map(|n| {
+            n.iter()
+                .take_while(|&&b| b != 0)
+                .cloned()
+                .collect::<Vec<u8>>()
+        })
+        .collect::<Vec<Vec<u8>>>();
+    info!("Fnames for FID {}: {:?}", cursor.token.fid(), fnames);
 
-                    Ok((results, None))
-                }
-                Err(e) => Err(ReplicationError::InternalError(format!(
-                    "Failed to get username proof by fid: {}",
-                    e
-                ))),
-            }
-        },
-    )
+    // 3. Read all the UserNameProofs
+    let proofs = fnames
+        .into_iter()
+        .map(|fname_bytes| {
+            UserDataStore::get_username_proof(
+                &stores.user_data_store,
+                &RocksDbTransactionBatch::new(),
+                &fname_bytes,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            ReplicationError::InternalError(format!(
+                "Failed to get username proofs for FID {}: {}",
+                cursor.token.fid(),
+                e
+            ))
+        })?;
+    info!(
+        "UserNameProofs for FID {}: {:?}",
+        cursor.token.fid(),
+        proofs
+    );
+
+    // 4. Collect all valid proofs into ValidatorMessage
+    let validator_messages = proofs
+        .into_iter()
+        .filter_map(|proof| {
+            proof.map(|p| proto::ValidatorMessage {
+                fname_transfer: Some(proto::FnameTransfer {
+                    proof: Some(p),
+                        ..Default::default()
+                }),
+                ..Default::default()
+            })
+        })
+        .collect::<Vec<_>>();
+    info!(
+        "ValidatorMessages for FID {}: {:?}",
+        cursor.token.fid(),
+        validator_messages
+    );
+
+    Ok(validator_messages)
 }
 
 fn build_validator_messages(
@@ -724,7 +776,7 @@ fn build_validator_messages(
     }
 
     // username proofs
-    match build_username_proof_events(stores, cursor) {
+    match build_ens_username_proofs_events(stores, cursor) {
         Ok(mut msgs) => messages.append(&mut msgs),
         Err(e) => {
             return Err(ReplicationError::InternalError(format!(
@@ -734,7 +786,7 @@ fn build_validator_messages(
         }
     }
 
-    match build_username_proof_event(stores, cursor) {
+    match build_fname_username_proofs_event(stores, cursor) {
         Ok(mut msgs) => messages.append(&mut msgs),
         Err(e) => {
             return Err(ReplicationError::InternalError(format!(
