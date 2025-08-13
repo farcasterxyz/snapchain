@@ -4,7 +4,11 @@ mod tests {
         proto,
         replication::{
             replication_stores::ReplicationStores,
-            replicator::{self, Replicator, ReplicatorSnapshotOptions},
+            replicator::{
+                self,
+                tests::{DEFAULT_SYSTEM_MESSAGES_SORT_ORDER, DEFAULT_USER_MESSAGES_SORT_ORDER},
+                Replicator, ReplicatorSnapshotOptions,
+            },
         },
         storage::{
             db::{RocksDB, RocksdbError},
@@ -277,6 +281,8 @@ mod tests {
                 next_page_token.clone(),
                 None,
                 message_limit,
+                DEFAULT_SYSTEM_MESSAGES_SORT_ORDER.to_vec(),
+                DEFAULT_USER_MESSAGES_SORT_ORDER.to_vec(),
             );
 
             let (results, next_page) = match results {

@@ -3,8 +3,42 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use crate::mempool::routing;
-use crate::proto;
+use crate::proto::{self, MessageType, OnChainEventType};
 use crate::replication::replicator::Replicator;
+
+/// Extract the sort order Enums from the protos
+fn get_sort_order_from_request(
+    system_message_types: Option<proto::SortOrderTypes>,
+    user_message_types: Option<proto::SortOrderTypes>,
+) -> Result<(Vec<OnChainEventType>, Vec<proto::MessageType>), Status> {
+    let system_sort_order = match system_message_types {
+        Some(types) => types
+            .sort_order
+            .iter()
+            .map(|t| {
+                OnChainEventType::try_from(*t as i32).map_err(|e| {
+                    Status::invalid_argument(format!("Invalid system message type: {}", e))
+                })
+            })
+            .collect::<Result<Vec<_>, Status>>()?,
+
+        None => return Err(Status::invalid_argument("Missing system_message_types")),
+    };
+    let user_sort_order = match user_message_types {
+        Some(types) => types
+            .sort_order
+            .iter()
+            .map(|t| {
+                MessageType::try_from(*t as i32).map_err(|e| {
+                    Status::invalid_argument(format!("Invalid user message type: {}", e))
+                })
+            })
+            .collect::<Result<Vec<_>, Status>>()?,
+        None => return Err(Status::invalid_argument("Missing user_message_types")),
+    };
+
+    Ok((system_sort_order, user_sort_order))
+}
 
 pub struct ReplicationServer {
     replicator: Arc<Replicator>,
@@ -72,12 +106,16 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
             None => (None, None),
         };
 
+        let (system_sort_order, user_sort_order) =
+            get_sort_order_from_request(request.system_message_types, request.user_message_types)?;
         let results = self.replicator.transactions_for_shard_and_height(
             request.shard_id,
             request.height,
             page_token,
             start_fid,
             Self::MESSAGE_LIMIT,
+            system_sort_order,
+            user_sort_order,
         );
 
         let response = match results {
@@ -103,10 +141,17 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
         request: Request<proto::GetReplicationTransactionsByFidRequest>,
     ) -> Result<Response<proto::GetReplicationTransactionsByFidResponse>, Status> {
         let request = request.into_inner();
+
+        let (system_sort_order, user_sort_order) =
+            get_sort_order_from_request(request.system_message_types, request.user_message_types)?;
+
         let shard = self.message_router.route_fid(request.fid, self.num_shards);
-        let transaction = self
-            .replicator
-            .latest_transactions_for_fid(shard, request.fid)?;
+        let transaction = self.replicator.latest_transactions_for_fid(
+            shard,
+            request.fid,
+            system_sort_order,
+            user_sort_order,
+        )?;
 
         Ok(Response::new(
             proto::GetReplicationTransactionsByFidResponse {
