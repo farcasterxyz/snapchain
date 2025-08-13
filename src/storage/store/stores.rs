@@ -268,16 +268,9 @@ impl Stores {
         }
     }
 
-    pub fn set_schema_version(
-        &self,
-        version: u32,
-        txn: &mut RocksDbTransactionBatch,
-    ) -> Result<(), RocksdbError> {
-        txn.put(
-            Self::make_schema_version_key(),
-            version.to_be_bytes().to_vec(),
-        );
-        Ok(())
+    pub fn set_schema_version(&self, version: u32) -> Result<(), RocksdbError> {
+        self.db
+            .put(&Self::make_schema_version_key(), &version.to_be_bytes())
     }
 
     pub fn get_usage(
