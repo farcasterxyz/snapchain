@@ -32,7 +32,14 @@ message GetShardTransactionsRequest {
   oneof cursor {
     bytes page_token = 3;
     uint64 start_fid = 4;
-  }
+  };
+  SortOrderTypes system_message_types = 5;
+  SortOrderTypes user_message_types = 6;
+}
+
+// A list of event/message types. The RPC will return messages in this order
+message SortOrderTypes {
+  repeated uint32 sort_order = 1;
 }
 
 message GetShardTransactionsResponse {
@@ -41,7 +48,9 @@ message GetShardTransactionsResponse {
 }
 
 message GetReplicationTransactionsByFidRequest {
-  uint64 fid = 2;
+  uint64 fid = 1;
+  SortOrderTypes system_message_types = 2;
+  SortOrderTypes user_message_types = 3;
 }
 
 message GetReplicationTransactionsByFidResponse {

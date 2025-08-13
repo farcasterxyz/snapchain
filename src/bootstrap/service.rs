@@ -3,7 +3,9 @@ use crate::cfg::Config;
 use crate::core::util::FarcasterTime;
 use crate::proto::get_shard_transactions_request::Cursor;
 use crate::proto::replication_service_client::ReplicationServiceClient;
-use crate::proto::{GetShardSnapshotMetadataRequest, GetShardTransactionsRequest, Transaction};
+use crate::proto::{
+    GetShardSnapshotMetadataRequest, GetShardTransactionsRequest, SortOrderTypes, Transaction,
+};
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::engine::{ProposalSource, ShardEngine};
 use crate::storage::store::stores::StoreLimits;
@@ -111,6 +113,22 @@ async fn replay_shard_transactions(
     let mut last_fid_account_root = vec![];
     let start_fid = 0;
 
+    // We'll send the server the order in which we want the messages to be sent, so the engine can process them correctly
+    let sys_messages_map = ShardEngine::system_message_sort_order_map();
+    let system_message_types = Some(SortOrderTypes {
+        sort_order: (0..sys_messages_map.len())
+            .map(|i| sys_messages_map.iter().find(|(_, &v)| v == i).unwrap().0)
+            .map(|m| *m as u32) // Convert to u32 to send over wire
+            .collect::<Vec<_>>(),
+    });
+    let user_messages_map = ShardEngine::user_message_sort_order_map();
+    let user_message_types = Some(SortOrderTypes {
+        sort_order: (0..user_messages_map.len())
+            .map(|i| user_messages_map.iter().find(|(_, &v)| v == i).unwrap().0)
+            .map(|m| *m as u32) // Convert to u32 to send over wire
+            .collect::<Vec<_>>(),
+    });
+
     loop {
         let cursor = if let Some(token) = &page_token {
             Some(Cursor::PageToken(token.clone()))
@@ -118,10 +136,15 @@ async fn replay_shard_transactions(
             Some(Cursor::StartFid(start_fid))
         };
 
+        let system_message_types = system_message_types.clone();
+        let user_message_types = user_message_types.clone();
+
         let request = GetShardTransactionsRequest {
             shard_id,
             height,
             cursor,
+            system_message_types,
+            user_message_types,
         };
 
         match client.get_shard_transactions(request).await {
@@ -138,14 +161,9 @@ async fn replay_shard_transactions(
                 let tx_last_fid = transactions.last().map_or(0, |tx| tx.fid);
 
                 info!(
-                    "Retrieved {} transactions for shard {}. Next page token: {}. Fids: {} to {}.",
+                    "Retrieved {} transactions for shard {}. Fids: {} to {}.",
                     transactions.len(),
                     shard_id,
-                    response
-                        .next_page_token
-                        .as_ref()
-                        .map(|t| hex::encode(t))
-                        .unwrap_or_else(|| "<none>".to_string()),
                     tx_first_fid,
                     tx_last_fid,
                 );

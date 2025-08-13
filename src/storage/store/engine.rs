@@ -22,6 +22,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use informalsystems_malachitebft_core_types::Round;
 use itertools::Itertools;
 use merkle_trie::TrieKey;
+use once_cell::sync::Lazy;
 use prost::Message;
 use std::cmp::{Ordering, PartialEq};
 use std::collections::{HashMap, HashSet};
@@ -188,6 +189,43 @@ pub struct ShardEngine {
 }
 
 impl ShardEngine {
+    // Efficient lookup for system message sort order
+    pub fn system_message_sort_order_map() -> &'static HashMap<proto::OnChainEventType, usize> {
+        static MAP: Lazy<HashMap<proto::OnChainEventType, usize>> = Lazy::new(|| {
+            [
+                proto::OnChainEventType::EventTypeIdRegister,
+                proto::OnChainEventType::EventTypeSigner,
+                proto::OnChainEventType::EventTypeStorageRent,
+                proto::OnChainEventType::EventTypeTierPurchase,
+                proto::OnChainEventType::EventTypeSignerMigrated,
+            ]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (*t, i))
+            .collect()
+        });
+        &MAP
+    }
+
+    // Efficient lookup for user message sort order
+    pub fn user_message_sort_order_map() -> &'static HashMap<proto::MessageType, usize> {
+        static MAP: Lazy<HashMap<proto::MessageType, usize>> = Lazy::new(|| {
+            [
+                proto::MessageType::VerificationAddEthAddress,
+                proto::MessageType::UsernameProof,
+                proto::MessageType::UserDataAdd,
+                proto::MessageType::CastAdd,
+                proto::MessageType::LinkCompactState,
+                proto::MessageType::LinkAdd,
+                proto::MessageType::ReactionAdd,
+            ]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (*t, i))
+            .collect()
+        });
+        &MAP
+    }
     pub fn new(
         db: Arc<RocksDB>,
         network: proto::FarcasterNetwork,
@@ -670,18 +708,18 @@ impl ShardEngine {
         // Sort system_messages to process OnChainEvents first in their canonical order,
         // followed by FnameTransfers sorted by timestamp.
         let mut sorted_system_messages = snapchain_txn.system_messages.clone();
-        sorted_system_messages.sort_by(|a, b| {
-            match (&a.on_chain_event, &b.on_chain_event) {
+        sorted_system_messages.sort_by(|a, b| match (&a.on_chain_event, &b.on_chain_event) {
                 (Some(event_a), Some(event_b)) => {
-                    // Both are OnChainEvents, sort by block_number then log_index.
-                    (event_a.block_number, event_a.log_index)
-                        .cmp(&(event_b.block_number, event_b.log_index))
+                let map = ShardEngine::system_message_sort_order_map();
+                let idx_a = map.get(&event_a.r#type()).copied().unwrap_or(map.len());
+                let idx_b = map.get(&event_b.r#type()).copied().unwrap_or(map.len());
+                idx_a.cmp(&idx_b)
                 }
                 (Some(_), None) => Ordering::Less, // OnChainEvents come before FnameTransfers.
                 (None, Some(_)) => Ordering::Greater, // FnameTransfers come after OnChainEvents.
                 (None, None) => Ordering::Equal,   // Both are FnameTransfers, sort equal
-            }
         });
+
         for msg in sorted_system_messages {
             if let Some(onchain_event) = &msg.on_chain_event {
                 if onchain_event.r#type() == OnChainEventType::EventTypeTierPurchase
@@ -831,38 +869,11 @@ impl ShardEngine {
         // Sort the user messages so that all dependent messages are processed in order
         let mut sorted_user_messages = snapchain_txn.user_messages.clone();
         sorted_user_messages.sort_by(|a, b| {
-            fn get_message_priority(msg: &proto::Message) -> u8 {
-                let msg_type = msg.msg_type();
-                match msg_type {
-                    MessageType::VerificationAddEthAddress => 1,
-                    MessageType::UsernameProof => 2,
-                    MessageType::UserDataAdd => {
-                        if let Some(Body::UserDataBody(body)) = &msg.data.as_ref().unwrap().body {
-                            let user_data_type = body.r#type();
-                            if user_data_type == UserDataType::Username
-                                || user_data_type == UserDataType::UserDataPrimaryAddressEthereum
-                                || user_data_type == UserDataType::UserDataPrimaryAddressSolana
-                            {
-                                return 3; // Dependent UserData types
-                            }
-                        }
-                        4 // Other UserDataAdd types
-                    }
-                    _ => 5, // All other message types
-                }
-            }
+            let map = ShardEngine::user_message_sort_order_map();
+            let priority_a = map.get(&a.msg_type()).copied().unwrap_or(map.len());
+            let priority_b = map.get(&b.msg_type()).copied().unwrap_or(map.len());
 
-            let priority_a = get_message_priority(a);
-            let priority_b = get_message_priority(b);
-
-            // Message priority first, then timestamp
-            priority_a.cmp(&priority_b).then_with(|| {
-                a.data
-                    .as_ref()
-                    .unwrap()
-                    .timestamp
-                    .cmp(&b.data.as_ref().unwrap().timestamp)
-            })
+            priority_a.cmp(&priority_b)
         });
 
         if source == ProposalSource::Replication {
