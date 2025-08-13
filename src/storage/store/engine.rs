@@ -709,15 +709,15 @@ impl ShardEngine {
         // followed by FnameTransfers sorted by timestamp.
         let mut sorted_system_messages = snapchain_txn.system_messages.clone();
         sorted_system_messages.sort_by(|a, b| match (&a.on_chain_event, &b.on_chain_event) {
-                (Some(event_a), Some(event_b)) => {
+            (Some(event_a), Some(event_b)) => {
                 let map = ShardEngine::system_message_sort_order_map();
                 let idx_a = map.get(&event_a.r#type()).copied().unwrap_or(map.len());
                 let idx_b = map.get(&event_b.r#type()).copied().unwrap_or(map.len());
                 idx_a.cmp(&idx_b)
-                }
-                (Some(_), None) => Ordering::Less, // OnChainEvents come before FnameTransfers.
-                (None, Some(_)) => Ordering::Greater, // FnameTransfers come after OnChainEvents.
-                (None, None) => Ordering::Equal,   // Both are FnameTransfers, sort equal
+            }
+            (Some(_), None) => Ordering::Less, // OnChainEvents come before FnameTransfers.
+            (None, Some(_)) => Ordering::Greater, // FnameTransfers come after OnChainEvents.
+            (None, None) => Ordering::Equal,   // Both are FnameTransfers, sort equal
         });
 
         for msg in sorted_system_messages {
