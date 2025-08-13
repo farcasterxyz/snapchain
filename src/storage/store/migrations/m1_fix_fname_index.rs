@@ -20,10 +20,6 @@ impl AsyncMigration for M1FixFnameSecondaryIndex {
         "Fixes the secondary index for Farcaster name (fname) proofs by ensuring all proofs have a corresponding by-FID index entry."
     }
 
-    fn blocks_startup(&self) -> bool {
-        false // This migration can run in the background
-    }
-
     async fn run(&self, mut context: MigrationContext) -> Result<(), MigrationError> {
         let fid_iterator = FIDIterator::new(context.stores.db.clone(), 0);
 
@@ -33,8 +29,13 @@ impl AsyncMigration for M1FixFnameSecondaryIndex {
         );
 
         for fid in fid_iterator {
-            // The original logic was in a function called `fix_fname_secondary_index_for_fid`
-            // We will move that logic here.
+            if fid % 1000 == 0 {
+                info!(
+                    fid,
+                    shard_id = context.stores.shard_id,
+                    "Processing FID for fname secondary index fix."
+                );
+            }
             let mut txn = RocksDbTransactionBatch::new();
             let mut fixed_count = 0;
 
