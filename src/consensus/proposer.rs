@@ -8,7 +8,7 @@ use crate::storage::store::engine::{BlockEngine, ShardEngine, ShardStateChange};
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStorageError;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
-use crate::version::version::EngineVersion;
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use informalsystems_malachitebft_core_types::{Round, Validity};
 use prost::Message;
 use std::collections::{BTreeMap, HashMap};
@@ -368,12 +368,18 @@ impl BlockProposer {
         block_height: Height,
         shard_id: u32,
         stores: &Stores,
+        version: EngineVersion,
     ) -> Option<ShardChunkWitness> {
         let desired_shard_block_number = if block_height.block_number == 1 {
             1
         } else {
-            let last_shard_witness = self.engine.get_last_shard_witness(block_height, shard_id)?;
-            last_shard_witness.height.unwrap().increment().block_number
+            if version.is_enabled(ProtocolFeature::DecoupleShardZeroBlockProduction) {
+                let last_shard_witness =
+                    self.engine.get_last_shard_witness(block_height, shard_id)?;
+                last_shard_witness.height.unwrap().increment().block_number
+            } else {
+                block_height.block_number
+            }
         };
 
         let chunk = stores
@@ -392,6 +398,7 @@ impl BlockProposer {
     async fn collect_confirmed_shard_witnesses(
         &mut self,
         height: Height,
+        version: EngineVersion,
         timeout: Duration,
     ) -> Vec<ShardChunkWitness> {
         let mut poll_interval = time::interval(Duration::from_millis(100));
@@ -408,7 +415,7 @@ impl BlockProposer {
                             continue;
                         }
 
-                        if let Some(next_shard_witness) = self.get_next_shard_witness(height, *shard_id, store) {
+                        if let Some(next_shard_witness) = self.get_next_shard_witness(height, *shard_id, store, version) {
                             chunks.insert(*shard_id, next_shard_witness);
                         }
                     }
@@ -455,8 +462,11 @@ impl Proposer for BlockProposer {
         round: Round,
         timeout: Duration,
     ) -> FullProposal {
+        let timestamp = FarcasterTime::current();
+        let version = EngineVersion::version_for(&timestamp, self.network);
+
         let shard_witnesses = self
-            .collect_confirmed_shard_witnesses(height, timeout)
+            .collect_confirmed_shard_witnesses(height, version, timeout)
             .await;
 
         let shard_witness = ShardWitness {
@@ -491,9 +501,6 @@ impl Proposer for BlockProposer {
         let witness_hash = blake3::hash(&shard_witness.encode_to_vec())
             .as_bytes()
             .to_vec();
-
-        let timestamp = FarcasterTime::current();
-        let version = EngineVersion::version_for(&timestamp, self.network);
 
         let block_header = BlockHeader {
             parent_hash,
