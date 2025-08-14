@@ -506,12 +506,6 @@ impl Proposer for BlockProposer {
         let proposal = self.engine.propose_state_change(messages, height);
         let version = EngineVersion::version_for(&proposal.timestamp, self.network);
 
-        let mut events_hasher = blake3::Hasher::new();
-        for event in proposal.events.iter() {
-            events_hasher.update(&event.hash);
-        }
-        let events_hash = events_hasher.finalize().as_bytes().to_vec();
-
         let block_header = BlockHeader {
             parent_hash,
             chain_id: self.network as i32,
@@ -520,7 +514,7 @@ impl Proposer for BlockProposer {
             height: Some(height.clone()),
             shard_witnesses_hash: witness_hash,
             state_root: proposal.new_state_root,
-            events_hash,
+            events_hash: proposal.events_hash,
         };
         let hash = blake3::hash(&block_header.encode_to_vec())
             .as_bytes()
@@ -608,6 +602,7 @@ impl Proposer for BlockProposer {
                 timestamp,
                 new_state_root: header.state_root.clone(),
                 transactions: block.transactions.clone(),
+                events_hash: header.events_hash.clone(),
                 events: block.events.clone(),
             };
             if !self.engine.validate_state_change(&state_change, height) {

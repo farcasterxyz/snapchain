@@ -13,6 +13,7 @@ use crate::storage::store::BlockStore;
 use crate::storage::trie::merkle_trie::{MerkleTrie, TrieKey};
 use crate::storage::trie::{self};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use blake3::Hash;
 use prost::Message;
 use std::sync::Arc;
 use thiserror::Error;
@@ -29,6 +30,9 @@ pub enum BlockEngineError {
 
     #[error("merkle trie root hash mismatch")]
     HashMismatch,
+
+    #[error("events hash mismatch")]
+    EventsHashMismatch,
 
     #[error(transparent)]
     OnchainEventError(#[from] OnchainEventStorageError),
@@ -50,6 +54,7 @@ pub struct BlockEngine {
 pub struct ShardStateChange {
     pub timestamp: FarcasterTime,
     pub new_state_root: Vec<u8>,
+    pub events_hash: Vec<u8>,
     pub transactions: Vec<Transaction>,
     pub events: Vec<BlockEvent>,
 }
@@ -106,7 +111,7 @@ impl BlockEngine {
         height: Height,
         timestamp: &FarcasterTime,
         txn: &mut RocksDbTransactionBatch,
-    ) -> Vec<BlockEvent> {
+    ) -> (Vec<BlockEvent>, Hash) {
         let mut events = vec![];
         if height.block_number % self.heartbeat_block_interval == 0 {
             let event_seqnum = self.block_event_store.max_seqnum().unwrap() + 1;
@@ -125,7 +130,14 @@ impl BlockEngine {
             self.block_event_store.put_block_event(&event, txn).unwrap();
             events.push(event);
         }
-        events
+
+        let mut events_hasher = blake3::Hasher::new();
+        for event in events.iter() {
+            events_hasher.update(&event.hash);
+        }
+        let events_hash = events_hasher.finalize();
+
+        (events, events_hash)
     }
 
     fn prepare_proposal(
@@ -149,16 +161,18 @@ impl BlockEngine {
             snapchain_txn.account_root = account_root;
         }
 
-        let events = self.generate_block_events(height, timestamp, txn_batch);
+        let (events, events_hash) = self.generate_block_events(height, timestamp, txn_batch);
 
         self.metrics
             .publish_transaction_counts(&snapchain_txns, ProposalSource::Propose);
 
         let new_root_hash = self.trie.root_hash()?;
+
         let result = ShardStateChange {
             timestamp: timestamp.clone(),
             new_state_root: new_root_hash.clone(),
             transactions: snapchain_txns,
+            events_hash: events_hash.as_bytes().to_vec(),
             events,
         };
 
@@ -194,6 +208,7 @@ impl BlockEngine {
         txn_batch: &mut RocksDbTransactionBatch,
         transactions: &[Transaction],
         shard_root: &[u8],
+        events_hash: &Vec<u8>,
         source: ProposalSource,
         height: Height,
         timestamp: &FarcasterTime,
@@ -242,7 +257,18 @@ impl BlockEngine {
             }
         }
 
-        let block_events = self.generate_block_events(height, timestamp, txn_batch);
+        let (block_events, computed_events_hash) =
+            self.generate_block_events(height, timestamp, txn_batch);
+
+        if computed_events_hash.as_bytes().to_vec() != *events_hash {
+            warn!(
+                shard_id = self.shard_id,
+                expected_events_hash = hex::encode(events_hash),
+                actual_events_hash = hex::encode(computed_events_hash.as_bytes().to_vec()),
+                "Events hash mismatch"
+            );
+            return Err(BlockEngineError::EventsHashMismatch);
+        }
 
         let root1 = self.trie.root_hash()?;
         if &root1 != shard_root {
@@ -280,23 +306,17 @@ impl BlockEngine {
             &mut txn,
             transactions,
             shard_root,
+            &shard_state_change.events_hash,
             ProposalSource::Validate,
             height,
             &shard_state_change.timestamp,
         );
 
-        let mut valid = true;
-
         match proposal_result {
             Err(ref err) => {
                 error!("State change validation failed: {}", err);
-                valid = false;
             }
-            Ok(events) => {
-                if events != shard_state_change.events {
-                    valid = false;
-                }
-            }
+            Ok(_events) => {}
         }
 
         self.trie.reload(&self.db).unwrap();
@@ -304,7 +324,7 @@ impl BlockEngine {
         self.metrics
             .time_with_shard("validate_time", elapsed.as_millis() as u64);
 
-        if valid {
+        if proposal_result.is_ok() {
             self.metrics.count("validate.true", 1, vec![]);
         } else {
             self.metrics.count("validate.false", 1, vec![]);
@@ -337,6 +357,7 @@ impl BlockEngine {
             &mut txn,
             &block.transactions,
             &block.header.as_ref().unwrap().state_root,
+            &block.header.as_ref().unwrap().events_hash,
             ProposalSource::Commit,
             height,
             &FarcasterTime::new(block_timestamp),
