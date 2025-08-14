@@ -20,6 +20,7 @@ use crate::version::version::{EngineVersion, ProtocolFeature};
 use alloy_primitives::hex::FromHex;
 use alloy_primitives::Address;
 use informalsystems_malachitebft_core_types::Round;
+use itertools::Itertools;
 use merkle_trie::TrieKey;
 use std::cmp::{Ordering, PartialEq};
 use std::collections::{HashMap, HashSet};
@@ -270,38 +271,44 @@ impl ShardEngine {
             vec![],
         );
 
+        let version = self.version_for(timestamp);
         let mut snapchain_txns = self
             .mempool_poller
-            .create_transactions_from_mempool(messages)?;
+            .create_transactions_from_mempool(messages)?
+            .into_iter()
+            .filter_map(|mut transaction| {
+                // TODO(aditi): In the future, this seems like it should just be a part of the validation logic in replay_snapchain_txn.
+                let pending_onchain_events: Vec<OnChainEvent> = transaction
+                    .system_messages
+                    .iter()
+                    .filter_map(|vm| vm.on_chain_event.clone())
+                    .collect();
 
-        let version = self.version_for(timestamp);
+                let maybe_onchainevents =
+                    if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
+                        Some(pending_onchain_events.as_slice())
+                    } else {
+                        None
+                    };
 
-        // TODO(aditi): In the future, this seems like it should just be a part of the validation logic in replay_snapchain_txn and we should not drop messages entirely for users who don't have storage.
-        for transaction in &mut snapchain_txns {
-            let pending_onchain_events: Vec<OnChainEvent> = transaction
-                .system_messages
-                .iter()
-                .filter_map(|vm| vm.on_chain_event.clone())
-                .collect();
+                let storage_slot = self
+                    .stores
+                    .onchain_event_store
+                    .get_storage_slot_for_fid(transaction.fid, self.network, maybe_onchainevents)
+                    .ok()?;
 
-            let maybe_onchainevents =
-                if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
-                    Some(pending_onchain_events.as_slice())
+                // Drop events if storage slot is inactive
+                if !storage_slot.is_active() {
+                    transaction.user_messages = vec![];
+                }
+
+                if transaction.system_messages.is_empty() && transaction.user_messages.is_empty() {
+                    return None;
                 } else {
-                    None
-                };
-
-            let storage_slot = self.stores.onchain_event_store.get_storage_slot_for_fid(
-                transaction.fid,
-                self.network,
-                maybe_onchainevents,
-            )?;
-
-            // Drop events if storage slot is inactive
-            if !storage_slot.is_active() {
-                transaction.user_messages = vec![];
-            }
-        }
+                    return Some(transaction);
+                }
+            })
+            .collect_vec();
 
         let mut events = vec![];
         let mut validation_error_count = 0;
