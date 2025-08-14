@@ -22,7 +22,8 @@ use crate::proto::{
 };
 use crate::proto::{MessagesResponse, OnChainEvent};
 use crate::storage::store::account::MessagesPage;
-use crate::storage::store::engine::{MempoolMessage, PostCommitMessage, ShardStateChange};
+use crate::storage::store::engine::{PostCommitMessage, ShardStateChange};
+use crate::storage::store::mempool_poller::MempoolMessage;
 #[allow(unused_imports)] // Used by cfg(test)
 use crate::storage::trie::merkle_trie::TrieKey;
 use crate::storage::util::bytes_compare;

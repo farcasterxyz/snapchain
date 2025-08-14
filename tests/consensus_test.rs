@@ -19,7 +19,7 @@ use snapchain::proto::{self, Height, StorageUnitType};
 use snapchain::proto::{Block, FarcasterNetwork, IdRegisterEventType, SignerEventType};
 use snapchain::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use snapchain::storage::store::account::{CastStore, OnchainEventStore, UserDataStore};
-use snapchain::storage::store::engine::MempoolMessage;
+use snapchain::storage::store::mempool_poller::MempoolMessage;
 use snapchain::storage::store::node_local_state::LocalStateStore;
 use snapchain::storage::store::stores::Stores;
 use snapchain::storage::store::BlockStore;

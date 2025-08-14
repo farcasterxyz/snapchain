@@ -150,7 +150,12 @@ impl Proposer for ShardProposer {
         // TODO: perhaps not the best place to get our messages, but this is (currently) the
         // last place we're still in an async function
         let mempool_timeout = Duration::from_millis(200);
-        let messages = self.engine.pull_messages(mempool_timeout).await.unwrap(); // TODO: don't unwrap
+        let messages = self
+            .engine
+            .mempool_poller
+            .pull_messages(mempool_timeout)
+            .await
+            .unwrap(); // TODO: don't unwrap
 
         let previous_chunk = self.engine.get_last_shard_chunk();
         let parent_hash = match previous_chunk {
@@ -430,6 +435,7 @@ impl Proposer for BlockProposer {
         let shard_witnesses = self
             .collect_confirmed_shard_witnesses(height, timeout)
             .await;
+
         let shard_witness = ShardWitness {
             shard_chunk_witnesses: shard_witnesses,
         };

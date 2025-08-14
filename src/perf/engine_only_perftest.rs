@@ -2,7 +2,8 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::mempool::mempool::{self, Mempool, MempoolRequest, MempoolSource};
 use crate::proto::{FarcasterNetwork, Height, ShardChunk, ShardHeader};
-use crate::storage::store::engine::{MempoolMessage, ShardStateChange};
+use crate::storage::store::engine::ShardStateChange;
+use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::test_helper;
 use crate::utils::cli::compose_message;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
@@ -96,7 +97,10 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
             i += 1;
         }
 
-        let messages = engine.pull_messages(Duration::from_millis(50)).await?;
+        let messages = engine
+            .mempool_poller
+            .pull_messages(Duration::from_millis(50))
+            .await?;
         let state_change = engine.propose_state_change(1, messages, None);
 
         let valid = engine.validate_state_change(&state_change);
