@@ -1,9 +1,10 @@
 use crate::{
+    consensus::proposer::ProposalSource,
     core::util::FarcasterTime,
     proto,
     storage::{
         db::RocksDbTransactionBatch,
-        store::engine::{ProposalSource, ShardEngine},
+        store::engine::ShardEngine,
         trie::merkle_trie::{self, TrieKey},
     },
     version::version::EngineVersion,
@@ -33,7 +34,7 @@ impl ShardEngine {
         let mut tx_batch = RocksDbTransactionBatch::new();
         let ctx = merkle_trie::Context::new();
 
-        let (_, _, validation_errors) = self
+        let (_, _, validation_errors, _) = self
             .replay_snapchain_txn(
                 &ctx,
                 &tx,

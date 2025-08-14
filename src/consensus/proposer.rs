@@ -4,7 +4,8 @@ use crate::proto::{
     full_proposal, Block, BlockHeader, Commits, FullProposal, ShardChunk, ShardChunkWitness,
     ShardHeader, ShardWitness,
 };
-use crate::storage::store::engine::{BlockEngine, ShardEngine, ShardStateChange};
+use crate::storage::store::block_engine::{self, BlockEngine};
+use crate::storage::store::engine::{ShardEngine, ShardStateChange};
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStorageError;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
@@ -14,10 +15,18 @@ use prost::Message;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use tokio::time::Instant;
 use tokio::{select, time};
 use tracing::{error, warn};
+
+#[derive(Clone, Copy, Debug, PartialEq, strum_macros::Display)]
+pub enum ProposalSource {
+    Simulate,
+    Propose,
+    Validate,
+    Commit,
+}
 
 pub const GENESIS_MESSAGE: &str =
     "It occurs to me that our survival may depend upon our talking to one another.";
@@ -150,7 +159,12 @@ impl Proposer for ShardProposer {
         // TODO: perhaps not the best place to get our messages, but this is (currently) the
         // last place we're still in an async function
         let mempool_timeout = Duration::from_millis(200);
-        let messages = self.engine.pull_messages(mempool_timeout).await.unwrap(); // TODO: don't unwrap
+        let messages = self
+            .engine
+            .mempool_poller
+            .pull_messages(mempool_timeout)
+            .await
+            .unwrap(); // TODO: don't unwrap
 
         let previous_chunk = self.engine.get_last_shard_chunk();
         let parent_hash = match previous_chunk {
@@ -218,6 +232,7 @@ impl Proposer for ShardProposer {
                 return Validity::Invalid;
             }
 
+            // TODO(aditi): Something seems wrong here. The proposer shouldn't need to provide [events] and [max_block_event_seqnum] becuase those are derived from [transactions]. We probably need a different type for this. We're providing empty values here because the engine needs to compute them.
             let state = ShardStateChange {
                 shard_id: height.shard_index,
                 timestamp,
@@ -225,6 +240,7 @@ impl Proposer for ShardProposer {
                 new_state_root: header.shard_root.clone(),
                 transactions: chunk.transactions.clone(),
                 events: vec![],
+                max_block_event_seqnum: 0,
             };
             return if self.engine.validate_state_change(&state) {
                 Validity::Valid
@@ -321,7 +337,7 @@ pub struct BlockProposer {
     shard_stores: HashMap<u32, Stores>,
     num_shards: u32,
     network: proto::FarcasterNetwork,
-    block_tx: Option<mpsc::Sender<Block>>,
+    block_tx: Option<broadcast::Sender<Block>>,
     engine: BlockEngine,
     statsd_client: StatsdClientWrapper,
 }
@@ -333,7 +349,7 @@ impl BlockProposer {
         shard_stores: HashMap<u32, Stores>,
         num_shards: u32,
         network: proto::FarcasterNetwork,
-        block_tx: Option<mpsc::Sender<Block>>,
+        block_tx: Option<broadcast::Sender<Block>>,
         engine: BlockEngine,
         statsd_client: StatsdClientWrapper,
     ) -> BlockProposer {
@@ -425,7 +441,7 @@ impl BlockProposer {
 
     async fn publish_new_block(&self, block: Block) {
         if let Some(block_tx) = &self.block_tx {
-            match block_tx.send(block.clone()).await {
+            match block_tx.send(block.clone()) {
                 Err(err) => {
                     error!("Error publishing new block {:?}", err.to_string());
                 }
@@ -445,6 +461,15 @@ impl Proposer for BlockProposer {
         let shard_witnesses = self
             .collect_confirmed_shard_witnesses(height, timeout)
             .await;
+
+        let mempool_timeout = Duration::from_millis(200);
+        let messages = self
+            .engine
+            .mempool_poller
+            .pull_messages(mempool_timeout)
+            .await
+            .unwrap(); // TODO: don't unwrap
+
         let shard_witness = ShardWitness {
             shard_chunk_witnesses: shard_witnesses,
         };
@@ -478,16 +503,18 @@ impl Proposer for BlockProposer {
             .as_bytes()
             .to_vec();
 
-        let timestamp = FarcasterTime::current();
-        let version = EngineVersion::version_for(&timestamp, self.network);
+        let proposal = self.engine.propose_state_change(messages, height);
+        let version = EngineVersion::version_for(&proposal.timestamp, self.network);
 
         let block_header = BlockHeader {
             parent_hash,
             chain_id: self.network as i32,
             version: version.protocol_version(),
-            timestamp: timestamp.into(),
+            timestamp: proposal.timestamp.to_u64(),
             height: Some(height.clone()),
             shard_witnesses_hash: witness_hash,
+            state_root: proposal.new_state_root,
+            events_hash: proposal.events_hash,
         };
         let hash = blake3::hash(&block_header.encode_to_vec())
             .as_bytes()
@@ -498,6 +525,8 @@ impl Proposer for BlockProposer {
             hash: hash.clone(),
             shard_witness: Some(shard_witness),
             commits: None,
+            transactions: proposal.transactions,
+            events: proposal.events,
         };
 
         let proposal = FullProposal {
@@ -568,6 +597,18 @@ impl Proposer for BlockProposer {
                 error!("Received block with invalid shard witnesses hash");
                 return Validity::Invalid;
             }
+
+            let state_change = block_engine::ShardStateChange {
+                timestamp,
+                new_state_root: header.state_root.clone(),
+                transactions: block.transactions.clone(),
+                events_hash: header.events_hash.clone(),
+                events: block.events.clone(),
+            };
+            if !self.engine.validate_state_change(&state_change, height) {
+                return Validity::Invalid;
+            };
+
             self.proposed_blocks
                 .add_proposed_value(full_proposal.clone());
         }

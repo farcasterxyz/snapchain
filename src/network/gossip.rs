@@ -8,7 +8,7 @@ use crate::proto::{
     GossipMessage,
 };
 use crate::storage::store::account::message_bytes_decode;
-use crate::storage::store::engine::MempoolMessage;
+use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::EngineVersion;
 use bytes::Bytes;

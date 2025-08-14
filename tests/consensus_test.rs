@@ -19,7 +19,7 @@ use snapchain::proto::{self, Height, StorageUnitType};
 use snapchain::proto::{Block, FarcasterNetwork, IdRegisterEventType, SignerEventType};
 use snapchain::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use snapchain::storage::store::account::{CastStore, OnchainEventStore, UserDataStore};
-use snapchain::storage::store::engine::MempoolMessage;
+use snapchain::storage::store::mempool_poller::MempoolMessage;
 use snapchain::storage::store::node_local_state::LocalStateStore;
 use snapchain::storage::store::stores::Stores;
 use snapchain::storage::store::BlockStore;
@@ -344,7 +344,7 @@ impl NodeForTest {
         let registry = SharedRegistry::global();
         let peer_id = gossip.swarm.local_peer_id().clone();
         println!("StartNode validator peer id: {}", peer_id.to_string());
-        let (block_tx, mut block_rx) = mpsc::channel::<Block>(100);
+        let (block_tx, mut block_rx) = broadcast::channel::<Block>(100);
         let data_dir = &make_tmp_path();
         let db = Arc::new(RocksDB::new(data_dir));
         db.open().unwrap();
@@ -402,7 +402,7 @@ impl NodeForTest {
         let mut join_handles = Vec::new();
 
         let handle = tokio::spawn(async move {
-            while let Some(block) = block_rx.recv().await {
+            while let Ok(block) = block_rx.recv().await {
                 assert_valid_block(&block);
             }
         });
@@ -618,10 +618,14 @@ impl TestNetwork {
         for event in on_chain_events {
             let result = self.nodes[0]
                 .add_message(
-                    MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
-                        on_chain_event: Some(event),
-                        fname_transfer: None,
-                    }),
+                    MempoolMessage::ValidatorMessage {
+                        for_shard: None,
+                        message: proto::ValidatorMessage {
+                            on_chain_event: Some(event),
+                            fname_transfer: None,
+                            block_event: None,
+                        },
+                    },
                     MempoolSource::Local,
                     None,
                 )
@@ -972,7 +976,8 @@ async fn test_cross_shard_interactions() {
                 signature: hex::decode("050b42fdda7b0a7309a1fb8a2cbc9a5f4bbf241aec74f53191f9665d9b9f572d4f452ac807911af7b6980219482d6f7fda7f99f23ab19c961b4701b9934fa2f91b").unwrap(),
                 r#type: proto::UserNameType::UsernameTypeFname as i32,
             }),
-        })
+        }),
+        block_event: None,
     };
 
     let transfer2 = proto::ValidatorMessage {
@@ -988,13 +993,17 @@ async fn test_cross_shard_interactions() {
                 signature: hex::decode("00c3601c515edffe208e7128f47f89c2fb7b8e0beaaf615158305ddf02818a71679a8e7062503be59a19d241bd0b47396a3c294cfafd0d5478db1ae8249463bd1c").unwrap(),
                 r#type: proto::UserNameType::UsernameTypeFname as i32,
             }),
-        })
+        }),
+        block_event: None,
     };
 
     let node = &network.nodes[0];
 
     node.add_message(
-        MempoolMessage::ValidatorMessage(transfer1.clone()),
+        MempoolMessage::ValidatorMessage {
+            for_shard: None,
+            message: transfer1.clone(),
+        },
         MempoolSource::Local,
         None,
     )
@@ -1002,7 +1011,10 @@ async fn test_cross_shard_interactions() {
     .unwrap();
 
     node.add_message(
-        MempoolMessage::ValidatorMessage(transfer2.clone()),
+        MempoolMessage::ValidatorMessage {
+            for_shard: None,
+            message: transfer2.clone(),
+        },
         MempoolSource::Local,
         None,
     )
