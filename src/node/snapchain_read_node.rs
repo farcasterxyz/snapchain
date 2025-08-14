@@ -112,6 +112,7 @@ impl SnapchainReadNode {
             config.max_messages_per_block,
             None,
             farcaster_network,
+            config.heartbeat_block_interval,
         );
         let ctx = SnapchainValidatorContext::new(keypair.clone());
         let block_actor = MalachiteReadNodeActors::create_and_start(

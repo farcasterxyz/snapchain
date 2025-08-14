@@ -2,18 +2,16 @@ use crate::consensus::proposer::ProposalSource;
 use crate::core::{types::Height, util::FarcasterTime};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::{
-    self, block_event, Block, BlockEvent, BlockEventType, FarcasterNetwork, ShardChunkWitness,
-    TestEventBody, Transaction,
+    block_event, Block, BlockEvent, BlockEventType, FarcasterNetwork, HeartbeatEventBody,
+    ShardChunkWitness, Transaction,
 };
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
-use crate::storage::store::account::{
-    OnchainEventStorageError, OnchainEventStore, StoreEventHandler,
-};
+use crate::storage::store::account::{BlockEventStore, OnchainEventStorageError};
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
 use crate::storage::store::BlockStore;
 use crate::storage::trie::merkle_trie::{MerkleTrie, TrieKey};
-use crate::storage::trie::{self, merkle_trie};
+use crate::storage::trie::{self};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use prost::Message;
 use std::sync::Arc;
@@ -38,12 +36,13 @@ pub enum BlockEngineError {
 
 pub struct BlockEngine {
     block_store: BlockStore,
+    block_event_store: BlockEventStore,
     trie: MerkleTrie,
     pub mempool_poller: MempoolPoller,
-    onchain_event_store: OnchainEventStore,
     shard_id: u64,
     db: Arc<RocksDB>,
     metrics: Metrics,
+    heartbeat_block_interval: u64,
 }
 
 // Shard state root and the transactions
@@ -64,19 +63,17 @@ impl BlockEngine {
         max_messages_per_block: u32,
         messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
         network: FarcasterNetwork,
+        heartbeat_block_interval: u64,
     ) -> Self {
         trie.initialize(&db).unwrap();
-        let event_handler = StoreEventHandler::new();
-        let onchain_event_store = OnchainEventStore::new(db.clone(), event_handler.clone());
         BlockEngine {
             block_store,
+            block_event_store: BlockEventStore { db: db.clone() },
             trie,
-            onchain_event_store: onchain_event_store.clone(),
             shard_id: 0,
             mempool_poller: MempoolPoller {
                 max_messages_per_block,
                 messages_request_tx,
-                onchain_event_store: onchain_event_store.clone(),
                 network,
                 shard_id: 0,
                 statsd_client: statsd_client.clone(),
@@ -86,87 +83,49 @@ impl BlockEngine {
                 statsd_client,
                 shard_id: 0,
             },
+            heartbeat_block_interval,
         }
-    }
-
-    fn update_trie(
-        &mut self,
-        event: &proto::HubEvent,
-        txn_batch: &mut RocksDbTransactionBatch,
-    ) -> Result<(), BlockEngineError> {
-        match &event.body {
-            Some(proto::hub_event::Body::MergeOnChainEventBody(merge)) => {
-                if let Some(onchain_event) = &merge.on_chain_event {
-                    self.trie.insert(
-                        &merkle_trie::Context::new(),
-                        &self.db,
-                        txn_batch,
-                        vec![&TrieKey::for_onchain_event(&onchain_event)],
-                    )?;
-                }
-            }
-            _ => {}
-        };
-        Ok(())
     }
 
     pub(crate) fn replay_snapchain_txn(
         &mut self,
         snapchain_txn: &Transaction,
         txn_batch: &mut RocksDbTransactionBatch,
-        height: Height,
-        timestamp: &FarcasterTime,
-    ) -> Result<(Vec<u8>, Vec<BlockEvent>), BlockEngineError> {
-        let now = std::time::Instant::now();
-        let mut events = vec![];
-        let mut event_seqnum = self.get_last_event_seqnum().unwrap_or(0) + 1;
-
-        for system_message in snapchain_txn.system_messages.iter() {
-            if let Some(ref onchain_event) = system_message.on_chain_event {
-                let event = self
-                    .onchain_event_store
-                    .merge_onchain_event(onchain_event.clone(), txn_batch)?;
-                self.update_trie(&event, txn_batch)?;
-                // Each shard ingests its own onchain events, there's no need to expose these via block events.
-            }
-        }
-
-        // TODO(aditi): This is a hack for now to test the pipeline
-        for user_message in snapchain_txn.user_messages.iter() {
-            let mut event = BlockEvent {
-                r#type: BlockEventType::Test as i32,
-                seqnum: event_seqnum,
-                body: Some(block_event::Body::TestEventBody(TestEventBody {
-                    fid: user_message.fid(),
-                    text: user_message
-                        .data
-                        .as_ref()
-                        .unwrap()
-                        .r#type()
-                        .as_str_name()
-                        .to_string(),
-                })),
-                hash: vec![],
-                block_number: height.block_number,
-                block_timestamp: timestamp.to_u64(),
-                event_index: events.len() as u64,
-            };
-            event.hash = event.encode_to_vec();
-            events.push(event);
-            event_seqnum += 1;
-        }
-
+    ) -> Result<Vec<u8>, BlockEngineError> {
         // TODO(aditi): Fill this in, it's a no-op for now
 
         let account_root =
             self.trie
                 .get_hash(&self.db, txn_batch, &TrieKey::for_fid(snapchain_txn.fid));
-        let elapsed = now.elapsed();
-        self.metrics
-            .time_with_shard("replay_txn_time_us", elapsed.as_micros() as u64);
 
-        // Return the new account root hash
-        Ok((account_root, events))
+        Ok(account_root)
+    }
+
+    fn generate_block_events(
+        &self,
+        height: Height,
+        timestamp: &FarcasterTime,
+        txn: &mut RocksDbTransactionBatch,
+    ) -> Vec<BlockEvent> {
+        let mut events = vec![];
+        if height.block_number % self.heartbeat_block_interval == 0 {
+            let event_seqnum = self.block_event_store.max_seqnum().unwrap() + 1;
+            let mut event = BlockEvent {
+                seqnum: event_seqnum,
+                hash: vec![],
+                r#type: BlockEventType::Heartbeat as i32,
+                block_number: height.block_number,
+                event_index: events.len() as u64,
+                block_timestamp: timestamp.to_u64(),
+                body: Some(block_event::Body::HeartbeatEventBody(HeartbeatEventBody {})),
+            };
+            event.hash = blake3::hash(event.encode_to_vec().as_slice())
+                .as_bytes()
+                .to_vec();
+            self.block_event_store.put_block_event(&event, txn).unwrap();
+            events.push(event);
+        }
+        events
     }
 
     fn prepare_proposal(
@@ -185,13 +144,12 @@ impl BlockEngine {
         let mut snapchain_txns = self
             .mempool_poller
             .create_transactions_from_mempool(messages)?;
-        let mut events = vec![];
         for snapchain_txn in &mut snapchain_txns {
-            let (account_root, txn_events) =
-                self.replay_snapchain_txn(&snapchain_txn, txn_batch, height, timestamp)?;
+            let account_root = self.replay_snapchain_txn(&snapchain_txn, txn_batch)?;
             snapchain_txn.account_root = account_root;
-            events.extend(txn_events);
         }
+
+        let events = self.generate_block_events(height, timestamp, txn_batch);
 
         self.metrics
             .publish_transaction_counts(&snapchain_txns, ProposalSource::Propose);
@@ -241,7 +199,6 @@ impl BlockEngine {
         timestamp: &FarcasterTime,
     ) -> Result<Vec<BlockEvent>, BlockEngineError> {
         let now = std::time::Instant::now();
-        let mut events = vec![];
         // Validate that the trie is in a good place to start with
         match self.get_last_block() {
             None => { // There are places where it's hard to provide a parent hash-- e.g. tests so make this an option and skip validation if not present
@@ -269,8 +226,7 @@ impl BlockEngine {
         }
 
         for snapchain_txn in transactions {
-            let (account_root, txn_events) =
-                self.replay_snapchain_txn(snapchain_txn, txn_batch, height, timestamp)?;
+            let account_root = self.replay_snapchain_txn(snapchain_txn, txn_batch)?;
             // Reject early if account roots fail to match (shard roots will definitely fail)
             if &account_root != &snapchain_txn.account_root {
                 warn!(
@@ -284,8 +240,9 @@ impl BlockEngine {
                 );
                 return Err(BlockEngineError::HashMismatch);
             }
-            events.extend(txn_events);
         }
+
+        let block_events = self.generate_block_events(height, timestamp, txn_batch);
 
         let root1 = self.trie.root_hash()?;
         if &root1 != shard_root {
@@ -303,7 +260,8 @@ impl BlockEngine {
         let elapsed = now.elapsed();
         self.metrics
             .time_with_shard("replay_proposal_time", elapsed.as_millis() as u64);
-        Ok(events)
+
+        Ok(block_events)
     }
 
     pub fn validate_state_change(
@@ -388,12 +346,11 @@ impl BlockEngine {
                 panic!("State change commit failed: {}", err);
             }
             Ok(_events) => {
-                // TODO(aditi): Emit events
+                self.db.commit(txn).unwrap();
                 let result = self.block_store.put_block(block);
                 if result.is_err() {
                     error!("Failed to store block: {:?}", result.err());
                 }
-                self.db.commit(txn).unwrap();
                 self.trie.reload(&self.db).unwrap();
                 // TODO(aditi): We need to add the post-commit hooks for replication for shard 0.
             }
@@ -459,11 +416,5 @@ impl BlockEngine {
             .iter()
             .find(|witness| witness.height.unwrap().shard_index == shard_id)
             .cloned()
-    }
-
-    pub fn get_last_event_seqnum(&self) -> Option<u64> {
-        let last_block = self.get_last_block()?;
-        let last_event = last_block.events.last()?;
-        Some(last_event.seqnum)
     }
 }

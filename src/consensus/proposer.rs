@@ -232,6 +232,7 @@ impl Proposer for ShardProposer {
                 return Validity::Invalid;
             }
 
+            // TODO(aditi): Something seems wrong here. The proposer shouldn't need to provide [events] and [max_block_event_seqnum] becuase those are derived from [transactions]. We probably need a different type for this. We're providing empty values here because the engine needs to compute them.
             let state = ShardStateChange {
                 shard_id: height.shard_index,
                 timestamp,
@@ -239,6 +240,7 @@ impl Proposer for ShardProposer {
                 new_state_root: header.shard_root.clone(),
                 transactions: chunk.transactions.clone(),
                 events: vec![],
+                max_block_event_seqnum: 0,
             };
             return if self.engine.validate_state_change(&state) {
                 Validity::Valid

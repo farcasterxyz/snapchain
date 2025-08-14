@@ -1,7 +1,7 @@
 use crate::core::error::HubError;
 use crate::proto::BlockEvent;
 use crate::storage::constants::{RootPrefix, PAGE_SIZE_MAX};
-use crate::storage::db::{PageOptions, RocksDB, RocksdbError};
+use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch, RocksdbError};
 use prost::Message;
 use std::sync::Arc;
 use thiserror::Error;
@@ -12,6 +12,9 @@ use tracing::error;
 pub enum BlockEventStorageError {
     #[error(transparent)]
     RocksdbError(#[from] RocksdbError),
+
+    #[error(transparent)]
+    HubError(#[from] HubError),
 
     #[error("Too many blocks in result")]
     TooManyBlocksInResult,
@@ -26,11 +29,10 @@ pub struct BlockEventPage {
     pub next_page_token: Option<Vec<u8>>,
 }
 
-#[inline]
 fn make_block_event_key(seqnum: u64) -> Vec<u8> {
     // Store the prefix in the first byte so there's no overlap across different stores
     let mut key = vec![RootPrefix::BlockEvent as u8];
-    // Store the block number in the next 8 bytes
+    // Store the sequence number in the next 8 bytes
     key.extend_from_slice(&seqnum.to_be_bytes());
 
     key
@@ -53,7 +55,7 @@ fn get_block_page_by_prefix(
     let stop_prefix = match stop_prefix {
         None => {
             // Covers everything up to the end of the shard keys
-            vec![RootPrefix::Block as u8 + 1]
+            vec![RootPrefix::BlockEvent as u8 + 1]
         }
         Some(key) => key,
     };
@@ -109,14 +111,11 @@ fn get_last_block_event(db: &RocksDB) -> Result<Option<BlockEvent>, BlockEventSt
 }
 
 pub fn put_block_event(
-    db: &RocksDB,
     block_event: &BlockEvent,
+    txn: &mut RocksDbTransactionBatch,
 ) -> Result<(), BlockEventStorageError> {
-    let mut txn = db.txn();
     let primary_key = make_block_event_key(block_event.seqnum);
     txn.put(primary_key.clone(), block_event.encode_to_vec());
-
-    db.commit(txn)?;
     Ok(())
 }
 
@@ -131,8 +130,12 @@ impl BlockEventStore {
     }
 
     #[inline]
-    pub fn put_block_event(&self, block_event: &BlockEvent) -> Result<(), BlockEventStorageError> {
-        put_block_event(&self.db, block_event)
+    pub fn put_block_event(
+        &self,
+        block_event: &BlockEvent,
+        txn: &mut RocksDbTransactionBatch,
+    ) -> Result<(), BlockEventStorageError> {
+        put_block_event(block_event, txn)
     }
 
     #[inline]

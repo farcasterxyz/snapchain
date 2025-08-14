@@ -662,12 +662,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         };
 
         for shard_id in app_config.consensus.shard_ids.iter() {
+            let senders = node.shard_senders.get(shard_id).unwrap();
             let mut block_receiver = BlockReceiver {
                 shard_id: *shard_id,
                 stores: node.shard_stores.get(shard_id).unwrap().clone(),
                 block_rx: block_tx.subscribe(),
                 mempool_tx: mempool_tx.clone(),
                 system_tx: system_tx.clone(),
+                event_rx: senders.events_tx.subscribe(),
             };
             tokio::spawn(async move { block_receiver.run().await });
         }

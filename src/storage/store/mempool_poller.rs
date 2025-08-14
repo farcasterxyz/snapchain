@@ -1,8 +1,7 @@
 use crate::mempool::mempool::MempoolMessagesRequest;
-use crate::proto::{self, FarcasterNetwork, OnChainEvent, Transaction};
-use crate::storage::store::account::{OnchainEventStorageError, OnchainEventStore};
+use crate::proto::{self, FarcasterNetwork, Transaction};
+use crate::storage::store::account::OnchainEventStorageError;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
-use crate::version::version::{EngineVersion, ProtocolFeature};
 use itertools::Itertools;
 use std::string::ToString;
 use std::time::Duration;
@@ -23,7 +22,6 @@ pub enum MempoolPollerError {
 pub struct MempoolPoller {
     pub messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
     pub max_messages_per_block: u32,
-    pub onchain_event_store: OnchainEventStore,
     pub network: FarcasterNetwork,
     pub shard_id: u32,
     pub statsd_client: StatsdClientWrapper,
@@ -140,36 +138,9 @@ impl MempoolPoller {
                 {
                     transaction.system_messages.push(message.clone());
                 }
-            }
 
-            // Extract just the OnChainEvents from the collected system messages
-            let pending_onchain_events: Vec<OnChainEvent> = transaction
-                .system_messages
-                .iter()
-                .filter_map(|vm| vm.on_chain_event.clone())
-                .collect();
-
-            let version = EngineVersion::current(self.network);
-            let maybe_onchainevents =
-                if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
-                    Some(pending_onchain_events.as_slice())
-                } else {
-                    None
-                };
-
-            let storage_slot = self.onchain_event_store.get_storage_slot_for_fid(
-                fid,
-                self.network,
-                maybe_onchainevents,
-            )?;
-
-            // Second pass: filter user_messages based on the look-ahead storage check
-            for msg in messages {
-                if let MempoolMessage::UserMessage(user_msg) = msg {
-                    // Only include messages for users that have storage
-                    if storage_slot.is_active() {
-                        transaction.user_messages.push(user_msg.clone());
-                    }
+                if let MempoolMessage::UserMessage(message) = msg {
+                    transaction.user_messages.push(message.clone());
                 }
             }
 

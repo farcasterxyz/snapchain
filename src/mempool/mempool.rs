@@ -519,9 +519,6 @@ impl Mempool {
                 } else {
                     vec![fid_shard]
                 }
-            } else if let Some(_onchain_event) = &inner_message.on_chain_event {
-                // All onchain events should also go to shard 0
-                vec![fid_shard, 0]
             } else {
                 vec![fid_shard]
             }

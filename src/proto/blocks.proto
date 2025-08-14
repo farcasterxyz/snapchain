@@ -102,12 +102,10 @@ message ConsensusMessage {
 }
 
 enum BlockEventType {
-  BLOCK_EVENT_TYPE_TEST = 0; // Placeholder
+  BLOCK_EVENT_TYPE_HEARTBEAT = 0; 
 }
 
-message TestEventBody {
-  uint64 fid = 1;
-  string text = 2;
+message HeartbeatEventBody {
 }
 
 message BlockEvent {
@@ -118,7 +116,7 @@ message BlockEvent {
   uint64 event_index = 5;
   uint64 block_timestamp = 6;
   oneof body {
-    TestEventBody test_event_body = 7; // Placeholder
+    HeartbeatEventBody heartbeat_event_body = 7; // Placeholder
   };
 }
 
