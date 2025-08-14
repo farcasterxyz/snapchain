@@ -23,6 +23,7 @@ use snapchain::storage::store::mempool_poller::MempoolMessage;
 use snapchain::storage::store::node_local_state::LocalStateStore;
 use snapchain::storage::store::stores::Stores;
 use snapchain::storage::store::BlockStore;
+use snapchain::storage::trie::merkle_trie::{self, TrieKey};
 use snapchain::utils::factory::{self, messages_factory};
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::HashMap;
@@ -233,7 +234,7 @@ impl ReadNodeForTest {
 
         let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
 
-        let fc_network = FarcasterNetwork::Testnet;
+        let fc_network = FarcasterNetwork::Devnet;
         let mut gossip = SnapchainGossip::create(
             keypair.clone(),
             &config,
@@ -327,7 +328,7 @@ impl NodeForTest {
         consensus_config.block_time = time::Duration::from_millis(250);
 
         let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
-        let fc_network = FarcasterNetwork::Testnet;
+        let fc_network = FarcasterNetwork::Devnet;
 
         let mut gossip = SnapchainGossip::create(
             keypair.clone(),
@@ -432,7 +433,7 @@ impl NodeForTest {
             node.shard_senders.clone(),
             statsd_client.clone(),
             num_shards,
-            FarcasterNetwork::Testnet,
+            FarcasterNetwork::Devnet,
             Box::new(routing::EvenOddRouterForTest {}),
             mempool_tx.clone(),
             gossip_tx.clone(),
@@ -1014,4 +1015,43 @@ async fn test_cross_shard_interactions() {
         .wait_for_username_registered_to_fid(first_fid, fname.to_string())
         .await
         .unwrap();
+}
+
+#[tokio::test]
+#[serial]
+async fn test_decoupling_shard_0_from_other_shards() {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .try_init();
+    let num_shards = 2;
+    let mut network = TestNetwork::create(3, num_shards).await;
+    network.start_validators().await;
+
+    // Register some data to both shards to make sure the setup is working
+    let first_fid = 20270;
+    let second_fid = 211428;
+
+    network.register_and_wait_for_fid(first_fid).await.unwrap();
+    network.register_and_wait_for_fid(second_fid).await.unwrap();
+
+    // Corrupt the trie for both shards on one of the nodes so consensus halts on shards 1 and 2.
+    for stores in network.nodes[0].node.shard_stores.values_mut() {
+        let mut txn = RocksDbTransactionBatch::new();
+        let message = messages_factory::casts::create_cast_add(123455, "hi", None, None);
+        stores
+            .trie
+            .insert(
+                &merkle_trie::Context::new(),
+                &stores.db,
+                &mut txn,
+                vec![&TrieKey::for_message(&message)],
+            )
+            .unwrap();
+        stores.db.commit(txn).unwrap();
+    }
+
+    // Make sure that shard 0 proceeds
+    let max_block_height = network.max_block_height();
+    network.wait_for_block(max_block_height + 4).await.unwrap();
 }
