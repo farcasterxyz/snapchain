@@ -10,7 +10,7 @@ use crate::proto::{
     RetryOnchainEventsRequest, UploadSnapshotRequest, UserNameProof, ValidatorMessage,
 };
 use crate::storage;
-use crate::storage::store::engine::MempoolMessage;
+use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;

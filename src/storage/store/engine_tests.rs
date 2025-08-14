@@ -10,7 +10,8 @@ mod tests {
     use crate::proto::{OnChainEvent, OnChainEventType};
     use crate::storage::db::{PageOptions, RocksDbTransactionBatch};
     use crate::storage::store::account::{HubEventIdGenerator, UserDataStore};
-    use crate::storage::store::engine::{MempoolMessage, MessageValidationError, ShardEngine};
+    use crate::storage::store::engine::{MessageValidationError, ShardEngine};
+    use crate::storage::store::mempool_poller::MempoolMessage;
     use crate::storage::store::stores::StoreLimits;
     use crate::storage::store::test_helper::{
         self, commit_event, commit_event_at, commit_message_at, commit_messages,

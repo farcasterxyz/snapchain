@@ -11,7 +11,8 @@ mod tests {
         network::gossip::{Config, SnapchainGossip},
         proto::{self, Height, ShardChunk, ShardHeader, Transaction, ValidatorMessage},
         storage::store::{
-            engine::{MempoolMessage, ShardEngine},
+            engine::ShardEngine,
+            mempool_poller::MempoolMessage,
             test_helper::{self, commit_event, default_storage_event, FID_FOR_TEST},
         },
         utils::{

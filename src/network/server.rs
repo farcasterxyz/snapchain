@@ -35,7 +35,8 @@ use crate::storage::store::account::{
     CastStore, LinkStore, ReactionStore, UserDataStore, VerificationStore,
 };
 use crate::storage::store::account::{EventsPage, HubEventIdGenerator};
-use crate::storage::store::engine::{MempoolMessage, MessageValidationError, Senders, ShardEngine};
+use crate::storage::store::engine::{MessageValidationError, Senders, ShardEngine};
+use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
