@@ -12,29 +12,30 @@ use crate::storage::store::stores::StoreLimits;
 use crate::storage::trie::merkle_trie::{self, TrieKey};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::EngineVersion;
+use futures::future::try_join_all;
 use std::error::Error;
 use std::net;
+use tokio::sync::{mpsc, oneshot};
 use tonic::transport::Channel;
 use tracing::{error, info};
+
+/// Request to commit a transaction batch to the database
+struct DbCommitRequest {
+    txn_batch: RocksDbTransactionBatch,
+    fid: u64,
+    response_tx: oneshot::Sender<Result<(), BootstrapError>>,
+}
 
 /// Bootstrap a node from replication instead of snapshot download
 pub async fn bootstrap_from_replication(app_config: &Config) -> Result<(), Box<dyn Error>> {
     info!("Starting replication-based bootstrap");
 
-    // For now, use a hardcoded peer as requested
-    let peer_address = "http://127.0.0.1:4383";
-    info!("Connecting to hardcoded peer: {}", peer_address);
-
-    // Create a replication client
-    let mut client = match ReplicationServiceClient::connect(peer_address).await {
-        Ok(client) => client,
-        Err(e) => {
-            error!("Failed to connect to peer {}: {}", peer_address, e);
-            return Err(BootstrapError::PeerConnectionError(e.to_string()).into());
-        }
-    };
-
     // Fetch metadata and determine target height
+    // Get the peer address from the client's channel
+    let peer_address = "http://127.0.0.1:4383"; // Same hardcoded address as in bootstrap_from_replication
+    let mut client = ReplicationServiceClient::connect(peer_address)
+        .await
+        .map_err(|e| BootstrapError::PeerConnectionError(e.to_string()))?;
     let target_height =
         determine_target_height(&mut client, &app_config.consensus.shard_ids).await?;
     info!("Target height for bootstrap: {}", target_height);
@@ -67,31 +68,168 @@ pub async fn bootstrap_from_replication(app_config: &Config) -> Result<(), Box<d
     for shard_id in shard_ids {
         info!("Bootstrapping shard {}", shard_id);
 
-        // Initialize empty database for this shard
-        let db = RocksDB::open_shard_db(&app_config.rocksdb_dir, shard_id);
-
-        // Create a read-only ShardEngine for replaying transactions
-        let trie = merkle_trie::MerkleTrie::new(app_config.trie_branching_factor).unwrap();
-        let mut engine = ShardEngine::new(
-            db,
-            app_config.fc_network,
-            trie,
-            shard_id,
-            StoreLimits::default(),
-            statsd_client.clone(),
-            256,
-            None,
-            None,
-            None,
-        );
-
         // Replay transactions for this shard
-        replay_shard_transactions(&mut client, &mut engine, shard_id, target_height).await?;
+        start_shard_replication(
+            peer_address,
+            app_config.fc_network,
+            shard_id,
+            app_config.trie_branching_factor,
+            target_height,
+            &statsd_client,
+            &app_config.rocksdb_dir,
+        )
+        .await?;
 
         info!("Completed bootstrap for shard {}", shard_id);
     }
 
     info!("Replication bootstrap completed successfully");
+    Ok(())
+}
+
+async fn start_shard_replication(
+    peer_address: &str,
+    network: crate::proto::FarcasterNetwork,
+    shard_id: u32,
+    trie_branching_factor: u32,
+    target_height: u64,
+    statsd_client: &StatsdClientWrapper,
+    rocksdb_dir: &str,
+) -> Result<(), BootstrapError> {
+    info!(
+        "Starting parallel shard replication for shard {} up to height {}",
+        shard_id, target_height
+    );
+
+    let db = RocksDB::open_shard_db(&rocksdb_dir, shard_id);
+
+    // TODO: How do we get the total number of FIDs to split them up?
+    // Define the FID ranges for the 3 threads
+    let ranges = [
+        (0u64, 400_000u64),       // Thread 1: 0 to 400k
+        (400_000u64, 800_000u64), // Thread 2: 400k to 800k
+        (800_000u64, 0u64),       // Thread 3: 800k to end (0 means no limit)
+    ];
+
+    let statsd_client = statsd_client.clone();
+
+    // Create a channel for DB commit requests
+    let (db_commit_tx, mut db_commit_rx) = mpsc::unbounded_channel::<DbCommitRequest>();
+
+    // Clone db for the DB writer thread
+    let db_writer = db.clone();
+
+    // Spawn the DB writer thread
+    let db_writer_task = tokio::spawn(async move {
+        info!("DB writer thread started for shard {}", shard_id);
+
+        while let Some(commit_request) = db_commit_rx.recv().await {
+            let result = db_writer.commit(commit_request.txn_batch).map_err(|e| {
+                BootstrapError::DatabaseError(format!("Failed to commit transaction: {}", e))
+            });
+
+            // Send the result back to the requesting thread
+            if let Err(_) = commit_request.response_tx.send(result) {
+                error!(
+                    "DB writer - Failed to send commit result for FID {} - receiver dropped",
+                    commit_request.fid
+                );
+            }
+        }
+
+        info!("DB writer thread finished for shard {}", shard_id);
+    });
+
+    // Create tasks for each FID range
+    let mut tasks = Vec::new();
+
+    for (i, (start_fid, end_fid)) in ranges.iter().enumerate() {
+        let peer_address = peer_address.to_string();
+        let statsd_client = statsd_client.clone();
+        let start_fid = *start_fid;
+        let end_fid = *end_fid;
+        let db_commit_tx = db_commit_tx.clone();
+
+        let db = db.clone();
+        let task = tokio::spawn(async move {
+            info!(
+                "Thread {} starting replication for FID range {} to {}",
+                i + 1,
+                start_fid,
+                if end_fid == 0 {
+                    "end".to_string()
+                } else {
+                    end_fid.to_string()
+                }
+            );
+
+            // Create a new client for this thread
+            let mut thread_client = ReplicationServiceClient::connect(peer_address)
+                .await
+                .map_err(|e| BootstrapError::PeerConnectionError(e.to_string()))?;
+
+            // Create a new engine for this thread
+
+            let trie = merkle_trie::MerkleTrie::new(trie_branching_factor).unwrap();
+            let mut thread_engine = ShardEngine::new(
+                db,
+                network,
+                trie,
+                shard_id,
+                StoreLimits::default(),
+                statsd_client,
+                256,
+                None,
+                None,
+                None,
+            );
+
+            // Call replay_shard_transactions with the specified range
+            replay_shard_transactions(
+                &mut thread_client,
+                &mut thread_engine,
+                shard_id,
+                target_height,
+                start_fid,
+                end_fid,
+                db_commit_tx,
+            )
+            .await
+        });
+
+        tasks.push(task);
+    }
+
+    // Drop the original sender so the DB writer thread can exit when all workers are done
+    drop(db_commit_tx);
+
+    // Wait for all tasks to complete and collect results
+    let results = try_join_all(tasks)
+        .await
+        .map_err(|e| BootstrapError::TransactionReplayError(format!("Task join error: {}", e)))?;
+
+    // Check if any task returned an error
+    for (i, result) in results.into_iter().enumerate() {
+        if let Err(e) = result {
+            error!("Thread {} failed during replication: {}", i + 1, e);
+            return Err(e);
+        }
+        info!("Thread {} completed successfully", i + 1);
+    }
+
+    // Wait for the DB writer thread to finish
+    if let Err(e) = db_writer_task.await {
+        error!("DB writer task failed: {}", e);
+        return Err(BootstrapError::DatabaseError(format!(
+            "DB writer task failed: {}",
+            e
+        )));
+    }
+
+    info!(
+        "All parallel replication threads completed successfully for shard {}",
+        shard_id
+    );
     Ok(())
 }
 
@@ -101,17 +239,19 @@ async fn replay_shard_transactions(
     engine: &mut ShardEngine,
     shard_id: u32,
     height: u64,
+    start_fid: u64,
+    end_fid: u64,
+    db_commit_tx: mpsc::UnboundedSender<DbCommitRequest>,
 ) -> Result<(), BootstrapError> {
     info!(
-        "Replaying transactions for shard {} at height {}",
-        shard_id, height
+        "Replaying transactions for shard {} at height {}. Fids {} to {}",
+        shard_id, height, start_fid, end_fid
     );
 
     let mut page_token: Option<Vec<u8>> = None;
     let mut total_transactions = 0;
     let mut last_fid = 0;
     let mut last_fid_account_root = vec![];
-    let start_fid = 0;
 
     // We'll send the server the order in which we want the messages to be sent, so the engine can process them correctly
     let sys_messages_map = ShardEngine::system_message_sort_order_map();
@@ -128,6 +268,36 @@ async fn replay_shard_transactions(
             .map(|m| *m as u32) // Convert to u32 to send over wire
             .collect::<Vec<_>>(),
     });
+
+    // Helper function to check if the account roots match
+    fn check_account_roots(
+        engine: &mut ShardEngine,
+        fid: u64,
+        expected_root: &[u8],
+    ) -> Result<(), BootstrapError> {
+        // Get the account root from the store
+        let stores_account_root = engine.get_stores().trie.get_hash(
+            &engine.db,
+            &mut RocksDbTransactionBatch::new(),
+            &TrieKey::for_fid(fid),
+        );
+
+        if stores_account_root != expected_root {
+            Err(BootstrapError::AccountRootMismatch(format!(
+                "Account root mismatch for FID {}: expected {}, got {}",
+                fid,
+                hex::encode(expected_root),
+                hex::encode(stores_account_root)
+            )))
+        } else {
+            info!(
+                "Account root for FID {} matches: {}",
+                fid,
+                hex::encode(expected_root)
+            );
+            Ok(())
+        }
+    }
 
     loop {
         let cursor = if let Some(token) = &page_token {
@@ -147,8 +317,10 @@ async fn replay_shard_transactions(
             user_message_types,
         };
 
+        let req_start = std::time::Instant::now();
         match client.get_shard_transactions(request).await {
             Ok(response) => {
+                let req_time = req_start.elapsed();
                 let response = response.into_inner();
                 let transactions = response.transactions;
 
@@ -161,6 +333,7 @@ async fn replay_shard_transactions(
                 let tx_last_fid = transactions.last().map_or(0, |tx| tx.fid);
 
                 info!(
+                    client_call_time_ms = format!("{:.2}", req_time.as_millis()),
                     "Retrieved {} transactions for shard {}. Fids: {} to {}.",
                     transactions.len(),
                     shard_id,
@@ -171,32 +344,18 @@ async fn replay_shard_transactions(
                 // Replay each transaction
                 for transaction in &transactions {
                     if transaction.fid > last_fid && last_fid != 0 {
-                        // Check the account root for the last FID to see if it matches
-
-                        // Get the account root from the store
-                        let stores_account_root = engine.get_stores().trie.get_hash(
-                            &engine.db,
-                            &mut RocksDbTransactionBatch::new(),
-                            &TrieKey::for_fid(last_fid),
-                        );
-
-                        if stores_account_root != last_fid_account_root {
-                            error!(
-                                "Account root mismatch for FID {}: expected {}, got {}",
-                                last_fid,
-                                hex::encode(last_fid_account_root),
-                                hex::encode(stores_account_root)
-                            );
-                            // TODO: Return Error
-                        } else {
-                            info!(
-                                "Account root for FID {} matches: {}",
-                                last_fid,
-                                hex::encode(last_fid_account_root)
-                            );
-                        }
+                        check_account_roots(engine, last_fid, &last_fid_account_root)?;
                     }
-                    replay_transaction(engine, transaction)?;
+                    if end_fid != 0 && transaction.fid > end_fid {
+                        info!(
+                            "Reached end FID {} for shard {}. Stopping replay for this thread",
+                            end_fid, shard_id
+                        );
+                        break;
+                    }
+
+                    replay_transaction(engine, transaction, start_fid, &db_commit_tx).await?;
+
                     total_transactions += 1;
 
                     last_fid = transaction.fid;
@@ -217,11 +376,18 @@ async fn replay_shard_transactions(
                 }
             }
             Err(e) => {
-                error!("Failed to get transactions for shard {}: {}", shard_id, e);
+                let req_time = req_start.elapsed();
+                error!(
+                    client_call_time_ms = format!("{:.2}", req_time.as_millis()),
+                    "Failed to get transactions for shard {}: {}", shard_id, e
+                );
                 return Err(BootstrapError::TransactionReplayError(e.to_string()));
             }
         }
     }
+
+    // Check the last account's roots
+    check_account_roots(engine, last_fid, &last_fid_account_root)?;
 
     info!(
         "Replayed {} total transactions for shard {}",
@@ -231,9 +397,11 @@ async fn replay_shard_transactions(
 }
 
 /// Replay a single transaction using the ShardEngine
-fn replay_transaction(
+async fn replay_transaction(
     engine: &mut ShardEngine,
     transaction: &Transaction,
+    start_fid: u64, // For debugging
+    db_commit_tx: &mpsc::UnboundedSender<DbCommitRequest>,
 ) -> Result<(), BootstrapError> {
     let mut txn_batch = RocksDbTransactionBatch::new();
     let trie_ctx = merkle_trie::Context::new();
@@ -262,25 +430,43 @@ fn replay_transaction(
 
             // TODO: We don't generate HubEvents during bootstrap, so we skip that part, correct?
 
-            // Commit the transaction batch to the database
-            engine.db.commit(txn_batch).map_err(|e| {
-                BootstrapError::DatabaseError(format!("Failed to commit transaction: {}", e))
+            // Send the transaction batch to the DB writer thread for commit
+            let (response_tx, response_rx) = oneshot::channel();
+            if let Err(_) = db_commit_tx.send(DbCommitRequest {
+                txn_batch,
+                fid: transaction.fid,
+                response_tx,
+            }) {
+                return Err(BootstrapError::DatabaseError(format!(
+                    "Thread {} - DB writer thread unavailable",
+                    start_fid
+                )));
+            }
+
+            // Wait for the commit to complete
+            let commit_result = response_rx.await.map_err(|_| {
+                BootstrapError::DatabaseError("DB writer response channel closed".to_string())
             })?;
+
+            // Handle the commit result
+            commit_result?;
 
             // Reload the trie after commit
             engine.get_stores().trie.reload(&engine.db).map_err(|e| {
                 BootstrapError::DatabaseError(format!("Failed to reload trie: {}", e))
             })?;
 
+            // Log profiling information
+            info!(
+                fid = transaction.fid,
+                user_message_count = transaction.user_messages.len(),
+                system_message_count = transaction.system_messages.len(),
+                "Bootstrap transaction replay profiling"
+            );
+
             Ok(())
         }
-        Err(e) => {
-            error!(
-                "Failed to replay transaction for FID {}: {}",
-                transaction.fid, e
-            );
-            Err(BootstrapError::TransactionReplayError(e.to_string()))
-        }
+        Err(e) => Err(BootstrapError::TransactionReplayError(e.to_string())),
     }
 }
 

@@ -306,7 +306,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 match bootstrap_from_replication(&app_config).await {
                     Ok(()) => info!("Replication bootstrap successful"),
                     Err(e) => {
-                        error!("Replication bootstrap failed: {}. Please clear the database directory and try again.", e);
+                        error!("Replication bootstrap failed:\n{}\nPlease clear the database directory and try again.", e);
                         // Clean up partially created DB
                         let _ = std::fs::remove_dir_all(&app_config.rocksdb_dir);
                         process::exit(1);

@@ -31,4 +31,7 @@ pub enum BootstrapError {
 
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
+
+    #[error("Account root mismatch: {0}")]
+    AccountRootMismatch(String),
 }
