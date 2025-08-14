@@ -19,6 +19,14 @@ use tokio::time::Instant;
 use tokio::{select, time};
 use tracing::{error, warn};
 
+#[derive(Clone, Copy, Debug, PartialEq, strum_macros::Display)]
+pub enum ProposalSource {
+    Simulate,
+    Propose,
+    Validate,
+    Commit,
+}
+
 pub const GENESIS_MESSAGE: &str =
     "It occurs to me that our survival may depend upon our talking to one another.";
 
