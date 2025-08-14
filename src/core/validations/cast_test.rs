@@ -112,7 +112,11 @@ mod tests {
                             })
                         }),
                     };
-                    assert!(validations::cast::validate_cast_add_body(&cast, true, false).is_ok())
+                    assert!(
+                        validations::cast::validate_cast_add_body(&cast, true, false).is_ok(),
+                        "Failed to validate cast {:?}",
+                        serde_json::to_string(&cast)
+                    );
                 }
                 None => {}
             }
