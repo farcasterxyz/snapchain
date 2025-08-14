@@ -1,4 +1,4 @@
-use informalsystems_malachitebft_config::ValueSyncConfig;
+use informalsystems_malachitebft_config::{ScoringStrategy, ValueSyncConfig};
 use informalsystems_malachitebft_engine::network::NetworkRef;
 use informalsystems_malachitebft_sync::Metrics as SyncMetrics;
 use std::collections::BTreeMap;
@@ -68,8 +68,21 @@ pub async fn spawn_read_sync_actor(
     };
 
     let metrics = SyncMetrics::register(registry);
+    let scoring_strategy = match config.scoring_strategy {
+        ScoringStrategy::Ema => informalsystems_malachitebft_sync::scoring::Strategy::Ema,
+    };
+    let sync_config = informalsystems_malachitebft_sync::Config {
+        enabled: config.enabled,
+        max_request_size: config.max_request_size.as_u64() as usize,
+        max_response_size: config.max_response_size.as_u64() as usize,
+        request_timeout: config.request_timeout,
+        parallel_requests: config.parallel_requests as u64,
+        scoring_strategy,
+        inactive_threshold: (!config.inactive_threshold.is_zero())
+            .then_some(config.inactive_threshold),
+    };
 
-    let actor_ref = ReadSync::spawn(ctx, network, host, params, metrics, span).await?;
+    let actor_ref = ReadSync::spawn(ctx, network, host, params, sync_config, metrics, span).await?;
 
     Ok(actor_ref)
 }

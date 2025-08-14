@@ -1,7 +1,7 @@
 use crate::core::types::SnapchainValidatorContext;
 use crate::network::gossip::GossipEvent;
 use async_trait::async_trait;
-use informalsystems_malachitebft_core_consensus::SignedConsensusMsg;
+use informalsystems_malachitebft_core_consensus::{LivenessMsg, SignedConsensusMsg};
 use informalsystems_malachitebft_engine::consensus::ConsensusCodec;
 use informalsystems_malachitebft_engine::network::{NetworkEvent, NetworkMsg as Msg, Status};
 use informalsystems_malachitebft_engine::sync::SyncCodec;
@@ -101,7 +101,7 @@ where
                 info!("consensus_trace: Subscribed to port");
             }
 
-            Msg::Publish(msg) => match msg {
+            Msg::PublishConsensusMsg(msg) => match msg {
                 SignedConsensusMsg::Vote(vote) => {
                     gossip_tx
                         .send(GossipEvent::BroadcastSignedVote(vote))
@@ -113,6 +113,12 @@ where
                         .await?;
                 }
             },
+
+            Msg::PublishLivenessMsg(liveness_msg) => {
+                gossip_tx
+                    .send(GossipEvent::BroadcastLivenessMessage(liveness_msg))
+                    .await?;
+            }
 
             Msg::PublishProposalPart(msg) => {
                 if let Some(full_proposal) = msg.content.as_data() {
@@ -127,7 +133,7 @@ where
             Msg::BroadcastStatus(status) => {
                 let status = sync::Status {
                     peer_id: state.peer_id,
-                    height: status.height,
+                    tip_height: status.tip_height,
                     history_min_height: status.history_min_height,
                 };
                 gossip_tx.send(GossipEvent::BroadcastStatus(status)).await?
@@ -168,7 +174,7 @@ where
                 output_port.send(NetworkEvent::PeerDisconnected(peer_id));
             }
 
-            Msg::NewEvent(Event::Message(Channel::Consensus, from, data)) => {
+            Msg::NewEvent(Event::ConsensusMessage(Channel::Consensus, from, data)) => {
                 let msg = match self.codec.decode(data) {
                     Ok(msg) => msg,
                     Err(e) => {
@@ -188,7 +194,7 @@ where
                 output_port.send(event);
             }
 
-            Msg::NewEvent(Event::Message(Channel::ProposalParts, from, data)) => {
+            Msg::NewEvent(Event::ConsensusMessage(Channel::ProposalParts, from, data)) => {
                 debug!("Received proposal parts from network");
                 let msg: StreamMessage<<SnapchainValidatorContext as informalsystems_malachitebft_core_types::Context>::ProposalPart> = match self.codec.decode(data) {
                     Ok(stream_msg) => stream_msg,
@@ -208,7 +214,7 @@ where
                 output_port.send(NetworkEvent::ProposalPart(from, msg));
             }
 
-            Msg::NewEvent(Event::Message(Channel::Sync, from, data)) => {
+            Msg::NewEvent(Event::ConsensusMessage(Channel::Sync, from, data)) => {
                 let status: sync::Status<SnapchainValidatorContext> = match self.codec.decode(data)
                 {
                     Ok(status) => status,
@@ -224,12 +230,43 @@ where
                 //     return Ok(());
                 // }
 
-                trace!(%from, height = %status.height, "Received status");
+                trace!(%from, height = %status.tip_height, "Received status");
 
                 output_port.send(NetworkEvent::Status(
                     status.peer_id,
-                    Status::new(status.height, status.history_min_height),
+                    Status::new(status.tip_height, status.history_min_height),
                 ));
+            }
+
+            Msg::NewEvent(Event::ConsensusMessage(channel, from, _)) => {
+                error!(%from, "Unexpected consensus message on {channel} channel");
+                return Ok(());
+            }
+
+            Msg::NewEvent(Event::LivenessMessage(Channel::Liveness, from, data)) => {
+                let liveness_msg: LivenessMsg<SnapchainValidatorContext> =
+                    match self.codec.decode(data) {
+                        Ok(msg) => msg,
+                        Err(e) => {
+                            error!(%from, "Failed to decode liveness message: {e:?}");
+                            return Ok(());
+                        }
+                    };
+                let event = match liveness_msg {
+                    LivenessMsg::PolkaCertificate(polka_cert) => {
+                        NetworkEvent::PolkaCertificate(from, polka_cert)
+                    }
+                    LivenessMsg::Vote(vote) => NetworkEvent::Vote(from, vote),
+                    LivenessMsg::SkipRoundCertificate(round_cert) => {
+                        NetworkEvent::RoundCertificate(from, round_cert)
+                    }
+                };
+                output_port.send(event);
+            }
+
+            Msg::NewEvent(Event::LivenessMessage(channel, from, _)) => {
+                error!(%from, "Unexpected liveness message on {channel} channel");
+                return Ok(());
             }
 
             Msg::NewEvent(Event::Sync(raw_msg)) => match raw_msg {
@@ -247,18 +284,20 @@ where
                             }
                         };
 
-                    if let sync::Request::ValueRequest(request) = &request {
-                        info!(
-                            peer_id = peer.to_string(),
-                            request_id = request_id.to_string(),
-                            height = request.height.to_string(),
-                            "Received value sync request"
-                        );
+                    match &request {
+                        sync::Request::ValueRequest(request) => {
+                            info!(
+                                peer_id = peer.to_string(),
+                                request_id = request_id.to_string(),
+                                height = request.height.to_string(),
+                                "Received value sync request"
+                            );
+                        }
                     }
 
                     inbound_requests.insert(sync::InboundRequestId::new(request_id), request_id);
 
-                    output_port.send(NetworkEvent::Request(
+                    output_port.send(NetworkEvent::SyncRequest(
                         sync::InboundRequestId::new(request_id),
                         peer,
                         request,
@@ -279,19 +318,21 @@ where
                             }
                         };
 
-                    if let sync::Response::ValueResponse(response) = &response {
-                        info!(
-                            peer_id = peer.to_string(),
-                            request_id = request_id.to_string(),
-                            height = response.height.to_string(),
-                            "Sending value sync response"
-                        );
+                    match &response {
+                        sync::Response::ValueResponse(response) => {
+                            info!(
+                                peer_id = peer.to_string(),
+                                request_id = request_id.to_string(),
+                                height = response.height.to_string(),
+                                "Sending value sync response"
+                            );
+                        }
                     }
 
-                    output_port.send(NetworkEvent::Response(
+                    output_port.send(NetworkEvent::SyncResponse(
                         sync::OutboundRequestId::new(request_id),
                         peer,
-                        response,
+                        Some(response),
                     ));
                 }
             },

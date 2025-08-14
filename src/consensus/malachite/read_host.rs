@@ -68,7 +68,9 @@ impl ReadHost {
         match msg {
             ReadHostMsg::Started { sync } => {
                 state.validator.initialize_height();
-                sync.cast(read_sync::Msg::Decided(state.validator.last_height))?
+                sync.cast(read_sync::Msg::Started(
+                    state.validator.last_height.increment(),
+                ))?
             }
 
             ReadHostMsg::GetHistoryMinHeight { reply_to } => {
@@ -79,7 +81,9 @@ impl ReadHost {
             ReadHostMsg::ProcessDecidedValue { value, sync } => {
                 let num_values_processed = state.validator.process_decided_value(value).await;
                 if num_values_processed > 0 {
-                    sync.cast(read_sync::Msg::Decided(state.validator.last_height))?
+                    let decided_height = state.validator.last_height;
+                    sync.cast(read_sync::Msg::Decided(decided_height))?;
+                    sync.cast(read_sync::Msg::Started(decided_height.increment()))?
                 }
             }
 

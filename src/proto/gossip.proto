@@ -23,5 +23,6 @@ message GossipMessage {
     StatusMessage status = 4;
     ReadNodeMessage read_node_message = 5;
     ContactInfo contact_info_message = 6;
+    LivenessMessage liveness = 7;
   }
 }

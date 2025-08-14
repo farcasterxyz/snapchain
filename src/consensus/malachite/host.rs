@@ -6,8 +6,7 @@ use crate::network::gossip::GossipEvent;
 use crate::proto::{self, decided_value, full_proposal, Block, Commits, FullProposal, ShardChunk};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use bytes::Bytes;
-use informalsystems_malachitebft_engine::consensus::ConsensusMsg;
-use informalsystems_malachitebft_engine::host::{HostMsg, LocallyProposedValue};
+use informalsystems_malachitebft_engine::host::{HostMsg, LocallyProposedValue, Next};
 use informalsystems_malachitebft_engine::network::{NetworkMsg, NetworkRef};
 use informalsystems_malachitebft_engine::util::streaming::{
     StreamContent, StreamId, StreamMessage,
@@ -54,7 +53,7 @@ impl Host {
         state: &mut HostState,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
-            HostMsg::ConsensusReady(consensus_ref) => {
+            HostMsg::ConsensusReady { reply_to } => {
                 // Start height
                 state.shard_validator.start(); // Call each time?
                 let height = state.shard_validator.get_current_height().increment();
@@ -69,13 +68,15 @@ impl Host {
                     validators = validator_set.validators.len(),
                     "Consensus ready. Starting Height"
                 );
-                consensus_ref.cast(ConsensusMsg::StartHeight(height, validator_set))?;
+                reply_to.send((height, validator_set))?;
             }
 
             HostMsg::StartedRound {
                 height,
                 round,
                 proposer,
+                role: _,
+                reply_to: _,
             } => {
                 state.shard_validator.start_round(height, round, proposer);
                 info!(
@@ -205,13 +206,15 @@ impl Host {
             }
 
             HostMsg::GetValidatorSet { height, reply_to } => {
-                reply_to.send(state.shard_validator.get_validator_set(height.as_u64()))?;
+                reply_to.send(Some(
+                    state.shard_validator.get_validator_set(height.as_u64()),
+                ))?;
             }
 
             HostMsg::Decided {
                 certificate,
-                consensus: consensus_ref,
                 extensions: _,
+                reply_to,
             } => {
                 let now = tokio::time::Instant::now();
                 let result = state
@@ -227,8 +230,7 @@ impl Host {
                     let validator_set = state
                         .shard_validator
                         .get_validator_set(certificate.height.as_u64());
-                    consensus_ref
-                        .cast(ConsensusMsg::StartHeight(certificate.height, validator_set))?;
+                    reply_to.send(Next::Restart(certificate.height, validator_set))?;
                     return Ok(());
                 }
                 let proposed_value = result.unwrap();
@@ -282,9 +284,7 @@ impl Host {
                     .get_validator_set(next_height.as_u64());
                 tokio::spawn(async move {
                     tokio::time::sleep(delay).await;
-                    if let Err(err) =
-                        consensus_ref.cast(ConsensusMsg::StartHeight(next_height, validator_set))
-                    {
+                    if let Err(err) = reply_to.send(Next::Start(next_height, validator_set)) {
                         error!(
                             next_height = next_height.as_u64(),
                             "Unable to start next height: {}",
@@ -316,7 +316,7 @@ impl Host {
             HostMsg::ProcessSyncedValue {
                 height,
                 round,
-                validator_address,
+                proposer,
                 value_bytes,
                 reply_to,
             } => {
@@ -325,7 +325,7 @@ impl Host {
                     FullProposal {
                         height: Some(height),
                         round: round.as_i64(),
-                        proposer: validator_address.to_vec(),
+                        proposer: proposer.to_vec(),
                         proposed_value: Some(full_proposal::ProposedValue::Block(decoded_block)),
                     }
                 } else {
@@ -333,7 +333,7 @@ impl Host {
                     FullProposal {
                         height: Some(height),
                         round: round.as_i64(),
-                        proposer: validator_address.to_vec(),
+                        proposer: proposer.to_vec(),
                         proposed_value: Some(full_proposal::ProposedValue::Shard(chunk)),
                     }
                 };
@@ -363,8 +363,6 @@ impl Host {
                 extension: _,
                 reply_to,
             } => reply_to.send(Ok(()))?,
-            HostMsg::PeerJoined { .. } => {}
-            HostMsg::PeerLeft { .. } => {}
         };
 
         Ok(())

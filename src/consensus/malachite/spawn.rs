@@ -1,12 +1,14 @@
-use informalsystems_malachitebft_config::{TimeoutConfig, ValueSyncConfig};
-use informalsystems_malachitebft_core_consensus::{ValuePayload, VoteSyncMode};
+use informalsystems_malachitebft_config::{
+    ConsensusConfig, P2pConfig, ScoringStrategy, TimeoutConfig, ValuePayload as ValuePayloadConfig,
+    ValueSyncConfig,
+};
+use informalsystems_malachitebft_core_consensus::ValuePayload;
 use informalsystems_malachitebft_engine::consensus::{Consensus, ConsensusParams, ConsensusRef};
 use informalsystems_malachitebft_engine::host::HostRef;
 use informalsystems_malachitebft_engine::network::NetworkRef;
 use informalsystems_malachitebft_network::{PeerId as MalachitePeerId, PeerIdExt};
 use informalsystems_malachitebft_sync::Metrics as SyncMetrics;
 use std::path::Path;
-use std::time::Duration;
 use tracing::Span;
 
 use crate::consensus::consensus::Config;
@@ -98,14 +100,20 @@ pub async fn spawn_consensus_actor(
         address,
         threshold_params: Default::default(),
         value_payload: ValuePayload::ProposalAndParts,
-        vote_sync_mode: VoteSyncMode::RequestResponse,
     };
     let signing_provider = ctx.signing_provider();
+
+    let consensus_config = ConsensusConfig {
+        queue_capacity: 1000,
+        timeouts: timeout_cfg,
+        value_payload: ValuePayloadConfig::ProposalAndParts,
+        p2p: P2pConfig::default(), // This is not actually using in the consensus actor. Ensure this is the case on future upgrades
+    };
 
     Consensus::spawn(
         ctx,
         consensus_params,
-        timeout_cfg,
+        consensus_config,
         Box::new(signing_provider),
         network,
         host,
@@ -134,7 +142,21 @@ pub async fn spawn_sync_actor(
 
     let metrics = SyncMetrics::register(registry);
 
-    let actor_ref = Sync::spawn(ctx, network, host, params, metrics, span).await?;
+    let scoring_strategy = match config.scoring_strategy {
+        ScoringStrategy::Ema => informalsystems_malachitebft_sync::scoring::Strategy::Ema,
+    };
+    let sync_config = informalsystems_malachitebft_sync::Config {
+        enabled: config.enabled,
+        max_request_size: config.max_request_size.as_u64() as usize,
+        max_response_size: config.max_response_size.as_u64() as usize,
+        request_timeout: config.request_timeout,
+        parallel_requests: config.parallel_requests as u64,
+        scoring_strategy,
+        inactive_threshold: (!config.inactive_threshold.is_zero())
+            .then_some(config.inactive_threshold),
+    };
+
+    let actor_ref = Sync::spawn(ctx, network, host, params, sync_config, metrics, span).await?;
 
     Ok(actor_ref)
 }
@@ -156,8 +178,7 @@ fn timeout_from_config(config: &Config) -> TimeoutConfig {
         timeout_precommit_delta: config.step_delta,
         timeout_prevote_delta: config.step_delta,
         timeout_propose_delta: config.step_delta,
-        timeout_commit: Duration::from_millis(0),
-        timeout_step: Duration::from_secs(10),
+        timeout_rebroadcast: config.propose_time + config.prevote_time + config.precommit_time,
     }
 }
 
