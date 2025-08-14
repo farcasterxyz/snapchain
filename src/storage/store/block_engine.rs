@@ -316,7 +316,7 @@ impl BlockEngine {
             Err(ref err) => {
                 error!("State change validation failed: {}", err);
             }
-            Ok(_events) => {}
+            Ok(ref _events) => {}
         }
 
         self.trie.reload(&self.db).unwrap();
@@ -330,7 +330,7 @@ impl BlockEngine {
             self.metrics.count("validate.false", 1, vec![]);
         }
 
-        valid
+        proposal_result.is_ok()
     }
 
     pub fn commit_block(&mut self, block: &Block) {
