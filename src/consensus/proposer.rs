@@ -429,18 +429,29 @@ impl BlockProposer {
             }
         }
 
-        for shard_id in self.shard_stores.keys() {
-            if !chunks.contains_key(&shard_id) {
-                // If the next height is not available, record the witness for the previous height.
-                if let Some(last_shard_witness) =
-                    self.engine.get_last_shard_witness(height, *shard_id)
-                {
-                    chunks.insert(*shard_id, last_shard_witness);
+        if version.is_enabled(ProtocolFeature::DecoupleShardZeroBlockProduction) {
+            for shard_id in self.shard_stores.keys() {
+                if !chunks.contains_key(&shard_id) {
+                    // If the next height is not available, record the witness for the previous height.
+                    if let Some(last_shard_witness) =
+                        self.engine.get_last_shard_witness(height, *shard_id)
+                    {
+                        chunks.insert(*shard_id, last_shard_witness);
+                    }
                 }
             }
         }
 
-        chunks.values().cloned().collect()
+        if chunks.values().len() == self.num_shards as usize {
+            chunks.values().cloned().collect()
+        } else {
+            // In the new codepath, this should never be hit
+            warn!(
+                "Block validator did not receive all shard chunks for height: {:?}",
+                height
+            );
+            vec![]
+        }
     }
 
     async fn publish_new_block(&self, block: Block) {
