@@ -22,7 +22,7 @@ use tracing::{error, info};
 /// Request to commit a transaction batch to the database
 struct DbCommitRequest {
     txn_batch: RocksDbTransactionBatch,
-    fid: u64,
+    num_messages: u64,
     response_tx: oneshot::Sender<Result<(), BootstrapError>>,
 }
 
@@ -36,9 +36,21 @@ pub async fn bootstrap_from_replication(app_config: &Config) -> Result<(), Box<d
     let mut client = ReplicationServiceClient::connect(peer_address)
         .await
         .map_err(|e| BootstrapError::PeerConnectionError(e.to_string()))?;
-    let target_height =
-        determine_target_height(&mut client, &app_config.consensus.shard_ids).await?;
-    info!("Target height for bootstrap: {}", target_height);
+
+    // Define the FID ranges to get (In 100k chunks, max 10 threads)
+    let fid_chunk_size = 100_000;
+    let max_threads = 10;
+    let mut ranges = Vec::new();
+    for i in 0..(max_threads - 1) {
+        ranges.push((i * fid_chunk_size, (i + 1) * fid_chunk_size));
+    }
+    ranges.push((fid_chunk_size * ranges.len() as u64, 0)); // Last range goes to the end
+
+    let target_height = 12247700; //determine_target_height(&mut client, &app_config.consensus.shard_ids).await?;
+    info!(
+        "Target height for bootstrap: {}. FID ranges: {:?}",
+        target_height, ranges
+    );
 
     // Initialize databases and replay transactions for each shard
     // Note: We're not replicating shard 0 (block shard) for now as requested
@@ -70,6 +82,7 @@ pub async fn bootstrap_from_replication(app_config: &Config) -> Result<(), Box<d
 
         // Replay transactions for this shard
         start_shard_replication(
+            ranges.clone(),
             peer_address,
             app_config.fc_network,
             shard_id,
@@ -88,6 +101,7 @@ pub async fn bootstrap_from_replication(app_config: &Config) -> Result<(), Box<d
 }
 
 async fn start_shard_replication(
+    ranges: Vec<(u64, u64)>,
     peer_address: &str,
     network: crate::proto::FarcasterNetwork,
     shard_id: u32,
@@ -103,14 +117,6 @@ async fn start_shard_replication(
 
     let db = RocksDB::open_shard_db(&rocksdb_dir, shard_id);
 
-    // TODO: How do we get the total number of FIDs to split them up?
-    // Define the FID ranges for the 3 threads
-    let ranges = [
-        (0u64, 400_000u64),       // Thread 1: 0 to 400k
-        (400_000u64, 800_000u64), // Thread 2: 400k to 800k
-        (800_000u64, 0u64),       // Thread 3: 800k to end (0 means no limit)
-    ];
-
     let statsd_client = statsd_client.clone();
 
     // Create a channel for DB commit requests
@@ -122,18 +128,28 @@ async fn start_shard_replication(
     // Spawn the DB writer thread
     let db_writer_task = tokio::spawn(async move {
         info!("DB writer thread started for shard {}", shard_id);
+        let mut total_messages = 0;
+        let total_start_time = std::time::Instant::now();
 
         while let Some(commit_request) = db_commit_rx.recv().await {
+            let start_time = std::time::Instant::now();
+            total_messages += commit_request.num_messages;
+
             let result = db_writer.commit(commit_request.txn_batch).map_err(|e| {
+                error!("DB writer - Failed to commit transaction: {}", e);
                 BootstrapError::DatabaseError(format!("Failed to commit transaction: {}", e))
             });
+            let elapsed_time = start_time.elapsed();
+            let total_elapsed = total_start_time.elapsed();
+            info!(
+                "DB writer - Commit took {:?}. Writing at {:.1}k msg/sec",
+                elapsed_time,
+                total_messages as f64 / 1000.0 / total_elapsed.as_secs_f64()
+            );
 
             // Send the result back to the requesting thread
             if let Err(_) = commit_request.response_tx.send(result) {
-                error!(
-                    "DB writer - Failed to send commit result for FID {} - receiver dropped",
-                    commit_request.fid
-                );
+                error!("DB writer - Failed to send commit result - receiver dropped");
             }
         }
 
@@ -200,13 +216,13 @@ async fn start_shard_replication(
         tasks.push(task);
     }
 
-    // Drop the original sender so the DB writer thread can exit when all workers are done
-    drop(db_commit_tx);
-
     // Wait for all tasks to complete and collect results
     let results = try_join_all(tasks)
         .await
         .map_err(|e| BootstrapError::TransactionReplayError(format!("Task join error: {}", e)))?;
+
+    // Drop the original sender so the DB writer thread can exit when all workers are done
+    drop(db_commit_tx);
 
     // Check if any task returned an error
     for (i, result) in results.into_iter().enumerate() {
@@ -243,11 +259,6 @@ async fn replay_shard_transactions(
     end_fid: u64,
     db_commit_tx: mpsc::UnboundedSender<DbCommitRequest>,
 ) -> Result<(), BootstrapError> {
-    info!(
-        "Replaying transactions for shard {} at height {}. Fids {} to {}",
-        shard_id, height, start_fid, end_fid
-    );
-
     let mut page_token: Option<Vec<u8>> = None;
     let mut total_transactions = 0;
     let mut last_fid = 0;
@@ -320,7 +331,6 @@ async fn replay_shard_transactions(
         let req_start = std::time::Instant::now();
         match client.get_shard_transactions(request).await {
             Ok(response) => {
-                let req_time = req_start.elapsed();
                 let response = response.into_inner();
                 let transactions = response.transactions;
 
@@ -329,22 +339,17 @@ async fn replay_shard_transactions(
                     break;
                 }
 
-                let tx_first_fid = transactions.first().map_or(0, |tx| tx.fid);
-                let tx_last_fid = transactions.last().map_or(0, |tx| tx.fid);
-
-                info!(
-                    client_call_time_ms = format!("{:.2}", req_time.as_millis()),
-                    "Retrieved {} transactions for shard {}. Fids: {} to {}.",
-                    transactions.len(),
-                    shard_id,
-                    tx_first_fid,
-                    tx_last_fid,
-                );
+                // TXN batch to hold all changes
+                let mut txn_batch = RocksDbTransactionBatch::new();
+                // FIDs to check for account root consistency that were a part of this transaction
+                let mut fids_to_check = vec![];
+                // Num messages in this transaction
+                let mut num_messages = 0;
 
                 // Replay each transaction
                 for transaction in &transactions {
                     if transaction.fid > last_fid && last_fid != 0 {
-                        check_account_roots(engine, last_fid, &last_fid_account_root)?;
+                        fids_to_check.push((last_fid, last_fid_account_root.clone()));
                     }
                     if end_fid != 0 && transaction.fid > end_fid {
                         info!(
@@ -354,12 +359,45 @@ async fn replay_shard_transactions(
                         break;
                     }
 
-                    replay_transaction(engine, transaction, start_fid, &db_commit_tx).await?;
+                    replay_transaction(engine, transaction, &mut txn_batch).await?;
 
                     total_transactions += 1;
+                    num_messages += transaction.user_messages.len() as u64
+                        + transaction.system_messages.len() as u64;
 
                     last_fid = transaction.fid;
                     last_fid_account_root = transaction.account_root.clone();
+                }
+
+                // Send the transaction batch to the DB writer thread for commit
+                let (response_tx, response_rx) = oneshot::channel();
+                if let Err(_) = db_commit_tx.send(DbCommitRequest {
+                    txn_batch,
+                    num_messages,
+                    response_tx,
+                }) {
+                    return Err(BootstrapError::DatabaseError(format!(
+                        "Thread {} - DB writer thread unavailable",
+                        start_fid
+                    )));
+                }
+
+                // Wait for the commit to complete
+                let commit_result = response_rx.await.map_err(|_| {
+                    BootstrapError::DatabaseError("DB writer response channel closed".to_string())
+                })?;
+
+                // Handle the commit result
+                commit_result?;
+
+                // Reload the trie after commit
+                engine.get_stores().trie.reload(&engine.db).map_err(|e| {
+                    BootstrapError::DatabaseError(format!("Failed to reload trie: {}", e))
+                })?;
+
+                // Check the account roots for the processed FIDs
+                for (fid, account_root) in fids_to_check {
+                    check_account_roots(engine, fid, &account_root)?;
                 }
 
                 // Check if there are more pages
@@ -400,15 +438,14 @@ async fn replay_shard_transactions(
 async fn replay_transaction(
     engine: &mut ShardEngine,
     transaction: &Transaction,
-    start_fid: u64, // For debugging
-    db_commit_tx: &mpsc::UnboundedSender<DbCommitRequest>,
+    mut txn_batch: &mut RocksDbTransactionBatch,
 ) -> Result<(), BootstrapError> {
-    let mut txn_batch = RocksDbTransactionBatch::new();
     let trie_ctx = merkle_trie::Context::new();
-    let timestamp = FarcasterTime::current(); // TODO: Use proper timestamp from transaction/block
+    let timestamp = FarcasterTime::current();
     let version = EngineVersion::current(engine.network);
 
-    // Set the block height to 0 (by resetting the event id) for bootstrap
+    // Set the block height to 0 (by resetting the event id) for bootstrap. This makes the hub events
+    // get proper IDs.
     engine.reset_event_id();
 
     match engine.replay_snapchain_txn(
@@ -429,40 +466,6 @@ async fn replay_transaction(
             }
 
             // TODO: We don't generate HubEvents during bootstrap, so we skip that part, correct?
-
-            // Send the transaction batch to the DB writer thread for commit
-            let (response_tx, response_rx) = oneshot::channel();
-            if let Err(_) = db_commit_tx.send(DbCommitRequest {
-                txn_batch,
-                fid: transaction.fid,
-                response_tx,
-            }) {
-                return Err(BootstrapError::DatabaseError(format!(
-                    "Thread {} - DB writer thread unavailable",
-                    start_fid
-                )));
-            }
-
-            // Wait for the commit to complete
-            let commit_result = response_rx.await.map_err(|_| {
-                BootstrapError::DatabaseError("DB writer response channel closed".to_string())
-            })?;
-
-            // Handle the commit result
-            commit_result?;
-
-            // Reload the trie after commit
-            engine.get_stores().trie.reload(&engine.db).map_err(|e| {
-                BootstrapError::DatabaseError(format!("Failed to reload trie: {}", e))
-            })?;
-
-            // Log profiling information
-            info!(
-                fid = transaction.fid,
-                user_message_count = transaction.user_messages.len(),
-                system_message_count = transaction.system_messages.len(),
-                "Bootstrap transaction replay profiling"
-            );
 
             Ok(())
         }

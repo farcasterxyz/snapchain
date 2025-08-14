@@ -1,6 +1,6 @@
 use crate::core::error::HubError;
 use crate::storage::util::increment_vec_u8;
-use rocksdb::{Options, TransactionDB, DB};
+use rocksdb::{Options, TransactionDB, WriteOptions, DB};
 use std::collections::HashMap;
 use std::fs::{self};
 use std::path::Path;
@@ -117,6 +117,22 @@ impl RocksDB {
 
         // Create RocksDB options
         let mut opts = Options::default();
+
+        // 1. Increase the write buffer size. This is the size of a single in-memory memtable.
+        // For large, sustained writes, a larger buffer (e.g., 128MB) reduces how often
+        // the database flushes to disk
+        opts.set_write_buffer_size(512 * 1024 * 1024);
+
+        // 2. Increase the number of background threads for flushes and compactions.
+        opts.increase_parallelism(8);
+
+        // 3. Set the maximum number of write buffers. This allows RocksDB to continue
+        // accepting writes into a new memtable while old ones are being flushed.
+        opts.set_max_write_buffer_number(4);
+
+        // 4. Set the minimum number of write buffers to merge before flushing.
+        opts.set_min_write_buffer_number_to_merge(2);
+
         opts.create_if_missing(true); // Creates a database if it does not exist
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
 
@@ -267,7 +283,16 @@ impl RocksDB {
     pub fn commit(&self, batch: RocksDbTransactionBatch) -> Result<(), RocksdbError> {
         match self.db().as_ref() {
             Some(DBProvider::Transaction(db)) => {
-                let txn = db.transaction();
+                // let txn = db.transaction();
+                // Create a WriteOptions object for this specific transaction.
+                let mut write_opts = WriteOptions::default();
+
+                // Disabling the WAL (Write Ahead Log) provides a significant performance boost
+                // for writes
+                write_opts.disable_wal(true);
+
+                // Use the custom write options to create the transaction.
+                let txn = db.transaction_opt(&write_opts, &Default::default());
 
                 for (key, value) in batch.batch {
                     if value.is_none() {
