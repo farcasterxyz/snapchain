@@ -339,6 +339,7 @@ pub struct BlockProposer {
     block_tx: Option<mpsc::Sender<Block>>,
     engine: BlockEngine,
     statsd_client: StatsdClientWrapper,
+    shard_witness_proposal_timeout: Duration,
 }
 
 impl BlockProposer {
@@ -350,6 +351,7 @@ impl BlockProposer {
         network: proto::FarcasterNetwork,
         block_tx: Option<mpsc::Sender<Block>>,
         engine: BlockEngine,
+        shard_witness_proposal_timeout: Duration,
         statsd_client: StatsdClientWrapper,
     ) -> BlockProposer {
         BlockProposer {
@@ -362,6 +364,7 @@ impl BlockProposer {
             block_tx,
             engine,
             statsd_client,
+            shard_witness_proposal_timeout,
         }
     }
 
@@ -504,8 +507,10 @@ impl Proposer for BlockProposer {
         let proposal = self.engine.propose_state_change(messages, height);
         let version = EngineVersion::version_for(&proposal.timestamp, self.network);
 
+        let shard_witness_timeout = timeout.min(self.shard_witness_proposal_timeout);
+
         let shard_witnesses = self
-            .collect_confirmed_shard_witnesses(height, version, timeout)
+            .collect_confirmed_shard_witnesses(height, version, shard_witness_timeout)
             .await;
 
         let shard_witness = ShardWitness {
