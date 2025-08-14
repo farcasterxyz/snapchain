@@ -704,7 +704,6 @@ fn build_fname_username_proofs_event(
                 .collect::<Vec<u8>>()
         })
         .collect::<Vec<Vec<u8>>>();
-    info!("Fnames for FID {}: {:?}", cursor.token.fid(), fnames);
 
     // 3. Read all the UserNameProofs
     let proofs = fnames
@@ -724,11 +723,6 @@ fn build_fname_username_proofs_event(
                 e
             ))
         })?;
-    info!(
-        "UserNameProofs for FID {}: {:?}",
-        cursor.token.fid(),
-        proofs
-    );
 
     // 4. Collect all valid proofs into ValidatorMessage
     let validator_messages = proofs
@@ -743,11 +737,6 @@ fn build_fname_username_proofs_event(
             })
         })
         .collect::<Vec<_>>();
-    info!(
-        "ValidatorMessages for FID {}: {:?}",
-        cursor.token.fid(),
-        validator_messages
-    );
 
     Ok(validator_messages)
 }

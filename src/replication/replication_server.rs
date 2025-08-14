@@ -47,7 +47,7 @@ pub struct ReplicationServer {
 }
 
 impl ReplicationServer {
-    const MESSAGE_LIMIT: usize = 1_000; // Maximum number of messages to fetch per page
+    const MESSAGE_LIMIT: usize = 2_000; // Maximum number of messages to fetch per page
 
     pub fn new(
         replicator: Arc<Replicator>,
