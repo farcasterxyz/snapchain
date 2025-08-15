@@ -233,6 +233,7 @@ impl Proposer for ShardProposer {
                 return Validity::Invalid;
             }
 
+            // TODO(aditi): Something seems wrong here. The proposer shouldn't need to provide [events] and [max_block_event_seqnum] becuase those are derived from [transactions]. We probably need a different type for this. We're providing empty values here because the engine needs to compute them.
             let state = ShardStateChange {
                 shard_id: height.shard_index,
                 timestamp,
@@ -508,6 +509,14 @@ impl Proposer for BlockProposer {
             .collect_confirmed_shard_witnesses(height, version, timeout)
             .await;
 
+        let mempool_timeout = Duration::from_millis(200);
+        let messages = self
+            .engine
+            .mempool_poller
+            .pull_messages(mempool_timeout)
+            .await
+            .unwrap(); // TODO: don't unwrap
+
         let shard_witness = ShardWitness {
             shard_chunk_witnesses: shard_witnesses,
         };
@@ -540,6 +549,8 @@ impl Proposer for BlockProposer {
         let witness_hash = blake3::hash(&shard_witness.encode_to_vec())
             .as_bytes()
             .to_vec();
+
+        let proposal = self.engine.propose_state_change(messages, height);
 
         let block_header = BlockHeader {
             parent_hash,
@@ -641,7 +652,6 @@ impl Proposer for BlockProposer {
                 events_hash: header.events_hash.clone(),
                 events: block.events.clone(),
             };
-
             if !self.engine.validate_state_change(&state_change, height) {
                 return Validity::Invalid;
             };
