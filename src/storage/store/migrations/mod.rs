@@ -117,13 +117,6 @@ impl MigrationRunner {
 
         if db_version >= LATEST_SCHEMA_VERSION {
             return Ok(None);
-        } else {
-            info!(
-                shard_id = self.context.stores.shard_id,
-                db_version,
-                code_version = LATEST_SCHEMA_VERSION,
-                "DB needs migrations. Running pending DB migrations..."
-            );
         }
 
         for (i, migration) in self.all_migrations.iter().enumerate() {
@@ -150,6 +143,14 @@ impl MigrationRunner {
             return Ok(None);
         }
         Self::set_migration_running(&context, start_migrations_at as u32, true)?;
+
+        info!(
+            shard_id = self.context.stores.shard_id,
+            db_version,
+            code_version = LATEST_SCHEMA_VERSION,
+            start_migrations_at,
+            "DB needs migrations. Running pending DB migrations..."
+        );
 
         // Collect all the migrations to run
         let migrations_to_run = self
