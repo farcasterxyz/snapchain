@@ -7,7 +7,8 @@ use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::message_data::Body;
 use crate::proto::{
     self, hub_event, Block, FarcasterNetwork, HubEvent, HubEventType, MessageType, OnChainEvent,
-    OnChainEventType, Protocol, ShardChunk, Transaction, UserDataType, UserNameProof,
+    OnChainEventType, Protocol, ShardChunk, ShardChunkWitness, Transaction, UserDataType,
+    UserNameProof,
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{CastStore, MessagesPage, VerificationStore};
@@ -833,6 +834,7 @@ impl ShardEngine {
                 .trie
                 .get_hash(&self.db, txn_batch, &TrieKey::for_fid(snapchain_txn.fid));
         debug!(
+            shard_id = self.shard_id,
             fid = snapchain_txn.fid,
             num_user_messages = total_user_messages,
             num_system_messages = total_system_messages,
@@ -2062,5 +2064,20 @@ impl BlockEngine {
             // In case of no blocks, return height 1
             Err(_) => Height::new(shard_index, 1),
         }
+    }
+
+    pub fn get_last_shard_witness(
+        &self,
+        height: Height,
+        shard_id: u32,
+    ) -> Option<ShardChunkWitness> {
+        let previous_height = height.decrement()?;
+        let previous_block = self.get_block_by_height(previous_height)?;
+        let previous_shard_witness = previous_block.shard_witness?;
+        previous_shard_witness
+            .shard_chunk_witnesses
+            .iter()
+            .find(|witness| witness.height.unwrap().shard_index == shard_id)
+            .cloned()
     }
 }

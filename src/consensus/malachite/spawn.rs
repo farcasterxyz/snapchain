@@ -205,6 +205,7 @@ impl MalachiteConsensusActors {
         .await?;
         let sync_config = ValueSyncConfig {
             request_timeout: config.sync_request_timeout,
+            status_update_interval: config.sync_status_update_interval,
             ..ValueSyncConfig::default()
         };
         let sync_actor = spawn_sync_actor(
