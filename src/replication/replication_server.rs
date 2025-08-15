@@ -64,10 +64,19 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
     ) -> Result<Response<proto::GetShardTransactionsResponse>, Status> {
         let request = request.into_inner();
 
+        let (page_token, start_fid) = match request.cursor {
+            Some(proto::get_shard_transactions_request::Cursor::PageToken(token)) => {
+                (Some(token), None)
+            }
+            Some(proto::get_shard_transactions_request::Cursor::StartFid(fid)) => (None, Some(fid)),
+            None => (None, None),
+        };
+
         let results = self.replicator.transactions_for_shard_and_height(
             request.shard_id,
             request.height,
-            request.page_token.clone(),
+            page_token,
+            start_fid,
             Self::MESSAGE_LIMIT,
         );
 

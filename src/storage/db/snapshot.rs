@@ -29,6 +29,18 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio_retry2::{Retry, RetryError};
 use tracing::{error, info, warn};
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum BootstrapMethod {
+    Snapshot,
+    Replicate,
+}
+
+impl Default for BootstrapMethod {
+    fn default() -> Self {
+        BootstrapMethod::Snapshot
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
     pub endpoint_url: String,
@@ -41,6 +53,7 @@ pub struct Config {
     pub snapshot_download_dir: String,
     pub aws_access_key_id: String,
     pub aws_secret_access_key: String,
+    pub bootstrap_method: BootstrapMethod,
 }
 
 impl Default for Config {
@@ -57,6 +70,7 @@ impl Default for Config {
                 .to_string(),
             aws_access_key_id: "".to_string(),
             aws_secret_access_key: "".to_string(),
+            bootstrap_method: BootstrapMethod::default(),
         }
     }
 }

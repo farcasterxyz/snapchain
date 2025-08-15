@@ -6,6 +6,7 @@ use alloy_transport::Transport;
 use eth_signature_verifier::Verification;
 use serde::Serialize;
 use serde_json::{json, Value};
+use tracing::warn;
 
 const EIP_712_FARCASTER_VERIFICATION_CLAIM_CHAIN_IDS: [u16; 5] = [0, 1, 5, 10, 420];
 const FNAME_SIGNER_ADDRESS: alloy_primitives::Address =
@@ -147,6 +148,7 @@ pub fn validate_fname_transfer(
     }
 
     if proof.signature.len() != 65 {
+        warn!("Invalid signature length: {}", proof.signature.len());
         return Err(ValidationError::InvalidSignature);
     }
 

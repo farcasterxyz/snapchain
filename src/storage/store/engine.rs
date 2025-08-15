@@ -1,4 +1,5 @@
 use super::account::{IntoU8, OnchainEventStorageError, UserDataStore, UsernameProofStore};
+use crate::core::validations::message::validate_message_hash;
 use crate::core::{
     error::HubError, types::Height, util::FarcasterTime, validations, validations::verification,
 };
@@ -17,9 +18,12 @@ use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::{EngineVersion, ProtocolFeature};
 use alloy_primitives::hex::FromHex;
 use alloy_primitives::Address;
+use ed25519_dalek::{Signature, VerifyingKey};
 use informalsystems_malachitebft_core_types::Round;
 use itertools::Itertools;
 use merkle_trie::TrieKey;
+use once_cell::sync::Lazy;
+use prost::Message;
 use std::cmp::{Ordering, PartialEq};
 use std::collections::{HashMap, HashSet};
 use std::str;
@@ -64,6 +68,7 @@ pub enum ProposalSource {
     Propose,
     Validate,
     Commit,
+    Replication,
 }
 
 #[derive(Error, Debug, Clone)]
@@ -184,6 +189,43 @@ pub struct ShardEngine {
 }
 
 impl ShardEngine {
+    // Efficient lookup for system message sort order
+    pub fn system_message_sort_order_map() -> &'static HashMap<proto::OnChainEventType, usize> {
+        static MAP: Lazy<HashMap<proto::OnChainEventType, usize>> = Lazy::new(|| {
+            [
+                proto::OnChainEventType::EventTypeIdRegister,
+                proto::OnChainEventType::EventTypeSigner,
+                proto::OnChainEventType::EventTypeStorageRent,
+                proto::OnChainEventType::EventTypeTierPurchase,
+                proto::OnChainEventType::EventTypeSignerMigrated,
+            ]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (*t, i))
+            .collect()
+        });
+        &MAP
+    }
+
+    // Efficient lookup for user message sort order
+    pub fn user_message_sort_order_map() -> &'static HashMap<proto::MessageType, usize> {
+        static MAP: Lazy<HashMap<proto::MessageType, usize>> = Lazy::new(|| {
+            [
+                proto::MessageType::VerificationAddEthAddress,
+                proto::MessageType::UsernameProof,
+                proto::MessageType::UserDataAdd,
+                proto::MessageType::CastAdd,
+                proto::MessageType::LinkCompactState,
+                proto::MessageType::LinkAdd,
+                proto::MessageType::ReactionAdd,
+            ]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (*t, i))
+            .collect()
+        });
+        &MAP
+    }
     pub fn new(
         db: Arc<RocksDB>,
         network: proto::FarcasterNetwork,
@@ -624,6 +666,141 @@ impl ShardEngine {
         Ok(events)
     }
 
+    // Reset the event id generator to 0. This is used when doing replication, when we're merging in events from another node
+    // and not from blocks (so no blockheight to use)
+    pub(crate) fn reset_event_id(&mut self) {
+        self.stores.event_handler.set_current_height(0);
+    }
+
+    fn merge_replicator_user_messages(
+        &mut self,
+        sorted_user_messages: Vec<proto::Message>,
+        validation_errors: &mut Vec<MessageValidationError>,
+        events: &mut Vec<HubEvent>,
+        trie_ctx: &merkle_trie::Context,
+        txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Result<(usize, HashSet<MessageType>), EngineError> {
+        let mut messages_to_process = Vec::new();
+
+        let mut valid_hash_messages = Vec::new();
+        let mut invalid_hash_messages = Vec::new();
+
+        for msg in &sorted_user_messages {
+            let data_bytes;
+            if msg.data_bytes.is_some() {
+                data_bytes = msg.data_bytes.as_ref().unwrap().clone();
+            } else {
+                if msg.data.is_none() {
+                    invalid_hash_messages.push(msg);
+                    continue;
+                }
+
+                data_bytes = msg.data.as_ref().unwrap().encode_to_vec();
+            }
+            if validate_message_hash(msg.hash_scheme, &data_bytes, &msg.hash).is_ok() {
+                valid_hash_messages.push(msg);
+            } else {
+                invalid_hash_messages.push(msg);
+            }
+        }
+
+        for invalid_msg in invalid_hash_messages {
+            warn!(
+                fid = invalid_msg.fid(),
+                hash = invalid_msg.hex_hash(),
+                "Invalid hash during batch verification"
+            );
+            validation_errors.push(MessageValidationError::MessageValidationError(
+                validations::error::ValidationError::InvalidHash,
+            ));
+        }
+
+        // Batch signature verification
+        if !valid_hash_messages.is_empty() {
+            let mut messages_for_signature_check = Vec::with_capacity(valid_hash_messages.len());
+            let mut signatures = Vec::with_capacity(valid_hash_messages.len());
+            let mut verifying_keys = Vec::with_capacity(valid_hash_messages.len());
+            let mut message_hashes = Vec::with_capacity(valid_hash_messages.len());
+
+            for msg in valid_hash_messages {
+                if let (Ok(sig), Ok(key)) = (
+                    Signature::from_slice(&msg.signature),
+                    VerifyingKey::from_bytes(msg.signer.as_slice().try_into().unwrap()),
+                ) {
+                    messages_for_signature_check.push(msg);
+                    signatures.push(sig);
+                    verifying_keys.push(key);
+                    message_hashes.push(msg.hash.as_slice());
+                } else {
+                    warn!(
+                        fid = msg.fid(),
+                        hash = msg.hex_hash(),
+                        "Failed to parse signature or key for batch verification"
+                    );
+                    validation_errors.push(MessageValidationError::MessageValidationError(
+                        validations::error::ValidationError::InvalidSignature,
+                    ));
+                }
+            }
+
+            if !signatures.is_empty() {
+                match ed25519_dalek::verify_batch(&message_hashes, &signatures, &verifying_keys) {
+                    Ok(_) => {
+                        // All signatures in the batch are valid.
+                        messages_to_process.extend(messages_for_signature_check);
+                    }
+                    Err(e) => {
+                        warn!("Batch signature verification failed: {}", e);
+                        validation_errors.push(MessageValidationError::MessageValidationError(
+                            validations::error::ValidationError::InvalidSignature,
+                        ));
+                        // Since we cannot know which message failed, we will not process any
+                        // messages in this batch if the verification fails.
+                    }
+                }
+            }
+        }
+
+        let mut message_types = HashSet::new();
+        let mut merged_messages_count = 0;
+        let mut trie_events = Vec::new();
+
+        for msg in messages_to_process {
+            // These messages have already been validated, so we can proceed to merge them.
+            match self.merge_message(msg, txn_batch) {
+                Ok(event) => {
+                    // self.update_trie(trie_ctx, &event, txn_batch)?;
+                    trie_events.push(event.clone());
+
+                    merged_messages_count += 1;
+                    events.push(event);
+                    message_types.insert(msg.msg_type());
+                }
+                Err(err) => {
+                    warn!(
+                        fid = msg.fid(),
+                        hash = msg.hex_hash(),
+                        msg_type = msg.msg_type().as_str_name(),
+                        "Error merging message after batch validation: {:?}",
+                        err
+                    );
+                    validation_errors.push(err.clone());
+                    let mut merge_failure = HubEvent::from_validation_error(err, msg);
+                    let _ = self
+                        .stores
+                        .event_handler
+                        .commit_transaction(txn_batch, &mut merge_failure);
+                    events.push(merge_failure);
+                }
+            }
+        }
+
+        // Batch update the trie
+        self.update_trie_batch(trie_ctx, &trie_events, txn_batch)?;
+
+        Ok((merged_messages_count, message_types))
+    }
+
     pub(crate) fn replay_snapchain_txn(
         &mut self,
         trie_ctx: &merkle_trie::Context,
@@ -634,6 +811,7 @@ impl ShardEngine {
         timestamp: &FarcasterTime,
     ) -> Result<(Vec<u8>, Vec<HubEvent>, Vec<MessageValidationError>), EngineError> {
         let now = std::time::Instant::now();
+
         let total_user_messages = snapchain_txn.user_messages.len();
         let total_system_messages = snapchain_txn.system_messages.len();
         let mut user_messages_count = 0;
@@ -650,22 +828,28 @@ impl ShardEngine {
         let mut validation_errors = vec![];
 
         // System messages first, then user messages and finally prunes
+        info!(
+            "Replaying transaction for FID: {}, user_messages: {}, system_messages: {}",
+            snapchain_txn.fid,
+            snapchain_txn.user_messages.len(),
+            snapchain_txn.system_messages.len()
+        );
 
         // Sort system_messages to process OnChainEvents first in their canonical order,
         // followed by FnameTransfers sorted by timestamp.
         let mut sorted_system_messages = snapchain_txn.system_messages.clone();
-        sorted_system_messages.sort_by(|a, b| {
-            match (&a.on_chain_event, &b.on_chain_event) {
-                (Some(event_a), Some(event_b)) => {
-                    // Both are OnChainEvents, sort by block_number then log_index.
-                    (event_a.block_number, event_a.log_index)
-                        .cmp(&(event_b.block_number, event_b.log_index))
-                }
-                (Some(_), None) => Ordering::Less, // OnChainEvents come before FnameTransfers.
-                (None, Some(_)) => Ordering::Greater, // FnameTransfers come after OnChainEvents.
-                (None, None) => Ordering::Equal,   // Both are FnameTransfers, sort equal
+        sorted_system_messages.sort_by(|a, b| match (&a.on_chain_event, &b.on_chain_event) {
+            (Some(event_a), Some(event_b)) => {
+                let map = ShardEngine::system_message_sort_order_map();
+                let idx_a = map.get(&event_a.r#type()).copied().unwrap_or(map.len());
+                let idx_b = map.get(&event_b.r#type()).copied().unwrap_or(map.len());
+                idx_a.cmp(&idx_b)
             }
+            (Some(_), None) => Ordering::Less, // OnChainEvents come before FnameTransfers.
+            (None, Some(_)) => Ordering::Greater, // FnameTransfers come after OnChainEvents.
+            (None, None) => Ordering::Equal,   // Both are FnameTransfers, sort equal
         });
+
         for msg in sorted_system_messages {
             if let Some(onchain_event) = &msg.on_chain_event {
                 if onchain_event.r#type() == OnChainEventType::EventTypeTierPurchase
@@ -815,88 +999,83 @@ impl ShardEngine {
         // Sort the user messages so that all dependent messages are processed in order
         let mut sorted_user_messages = snapchain_txn.user_messages.clone();
         sorted_user_messages.sort_by(|a, b| {
-            fn get_message_priority(msg: &proto::Message) -> u8 {
-                let msg_type = msg.msg_type();
-                match msg_type {
-                    MessageType::VerificationAddEthAddress => 1,
-                    MessageType::UsernameProof => 2,
-                    MessageType::UserDataAdd => {
-                        if let Some(Body::UserDataBody(body)) = &msg.data.as_ref().unwrap().body {
-                            let user_data_type = body.r#type();
-                            if user_data_type == UserDataType::Username
-                                || user_data_type == UserDataType::UserDataPrimaryAddressEthereum
-                                || user_data_type == UserDataType::UserDataPrimaryAddressSolana
-                            {
-                                return 3; // Dependent UserData types
-                            }
-                        }
-                        4 // Other UserDataAdd types
-                    }
-                    _ => 5, // All other message types
-                }
-            }
+            let map = ShardEngine::user_message_sort_order_map();
+            let priority_a = map.get(&a.msg_type()).copied().unwrap_or(map.len());
+            let priority_b = map.get(&b.msg_type()).copied().unwrap_or(map.len());
 
-            let priority_a = get_message_priority(a);
-            let priority_b = get_message_priority(b);
-
-            // Message priority first, then timestamp
-            priority_a.cmp(&priority_b).then_with(|| {
-                a.data
-                    .as_ref()
-                    .unwrap()
-                    .timestamp
-                    .cmp(&b.data.as_ref().unwrap().timestamp)
-            })
+            priority_a.cmp(&priority_b)
         });
 
-        for msg in &sorted_user_messages {
-            // Errors are validated based on the shard root
-            match self.validate_user_message(msg, timestamp, version, txn_batch) {
-                Ok(()) => {
-                    let result = self.merge_message(msg, txn_batch);
-                    match result {
-                        Ok(event) => {
-                            merged_messages_count += 1;
-                            self.update_trie(trie_ctx, &event, txn_batch)?;
-                            events.push(event.clone());
-                            user_messages_count += 1;
-                            message_types.insert(msg.msg_type());
-                        }
-                        Err(err) => {
-                            if source != ProposalSource::Simulate {
-                                warn!(
-                                    fid = msg.fid(),
-                                    hash = msg.hex_hash(),
-                                    "Error merging message: {:?}",
-                                    err
-                                );
+        if source == ProposalSource::Replication {
+            let (msg_count, replication_message_types) = self.merge_replicator_user_messages(
+                sorted_user_messages,
+                &mut validation_errors,
+                &mut events,
+                trie_ctx,
+                txn_batch,
+            )?;
+            merged_messages_count += msg_count;
+            user_messages_count += msg_count;
+
+            message_types.extend(replication_message_types);
+
+            if !validation_errors.is_empty() {
+                info!(
+                "FID replication merge results: system_messages={}, user_messages={}. Validation errors: {:?}",
+                system_messages_count, user_messages_count, validation_errors
+            );
+            }
+        } else {
+            for msg in &sorted_user_messages {
+                // Errors are validated based on the shard root
+                match self.validate_user_message(msg, timestamp, version, txn_batch) {
+                    Ok(()) => {
+                        let result = self.merge_message(msg, txn_batch);
+                        match result {
+                            Ok(event) => {
+                                merged_messages_count += 1;
+                                self.update_trie(trie_ctx, &event, txn_batch)?;
+                                events.push(event.clone());
+                                user_messages_count += 1;
+                                message_types.insert(msg.msg_type());
                             }
-                            validation_errors.push(err.clone());
-                            let mut merge_failure = HubEvent::from_validation_error(err, msg);
-                            let _ = self
-                                .stores
-                                .event_handler
-                                .commit_transaction(txn_batch, &mut merge_failure);
-                            events.push(merge_failure);
+                            Err(err) => {
+                                if source != ProposalSource::Simulate {
+                                    warn!(
+                                        fid = msg.fid(),
+                                        hash = msg.hex_hash(),
+                                        msg_type = msg.msg_type().as_str_name(),
+                                        "Error merging message: {:?}",
+                                        err
+                                    );
+                                }
+                                validation_errors.push(err.clone());
+                                let mut merge_failure = HubEvent::from_validation_error(err, msg);
+                                let _ = self
+                                    .stores
+                                    .event_handler
+                                    .commit_transaction(txn_batch, &mut merge_failure);
+                                events.push(merge_failure);
+                            }
                         }
                     }
-                }
-                Err(err) => {
-                    if source != ProposalSource::Simulate {
-                        warn!(
-                            fid = msg.fid(),
-                            hash = msg.hex_hash(),
-                            "Error validating user message: {:?}",
-                            err
-                        );
+                    Err(err) => {
+                        if source != ProposalSource::Simulate {
+                            warn!(
+                                fid = msg.fid(),
+                                hash = msg.hex_hash(),
+                                "Error validating user message: {:?}",
+                                err
+                            );
+                        }
+                        validation_errors.push(err.clone());
+                        let mut merge_failure = HubEvent::from_validation_error(err, msg);
+                        let _ = self
+                            .stores
+                            .event_handler
+                            .commit_transaction(txn_batch, &mut merge_failure);
+                        events.push(merge_failure);
                     }
-                    validation_errors.push(err.clone());
-                    let mut merge_failure = HubEvent::from_validation_error(err, msg);
-                    let _ = self
-                        .stores
-                        .event_handler
-                        .commit_transaction(txn_batch, &mut merge_failure);
-                    events.push(merge_failure);
                 }
             }
         }
@@ -1175,78 +1354,45 @@ impl ShardEngine {
         Ok(events)
     }
 
-    fn update_trie(
-        &mut self,
-        ctx: &merkle_trie::Context,
+    // Compute the keys that need to be updated in the trie. Returns (inserts, deletes)
+    fn get_trie_update_keys(
+        &self,
         event: &proto::HubEvent,
-        txn_batch: &mut RocksDbTransactionBatch,
-    ) -> Result<(), EngineError> {
-        let now = std::time::Instant::now();
+    ) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>), EngineError> {
+        let mut inserts = Vec::new();
+        let mut deletes = Vec::new();
+
         match &event.body {
             Some(proto::hub_event::Body::MergeMessageBody(merge)) => {
                 if let Some(msg) = &merge.message {
-                    self.stores.trie.insert(
-                        ctx,
-                        &self.db,
-                        txn_batch,
-                        vec![&TrieKey::for_message(&msg)],
-                    )?;
+                    inserts.push(TrieKey::for_message(&msg));
                 }
                 for deleted_message in &merge.deleted_messages {
-                    self.stores.trie.delete(
-                        ctx,
-                        &self.db,
-                        txn_batch,
-                        vec![&TrieKey::for_message(&deleted_message)],
-                    )?;
+                    deletes.push(TrieKey::for_message(&deleted_message));
                 }
             }
             Some(proto::hub_event::Body::MergeOnChainEventBody(merge)) => {
                 if let Some(onchain_event) = &merge.on_chain_event {
-                    self.stores.trie.insert(
-                        ctx,
-                        &self.db,
-                        txn_batch,
-                        vec![&TrieKey::for_onchain_event(&onchain_event)],
-                    )?;
+                    inserts.push(TrieKey::for_onchain_event(&onchain_event));
                 }
             }
             Some(proto::hub_event::Body::PruneMessageBody(prune)) => {
                 if let Some(msg) = &prune.message {
-                    self.stores.trie.delete(
-                        ctx,
-                        &self.db,
-                        txn_batch,
-                        vec![&TrieKey::for_message(&msg)],
-                    )?;
+                    deletes.push(TrieKey::for_message(&msg));
                 }
             }
+
             Some(proto::hub_event::Body::RevokeMessageBody(revoke)) => {
                 if let Some(msg) = &revoke.message {
-                    self.stores.trie.delete(
-                        ctx,
-                        &self.db,
-                        txn_batch,
-                        vec![&TrieKey::for_message(&msg)],
-                    )?;
+                    deletes.push(TrieKey::for_message(&msg));
                 }
             }
             Some(proto::hub_event::Body::MergeUsernameProofBody(merge)) => {
                 if let Some(msg) = &merge.username_proof_message {
-                    self.stores.trie.insert(
-                        ctx,
-                        &self.db,
-                        txn_batch,
-                        vec![&TrieKey::for_message(&msg)],
-                    )?;
+                    inserts.push(TrieKey::for_message(&msg));
                 }
                 if let Some(msg) = &merge.deleted_username_proof_message {
-                    self.stores.trie.delete(
-                        ctx,
-                        &self.db,
-                        txn_batch,
-                        vec![&TrieKey::for_message(&msg)],
-                    )?;
+                    deletes.push(TrieKey::for_message(&msg));
                 }
                 if let Some(proof) = &merge.username_proof {
                     if proof.r#type == proto::UserNameType::UsernameTypeFname as i32
@@ -1254,23 +1400,13 @@ impl ShardEngine {
                     // Deletes should not be added to the trie
                     {
                         let name = str::from_utf8(&proof.name).unwrap().to_string();
-                        self.stores.trie.insert(
-                            ctx,
-                            &self.db,
-                            txn_batch,
-                            vec![&TrieKey::for_fname(proof.fid, &name)],
-                        )?;
+                        inserts.push(TrieKey::for_fname(proof.fid, &name));
                     }
                 }
                 if let Some(proof) = &merge.deleted_username_proof {
                     if proof.r#type == proto::UserNameType::UsernameTypeFname as i32 {
                         let name = str::from_utf8(&proof.name).unwrap().to_string();
-                        self.stores.trie.delete(
-                            ctx,
-                            &self.db,
-                            txn_batch,
-                            vec![&TrieKey::for_fname(proof.fid, &name)],
-                        )?;
+                        deletes.push(TrieKey::for_fname(proof.fid, &name));
                     }
                 }
             }
@@ -1284,7 +1420,86 @@ impl ShardEngine {
                 // This should never happen
                 panic!("No body in event");
             }
+        };
+        Ok((inserts, deletes))
+    }
+
+    fn update_trie(
+        &mut self,
+        ctx: &merkle_trie::Context,
+        event: &proto::HubEvent,
+        txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Result<(), EngineError> {
+        let now = std::time::Instant::now();
+        let (inserts, deletes) = self.get_trie_update_keys(event)?;
+
+        for key in inserts {
+            self.stores
+                .trie
+                .insert(ctx, &self.db, txn_batch, vec![&key])?;
         }
+        for key in deletes {
+            self.stores
+                .trie
+                .delete(ctx, &self.db, txn_batch, vec![&key])?;
+        }
+
+        let elapsed = now.elapsed();
+        self.time_with_shard("update_trie_time_us", elapsed.as_micros() as u64);
+        Ok(())
+    }
+
+    fn update_trie_batch(
+        &mut self,
+        ctx: &merkle_trie::Context,
+        events: &Vec<proto::HubEvent>,
+        txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Result<(), EngineError> {
+        let now = std::time::Instant::now();
+
+        let mut all_inserts = HashSet::new();
+        let mut all_deletes = HashSet::new();
+
+        for event in events {
+            let (inserts, deletes) = self.get_trie_update_keys(event)?;
+
+            // Merge the inserts and deletes
+            for key in inserts {
+                if all_deletes.contains(&key) {
+                    all_deletes.remove(&key);
+                }
+                all_inserts.insert(key);
+            }
+
+            for key in deletes {
+                if all_inserts.contains(&key) {
+                    all_inserts.remove(&key);
+                }
+                all_deletes.insert(key);
+            }
+        }
+
+        // Batch insert and delete into the trie
+        self.stores.trie.insert(
+            ctx,
+            &self.db,
+            txn_batch,
+            all_inserts
+                .iter()
+                .map(|v| v.as_slice())
+                .collect::<Vec<&[u8]>>(),
+        )?;
+
+        self.stores.trie.delete(
+            ctx,
+            &self.db,
+            txn_batch,
+            all_deletes
+                .iter()
+                .map(|v| v.as_slice())
+                .collect::<Vec<&[u8]>>(),
+        )?;
+
         let elapsed = now.elapsed();
         self.time_with_shard("update_trie_time_us", elapsed.as_micros() as u64);
         Ok(())
