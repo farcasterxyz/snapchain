@@ -1,7 +1,7 @@
-use crate::core::error::HubError;
-use crate::storage::db::RocksDB;
+use crate::storage::db::{RocksDB, RocksdbError};
 use crate::storage::store::migrations::m1_fix_fname_index::M1FixFnameSecondaryIndex;
 use crate::storage::store::stores::Stores;
+use crate::{core::error::HubError, storage::constants::RootPrefix};
 use async_trait::async_trait;
 use std::sync::Arc;
 use thiserror::Error;
@@ -77,25 +77,53 @@ impl MigrationRunner {
         }
     }
 
+    fn make_migration_version_key(migration_version: u32) -> Vec<u8> {
+        vec![RootPrefix::DBSchemaVersion as u8, migration_version as u8]
+    }
+
+    fn set_migration_running(
+        context: &MigrationContext,
+        migration_version: u32,
+        running: bool,
+    ) -> Result<(), RocksdbError> {
+        // Write the migration running state to the database
+        context.stores.db.put(
+            &Self::make_migration_version_key(migration_version),
+            &[if running { 1u8 } else { 0u8 }],
+        )
+    }
+
+    fn get_migration_running(
+        context: &MigrationContext,
+        migration_version: u32,
+    ) -> Result<bool, RocksdbError> {
+        // Check if the migration is already running
+        match context
+            .stores
+            .db
+            .get(&Self::make_migration_version_key(migration_version))?
+        {
+            Some(v) => Ok(v == [1u8]),
+            None => Ok(false),
+        }
+    }
+
     /// Checks the database schema version and runs all pending migrations.
     /// Returns a handle to the background task for the migrations.
     pub async fn run_pending_migrations(
         self,
     ) -> Result<Option<tokio::task::JoinHandle<Result<(), MigrationError>>>, MigrationError> {
         let db_version = self.context.stores.get_schema_version()?;
-        info!(
-            shard_id = self.context.stores.shard_id,
-            db_version,
-            code_version = LATEST_SCHEMA_VERSION,
-            "Checking for pending DB migrations."
-        );
 
         if db_version >= LATEST_SCHEMA_VERSION {
+            return Ok(None);
+        } else {
             info!(
                 shard_id = self.context.stores.shard_id,
-                "DB schema is up to date."
+                db_version,
+                code_version = LATEST_SCHEMA_VERSION,
+                "DB needs migrations. Running pending DB migrations..."
             );
-            return Ok(None);
         }
 
         for (i, migration) in self.all_migrations.iter().enumerate() {
@@ -116,6 +144,13 @@ impl MigrationRunner {
             ));
         }
 
+        // Don't run more than 1 migration at a time
+        let context = self.context.clone();
+        if Self::get_migration_running(&context, start_migrations_at as u32)? {
+            return Ok(None);
+        }
+        Self::set_migration_running(&context, start_migrations_at as u32, true)?;
+
         // Collect all the migrations to run
         let migrations_to_run = self
             .all_migrations
@@ -124,7 +159,7 @@ impl MigrationRunner {
             .collect::<Vec<_>>();
 
         // Kick them off and return, not waiting for them to finish i.e., they will run in the background
-        let context = self.context.clone();
+
         let handle = tokio::spawn(async move {
             for migration in migrations_to_run {
                 info!(
@@ -136,7 +171,11 @@ impl MigrationRunner {
 
                 // We will await the background migration, but we're inside a tokio::spawn, so not blocking engine startup
                 // This is done so that only one background migration runs at a time, and the SCHEMA_VERSION is updated correctly
-                migration.run(context.clone()).await?;
+                if let Err(e) = migration.run(context.clone()).await {
+                    // If a migration fails, we'll write to DB that the migration is no longer running
+                    Self::set_migration_running(&context, start_migrations_at as u32, false)?;
+                    return Err(e);
+                }
 
                 // Update the schema version in the DB transactionally with the migration
                 context
@@ -149,6 +188,8 @@ impl MigrationRunner {
                     "Background migration completed successfully."
                 );
             }
+
+            Self::set_migration_running(&context, start_migrations_at as u32, false)?;
             Ok(())
         });
         Ok(Some(handle))
