@@ -109,13 +109,13 @@ impl RocksDB {
         }
     }
 
-    pub fn new_with_options(path: &str, db_options: SnapchainDbOptimizationType) -> RocksDB {
+    pub fn new_with_options(path: &str, db_options_type: SnapchainDbOptimizationType) -> RocksDB {
         info!({ path }, "Opening RocksDB database");
 
         RocksDB {
             inner: RwLock::new(None),
             path: path.to_string(),
-            db_options_type: db_options,
+            db_options_type,
         }
     }
 
