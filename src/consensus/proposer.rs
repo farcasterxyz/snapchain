@@ -5,6 +5,7 @@ use crate::proto::{
     ShardHeader, ShardWitness,
 };
 use crate::storage::store::engine::{BlockEngine, ShardEngine, ShardStateChange};
+use crate::storage::store::shard::ShardStorageError;
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStorageError;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
@@ -17,7 +18,7 @@ use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 use tokio::{select, time};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 #[derive(Clone, Copy, Debug, PartialEq, strum_macros::Display)]
 pub enum ProposalSource {
@@ -367,18 +368,19 @@ impl BlockProposer {
         &self,
         shard_height: u64,
         stores: &Stores,
-    ) -> Option<ShardChunkWitness> {
-        let chunk = stores
-            .shard_store
-            .get_chunk_by_height(shard_height)
-            .ok()??;
-        let header = chunk.header.as_ref().unwrap();
-        let shard_witness = ShardChunkWitness {
-            height: header.height,
-            shard_hash: chunk.hash.clone(),
-            shard_root: chunk.header.unwrap().shard_root,
-        };
-        Some(shard_witness)
+    ) -> Result<Option<ShardChunkWitness>, ShardStorageError> {
+        let chunk = stores.shard_store.get_chunk_by_height(shard_height)?;
+        if let Some(chunk) = chunk {
+            let header = chunk.header.as_ref().unwrap();
+            let shard_witness = ShardChunkWitness {
+                height: header.height,
+                shard_hash: chunk.hash.clone(),
+                shard_root: chunk.header.unwrap().shard_root,
+            };
+            Ok(Some(shard_witness))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn collect_confirmed_shard_witnesses(
@@ -400,13 +402,13 @@ impl BlockProposer {
                 let desired_shard_block_number = if height.block_number == 1 {
                     1
                 } else if let Some(ref last_shard_witness) = last_shard_witness {
-                    last_shard_witness.height.unwrap().increment().block_number
+                    last_shard_witness.height.unwrap().block_number + 1
                 } else {
                     // Error case, we should never get here
                     continue;
                 };
 
-                if let Some(next_shard_witness) =
+                if let Ok(Some(next_shard_witness)) =
                     self.get_shard_witness_at_height(desired_shard_block_number, store)
                 {
                     chunks.insert(*shard_id, next_shard_witness);
@@ -426,10 +428,17 @@ impl BlockProposer {
                             if chunks.contains_key(shard_id) {
                                 continue;
                             }
-
-                            if let Some(next_shard_witness) = self.get_shard_witness_at_height(height.block_number,  store) {
-                                chunks.insert(*shard_id, next_shard_witness);
+                            let result = self.get_shard_witness_at_height(height.block_number, store);
+                            match result {
+                                Ok(Some(shard_witness)) => {
+                                    chunks.insert(*shard_id, shard_witness);
+                                }
+                                Ok(None) => {}
+                                Err(err) => {
+                                    error!(height=height.block_number, shard_id=shard_id, "Error getting confirmed shard chunk: {:?}", err);
+                                }
                             }
+
                         }
                         if chunks.len() == self.num_shards as usize {
                             break;
