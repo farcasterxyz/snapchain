@@ -1047,7 +1047,30 @@ async fn test_decoupling_shard_0_from_other_shards() {
         stores.db.commit(txn).unwrap();
     }
 
-    // Make sure that shard 0 proceeds
-    let max_block_height = network.max_block_height();
-    network.wait_for_block(max_block_height + 4).await.unwrap();
+    let mut max_shard_height = 0;
+    for stores in network.nodes[0].shard_stores().values() {
+        max_shard_height = max_shard_height.max(stores.shard_store.max_block_number().unwrap());
+    }
+
+    // Make sure that shard 0 proceeds to a height beyond the last shard chunk successfully produced for the purpose of testing that shard 0 works even if other shards are down
+    network
+        .wait_for_block(max_shard_height as usize + 4)
+        .await
+        .unwrap();
+
+    let last_block = network.nodes[0]
+        .block_store
+        .get_last_block()
+        .unwrap()
+        .unwrap();
+    let last_shard_witnesses = last_block.shard_witness.unwrap().shard_chunk_witnesses;
+    assert_eq!(last_shard_witnesses.len() as u32, num_shards);
+
+    let previous_block = network.nodes[0]
+        .block_store
+        .get_block_by_height(last_block.header.unwrap().height.unwrap().block_number - 1)
+        .unwrap()
+        .unwrap();
+    let prev_shard_witnesses = previous_block.shard_witness.unwrap().shard_chunk_witnesses;
+    assert_eq!(last_shard_witnesses, prev_shard_witnesses);
 }
