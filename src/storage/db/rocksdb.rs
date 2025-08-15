@@ -1,6 +1,6 @@
 use crate::core::error::HubError;
 use crate::storage::util::increment_vec_u8;
-use rocksdb::{Options, TransactionDB, DB};
+use rocksdb::{Options, TransactionDB, WriteOptions, DB};
 use std::collections::HashMap;
 use std::fs::{self};
 use std::path::Path;
@@ -65,6 +65,13 @@ pub struct IteratorOptions {
     pub reverse: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SnapchainDbOptimizationType {
+    #[default]
+    Default, // Default read-write DB
+    BulkWriteOptimized, // Optimized for very large bulk writes
+}
+
 pub enum DBProvider {
     Transaction(TransactionDB),
     ReadOnly(DB),
@@ -75,6 +82,7 @@ pub struct RocksDB {
     inner: RwLock<Option<DBProvider>>,
 
     pub path: String,
+    pub db_options_type: SnapchainDbOptimizationType,
 }
 
 #[derive(Debug, Default)]
@@ -97,6 +105,17 @@ impl RocksDB {
         RocksDB {
             inner: RwLock::new(None),
             path: path.to_string(),
+            db_options_type: SnapchainDbOptimizationType::Default,
+        }
+    }
+
+    pub fn new_with_options(path: &str, db_options: SnapchainDbOptimizationType) -> RocksDB {
+        info!({ path }, "Opening RocksDB database");
+
+        RocksDB {
+            inner: RwLock::new(None),
+            path: path.to_string(),
+            db_options_type: db_options,
         }
     }
 
@@ -117,6 +136,25 @@ impl RocksDB {
 
         // Create RocksDB options
         let mut opts = Options::default();
+
+        if self.db_options_type == SnapchainDbOptimizationType::BulkWriteOptimized {
+            // 1. Increase the write buffer size. This is the size of a single in-memory memtable.
+            // For large, sustained writes, a larger buffer (e.g., 128MB) reduces how often
+            // the database flushes to disk
+            opts.set_write_buffer_size(512 * 1024 * 1024);
+
+            // 2. Increase the number of background threads for flushes and compactions.
+            opts.increase_parallelism(8);
+
+            // 3. Set the maximum number of write buffers. This allows RocksDB to continue
+            // accepting writes into a new memtable while old ones are being flushed.
+            opts.set_max_write_buffer_number(4);
+
+            // 4. Set the minimum number of write buffers to merge before flushing. 2
+            // allows us to "double-buffer" writes, allowing for more efficient flush-to-disk.
+            opts.set_min_write_buffer_number_to_merge(2);
+        }
+
         opts.create_if_missing(true); // Creates a database if it does not exist
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
 
@@ -152,6 +190,7 @@ impl RocksDB {
                 let rdb = RocksDB {
                     inner: RwLock::new(Some(provider)),
                     path: self.path.clone(),
+                    db_options_type: SnapchainDbOptimizationType::default(),
                 };
                 Ok(rdb)
             }
@@ -267,7 +306,21 @@ impl RocksDB {
     pub fn commit(&self, batch: RocksDbTransactionBatch) -> Result<(), RocksdbError> {
         match self.db().as_ref() {
             Some(DBProvider::Transaction(db)) => {
-                let txn = db.transaction();
+                let txn = if self.db_options_type == SnapchainDbOptimizationType::BulkWriteOptimized
+                {
+                    // Create a WriteOptions object for this specific transaction.
+                    let mut write_opts = WriteOptions::default();
+
+                    // Disabling the WAL (Write Ahead Log) provides a significant performance boost
+                    // for bulk writes. If you have BulkWriteOptimized enabled, this can greatly improve
+                    // write performance, but a crash means recent data will be lost and need to be re-written.
+                    write_opts.disable_wal(true);
+
+                    // Use the custom write options to create the transaction.
+                    db.transaction_opt(&write_opts, &Default::default())
+                } else {
+                    db.transaction()
+                };
 
                 for (key, value) in batch.batch {
                     if value.is_none() {
