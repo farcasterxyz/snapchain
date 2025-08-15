@@ -1,11 +1,13 @@
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::mempool::mempool::MempoolRequest;
 use crate::proto;
+use crate::proto::Block;
 pub use informalsystems_malachitebft_core_consensus::Params as ConsensusParams;
 pub use informalsystems_malachitebft_core_consensus::State as ConsensusState;
 use libp2p::identity::ed25519::{Keypair, SecretKey};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tokio::sync::oneshot;
 
 #[derive(Clone, Debug)]
 pub enum MalachiteEventShard {
@@ -20,7 +22,14 @@ pub enum SystemMessage {
 
     DecidedValueForReadNode(proto::DecidedValue),
 
-    ReadNodeFinishedInitialSync { shard_id: u32 },
+    BlockRequest {
+        block_number: u64,
+        block_tx: oneshot::Sender<Option<Block>>,
+    },
+
+    ReadNodeFinishedInitialSync {
+        shard_id: u32,
+    },
     ExitWithError(String),
 }
 

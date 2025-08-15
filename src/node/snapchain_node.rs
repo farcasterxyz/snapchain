@@ -40,7 +40,7 @@ impl SnapchainNode {
         local_peer_id: PeerId,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         shard_decision_tx: broadcast::Sender<ShardChunk>,
-        block_tx: Option<mpsc::Sender<Block>>,
+        block_tx: Option<broadcast::Sender<Block>>,
         messages_request_tx: mpsc::Sender<MempoolMessagesRequest>,
         block_store: BlockStore,
         local_state_store: LocalStateStore,

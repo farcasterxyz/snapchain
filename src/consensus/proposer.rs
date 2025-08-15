@@ -16,7 +16,7 @@ use prost::Message;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use tokio::time::Instant;
 use tokio::{select, time};
 use tracing::{error, warn};
@@ -241,6 +241,7 @@ impl Proposer for ShardProposer {
                 new_state_root: header.shard_root.clone(),
                 transactions: chunk.transactions.clone(),
                 events: vec![],
+                max_block_event_seqnum: 0,
             };
             return if self.engine.validate_state_change(&state) {
                 Validity::Valid
@@ -337,7 +338,7 @@ pub struct BlockProposer {
     shard_stores: HashMap<u32, Stores>,
     num_shards: u32,
     network: proto::FarcasterNetwork,
-    block_tx: Option<mpsc::Sender<Block>>,
+    block_tx: Option<broadcast::Sender<Block>>,
     engine: BlockEngine,
     statsd_client: StatsdClientWrapper,
 }
@@ -349,7 +350,7 @@ impl BlockProposer {
         shard_stores: HashMap<u32, Stores>,
         num_shards: u32,
         network: proto::FarcasterNetwork,
-        block_tx: Option<mpsc::Sender<Block>>,
+        block_tx: Option<broadcast::Sender<Block>>,
         engine: BlockEngine,
         statsd_client: StatsdClientWrapper,
     ) -> BlockProposer {
@@ -477,7 +478,7 @@ impl BlockProposer {
 
     async fn publish_new_block(&self, block: Block) {
         if let Some(block_tx) = &self.block_tx {
-            match block_tx.send(block.clone()).await {
+            match block_tx.send(block.clone()) {
                 Err(err) => {
                     error!("Error publishing new block {:?}", err.to_string());
                 }
