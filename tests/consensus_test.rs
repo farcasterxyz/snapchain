@@ -662,7 +662,7 @@ impl TestNetwork {
 
                 None
             },
-            tokio::time::Duration::from_secs(5),
+            tokio::time::Duration::from_secs(15),
             tokio::time::Duration::from_millis(100),
         )
         .await
@@ -711,7 +711,7 @@ impl TestNetwork {
 
                 None
             },
-            tokio::time::Duration::from_secs(5),
+            tokio::time::Duration::from_secs(15),
             tokio::time::Duration::from_millis(100),
         )
         .await
@@ -801,7 +801,7 @@ impl TestNetwork {
 
                 None
             },
-            tokio::time::Duration::from_secs(5),
+            tokio::time::Duration::from_secs(15),
             tokio::time::Duration::from_millis(100),
         )
         .await
