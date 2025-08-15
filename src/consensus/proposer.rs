@@ -405,6 +405,10 @@ impl BlockProposer {
                     last_shard_witness.height.unwrap().block_number + 1
                 } else {
                     // Error case, we should never get here
+                    error!(
+                        height = height.block_number,
+                        "Unable to find last shard witness for block"
+                    );
                     continue;
                 };
 
