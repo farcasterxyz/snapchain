@@ -721,7 +721,7 @@ fn build_fname_username_proofs_event(
             proof.map(|p| proto::ValidatorMessage {
                 fname_transfer: Some(proto::FnameTransfer {
                     proof: Some(p),
-                        ..Default::default()
+                    ..Default::default()
                 }),
                 ..Default::default()
             })
