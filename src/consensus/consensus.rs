@@ -41,7 +41,6 @@ pub struct Config {
     pub step_delta: Duration, // Timeout delta between steps
     #[serde(with = "humantime_serde")]
     pub propose_time: Duration, // Timeout for each propose/prevote/precommit step
-    pub shard_witness_proposal_timeout: Duration, // Timeout for waiting for confirmed shard chunks
     #[serde(with = "humantime_serde")]
     pub prevote_time: Duration, // Timeout for each propose/prevote/precommit step
     #[serde(with = "humantime_serde")]
@@ -82,7 +81,6 @@ impl Config {
             consensus_start_delay: self.consensus_start_delay,
             sync_request_timeout: self.sync_request_timeout,
             sync_status_update_interval: self.sync_status_update_interval,
-            shard_witness_proposal_timeout: self.shard_witness_proposal_timeout,
         }
     }
 
@@ -112,7 +110,6 @@ impl Default for Config {
             shard_ids: vec![1],
             num_shards: 1,
             propose_time: Duration::from_millis(1000),
-            shard_witness_proposal_timeout: Duration::from_millis(500),
             prevote_time: Duration::from_millis(500),
             precommit_time: Duration::from_millis(500),
             step_delta: Duration::from_millis(500),
