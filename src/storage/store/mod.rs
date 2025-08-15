@@ -2,6 +2,7 @@ pub use self::block::*;
 
 pub mod account;
 pub mod block;
+pub mod block_engine;
 pub mod engine;
 pub mod engine_metrics;
 pub mod mempool_poller;
