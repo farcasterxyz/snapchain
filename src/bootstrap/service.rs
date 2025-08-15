@@ -1,5 +1,6 @@
 use crate::bootstrap::error::BootstrapError;
 use crate::cfg::Config;
+use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
 use crate::proto::get_shard_transactions_request::Cursor;
 use crate::proto::replication_service_client::ReplicationServiceClient;
@@ -13,6 +14,7 @@ use crate::storage::trie::merkle_trie::{self, TrieKey};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::EngineVersion;
 use futures::future::try_join_all;
+use std::collections::HashMap;
 use std::error::Error;
 use std::net;
 use tokio::sync::{mpsc, oneshot};
@@ -46,10 +48,11 @@ pub async fn bootstrap_from_replication(app_config: &Config) -> Result<(), Box<d
     }
     ranges.push((fid_chunk_size * ranges.len() as u64, 0)); // Last range goes to the end
 
-    let target_height = 12247700; //determine_target_height(&mut client, &app_config.consensus.shard_ids).await?;
+    let target_heights =
+        determine_target_height(&mut client, &app_config.consensus.shard_ids).await?;
     info!(
-        "Target height for bootstrap: {}. FID ranges: {:?}",
-        target_height, ranges
+        "Target heights for bootstrap: {:?}. FID ranges: {:?}",
+        target_heights, ranges
     );
 
     // Initialize databases and replay transactions for each shard
@@ -77,23 +80,76 @@ pub async fn bootstrap_from_replication(app_config: &Config) -> Result<(), Box<d
         cadence::StatsdClient::builder(app_config.statsd.prefix.as_str(), sink).build();
     let statsd_client = StatsdClientWrapper::new(statsd_client, app_config.statsd.use_tags);
 
+    // Create tasks for each shard to run in parallel
+    let mut shard_tasks = Vec::new();
+
     for shard_id in shard_ids {
-        info!("Bootstrapping shard {}", shard_id);
+        let target_height = target_heights.get(&shard_id).cloned().unwrap_or(0);
+        if target_height == 0 {
+            return Err(Box::new(HubError::unavailable(
+                format!(
+                    "No valid snapshot found for shard {}. Skipping bootstrap.",
+                    shard_id
+                )
+                .as_str(),
+            )));
+        }
+        info!(
+            "Bootstrapping shard {} at height {}",
+            shard_id, target_height
+        );
 
-        // Replay transactions for this shard
-        start_shard_replication(
-            ranges.clone(),
-            peer_address,
-            app_config.fc_network,
-            shard_id,
-            app_config.trie_branching_factor,
-            target_height,
-            &statsd_client,
-            &app_config.rocksdb_dir,
-        )
-        .await?;
+        // Clone necessary data for the spawned task
+        let ranges_clone = ranges.clone();
+        let peer_address_clone = peer_address.to_string();
+        let network = app_config.fc_network;
+        let trie_branching_factor = app_config.trie_branching_factor;
+        let statsd_client_clone = statsd_client.clone();
+        let rocksdb_dir = app_config.rocksdb_dir.clone();
 
-        info!("Completed bootstrap for shard {}", shard_id);
+        // Spawn a task for this shard
+        let task = tokio::spawn(async move {
+            info!("Starting parallel bootstrap for shard {}", shard_id);
+
+            // Replay transactions for this shard
+            let result = start_shard_replication(
+                ranges_clone,
+                &peer_address_clone,
+                network,
+                shard_id,
+                trie_branching_factor,
+                target_height,
+                &statsd_client_clone,
+                &rocksdb_dir,
+            )
+            .await;
+
+            match &result {
+                Ok(_) => info!("Completed bootstrap for shard {}", shard_id),
+                Err(e) => error!("Failed bootstrap for shard {}: {}", shard_id, e),
+            }
+
+            (shard_id, result)
+        });
+
+        shard_tasks.push(task);
+    }
+
+    // Wait for all shard tasks to complete
+    let results = try_join_all(shard_tasks).await.map_err(|e| {
+        Box::new(BootstrapError::TransactionReplayError(format!(
+            "Shard task join error: {}",
+            e
+        ))) as Box<dyn Error>
+    })?;
+
+    // Check if any shard returned an error
+    for (shard_id, result) in results {
+        if let Err(e) = result {
+            error!("Shard {} failed during bootstrap: {}", shard_id, e);
+            return Err(Box::new(e) as Box<dyn Error>);
+        }
+        info!("Shard {} completed successfully", shard_id);
     }
 
     info!("Replication bootstrap completed successfully");
@@ -142,7 +198,8 @@ async fn start_shard_replication(
             let elapsed_time = start_time.elapsed();
             let total_elapsed = total_start_time.elapsed();
             info!(
-                "DB writer - Commit took {:?}. Writing at {:.1}k msg/sec",
+                "DB writer({}) - Commit took {:?}. Writing at {:.1}k msg/sec",
+                shard_id,
                 elapsed_time,
                 total_messages as f64 / 1000.0 / total_elapsed.as_secs_f64()
             );
@@ -473,12 +530,12 @@ async fn replay_transaction(
     }
 }
 
-/// Determine the highest common block number for which all shards have a snapshot
+/// Determine the highest block for each shard.
 async fn determine_target_height(
     client: &mut ReplicationServiceClient<Channel>,
     shard_ids: &[u32],
-) -> Result<u64, BootstrapError> {
-    let mut min_height = u64::MAX;
+) -> Result<HashMap<u32, u64>, BootstrapError> {
+    let mut target_heights = HashMap::new();
 
     // Check all configured shards plus block shard (0)
     let all_shards = shard_ids.to_vec();
@@ -492,22 +549,14 @@ async fn determine_target_height(
             Ok(response) => {
                 let metadata_response = response.into_inner();
 
-                // Get the latest snapshot (assuming they're ordered by height)
-                if let Some(latest_metadata) = metadata_response.snapshots.last() {
-                    if latest_metadata.height < min_height {
-                        min_height = latest_metadata.height;
+                // Go over the response, finding the highest block
+                let mut highest_block = 0;
+                for snapshot in metadata_response.snapshots {
+                    if snapshot.height > highest_block {
+                        highest_block = snapshot.height;
                     }
-                    info!(
-                        "Shard {} has snapshot at height {}",
-                        shard_id, latest_metadata.height
-                    );
-                } else {
-                    error!("No snapshots found for shard {}", shard_id);
-                    return Err(BootstrapError::MetadataFetchError(format!(
-                        "No snapshots found for shard {}",
-                        shard_id
-                    )));
                 }
+                target_heights.insert(shard_id, highest_block);
             }
             Err(e) => {
                 error!("Failed to get metadata for shard {}: {}", shard_id, e);
@@ -516,11 +565,11 @@ async fn determine_target_height(
         }
     }
 
-    if min_height == u64::MAX {
+    if target_heights.is_empty() {
         return Err(BootstrapError::MetadataFetchError(
             "No valid snapshots found".to_string(),
         ));
     }
 
-    Ok(min_height)
+    Ok(target_heights)
 }
