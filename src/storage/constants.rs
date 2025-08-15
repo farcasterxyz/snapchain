@@ -27,8 +27,8 @@ pub enum RootPrefix {
 
     // /* Used to store on chain events */
     OnChainEvent = 12,
-    // /** DB Schema version */
-    // DBSchemaVersion = 13,
+    // /** DB Schema version used to manage migrations */
+    DBSchemaVersion = 13,
 
     // /* Used to index verifications by address */
     VerificationByAddress = 14,

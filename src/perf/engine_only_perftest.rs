@@ -41,7 +41,8 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         limits: Some(test_helper::limits::unlimited_store_limits()),
         messages_request_tx: Some(messages_request_tx),
         ..Default::default()
-    });
+    })
+    .await;
 
     let statsd_client = StatsdClientWrapper::new(
         cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
