@@ -102,6 +102,7 @@ impl MalachiteReadNodeActors {
 
         let sync_config = ValueSyncConfig {
             request_timeout: config.sync_request_timeout,
+            status_update_interval: config.sync_status_update_interval,
             ..ValueSyncConfig::default()
         };
         let network_actor =

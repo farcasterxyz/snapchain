@@ -834,6 +834,7 @@ impl ShardEngine {
                 .trie
                 .get_hash(&self.db, txn_batch, &TrieKey::for_fid(snapchain_txn.fid));
         debug!(
+            shard_id = self.shard_id,
             fid = snapchain_txn.fid,
             num_user_messages = total_user_messages,
             num_system_messages = total_system_messages,
