@@ -100,6 +100,25 @@ message ConsensusMessage {
   bytes signature = 3;
 }
 
+enum BlockEventType {
+  BLOCK_EVENT_TYPE_HEARTBEAT = 0; 
+}
+
+message HeartbeatEventBody {
+}
+
+message BlockEvent {
+  uint64 seqnum = 1;
+  bytes hash = 2;
+  BlockEventType type = 3;
+  uint64 block_number = 4;
+  uint64 event_index = 5;
+  uint64 block_timestamp = 6;
+  oneof body {
+    HeartbeatEventBody heartbeat_event_body = 7; // Placeholder
+  };
+}
+
 // Block types
 message BlockHeader {
   Height height = 1;
@@ -108,6 +127,8 @@ message BlockHeader {
   FarcasterNetwork chain_id = 4;
   bytes shard_witnesses_hash = 5;
   bytes parent_hash = 6;
+  bytes state_root = 7;
+  bytes events_hash = 8;
 }
 
 message ShardWitness {
@@ -125,6 +146,8 @@ message Block {
   bytes hash = 2;
   ShardWitness shard_witness = 3;
   Commits commits = 4;
+  repeated Transaction transactions = 5;
+  repeated BlockEvent events = 6;
 }
 
 message ShardHeader {

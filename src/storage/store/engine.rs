@@ -6,9 +6,8 @@ use crate::core::{
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::message_data::Body;
 use crate::proto::{
-    self, hub_event, Block, FarcasterNetwork, HubEvent, HubEventType, MessageType, OnChainEvent,
-    OnChainEventType, Protocol, ShardChunk, ShardChunkWitness, Transaction, UserDataType,
-    UserNameProof,
+    self, hub_event, FarcasterNetwork, HubEvent, HubEventType, MessageType, OnChainEvent,
+    OnChainEventType, Protocol, ShardChunk, Transaction, UserDataType, UserNameProof,
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{CastStore, MessagesPage, VerificationStore};
@@ -16,7 +15,6 @@ use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
 use crate::storage::store::migrations::{MigrationContext, MigrationRunner};
 use crate::storage::store::stores::{StoreLimits, Stores};
-use crate::storage::store::BlockStore;
 use crate::storage::trie::{self, merkle_trie};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::{EngineVersion, ProtocolFeature};
@@ -1997,126 +1995,5 @@ impl ShardEngine {
             return false;
         }
         signer_event.event_type == proto::SignerEventType::Remove as i32
-    }
-}
-
-pub struct BlockEngine {
-    block_store: BlockStore,
-    statsd_client: StatsdClientWrapper,
-}
-
-impl BlockEngine {
-    pub fn new(block_store: BlockStore, statsd_client: StatsdClientWrapper) -> Self {
-        BlockEngine {
-            block_store,
-            statsd_client,
-        }
-    }
-
-    // statsd
-    fn count(&self, key: &str, count: u64) {
-        let key = format!("engine.{}", key);
-        self.statsd_client
-            .count_with_shard(0, key.as_str(), count, vec![]);
-    }
-
-    // statsd
-    fn gauge(&self, key: &str, value: u64) {
-        let key = format!("engine.{}", key);
-        self.statsd_client.gauge_with_shard(0, key.as_str(), value);
-    }
-
-    pub fn commit_block(&mut self, block: &Block) {
-        self.gauge(
-            "block_height",
-            block
-                .header
-                .as_ref()
-                .unwrap()
-                .height
-                .as_ref()
-                .unwrap()
-                .block_number,
-        );
-        let block_timestamp = block.header.as_ref().unwrap().timestamp;
-        self.gauge(
-            "block_delay_seconds",
-            FarcasterTime::current().to_u64() - block_timestamp,
-        );
-        self.count(
-            "block_shards",
-            block
-                .shard_witness
-                .as_ref()
-                .unwrap()
-                .shard_chunk_witnesses
-                .len() as u64,
-        );
-
-        let result = self.block_store.put_block(block);
-        if result.is_err() {
-            error!("Failed to store block: {:?}", result.err());
-        }
-    }
-
-    pub fn get_last_block(&self) -> Option<Block> {
-        match self.block_store.get_last_block() {
-            Ok(block) => block,
-            Err(err) => {
-                error!("Unable to obtain last block {:#?}", err);
-                None
-            }
-        }
-    }
-
-    pub fn get_block_by_height(&self, height: Height) -> Option<Block> {
-        if height.shard_index != 0 {
-            error!(
-                shard_id = 0,
-                requested_shard_id = height.shard_index,
-                "Requested shard chunk from incorrect shard"
-            );
-
-            return None;
-        }
-        match self.block_store.get_block_by_height(height.block_number) {
-            Ok(block) => block,
-            Err(err) => {
-                error!("No block at height {:#?}", err);
-                None
-            }
-        }
-    }
-
-    pub fn get_confirmed_height(&self) -> Height {
-        let shard_index = 0;
-        match self.block_store.max_block_number() {
-            Ok(block_num) => Height::new(shard_index, block_num),
-            Err(_) => Height::new(shard_index, 0),
-        }
-    }
-
-    pub fn get_min_height(&self) -> Height {
-        let shard_index = 0;
-        match self.block_store.min_block_number() {
-            Ok(block_num) => Height::new(shard_index, block_num),
-            // In case of no blocks, return height 1
-            Err(_) => Height::new(shard_index, 1),
-        }
-    }
-
-    pub fn get_last_shard_witness(
-        &self,
-        height: Height,
-        shard_id: u32,
-    ) -> Option<ShardChunkWitness> {
-        let previous_height = height.decrement()?;
-        let previous_block = self.get_block_by_height(previous_height)?;
-        let previous_shard_witness = previous_block.shard_witness?;
-        previous_shard_witness
-            .shard_chunk_witnesses
-            .iter()
-            .find(|witness| witness.height.unwrap().shard_index == shard_id)
-            .cloned()
     }
 }
