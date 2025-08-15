@@ -1,4 +1,5 @@
 use super::account::{IntoU8, OnchainEventStorageError, UserDataStore, UsernameProofStore};
+use crate::consensus::proposer::ProposalSource;
 use crate::core::{
     error::HubError, types::Height, util::FarcasterTime, validations, validations::verification,
 };
@@ -10,6 +11,7 @@ use crate::proto::{
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{CastStore, MessagesPage, VerificationStore};
+use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
 use crate::storage::store::migrations::{MigrationContext, MigrationRunner};
 use crate::storage::store::stores::{StoreLimits, Stores};
@@ -22,7 +24,7 @@ use alloy_primitives::Address;
 use informalsystems_malachitebft_core_types::Round;
 use itertools::Itertools;
 use merkle_trie::TrieKey;
-use std::cmp::{Ordering, PartialEq};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::str;
 use std::string::ToString;
@@ -57,14 +59,6 @@ pub enum EngineError {
 
     #[error(transparent)]
     MempoolPollerError(#[from] MempoolPollerError),
-}
-
-#[derive(Clone, Debug, PartialEq, strum_macros::Display)]
-pub enum ProposalSource {
-    Simulate,
-    Propose,
-    Validate,
-    Commit,
 }
 
 #[derive(Error, Debug, Clone)]
@@ -130,12 +124,6 @@ pub struct PostCommitMessage {
     pub channel: oneshot::Sender<bool>,
 }
 
-struct TransactionCounts {
-    transactions: u64,
-    user_messages: u64,
-    system_messages: u64,
-}
-
 #[derive(Clone)]
 struct CachedTransaction {
     shard_root: Vec<u8>,
@@ -149,7 +137,7 @@ pub struct ShardEngine {
     pub db: Arc<RocksDB>,
     senders: Senders,
     stores: Stores,
-    statsd_client: StatsdClientWrapper,
+    metrics: Metrics,
     pending_txn: Option<CachedTransaction>,
     fname_signer_address: Option<alloy_primitives::Address>,
     post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
@@ -208,35 +196,18 @@ impl ShardEngine {
             },
             senders: Senders::new(),
             db,
+            metrics: Metrics {
+                statsd_client,
+                shard_id,
+            },
             pending_txn: None,
             fname_signer_address,
             post_commit_tx,
-            statsd_client,
         })
     }
 
     pub fn shard_id(&self) -> u32 {
         self.shard_id
-    }
-
-    // statsd
-    fn count(&self, key: &str, count: u64, extra_tags: Vec<(&str, &str)>) {
-        let key = format!("engine.{}", key);
-        self.statsd_client
-            .count_with_shard(self.shard_id, key.as_str(), count, extra_tags);
-    }
-
-    // statsd
-    fn gauge(&self, key: &str, value: u64) {
-        let key = format!("engine.{}", key);
-        self.statsd_client
-            .gauge_with_shard(self.shard_id, key.as_str(), value);
-    }
-
-    fn time_with_shard(&self, key: &str, value: u64) {
-        let key = format!("engine.{}", key);
-        self.statsd_client
-            .time_with_shard(self.shard_id, key.as_str(), value);
     }
 
     pub fn get_stores(&self) -> Stores {
@@ -265,7 +236,7 @@ impl ShardEngine {
         messages: Vec<MempoolMessage>,
         timestamp: &FarcasterTime,
     ) -> Result<ShardStateChange, EngineError> {
-        self.count(
+        self.metrics.count(
             "prepare_proposal.recv_messages",
             messages.len() as u64,
             vec![],
@@ -327,23 +298,13 @@ impl ShardEngine {
             validation_error_count += validation_errors.len();
         }
 
-        let count = Self::txn_counts(&snapchain_txns);
+        self.metrics
+            .publish_transaction_counts(&snapchain_txns, ProposalSource::Propose);
 
-        self.count("prepare_proposal.transactions", count.transactions, vec![]);
-        self.count(
-            "prepare_proposal.user_messages",
-            count.user_messages,
-            vec![],
-        );
-        self.count(
-            "prepare_proposal.system_messages",
-            count.system_messages,
-            vec![],
-        );
-        self.count(
-            "prepare_proposal.validation_errors",
+        self.metrics.count(
+            "validation_errors",
             validation_error_count as u64,
-            vec![],
+            Metrics::proposal_source_tags(ProposalSource::Propose),
         );
 
         let new_root_hash = self.stores.trie.root_hash()?;
@@ -379,7 +340,7 @@ impl ShardEngine {
         let now = std::time::Instant::now();
         let mut txn = RocksDbTransactionBatch::new();
 
-        let count_fn = Self::make_count_fn(self.statsd_client.clone(), self.shard_id);
+        let count_fn = self.metrics.make_count_fn();
         let count_callback = move |read_count: (u64, u64)| {
             count_fn("trie.db_get_count.total", read_count.0, vec![]);
             count_fn("trie.db_get_count.for_propose", read_count.0, vec![]);
@@ -406,9 +367,10 @@ impl ShardEngine {
         });
 
         let proposal_duration = now.elapsed();
-        self.time_with_shard("propose_time", proposal_duration.as_millis() as u64);
+        self.metrics
+            .time_with_shard("propose_time", proposal_duration.as_millis() as u64);
 
-        self.count("propose.invoked", 1, vec![]);
+        self.metrics.count("propose.invoked", 1, vec![]);
         result
     }
 
@@ -544,7 +506,8 @@ impl ShardEngine {
         }
 
         let elapsed = now.elapsed();
-        self.time_with_shard("replay_proposal_time", elapsed.as_millis() as u64);
+        self.metrics
+            .time_with_shard("replay_proposal_time", elapsed.as_millis() as u64);
         Ok(events)
     }
 
@@ -887,7 +850,8 @@ impl ShardEngine {
             "Replayed transaction"
         );
         let elapsed = now.elapsed();
-        self.time_with_shard("replay_txn_time_us", elapsed.as_micros() as u64);
+        self.metrics
+            .time_with_shard("replay_txn_time_us", elapsed.as_micros() as u64);
 
         // Return the new account root hash
         Ok((account_root, events, validation_errors))
@@ -1030,7 +994,8 @@ impl ShardEngine {
             }
         }?;
         let elapsed = now.elapsed();
-        self.time_with_shard("merge_message_time_us", elapsed.as_micros() as u64);
+        self.metrics
+            .time_with_shard("merge_message_time_us", elapsed.as_micros() as u64);
         Ok(event)
     }
 
@@ -1210,7 +1175,8 @@ impl ShardEngine {
             }
         }
         let elapsed = now.elapsed();
-        self.time_with_shard("update_trie_time_us", elapsed.as_micros() as u64);
+        self.metrics
+            .time_with_shard("update_trie_time_us", elapsed.as_micros() as u64);
         Ok(())
     }
 
@@ -1287,7 +1253,8 @@ impl ShardEngine {
         }
 
         let elapsed = now.elapsed();
-        self.time_with_shard("validate_user_message_time_us", elapsed.as_micros() as u64);
+        self.metrics
+            .time_with_shard("validate_user_message_time_us", elapsed.as_micros() as u64);
         Ok(())
     }
 
@@ -1414,7 +1381,7 @@ impl ShardEngine {
 
         let mut result = true;
 
-        let count_fn = Self::make_count_fn(self.statsd_client.clone(), self.shard_id);
+        let count_fn = self.metrics.make_count_fn();
         let count_callback = move |read_count: (u64, u64)| {
             count_fn("trie.db_get_count.total", read_count.0, vec![]);
             count_fn("trie.db_get_count.for_validate", read_count.0, vec![]);
@@ -1448,14 +1415,15 @@ impl ShardEngine {
 
         self.stores.trie.reload(&self.db).unwrap();
         let elapsed = now.elapsed();
-        self.time_with_shard("validate_time", elapsed.as_millis() as u64);
+        self.metrics
+            .time_with_shard("validate_time", elapsed.as_millis() as u64);
 
         if result {
-            self.count("validate.true", 1, vec![]);
-            self.count("validate.false", 0, vec![]);
+            self.metrics.count("validate.true", 1, vec![]);
+            self.metrics.count("validate.false", 0, vec![]);
         } else {
-            self.count("validate.false", 1, vec![]);
-            self.count("validate.true", 0, vec![]);
+            self.metrics.count("validate.false", 1, vec![]);
+            self.metrics.count("validate.true", 0, vec![]);
         }
 
         result
@@ -1514,7 +1482,8 @@ impl ShardEngine {
             Ok(()) => {}
         }
         let elapsed = now.elapsed();
-        self.time_with_shard("commit_time", elapsed.as_millis() as u64);
+        self.metrics
+            .time_with_shard("commit_time", elapsed.as_millis() as u64);
         self.post_commit(shard_chunk.header.as_ref().unwrap().clone())
             .await;
     }
@@ -1524,7 +1493,7 @@ impl ShardEngine {
         shard_chunk: &&ShardChunk,
         events: &Vec<HubEvent>,
     ) -> Result<(), EngineError> {
-        self.count("commit.invoked", 1, vec![]);
+        self.metrics.count("commit.invoked", 1, vec![]);
 
         let block_number = &shard_chunk
             .header
@@ -1534,30 +1503,27 @@ impl ShardEngine {
             .unwrap()
             .block_number;
 
-        self.gauge("block_height", *block_number);
+        self.metrics.gauge("block_height", *block_number);
         let block_timestamp = shard_chunk.header.as_ref().unwrap().timestamp;
-        self.gauge(
+        self.metrics.gauge(
             "block_delay_seconds",
             FarcasterTime::current().to_u64() - block_timestamp,
         );
 
         let trie_size = self.stores.trie.items()?;
-        self.gauge("trie.num_items", trie_size as u64);
+        self.metrics.gauge("trie.num_items", trie_size as u64);
 
-        let counts = Self::txn_counts(&shard_chunk.transactions);
-
-        self.count("commit.transactions", counts.transactions, vec![]);
-        self.count("commit.user_messages", counts.user_messages, vec![]);
-        self.count("commit.system_messages", counts.system_messages, vec![]);
+        self.metrics
+            .publish_transaction_counts(&shard_chunk.transactions, ProposalSource::Commit);
 
         // useful to see on perf test dashboards
-        self.gauge(
+        self.metrics.gauge(
             "trie.branching_factor",
             self.stores.trie.branching_factor() as u64,
         );
 
         for event in events {
-            self.count(
+            self.metrics.count(
                 "commit.emitted_event",
                 1,
                 vec![("event_type", &event.r#type.to_string())],
@@ -1566,7 +1532,7 @@ impl ShardEngine {
                 match &event.body {
                     Some(hub_event::Body::MergeMessageBody(body)) => {
                         if let Some(message) = &body.message {
-                            self.count(
+                            self.metrics.count(
                                 "commit.merged_message",
                                 1,
                                 vec![("message_type", &(message.msg_type() as i32).to_string())],
@@ -1614,18 +1580,9 @@ impl ShardEngine {
                 }
 
                 let elapsed = now.elapsed();
-                self.time_with_shard("post_commit_time", elapsed.as_millis() as u64);
+                self.metrics
+                    .time_with_shard("post_commit_time", elapsed.as_millis() as u64);
             }
-        }
-    }
-
-    pub fn make_count_fn(
-        statsd_client: StatsdClientWrapper,
-        shard_id: u32,
-    ) -> impl Fn(&str, u64, Vec<(&str, &str)>) {
-        move |key: &str, count: u64, extra_tags: Vec<(&str, &str)>| {
-            let key = format!("engine.{}", key);
-            statsd_client.count_with_shard(shard_id, &key, count, extra_tags);
         }
     }
 
@@ -1664,7 +1621,7 @@ impl ShardEngine {
             self.stores.event_handler.set_current_height(block_number);
             let version = self.version_for(&FarcasterTime::new(header.timestamp));
 
-            let count_fn = Self::make_count_fn(self.statsd_client.clone(), self.shard_id);
+            let count_fn = self.metrics.make_count_fn();
             let count_callback = move |read_count: (u64, u64)| {
                 count_fn("trie.db_get_count.total", read_count.0, vec![]);
                 count_fn("trie.db_get_count.for_commit", read_count.0, vec![]);
@@ -1987,22 +1944,6 @@ impl ShardEngine {
         self.stores
             .onchain_event_store
             .get_onchain_events(event_type, Some(fid))
-    }
-
-    fn txn_counts(txns: &[Transaction]) -> TransactionCounts {
-        let (user_count, system_count) =
-            txns.iter().fold((0, 0), |(user_count, system_count), tx| {
-                (
-                    user_count + tx.user_messages.len(),
-                    system_count + tx.system_messages.len(),
-                )
-            });
-
-        TransactionCounts {
-            transactions: txns.len() as u64,
-            user_messages: user_count as u64,
-            system_messages: system_count as u64,
-        }
     }
 
     pub fn trie_num_items(&mut self) -> usize {
