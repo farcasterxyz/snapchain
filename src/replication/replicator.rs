@@ -15,6 +15,7 @@ use crate::{
         trie::merkle_trie::TrieKey,
     },
 };
+use std::{sync::Arc, time::Duration};
 use tokio::select;
 use tracing::{error, info};
 
@@ -670,12 +671,6 @@ fn build_fname_username_proofs_event(
     let fid_fnames_key =
         TrieKey::for_fname(cursor.token.fid(), &"".to_string())[..prefix_len].to_vec();
 
-    info!(
-        "Building Fname username proofs for FID {} with prefix length {}",
-        cursor.token.fid(),
-        prefix_len
-    );
-
     // 1. We'll read all this FID's keys for all fname messages from the merkle trie
     let mut trie = stores.trie.clone();
     let trie_key_bytes = trie
@@ -687,11 +682,6 @@ fn build_fname_username_proofs_event(
                 e
             ))
         })?;
-    info!(
-        "Trie keys for FID {}: {:?}",
-        cursor.token.fid(),
-        trie_key_bytes
-    );
 
     // 2. Get all the fnames that we found
     let fnames = trie_key_bytes
