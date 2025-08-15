@@ -80,6 +80,7 @@ impl Host {
                 state.shard_validator.start_round(height, round, proposer);
                 info!(
                     height = height.to_string(),
+                    shard = height.shard_index,
                     round = round.as_i64(),
                     at = "host_trace",
                     "Started height with round: {}",
@@ -115,6 +116,7 @@ impl Host {
                 let elapsed = now.elapsed();
                 info!(
                     height = height.to_string(),
+                    shard = height.shard_index,
                     round = round.as_i64(),
                     at = "host_trace",
                     "Proposed value with round: {} ({} ms)",
@@ -189,6 +191,7 @@ impl Host {
                         let elapsed = now.elapsed();
                         info!(
                             height = height.to_string(),
+                            shard = height.shard_index,
                             round = round,
                             at = "host_trace",
                             "Received value at with round: {}, valid_round: {}, valid: {} ({} ms)",
@@ -262,6 +265,7 @@ impl Host {
                 info!(
                     height = height.to_string(),
                     round = round.as_i64(),
+                    shard = height.shard_index,
                     at = "host_trace",
                     "Decided value with round: {} ({} ms)",
                     round.as_i64(),
@@ -295,7 +299,9 @@ impl Host {
             }
 
             HostMsg::GetDecidedValue { height, reply_to } => {
-                info!(height = height.as_u64(), "Get decided value");
+                state
+                    .statsd
+                    .count_with_shard(height.shard_index, "sync.return_value", 1, vec![]);
                 let proposal = state.shard_validator.get_decided_value(height).await;
                 let decided_value = match proposal {
                     Some((commits, proposal)) => match proposal {
@@ -320,6 +326,9 @@ impl Host {
                 value_bytes,
                 reply_to,
             } => {
+                state
+                    .statsd
+                    .count_with_shard(height.shard_index, "sync.process_value", 1, vec![]);
                 let proposal = if height.shard_index == 0 {
                     let decoded_block = Block::decode(value_bytes.as_ref()).unwrap();
                     FullProposal {
@@ -342,7 +351,9 @@ impl Host {
                     .add_proposed_value(&proposal, ProposalSource::Sync);
                 info!(
                     height = height.to_string(),
-                    "Processed value via sync: {}", proposed_value.value
+                    shard = height.shard_index,
+                    "Processed value via sync: {}",
+                    proposed_value.value
                 );
                 reply_to.send(proposed_value)?;
             }

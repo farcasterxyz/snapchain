@@ -1,5 +1,6 @@
-use crate::core::types::SnapchainValidatorContext;
+use crate::core::types::{Shardable, SnapchainValidatorContext};
 use crate::network::gossip::GossipEvent;
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use async_trait::async_trait;
 use informalsystems_malachitebft_core_consensus::SignedConsensusMsg;
 use informalsystems_malachitebft_engine::consensus::ConsensusCodec;
@@ -27,12 +28,15 @@ pub struct NetworkConnectorState {
     peer_id: MalachitePeerId,
     output_port: OutputPort<NetworkEvent<SnapchainValidatorContext>>,
     inbound_requests: HashMap<sync::InboundRequestId, request_response::InboundRequestId>,
+    outbound_requests: HashMap<sync::OutboundRequestId, request_response::OutboundRequestId>,
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
+    statsd: StatsdClientWrapper,
 }
 
 pub struct NetworkConnectorArgs {
     pub gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     pub peer_id: MalachitePeerId,
+    pub statsd: StatsdClientWrapper,
 }
 
 impl<Codec> MalachiteNetworkConnector<Codec>
@@ -70,7 +74,9 @@ where
             output_port: OutputPort::with_capacity(100),
             gossip_tx: args.gossip_tx.clone(),
             inbound_requests: HashMap::new(),
+            outbound_requests: HashMap::new(),
             peer_id: args.peer_id,
+            statsd: args.statsd,
         })
     }
 
@@ -92,6 +98,8 @@ where
             output_port,
             gossip_tx,
             inbound_requests,
+            outbound_requests,
+            statsd,
             peer_id: _,
         } = state;
 
@@ -135,15 +143,26 @@ where
 
             Msg::OutgoingRequest(peer_id, request, reply_to) => {
                 let (tx, rx) = oneshot::channel();
+                statsd.count_with_shard(request.shard_id(), "sync.request_sent", 1, vec![]);
                 gossip_tx
                     .send(GossipEvent::SyncRequest(peer_id, request, tx))
                     .await?;
                 let request_id = rx.await?;
+                outbound_requests
+                    .insert(sync::OutboundRequestId::new(request_id), request_id.clone());
+                statsd.gauge(
+                    "sync.pending_outbound_requests",
+                    outbound_requests.len() as u64,
+                );
                 reply_to.send(sync::OutboundRequestId::new(request_id))?;
             }
 
             Msg::OutgoingResponse(request_id, response) => {
                 let request_id = inbound_requests.remove(&request_id);
+                statsd.gauge(
+                    "sync.pending_inbound_requests",
+                    inbound_requests.len() as u64,
+                );
                 if let Some(request_id) = request_id {
                     gossip_tx
                         .send(GossipEvent::SyncReply(request_id, response))
@@ -248,7 +267,7 @@ where
                         };
 
                     if let sync::Request::ValueRequest(request) = &request {
-                        info!(
+                        debug!(
                             peer_id = peer.to_string(),
                             request_id = request_id.to_string(),
                             height = request.height.to_string(),
@@ -257,6 +276,10 @@ where
                     }
 
                     inbound_requests.insert(sync::InboundRequestId::new(request_id), request_id);
+                    statsd.gauge(
+                        "sync.pending_inbound_requests",
+                        inbound_requests.len() as u64,
+                    );
 
                     output_port.send(NetworkEvent::Request(
                         sync::InboundRequestId::new(request_id),
@@ -280,13 +303,25 @@ where
                         };
 
                     if let sync::Response::ValueResponse(response) = &response {
-                        info!(
+                        debug!(
                             peer_id = peer.to_string(),
                             request_id = request_id.to_string(),
                             height = response.height.to_string(),
-                            "Sending value sync response"
+                            "Received value sync response"
                         );
                     }
+
+                    statsd.count_with_shard(
+                        response.shard_id(),
+                        "sync.response_received",
+                        1,
+                        vec![],
+                    );
+                    outbound_requests.remove(&sync::OutboundRequestId::new(request_id));
+                    statsd.gauge(
+                        "sync.pending_outbound_requests",
+                        outbound_requests.len() as u64,
+                    );
 
                     output_port.send(NetworkEvent::Response(
                         sync::OutboundRequestId::new(request_id),

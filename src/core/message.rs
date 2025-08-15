@@ -1,4 +1,5 @@
 use crate::core::error::HubError;
+use crate::core::types::{Shardable, SnapchainValidatorContext};
 use crate::proto;
 use crate::proto::{consensus_message, ConsensusMessage, HubEvent, MessageType};
 use crate::storage::store::engine::MessageValidationError;
@@ -100,5 +101,29 @@ impl proto::HubEvent {
                 reason: merge_error.message,
             }),
         )
+    }
+}
+
+impl Shardable for informalsystems_malachitebft_sync::Request<SnapchainValidatorContext> {
+    fn shard_id(&self) -> u32 {
+        match self {
+            informalsystems_malachitebft_sync::Request::ValueRequest(req) => req.height.shard_index,
+            informalsystems_malachitebft_sync::Request::VoteSetRequest(req) => {
+                req.height.shard_index
+            }
+        }
+    }
+}
+
+impl Shardable for informalsystems_malachitebft_sync::Response<SnapchainValidatorContext> {
+    fn shard_id(&self) -> u32 {
+        match self {
+            informalsystems_malachitebft_sync::Response::ValueResponse(resp) => {
+                resp.height.shard_index
+            }
+            informalsystems_malachitebft_sync::Response::VoteSetResponse(resp) => {
+                resp.height.shard_index
+            }
+        }
     }
 }
