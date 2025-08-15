@@ -39,6 +39,19 @@ impl proto::ValidatorMessage {
         if let Some(event) = &self.on_chain_event {
             return event.fid;
         }
+
+        if let Some(block_event) = &self.block_event {
+            if let Some(body) = &block_event.body {
+                match body {
+                    proto::block_event::Body::HeartbeatEventBody(_body) =>
+                    // These messages don't have an fid associated with them, just return 0 explicitly here to make it clear
+                    {
+                        return 0
+                    }
+                }
+            }
+        }
+
         0
     }
 }

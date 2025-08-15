@@ -535,10 +535,14 @@ impl Subscriber {
         if let Err(err) = self
             .mempool_tx
             .send(MempoolRequest::AddMessage(
-                MempoolMessage::ValidatorMessage(ValidatorMessage {
-                    on_chain_event: Some(event.clone()),
-                    fname_transfer: None,
-                }),
+                MempoolMessage::ValidatorMessage {
+                    for_shard: None,
+                    message: ValidatorMessage {
+                        on_chain_event: Some(event.clone()),
+                        fname_transfer: None,
+                        block_event: None,
+                    },
+                },
                 MempoolSource::Local,
                 None,
             ))

@@ -47,6 +47,7 @@ message BlockConfirmedBody {
   bytes block_hash = 4;
   uint64 total_events = 5;
   map<int32, uint64> event_counts_by_type = 6;
+  uint64 max_block_event_seqnum = 7;
 }
 
 message MergeOnChainEventBody {
