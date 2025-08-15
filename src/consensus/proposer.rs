@@ -18,7 +18,7 @@ use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 use tokio::{select, time};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 #[derive(Clone, Copy, Debug, PartialEq, strum_macros::Display)]
 pub enum ProposalSource {
