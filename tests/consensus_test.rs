@@ -1020,10 +1020,6 @@ async fn test_cross_shard_interactions() {
 #[tokio::test]
 #[serial]
 async fn test_decoupling_shard_0_from_other_shards() {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .try_init();
     let num_shards = 2;
     let mut network = TestNetwork::create(3, num_shards).await;
     network.start_validators().await;

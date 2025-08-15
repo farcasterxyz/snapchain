@@ -146,7 +146,6 @@ impl SnapchainNode {
             network,
             block_tx,
             engine,
-            config.shard_witness_proposal_timeout,
             statsd_client.clone(),
         );
         let validator_sets = config.get_validator_set_config(0);
