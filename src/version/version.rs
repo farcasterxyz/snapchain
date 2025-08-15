@@ -84,7 +84,7 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
         version: EngineVersion::V6,
     },
     VersionSchedule {
-        active_at: 1756141200, // 2026-08-25 5PM UTC
+        active_at: 1755291600, // 2026-08-15 9PM UTC
         version: EngineVersion::V7,
     },
 ]
