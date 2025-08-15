@@ -337,7 +337,6 @@ pub struct BlockProposer {
     block_tx: Option<mpsc::Sender<Block>>,
     engine: BlockEngine,
     statsd_client: StatsdClientWrapper,
-    shard_witness_proposal_timeout: Duration,
 }
 
 impl BlockProposer {
@@ -349,7 +348,6 @@ impl BlockProposer {
         network: proto::FarcasterNetwork,
         block_tx: Option<mpsc::Sender<Block>>,
         engine: BlockEngine,
-        shard_witness_proposal_timeout: Duration,
         statsd_client: StatsdClientWrapper,
     ) -> BlockProposer {
         BlockProposer {
@@ -362,32 +360,17 @@ impl BlockProposer {
             block_tx,
             engine,
             statsd_client,
-            shard_witness_proposal_timeout,
         }
     }
 
-    pub fn get_next_shard_witness(
+    pub fn get_shard_witness_at_height(
         &self,
-        block_height: Height,
-        shard_id: u32,
+        shard_height: u64,
         stores: &Stores,
-        version: EngineVersion,
     ) -> Option<ShardChunkWitness> {
-        let desired_shard_block_number = if block_height.block_number == 1 {
-            1
-        } else {
-            if version.is_enabled(ProtocolFeature::DecoupleShardZeroBlockProduction) {
-                let last_shard_witness =
-                    self.engine.get_last_shard_witness(block_height, shard_id)?;
-                last_shard_witness.height.unwrap().increment().block_number
-            } else {
-                block_height.block_number
-            }
-        };
-
         let chunk = stores
             .shard_store
-            .get_chunk_by_height(desired_shard_block_number)
+            .get_chunk_by_height(shard_height)
             .ok()??;
         let header = chunk.header.as_ref().unwrap();
         let shard_witness = ShardChunkWitness {
@@ -407,39 +390,53 @@ impl BlockProposer {
         let mut poll_interval = time::interval(Duration::from_millis(100));
         let mut chunks = BTreeMap::new();
 
-        // convert to deadline
-        let deadline = Instant::now() + timeout;
-        loop {
-            let timeout = time::sleep_until(deadline);
-            select! {
-                _ = poll_interval.tick() => {
-                    for (shard_id, store) in self.shard_stores.iter() {
-                        if chunks.contains_key(shard_id) {
-                            continue;
-                        }
+        if version.is_enabled(ProtocolFeature::DecoupleShardZeroBlockProduction) {
+            // There's no need for an explicit timeout here to wait for the shard chunk to be available because the block time is essentially the time we wait to see if new shard chunks have been produced.
 
-                        if let Some(next_shard_witness) = self.get_next_shard_witness(height, *shard_id, store, version) {
-                            chunks.insert(*shard_id, next_shard_witness);
-                        }
-                    }
-                    if chunks.len() == self.num_shards as usize {
-                        break;
-                    }
-                }
-                _ = timeout => {
-                    break;
+            for (shard_id, store) in self.shard_stores.iter() {
+                let last_shard_witness = self.engine.get_last_shard_witness(height, *shard_id);
+
+                // This is the height we want the witness for
+                let desired_shard_block_number = if height.block_number == 1 {
+                    1
+                } else if let Some(ref last_shard_witness) = last_shard_witness {
+                    last_shard_witness.height.unwrap().increment().block_number
+                } else {
+                    // Error case, we should never get here
+                    continue;
+                };
+
+                if let Some(next_shard_witness) =
+                    self.get_shard_witness_at_height(desired_shard_block_number, store)
+                {
+                    chunks.insert(*shard_id, next_shard_witness);
+                } else if let Some(last_shard_witness) = last_shard_witness {
+                    // If the next shard witness is not available, carry over the previous one
+                    chunks.insert(*shard_id, last_shard_witness);
                 }
             }
-        }
+        } else {
+            // convert to deadline
+            let deadline = Instant::now() + timeout;
+            loop {
+                let timeout = time::sleep_until(deadline);
+                select! {
+                    _ = poll_interval.tick() => {
+                        for (shard_id, store) in self.shard_stores.iter() {
+                            if chunks.contains_key(shard_id) {
+                                continue;
+                            }
 
-        if version.is_enabled(ProtocolFeature::DecoupleShardZeroBlockProduction) {
-            for shard_id in self.shard_stores.keys() {
-                if !chunks.contains_key(&shard_id) {
-                    // If the next height is not available, record the witness for the previous height.
-                    if let Some(last_shard_witness) =
-                        self.engine.get_last_shard_witness(height, *shard_id)
-                    {
-                        chunks.insert(*shard_id, last_shard_witness);
+                            if let Some(next_shard_witness) = self.get_shard_witness_at_height(height.block_number,  store) {
+                                chunks.insert(*shard_id, next_shard_witness);
+                            }
+                        }
+                        if chunks.len() == self.num_shards as usize {
+                            break;
+                        }
+                    }
+                    _ = timeout => {
+                        break;
                     }
                 }
             }
@@ -479,10 +476,8 @@ impl Proposer for BlockProposer {
         let timestamp = FarcasterTime::current();
         let version = EngineVersion::version_for(&timestamp, self.network);
 
-        let shard_witness_timeout = timeout.min(self.shard_witness_proposal_timeout);
-
         let shard_witnesses = self
-            .collect_confirmed_shard_witnesses(height, version, shard_witness_timeout)
+            .collect_confirmed_shard_witnesses(height, version, timeout)
             .await;
 
         let shard_witness = ShardWitness {
