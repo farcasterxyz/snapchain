@@ -30,11 +30,13 @@ use tokio::sync::mpsc;
 pub async fn spawn_network_actor(
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     local_peer_id: PeerId,
+    statsd: StatsdClientWrapper,
 ) -> Result<NetworkRef<SnapchainValidatorContext>, ractor::SpawnErr> {
     let codec = SnapchainCodec;
     let args = NetworkConnectorArgs {
         gossip_tx,
         peer_id: MalachitePeerId::from_libp2p(&local_peer_id),
+        statsd,
     };
     MalachiteNetworkConnector::spawn(codec, args)
         .await
@@ -183,7 +185,8 @@ impl MalachiteConsensusActors {
         };
         let span = tracing::info_span!("node", name = %name);
 
-        let network_actor = spawn_network_actor(gossip_tx.clone(), local_peer_id).await?;
+        let network_actor =
+            spawn_network_actor(gossip_tx.clone(), local_peer_id, statsd.clone()).await?;
         let wal_actor = spawn_wal_actor(
             Path::new(format!("{}/shard-{}/wal", db_dir, shard_id).as_str()),
             ctx.clone(),

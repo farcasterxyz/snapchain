@@ -55,6 +55,10 @@ pub trait SnapchainContext:
 {
 }
 
+pub trait Shardable {
+    fn shard_id(&self) -> u32;
+}
+
 // TODO: Should validator keys be ECDSA?
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Address(pub [u8; 32]);
