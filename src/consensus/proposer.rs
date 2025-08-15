@@ -419,6 +419,12 @@ impl BlockProposer {
                 } else if let Some(last_shard_witness) = last_shard_witness {
                     // If the next shard witness is not available, carry over the previous one
                     chunks.insert(*shard_id, last_shard_witness);
+                    self.statsd_client.count_with_shard(
+                        *shard_id,
+                        "block_proposer.old_shard_witness",
+                        1,
+                        vec![],
+                    );
                 }
             }
         } else {
