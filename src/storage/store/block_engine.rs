@@ -127,6 +127,9 @@ impl BlockEngine {
             event.hash = blake3::hash(event.encode_to_vec().as_slice())
                 .as_bytes()
                 .to_vec();
+            // Store these events so
+            // (1) It's possible to figuure out the max seqnum easily
+            // (2) It's possible to query over them in an rpc and see what has been produced.
             self.block_event_store.put_block_event(&event, txn).unwrap();
             events.push(event);
         }
