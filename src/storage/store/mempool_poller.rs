@@ -30,14 +30,20 @@ pub struct MempoolPoller {
 #[derive(Clone, Debug)]
 pub enum MempoolMessage {
     UserMessage(proto::Message),
-    ValidatorMessage(proto::ValidatorMessage),
+    ValidatorMessage {
+        for_shard: Option<u32>,
+        message: proto::ValidatorMessage,
+    },
 }
 
 impl MempoolMessage {
     pub fn fid(&self) -> u64 {
         match self {
             MempoolMessage::UserMessage(msg) => msg.fid(),
-            MempoolMessage::ValidatorMessage(msg) => msg.fid(),
+            MempoolMessage::ValidatorMessage {
+                for_shard: _,
+                message,
+            } => message.fid(),
         }
     }
 
@@ -125,7 +131,11 @@ impl MempoolPoller {
 
             // First pass: collect all system_messages for this FID
             for msg in &messages {
-                if let MempoolMessage::ValidatorMessage(message) = msg {
+                if let MempoolMessage::ValidatorMessage {
+                    for_shard: _,
+                    message,
+                } = msg
+                {
                     transaction.system_messages.push(message.clone());
                 }
 
