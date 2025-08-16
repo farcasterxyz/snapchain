@@ -10,7 +10,8 @@ mod tests {
             db::{RocksDB, RocksdbError},
             store::{
                 account::UserDataStore,
-                engine::{MempoolMessage, PostCommitMessage, ShardEngine},
+                engine::{PostCommitMessage, ShardEngine},
+                mempool_poller::MempoolMessage,
                 test_helper::{self, EngineOptions},
             },
             trie::merkle_trie::TrieKey,

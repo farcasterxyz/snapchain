@@ -10,6 +10,7 @@ use crate::proto::{
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{CastStore, MessagesPage, VerificationStore};
+use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
 use crate::storage::store::migrations::{MigrationContext, MigrationRunner};
 use crate::storage::store::stores::{StoreLimits, Stores};
 use crate::storage::store::BlockStore;
@@ -29,7 +30,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
 #[derive(Error, Debug)]
@@ -49,14 +49,14 @@ pub enum EngineError {
     #[error("Unable to get usage count")]
     UsageCountError,
 
-    #[error("message receive error")]
-    MessageReceiveError(#[from] oneshot::error::RecvError),
-
     #[error(transparent)]
     MergeOnchainEventError(#[from] OnchainEventStorageError),
 
     #[error(transparent)]
     EngineMessageValidationError(#[from] MessageValidationError),
+
+    #[error(transparent)]
+    MempoolPollerError(#[from] MempoolPollerError),
 }
 
 #[derive(Clone, Debug, PartialEq, strum_macros::Display)]
@@ -98,33 +98,6 @@ pub enum MessageValidationError {
 
     #[error("address is not part of any verification")]
     AddressNotPartOfVerification,
-}
-
-#[derive(Clone, Debug)]
-pub enum MempoolMessage {
-    UserMessage(proto::Message),
-    ValidatorMessage(proto::ValidatorMessage),
-}
-
-impl MempoolMessage {
-    pub fn fid(&self) -> u64 {
-        match self {
-            MempoolMessage::UserMessage(msg) => msg.fid(),
-            MempoolMessage::ValidatorMessage(msg) => msg.fid(),
-        }
-    }
-
-    pub fn to_proto(&self) -> proto::MempoolMessage {
-        let msg = match self {
-            MempoolMessage::UserMessage(msg) => {
-                proto::mempool_message::MempoolMessage::UserMessage(msg.clone())
-            }
-            _ => todo!(),
-        };
-        proto::MempoolMessage {
-            mempool_message: Some(msg),
-        }
-    }
 }
 
 // Shard state root and the transactions
@@ -177,11 +150,10 @@ pub struct ShardEngine {
     senders: Senders,
     stores: Stores,
     statsd_client: StatsdClientWrapper,
-    max_messages_per_block: u32,
-    messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
     pending_txn: Option<CachedTransaction>,
     fname_signer_address: Option<alloy_primitives::Address>,
     post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
+    pub mempool_poller: MempoolPoller,
 }
 
 impl ShardEngine {
@@ -227,14 +199,19 @@ impl ShardEngine {
             shard_id,
             network,
             stores,
+            mempool_poller: MempoolPoller {
+                shard_id,
+                max_messages_per_block,
+                messages_request_tx,
+                network,
+                statsd_client: statsd_client.clone(),
+            },
             senders: Senders::new(),
             db,
-            statsd_client,
-            max_messages_per_block,
-            messages_request_tx,
             pending_txn: None,
             fname_signer_address,
             post_commit_tx,
+            statsd_client,
         })
     }
 
@@ -277,49 +254,7 @@ impl ShardEngine {
     pub fn is_read_only(&self) -> bool {
         // For a read-only node, we will never pull from the mempool, so Engines are constructed without a
         // messages_request_tx for read-only nodes
-        self.messages_request_tx.is_none()
-    }
-
-    pub(crate) async fn pull_messages(
-        &mut self,
-        max_wait: Duration,
-    ) -> Result<Vec<MempoolMessage>, EngineError> {
-        let now = std::time::Instant::now();
-        if let Some(messages_request_tx) = &self.messages_request_tx {
-            let (message_tx, message_rx) = oneshot::channel();
-
-            if let Err(err) = messages_request_tx
-                .send(MempoolMessagesRequest {
-                    shard_id: self.shard_id,
-                    message_tx,
-                    max_messages_per_block: self.max_messages_per_block,
-                })
-                .await
-            {
-                error!(
-                    "Could not send request for messages to mempool {}",
-                    err.to_string()
-                )
-            }
-
-            match timeout(max_wait, message_rx).await {
-                Ok(response) => match response {
-                    Ok(new_messages) => {
-                        let elapsed = now.elapsed();
-                        self.time_with_shard("pull_messages", elapsed.as_millis() as u64);
-                        Ok(new_messages)
-                    }
-                    Err(err) => Err(EngineError::from(err)),
-                },
-                Err(_) => {
-                    error!("Did not receive messages from mempool in time");
-                    // Just proceed with no messages
-                    Ok(vec![])
-                }
-            }
-        } else {
-            Ok(vec![])
-        }
+        self.mempool_poller.for_read_node()
     }
 
     fn prepare_proposal(
@@ -336,7 +271,45 @@ impl ShardEngine {
             vec![],
         );
 
-        let mut snapchain_txns = self.create_transactions_from_mempool(messages)?;
+        let version = self.version_for(timestamp);
+        let mut snapchain_txns = self
+            .mempool_poller
+            .create_transactions_from_mempool(messages)?
+            .into_iter()
+            .filter_map(|mut transaction| {
+                // TODO(aditi): In the future, this seems like it should just be a part of the validation logic in replay_snapchain_txn.
+                let pending_onchain_events: Vec<OnChainEvent> = transaction
+                    .system_messages
+                    .iter()
+                    .filter_map(|vm| vm.on_chain_event.clone())
+                    .collect();
+
+                let maybe_onchainevents =
+                    if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
+                        Some(pending_onchain_events.as_slice())
+                    } else {
+                        None
+                    };
+
+                let storage_slot = self
+                    .stores
+                    .onchain_event_store
+                    .get_storage_slot_for_fid(transaction.fid, self.network, maybe_onchainevents)
+                    .ok()?;
+
+                // Drop events if storage slot is inactive
+                if !storage_slot.is_active() {
+                    transaction.user_messages = vec![];
+                }
+
+                if transaction.system_messages.is_empty() && transaction.user_messages.is_empty() {
+                    return None;
+                } else {
+                    return Some(transaction);
+                }
+            })
+            .collect_vec();
+
         let mut events = vec![];
         let mut validation_error_count = 0;
         let version = self.version_for(timestamp);
@@ -388,74 +361,6 @@ impl ShardEngine {
 
     pub fn version_for(&self, timestamp: &FarcasterTime) -> EngineVersion {
         EngineVersion::version_for(timestamp, self.network)
-    }
-
-    // Groups messages by fid and creates a transaction for each fid
-    fn create_transactions_from_mempool(
-        &mut self,
-        messages: Vec<MempoolMessage>,
-    ) -> Result<Vec<Transaction>, EngineError> {
-        let mut transactions = vec![];
-
-        let grouped_messages = messages.iter().into_group_map_by(|msg| msg.fid());
-        let unique_fids = grouped_messages.keys().len();
-        for (fid, messages) in grouped_messages {
-            let mut transaction = Transaction {
-                fid: fid as u64,
-                account_root: vec![], // Starts empty, will be updated after replay
-                system_messages: vec![],
-                user_messages: vec![],
-            };
-
-            // First pass: collect all system_messages for this FID
-            for msg in &messages {
-                if let MempoolMessage::ValidatorMessage(validator_msg) = msg {
-                    transaction.system_messages.push(validator_msg.clone());
-                }
-            }
-
-            // Extract just the OnChainEvents from the collected system messages
-            let pending_onchain_events: Vec<OnChainEvent> = transaction
-                .system_messages
-                .iter()
-                .filter_map(|vm| vm.on_chain_event.clone())
-                .collect();
-
-            let version = EngineVersion::current(self.network);
-            let maybe_onchainevents =
-                if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
-                    Some(pending_onchain_events.as_slice())
-                } else {
-                    None
-                };
-
-            let storage_slot = self.stores.onchain_event_store.get_storage_slot_for_fid(
-                fid,
-                self.network,
-                maybe_onchainevents,
-            )?;
-
-            // Second pass: filter user_messages based on the look-ahead storage check
-            for msg in messages {
-                if let MempoolMessage::UserMessage(user_msg) = msg {
-                    // Only include messages for users that have storage
-                    if storage_slot.is_active() {
-                        transaction.user_messages.push(user_msg.clone());
-                    }
-                }
-            }
-
-            if !transaction.user_messages.is_empty() || !transaction.system_messages.is_empty() {
-                transactions.push(transaction);
-            }
-        }
-        info!(
-            transactions = transactions.len(),
-            messages = messages.len(),
-            fids = unique_fids,
-            "Created transactions from mempool"
-        );
-        Ok(transactions)
     }
 
     pub fn start_round(&mut self, height: Height, _round: Round) {
@@ -1650,7 +1555,6 @@ impl ShardEngine {
             "trie.branching_factor",
             self.stores.trie.branching_factor() as u64,
         );
-        self.gauge("max_messages_per_block", self.max_messages_per_block as u64);
 
         for event in events {
             self.count(
