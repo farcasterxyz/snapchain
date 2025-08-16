@@ -3,6 +3,7 @@ use super::errors::TrieError;
 use super::trie_node::{TrieNode, UNCOMPACTED_LENGTH};
 use crate::mempool::routing::{MessageRouter, ShardRouter};
 use crate::proto;
+use crate::storage::constants::UserPostfix;
 use crate::storage::store::account::{make_fid_key, IntoU8};
 use crate::storage::trie::{trie_node, util};
 use std::collections::HashMap;
@@ -50,7 +51,7 @@ impl TrieKey {
         let fid_bytes = Self::for_fid(fid);
         let mut key = Vec::with_capacity(fid_bytes.len() + 1 + USERNAME_MAX_LENGTH as usize);
         key.extend_from_slice(&Self::for_fid(fid));
-        key.push(7); // 1-6 is for onchain events, use 7 for fnames, and everything else for messages
+        key.push(UserPostfix::UsernameProofMessage as u8); // 1-6 is for onchain events, use 7 for fnames, and everything else for messages
 
         // Pad the name with null bytes to ensure all names have the same length. The trie cannot handle entries that are substrings for another (e.g. "net" and "network")
         let name_bytes = name.as_bytes();
