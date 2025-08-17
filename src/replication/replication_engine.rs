@@ -1,9 +1,10 @@
 use crate::{
+    consensus::proposer::ProposalSource,
     core::util::FarcasterTime,
     proto,
     storage::{
         db::RocksDbTransactionBatch,
-        store::engine::{ProposalSource, ShardEngine},
+        store::engine::ShardEngine,
         trie::merkle_trie::{self, TrieKey},
     },
     version::version::EngineVersion,
