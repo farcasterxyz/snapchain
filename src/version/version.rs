@@ -328,7 +328,7 @@ mod version_test {
 
     #[test]
     fn test_latest() {
-        assert_eq!(EngineVersion::latest(), EngineVersion::V7);
+        assert_eq!(EngineVersion::latest(), EngineVersion::V8);
         assert_eq!(
             EngineVersion::version_for(&FarcasterTime::current(), FarcasterNetwork::Devnet),
             EngineVersion::latest()
@@ -353,7 +353,7 @@ mod version_test {
             Some(1747352400)
         );
 
-        let time = FarcasterTime::from_unix_seconds(1756141200);
+        let time = FarcasterTime::from_unix_seconds(1757523600);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
             None
