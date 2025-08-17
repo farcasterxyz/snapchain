@@ -10,7 +10,7 @@ use crate::proto::{
     OnChainEventType, Protocol, ShardChunk, Transaction, UserDataType, UserNameProof,
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
-use crate::storage::store::account::{CastStore, MessagesPage, VerificationStore};
+use crate::storage::store::account::{CastStore, MessagesPage, StoreOptions, VerificationStore};
 use crate::storage::store::stores::{StoreLimits, Stores};
 use crate::storage::store::BlockStore;
 use crate::storage::trie::{self, merkle_trie};
@@ -238,17 +238,46 @@ impl ShardEngine {
         fname_signer_address: Option<alloy_primitives::Address>,
         post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
     ) -> ShardEngine {
+        Self::new_with_opts(
+            db,
+            network,
+            trie,
+            shard_id,
+            store_limits,
+            statsd_client,
+            max_messages_per_block,
+            messages_request_tx,
+            fname_signer_address,
+            post_commit_tx,
+            StoreOptions::default(),
+        )
+    }
+
+    pub fn new_with_opts(
+        db: Arc<RocksDB>,
+        network: proto::FarcasterNetwork,
+        trie: merkle_trie::MerkleTrie,
+        shard_id: u32,
+        store_limits: StoreLimits,
+        statsd_client: StatsdClientWrapper,
+        max_messages_per_block: u32,
+        messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
+        fname_signer_address: Option<alloy_primitives::Address>,
+        post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
+        store_opts: StoreOptions,
+    ) -> ShardEngine {
         // TODO: adding the trie here introduces many calls that want to return errors. Rethink unwrap strategy.
         ShardEngine {
             shard_id,
             network,
-            stores: Stores::new(
+            stores: Stores::new_with_opts(
                 db.clone(),
                 shard_id,
                 trie,
                 store_limits,
                 network,
                 statsd_client.clone(),
+                store_opts,
             ),
             senders: Senders::new(),
             db,
@@ -828,7 +857,7 @@ impl ShardEngine {
         let mut validation_errors = vec![];
 
         // System messages first, then user messages and finally prunes
-        info!(
+        debug!(
             "Replaying transaction for FID: {}, user_messages: {}, system_messages: {}",
             snapchain_txn.fid,
             snapchain_txn.user_messages.len(),

@@ -8,6 +8,7 @@ use crate::proto::{
     GetShardSnapshotMetadataRequest, GetShardTransactionsRequest, SortOrderTypes, Transaction,
 };
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
+use crate::storage::store::account::StoreOptions;
 use crate::storage::store::engine::{ProposalSource, ShardEngine};
 use crate::storage::store::stores::StoreLimits;
 use crate::storage::trie::merkle_trie::{self, TrieKey};
@@ -29,12 +30,12 @@ struct DbCommitRequest {
 }
 
 /// Bootstrap a node from replication instead of snapshot download
-pub async fn bootstrap_from_replication(app_config: &Config) -> Result<(), Box<dyn Error>> {
+pub async fn bootstrap_using_replication(app_config: &Config) -> Result<(), Box<dyn Error>> {
     info!("Starting replication-based bootstrap");
 
     // Fetch metadata and determine target height
     // Get the peer address from the client's channel
-    let peer_address = "http://127.0.0.1:4383"; // Same hardcoded address as in bootstrap_from_replication
+    let peer_address = "http://127.0.0.1:3383"; // Same hardcoded address as in bootstrap_from_replication
     let mut client = ReplicationServiceClient::connect(peer_address)
         .await
         .map_err(|e| BootstrapError::PeerConnectionError(e.to_string()))?;
@@ -198,10 +199,11 @@ async fn start_shard_replication(
             let elapsed_time = start_time.elapsed();
             let total_elapsed = total_start_time.elapsed();
             info!(
-                "DB writer({}) - Commit took {:?}. Writing at {:.1}k msg/sec",
+                "DB writer({}) - Commit took {:?}. Writing at {:.1}k msg/sec {:.2}M total messages",
                 shard_id,
                 elapsed_time,
-                total_messages as f64 / 1000.0 / total_elapsed.as_secs_f64()
+                total_messages as f64 / 1000.0 / total_elapsed.as_secs_f64(),
+                total_messages as f64 / 1_000_000.0
             );
 
             // Send the result back to the requesting thread
@@ -242,9 +244,13 @@ async fn start_shard_replication(
                 .map_err(|e| BootstrapError::PeerConnectionError(e.to_string()))?;
 
             // Create a new engine for this thread
+            let store_opts = StoreOptions {
+                conflict_free: true, // All messages will be free of conflicts, since these are from a alread-merged snapshot
+                save_hub_events: false, // No need for HubEvents, which are emitted only from "live" nodes
+            };
 
             let trie = merkle_trie::MerkleTrie::new(trie_branching_factor).unwrap();
-            let mut thread_engine = ShardEngine::new(
+            let mut thread_engine = ShardEngine::new_with_opts(
                 db,
                 network,
                 trie,
@@ -255,6 +261,7 @@ async fn start_shard_replication(
                 None,
                 None,
                 None,
+                store_opts,
             );
 
             // Call replay_shard_transactions with the specified range
@@ -306,6 +313,79 @@ async fn start_shard_replication(
     Ok(())
 }
 
+// Helper function to check if the account roots match
+fn check_account_roots(
+    engine: &mut ShardEngine,
+    fid: u64,
+    expected_root: &[u8],
+) -> Result<(), BootstrapError> {
+    // Get the account root from the store
+    let stores_account_root = engine.get_stores().trie.get_hash(
+        &engine.db,
+        &mut RocksDbTransactionBatch::new(),
+        &TrieKey::for_fid(fid),
+    );
+
+    if stores_account_root != expected_root {
+        Err(BootstrapError::AccountRootMismatch(format!(
+            "Account root mismatch for FID {}: expected {}, got {}",
+            fid,
+            hex::encode(expected_root),
+            hex::encode(stores_account_root)
+        )))
+    } else {
+        info!(
+            "Account root for FID {} matches: {}",
+            fid,
+            hex::encode(expected_root)
+        );
+        Ok(())
+    }
+}
+
+async fn commit_pending_fids(
+    engine: &mut ShardEngine,
+    db_commit_tx: &mpsc::UnboundedSender<DbCommitRequest>,
+    txn_batch: RocksDbTransactionBatch,
+    num_messages: u64,
+    fids_to_check: Vec<(u64, Vec<u8>)>,
+) -> Result<(), BootstrapError> {
+    // Send the transaction batch to the DB writer thread for commit
+    let (response_tx, response_rx) = oneshot::channel();
+    if let Err(_) = db_commit_tx.send(DbCommitRequest {
+        txn_batch,
+        num_messages,
+        response_tx,
+    }) {
+        return Err(BootstrapError::DatabaseError(format!(
+            "DB writer thread unavailable. Trying to send transaction batch for FIDs: {:?}",
+            fids_to_check
+        )));
+    }
+
+    // Wait for the commit to complete
+    let commit_result = response_rx.await.map_err(|_| {
+        BootstrapError::DatabaseError("DB writer response channel closed".to_string())
+    })?;
+
+    // Handle the commit result
+    commit_result?;
+
+    // Reload the trie after commit
+    engine
+        .get_stores()
+        .trie
+        .reload(&engine.db)
+        .map_err(|e| BootstrapError::DatabaseError(format!("Failed to reload trie: {}", e)))?;
+
+    // Check the account roots for the processed FIDs
+    for (fid, account_root) in fids_to_check {
+        check_account_roots(engine, fid, &account_root)?;
+    }
+
+    Ok(())
+}
+
 /// Replay transactions for a specific shard from the replication service
 async fn replay_shard_transactions(
     client: &mut ReplicationServiceClient<Channel>,
@@ -337,35 +417,12 @@ async fn replay_shard_transactions(
             .collect::<Vec<_>>(),
     });
 
-    // Helper function to check if the account roots match
-    fn check_account_roots(
-        engine: &mut ShardEngine,
-        fid: u64,
-        expected_root: &[u8],
-    ) -> Result<(), BootstrapError> {
-        // Get the account root from the store
-        let stores_account_root = engine.get_stores().trie.get_hash(
-            &engine.db,
-            &mut RocksDbTransactionBatch::new(),
-            &TrieKey::for_fid(fid),
-        );
-
-        if stores_account_root != expected_root {
-            Err(BootstrapError::AccountRootMismatch(format!(
-                "Account root mismatch for FID {}: expected {}, got {}",
-                fid,
-                hex::encode(expected_root),
-                hex::encode(stores_account_root)
-            )))
-        } else {
-            info!(
-                "Account root for FID {} matches: {}",
-                fid,
-                hex::encode(expected_root)
-            );
-            Ok(())
-        }
-    }
+    // TXN batch to hold all changes
+    let mut txn_batch = RocksDbTransactionBatch::new();
+    // FIDs to check for account root consistency that were a part of this transaction
+    let mut fids_to_check = vec![];
+    // Num messages in this transaction
+    let mut num_messages = 0;
 
     loop {
         let cursor = if let Some(token) = &page_token {
@@ -396,13 +453,6 @@ async fn replay_shard_transactions(
                     break;
                 }
 
-                // TXN batch to hold all changes
-                let mut txn_batch = RocksDbTransactionBatch::new();
-                // FIDs to check for account root consistency that were a part of this transaction
-                let mut fids_to_check = vec![];
-                // Num messages in this transaction
-                let mut num_messages = 0;
-
                 // Replay each transaction
                 for transaction in &transactions {
                     if transaction.fid > last_fid && last_fid != 0 {
@@ -424,37 +474,6 @@ async fn replay_shard_transactions(
 
                     last_fid = transaction.fid;
                     last_fid_account_root = transaction.account_root.clone();
-                }
-
-                // Send the transaction batch to the DB writer thread for commit
-                let (response_tx, response_rx) = oneshot::channel();
-                if let Err(_) = db_commit_tx.send(DbCommitRequest {
-                    txn_batch,
-                    num_messages,
-                    response_tx,
-                }) {
-                    return Err(BootstrapError::DatabaseError(format!(
-                        "Thread {} - DB writer thread unavailable",
-                        start_fid
-                    )));
-                }
-
-                // Wait for the commit to complete
-                let commit_result = response_rx.await.map_err(|_| {
-                    BootstrapError::DatabaseError("DB writer response channel closed".to_string())
-                })?;
-
-                // Handle the commit result
-                commit_result?;
-
-                // Reload the trie after commit
-                engine.get_stores().trie.reload(&engine.db).map_err(|e| {
-                    BootstrapError::DatabaseError(format!("Failed to reload trie: {}", e))
-                })?;
-
-                // Check the account roots for the processed FIDs
-                for (fid, account_root) in fids_to_check {
-                    check_account_roots(engine, fid, &account_root)?;
                 }
 
                 // Check if there are more pages
@@ -479,10 +498,33 @@ async fn replay_shard_transactions(
                 return Err(BootstrapError::TransactionReplayError(e.to_string()));
             }
         }
+
+        if num_messages > 20_000 {
+            commit_pending_fids(
+                engine,
+                &db_commit_tx,
+                txn_batch,
+                num_messages,
+                fids_to_check,
+            )
+            .await?;
+
+            // Clear everything
+            txn_batch = RocksDbTransactionBatch::new();
+            fids_to_check = vec![];
+            num_messages = 0;
+        }
     }
 
-    // Check the last account's roots
-    check_account_roots(engine, last_fid, &last_fid_account_root)?;
+    // Commit the last set
+    commit_pending_fids(
+        engine,
+        &db_commit_tx,
+        txn_batch,
+        num_messages,
+        fids_to_check,
+    )
+    .await?;
 
     info!(
         "Replayed {} total transactions for shard {}",

@@ -14,7 +14,7 @@ use crate::storage::constants::PAGE_SIZE_MAX;
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
     CastStore, CastStoreDef, IntoU8, LinkStore, OnchainEventStorageError, OnchainEventStore, Store,
-    StoreEventHandler, UsernameProofStore, UsernameProofStoreDef,
+    StoreEventHandler, StoreOptions, UsernameProofStore, UsernameProofStoreDef,
 };
 use crate::storage::store::shard::ShardStore;
 use crate::storage::trie::merkle_trie;
@@ -221,18 +221,41 @@ impl Stores {
     pub fn new(
         db: Arc<RocksDB>,
         shard_id: u32,
+        trie: merkle_trie::MerkleTrie,
+        store_limits: StoreLimits,
+        network: proto::FarcasterNetwork,
+        statsd: StatsdClientWrapper,
+    ) -> Stores {
+        Self::new_with_opts(
+            db,
+            shard_id,
+            trie,
+            store_limits,
+            network,
+            statsd,
+            StoreOptions::default(),
+        )
+    }
+
+    pub fn new_with_opts(
+        db: Arc<RocksDB>,
+        shard_id: u32,
         mut trie: merkle_trie::MerkleTrie,
         store_limits: StoreLimits,
         network: proto::FarcasterNetwork,
         statsd: StatsdClientWrapper,
+        store_opts: StoreOptions,
     ) -> Stores {
         trie.initialize(&db).unwrap();
 
         let event_handler = StoreEventHandler::new();
         let shard_store = ShardStore::new(db.clone(), shard_id);
-        let cast_store = CastStore::new(db.clone(), event_handler.clone(), 100);
+        let cast_store =
+            CastStore::new_with_opts(db.clone(), event_handler.clone(), 100, store_opts.clone());
+        let reaction_store =
+            ReactionStore::new_with_opts(db.clone(), event_handler.clone(), 100, store_opts);
+
         let link_store = LinkStore::new(db.clone(), event_handler.clone(), 100);
-        let reaction_store = ReactionStore::new(db.clone(), event_handler.clone(), 100);
         let user_data_store = UserDataStore::new(db.clone(), event_handler.clone(), 100);
         let verification_store = VerificationStore::new(db.clone(), event_handler.clone(), 100);
         let onchain_event_store = OnchainEventStore::new(db.clone(), event_handler.clone());
@@ -248,7 +271,7 @@ impl Stores {
             verification_store,
             onchain_event_store,
             username_proof_store,
-            db: db.clone(),
+            db,
             store_limits,
             event_handler,
             network,

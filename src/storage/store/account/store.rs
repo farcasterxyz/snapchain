@@ -16,7 +16,7 @@ use crate::{
 };
 use std::clone::Clone;
 use std::string::ToString;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tracing::warn;
 
 pub const FID_LOCKS_COUNT: usize = 4;
@@ -242,14 +242,29 @@ pub trait StoreDef: Send + Sync {
 }
 
 #[derive(Clone)]
+pub struct StoreOptions {
+    pub(crate) conflict_free: bool,
+    pub(crate) save_hub_events: bool,
+}
+
+impl Default for StoreOptions {
+    fn default() -> Self {
+        StoreOptions {
+            conflict_free: false,
+            save_hub_events: true,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Store<T>
 where
     T: StoreDef + Clone,
 {
     store_def: T,
     store_event_handler: Arc<StoreEventHandler>,
-    fid_locks: Arc<[Mutex<()>; 4]>,
     db: Arc<RocksDB>,
+    store_opts: StoreOptions,
 }
 
 impl<T: StoreDef + Clone> Store<T> {
@@ -261,13 +276,22 @@ impl<T: StoreDef + Clone> Store<T> {
         Store {
             store_def,
             store_event_handler,
-            fid_locks: Arc::new([
-                Mutex::new(()),
-                Mutex::new(()),
-                Mutex::new(()),
-                Mutex::new(()),
-            ]),
             db,
+            store_opts: StoreOptions::default(),
+        }
+    }
+
+    pub fn new_with_store_def_opts(
+        db: Arc<RocksDB>,
+        store_event_handler: Arc<StoreEventHandler>,
+        store_def: T,
+        store_opts: StoreOptions,
+    ) -> Store<T> {
+        Store {
+            store_def,
+            store_event_handler,
+            db,
+            store_opts,
         }
     }
 
@@ -533,14 +557,6 @@ impl<T: StoreDef + Clone> Store<T> {
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<HubEvent, HubError> {
-        // Grab a merge lock. The typescript code does this by individual fid, but we don't have a
-        // good way of doing that efficiently here. We'll just use an array of locks, with each fid
-        // deterministically mapped to a lock.
-        let _fid_lock = &self.fid_locks
-            [message.data.as_ref().unwrap().fid as usize % FID_LOCKS_COUNT]
-            .lock()
-            .unwrap();
-
         if !self.store_def.is_add_type(message)
             && !(self.store_def.remove_type_supported() && self.store_def.is_remove_type(message))
             && !(self.store_def.compact_state_type_supported()
@@ -749,12 +765,18 @@ impl<T: StoreDef + Clone> Store<T> {
         }
 
         // Get the merge conflicts first
-        let merge_conflicts = self
-            .store_def
-            .get_merge_conflicts(&self.db, txn, message, ts_hash)?;
+        let merge_conflicts = if self.store_opts.conflict_free {
+            // If the store is conflict-free, we don't need to check for merge conflicts
+            vec![]
+        } else {
+            let merge_conflicts = self
+                .store_def
+                .get_merge_conflicts(&self.db, txn, message, ts_hash)?;
 
-        // Delete all the merge conflicts
-        self.delete_many_transaction(txn, &merge_conflicts)?;
+            // Delete all the merge conflicts
+            self.delete_many_transaction(txn, &merge_conflicts)?;
+            merge_conflicts
+        };
 
         // Add ops to store the message by messageKey and index the messageKey by set and by target
         self.put_add_transaction(txn, &ts_hash, message)?;
@@ -762,11 +784,13 @@ impl<T: StoreDef + Clone> Store<T> {
         // Event handler
         let mut hub_event = self.store_def.merge_event_args(message, merge_conflicts);
 
-        let id = self
-            .store_event_handler
-            .commit_transaction(txn, &mut hub_event)?;
+        if self.store_opts.save_hub_events {
+            let id = self
+                .store_event_handler
+                .commit_transaction(txn, &mut hub_event)?;
 
-        hub_event.id = id;
+            hub_event.id = id;
+        }
 
         Ok(hub_event)
     }
@@ -803,12 +827,18 @@ impl<T: StoreDef + Clone> Store<T> {
         }
 
         // Get the merge conflicts first
-        let merge_conflicts = self
-            .store_def
-            .get_merge_conflicts(&self.db, txn, message, ts_hash)?;
+        let merge_conflicts = if self.store_opts.conflict_free {
+            // If the store is conflict-free, we don't need to check for merge conflicts
+            vec![]
+        } else {
+            let merge_conflicts = self
+                .store_def
+                .get_merge_conflicts(&self.db, txn, message, ts_hash)?;
 
-        // Delete all the merge conflicts
-        self.delete_many_transaction(txn, &merge_conflicts)?;
+            // Delete all the merge conflicts
+            self.delete_many_transaction(txn, &merge_conflicts)?;
+            merge_conflicts
+        };
 
         // Add ops to store the message by messageKey and index the messageKey by set and by target
         self.put_remove_transaction(txn, ts_hash, message)?;
@@ -816,11 +846,13 @@ impl<T: StoreDef + Clone> Store<T> {
         // Event handler
         let mut hub_event = self.store_def.merge_event_args(message, merge_conflicts);
 
-        let id = self
-            .store_event_handler
-            .commit_transaction(txn, &mut hub_event)?;
+        if self.store_opts.save_hub_events {
+            let id = self
+                .store_event_handler
+                .commit_transaction(txn, &mut hub_event)?;
 
-        hub_event.id = id;
+            hub_event.id = id;
+        }
 
         Ok(hub_event)
     }
