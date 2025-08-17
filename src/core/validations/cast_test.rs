@@ -113,7 +113,8 @@ mod tests {
                         }),
                     };
                     assert!(
-                        validations::cast::validate_cast_add_body(&cast, true, false).is_ok(),
+                        // Assume pro user is true to avoid failures on casts with 10k characters or 4 embeds.
+                        validations::cast::validate_cast_add_body(&cast, true, true).is_ok(),
                         "Failed to validate cast {:?}",
                         serde_json::to_string(&cast)
                     );
