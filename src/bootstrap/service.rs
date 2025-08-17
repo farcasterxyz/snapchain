@@ -171,7 +171,7 @@ async fn start_shard_replication(
         shard_id, target_height
     );
 
-    let db = RocksDB::open_shard_db(&rocksdb_dir, shard_id);
+    let db = RocksDB::open_bulk_write_shard_db(&rocksdb_dir, shard_id);
 
     let statsd_client = statsd_client.clone();
 
