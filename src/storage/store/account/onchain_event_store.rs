@@ -754,8 +754,14 @@ impl FIDIterator {
                         return Ok(false); // Skip this event
                     }
 
-                    self.fids.push_back(onchain_event.fid);
-                    last_fid = onchain_event.fid;
+                    if self.fids.back() == Some(&onchain_event.fid) {
+                        // Skip this ID register event. There is a small number of FIDs that have 2 ID register events
+                        // because of an old issue. See FIDs 20617, 20671 for eg.
+                    } else {
+                        self.fids.push_back(onchain_event.fid);
+                        last_fid = onchain_event.fid;
+                    }
+
                     if self.fids.len() >= page_options.page_size.unwrap_or(PAGE_SIZE_MAX) {
                         return Ok(true); // Stop iterating
                     }
