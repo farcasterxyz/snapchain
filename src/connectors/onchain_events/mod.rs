@@ -31,7 +31,8 @@ use crate::{
         SignerEventBody, SignerEventType, SignerMigratedEventBody, StorageRentEventBody,
         ValidatorMessage, VerificationAddAddressBody,
     },
-    storage::store::{engine::MempoolMessage, node_local_state::LocalStateStore},
+    storage::store::mempool_poller::MempoolMessage,
+    storage::store::node_local_state::LocalStateStore,
     utils::statsd_wrapper::StatsdClientWrapper,
 };
 

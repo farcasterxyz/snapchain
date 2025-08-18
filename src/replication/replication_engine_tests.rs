@@ -10,7 +10,8 @@ mod tests {
             db::{RocksDB, RocksdbError},
             store::{
                 account::UserDataStore,
-                engine::{MempoolMessage, PostCommitMessage, ShardEngine},
+                engine::{PostCommitMessage, ShardEngine},
+                mempool_poller::MempoolMessage,
                 test_helper::{self, EngineOptions},
             },
             trie::merkle_trie::TrieKey,
@@ -30,7 +31,7 @@ mod tests {
         Ok(Arc::new(db))
     }
 
-    fn new_engine_with_fname_signer(
+    async fn new_engine_with_fname_signer(
         tmp: &tempfile::TempDir,
         post_commit_tx: Option<tokio::sync::mpsc::Sender<PostCommitMessage>>,
     ) -> (alloy_signer_local::PrivateKeySigner, ShardEngine) {
@@ -43,7 +44,8 @@ mod tests {
             fname_signer_address: Some(signer.address()),
             post_commit_tx,
             ..EngineOptions::default()
-        });
+        })
+        .await;
         (signer, engine)
     }
 
@@ -352,8 +354,9 @@ mod tests {
 
         let (post_commit_tx, post_commit_rx) = tokio::sync::mpsc::channel::<PostCommitMessage>(1);
 
-        let (signer, mut engine) = new_engine_with_fname_signer(&tmp_dir, Some(post_commit_tx)); // source engine
-        let (_, mut new_engine) = new_engine_with_fname_signer(&tmp_dir, None); // engine to replicate to
+        let (signer, mut engine) =
+            new_engine_with_fname_signer(&tmp_dir, Some(post_commit_tx)).await; // source engine
+        let (_, mut new_engine) = new_engine_with_fname_signer(&tmp_dir, None).await; // engine to replicate to
 
         let replicator = setup_replicator(&mut engine);
         let spawned_replicator = replicator.clone();

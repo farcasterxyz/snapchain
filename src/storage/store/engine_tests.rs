@@ -10,7 +10,8 @@ mod tests {
     use crate::proto::{OnChainEvent, OnChainEventType};
     use crate::storage::db::{PageOptions, RocksDbTransactionBatch};
     use crate::storage::store::account::{HubEventIdGenerator, UserDataStore};
-    use crate::storage::store::engine::{MempoolMessage, MessageValidationError, ShardEngine};
+    use crate::storage::store::engine::{MessageValidationError, ShardEngine};
+    use crate::storage::store::mempool_poller::MempoolMessage;
     use crate::storage::store::stores::StoreLimits;
     use crate::storage::store::test_helper::{
         self, commit_event, commit_event_at, commit_message_at, commit_messages,
@@ -207,7 +208,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_engine_basic_propose() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         // State root starts empty
         assert_eq!("", to_hex(&engine.trie_root_hash()));
 
@@ -240,7 +241,7 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "State change commit failed: merkle trie root hash mismatch")]
     async fn test_engine_commit_with_mismatched_hash() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let mut state_change = engine.propose_state_change(1, vec![], None);
         let invalid_hash = from_hex("ffffffffffffffffffffffffffffffffffffffff");
 
@@ -264,7 +265,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_engine_rejects_message_with_invalid_hash() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -288,7 +289,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_engine_rejects_message_with_invalid_signature() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -313,7 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_engine_commit_no_messages_happy_path() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let state_change = engine.propose_state_change(1, vec![], None);
         let expected_roots = vec![""];
 
@@ -329,7 +330,7 @@ mod tests {
     async fn test_engine_commit_with_single_message() {
         // enable_logging();
         let (msg1, _) = entities();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -402,7 +403,7 @@ mod tests {
         let timestamp = messages_factory::farcaster_time();
         let cast =
             messages_factory::casts::create_cast_add(FID_FOR_TEST, "msg1", Some(timestamp), None);
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -442,7 +443,7 @@ mod tests {
     async fn test_commit_link_messages() {
         let timestamp = messages_factory::farcaster_time();
         let target_fid = 15;
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -512,7 +513,7 @@ mod tests {
     async fn test_commit_reaction_messages() {
         let timestamp = messages_factory::farcaster_time();
         let target_url = "exampleurl".to_string();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -551,7 +552,7 @@ mod tests {
     #[tokio::test]
     async fn test_commit_user_data_messages() {
         let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -577,7 +578,7 @@ mod tests {
     #[tokio::test]
     async fn test_commit_verification_messages() {
         let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::register_user(
             FID3_FOR_TEST,
             test_helper::default_signer(),
@@ -617,7 +618,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_ethereum_address_with_verification() {
         let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         // Register a user
         test_helper::register_user(
@@ -698,7 +699,7 @@ mod tests {
     #[tokio::test]
     async fn test_primary_address_revoked_when_verification_deleted() {
         let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         // Register a user
         test_helper::register_user(
@@ -791,7 +792,7 @@ mod tests {
     #[tokio::test]
     async fn test_primary_address_validation_requires_verification() {
         let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         // Register a user
         test_helper::register_user(
@@ -839,7 +840,7 @@ mod tests {
     #[tokio::test]
     async fn test_removing_non_primary_verification_keeps_primary_address() {
         let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         // Register a user
         test_helper::register_user(
@@ -952,7 +953,8 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             network: Some(FarcasterNetwork::Testnet), // To test basename support
             ..Default::default()
-        });
+        })
+        .await;
         let owner = "owner".to_string().encode_to_vec();
         let signature = "signature".to_string();
         let signer = test_helper::default_signer();
@@ -1061,7 +1063,7 @@ mod tests {
     #[tokio::test]
     async fn test_account_roots() {
         let cast = messages_factory::casts::create_cast_add(FID_FOR_TEST, "msg1", None, None);
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         let txn = &mut RocksDbTransactionBatch::new();
         let account_root =
@@ -1118,7 +1120,7 @@ mod tests {
     async fn test_engine_send_messages_one_by_one() {
         // enable_logging();
         let (msg1, msg2) = entities();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let mut previous_root = "".to_string();
 
         let height = engine.get_confirmed_height();
@@ -1190,7 +1192,7 @@ mod tests {
     async fn test_engine_send_two_messages() {
         // enable_logging();
         let (msg1, msg2) = entities();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -1234,7 +1236,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simulate_bulk_messages_invalid_message_in_batch() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         // 1. Register user
         register_user(
@@ -1309,7 +1311,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simulate_bulk_messages_empty_batch() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -1338,7 +1340,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simulate_bulk_messages_valid_batch() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         // 1. Register user
         register_user(
@@ -1400,7 +1402,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simulate_bulk_messages_username_proof_and_user_data_add() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let signer = test_helper::default_signer();
         let owner = test_helper::default_custody_address();
         let timestamp = time::farcaster_time();
@@ -1478,7 +1480,7 @@ mod tests {
     #[tokio::test]
     async fn test_bulk_username_proof_and_user_data_add_commit() {
         // 1. Setup
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let signer = test_helper::default_signer();
         let owner = test_helper::default_custody_address();
         let timestamp = time::farcaster_time();
@@ -1619,7 +1621,8 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             network: Some(FarcasterNetwork::Testnet), // To test ENS support
             ..Default::default()
-        });
+        })
+        .await;
         let signer = test_helper::default_signer();
         let custody_address = test_helper::default_custody_address();
         let timestamp = time::farcaster_time();
@@ -1688,7 +1691,8 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             network: Some(FarcasterNetwork::Testnet), // To test ENS support
             ..Default::default()
-        });
+        })
+        .await;
         let signer = test_helper::default_signer();
         let custody_address = test_helper::default_custody_address();
         let timestamp = time::farcaster_time();
@@ -1827,7 +1831,7 @@ mod tests {
     #[tokio::test]
     async fn test_bulk_register_add_signer_and_cast_commit() {
         // 1. Setup
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let mut event_rx = engine.get_senders().events_tx.subscribe();
 
         let new_fid = FID3_FOR_TEST;
@@ -2015,7 +2019,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_remove_in_same_tx_respects_crdt_rules() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -2090,7 +2094,7 @@ mod tests {
     #[tokio::test]
     async fn test_engine_send_onchain_event() {
         let onchain_event = default_onchain_event();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let mut event_rx = engine.get_senders().events_tx.subscribe();
         let state_change = engine.propose_state_change(
             1,
@@ -2144,7 +2148,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_ids() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -2210,7 +2214,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_messages_not_merged_with_no_storage() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         let cast_add =
             messages_factory::casts::create_cast_add(FID_FOR_TEST + 1, "no storage", None, None);
@@ -2228,7 +2232,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_messages_with_invalid_network_are_not_merged() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         let signer = test_helper::default_signer();
         register_user(
@@ -2255,7 +2259,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_messages_pruned_with_exceeded_storage() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -2345,7 +2349,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_messages_partially_merged_with_insufficient_storage() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let signer = test_helper::default_signer();
         test_helper::register_user(
             FID_FOR_TEST,
@@ -2466,7 +2470,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_revoking_a_signer_deletes_all_messages_from_that_signer() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let signer = generate_signer();
         let another_signer = generate_signer();
         let timestamp = factory::time::farcaster_time();
@@ -2578,7 +2582,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_fname() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         test_helper::register_user(
             FID_FOR_TEST,
@@ -2638,7 +2642,8 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             fname_signer_address: Some(signer.address()),
             ..EngineOptions::default()
-        });
+        })
+        .await;
 
         test_helper::register_user(
             FID_FOR_TEST,
@@ -2733,12 +2738,14 @@ mod tests {
             shard_id: 1,
             fname_signer_address: Some(fname_signer_address.clone()),
             ..Default::default()
-        });
+        })
+        .await;
         let (mut engine2, _) = test_helper::new_engine_with_options(EngineOptions {
             shard_id: 2,
             fname_signer_address: Some(fname_signer_address.clone()),
             ..Default::default()
-        });
+        })
+        .await;
 
         let fid1 = FID_FOR_TEST;
         let signer = generate_signer();
@@ -2871,7 +2878,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_ens_username() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let ens_name = &"farcaster.eth".to_string();
         let owner = test_helper::default_custody_address();
         let signature = "signature".to_string();
@@ -2912,7 +2919,8 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             fname_signer_address: Some(signer.address()),
             ..EngineOptions::default()
-        });
+        })
+        .await;
 
         test_helper::register_user(
             FID_FOR_TEST,
@@ -2984,7 +2992,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_id_registration() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::commit_event(
             &mut engine,
             &test_helper::default_storage_event(FID_FOR_TEST),
@@ -3024,7 +3032,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_signer() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::commit_event(
             &mut engine,
             &test_helper::default_storage_event(FID_FOR_TEST),
@@ -3071,7 +3079,8 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             limits: Some(single_message_limit),
             ..Default::default()
-        });
+        })
+        .await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -3131,7 +3140,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fname_validation() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let fname = &"acp".to_string();
         test_helper::register_user(
             FID_FOR_TEST,
@@ -3243,7 +3252,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simulate_message() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         let message = messages_factory::casts::create_cast_add(
             FID_FOR_TEST,
@@ -3311,7 +3320,8 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             network: Some(FarcasterNetwork::Mainnet),
             ..Default::default()
-        });
+        })
+        .await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -3418,7 +3428,8 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             network: Some(FarcasterNetwork::Testnet), // To test pro support
             ..Default::default()
-        });
+        })
+        .await;
         // Before active
         purchase_pro_at_time(&mut engine, 1748950000, false).await;
 
@@ -3428,7 +3439,7 @@ mod tests {
 
     #[tokio::test]
     async fn pro_users_get_10k_casts() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -3469,7 +3480,7 @@ mod tests {
 
     #[tokio::test]
     async fn pro_users_get_four_embeds() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -3527,7 +3538,7 @@ mod tests {
 
     #[tokio::test]
     async fn pro_users_get_banners() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -3562,7 +3573,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_block_confirmed_event_is_always_first() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let mut event_rx = engine.get_senders().events_tx.subscribe();
 
         // Register user to create some events
@@ -3634,7 +3645,7 @@ mod tests {
         // Test that events are committed to the database in the correct order.
         // This is distinct from the previous test which checks that events are emitted
         // from the channel in the right order.
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         // Register user
         test_helper::register_user(
@@ -3684,7 +3695,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_block_confirmed_event_with_no_messages() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let mut event_rx = engine.get_senders().events_tx.subscribe();
 
         // Create empty state change
@@ -3723,7 +3734,8 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             post_commit_tx: Some(tx),
             ..Default::default()
-        });
+        })
+        .await;
 
         let mut handles = vec![];
 
@@ -3769,7 +3781,8 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             post_commit_tx: Some(tx),
             ..Default::default()
-        });
+        })
+        .await;
 
         let commit_future = test_helper::register_user(
             FID_FOR_TEST,

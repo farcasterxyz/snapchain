@@ -10,8 +10,8 @@ use crate::proto::{
     StoreType,
 };
 use crate::proto::{MessageType, TierDetails};
-use crate::storage::constants::PAGE_SIZE_MAX;
-use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
+use crate::storage::constants::{RootPrefix, PAGE_SIZE_MAX};
+use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch, RocksdbError};
 use crate::storage::store::account::{
     CastStore, CastStoreDef, IntoU8, LinkStore, OnchainEventStorageError, OnchainEventStore, Store,
     StoreEventHandler, StoreOptions, UsernameProofStore, UsernameProofStoreDef,
@@ -51,8 +51,8 @@ pub struct Stores {
     pub verification_store: Store<VerificationStoreDef>,
     pub onchain_event_store: OnchainEventStore,
     pub username_proof_store: Store<UsernameProofStoreDef>,
-    pub(crate) db: Arc<RocksDB>,
-    pub(crate) trie: merkle_trie::MerkleTrie,
+    pub db: Arc<RocksDB>,
+    pub trie: merkle_trie::MerkleTrie,
     pub store_limits: StoreLimits,
     pub event_handler: Arc<StoreEventHandler>,
     pub shard_id: u32,
@@ -278,6 +278,22 @@ impl Stores {
             statsd,
             prune_lock: Arc::new(RwLock::new(false)),
         }
+    }
+
+    fn make_schema_version_key() -> Vec<u8> {
+        vec![RootPrefix::DBSchemaVersion as u8]
+    }
+
+    pub fn get_schema_version(&self) -> Result<u32, RocksdbError> {
+        match self.db.get(&Self::make_schema_version_key())? {
+            Some(bytes) => Ok(u32::from_be_bytes(bytes.try_into().unwrap_or_default())),
+            None => Ok(0), // Default to version 0
+        }
+    }
+
+    pub fn set_schema_version(&self, version: u32) -> Result<(), RocksdbError> {
+        self.db
+            .put(&Self::make_schema_version_key(), &version.to_be_bytes())
     }
 
     pub fn get_usage(

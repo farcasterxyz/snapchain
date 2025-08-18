@@ -11,12 +11,15 @@ logs/
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
+logs/
+
 .rocks/
 .rocks.*/
 .cargo/
 nodes/
 Procfile
 .vscode/
+.cargo/
 /.idea
 node_modules
 grafana/data

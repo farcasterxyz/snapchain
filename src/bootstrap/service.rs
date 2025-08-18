@@ -1,5 +1,6 @@
 use crate::bootstrap::error::BootstrapError;
 use crate::cfg::Config;
+use crate::consensus::proposer::ProposalSource;
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
 use crate::proto::get_shard_transactions_request::Cursor;
@@ -9,7 +10,7 @@ use crate::proto::{
 };
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::StoreOptions;
-use crate::storage::store::engine::{ProposalSource, ShardEngine};
+use crate::storage::store::engine::ShardEngine;
 use crate::storage::store::stores::StoreLimits;
 use crate::storage::trie::merkle_trie::{self, TrieKey};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;

@@ -35,7 +35,8 @@ use crate::storage::store::account::{
     CastStore, LinkStore, ReactionStore, UserDataStore, VerificationStore,
 };
 use crate::storage::store::account::{EventsPage, HubEventIdGenerator};
-use crate::storage::store::engine::{MempoolMessage, MessageValidationError, Senders, ShardEngine};
+use crate::storage::store::engine::{MessageValidationError, Senders, ShardEngine};
+use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::stores::Stores;
 use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
@@ -156,7 +157,8 @@ impl MyHubService {
                 None,
                 None,
                 None,
-            );
+            )
+            .await?;
             readonly_engine.simulate_message(&message)
         };
 
@@ -640,7 +642,7 @@ impl HubService for MyHubService {
 
             // Create a temporary, mutable engine for simulation
             // TODO: This is a hack to get around the fact that self cannot be made mutable
-            let mut engine = ShardEngine::new(
+            let sim_results = if let Ok(mut engine) = ShardEngine::new(
                 stores.db.clone(),
                 self.network,
                 stores.trie.clone(),
@@ -651,12 +653,16 @@ impl HubService for MyHubService {
                 None,
                 None,
                 None,
-            );
-
-            // 3. Simulate the entire batch for the shard
-            self.statsd_client
-                .count("rpc.submit_message_in_flight", batch.len() as i64);
-            let sim_results = engine.simulate_bulk_messages(&batch);
+            )
+            .await
+            {
+                // 3. Simulate the entire batch for the shard
+                self.statsd_client
+                    .count("rpc.submit_message_in_flight", batch.len() as i64);
+                engine.simulate_bulk_messages(&batch)
+            } else {
+                return Err(Status::internal("Failed to create shard engine"));
+            };
 
             // 4. Process simulation results
             for (sim_result, msg) in sim_results.into_iter().zip(batch.into_iter()) {
