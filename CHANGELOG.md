@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2025-08-18
+
+### 🚀 Features
+
+- Add support for onchain events and verification messages in a single transaction (#608)
+- Return account root hash for each fid in transaction (#621)
+- Decouple shard 0 block production from other shards block production (#619)
+
+### 🐛 Bug Fixes
+
+- Update tagging instructions in readme
+- Fix tests to increment and decrement hash values correctly (#613)
+- Switch to polling getLogs for Base pro events to fix not picking up events (#616)
+- Fix testnet version schedule to reflect when upgrade actually happened (#618)
+- Handle replicator cursor gets stuck (#617)
+- Add additional sync metrics to improve visibility (#631)
+- Fix fname secondary DB index (#622)
+- Don't run parallel migrations + quiet migration logs (#632)
+- Supress version check log message (#633)
+
+### 💼 Other
+
+- Log flaky test failure (#628)
+
+### ⚙️ Miscellaneous Tasks
+
+- Add link store tests (#612)
+- Enable new version on testnet (#636)
+- Extract mempool polling logic into a module for sharing (#629)
+- Pull engine metrics publishing out into a module for sharing (#630)
+
 ## [0.4.1] - 2025-08-01
 
 ### 🚀 Features
