@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::{net, process};
 use tokio::signal::ctrl_c;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tonic::transport::Channel;
 use tracing::{debug, error, info};
 
@@ -223,155 +223,208 @@ enum WorkerMessage {
     Stop(StopSignal),
 }
 
-/// Bootstrap a node from replication instead of snapshot download
-pub async fn bootstrap_using_replication(app_config: &Config) -> Result<(), Box<dyn Error>> {
-    info!("Starting replication-based bootstrap");
+pub struct ReplicatorBootstrap {
+    shutdown: Arc<AtomicBool>,
+}
 
-    // Fetch metadata and determine target height
-    // Get the peer address from the client's channel
-    let peer_address = "http://127.0.0.1:3383";
-    let mut client = ReplicationServiceClient::connect(peer_address)
-        .await
-        .map_err(|e| BootstrapError::PeerConnectionError(e.to_string()))?;
-
-    let target_heights =
-        determine_target_height(&mut client, &app_config.consensus.shard_ids).await?;
-    info!("Target heights for bootstrap: {:?}", target_heights);
-
-    // Initialize databases and replay transactions for each shard
-    // Note: We're not replicating shard 0 (block shard) for now as requested
-    let shard_ids = app_config.consensus.shard_ids.clone();
-
-    // Initialize statsd client for engines
-    let (statsd_host, statsd_port) = match app_config.statsd.addr.split_once(':') {
-        Some((host, port)) => {
-            if host.is_empty() || port.is_empty() {
-                return Err("statsd address must be in the format host:port".into());
-            }
-            Ok((host.to_string(), port.parse::<u16>()?))
+impl ReplicatorBootstrap {
+    pub fn new() -> Self {
+        Self {
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
-        None => Err(format!(
-            "invalid statsd address: {}",
-            app_config.statsd.addr
-        )),
-    }?;
+    }
 
-    let host = (statsd_host, statsd_port);
-    let socket = net::UdpSocket::bind("0.0.0.0:0")?;
-    let sink = cadence::UdpMetricSink::from(host, socket)?;
-    let statsd_client =
-        cadence::StatsdClient::builder(app_config.statsd.prefix.as_str(), sink).build();
-    let statsd_client = StatsdClientWrapper::new(statsd_client, app_config.statsd.use_tags);
+    /// Bootstrap a node from replication instead of snapshot download
+    pub async fn bootstrap_using_replication(
+        &self,
+        app_config: &Config,
+    ) -> Result<(), Box<dyn Error>> {
+        info!("Starting replication-based bootstrap");
 
-    // Create a broadcast channel for shutdown signaling to all shard tasks
-    let (shutdown_broadcast_tx, _) = broadcast::channel::<()>(16);
+        // Fetch metadata and determine target height
+        // Get the peer address from the client's channel
+        let peer_address = "http://127.0.0.1:3383";
+        let mut client = ReplicationServiceClient::connect(peer_address)
+            .await
+            .map_err(|e| BootstrapError::PeerConnectionError(e.to_string()))?;
 
-    // Create tasks for each shard to run in parallel
-    let mut shard_tasks = Vec::new();
+        let target_heights = self
+            .determine_target_height(&mut client, app_config.consensus.shard_ids.to_vec())
+            .await?;
+        info!("Target heights for bootstrap: {:?}", target_heights);
 
-    for shard_id in shard_ids {
-        let target_height = target_heights.get(&shard_id).cloned().unwrap_or(0);
-        if target_height == 0 {
-            return Err(Box::new(HubError::unavailable(
-                format!(
-                    "No valid snapshot found for shard {}. Skipping bootstrap.",
-                    shard_id
+        // Initialize databases and replay transactions for each shard
+        // Note: We're not replicating shard 0 (block shard) for now as requested
+        let shard_ids = app_config.consensus.shard_ids.clone();
+
+        // Initialize statsd client for engines
+        let (statsd_host, statsd_port) = match app_config.statsd.addr.split_once(':') {
+            Some((host, port)) => {
+                if host.is_empty() || port.is_empty() {
+                    return Err("statsd address must be in the format host:port".into());
+                }
+                Ok((host.to_string(), port.parse::<u16>()?))
+            }
+            None => Err(format!(
+                "invalid statsd address: {}",
+                app_config.statsd.addr
+            )),
+        }?;
+
+        let host = (statsd_host, statsd_port);
+        let socket = net::UdpSocket::bind("0.0.0.0:0")?;
+        let sink = cadence::UdpMetricSink::from(host, socket)?;
+        let statsd_client =
+            cadence::StatsdClient::builder(app_config.statsd.prefix.as_str(), sink).build();
+        let statsd_client = StatsdClientWrapper::new(statsd_client, app_config.statsd.use_tags);
+
+        // Create tasks for each shard to run in parallel
+        let mut shard_tasks = Vec::new();
+
+        for shard_id in shard_ids {
+            let target_height = target_heights.get(&shard_id).cloned().unwrap_or(0);
+            if target_height == 0 {
+                return Err(Box::new(HubError::unavailable(
+                    format!(
+                        "No valid snapshot found for shard {}. Skipping bootstrap.",
+                        shard_id
+                    )
+                    .as_str(),
+                )));
+            }
+            info!(
+                "Bootstrapping shard {} at height {}",
+                shard_id, target_height
+            );
+
+            // Clone necessary data for the spawned task
+            let peer_address_clone = peer_address.to_string();
+            let network = app_config.fc_network;
+            let trie_branching_factor = app_config.trie_branching_factor;
+            let statsd_client_clone = statsd_client.clone();
+            let rocksdb_dir = format!("{}.snapshot", app_config.rocksdb_dir.clone());
+
+            // Spawn a task for this shard
+            let shutdown_signal = self.shutdown.clone();
+            let task = tokio::spawn(async move {
+                info!("Starting parallel bootstrap for shard {}", shard_id);
+
+                // Replay transactions for this shard
+                let result = start_shard_replication_outer(
+                    &peer_address_clone,
+                    network,
+                    shard_id,
+                    trie_branching_factor,
+                    target_height,
+                    &statsd_client_clone,
+                    &rocksdb_dir,
+                    shutdown_signal,
                 )
-                .as_str(),
-            )));
+                .await;
+
+                match &result {
+                    Ok(_) => info!("Completed bootstrap for shard {}", shard_id),
+                    Err(e) => error!("Failed bootstrap for shard {}: {}", shard_id, e),
+                }
+
+                (shard_id, result)
+            });
+
+            shard_tasks.push(task);
         }
-        info!(
-            "Bootstrapping shard {} at height {}",
-            shard_id, target_height
-        );
 
-        // Clone necessary data for the spawned task
-        let peer_address_clone = peer_address.to_string();
-        let network = app_config.fc_network;
-        let trie_branching_factor = app_config.trie_branching_factor;
-        let statsd_client_clone = statsd_client.clone();
-        let rocksdb_dir = format!("{}.snapshot", app_config.rocksdb_dir.clone());
-
-        // Create a shutdown signal receiver for this shard from the broadcast channel
-        let shutdown_signal = shutdown_broadcast_tx.subscribe();
-
-        // Spawn a task for this shard
-        let task = tokio::spawn(async move {
-            info!("Starting parallel bootstrap for shard {}", shard_id);
-
-            // Replay transactions for this shard
-            let result = start_shard_replication_outer(
-                &peer_address_clone,
-                network,
-                shard_id,
-                trie_branching_factor,
-                target_height,
-                &statsd_client_clone,
-                &rocksdb_dir,
-                shutdown_signal,
-            )
-            .await;
-
-            match &result {
-                Ok(_) => info!("Completed bootstrap for shard {}", shard_id),
-                Err(e) => error!("Failed bootstrap for shard {}: {}", shard_id, e),
+        // Wait for either all shard tasks to complete or a shutdown signal
+        let results;
+        info!("Waiting for shutdown signal or shard tasks to complete");
+        tokio::select! {
+            // Wait for all shard tasks to complete normally
+            res = try_join_all(&mut shard_tasks) => {
+                results = res.map_err(|e| {
+                    Box::new(BootstrapError::TransactionReplayError(format!(
+                        "Shard task join error: {}",
+                        e
+                    ))) as Box<dyn Error>
+                })?;
             }
+            // Handle shutdown signal
+            _ = ctrl_c() => {
+                info!("Shutdown signal received, stopping all shard replication tasks");
 
-            (shard_id, result)
-        });
+                // Broadcast shutdown to all shard tasks
+                self.shutdown.store(true, Ordering::SeqCst);
 
-        shard_tasks.push(task);
+                // After sending the shutdown signal, we still need to wait for the tasks
+                // to finish their cleanup. We can re-await the `try_join_all` future.
+                // We expect it to return errors as tasks might be cancelled, which is okay.
+                info!("Waiting for shard tasks to shut down gracefully...");
+
+                // We re-assign `shard_tasks` into the `try_join_all` to consume it.
+                // The result is ignored here because we are intentionally shutting down.
+                // The tasks should handle the shutdown signal and exit gracefully.
+                let _ = try_join_all(shard_tasks).await;
+
+                info!("All shard tasks have been shut down.");
+                process::exit(0);
+                return Ok(()); // Exit gracefully after shutdown
+            }
+        }
+
+        // This part now only runs if the tasks completed without a shutdown signal.
+        // Check if any shard returned an error
+        for (shard_id, result) in results {
+            if let Err(e) = result {
+                error!("Shard {} failed during bootstrap: {}", shard_id, e);
+                return Err(Box::new(e) as Box<dyn Error>);
+            }
+            info!("Shard {} completed successfully", shard_id);
+        }
+
+        info!("Replication bootstrap completed successfully");
+
+        Ok(())
     }
 
-    // Wait for either all shard tasks to complete or a shutdown signal
-    let results;
-    info!("Waiting for shutdown signal or shard tasks to complete");
-    tokio::select! {
-        // Wait for all shard tasks to complete normally
-        res = try_join_all(&mut shard_tasks) => {
-            results = res.map_err(|e| {
-                Box::new(BootstrapError::TransactionReplayError(format!(
-                    "Shard task join error: {}",
-                    e
-                ))) as Box<dyn Error>
-            })?;
+    /// Determine the highest block for each shard.
+    async fn determine_target_height(
+        &self,
+        client: &mut ReplicationServiceClient<Channel>,
+        all_shards: Vec<u32>,
+    ) -> Result<HashMap<u32, u64>, BootstrapError> {
+        let mut target_heights = HashMap::new();
+
+        // TODO: Shard 0 doesn't have a snapshot, so we skip it?
+
+        for shard_id in all_shards {
+            let request = GetShardSnapshotMetadataRequest { shard_id };
+
+            match client.get_shard_snapshot_metadata(request).await {
+                Ok(response) => {
+                    let metadata_response = response.into_inner();
+
+                    // Go over the response, finding the highest block
+                    let mut highest_block = 0;
+                    for snapshot in metadata_response.snapshots {
+                        if snapshot.height > highest_block {
+                            highest_block = snapshot.height;
+                        }
+                    }
+                    target_heights.insert(shard_id, highest_block);
+                }
+                Err(e) => {
+                    error!("Failed to get metadata for shard {}: {}", shard_id, e);
+                    return Err(BootstrapError::MetadataFetchError(e.to_string()));
+                }
+            }
         }
-        // Handle shutdown signal
-        _ = ctrl_c() => {
-            info!("Shutdown signal received, stopping all shard replication tasks");
 
-            // Broadcast shutdown to all shard tasks
-            shutdown_broadcast_tx.send(()).unwrap();
-
-            // After sending the shutdown signal, we still need to wait for the tasks
-            // to finish their cleanup. We can re-await the `try_join_all` future.
-            // We expect it to return errors as tasks might be cancelled, which is okay.
-            info!("Waiting for shard tasks to shut down gracefully...");
-
-            // We re-assign `shard_tasks` into the `try_join_all` to consume it.
-            // The result is ignored here because we are intentionally shutting down.
-            // The tasks should handle the shutdown signal and exit gracefully.
-            let _ = try_join_all(shard_tasks).await;
-
-            info!("All shard tasks have been shut down.");
-            process::exit(0);
-            return Ok(()); // Exit gracefully after shutdown
+        if target_heights.is_empty() {
+            return Err(BootstrapError::MetadataFetchError(
+                "No valid snapshots found".to_string(),
+            ));
         }
+
+        Ok(target_heights)
     }
-
-    // This part now only runs if the tasks completed without a shutdown signal.
-    // Check if any shard returned an error
-    for (shard_id, result) in results {
-        if let Err(e) = result {
-            error!("Shard {} failed during bootstrap: {}", shard_id, e);
-            return Err(Box::new(e) as Box<dyn Error>);
-        }
-        info!("Shard {} completed successfully", shard_id);
-    }
-
-    info!("Replication bootstrap completed successfully");
-
-    Ok(())
 }
 
 async fn start_shard_replication_outer(
@@ -382,30 +435,15 @@ async fn start_shard_replication_outer(
     target_height: u64,
     statsd_client: &StatsdClientWrapper,
     rocksdb_dir: &str,
-    mut shutdown_signal: broadcast::Receiver<()>,
+    shutdown_signal: Arc<AtomicBool>,
 ) -> Result<(), BootstrapError> {
     // Go over the FIDs in chunks of 50k and import them into the DB in batches. This allows the
     // DB to compact and flush every 50k FIDs, managing the SST files more efficiently.
 
-    // Create a channel to pass on the shutdown signal
-    let (shutdown_broadcast_tx, mut shutdown_broadcast_rx) = broadcast::channel(16);
-
-    let is_shutdown = Arc::new(AtomicBool::new(false));
-
-    // Listen to the shutdown_signal in a tokio thread, and if it receives a message, it will notify the shard replication tasks
-    let is_shut = is_shutdown.clone();
-    tokio::spawn(async move {
-        if let Ok(_) = shutdown_signal.recv().await {
-            info!("Shutdown signal received, stopping shard replication");
-            shutdown_broadcast_tx.send(()).unwrap();
-            is_shut.store(true, Ordering::SeqCst);
-        }
-    });
-
     let highest_fid = 1_200_000u64; // TODO: Get this from server
-    let step = 25_000;
+    let step = 20_000;
     for fid in (1..=highest_fid).step_by(step) {
-        if is_shutdown.load(Ordering::SeqCst) {
+        if shutdown_signal.load(Ordering::SeqCst) {
             info!("Shutdown signal received, stopping shard replication");
             break;
         }
@@ -420,7 +458,7 @@ async fn start_shard_replication_outer(
             statsd_client,
             rocksdb_dir,
             max_fid,
-            &mut shutdown_broadcast_rx,
+            shutdown_signal.clone(),
         )
         .await?;
     }
@@ -437,7 +475,7 @@ async fn start_shard_replication(
     statsd_client: &StatsdClientWrapper,
     rocksdb_dir: &str,
     max_fid: u64,
-    shutdown_signal: &mut broadcast::Receiver<()>,
+    shutdown_signal: Arc<AtomicBool>,
 ) -> Result<(), BootstrapError> {
     info!(
         "Starting parallel shard replication for shard {} up to height {} upto fid {}",
@@ -547,7 +585,7 @@ async fn start_shard_replication(
 
     loop {
         // Check for shutdown signal first
-        if shutdown_signal.try_recv().is_ok() {
+        if shutdown_signal.load(Ordering::SeqCst) {
             info!(
                 "Shutdown signal received for shard {}, stopping replication",
                 shard_id
@@ -767,7 +805,7 @@ async fn create_workers_for_shard(
 
         // Spawn worker thread
         tokio::spawn(async move {
-            info!("Worker {} started for shard {}", worker_id, shard_id);
+            debug!("Worker {} started for shard {}", worker_id, shard_id);
 
             // Process work items
             while let Some(message) = worker_rx.recv().await {
@@ -1117,50 +1155,6 @@ async fn replay_transaction(
         }
         Err(e) => Err(BootstrapError::TransactionReplayError(e.to_string())),
     }
-}
-
-/// Determine the highest block for each shard.
-async fn determine_target_height(
-    client: &mut ReplicationServiceClient<Channel>,
-    shard_ids: &[u32],
-) -> Result<HashMap<u32, u64>, BootstrapError> {
-    let mut target_heights = HashMap::new();
-
-    // Check all configured shards plus block shard (0)
-    let all_shards = shard_ids.to_vec();
-
-    // TODO: Shard 0 doesn't have a snapshot, so we skip it?
-
-    for shard_id in all_shards {
-        let request = GetShardSnapshotMetadataRequest { shard_id };
-
-        match client.get_shard_snapshot_metadata(request).await {
-            Ok(response) => {
-                let metadata_response = response.into_inner();
-
-                // Go over the response, finding the highest block
-                let mut highest_block = 0;
-                for snapshot in metadata_response.snapshots {
-                    if snapshot.height > highest_block {
-                        highest_block = snapshot.height;
-                    }
-                }
-                target_heights.insert(shard_id, highest_block);
-            }
-            Err(e) => {
-                error!("Failed to get metadata for shard {}: {}", shard_id, e);
-                return Err(BootstrapError::MetadataFetchError(e.to_string()));
-            }
-        }
-    }
-
-    if target_heights.is_empty() {
-        return Err(BootstrapError::MetadataFetchError(
-            "No valid snapshots found".to_string(),
-        ));
-    }
-
-    Ok(target_heights)
 }
 
 #[cfg(test)]
