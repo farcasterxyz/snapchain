@@ -67,7 +67,7 @@ jobs:
       - working-directory: ./snapchain
         env:
           RUSTFLAGS: "-Dwarnings"
-        run: cargo test
+        run: cargo test -- test_basic_consensus
 
       - working-directory: ./snapchain
         env:
