@@ -10,8 +10,6 @@ use crate::storage::store::account::{BlockEventStore, OnchainEventStorageError};
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
 use crate::storage::store::BlockStore;
-#[cfg(test)]
-use crate::storage::trie::merkle_trie;
 use crate::storage::trie::merkle_trie::{MerkleTrie, TrieKey};
 use crate::storage::trie::{self};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
@@ -99,16 +97,6 @@ impl BlockEngine {
         self.trie.root_hash().unwrap()
     }
 
-    #[cfg(test)]
-    pub fn trie_key_exists(&mut self, ctx: &merkle_trie::Context, sync_id: &Vec<u8>) -> bool {
-        self.trie
-            .exists(ctx, &self.db, sync_id.as_ref())
-            .unwrap_or_else(|err| {
-                error!("Error checking if sync id exists: {:?}", err);
-                false
-            })
-    }
-
     pub(crate) fn replay_snapchain_txn(
         &mut self,
         snapchain_txn: &Transaction,
@@ -173,9 +161,7 @@ impl BlockEngine {
             Metrics::proposal_source_tags(ProposalSource::Propose),
         );
 
-        let mut snapchain_txns = self
-            .mempool_poller
-            .create_transactions_from_mempool(messages)?;
+        let mut snapchain_txns = MempoolPoller::create_transactions_from_mempool(messages)?;
         for snapchain_txn in &mut snapchain_txns {
             let account_root = self.replay_snapchain_txn(&snapchain_txn, txn_batch)?;
             snapchain_txn.account_root = account_root;

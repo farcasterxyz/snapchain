@@ -242,9 +242,7 @@ impl ShardEngine {
         );
 
         let version = self.version_for(timestamp);
-        let mut snapchain_txns = self
-            .mempool_poller
-            .create_transactions_from_mempool(messages)?
+        let mut snapchain_txns = MempoolPoller::create_transactions_from_mempool(messages)?
             .into_iter()
             .filter_map(|mut transaction| {
                 // TODO(aditi): In the future, this seems like it should just be a part of the validation logic in replay_snapchain_txn.
