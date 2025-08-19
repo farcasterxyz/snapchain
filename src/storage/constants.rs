@@ -44,6 +44,9 @@ pub enum RootPrefix {
 
     /* Used to index blocks by timestamp */
     BlockIndex = 18,
+
+    /* Status of the replication bootstrap */
+    ReplicationStatusKey = 19,
 }
 
 /** Copied from the JS code */

@@ -50,6 +50,7 @@ impl Metrics {
             ProposalSource::Propose => "propose",
             ProposalSource::Validate => "validate",
             ProposalSource::Commit => "commit",
+            ProposalSource::Replication => "replication",
         };
 
         vec![("source", source)]

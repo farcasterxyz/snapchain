@@ -146,11 +146,14 @@ impl MyHubService {
 
         let result = {
             // TODO: This is a hack to get around the fact that self cannot be made mutable
+            let shard_id = self
+                .message_router
+                .route_fid(message.fid(), self.num_shards);
             let mut readonly_engine = ShardEngine::new(
                 stores.db.clone(),
                 self.network,
                 stores.trie.clone(),
-                1,
+                shard_id,
                 stores.store_limits.clone(),
                 self.statsd_client.clone(),
                 100,

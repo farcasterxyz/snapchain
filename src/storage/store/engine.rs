@@ -15,6 +15,7 @@ use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{CastStore, MessagesPage, StoreOptions, VerificationStore};
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
+use crate::storage::store::migrations::{MigrationContext, MigrationRunner};
 use crate::storage::store::stores::{StoreLimits, Stores};
 use crate::storage::store::BlockStore;
 use crate::storage::trie::{self, merkle_trie};
@@ -198,7 +199,7 @@ impl ShardEngine {
         messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
         fname_signer_address: Option<alloy_primitives::Address>,
         post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
-    ) -> ShardEngine {
+    ) -> Result<ShardEngine, HubError> {
         Self::new_with_opts(
             db,
             network,
@@ -212,9 +213,10 @@ impl ShardEngine {
             post_commit_tx,
             StoreOptions::default(),
         )
+        .await
     }
 
-    pub fn new_with_opts(
+    pub async fn new_with_opts(
         db: Arc<RocksDB>,
         network: proto::FarcasterNetwork,
         trie: merkle_trie::MerkleTrie,
@@ -226,22 +228,40 @@ impl ShardEngine {
         fname_signer_address: Option<alloy_primitives::Address>,
         post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
         store_opts: StoreOptions,
-    ) -> ShardEngine {
-        // TODO: adding the trie here introduces many calls that want to return errors. Rethink unwrap strategy.
-        ShardEngine {
+    ) -> Result<ShardEngine, HubError> {
+        let stores = Stores::new_with_opts(
+            db.clone(),
+            shard_id,
+            trie,
+            store_limits,
+            network,
+            statsd_client.clone(),
+            store_opts,
+        );
+
+        // No migrations on devnet (during tests)
+        if network != proto::FarcasterNetwork::Devnet {
+            let migration_context = MigrationContext {
+                db: db.clone(),
+                stores: stores.clone(),
+            };
+            let runner = MigrationRunner::new(migration_context);
+            let migration_handle = runner.run_pending_migrations().await?;
+
+            // If there are background migrations, we can optionally store the handle
+            // for later checking or cancellation if needed
+            if let Some(_background_handle) = migration_handle {
+                // Background migrations are running, but we don't block startup
+                info!(shard_id, "Background migrations started");
+            }
+        }
+
+        Ok(ShardEngine {
             shard_id,
             network,
             db: db.clone(),
             senders: Senders::new(),
-            stores: Stores::new_with_opts(
-                db,
-                shard_id,
-                trie,
-                store_limits,
-                network,
-                statsd_client.clone(),
-                store_opts,
-            ),
+            stores,
             metrics: Metrics {
                 statsd_client: statsd_client.clone(),
                 shard_id,
@@ -256,7 +276,7 @@ impl ShardEngine {
                 network,
                 statsd_client: statsd_client,
             },
-        }
+        })
     }
 
     pub fn shard_id(&self) -> u32 {
@@ -919,9 +939,10 @@ impl ShardEngine {
 
             if !validation_errors.is_empty() {
                 info!(
-                "FID replication merge results: system_messages={}, user_messages={}. Validation errors: {:?}",
-                system_messages_count, user_messages_count, validation_errors
-            );
+                    "FID {} replication merge results: system_messages={}, user_messages={}. Validation errors: {}",
+                    snapchain_txn.fid,
+                    system_messages_count, user_messages_count, validation_errors.len()
+                );
             }
         } else {
             for msg in &sorted_user_messages {
