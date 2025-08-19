@@ -108,7 +108,6 @@ impl MempoolPoller {
 
     // Groups messages by fid and creates a transaction for each fid
     pub fn create_transactions_from_mempool(
-        &mut self,
         messages: Vec<MempoolMessage>,
     ) -> Result<Vec<Transaction>, MempoolPollerError> {
         let mut transactions = vec![];
