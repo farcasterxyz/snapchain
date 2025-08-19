@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 #[derive(Error, Debug)]
 pub enum EngineError {
@@ -833,7 +833,7 @@ impl ShardEngine {
             self.stores
                 .trie
                 .get_hash(&self.db, txn_batch, &TrieKey::for_fid(snapchain_txn.fid));
-        debug!(
+        info!(
             shard_id = self.shard_id,
             fid = snapchain_txn.fid,
             num_user_messages = total_user_messages,

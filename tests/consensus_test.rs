@@ -33,7 +33,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time;
 use tonic::transport::Server;
 use tracing::{error, info};
-// use tracing_subscriber::EnvFilter;
+use tracing_subscriber::EnvFilter;
 
 const HOST_FOR_TEST: &str = "127.0.0.1";
 const BASE_PORT_FOR_TEST: u32 = 9482;
@@ -662,7 +662,7 @@ impl TestNetwork {
 
                 None
             },
-            tokio::time::Duration::from_secs(15),
+            tokio::time::Duration::from_secs(5),
             tokio::time::Duration::from_millis(100),
         )
         .await
@@ -711,7 +711,7 @@ impl TestNetwork {
 
                 None
             },
-            tokio::time::Duration::from_secs(15),
+            tokio::time::Duration::from_secs(5),
             tokio::time::Duration::from_millis(100),
         )
         .await
@@ -731,7 +731,7 @@ impl TestNetwork {
                     .all(|node| node.num_blocks() >= height)
                     .then_some(())
             },
-            tokio::time::Duration::from_secs(15),
+            tokio::time::Duration::from_secs(5),
             tokio::time::Duration::from_millis(100),
         )
         .await
@@ -866,16 +866,16 @@ fn assert_network_has_cast(network: &TestNetwork, fid: u64, hash: Vec<u8>) {
 #[serial]
 async fn test_basic_consensus() {
     // Useful for debugging
-    // let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
-    // let _ = tracing_subscriber::fmt()
-    //     .with_env_filter(env_filter)
-    //     .try_init();
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .try_init();
 
     let num_shards = 2;
     let mut network = TestNetwork::create(3, num_shards).await;
     network.start_validators().await;
 
-    network.register_and_wait_for_fid(1000).await;
+    network.register_and_wait_for_fid(1000).await.unwrap();
     let cast = network
         .send_and_wait_for_cast(1000, "Hello, world")
         .await
@@ -892,6 +892,11 @@ async fn test_basic_consensus() {
 #[tokio::test]
 #[serial]
 async fn test_basic_sync() {
+    // Useful for debugging
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .try_init();
     // Set up shard and validators
     let num_shards = 2;
     let mut network = TestNetwork::create(4, num_shards).await;
@@ -934,6 +939,11 @@ async fn test_basic_sync() {
 #[tokio::test]
 #[serial]
 async fn test_read_node() {
+    // Useful for debugging
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .try_init();
     let num_shards = 2;
     let mut network = TestNetwork::create(3, num_shards).await;
     network.start_validators().await;
@@ -971,6 +981,11 @@ async fn test_read_node() {
 #[tokio::test]
 #[serial]
 async fn test_cross_shard_interactions() {
+    // Useful for debugging
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .try_init();
     let num_shards = 2;
     let mut network = TestNetwork::create(3, num_shards).await;
     network.start_validators().await;
