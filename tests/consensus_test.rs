@@ -767,6 +767,21 @@ impl TestNetwork {
         .await
     }
 
+    // Waits for all read nodes to reach at least `height` for the specified shard.
+    pub async fn read_wait_for_shard_chunk(&self, shard_id: u32, height: usize) -> Option<()> {
+        wait_for(
+            || {
+                self.read_nodes
+                    .iter()
+                    .all(|node| node.num_shard_chunks(shard_id) >= height)
+                    .then_some(())
+            },
+            tokio::time::Duration::from_secs(15),
+            tokio::time::Duration::from_millis(100),
+        )
+        .await
+    }
+
     pub async fn wait_for_next_block_on_all_shards(&self) {
         let next_block_height = self.max_block_height() + 1;
         self.wait_for_block(next_block_height).await.unwrap();
@@ -944,7 +959,7 @@ async fn test_read_node() {
     for shard_id in 1..num_shards + 1 {
         let target_height = network.max_shard_height(shard_id);
         network
-            .wait_for_shard_chunk(shard_id, target_height)
+            .read_wait_for_shard_chunk(shard_id, target_height)
             .await
             .unwrap();
     }
