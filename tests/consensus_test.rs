@@ -876,7 +876,7 @@ async fn test_basic_consensus() {
     let mut network = TestNetwork::create(3, num_shards).await;
     network.start_validators().await;
 
-    network.register_and_wait_for_fid(1000).await;
+    network.register_and_wait_for_fid(1000).await.unwrap();
     let cast = network
         .send_and_wait_for_cast(1000, "Hello, world")
         .await
