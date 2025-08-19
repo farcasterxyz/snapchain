@@ -10,6 +10,8 @@ use crate::storage::store::account::{BlockEventStore, OnchainEventStorageError};
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
 use crate::storage::store::BlockStore;
+#[cfg(test)]
+use crate::storage::trie::merkle_trie;
 use crate::storage::trie::merkle_trie::{MerkleTrie, TrieKey};
 use crate::storage::trie::{self};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
@@ -50,7 +52,7 @@ pub struct BlockEngine {
 }
 
 // Shard state root and the transactions
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ShardStateChange {
     pub timestamp: FarcasterTime,
     pub new_state_root: Vec<u8>,
@@ -90,6 +92,21 @@ impl BlockEngine {
             },
             heartbeat_block_interval,
         }
+    }
+
+    #[cfg(test)]
+    pub fn trie_root_hash(&self) -> Vec<u8> {
+        self.trie.root_hash().unwrap()
+    }
+
+    #[cfg(test)]
+    pub fn trie_key_exists(&mut self, ctx: &merkle_trie::Context, sync_id: &Vec<u8>) -> bool {
+        self.trie
+            .exists(ctx, &self.db, sync_id.as_ref())
+            .unwrap_or_else(|err| {
+                error!("Error checking if sync id exists: {:?}", err);
+                false
+            })
     }
 
     pub(crate) fn replay_snapchain_txn(

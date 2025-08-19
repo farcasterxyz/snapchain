@@ -15,6 +15,8 @@ pub mod migrations;
 pub mod test_helper;
 
 #[cfg(test)]
+mod block_engine_test;
+#[cfg(test)]
 mod engine_tests;
 #[cfg(test)]
 mod node_local_state_tests;
