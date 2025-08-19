@@ -19,7 +19,7 @@ use crate::version::version::EngineVersion;
 use futures::future::try_join_all;
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
-use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::{net, process};
 use tokio::signal::ctrl_c;
@@ -300,7 +300,7 @@ pub async fn bootstrap_using_replication(app_config: &Config) -> Result<(), Box<
             info!("Starting parallel bootstrap for shard {}", shard_id);
 
             // Replay transactions for this shard
-            let result = start_shard_replication(
+            let result = start_shard_replication_outer(
                 &peer_address_clone,
                 network,
                 shard_id,
@@ -374,7 +374,7 @@ pub async fn bootstrap_using_replication(app_config: &Config) -> Result<(), Box<
     Ok(())
 }
 
-async fn start_shard_replication(
+async fn start_shard_replication_outer(
     peer_address: &str,
     network: crate::proto::FarcasterNetwork,
     shard_id: u32,
@@ -384,9 +384,64 @@ async fn start_shard_replication(
     rocksdb_dir: &str,
     mut shutdown_signal: broadcast::Receiver<()>,
 ) -> Result<(), BootstrapError> {
+    // Go over the FIDs in chunks of 50k and import them into the DB in batches. This allows the
+    // DB to compact and flush every 50k FIDs, managing the SST files more efficiently.
+
+    // Create a channel to pass on the shutdown signal
+    let (shutdown_broadcast_tx, mut shutdown_broadcast_rx) = broadcast::channel(16);
+
+    let is_shutdown = Arc::new(AtomicBool::new(false));
+
+    // Listen to the shutdown_signal in a tokio thread, and if it receives a message, it will notify the shard replication tasks
+    let is_shut = is_shutdown.clone();
+    tokio::spawn(async move {
+        if let Ok(_) = shutdown_signal.recv().await {
+            info!("Shutdown signal received, stopping shard replication");
+            shutdown_broadcast_tx.send(()).unwrap();
+            is_shut.store(true, Ordering::SeqCst);
+        }
+    });
+
+    let highest_fid = 1_200_000u64; // TODO: Get this from server
+    let step = 25_000;
+    for fid in (1..=highest_fid).step_by(step) {
+        if is_shutdown.load(Ordering::SeqCst) {
+            info!("Shutdown signal received, stopping shard replication");
+            break;
+        }
+
+        let max_fid = fid + step as u64 - 1;
+        start_shard_replication(
+            peer_address,
+            network,
+            shard_id,
+            trie_branching_factor,
+            target_height,
+            statsd_client,
+            rocksdb_dir,
+            max_fid,
+            &mut shutdown_broadcast_rx,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn start_shard_replication(
+    peer_address: &str,
+    network: crate::proto::FarcasterNetwork,
+    shard_id: u32,
+    trie_branching_factor: u32,
+    target_height: u64,
+    statsd_client: &StatsdClientWrapper,
+    rocksdb_dir: &str,
+    max_fid: u64,
+    shutdown_signal: &mut broadcast::Receiver<()>,
+) -> Result<(), BootstrapError> {
     info!(
-        "Starting parallel shard replication for shard {} up to height {}",
-        shard_id, target_height
+        "Starting parallel shard replication for shard {} up to height {} upto fid {}",
+        shard_id, target_height, max_fid
     );
 
     let db = RocksDB::open_bulk_write_shard_db(&rocksdb_dir, shard_id);
@@ -468,7 +523,6 @@ async fn start_shard_replication(
 
     // Generate work ranges
     let chunk_size = 100u64;
-    let max_fid = 1_200_000u64; // TODO: Get the highest FID in the snapshot
 
     let highest_consecutive = completed_ranges.get_highest_consecutive_fid(shard_id);
     let mut current_fid = if highest_consecutive.fid_end > 0 {
@@ -478,8 +532,18 @@ async fn start_shard_replication(
     };
 
     let mut all_work_sent = false;
+    if current_fid > max_fid {
+        info!(
+            "No work to do for shard {} as current fid {} exceeds max fid {}",
+            shard_id, current_fid, max_fid
+        );
+        all_work_sent = true;
+    }
 
-    info!("Starting from FID {} ", current_fid);
+    info!(
+        "start_shard_replication for shard {} starting work at highest fid {}",
+        shard_id, current_fid
+    );
 
     loop {
         // Check for shutdown signal first
@@ -494,6 +558,7 @@ async fn start_shard_replication(
         // Send work to available workers
         while !worker_queue.is_empty() && !all_work_sent && current_fid <= max_fid {
             let worker_idx = worker_queue.pop_front().unwrap();
+
             let end_fid = std::cmp::min(current_fid + chunk_size - 1, max_fid);
 
             let work_range = FidRange {
@@ -543,7 +608,7 @@ async fn start_shard_replication(
                 all_work_sent = true;
             }
 
-            info!(
+            debug!(
                 "Sent work for FID range {} to {} to worker {}",
                 current_fid, end_fid, worker_idx
             );
@@ -616,7 +681,7 @@ async fn start_shard_replication(
         }
 
         // Small delay to avoid busy waiting
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     }
 
     // Send stop signal to all workers
