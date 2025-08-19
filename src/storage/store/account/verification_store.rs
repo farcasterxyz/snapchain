@@ -1,5 +1,5 @@
 use super::{
-    make_fid_key, make_user_key,
+    make_fid_key, make_user_key, read_fid_key,
     store::{Store, StoreDef},
     MessagesPage, StoreEventHandler, TS_HASH_LENGTH,
 };
@@ -315,5 +315,25 @@ impl VerificationStore {
         page_options: &PageOptions,
     ) -> Result<MessagesPage, HubError> {
         store.get_removes_by_fid::<fn(&Message) -> bool>(fid, page_options, None)
+    }
+
+    pub fn get_fid_by_verification(
+        store: &Store<VerificationStoreDef>,
+        address: &[u8],
+    ) -> Result<Option<u64>, HubError> {
+        if address.is_empty() {
+            return Err(HubError {
+                code: "bad_request.invalid_param".to_string(),
+                message: "address empty".to_string(),
+            });
+        }
+
+        let key = VerificationStoreDef::make_verification_by_address_key(address);
+
+        let Some(value) = store.db().get(&key)? else {
+            return Ok(None);
+        };
+
+        Ok(Some(read_fid_key(&value, 0)))
     }
 }

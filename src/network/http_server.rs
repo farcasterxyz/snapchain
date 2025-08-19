@@ -427,6 +427,25 @@ impl FidRequest {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VerificationFidRequest {
+    #[serde(with = "serdehex")]
+    pub address: Vec<u8>,
+}
+
+impl VerificationFidRequest {
+    pub fn to_proto(self) -> proto::VerificationFidRequest {
+        proto::VerificationFidRequest {
+            address: self.address,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VerificationFidResponse {
+    pub fid: u64,
+}
+
 #[allow(non_snake_case)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FidTimestampRequest {
@@ -2168,6 +2187,10 @@ pub trait HubHttpService {
         &self,
         req: FidRequest,
     ) -> Result<PagedResponse, ErrorResponse>;
+    async fn get_fid_by_verification(
+        &self,
+        req: VerificationFidRequest,
+    ) -> Result<VerificationFidResponse, ErrorResponse>;
     async fn get_on_chain_signers_by_fid(
         &self,
         req: FidRequest,
@@ -2816,6 +2839,30 @@ where
         map_proto_messages_response_to_json_paged_response(proto_resp)
     }
 
+    /// GET /v1/fidByVerification
+    async fn get_fid_by_verification(
+        &self,
+        req: VerificationFidRequest,
+    ) -> Result<VerificationFidResponse, ErrorResponse> {
+        let service = &self.service;
+
+        let grpc_req = tonic::Request::new(req.to_proto());
+
+        let response = service
+            .get_fid_by_verification(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get fid by verification".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+
+        let proto_resp = response.into_inner();
+
+        Ok(VerificationFidResponse {
+            fid: proto_resp.fid,
+        })
+    }
+
     /// GET /v1/onChainSignersByFid
     async fn get_on_chain_signers_by_fid(
         &self,
@@ -3130,6 +3177,15 @@ where
                 self.handle_request::<FidRequest, PagedResponse, _>(req, |service, req| {
                     Box::pin(async move { service.get_verifications_by_fid(req).await })
                 })
+                .await
+            }
+            (&Method::GET, "/v1/fidByVerification") => {
+                self.handle_request::<VerificationFidRequest, VerificationFidResponse, _>(
+                    req,
+                    |service, req| {
+                        Box::pin(async move { service.get_fid_by_verification(req).await })
+                    },
+                )
                 .await
             }
             (&Method::GET, "/v1/onChainSignersByFid") => {
