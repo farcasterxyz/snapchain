@@ -1012,7 +1012,9 @@ async fn test_cross_shard_interactions() {
     let first_fid = 20270;
     let second_fid = 211428;
 
+    info!("Registering fid {}", first_fid);
     network.register_and_wait_for_fid(first_fid).await.unwrap();
+    info!("Registering fid {}", second_fid);
     network.register_and_wait_for_fid(second_fid).await.unwrap();
 
     let router = ShardRouter {};
@@ -1058,6 +1060,7 @@ async fn test_cross_shard_interactions() {
 
     let node = &network.nodes[0];
 
+    info!("Transfering fname {} to fid {}", fname, second_fid);
     node.add_message(
         MempoolMessage::ValidatorMessage(transfer1.clone()),
         MempoolSource::Local,
@@ -1066,6 +1069,10 @@ async fn test_cross_shard_interactions() {
     .await
     .unwrap();
 
+    info!(
+        "Transfering fname {} from fid {} to fid {}",
+        fname, second_fid, first_fid
+    );
     node.add_message(
         MempoolMessage::ValidatorMessage(transfer2.clone()),
         MempoolSource::Local,
