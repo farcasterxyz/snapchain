@@ -323,10 +323,11 @@ impl NodeForTest {
         consensus_config =
             consensus_config.with((1..=num_shards).collect(), validator_sets.clone());
         consensus_config.block_time = time::Duration::from_millis(250);
-        consensus_config.propose_time = time::Duration::from_millis(250);
-        consensus_config.prevote_time = time::Duration::from_millis(100);
-        consensus_config.precommit_time = time::Duration::from_millis(100);
-        consensus_config.step_delta = time::Duration::from_millis(100);
+        // TODO(aditi): We need to figure out the right values for these timeouts. 1s (default) is long, but these are too short.
+        // consensus_config.propose_time = time::Duration::from_millis(250);
+        // consensus_config.prevote_time = time::Duration::from_millis(100);
+        // consensus_config.precommit_time = time::Duration::from_millis(100);
+        // consensus_config.step_delta = time::Duration::from_millis(100);
         consensus_config.sync_status_update_interval = time::Duration::from_millis(250); // This is aggressive but makes sync faster in the tests
 
         let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
