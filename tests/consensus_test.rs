@@ -323,10 +323,11 @@ impl NodeForTest {
         consensus_config =
             consensus_config.with((1..=num_shards).collect(), validator_sets.clone());
         consensus_config.block_time = time::Duration::from_millis(250);
-        consensus_config.propose_time = time::Duration::from_millis(250);
-        consensus_config.prevote_time = time::Duration::from_millis(100);
-        consensus_config.precommit_time = time::Duration::from_millis(100);
-        consensus_config.step_delta = time::Duration::from_millis(100);
+        // TODO(aditi): We need to figure out the right values for these timeouts. 1s (default) is long, but these are too short.
+        // consensus_config.propose_time = time::Duration::from_millis(250);
+        // consensus_config.prevote_time = time::Duration::from_millis(100);
+        // consensus_config.precommit_time = time::Duration::from_millis(100);
+        // consensus_config.step_delta = time::Duration::from_millis(100);
         consensus_config.sync_status_update_interval = time::Duration::from_millis(250); // This is aggressive but makes sync faster in the tests
 
         let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
@@ -779,6 +780,21 @@ impl TestNetwork {
         }
     }
 
+    // Waits for all read nodes to reach at least `height` for the specified shard.
+    pub async fn read_wait_for_shard_chunk(&self, shard_id: u32, height: usize) -> Option<()> {
+        wait_for(
+            || {
+                self.read_nodes
+                    .iter()
+                    .all(|node| node.num_shard_chunks(shard_id) >= height)
+                    .then_some(())
+            },
+            tokio::time::Duration::from_secs(15),
+            tokio::time::Duration::from_millis(100),
+        )
+        .await
+    }
+
     // Waits for a username to be registered to a specific FID.
     pub async fn wait_for_username_registered_to_fid(
         &self,
@@ -860,7 +876,7 @@ async fn test_basic_consensus() {
     let mut network = TestNetwork::create(3, num_shards).await;
     network.start_validators().await;
 
-    network.register_and_wait_for_fid(1000).await;
+    network.register_and_wait_for_fid(1000).await.unwrap();
     let cast = network
         .send_and_wait_for_cast(1000, "Hello, world")
         .await
@@ -944,7 +960,7 @@ async fn test_read_node() {
     for shard_id in 1..num_shards + 1 {
         let target_height = network.max_shard_height(shard_id);
         network
-            .wait_for_shard_chunk(shard_id, target_height)
+            .read_wait_for_shard_chunk(shard_id, target_height)
             .await
             .unwrap();
     }
