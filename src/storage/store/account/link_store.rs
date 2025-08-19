@@ -7,6 +7,7 @@ use super::{
 use crate::{
     core::error::HubError,
     proto::{link_body::Target, SignatureScheme},
+    storage::store::account::StoreOptions,
 };
 use crate::{proto::message_data::Body, storage::db::PageOptions};
 use crate::{proto::LinkBody, storage::util::increment_vec_u8};
@@ -63,6 +64,20 @@ impl LinkStore {
         prune_size_limit: u32,
     ) -> Store<LinkStore> {
         Store::new_with_store_def(db, store_event_handler, LinkStore { prune_size_limit })
+    }
+
+    pub fn new_with_opts(
+        db: Arc<RocksDB>,
+        store_event_handler: Arc<StoreEventHandler>,
+        prune_size_limit: u32,
+        store_opts: StoreOptions,
+    ) -> Store<LinkStore> {
+        Store::new_with_store_def_opts(
+            db,
+            store_event_handler,
+            LinkStore { prune_size_limit },
+            store_opts,
+        )
     }
 
     /// Finds a LinkAdd Message by checking the Adds Set index.

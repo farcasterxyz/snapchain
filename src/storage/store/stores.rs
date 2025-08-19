@@ -252,14 +252,36 @@ impl Stores {
         let shard_store = ShardStore::new(db.clone(), shard_id);
         let cast_store =
             CastStore::new_with_opts(db.clone(), event_handler.clone(), 100, store_opts.clone());
-        let reaction_store =
-            ReactionStore::new_with_opts(db.clone(), event_handler.clone(), 100, store_opts);
+        let reaction_store = ReactionStore::new_with_opts(
+            db.clone(),
+            event_handler.clone(),
+            100,
+            store_opts.clone(),
+        );
+        let link_store =
+            LinkStore::new_with_opts(db.clone(), event_handler.clone(), 100, store_opts.clone());
+        let user_data_store = UserDataStore::new_with_opts(
+            db.clone(),
+            event_handler.clone(),
+            100,
+            store_opts.clone(),
+        );
+        let verification_store = VerificationStore::new_with_opts(
+            db.clone(),
+            event_handler.clone(),
+            100,
+            store_opts.clone(),
+        );
+        let username_proof_store = UsernameProofStore::new_with_opts(
+            db.clone(),
+            event_handler.clone(),
+            100,
+            store_opts.clone(),
+        );
 
-        let link_store = LinkStore::new(db.clone(), event_handler.clone(), 100);
-        let user_data_store = UserDataStore::new(db.clone(), event_handler.clone(), 100);
-        let verification_store = VerificationStore::new(db.clone(), event_handler.clone(), 100);
-        let onchain_event_store = OnchainEventStore::new(db.clone(), event_handler.clone());
-        let username_proof_store = UsernameProofStore::new(db.clone(), event_handler.clone(), 100);
+        let onchain_event_store =
+            OnchainEventStore::new_with_opts(db.clone(), event_handler.clone(), store_opts.clone());
+
         Stores {
             shard_id,
             trie,

@@ -8,7 +8,6 @@ use super::{
     MessagesPage, StoreEventHandler,
 };
 
-use crate::proto::{self};
 use crate::{
     core::error::HubError,
     proto::{
@@ -22,6 +21,10 @@ use crate::{proto::MessageData, storage::constants::UserPostfix};
 use crate::{
     proto::MessageType,
     storage::db::{RocksDB, RocksDbTransactionBatch},
+};
+use crate::{
+    proto::{self},
+    storage::store::account::StoreOptions,
 };
 use std::sync::Arc;
 
@@ -155,6 +158,20 @@ impl UserDataStore {
             db,
             store_event_handler,
             UserDataStoreDef { prune_size_limit },
+        )
+    }
+
+    pub fn new_with_opts(
+        db: Arc<RocksDB>,
+        store_event_handler: Arc<StoreEventHandler>,
+        prune_size_limit: u32,
+        options: StoreOptions,
+    ) -> Store<UserDataStoreDef> {
+        Store::new_with_store_def_opts(
+            db,
+            store_event_handler,
+            UserDataStoreDef { prune_size_limit },
+            options,
         )
     }
 

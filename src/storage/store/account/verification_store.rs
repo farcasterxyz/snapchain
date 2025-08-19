@@ -6,6 +6,7 @@ use super::{
 use crate::{
     core::error::HubError,
     proto::{Protocol, SignatureScheme, VerificationAddAddressBody, VerificationRemoveBody},
+    storage::store::account::StoreOptions,
 };
 use crate::{proto::message_data::Body, storage::db::PageOptions};
 use crate::{
@@ -251,6 +252,20 @@ impl VerificationStore {
             db,
             store_event_handler,
             VerificationStoreDef { prune_size_limit },
+        )
+    }
+
+    pub fn new_with_opts(
+        db: Arc<RocksDB>,
+        store_event_handler: Arc<StoreEventHandler>,
+        prune_size_limit: u32,
+        store_opts: StoreOptions,
+    ) -> Store<VerificationStoreDef> {
+        Store::new_with_store_def_opts(
+            db,
+            store_event_handler,
+            VerificationStoreDef { prune_size_limit },
+            store_opts,
         )
     }
 

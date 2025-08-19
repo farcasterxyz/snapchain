@@ -19,8 +19,9 @@ use crate::version::version::EngineVersion;
 use futures::future::try_join_all;
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
-use std::net;
+use std::io::{self, Write};
 use std::sync::Arc;
+use std::{net, process};
 use tokio::signal::ctrl_c;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tonic::transport::Channel;
@@ -337,7 +338,6 @@ pub async fn bootstrap_using_replication(app_config: &Config) -> Result<(), Box<
         }
         // Handle shutdown signal
         _ = ctrl_c() => {
-            println!("Shutdown signal received to stop!");
             info!("Shutdown signal received, stopping all shard replication tasks");
 
             // Broadcast shutdown to all shard tasks
@@ -354,6 +354,7 @@ pub async fn bootstrap_using_replication(app_config: &Config) -> Result<(), Box<
             let _ = try_join_all(shard_tasks).await;
 
             info!("All shard tasks have been shut down.");
+            process::exit(0);
             return Ok(()); // Exit gracefully after shutdown
         }
     }
@@ -487,7 +488,7 @@ async fn start_shard_replication(
                 "Shutdown signal received for shard {}, stopping replication",
                 shard_id
             );
-            break;
+            all_work_sent = true; // Mark as done to exit the loop
         }
 
         // Send work to available workers
@@ -614,15 +615,6 @@ async fn start_shard_replication(
             break;
         }
 
-        // Check for shutdown signal before sleeping
-        if shutdown_signal.try_recv().is_ok() {
-            info!(
-                "Shutdown signal received for shard {}, stopping replication",
-                shard_id
-            );
-            break;
-        }
-
         // Small delay to avoid busy waiting
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     }
@@ -659,10 +651,12 @@ async fn start_shard_replication(
     } else {
         info!(
             "Shard {} replication stopped due to shutdown signal. Completed ranges: {:?}",
-            shard_id,
-            completed_ranges.get_highest_consecutive_fid(shard_id)
+            shard_id, completed_ranges
         );
     }
+
+    db.close();
+    info!("DB closed for shard {}", shard_id);
 
     Ok(())
 }

@@ -147,6 +147,8 @@ impl RocksDB {
         let mut opts = Options::default();
 
         if self.db_options_type == SnapchainDbOptimizationType::BulkWriteOptimized {
+            opts.set_compaction_style(rocksdb::DBCompactionStyle::Universal);
+
             // 1. Increase the write buffer size. This is the size of a single in-memory memtable.
             // For large, sustained writes, a larger buffer (e.g., 512MB) reduces how often
             // the database flushes to disk
@@ -162,6 +164,8 @@ impl RocksDB {
             // 4. Set the minimum number of write buffers to merge before flushing. 2
             // allows us to "double-buffer" writes, allowing for more efficient flush-to-disk.
             opts.set_min_write_buffer_number_to_merge(2);
+
+            opts.optimize_universal_style_compaction(2 * 1024 * 1024 * 1024);
         }
 
         opts.create_if_missing(true); // Creates a database if it does not exist
@@ -323,7 +327,7 @@ impl RocksDB {
                     // Disabling the WAL (Write Ahead Log) provides a significant performance boost
                     // for bulk writes. If you have BulkWriteOptimized enabled, this can greatly improve
                     // write performance, but a crash means recent data will be lost and need to be re-written.
-                    write_opts.disable_wal(true);
+                    // write_opts.disable_wal(true);
 
                     // Use the custom write options to create the transaction.
                     db.transaction_opt(&write_opts, &Default::default())
