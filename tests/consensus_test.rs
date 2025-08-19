@@ -921,14 +921,24 @@ async fn test_basic_sync() {
 
     // Wait for all nodes to reach the same block height
     let target_height = network.max_block_height();
+    info!("Waiting for target block height {}", target_height);
     network.wait_for_block(target_height).await.unwrap();
+    info!("Reached target block height {}", target_height);
 
     for shard_id in 1..num_shards + 1 {
+        info!(
+            "Waiting for target height {} on shard {}",
+            target_height, shard_id
+        );
         let target_height = network.max_shard_height(shard_id);
         network
             .wait_for_shard_chunk(shard_id, target_height)
             .await
             .unwrap();
+        info!(
+            "Reached target height {} on shard {}",
+            target_height, shard_id
+        );
     }
 
     assert_network_has_messages(&network, 1);
