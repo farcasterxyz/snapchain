@@ -441,7 +441,7 @@ async fn start_shard_replication_outer(
     // DB to compact and flush every 50k FIDs, managing the SST files more efficiently.
 
     let highest_fid = 1_200_000u64; // TODO: Get this from server
-    let step = 20_000;
+    let step = 10_000;
     for fid in (1..=highest_fid).step_by(step) {
         if shutdown_signal.load(Ordering::SeqCst) {
             info!("Shutdown signal received, stopping shard replication");
@@ -500,6 +500,37 @@ async fn start_shard_replication(
         shard_id, initial_completed_ranges
     );
 
+    // Generate work ranges
+    let chunk_size = 100u64;
+    let num_workers = 12;
+    // Track work state - use the initial completed ranges from the parameters
+    let mut completed_ranges = initial_completed_ranges;
+    let mut pending_work: HashMap<u64, (oneshot::Receiver<Result<(), BootstrapError>>, usize)> =
+        HashMap::new();
+    let mut worker_queue: VecDeque<usize> = (0..num_workers).collect();
+
+    let highest_consecutive = completed_ranges.get_highest_consecutive_fid(shard_id);
+    let mut current_fid = if highest_consecutive.fid_end > 0 {
+        highest_consecutive.fid_end + 1
+    } else {
+        1u64
+    };
+
+    let mut all_work_sent = false;
+    if current_fid > max_fid {
+        info!(
+            "No work to do for shard {} as current fid {} exceeds max fid {}",
+            shard_id, current_fid, max_fid
+        );
+        db.close();
+        return Ok(());
+    }
+
+    info!(
+        "start_shard_replication for shard {} starting work at highest fid {}",
+        shard_id, current_fid
+    );
+
     let statsd_client = statsd_client.clone();
 
     // Create a channel for DB commit requests
@@ -543,7 +574,7 @@ async fn start_shard_replication(
 
     // Create worker threads
     let worker_channels = create_workers_for_shard(
-        12,
+        num_workers,
         network,
         shard_id,
         trie_branching_factor,
@@ -552,36 +583,6 @@ async fn start_shard_replication(
         db.clone(),
     )
     .await?;
-
-    // Track work state - use the initial completed ranges from the parameters
-    let mut completed_ranges = initial_completed_ranges;
-    let mut pending_work: HashMap<u64, (oneshot::Receiver<Result<(), BootstrapError>>, usize)> =
-        HashMap::new();
-    let mut worker_queue: VecDeque<usize> = (0..worker_channels.len()).collect();
-
-    // Generate work ranges
-    let chunk_size = 100u64;
-
-    let highest_consecutive = completed_ranges.get_highest_consecutive_fid(shard_id);
-    let mut current_fid = if highest_consecutive.fid_end > 0 {
-        highest_consecutive.fid_end + 1
-    } else {
-        1u64
-    };
-
-    let mut all_work_sent = false;
-    if current_fid > max_fid {
-        info!(
-            "No work to do for shard {} as current fid {} exceeds max fid {}",
-            shard_id, current_fid, max_fid
-        );
-        all_work_sent = true;
-    }
-
-    info!(
-        "start_shard_replication for shard {} starting work at highest fid {}",
-        shard_id, current_fid
-    );
 
     loop {
         // Check for shutdown signal first
