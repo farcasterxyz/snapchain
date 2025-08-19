@@ -875,12 +875,15 @@ async fn test_basic_consensus() {
     let mut network = TestNetwork::create(3, num_shards).await;
     network.start_validators().await;
 
+    info!("Registering fid {}", 1000);
     network.register_and_wait_for_fid(1000).await.unwrap();
+    info!("Sending cast for fid {}", 1000);
     let cast = network
         .send_and_wait_for_cast(1000, "Hello, world")
         .await
         .unwrap();
 
+    info!("Waiting for next block on all shards");
     // Wait for nodes to reach the next block height
     network.wait_for_next_block_on_all_shards().await;
 
@@ -906,12 +909,15 @@ async fn test_basic_sync() {
         network.start_validator_node(i).await;
     }
 
+    info!("Registering fid {}", 1000);
     network.register_and_wait_for_fid(1000).await.unwrap();
+    info!("Sending cast for fid {}", 1000);
     let cast = network
         .send_and_wait_for_cast(1000, "Hello, world")
         .await
         .unwrap();
 
+    info!("Waiting for next block on all shards");
     network.wait_for_next_block_on_all_shards().await;
 
     assert_network_has_messages(&network, 1);
@@ -958,12 +964,15 @@ async fn test_read_node() {
     let mut network = TestNetwork::create(3, num_shards).await;
     network.start_validators().await;
 
+    info!("Registering fid {}", 1000);
     network.register_and_wait_for_fid(1000).await.unwrap();
+    info!("Sending cast for fid {}", 1000);
     let cast = network
         .send_and_wait_for_cast(1000, "Hello, world")
         .await
         .unwrap();
 
+    info!("Waiting for next block on all shards");
     // Wait for the next block to arrive on all nodes
     network.wait_for_next_block_on_all_shards().await;
 
