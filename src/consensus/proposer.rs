@@ -500,14 +500,6 @@ impl Proposer for BlockProposer {
             .collect_confirmed_shard_witnesses(height, version, timeout)
             .await;
 
-        let mempool_timeout = Duration::from_millis(200);
-        let messages = self
-            .engine
-            .mempool_poller
-            .pull_messages(mempool_timeout)
-            .await
-            .unwrap(); // TODO: don't unwrap
-
         let shard_witness = ShardWitness {
             shard_chunk_witnesses: shard_witnesses,
         };
@@ -540,6 +532,14 @@ impl Proposer for BlockProposer {
         let witness_hash = blake3::hash(&shard_witness.encode_to_vec())
             .as_bytes()
             .to_vec();
+
+        let mempool_timeout = Duration::from_millis(200);
+        let messages = self
+            .engine
+            .mempool_poller
+            .pull_messages(mempool_timeout)
+            .await
+            .unwrap(); // TODO: don't unwrap
 
         let proposal = self.engine.propose_state_change(messages, height);
 
