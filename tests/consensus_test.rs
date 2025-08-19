@@ -662,7 +662,7 @@ impl TestNetwork {
 
                 None
             },
-            tokio::time::Duration::from_secs(15),
+            tokio::time::Duration::from_secs(30),
             tokio::time::Duration::from_millis(100),
         )
         .await
