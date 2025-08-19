@@ -734,7 +734,7 @@ impl<T: StoreDef + Clone> Store<T> {
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<HubEvent, HubError> {
         // If the store supports compact state messages, we don't merge messages that don't exist in the compact state
-        if self.store_def.compact_state_type_supported() {
+        if self.store_def.compact_state_type_supported() && !self.store_opts.conflict_free {
             // Get the compact state message
             let compact_state_key = self.store_def.make_compact_state_add_key(message)?;
             if let Some(compact_state_message_bytes) =
@@ -801,9 +801,8 @@ impl<T: StoreDef + Clone> Store<T> {
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<HubEvent, HubError> {
-        // If the store supports compact state messages, we don't merge remove messages before its timestamp
         // If the store supports compact state messages, we don't merge messages that don't exist in the compact state
-        if self.store_def.compact_state_type_supported() {
+        if self.store_def.compact_state_type_supported() && !self.store_opts.conflict_free {
             // Get the compact state message
             let compact_state_key = self.store_def.make_compact_state_add_key(message)?;
             if let Some(compact_state_message_bytes) =
