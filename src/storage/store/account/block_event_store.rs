@@ -7,7 +7,6 @@ use std::sync::Arc;
 use thiserror::Error;
 use tracing::error;
 
-// TODO(aditi): This code definitely needs unit tests
 #[derive(Error, Debug)]
 pub enum BlockEventStorageError {
     #[error(transparent)]
