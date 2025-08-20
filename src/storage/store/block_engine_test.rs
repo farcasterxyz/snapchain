@@ -107,6 +107,33 @@ mod tests {
 
         validate_and_commit_state_change(engine, &state_change)
     }
+    #[tokio::test]
+    async fn test_trie_updated_only_on_commit() {
+        let (mut block_engine, _temp_dir) = setup();
+        let onchain_event = events_factory::create_rent_event(
+            FID_FOR_TEST,
+            1,
+            StorageUnitType::UnitType2025,
+            false,
+            FarcasterNetwork::Devnet,
+        );
+        let height = block_engine.get_confirmed_height().increment();
+        let state_change = block_engine.propose_state_change(
+            vec![MempoolMessage::ValidatorMessage(ValidatorMessage {
+                on_chain_event: Some(onchain_event),
+                fname_transfer: None,
+            })],
+            height,
+        );
+        assert!(!state_change.new_state_root.is_empty());
+        assert!(block_engine.trie_root_hash().is_empty());
+
+        block_engine.validate_state_change(&state_change, height);
+        assert!(block_engine.trie_root_hash().is_empty());
+
+        block_engine.commit_block(&state_change_to_block(height.block_number, &state_change));
+        assert_eq!(block_engine.trie_root_hash(), state_change.new_state_root);
+    }
 
     #[tokio::test]
     async fn test_empty_block() {
@@ -211,31 +238,6 @@ mod tests {
         assert!(!valid);
 
         block_engine.commit_block(&state_change_to_block(height.block_number, &state_change));
-    }
-
-    #[tokio::test]
-    async fn test_trie_updated_only_on_commit() {
-        let (mut block_engine, _temp_dir) = setup();
-        let onchain_event = events_factory::create_rent_event(
-            FID_FOR_TEST,
-            1,
-            StorageUnitType::UnitType2025,
-            false,
-            FarcasterNetwork::Devnet,
-        );
-        let height = block_engine.get_confirmed_height().increment();
-        let state_change = block_engine.propose_state_change(
-            vec![MempoolMessage::ValidatorMessage(ValidatorMessage {
-                on_chain_event: Some(onchain_event),
-                fname_transfer: None,
-            })],
-            height,
-        );
-        assert!(!state_change.new_state_root.is_empty());
-        assert!(block_engine.trie_root_hash().is_empty());
-
-        validate_and_commit_state_change(&mut block_engine, &state_change);
-        assert_eq!(block_engine.trie_root_hash(), state_change.new_state_root);
     }
 
     #[tokio::test]
