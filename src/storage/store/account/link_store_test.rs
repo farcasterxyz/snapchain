@@ -4,7 +4,7 @@ mod tests {
     use crate::proto::link_body::Target;
     use crate::proto::{self as message, hub_event, HubEventType};
     use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
-    use crate::storage::store::account::{LinkStore, Store, StoreEventHandler};
+    use crate::storage::store::account::{LinkStore, Store, StoreEventHandler, StoreOptions};
     use crate::storage::util::{decrement_vec_u8, increment_vec_u8};
     use crate::utils::factory::messages_factory;
     use std::sync::Arc;
@@ -19,6 +19,27 @@ mod tests {
 
         let event_handler = StoreEventHandler::new();
         let store = LinkStore::new(db.clone(), event_handler.clone(), 10);
+
+        (store, db.clone(), temp_dir)
+    }
+
+    fn create_test_conflict_free_store() -> (Store<LinkStore>, Arc<RocksDB>, TempDir) {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = RocksDB::new(db_path.to_str().unwrap());
+        db.open().unwrap();
+        let db = Arc::new(db);
+
+        let event_handler = StoreEventHandler::new();
+        let store = LinkStore::new_with_opts(
+            db.clone(),
+            event_handler.clone(),
+            10,
+            StoreOptions {
+                conflict_free: true,
+                save_hub_events: false,
+            },
+        );
 
         (store, db.clone(), temp_dir)
     }
@@ -1406,6 +1427,69 @@ mod tests {
         );
 
         // Verify only one message is stored
+        let retrieved = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, link_remove);
+    }
+
+    #[test]
+    fn test_merge_link_remove_before_compact_state_fails() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let link_compact_state = messages_factory::links::create_link_compact_state(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            vec![TARGET_FID],
+            None,
+            None,
+        );
+        merge_message_success(&store, &db, &link_compact_state);
+
+        let link_remove = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(link_compact_state.data.unwrap().timestamp - 1),
+            None,
+        );
+
+        merge_message_failure(
+            &store,
+            &link_remove,
+            "bad_request.prunable",
+            "Remove message earlier than the compact state message will be immediately pruned",
+        );
+    }
+
+    #[test]
+    fn test_merge_link_remove_before_compact_state_succeeds_for_conflict_free() {
+        let (store, db, _temp_dir) = create_test_conflict_free_store();
+
+        let link_compact_state = messages_factory::links::create_link_compact_state(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            vec![TARGET_FID],
+            None,
+            None,
+        );
+        merge_message_success(&store, &db, &link_compact_state);
+
+        let link_remove = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(link_compact_state.data.unwrap().timestamp - 1),
+            None,
+        );
+        merge_message_success(&store, &db, &link_remove);
+
+        // Verify the message was stored
         let retrieved = LinkStore::get_link_remove(
             &store,
             FID_FOR_TEST,

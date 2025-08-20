@@ -8,6 +8,7 @@ use crate::proto::{
 };
 use crate::storage::constants::{OnChainEventPostfix, RootPrefix, PAGE_SIZE_MAX};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch, RocksdbError};
+use crate::storage::store::account::StoreOptions;
 use crate::storage::util::increment_vec_u8;
 use prost::{DecodeError, Message};
 use std::collections::VecDeque;
@@ -78,10 +79,13 @@ pub fn merge_onchain_event(
     db: &RocksDB,
     txn: &mut RocksDbTransactionBatch,
     onchain_event: OnChainEvent,
+    store_opts: &StoreOptions,
 ) -> Result<(), OnchainEventStorageError> {
     let primary_key = make_onchain_event_primary_key(&onchain_event);
-    if let Some(_) = get_from_db_or_txn(db, txn, &primary_key)? {
-        return Err(OnchainEventStorageError::DuplicateOnchainEvent);
+    if !store_opts.conflict_free {
+        if let Some(_) = get_from_db_or_txn(db, txn, &primary_key)? {
+            return Err(OnchainEventStorageError::DuplicateOnchainEvent);
+        }
     }
     txn.put(primary_key, onchain_event.encode_to_vec());
     build_secondary_indices(db, txn, &onchain_event)?;
@@ -473,6 +477,7 @@ impl StorageSlot {
 pub struct OnchainEventStore {
     pub(crate) db: Arc<RocksDB>,
     store_event_handler: Arc<StoreEventHandler>,
+    store_opts: StoreOptions,
 }
 
 impl OnchainEventStore {
@@ -480,6 +485,19 @@ impl OnchainEventStore {
         OnchainEventStore {
             db,
             store_event_handler,
+            store_opts: StoreOptions::default(),
+        }
+    }
+
+    pub fn new_with_opts(
+        db: Arc<RocksDB>,
+        store_event_handler: Arc<StoreEventHandler>,
+        store_opts: StoreOptions,
+    ) -> OnchainEventStore {
+        OnchainEventStore {
+            db,
+            store_event_handler,
+            store_opts,
         }
     }
 
@@ -488,7 +506,7 @@ impl OnchainEventStore {
         onchain_event: OnChainEvent,
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<HubEvent, OnchainEventStorageError> {
-        merge_onchain_event(&self.db, txn, onchain_event.clone())?;
+        merge_onchain_event(&self.db, txn, onchain_event.clone(), &self.store_opts)?;
         let hub_event = &mut HubEvent::from(
             HubEventType::MergeOnChainEvent,
             proto::hub_event::Body::MergeOnChainEventBody(MergeOnChainEventBody {
