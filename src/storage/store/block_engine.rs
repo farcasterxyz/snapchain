@@ -442,10 +442,10 @@ impl BlockEngine {
             vec![],
         );
 
-        let mut txn = RocksDbTransactionBatch::new();
         let version =
             EngineVersion::version_for(&FarcasterTime::new(block_timestamp), self.network);
         if version.is_enabled(ProtocolFeature::WriteDataToShardZero) {
+            let mut txn = RocksDbTransactionBatch::new();
             match self.replay_proposal(
                 &mut txn,
                 &block.transactions,
@@ -481,7 +481,6 @@ impl BlockEngine {
             if result.is_err() {
                 error!("Failed to store block: {:?}", result.err());
             }
-            self.db.commit(txn).unwrap();
         }
     }
 
