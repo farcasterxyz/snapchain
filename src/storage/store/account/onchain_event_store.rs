@@ -591,6 +591,8 @@ impl OnchainEventStore {
     }
 
     pub fn get_highest_fid(&self) -> Result<Option<u64>, OnchainEventStorageError> {
+        // start prefix is the key prefix for the OnChainEvents, and we'll increment the last byte of it to get the stop prefix
+        // this way, when we iterate backwards, we'll get the last (highest) FID first, so we can stop as soon as we find it
         let start_prefix = make_onchain_event_type_prefix(OnChainEventType::EventTypeIdRegister);
         let stop_prefix = increment_vec_u8(&start_prefix);
 
