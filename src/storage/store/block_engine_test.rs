@@ -206,7 +206,6 @@ mod tests {
     #[tokio::test]
     async fn test_user_messages_put_in_block_if_storage_purchased() {
         let (mut block_engine, _temp_dir) = setup(None);
-        // These messages are included in the transaction list but not included in the state root.
         let onchain_event = events_factory::create_rent_event(
             FID_FOR_TEST,
             1,
