@@ -17,7 +17,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::mpsc;
 
-    fn setup() -> (BlockEngine, TempDir) {
+    fn setup(network: Option<FarcasterNetwork>) -> (BlockEngine, TempDir) {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let db = RocksDB::new(db_path.to_str().unwrap());
@@ -36,7 +36,7 @@ mod tests {
             db,
             100,
             Some(tx),
-            FarcasterNetwork::Devnet,
+            network.unwrap_or(FarcasterNetwork::Devnet),
             5, // heartbeat_block_interval
         );
 
@@ -109,7 +109,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_trie_updated_only_on_commit() {
-        let (mut block_engine, _temp_dir) = setup();
+        let (mut block_engine, _temp_dir) = setup(None);
         let onchain_event = events_factory::create_rent_event(
             FID_FOR_TEST,
             1,
@@ -137,25 +137,57 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_block() {
-        let (mut block_engine, _temp_dir) = setup();
+        let (mut block_engine, _temp_dir) = setup(None);
         let height = block_engine.get_confirmed_height().increment();
         let state_change = block_engine.propose_state_change(vec![], height);
 
         assert_eq!(state_change.transactions.len(), 0);
         assert!(state_change.events.is_empty());
         assert!(state_change.new_state_root.is_empty());
-        assert_eq!(
-            state_change.events_hash,
-            blake3::hash(b"").as_bytes().to_vec()
-        );
+        assert!(state_change.events_hash.is_empty());
 
         validate_and_commit_state_change(&mut block_engine, &state_change);
         assert_eq!(block_engine.get_confirmed_height(), height);
     }
 
     #[tokio::test]
+    async fn test_mainnet_propose_validate_commit() {
+        // Test that the pipeline works while new features are not active on mainnet
+        let (mut block_engine, _temp_dir) = setup(Some(FarcasterNetwork::Mainnet));
+        let height = block_engine.get_confirmed_height().increment();
+        let state_change = block_engine.propose_state_change(vec![], height);
+
+        assert_eq!(state_change.transactions.len(), 0);
+        assert!(state_change.events.is_empty());
+        assert!(state_change.new_state_root.is_empty());
+        assert!(state_change.events_hash.is_empty());
+
+        validate_and_commit_state_change(&mut block_engine, &state_change);
+        assert_eq!(block_engine.get_confirmed_height(), height);
+    }
+
+    #[tokio::test]
+    async fn test_validate_and_commit_old_blocks() {
+        // Test that validate and commit will work for old blocks even after features are active
+        let (mut block_engine, _temp_dir) = setup(Some(FarcasterNetwork::Mainnet));
+
+        let height = block_engine.get_confirmed_height().increment();
+        validate_and_commit_state_change(
+            &mut block_engine,
+            &ShardStateChange {
+                timestamp: FarcasterTime::from_unix_seconds(1752685200),
+                new_state_root: vec![],
+                events_hash: vec![],
+                transactions: vec![],
+                events: vec![],
+            },
+        );
+        assert_eq!(block_engine.get_confirmed_height(), height);
+    }
+
+    #[tokio::test]
     async fn test_user_messages_dropped_if_no_storage() {
-        let (mut block_engine, _temp_dir) = setup();
+        let (mut block_engine, _temp_dir) = setup(None);
         let height = block_engine.get_confirmed_height().increment();
         // These messages are included in the transaction list but not included in the state root.
         let messages = vec![MempoolMessage::UserMessage(
@@ -165,10 +197,7 @@ mod tests {
         assert_eq!(state_change.transactions.len(), 0);
         assert!(state_change.events.is_empty());
         assert!(state_change.new_state_root.is_empty());
-        assert_eq!(
-            state_change.events_hash,
-            blake3::hash(b"").as_bytes().to_vec()
-        );
+        assert!(state_change.events_hash.is_empty());
 
         validate_and_commit_state_change(&mut block_engine, &state_change);
         assert_eq!(block_engine.get_confirmed_height(), height);
@@ -176,7 +205,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_user_messages_put_in_block_if_storage_purchased() {
-        let (mut block_engine, _temp_dir) = setup();
+        let (mut block_engine, _temp_dir) = setup(None);
         // These messages are included in the transaction list but not included in the state root.
         let onchain_event = events_factory::create_rent_event(
             FID_FOR_TEST,
@@ -205,7 +234,7 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "State change commit failed: merkle trie root hash mismatch")]
     async fn test_invalid_state_root() {
-        let (mut block_engine, _temp_dir) = setup();
+        let (mut block_engine, _temp_dir) = setup(None);
         let height = block_engine.get_confirmed_height().increment();
         let invalid_hash = hex::decode("ffffffffffffffffffffffffffffffffffffffff").unwrap();
 
@@ -224,7 +253,7 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "State change commit failed: events hash mismatch")]
     async fn test_invalid_events_hash() {
-        let (mut block_engine, _temp_dir) = setup();
+        let (mut block_engine, _temp_dir) = setup(None);
         let height = block_engine.get_confirmed_height().increment();
         let invalid_hash = hex::decode("ffffffffffffffffffffffffffffffffffffffff").unwrap();
 
@@ -242,7 +271,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_onchain_event() {
-        let (mut block_engine, _temp_dir) = setup();
+        let (mut block_engine, _temp_dir) = setup(None);
         let onchain_event = events_factory::create_rent_event(
             FID_FOR_TEST,
             1,
@@ -269,7 +298,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_heartbeat_generated_on_interval() {
-        let (mut block_engine, _temp_dir) = setup();
+        let (mut block_engine, _temp_dir) = setup(None);
         for _ in 0..4 {
             let height = block_engine.get_confirmed_height().increment();
             let state_change = block_engine.propose_state_change(vec![], height);
