@@ -499,7 +499,7 @@ impl Proposer for BlockProposer {
             .mempool_poller
             .pull_messages(mempool_timeout)
             .await
-            .unwrap(); // TODO: don't unwrap
+            .unwrap();
 
         let proposal = self.engine.propose_state_change(messages, height);
         let version = EngineVersion::version_for(&proposal.timestamp, self.network);

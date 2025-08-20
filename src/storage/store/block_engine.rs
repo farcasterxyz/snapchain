@@ -270,9 +270,8 @@ impl BlockEngine {
         let state_change = if version.is_enabled(ProtocolFeature::WriteDataToShardZero) {
             let result = self
                 .prepare_proposal(&mut txn, messages, height, &timestamp)
-                .unwrap(); //TODO: don't unwrap()
+                .unwrap();
 
-            // TODO: this should probably operate automatically via drop trait
             self.trie.reload(&self.db).unwrap();
             result
         } else {
