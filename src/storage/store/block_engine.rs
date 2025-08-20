@@ -394,7 +394,6 @@ impl BlockEngine {
         let now = std::time::Instant::now();
         let transactions = &shard_state_change.transactions;
         let shard_root = &shard_state_change.new_state_root;
-        // We ignore the events here, we don't know what they are yet. If state roots match, the events should match
 
         let proposal_result = self.replay_proposal(
             &mut txn,
