@@ -254,9 +254,9 @@ impl ShardEngine {
 
                 let maybe_onchainevents =
                     if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
-                        Some(pending_onchain_events.as_slice())
+                        pending_onchain_events.as_slice()
                     } else {
-                        None
+                        &[]
                     };
 
                 let storage_slot = self
@@ -1062,76 +1062,6 @@ impl ShardEngine {
         Ok(events)
     }
 
-    // Compute the keys that need to be updated in the trie. Returns (inserts, deletes)
-    fn get_trie_update_keys(
-        &self,
-        event: &proto::HubEvent,
-    ) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>), EngineError> {
-        let mut inserts = Vec::new();
-        let mut deletes = Vec::new();
-
-        match &event.body {
-            Some(proto::hub_event::Body::MergeMessageBody(merge)) => {
-                if let Some(msg) = &merge.message {
-                    inserts.push(TrieKey::for_message(&msg));
-                }
-                for deleted_message in &merge.deleted_messages {
-                    deletes.push(TrieKey::for_message(&deleted_message));
-                }
-            }
-            Some(proto::hub_event::Body::MergeOnChainEventBody(merge)) => {
-                if let Some(onchain_event) = &merge.on_chain_event {
-                    inserts.push(TrieKey::for_onchain_event(&onchain_event));
-                }
-            }
-            Some(proto::hub_event::Body::PruneMessageBody(prune)) => {
-                if let Some(msg) = &prune.message {
-                    deletes.push(TrieKey::for_message(&msg));
-                }
-            }
-
-            Some(proto::hub_event::Body::RevokeMessageBody(revoke)) => {
-                if let Some(msg) = &revoke.message {
-                    deletes.push(TrieKey::for_message(&msg));
-                }
-            }
-            Some(proto::hub_event::Body::MergeUsernameProofBody(merge)) => {
-                if let Some(msg) = &merge.username_proof_message {
-                    inserts.push(TrieKey::for_message(&msg));
-                }
-                if let Some(msg) = &merge.deleted_username_proof_message {
-                    deletes.push(TrieKey::for_message(&msg));
-                }
-                if let Some(proof) = &merge.username_proof {
-                    if proof.r#type == proto::UserNameType::UsernameTypeFname as i32
-                        && proof.fid != 0
-                    // Deletes should not be added to the trie
-                    {
-                        let name = str::from_utf8(&proof.name).unwrap().to_string();
-                        inserts.push(TrieKey::for_fname(proof.fid, &name));
-                    }
-                }
-                if let Some(proof) = &merge.deleted_username_proof {
-                    if proof.r#type == proto::UserNameType::UsernameTypeFname as i32 {
-                        let name = str::from_utf8(&proof.name).unwrap().to_string();
-                        deletes.push(TrieKey::for_fname(proof.fid, &name));
-                    }
-                }
-            }
-            Some(proto::hub_event::Body::MergeFailure(_)) => {
-                // Merge failures don't affect the trie. They are only for event subscribers
-            }
-            Some(proto::hub_event::Body::BlockConfirmedBody(_)) => {
-                // BLOCK_CONFIRMED events don't affect the trie state.
-            }
-            &None => {
-                // This should never happen
-                panic!("No body in event");
-            }
-        };
-        Ok((inserts, deletes))
-    }
-
     fn update_trie(
         &mut self,
         ctx: &merkle_trie::Context,
@@ -1139,18 +1069,10 @@ impl ShardEngine {
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<(), EngineError> {
         let now = std::time::Instant::now();
-        let (inserts, deletes) = self.get_trie_update_keys(event)?;
 
-        for key in inserts {
-            self.stores
-                .trie
-                .insert(ctx, &self.db, txn_batch, vec![&key])?;
-        }
-        for key in deletes {
-            self.stores
-                .trie
-                .delete(ctx, &self.db, txn_batch, vec![&key])?;
-        }
+        self.stores
+            .trie
+            .update_for_event(ctx, &self.db, event, txn_batch)?;
 
         let elapsed = now.elapsed();
         self.metrics
@@ -1172,7 +1094,7 @@ impl ShardEngine {
         let mut all_deletes = HashSet::new();
 
         for event in events {
-            let (inserts, deletes) = self.get_trie_update_keys(event)?;
+            let (inserts, deletes) = TrieKey::for_hub_event(event);
 
             // Merge the inserts and deletes
             for key in inserts {
