@@ -107,16 +107,20 @@ enum BlockEventType {
 message HeartbeatEventBody {
 }
 
-message BlockEvent {
+message BlockEventData {
   uint64 seqnum = 1;
-  bytes hash = 2;
-  BlockEventType type = 3;
-  uint64 block_number = 4;
-  uint64 event_index = 5;
-  uint64 block_timestamp = 6;
+  BlockEventType type = 2;
+  uint64 block_number = 3;
+  uint64 event_index = 4;
+  uint64 block_timestamp = 5;
   oneof body {
-    HeartbeatEventBody heartbeat_event_body = 7; // Placeholder
+    HeartbeatEventBody heartbeat_event_body = 6; 
   };
+}
+
+message BlockEvent {
+  bytes hash = 1;
+  BlockEventData data = 2;
 }
 
 // Block types

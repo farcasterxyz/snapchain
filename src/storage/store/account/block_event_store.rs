@@ -21,6 +21,9 @@ pub enum BlockEventStorageError {
 
     #[error("Error decoding shard chunk")]
     DecodeError(#[from] prost::DecodeError),
+
+    #[error("Event missing body")]
+    EventMissingBody,
 }
 
 /** A page of messages returned from various APIs */
@@ -114,7 +117,13 @@ pub fn put_block_event(
     block_event: &BlockEvent,
     txn: &mut RocksDbTransactionBatch,
 ) -> Result<(), BlockEventStorageError> {
-    let primary_key = make_block_event_key(block_event.seqnum);
+    let primary_key = make_block_event_key(
+        block_event
+            .data
+            .as_ref()
+            .ok_or(BlockEventStorageError::EventMissingBody)?
+            .seqnum,
+    );
     txn.put(primary_key.clone(), block_event.encode_to_vec());
     Ok(())
 }
@@ -140,7 +149,11 @@ impl BlockEventStore {
     pub fn max_seqnum(&self) -> Result<u64, BlockEventStorageError> {
         match get_last_block_event(&self.db)? {
             None => Ok(0),
-            Some(event) => Ok(event.seqnum),
+            Some(event) => Ok(event
+                .data
+                .as_ref()
+                .ok_or(BlockEventStorageError::EventMissingBody)?
+                .seqnum),
         }
     }
 }

@@ -280,9 +280,12 @@ mod tests {
         let height = block_engine.get_confirmed_height().increment();
         let state_change = block_engine.propose_state_change(vec![], height);
         assert_eq!(state_change.events.len(), 1);
-        assert_eq!(state_change.events[0].seqnum, 1);
-        assert_eq!(state_change.events[0].block_number, height.block_number);
-        assert_eq!(state_change.events[0].event_index, 0);
+        assert_eq!(state_change.events[0].data.as_ref().unwrap().seqnum, 1);
+        assert_eq!(
+            state_change.events[0].data.as_ref().unwrap().block_number,
+            height.block_number
+        );
+        assert_eq!(state_change.events[0].data.as_ref().unwrap().event_index, 0);
         validate_and_commit_state_change(&mut block_engine, &state_change);
 
         for _ in 0..4 {
@@ -296,9 +299,12 @@ mod tests {
         let height = block_engine.get_confirmed_height().increment();
         let state_change = block_engine.propose_state_change(vec![], height);
         assert_eq!(state_change.events.len(), 1);
-        assert_eq!(state_change.events[0].seqnum, 2);
-        assert_eq!(state_change.events[0].block_number, height.block_number);
-        assert_eq!(state_change.events[0].event_index, 0);
+        assert_eq!(state_change.events[0].data.as_ref().unwrap().seqnum, 2);
+        assert_eq!(
+            state_change.events[0].data.as_ref().unwrap().block_number,
+            height.block_number
+        );
+        assert_eq!(state_change.events[0].data.as_ref().unwrap().event_index, 0);
         validate_and_commit_state_change(&mut block_engine, &state_change);
     }
 }

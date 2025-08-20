@@ -2,8 +2,8 @@ use crate::consensus::proposer::ProposalSource;
 use crate::core::{types::Height, util::FarcasterTime};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::{
-    block_event, Block, BlockEvent, BlockEventType, FarcasterNetwork, HeartbeatEventBody,
-    OnChainEvent, ShardChunkWitness, Transaction,
+    block_event_data, Block, BlockEvent, BlockEventData, BlockEventType, FarcasterNetwork,
+    HeartbeatEventBody, OnChainEvent, ShardChunkWitness, Transaction,
 };
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
@@ -152,18 +152,23 @@ impl BlockEngine {
         let mut events = vec![];
         if height.block_number % self.heartbeat_block_interval == 0 {
             let event_seqnum = self.block_event_store.max_seqnum().unwrap() + 1;
-            let mut event = BlockEvent {
+            let data = BlockEventData {
                 seqnum: event_seqnum,
-                hash: vec![],
                 r#type: BlockEventType::Heartbeat as i32,
                 block_number: height.block_number,
                 event_index: events.len() as u64,
                 block_timestamp: timestamp.to_u64(),
-                body: Some(block_event::Body::HeartbeatEventBody(HeartbeatEventBody {})),
+                body: Some(block_event_data::Body::HeartbeatEventBody(
+                    HeartbeatEventBody {},
+                )),
             };
-            event.hash = blake3::hash(event.encode_to_vec().as_slice())
+            let hash = blake3::hash(data.encode_to_vec().as_slice())
                 .as_bytes()
                 .to_vec();
+            let event = BlockEvent {
+                hash,
+                data: Some(data),
+            };
             // Store these events so
             // (1) It's possible to figuure out the max seqnum easily
             // (2) It's possible to query over them in an rpc and see what has been produced.
