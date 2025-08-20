@@ -1157,7 +1157,8 @@ impl ShardEngine {
         }
 
         let elapsed = now.elapsed();
-        self.time_with_shard("update_trie_time_us", elapsed.as_micros() as u64);
+        self.metrics
+            .time_with_shard("update_trie_time_us", elapsed.as_micros() as u64);
         Ok(())
     }
 
