@@ -828,6 +828,24 @@ impl informalsystems_malachitebft_core_types::Validator<SnapchainValidatorContex
     }
 }
 
+impl proto::BlockEvent {
+    pub fn seqnum(&self) -> u64 {
+        self.data.as_ref().unwrap().seqnum
+    }
+
+    pub fn block_number(&self) -> u64 {
+        self.data.as_ref().unwrap().block_number
+    }
+
+    pub fn block_timestamp(&self) -> u64 {
+        self.data.as_ref().unwrap().block_timestamp
+    }
+
+    pub fn event_index(&self) -> u64 {
+        self.data.as_ref().unwrap().event_index
+    }
+}
+
 impl proto::Commits {
     pub fn to_commit_certificate(
         &self,

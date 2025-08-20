@@ -42,12 +42,14 @@ impl proto::ValidatorMessage {
         }
 
         if let Some(block_event) = &self.block_event {
-            if let Some(body) = &block_event.body {
-                match body {
-                    proto::block_event::Body::HeartbeatEventBody(_body) =>
-                    // These messages don't have an fid associated with them, just return 0 explicitly here to make it clear
-                    {
-                        return 0
+            if let Some(data) = &block_event.data {
+                if let Some(body) = &data.body {
+                    match body {
+                        proto::block_event_data::Body::HeartbeatEventBody(_body) =>
+                        // These messages don't have an fid associated with them, just return 0 explicitly here to make it clear
+                        {
+                            return 0
+                        }
                     }
                 }
             }

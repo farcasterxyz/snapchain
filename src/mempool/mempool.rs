@@ -200,8 +200,12 @@ impl proto::ValidatorMessage {
         if let Some(block_event) = &self.block_event {
             return MempoolKey::new(
                 MempoolMessageKind::ValidatorMessage,
-                block_event.block_timestamp,
-                format!("{}-{}", block_event.block_number, block_event.event_index),
+                block_event.block_timestamp(),
+                format!(
+                    "{}-{}",
+                    block_event.block_number(),
+                    block_event.event_index()
+                ),
             );
         }
         todo!();

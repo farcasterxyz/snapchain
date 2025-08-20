@@ -62,7 +62,7 @@ impl BlockReceiver {
             for event in block.events.iter() {
                 info!(
                     shard = self.shard_id.to_string(),
-                    seqnum = event.seqnum.to_string(),
+                    seqnum = event.data.as_ref().unwrap().seqnum.to_string(),
                     "Submitting block event to mempool"
                 );
                 self.mempool_tx
@@ -120,12 +120,12 @@ impl BlockReceiver {
             // The db is the source of truth, it's possible to read this out of the events_rx channel but delivery over that channel is not reliable (it's a broadcast channel) we may not have the most up to date state.
             let last_stored_event_seqnum = self.stores.block_event_store.max_seqnum().unwrap();
             let last_event_in_block = block.events.last().unwrap();
-            if last_event_in_block.seqnum < last_stored_event_seqnum {
+            if last_event_in_block.seqnum() < last_stored_event_seqnum {
                 continue;
             }
 
             let first_event_in_block = block.events.first().unwrap();
-            if first_event_in_block.seqnum > last_stored_event_seqnum + 1 {
+            if first_event_in_block.seqnum() > last_stored_event_seqnum + 1 {
                 let last_stored_event = self
                     .stores
                     .block_event_store
@@ -133,7 +133,7 @@ impl BlockReceiver {
                     .unwrap();
                 let last_block_number = match &last_stored_event {
                     None => 0,
-                    Some(last_event) => last_event.block_number,
+                    Some(last_event) => last_event.block_number(),
                 };
                 self.sync_missing_blocks(
                     last_block_number,
@@ -141,7 +141,10 @@ impl BlockReceiver {
                 )
                 .await;
                 if let Err(BlockReceiverError::ConfirmationTimedOut) = self
-                    .wait_for_confirmation(first_event_in_block.seqnum - 1, Duration::from_secs(10))
+                    .wait_for_confirmation(
+                        first_event_in_block.seqnum() - 1,
+                        Duration::from_secs(10),
+                    )
                     .await
                 {
                     // TODO(aditi): Right now, we will just wait for the next block with events and try again. In the future we may want better retry logic
@@ -151,7 +154,7 @@ impl BlockReceiver {
             self.submit_block(&block).await;
             // If confirmation fails, we'll try move onto the next block and retry this block if needed.
             let _ = self
-                .wait_for_confirmation(last_event_in_block.seqnum, Duration::from_secs(1))
+                .wait_for_confirmation(last_event_in_block.seqnum(), Duration::from_secs(1))
                 .await;
         }
     }

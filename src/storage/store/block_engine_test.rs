@@ -98,10 +98,14 @@ mod tests {
     pub fn commit_event(engine: &mut BlockEngine, event: &OnChainEvent) -> Block {
         let height = engine.get_confirmed_height().increment();
         let state_change = engine.propose_state_change(
-            vec![MempoolMessage::ValidatorMessage(ValidatorMessage {
-                on_chain_event: Some(event.clone()),
-                fname_transfer: None,
-            })],
+            vec![MempoolMessage::ValidatorMessage {
+                for_shard: None,
+                message: (ValidatorMessage {
+                    on_chain_event: Some(event.clone()),
+                    fname_transfer: None,
+                    block_event: None,
+                }),
+            }],
             height,
         );
 
@@ -119,10 +123,14 @@ mod tests {
         );
         let height = block_engine.get_confirmed_height().increment();
         let state_change = block_engine.propose_state_change(
-            vec![MempoolMessage::ValidatorMessage(ValidatorMessage {
-                on_chain_event: Some(onchain_event),
-                fname_transfer: None,
-            })],
+            vec![MempoolMessage::ValidatorMessage {
+                for_shard: None,
+                message: (ValidatorMessage {
+                    on_chain_event: Some(onchain_event.clone()),
+                    fname_transfer: None,
+                    block_event: None,
+                }),
+            }],
             height,
         );
         assert!(!state_change.new_state_root.is_empty());
