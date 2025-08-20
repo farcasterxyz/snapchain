@@ -122,7 +122,7 @@ impl Default for Config {
             consensus_start_delay: 2,
             sync_request_timeout: Duration::from_secs(2),
             sync_status_update_interval: Duration::from_secs(10),
-            heartbeat_block_interval: 10, // TODO(aditi): Set to 100 before merging
+            heartbeat_block_interval: 100,
         }
     }
 }
