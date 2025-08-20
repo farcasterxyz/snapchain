@@ -493,8 +493,16 @@ impl Proposer for BlockProposer {
         round: Round,
         timeout: Duration,
     ) -> FullProposal {
-        let timestamp = FarcasterTime::current();
-        let version = EngineVersion::version_for(&timestamp, self.network);
+        let mempool_timeout = Duration::from_millis(200);
+        let messages = self
+            .engine
+            .mempool_poller
+            .pull_messages(mempool_timeout)
+            .await
+            .unwrap(); // TODO: don't unwrap
+
+        let proposal = self.engine.propose_state_change(messages, height);
+        let version = EngineVersion::version_for(&proposal.timestamp, self.network);
 
         let shard_witnesses = self
             .collect_confirmed_shard_witnesses(height, version, timeout)
@@ -533,16 +541,6 @@ impl Proposer for BlockProposer {
             .as_bytes()
             .to_vec();
 
-        let mempool_timeout = Duration::from_millis(200);
-        let messages = self
-            .engine
-            .mempool_poller
-            .pull_messages(mempool_timeout)
-            .await
-            .unwrap(); // TODO: don't unwrap
-
-        let proposal = self.engine.propose_state_change(messages, height);
-
         let block_header = BlockHeader {
             parent_hash,
             chain_id: self.network as i32,
@@ -550,9 +548,10 @@ impl Proposer for BlockProposer {
             timestamp: proposal.timestamp.to_u64(),
             height: Some(height.clone()),
             shard_witnesses_hash: witness_hash,
-            state_root: proposal.new_state_root,
-            events_hash: proposal.events_hash,
+            state_root: proposal.new_state_root.clone(),
+            events_hash: proposal.events_hash.clone(),
         };
+
         let hash = blake3::hash(&block_header.encode_to_vec())
             .as_bytes()
             .to_vec();
@@ -562,8 +561,8 @@ impl Proposer for BlockProposer {
             hash: hash.clone(),
             shard_witness: Some(shard_witness),
             commits: None,
-            transactions: proposal.transactions,
-            events: proposal.events,
+            transactions: proposal.transactions.clone(),
+            events: proposal.events.clone(),
         };
 
         let proposal = FullProposal {
@@ -642,6 +641,7 @@ impl Proposer for BlockProposer {
                 events_hash: header.events_hash.clone(),
                 events: block.events.clone(),
             };
+
             if !self.engine.validate_state_change(&state_change, height) {
                 return Validity::Invalid;
             };

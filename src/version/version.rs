@@ -29,6 +29,7 @@ pub enum ProtocolFeature {
     FutureTimestampValidation,
     DependentMessagesInBulkSubmit,
     DecoupleShardZeroBlockProduction,
+    WriteDataToShardZero,
 }
 
 pub struct VersionSchedule {
@@ -144,7 +145,8 @@ impl EngineVersion {
             | ProtocolFeature::PrimaryAddresses => self >= &EngineVersion::V5,
             ProtocolFeature::FutureTimestampValidation => self >= &EngineVersion::V6,
             ProtocolFeature::DependentMessagesInBulkSubmit => self >= &EngineVersion::V7,
-            ProtocolFeature::DecoupleShardZeroBlockProduction => self >= &EngineVersion::V8,
+            ProtocolFeature::DecoupleShardZeroBlockProduction
+            | ProtocolFeature::WriteDataToShardZero => self >= &EngineVersion::V8,
         }
     }
 

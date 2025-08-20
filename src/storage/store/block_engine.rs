@@ -15,7 +15,7 @@ use crate::storage::store::BlockStore;
 use crate::storage::trie::merkle_trie::{self, MerkleTrie, TrieKey};
 use crate::storage::trie::{self};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
-use blake3::Hash;
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use itertools::Itertools;
 use prost::Message;
 use std::sync::Arc;
@@ -148,7 +148,7 @@ impl BlockEngine {
         height: Height,
         timestamp: &FarcasterTime,
         txn: &mut RocksDbTransactionBatch,
-    ) -> (Vec<BlockEvent>, Hash) {
+    ) -> (Vec<BlockEvent>, Vec<u8>) {
         let mut events = vec![];
         if height.block_number % self.heartbeat_block_interval == 0 {
             let event_seqnum = self.block_event_store.max_seqnum().unwrap() + 1;
@@ -176,11 +176,15 @@ impl BlockEngine {
             events.push(event);
         }
 
-        let mut events_hasher = blake3::Hasher::new();
-        for event in events.iter() {
-            events_hasher.update(&event.hash);
-        }
-        let events_hash = events_hasher.finalize();
+        let events_hash = if events.is_empty() {
+            vec![]
+        } else {
+            let mut events_hasher = blake3::Hasher::new();
+            for event in events.iter() {
+                events_hasher.update(&event.hash);
+            }
+            events_hasher.finalize().as_bytes().to_vec()
+        };
 
         (events, events_hash)
     }
@@ -246,7 +250,7 @@ impl BlockEngine {
             timestamp: timestamp.clone(),
             new_state_root: new_root_hash.clone(),
             transactions: snapchain_txns,
-            events_hash: events_hash.as_bytes().to_vec(),
+            events_hash,
             events,
         };
 
@@ -262,19 +266,31 @@ impl BlockEngine {
         let mut txn = RocksDbTransactionBatch::new();
 
         let timestamp = FarcasterTime::current();
-        let result = self
-            .prepare_proposal(&mut txn, messages, height, &timestamp)
-            .unwrap(); //TODO: don't unwrap()
+        let version = EngineVersion::version_for(&timestamp, self.network);
+        let state_change = if version.is_enabled(ProtocolFeature::WriteDataToShardZero) {
+            let result = self
+                .prepare_proposal(&mut txn, messages, height, &timestamp)
+                .unwrap(); //TODO: don't unwrap()
 
-        // TODO: this should probably operate automatically via drop trait
-        self.trie.reload(&self.db).unwrap();
+            // TODO: this should probably operate automatically via drop trait
+            self.trie.reload(&self.db).unwrap();
+            result
+        } else {
+            ShardStateChange {
+                events: vec![],
+                new_state_root: vec![],
+                timestamp: FarcasterTime::current(),
+                events_hash: vec![],
+                transactions: vec![],
+            }
+        };
 
         let proposal_duration = now.elapsed();
         self.metrics
             .time_with_shard("propose_time", proposal_duration.as_millis() as u64);
 
         self.metrics.count("propose.invoked", 1, vec![]);
-        result
+        state_change
     }
 
     fn replay_proposal(
@@ -335,11 +351,11 @@ impl BlockEngine {
         let (block_events, computed_events_hash) =
             self.generate_block_events(height, timestamp, txn_batch);
 
-        if computed_events_hash.as_bytes().to_vec() != *events_hash {
+        if computed_events_hash != *events_hash {
             warn!(
                 shard_id = self.shard_id,
                 expected_events_hash = hex::encode(events_hash),
-                actual_events_hash = hex::encode(computed_events_hash.as_bytes().to_vec()),
+                actual_events_hash = hex::encode(computed_events_hash),
                 "Events hash mismatch"
             );
             return Err(BlockEngineError::EventsHashMismatch);
@@ -370,6 +386,10 @@ impl BlockEngine {
         shard_state_change: &ShardStateChange,
         height: Height,
     ) -> bool {
+        let version = EngineVersion::version_for(&shard_state_change.timestamp, self.network);
+        if !version.is_enabled(ProtocolFeature::WriteDataToShardZero) {
+            return true;
+        }
         let mut txn = RocksDbTransactionBatch::new();
 
         let now = std::time::Instant::now();
@@ -428,28 +448,45 @@ impl BlockEngine {
         );
 
         let mut txn = RocksDbTransactionBatch::new();
-        match self.replay_proposal(
-            &mut txn,
-            &block.transactions,
-            &block.header.as_ref().unwrap().state_root,
-            &block.header.as_ref().unwrap().events_hash,
-            ProposalSource::Commit,
-            height,
-            &FarcasterTime::new(block_timestamp),
-        ) {
-            Err(err) => {
-                error!("State change commit failed: {}", err);
-                panic!("State change commit failed: {}", err);
-            }
-            Ok(_events) => {
-                self.db.commit(txn).unwrap();
-                let result = self.block_store.put_block(block);
-                if result.is_err() {
-                    error!("Failed to store block: {:?}", result.err());
+        let version =
+            EngineVersion::version_for(&FarcasterTime::new(block_timestamp), self.network);
+        if version.is_enabled(ProtocolFeature::WriteDataToShardZero) {
+            match self.replay_proposal(
+                &mut txn,
+                &block.transactions,
+                &block.header.as_ref().unwrap().state_root,
+                &block.header.as_ref().unwrap().events_hash,
+                ProposalSource::Commit,
+                height,
+                &FarcasterTime::new(block_timestamp),
+            ) {
+                Err(err) => {
+                    error!("State change commit failed: {}", err);
+                    panic!("State change commit failed: {}", err);
                 }
-                self.trie.reload(&self.db).unwrap();
-                // TODO(aditi): We need to add the post-commit hooks for replication for shard 0.
+                Ok(_events) => {
+                    self.db.commit(txn).unwrap();
+                    let result = self.block_store.put_block(block);
+                    if result.is_err() {
+                        error!("Failed to store block: {:?}", result.err());
+                    }
+                    self.trie.reload(&self.db).unwrap();
+                    self.metrics
+                        .publish_transaction_counts(&block.transactions, ProposalSource::Commit);
+                    self.metrics.count(
+                        "block_events",
+                        block.events.len() as u64,
+                        Metrics::proposal_source_tags(ProposalSource::Commit),
+                    );
+                    // TODO(aditi): We need to add the post-commit hooks for replication for shard 0.
+                }
             }
+        } else {
+            let result = self.block_store.put_block(block);
+            if result.is_err() {
+                error!("Failed to store block: {:?}", result.err());
+            }
+            self.db.commit(txn).unwrap();
         }
     }
 
