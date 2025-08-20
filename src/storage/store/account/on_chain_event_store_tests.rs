@@ -152,7 +152,7 @@ mod tests {
         let (store, _dir) = store();
 
         let storage_slot = store
-            .get_storage_slot_for_fid(10, FarcasterNetwork::Mainnet, None)
+            .get_storage_slot_for_fid(10, FarcasterNetwork::Mainnet, &[])
             .unwrap();
         assert_eq!(storage_slot.is_active(), false);
         assert_eq!(storage_slot.units_for(StorageUnitType::UnitTypeLegacy), 0);
@@ -230,7 +230,7 @@ mod tests {
         store.db.commit(txn).unwrap();
 
         let storage_slot_different_fid = store
-            .get_storage_slot_for_fid(11, FarcasterNetwork::Mainnet, None)
+            .get_storage_slot_for_fid(11, FarcasterNetwork::Mainnet, &[])
             .unwrap();
         assert_eq!(storage_slot_different_fid.is_active(), true);
         assert_eq!(
@@ -247,14 +247,14 @@ mod tests {
         );
 
         let storage_slot = store
-            .get_storage_slot_for_fid(10, FarcasterNetwork::Mainnet, None)
+            .get_storage_slot_for_fid(10, FarcasterNetwork::Mainnet, &[])
             .unwrap();
         assert_eq!(storage_slot.is_active(), true);
         assert_eq!(storage_slot.units_for(StorageUnitType::UnitTypeLegacy), 12); // 5 + 7
         assert_eq!(storage_slot.units_for(StorageUnitType::UnitType2024), 20); // 9 + 11
 
         let storage_slot_2025 = store
-            .get_storage_slot_for_fid(12, FarcasterNetwork::Mainnet, None)
+            .get_storage_slot_for_fid(12, FarcasterNetwork::Mainnet, &[])
             .unwrap();
         assert_eq!(storage_slot_2025.is_active(), true);
         assert_eq!(

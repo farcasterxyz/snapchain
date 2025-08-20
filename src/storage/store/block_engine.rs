@@ -3,17 +3,20 @@ use crate::core::{types::Height, util::FarcasterTime};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::{
     block_event, Block, BlockEvent, BlockEventType, FarcasterNetwork, HeartbeatEventBody,
-    ShardChunkWitness, Transaction,
+    OnChainEvent, ShardChunkWitness, Transaction,
 };
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
-use crate::storage::store::account::{BlockEventStore, OnchainEventStorageError};
+use crate::storage::store::account::{
+    BlockEventStore, OnchainEventStorageError, OnchainEventStore, StoreEventHandler,
+};
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
 use crate::storage::store::BlockStore;
-use crate::storage::trie::merkle_trie::{MerkleTrie, TrieKey};
+use crate::storage::trie::merkle_trie::{self, MerkleTrie, TrieKey};
 use crate::storage::trie::{self};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use blake3::Hash;
+use itertools::Itertools;
 use prost::Message;
 use std::sync::Arc;
 use thiserror::Error;
@@ -41,7 +44,9 @@ pub enum BlockEngineError {
 pub struct BlockEngine {
     block_store: BlockStore,
     block_event_store: BlockEventStore,
+    pub onchain_event_store: OnchainEventStore,
     trie: MerkleTrie,
+    network: FarcasterNetwork,
     pub mempool_poller: MempoolPoller,
     shard_id: u64,
     db: Arc<RocksDB>,
@@ -74,6 +79,7 @@ impl BlockEngine {
         BlockEngine {
             block_store,
             block_event_store: BlockEventStore { db: db.clone() },
+            onchain_event_store: OnchainEventStore::new(db.clone(), StoreEventHandler::new()),
             trie,
             shard_id: 0,
             mempool_poller: MempoolPoller {
@@ -89,6 +95,7 @@ impl BlockEngine {
                 shard_id: 0,
             },
             heartbeat_block_interval,
+            network,
         }
     }
 
@@ -97,12 +104,37 @@ impl BlockEngine {
         self.trie.root_hash().unwrap()
     }
 
+    pub fn trie_key_exists(&mut self, ctx: &merkle_trie::Context, sync_id: &Vec<u8>) -> bool {
+        self.trie
+            .exists(ctx, &self.db, sync_id.as_ref())
+            .unwrap_or_else(|err| {
+                error!("Error checking if sync id exists: {:?}", err);
+                false
+            })
+    }
+
     pub(crate) fn replay_snapchain_txn(
         &mut self,
+        trie_ctx: &merkle_trie::Context,
         snapchain_txn: &Transaction,
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<Vec<u8>, BlockEngineError> {
         // TODO(aditi): Fill this in, it's a no-op for now
+        for message in &snapchain_txn.system_messages {
+            if let Some(ref onchain_event) = message.on_chain_event {
+                match self
+                    .onchain_event_store
+                    .merge_onchain_event(onchain_event.clone(), txn_batch)
+                {
+                    Ok(event) => self
+                        .trie
+                        .update_for_event(trie_ctx, &self.db, &event, txn_batch)?,
+                    Err(err) => {
+                        error!("Unable to merge onchain event: {:#?}", err.to_string())
+                    }
+                }
+            }
+        }
 
         let account_root =
             self.trie
@@ -161,9 +193,40 @@ impl BlockEngine {
             Metrics::proposal_source_tags(ProposalSource::Propose),
         );
 
-        let mut snapchain_txns = MempoolPoller::create_transactions_from_mempool(messages)?;
+        let mut snapchain_txns = MempoolPoller::create_transactions_from_mempool(messages)?
+            .into_iter()
+            .filter_map(|mut transaction| {
+                let pending_onchain_events: Vec<OnChainEvent> = transaction
+                    .system_messages
+                    .iter()
+                    .filter_map(|vm| vm.on_chain_event.clone())
+                    .collect();
+
+                let storage_slot = self
+                    .onchain_event_store
+                    .get_storage_slot_for_fid(
+                        transaction.fid,
+                        self.network,
+                        pending_onchain_events.as_slice(),
+                    )
+                    .ok()?;
+
+                // Drop events if storage slot is inactive
+                if !storage_slot.is_active() {
+                    transaction.user_messages = vec![];
+                }
+
+                if transaction.system_messages.is_empty() && transaction.user_messages.is_empty() {
+                    return None;
+                } else {
+                    return Some(transaction);
+                }
+            })
+            .collect_vec();
+
         for snapchain_txn in &mut snapchain_txns {
-            let account_root = self.replay_snapchain_txn(&snapchain_txn, txn_batch)?;
+            let account_root =
+                self.replay_snapchain_txn(&merkle_trie::Context::new(), &snapchain_txn, txn_batch)?;
             snapchain_txn.account_root = account_root;
         }
 
@@ -247,7 +310,8 @@ impl BlockEngine {
         }
 
         for snapchain_txn in transactions {
-            let account_root = self.replay_snapchain_txn(snapchain_txn, txn_batch)?;
+            let account_root =
+                self.replay_snapchain_txn(&merkle_trie::Context::new(), snapchain_txn, txn_batch)?;
             // Reject early if account roots fail to match (shard roots will definitely fail)
             if &account_root != &snapchain_txn.account_root {
                 warn!(
