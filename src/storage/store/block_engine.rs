@@ -301,7 +301,7 @@ impl BlockEngine {
         source: ProposalSource,
         height: Height,
         timestamp: &FarcasterTime,
-    ) -> Result<Vec<BlockEvent>, BlockEngineError> {
+    ) -> Result<(), BlockEngineError> {
         let now = std::time::Instant::now();
         // Validate that the trie is in a good place to start with
         match self.get_last_block() {
@@ -347,7 +347,7 @@ impl BlockEngine {
             }
         }
 
-        let (block_events, computed_events_hash) =
+        let (_block_events, computed_events_hash) =
             self.generate_block_events(height, timestamp, txn_batch);
 
         if computed_events_hash != *events_hash {
@@ -377,7 +377,7 @@ impl BlockEngine {
         self.metrics
             .time_with_shard("replay_proposal_time", elapsed.as_millis() as u64);
 
-        Ok(block_events)
+        Ok(())
     }
 
     pub fn validate_state_change(
@@ -406,11 +406,8 @@ impl BlockEngine {
             &shard_state_change.timestamp,
         );
 
-        match proposal_result {
-            Err(ref err) => {
-                error!("State change validation failed: {}", err);
-            }
-            Ok(ref _events) => {}
+        if let Err(ref err) = proposal_result {
+            error!("State change validation failed: {}", err);
         }
 
         self.trie.reload(&self.db).unwrap();
@@ -463,7 +460,7 @@ impl BlockEngine {
                     error!("State change commit failed: {}", err);
                     panic!("State change commit failed: {}", err);
                 }
-                Ok(_events) => {
+                Ok(()) => {
                     self.db.commit(txn).unwrap();
                     let result = self.block_store.put_block(block);
                     if result.is_err() {
