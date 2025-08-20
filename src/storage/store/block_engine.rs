@@ -119,7 +119,6 @@ impl BlockEngine {
         snapchain_txn: &Transaction,
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<Vec<u8>, BlockEngineError> {
-        // TODO(aditi): Fill this in, it's a no-op for now
         for message in &snapchain_txn.system_messages {
             if let Some(ref onchain_event) = message.on_chain_event {
                 match self
