@@ -129,7 +129,6 @@ impl BlockEventStore {
         BlockEventStore { db }
     }
 
-    #[inline]
     pub fn put_block_event(
         &self,
         block_event: &BlockEvent,
@@ -138,15 +137,8 @@ impl BlockEventStore {
         put_block_event(block_event, txn)
     }
 
-    #[inline]
-    pub fn get_last_block_event(&self) -> Result<Option<BlockEvent>, BlockEventStorageError> {
-        get_last_block_event(&self.db)
-    }
-
-    #[inline]
     pub fn max_seqnum(&self) -> Result<u64, BlockEventStorageError> {
-        let last_block_event = self.get_last_block_event()?;
-        match last_block_event {
+        match get_last_block_event(&self.db)? {
             None => Ok(0),
             Some(event) => Ok(event.seqnum),
         }
