@@ -298,6 +298,7 @@ mod tests {
     #[tokio::test]
     async fn test_heartbeat_generated_on_interval() {
         let (mut block_engine, _temp_dir) = setup(None);
+        // The heartbeat interval is 5 blocks, generate the first 4 where there will be no events
         for _ in 0..4 {
             let height = block_engine.get_confirmed_height().increment();
             let state_change = block_engine.propose_state_change(vec![], height);
@@ -316,6 +317,7 @@ mod tests {
         assert_eq!(state_change.events[0].data.as_ref().unwrap().event_index, 0);
         validate_and_commit_state_change(&mut block_engine, &state_change);
 
+        // The heartbeat interval is 5 blocks, generate the next 4 where there will be no events
         for _ in 0..4 {
             let height = block_engine.get_confirmed_height().increment();
             let state_change = block_engine.propose_state_change(vec![], height);
