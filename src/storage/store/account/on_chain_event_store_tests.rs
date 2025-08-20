@@ -350,4 +350,56 @@ mod tests {
             )
             .unwrap());
     }
+
+    #[test]
+    fn test_get_fids_and_get_highest_fid() {
+        let (store, _dir) = store();
+
+        // Create 3 ID register events with different FIDs
+        let id_register_event_1 = factory::events_factory::create_id_register_event(
+            10,
+            crate::proto::IdRegisterEventType::Register,
+            vec![1, 2, 3],
+            None,
+        );
+        let id_register_event_2 = factory::events_factory::create_id_register_event(
+            25,
+            crate::proto::IdRegisterEventType::Register,
+            vec![4, 5, 6],
+            None,
+        );
+        let id_register_event_3 = factory::events_factory::create_id_register_event(
+            100,
+            crate::proto::IdRegisterEventType::Register,
+            vec![7, 8, 9],
+            None,
+        );
+
+        // Store the events
+        let mut txn = RocksDbTransactionBatch::new();
+        for event in vec![
+            id_register_event_1,
+            id_register_event_2,
+            id_register_event_3,
+        ] {
+            store.merge_onchain_event(event, &mut txn).unwrap();
+        }
+        store.db.commit(txn).unwrap();
+
+        // Test get_fids returns all 3 FIDs
+        let page_options = crate::storage::db::PageOptions {
+            page_size: Some(10),
+            page_token: None,
+            reverse: false,
+        };
+        let (fids, _) = store.get_fids(&page_options).unwrap();
+        assert_eq!(fids.len(), 3);
+        assert!(fids.contains(&10));
+        assert!(fids.contains(&25));
+        assert!(fids.contains(&100));
+
+        // Test get_highest_fid returns the highest FID (100)
+        let highest_fid = store.get_highest_fid().unwrap();
+        assert_eq!(highest_fid, Some(100));
+    }
 }
