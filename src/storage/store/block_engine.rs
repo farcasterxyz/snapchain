@@ -204,6 +204,7 @@ impl BlockEngine {
         let mut snapchain_txns = MempoolPoller::create_transactions_from_mempool(messages)?
             .into_iter()
             .filter_map(|mut transaction| {
+                // TODO(aditi): We could share this code with the shard engine but there may be other things we want to add here. For example, it may make sense to exclude validator messages and user messages that aren't intended for shard 0 here so a bug in the mempool won't impact the protocol in a significant way.
                 let pending_onchain_events: Vec<OnChainEvent> = transaction
                     .system_messages
                     .iter()
