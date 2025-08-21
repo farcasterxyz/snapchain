@@ -1,5 +1,5 @@
 use crate::mempool::mempool::MempoolMessagesRequest;
-use crate::proto::{self, FarcasterNetwork, Transaction};
+use crate::proto::{self, FarcasterNetwork, Transaction, ValidatorMessage};
 use crate::storage::store::account::OnchainEventStorageError;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use itertools::Itertools;
@@ -30,9 +30,11 @@ pub struct MempoolPoller {
 #[derive(Clone, Debug)]
 pub enum MempoolMessage {
     UserMessage(proto::Message),
-    ValidatorMessage {
-        for_shard: Option<u32>,
-        message: proto::ValidatorMessage,
+    OnchainEvent(proto::OnChainEvent),
+    FnameTransfer(proto::FnameTransfer),
+    BlockEvent {
+        for_shard: u32,
+        message: proto::BlockEvent,
     },
 }
 
@@ -40,10 +42,12 @@ impl MempoolMessage {
     pub fn fid(&self) -> u64 {
         match self {
             MempoolMessage::UserMessage(msg) => msg.fid(),
-            MempoolMessage::ValidatorMessage {
+            MempoolMessage::OnchainEvent(event) => event.fid,
+            MempoolMessage::FnameTransfer(transfer) => transfer.proof.as_ref().unwrap().fid,
+            MempoolMessage::BlockEvent {
                 for_shard: _,
-                message,
-            } => message.fid(),
+                message: _,
+            } => 0,
         }
     }
 
@@ -128,18 +132,33 @@ impl MempoolPoller {
                 user_messages: vec![],
             };
 
-            // First pass: collect all system_messages for this FID
             for msg in &messages {
-                if let MempoolMessage::ValidatorMessage {
-                    for_shard: _,
-                    message,
-                } = msg
-                {
-                    transaction.system_messages.push(message.clone());
-                }
-
-                if let MempoolMessage::UserMessage(message) = msg {
-                    transaction.user_messages.push(message.clone());
+                match msg {
+                    MempoolMessage::UserMessage(message) => {
+                        transaction.user_messages.push(message.clone());
+                    }
+                    MempoolMessage::BlockEvent {
+                        for_shard: _,
+                        message,
+                    } => transaction.system_messages.push(ValidatorMessage {
+                        on_chain_event: None,
+                        fname_transfer: None,
+                        block_event: Some(message.clone()),
+                    }),
+                    MempoolMessage::FnameTransfer(fname_transfer) => {
+                        transaction.system_messages.push(ValidatorMessage {
+                            on_chain_event: None,
+                            fname_transfer: Some(fname_transfer.clone()),
+                            block_event: None,
+                        })
+                    }
+                    MempoolMessage::OnchainEvent(onchain_event) => {
+                        transaction.system_messages.push(ValidatorMessage {
+                            on_chain_event: Some(onchain_event.clone()),
+                            fname_transfer: None,
+                            block_event: None,
+                        })
+                    }
                 }
             }
 

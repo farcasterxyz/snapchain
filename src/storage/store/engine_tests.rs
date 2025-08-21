@@ -4,9 +4,9 @@ mod tests {
         calculate_message_hash, from_farcaster_time, get_farcaster_time, FarcasterTime,
     };
     use crate::proto::reaction_body::Target;
+    use crate::proto::HubEvent;
     use crate::proto::{self, CastId, Embed, FarcasterNetwork, HubEventType, ReactionType};
     use crate::proto::{FnameTransfer, ShardChunk, UserNameProof};
-    use crate::proto::{HubEvent, ValidatorMessage};
     use crate::proto::{OnChainEvent, OnChainEventType};
     use crate::storage::db::{PageOptions, RocksDbTransactionBatch};
     use crate::storage::store::account::{HubEventIdGenerator, UserDataStore};
@@ -224,14 +224,9 @@ mod tests {
         // Propose a message that doesn't require storage
         let state_change = engine.propose_state_change(
             1,
-            vec![MempoolMessage::ValidatorMessage {
-                for_shard: None,
-                message: ValidatorMessage {
-                    on_chain_event: Some(events_factory::create_onchain_event(FID_FOR_TEST)),
-                    fname_transfer: None,
-                    block_event: None,
-                },
-            }],
+            vec![MempoolMessage::OnchainEvent(
+                events_factory::create_onchain_event(FID_FOR_TEST),
+            )],
             None,
         );
 
@@ -1872,30 +1867,9 @@ mod tests {
         );
 
         let messages_batch = vec![
-            MempoolMessage::ValidatorMessage {
-                for_shard: None,
-                message: proto::ValidatorMessage {
-                    on_chain_event: Some(test_helper::default_storage_event(new_fid)),
-                    fname_transfer: None,
-                    block_event: None,
-                },
-            },
-            MempoolMessage::ValidatorMessage {
-                for_shard: None,
-                message: proto::ValidatorMessage {
-                    on_chain_event: Some(id_register_event.clone()),
-                    fname_transfer: None,
-                    block_event: None,
-                },
-            },
-            MempoolMessage::ValidatorMessage {
-                for_shard: None,
-                message: proto::ValidatorMessage {
-                    on_chain_event: Some(signer_add_event.clone()),
-                    fname_transfer: None,
-                    block_event: None,
-                },
-            },
+            MempoolMessage::OnchainEvent(test_helper::default_storage_event(new_fid)),
+            MempoolMessage::OnchainEvent(id_register_event.clone()),
+            MempoolMessage::OnchainEvent(signer_add_event.clone()),
             MempoolMessage::UserMessage(cast_add.clone()),
         ];
 
@@ -2114,14 +2088,7 @@ mod tests {
         let mut event_rx = engine.get_senders().events_tx.subscribe();
         let state_change = engine.propose_state_change(
             1,
-            vec![MempoolMessage::ValidatorMessage {
-                for_shard: None,
-                message: ValidatorMessage {
-                    on_chain_event: Some(onchain_event.clone()),
-                    fname_transfer: None,
-                    block_event: None,
-                },
-            }],
+            vec![MempoolMessage::OnchainEvent(onchain_event.clone())],
             None,
         );
         assert_eq!(1, state_change.shard_id);
@@ -2630,14 +2597,7 @@ mod tests {
 
         let state_change = engine.propose_state_change(
             1,
-            vec![MempoolMessage::ValidatorMessage {
-                for_shard: None,
-                message: ValidatorMessage {
-                    on_chain_event: None,
-                    fname_transfer: Some(fname_transfer.clone()),
-                    block_event: None,
-                },
-            }],
+            vec![MempoolMessage::FnameTransfer(fname_transfer.clone())],
             None,
         );
         test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
@@ -2693,14 +2653,7 @@ mod tests {
 
         let state_change = engine.propose_state_change(
             1,
-            vec![MempoolMessage::ValidatorMessage {
-                for_shard: None,
-                message: ValidatorMessage {
-                    on_chain_event: None,
-                    fname_transfer: Some(fname_transfer.clone()),
-                    block_event: None,
-                },
-            }],
+            vec![MempoolMessage::FnameTransfer(fname_transfer.clone())],
             None,
         );
         test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
@@ -2734,14 +2687,7 @@ mod tests {
 
         let state_change = engine.propose_state_change(
             1,
-            vec![MempoolMessage::ValidatorMessage {
-                for_shard: None,
-                message: ValidatorMessage {
-                    on_chain_event: None,
-                    fname_transfer: Some(fname_transfer.clone()),
-                    block_event: None,
-                },
-            }],
+            vec![MempoolMessage::FnameTransfer(fname_transfer.clone())],
             None,
         );
         test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
@@ -3223,14 +3169,7 @@ mod tests {
         };
         let state_change = engine.propose_state_change(
             1,
-            vec![MempoolMessage::ValidatorMessage {
-                for_shard: None,
-                message: proto::ValidatorMessage {
-                    on_chain_event: None,
-                    fname_transfer: Some(fname_transfer),
-                    block_event: None,
-                },
-            }],
+            vec![MempoolMessage::FnameTransfer(fname_transfer)],
             None,
         );
 

@@ -4,7 +4,6 @@ mod tests {
     use crate::core::util::FarcasterTime;
     use crate::proto::{
         Block, BlockHeader, FarcasterNetwork, OnChainEvent, ShardWitness, StorageUnitType,
-        ValidatorMessage,
     };
     use crate::storage::db::RocksDB;
     use crate::storage::store::block_engine::{BlockEngine, ShardStateChange};
@@ -97,17 +96,8 @@ mod tests {
 
     pub fn commit_event(engine: &mut BlockEngine, event: &OnChainEvent) -> Block {
         let height = engine.get_confirmed_height().increment();
-        let state_change = engine.propose_state_change(
-            vec![MempoolMessage::ValidatorMessage {
-                for_shard: None,
-                message: (ValidatorMessage {
-                    on_chain_event: Some(event.clone()),
-                    fname_transfer: None,
-                    block_event: None,
-                }),
-            }],
-            height,
-        );
+        let state_change =
+            engine.propose_state_change(vec![MempoolMessage::OnchainEvent(event.clone())], height);
 
         validate_and_commit_state_change(engine, &state_change)
     }
@@ -123,14 +113,7 @@ mod tests {
         );
         let height = block_engine.get_confirmed_height().increment();
         let state_change = block_engine.propose_state_change(
-            vec![MempoolMessage::ValidatorMessage {
-                for_shard: None,
-                message: (ValidatorMessage {
-                    on_chain_event: Some(onchain_event.clone()),
-                    fname_transfer: None,
-                    block_event: None,
-                }),
-            }],
+            vec![MempoolMessage::OnchainEvent(onchain_event.clone())],
             height,
         );
         assert!(!state_change.new_state_root.is_empty());

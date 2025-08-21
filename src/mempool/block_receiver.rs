@@ -6,7 +6,7 @@ use tracing::info;
 
 use crate::consensus::consensus::SystemMessage;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
-use crate::proto::{hub_event, Block, HubEvent, ValidatorMessage};
+use crate::proto::{hub_event, Block, HubEvent};
 use crate::storage::store::{mempool_poller::MempoolMessage, stores::Stores};
 use thiserror::Error;
 
@@ -67,13 +67,9 @@ impl BlockReceiver {
                 );
                 self.mempool_tx
                     .send(MempoolRequest::AddMessage(
-                        MempoolMessage::ValidatorMessage {
-                            for_shard: Some(self.shard_id),
-                            message: ValidatorMessage {
-                                on_chain_event: None,
-                                fname_transfer: None,
-                                block_event: Some(event.clone()),
-                            },
+                        MempoolMessage::BlockEvent {
+                            for_shard: self.shard_id,
+                            message: event.clone(),
                         },
                         MempoolSource::Local,
                         None,

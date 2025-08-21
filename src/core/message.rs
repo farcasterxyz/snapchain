@@ -30,35 +30,6 @@ impl proto::Message {
     }
 }
 
-impl proto::ValidatorMessage {
-    pub fn fid(&self) -> u64 {
-        if let Some(fname) = &self.fname_transfer {
-            if let Some(proof) = &fname.proof {
-                return proof.fid;
-            }
-        }
-        if let Some(event) = &self.on_chain_event {
-            return event.fid;
-        }
-
-        if let Some(block_event) = &self.block_event {
-            if let Some(data) = &block_event.data {
-                if let Some(body) = &data.body {
-                    match body {
-                        proto::block_event_data::Body::HeartbeatEventBody(_body) =>
-                        // These messages don't have an fid associated with them, just return 0 explicitly here to make it clear
-                        {
-                            return 0
-                        }
-                    }
-                }
-            }
-        }
-
-        0
-    }
-}
-
 impl proto::FullProposal {
     pub fn shard_id(&self) -> Result<u32, String> {
         if let Some(height) = &self.height {

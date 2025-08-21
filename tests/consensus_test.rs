@@ -630,14 +630,7 @@ impl TestNetwork {
         for event in on_chain_events {
             let result = self.nodes[0]
                 .add_message(
-                    MempoolMessage::ValidatorMessage {
-                        for_shard: None,
-                        message: proto::ValidatorMessage {
-                            on_chain_event: Some(event),
-                            fname_transfer: None,
-                            block_event: None,
-                        },
-                    },
+                    MempoolMessage::OnchainEvent(event),
                     MempoolSource::Local,
                     None,
                 )
@@ -1032,10 +1025,7 @@ async fn test_cross_shard_interactions() {
     let node = &network.nodes[0];
 
     node.add_message(
-        MempoolMessage::ValidatorMessage {
-            for_shard: None,
-            message: transfer1.clone(),
-        },
+        MempoolMessage::FnameTransfer(transfer1.fname_transfer.clone().unwrap()),
         MempoolSource::Local,
         None,
     )
@@ -1043,10 +1033,7 @@ async fn test_cross_shard_interactions() {
     .unwrap();
 
     node.add_message(
-        MempoolMessage::ValidatorMessage {
-            for_shard: None,
-            message: transfer2.clone(),
-        },
+        MempoolMessage::FnameTransfer(transfer2.fname_transfer.clone().unwrap()),
         MempoolSource::Local,
         None,
     )
