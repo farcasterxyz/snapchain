@@ -2,6 +2,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
+use snapchain::bootstrap::service::WorkUnitResponse;
 use snapchain::bootstrap::ReplicatorBootstrap;
 use snapchain::connectors::fname::FnameRequest;
 use snapchain::connectors::onchain_events::{ChainClients, OnchainEventsRequest};
@@ -92,6 +93,7 @@ async fn start_servers(
             replicator,
             Box::new(routing::ShardRouter {}),
             app_config.consensus.num_shards,
+            block_store.clone(),
         );
         let service = ReplicationServiceServer::new(server);
         Some(service)
@@ -306,7 +308,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let replicator = ReplicatorBootstrap::new();
 
                 match replicator.bootstrap_using_replication(&app_config).await {
-                    Ok(()) => info!("Replication bootstrap successful"),
+                    Ok(r) => {
+                        if r == WorkUnitResponse::Stopped {
+                            info!("Replication bootstrap stopped by user, please restart snapchain to resume");
+                            return Ok(());
+                        } else if r == WorkUnitResponse::PartiallyComplete {
+                            info!("Replication bootstrap completed with partial data, please restart snapchain to resume");
+                            return Ok(());
+                        }
+
+                        // Successful, continue with startup
+                        info!("Replication bootstrap successfull. Continuing with startup");
+                        return Ok(());
+                    }
                     Err(e) => {
                         error!("Replication bootstrap failed:\n{}\nPlease clear the database directory and try again.", e);
                         // Clean up partially created DB

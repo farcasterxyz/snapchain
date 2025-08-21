@@ -3,27 +3,65 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use crate::mempool::routing;
-use crate::proto;
+use crate::proto::{self, MessageType, OnChainEventType};
 use crate::replication::replicator::Replicator;
+use crate::storage::store::block::BlockStore;
+
+/// Extract the sort order Enums from the protos
+fn get_sort_order_from_request(
+    system_message_types: Option<proto::SortOrderTypes>,
+    user_message_types: Option<proto::SortOrderTypes>,
+) -> Result<(Vec<OnChainEventType>, Vec<proto::MessageType>), Status> {
+    let system_sort_order = match system_message_types {
+        Some(types) => types
+            .sort_order
+            .iter()
+            .map(|t| {
+                OnChainEventType::try_from(*t as i32).map_err(|e| {
+                    Status::invalid_argument(format!("Invalid system message type: {}", e))
+                })
+            })
+            .collect::<Result<Vec<_>, Status>>()?,
+
+        None => return Err(Status::invalid_argument("Missing system_message_types")),
+    };
+    let user_sort_order = match user_message_types {
+        Some(types) => types
+            .sort_order
+            .iter()
+            .map(|t| {
+                MessageType::try_from(*t as i32).map_err(|e| {
+                    Status::invalid_argument(format!("Invalid user message type: {}", e))
+                })
+            })
+            .collect::<Result<Vec<_>, Status>>()?,
+        None => return Err(Status::invalid_argument("Missing user_message_types")),
+    };
+
+    Ok((system_sort_order, user_sort_order))
+}
 
 pub struct ReplicationServer {
     replicator: Arc<Replicator>,
     message_router: Box<dyn routing::MessageRouter>,
     num_shards: u32,
+    block_store: BlockStore,
 }
 
 impl ReplicationServer {
-    const MESSAGE_LIMIT: usize = 1_000; // Maximum number of messages to fetch per page
+    const MESSAGE_LIMIT: usize = 2_000; // Maximum number of messages to fetch per page
 
     pub fn new(
         replicator: Arc<Replicator>,
         message_router: Box<dyn routing::MessageRouter>,
         num_shards: u32,
+        block_store: BlockStore,
     ) -> Self {
         ReplicationServer {
             replicator,
             message_router,
             num_shards,
+            block_store,
         }
     }
 }
@@ -37,14 +75,39 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
         let request = request.into_inner();
 
         let snapshots = match self.replicator.get_snapshot_metadata(request.shard_id) {
-            Ok(metadata) => metadata
-                .into_iter()
-                .map(|(height, timestamp)| proto::ShardSnapshotMetadata {
-                    shard_id: request.shard_id,
-                    height,
-                    timestamp,
-                })
-                .collect(),
+            Ok(metadata) => {
+                let mut snapshots = Vec::new();
+                for (height, timestamp) in metadata {
+                    // Get the highest FID for this shard at this height
+                    let highest_fid = self
+                        .replicator
+                        .get_highest_fid_for_shard(request.shard_id, height)
+                        .unwrap_or(0);
+
+                    // Fetch the block for the given height
+                    let block = self.block_store.get_block_by_height(height).map_err(|e| {
+                        Status::internal(format!("Failed to get block by height: {}", e))
+                    })?;
+
+                    // Fetch the ShardChunk for the given shard and height from the replicator
+                    let shard_chunk = self
+                        .replicator
+                        .get_shard_chunk_by_height(request.shard_id, height)
+                        .map_err(|e| {
+                            Status::internal(format!("Failed to get shard chunk by height: {}", e))
+                        })?;
+
+                    snapshots.push(proto::ShardSnapshotMetadata {
+                        shard_id: request.shard_id,
+                        height,
+                        timestamp,
+                        highest_fid,
+                        block,
+                        shard_chunk,
+                    });
+                }
+                snapshots
+            }
             Err(e) => {
                 return Err(Status::internal(format!(
                     "Failed to get snapshot metadata: {}",
@@ -72,12 +135,16 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
             None => (None, None),
         };
 
+        let (system_sort_order, user_sort_order) =
+            get_sort_order_from_request(request.system_message_types, request.user_message_types)?;
         let results = self.replicator.transactions_for_shard_and_height(
             request.shard_id,
             request.height,
             page_token,
             start_fid,
             Self::MESSAGE_LIMIT,
+            system_sort_order,
+            user_sort_order,
         );
 
         let response = match results {
@@ -103,10 +170,17 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
         request: Request<proto::GetReplicationTransactionsByFidRequest>,
     ) -> Result<Response<proto::GetReplicationTransactionsByFidResponse>, Status> {
         let request = request.into_inner();
+
+        let (system_sort_order, user_sort_order) =
+            get_sort_order_from_request(request.system_message_types, request.user_message_types)?;
+
         let shard = self.message_router.route_fid(request.fid, self.num_shards);
-        let transaction = self
-            .replicator
-            .latest_transactions_for_fid(shard, request.fid)?;
+        let transaction = self.replicator.latest_transactions_for_fid(
+            shard,
+            request.fid,
+            system_sort_order,
+            user_sort_order,
+        )?;
 
         Ok(Response::new(
             proto::GetReplicationTransactionsByFidResponse {

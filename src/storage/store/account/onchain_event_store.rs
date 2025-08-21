@@ -608,6 +608,45 @@ impl OnchainEventStore {
         Ok((fids, next_page_token))
     }
 
+    pub fn get_highest_fid(&self) -> Result<Option<u64>, OnchainEventStorageError> {
+        let start_prefix = make_onchain_event_type_prefix(OnChainEventType::EventTypeIdRegister);
+        let stop_prefix = increment_vec_u8(&start_prefix);
+
+        let page_options = PageOptions {
+            page_size: Some(100),
+            page_token: None,
+            reverse: true,
+        };
+
+        let mut highest_fid: Option<u64> = None;
+
+        self.db
+            .for_each_iterator_by_prefix_paged(
+                Some(start_prefix),
+                Some(stop_prefix),
+                &page_options,
+                |_key, value| {
+                    let onchain_event =
+                        OnChainEvent::decode(value).map_err(|e| HubError::from(e))?;
+
+                    // Filter out events that are not IdRegisterEventBody.event_type == IdRegisterEventType::Register
+                    if let Some(Body::IdRegisterEventBody(body)) = &onchain_event.body {
+                        if body.event_type() != IdRegisterEventType::Register {
+                            return Ok(false); // Skip this event
+                        }
+                    } else {
+                        return Ok(false); // Skip this event
+                    }
+
+                    highest_fid = Some(onchain_event.fid);
+                    return Ok(true); // Stop iterating after finding the first (highest) FID
+                },
+            )
+            .map_err(|e| OnchainEventStorageError::HubError(e))?;
+
+        Ok(highest_fid)
+    }
+
     #[inline]
     pub fn get_id_register_event_by_fid(
         &self,
@@ -772,8 +811,14 @@ impl FIDIterator {
                         return Ok(false); // Skip this event
                     }
 
-                    self.fids.push_back(onchain_event.fid);
-                    last_fid = onchain_event.fid;
+                    if self.fids.back() == Some(&onchain_event.fid) {
+                        // Skip this ID register event. There is a small number of FIDs that have 2 ID register events
+                        // because of an old issue. See FIDs 20617, 20671 for eg.
+                    } else {
+                        self.fids.push_back(onchain_event.fid);
+                        last_fid = onchain_event.fid;
+                    }
+
                     if self.fids.len() >= page_options.page_size.unwrap_or(PAGE_SIZE_MAX) {
                         return Ok(true); // Stop iterating
                     }

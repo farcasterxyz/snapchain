@@ -4,7 +4,6 @@ use super::super::{
     util::{blake3_20, bytes_compare},
 };
 use super::errors::TrieError;
-use super::merkle_trie::TrieSnapshot;
 use crate::proto::DbTrieNode;
 use prost::Message as _;
 use std::collections::HashMap;
@@ -489,6 +488,66 @@ impl TrieNode {
         Ok(results)
     }
 
+    /// Attach a key to the root. Recurse down until we reach the key, make sure it is in all the parent's
+    /// `children`, recaulculate the hashes on the way back.
+    pub fn attach_to_root(
+        &mut self,
+        ctx: &Context,
+        child_hashes: &mut HashMap<u8, Vec<u8>>,
+        db: &RocksDB,
+        txn: &mut RocksDbTransactionBatch,
+        current_index: usize,
+        key: &[u8], // key of the node to attach
+    ) -> Result<(), TrieError> {
+        let prefix = key[..current_index].to_vec();
+
+        if current_index == key.len() {
+            // We are at the node that is supposed to be attached. no need to go down any further
+            // Just update my hash in the parent's child hashes cache and return
+            self.update_hash(child_hashes, &prefix)?;
+            return Ok(());
+        }
+
+        let child_char = key[current_index];
+
+        // If we're not yet at the child, we get the next level, make sure the next level is there
+        if !self.children.contains_key(&child_char) {
+            // Fetch the child node from the DB, and insert it into the DB
+            let child_node_from_db = self
+                .get_or_load_child(ctx, db, &prefix, child_char)?
+                .clone();
+            self.children
+                .insert(child_char, TrieNodeType::Node(child_node_from_db));
+        }
+
+        // temporarily taking child_hashes out of the node here to appease the borrow-checker
+        {
+            let mut my_child_hashes = std::mem::take(&mut self.child_hashes);
+
+            let child_node = self.get_or_load_child(ctx, db, &prefix, child_char)?;
+            // recurse down
+            child_node.attach_to_root(ctx, &mut my_child_hashes, db, txn, current_index + 1, key)?
+        }
+
+        // Update my hash in the parent's cache of child hashes
+        self.update_hash(child_hashes, &prefix)?;
+
+        // Recalculate the total child items
+        let mut total_child_items = 0;
+        let all_child_chars = self.children.keys().map(|&k| k).collect::<Vec<u8>>();
+
+        for child_char in all_child_chars {
+            let child = self.get_or_load_child(ctx, db, &prefix, child_char)?;
+            total_child_items += child.items();
+        }
+        self.items = total_child_items;
+
+        // Update in DB
+        self.put_to_txn(txn, &prefix);
+
+        return Ok(());
+    }
+
     pub fn exists(
         &mut self,
         ctx: &Context,
@@ -619,32 +678,6 @@ impl TrieNode {
         Ok(())
     }
 
-    fn excluded_hash(
-        &mut self,
-        ctx: &Context,
-        db: &RocksDB,
-        prefix: &[u8],
-        prefix_char: u8,
-    ) -> Result<(usize, String), TrieError> {
-        let mut excluded_items = 0;
-        let mut child_hashes = vec![];
-
-        let mut sorted_children = self.children.keys().map(|c| *c).collect::<Vec<_>>();
-        sorted_children.sort();
-
-        for char in sorted_children {
-            if char != prefix_char {
-                let child_node = self.get_or_load_child(ctx, db, prefix, char)?;
-                child_hashes.push(child_node.hash().clone());
-                excluded_items += child_node.items;
-            }
-        }
-
-        let hash = blake3_20(&child_hashes.concat());
-
-        Ok((excluded_items, hex::encode(hash.as_slice())))
-    }
-
     fn put_to_txn(&self, txn: &mut RocksDbTransactionBatch, prefix: &[u8]) {
         let key = Self::make_primary_key(prefix, None);
         let serialized = Self::serialize(self);
@@ -683,46 +716,6 @@ impl TrieNode {
         }
 
         Ok(values)
-    }
-
-    pub fn get_snapshot(
-        &mut self,
-        ctx: &Context,
-        db: &RocksDB,
-        prefix: &[u8],
-        current_index: usize,
-    ) -> Result<TrieSnapshot, TrieError> {
-        let mut excluded_hashes = vec![];
-        let mut num_messages = 0;
-
-        let mut current_node = self; // traverse from the current node
-        for (i, char) in prefix.iter().enumerate().skip(current_index) {
-            let current_prefix = prefix[0..i].to_vec();
-
-            let (excluded_items, excluded_hash) =
-                current_node.excluded_hash(ctx, db, &current_prefix, *char)?;
-
-            excluded_hashes.push(excluded_hash);
-            num_messages += excluded_items;
-
-            if !current_node.children.contains_key(char) {
-                return Ok(TrieSnapshot {
-                    prefix: current_prefix,
-                    excluded_hashes,
-                    num_messages,
-                });
-            }
-
-            current_node = current_node.get_or_load_child(ctx, db, &current_prefix, *char)?;
-        }
-
-        excluded_hashes.push(hex::encode(current_node.hash().as_slice()));
-
-        Ok(TrieSnapshot {
-            prefix: prefix.to_vec(),
-            excluded_hashes,
-            num_messages,
-        })
     }
 
     // Keeping this around since it is useful for debugging

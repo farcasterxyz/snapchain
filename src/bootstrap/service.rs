@@ -21,7 +21,7 @@ use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::{net, process};
+use std::{net, process, u64};
 use tokio::signal::ctrl_c;
 use tokio::sync::{mpsc, oneshot};
 use tonic::transport::Channel;
@@ -210,7 +210,15 @@ struct WorkUnit {
     range: FidRange,
     peer_address: String,
     db_commit_tx: mpsc::UnboundedSender<DbCommitRequest>,
-    response_tx: oneshot::Sender<Result<(), BootstrapError>>,
+    response_tx: oneshot::Sender<Result<WorkUnitResponse, BootstrapError>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkUnitResponse {
+    Stopped,
+    CompletedRange,
+    PartiallyComplete,
+    NoMoreFIDs(HashMap<u32, u64>), // Maps shard_id to highest FID processed
 }
 
 /// Signal to stop worker threads
@@ -238,7 +246,7 @@ impl ReplicatorBootstrap {
     pub async fn bootstrap_using_replication(
         &self,
         app_config: &Config,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<WorkUnitResponse, Box<dyn Error>> {
         info!("Starting replication-based bootstrap");
 
         // Fetch metadata and determine target height
@@ -364,9 +372,25 @@ impl ReplicatorBootstrap {
                 let _ = try_join_all(shard_tasks).await;
 
                 info!("All shard tasks have been shut down.");
-                process::exit(0);
-                return Ok(()); // Exit gracefully after shutdown
+                return Ok(WorkUnitResponse::Stopped);
             }
+        }
+
+        let all_shards_finished = results.iter().all(|(_, res)| match res {
+            Ok(WorkUnitResponse::NoMoreFIDs(_)) => true,
+            _ => false,
+        });
+
+        if all_shards_finished {
+            // Collect all the highest FID per shard hashmaps into one
+            let mut combined_fids = HashMap::new();
+            for (_, res) in results {
+                if let Ok(WorkUnitResponse::NoMoreFIDs(fids)) = res {
+                    combined_fids.extend(fids);
+                }
+            }
+
+            return Ok(WorkUnitResponse::NoMoreFIDs(combined_fids));
         }
 
         // This part now only runs if the tasks completed without a shutdown signal.
@@ -379,9 +403,7 @@ impl ReplicatorBootstrap {
             info!("Shard {} completed successfully", shard_id);
         }
 
-        info!("Replication bootstrap completed successfully");
-
-        Ok(())
+        Ok(WorkUnitResponse::PartiallyComplete)
     }
 
     /// Determine the highest block for each shard.
@@ -436,20 +458,20 @@ async fn start_shard_replication_outer(
     statsd_client: &StatsdClientWrapper,
     rocksdb_dir: &str,
     shutdown_signal: Arc<AtomicBool>,
-) -> Result<(), BootstrapError> {
+) -> Result<WorkUnitResponse, BootstrapError> {
     // Go over the FIDs in chunks of 50k and import them into the DB in batches. This allows the
     // DB to compact and flush every 50k FIDs, managing the SST files more efficiently.
 
-    let highest_fid = 1_200_000u64; // TODO: Get this from server
+    let mut start_fid = 1;
     let step = 10_000;
-    for fid in (1..=highest_fid).step_by(step) {
+    loop {
         if shutdown_signal.load(Ordering::SeqCst) {
             info!("Shutdown signal received, stopping shard replication");
-            break;
+            return Ok(WorkUnitResponse::Stopped);
         }
 
-        let max_fid = fid + step as u64 - 1;
-        start_shard_replication(
+        let max_fid = start_fid + step as u64 - 1;
+        let completed = start_shard_replication(
             peer_address,
             network,
             shard_id,
@@ -461,9 +483,17 @@ async fn start_shard_replication_outer(
             shutdown_signal.clone(),
         )
         .await?;
-    }
 
-    Ok(())
+        if let WorkUnitResponse::NoMoreFIDs(_) = completed {
+            info!(
+                "No more FIDs to process for shard {}. Highest FID is {:?}",
+                shard_id, completed
+            );
+            return Ok(completed);
+        }
+
+        start_fid += step;
+    }
 }
 
 async fn start_shard_replication(
@@ -476,7 +506,7 @@ async fn start_shard_replication(
     rocksdb_dir: &str,
     max_fid: u64,
     shutdown_signal: Arc<AtomicBool>,
-) -> Result<(), BootstrapError> {
+) -> Result<WorkUnitResponse, BootstrapError> {
     info!(
         "Starting parallel shard replication for shard {} up to height {} upto fid {}",
         shard_id, target_height, max_fid
@@ -505,8 +535,7 @@ async fn start_shard_replication(
     let num_workers = 12;
     // Track work state - use the initial completed ranges from the parameters
     let mut completed_ranges = initial_completed_ranges;
-    let mut pending_work: HashMap<u64, (oneshot::Receiver<Result<(), BootstrapError>>, usize)> =
-        HashMap::new();
+    let mut pending_work = HashMap::new();
     let mut worker_queue: VecDeque<usize> = (0..num_workers).collect();
 
     let highest_consecutive = completed_ranges.get_highest_consecutive_fid(shard_id);
@@ -523,7 +552,7 @@ async fn start_shard_replication(
             shard_id, current_fid, max_fid
         );
         db.close();
-        return Ok(());
+        return Ok(WorkUnitResponse::CompletedRange);
     }
 
     info!(
@@ -583,6 +612,8 @@ async fn start_shard_replication(
         db.clone(),
     )
     .await?;
+
+    let mut last_shard_fid = None;
 
     loop {
         // Check for shutdown signal first
@@ -666,9 +697,17 @@ async fn start_shard_replication(
             pending_work.remove(&start_fid);
 
             match result {
-                Ok(_) => {
+                Ok(wu_response) => {
                     let end_fid = std::cmp::min(start_fid + chunk_size - 1, max_fid);
-                    info!("Work completed for FID range {} to {}", start_fid, end_fid);
+                    info!(
+                        "Work completed for FID range {} to {}. Result {:?}",
+                        start_fid, end_fid, wu_response
+                    );
+
+                    if let WorkUnitResponse::NoMoreFIDs(r) = wu_response {
+                        last_shard_fid = Some(r);
+                        all_work_sent = true;
+                    }
 
                     // Add the completed range
                     completed_ranges.add_range(FidRange {
@@ -725,9 +764,10 @@ async fn start_shard_replication(
 
     // Send stop signal to all workers
     info!(
-        "Sending stop signal to all {} workers for shard {}",
+        "Sending stop signal to all {} workers for shard {}. (last_shard_fid = {:?})",
         worker_channels.len(),
-        shard_id
+        shard_id,
+        last_shard_fid
     );
     for channel in worker_channels {
         let _ = channel.send(WorkerMessage::Stop(StopSignal)).await;
@@ -762,7 +802,11 @@ async fn start_shard_replication(
     db.close();
     info!("DB closed for shard {}", shard_id);
 
-    Ok(())
+    if last_shard_fid.is_some() {
+        return Ok(WorkUnitResponse::NoMoreFIDs(last_shard_fid.unwrap()));
+    } else {
+        return Ok(WorkUnitResponse::CompletedRange);
+    }
 }
 
 /// Create worker threads for shard replication
@@ -984,7 +1028,7 @@ async fn replay_shard_transactions(
     height: u64,
     range: &FidRange,
     db_commit_tx: mpsc::UnboundedSender<DbCommitRequest>,
-) -> Result<(), BootstrapError> {
+) -> Result<WorkUnitResponse, BootstrapError> {
     let mut page_token: Option<Vec<u8>> = None;
     let mut total_transactions = 0;
     let mut last_fid = 0;
@@ -1012,6 +1056,8 @@ async fn replay_shard_transactions(
     let mut fids_to_check = vec![];
     // Num messages in this transaction
     let mut num_messages = 0;
+
+    let mut all_fids_exhausted = false;
 
     'pagingloop: loop {
         let cursor = if let Some(token) = &page_token {
@@ -1047,6 +1093,7 @@ async fn replay_shard_transactions(
                     if transaction.fid > last_fid && last_fid != 0 {
                         fids_to_check.push((last_fid, last_fid_account_root.clone()));
                     }
+
                     if range.fid_end > 0 && transaction.fid > range.fid_end {
                         // Stop replaying if we reach the end of the range
                         break 'pagingloop;
@@ -1063,16 +1110,14 @@ async fn replay_shard_transactions(
                 }
 
                 // Check if there are more pages
-                if let Some(next_token) = response.next_page_token {
-                    if !next_token.is_empty() {
-                        page_token = Some(next_token);
-                    } else {
-                        info!("No more pages available for shard {}", shard_id);
-                        break;
-                    }
-                } else {
-                    info!("No next page token provided for shard {}", shard_id);
+                if response.next_page_token.is_none()
+                    || response.next_page_token.as_ref().unwrap().is_empty()
+                {
+                    info!("No next page token for shard {}", shard_id);
+                    all_fids_exhausted = true;
                     break;
+                } else {
+                    page_token = response.next_page_token;
                 }
             }
             Err(e) => {
@@ -1116,7 +1161,14 @@ async fn replay_shard_transactions(
         "Replayed {} total transactions for shard {}",
         total_transactions, shard_id
     );
-    Ok(())
+
+    if all_fids_exhausted {
+        let mut fids = HashMap::new();
+        fids.insert(shard_id, last_fid);
+        return Ok(WorkUnitResponse::NoMoreFIDs(fids));
+    } else {
+        return Ok(WorkUnitResponse::Stopped);
+    }
 }
 
 /// Replay a single transaction using the ShardEngine
