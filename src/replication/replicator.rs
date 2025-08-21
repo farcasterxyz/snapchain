@@ -710,6 +710,11 @@ fn build_fname_username_proofs_event(
     stores: &Stores,
     cursor: &mut Cursor,
 ) -> Result<Vec<proto::ValidatorMessage>, ReplicationError> {
+    // Normally we'd fetch all this data from the DB, but for fnames, we fetch them from the Trie.
+    // This is because a very small number of FIDs have multiple fnames, which are technically not allowed,
+    // but they're in the trie. And if we get it from the DB, we'll get only the latest one, not all
+    // We need to get ALL the fnames, if we want the trie roots to match.
+
     // 1 byte Shard ID + 4 bytes of fid key + 1 byte postfix
     let prefix_len = 1 + FID_BYTES + 1;
     let fid_fnames_key =

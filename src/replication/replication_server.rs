@@ -95,12 +95,6 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
                         .get_shard_chunk_by_height(request.shard_id, height)
                         .map_err(|e| {
                             Status::internal(format!("Failed to get shard chunk by height: {}", e))
-                        })?
-                        .ok_or_else(|| {
-                            Status::not_found(format!(
-                                "ShardChunk not found for shard {} at height: {}",
-                                request.shard_id, height
-                            ))
                         })?;
 
                     snapshots.push(proto::ShardSnapshotMetadata {
@@ -109,7 +103,7 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
                         timestamp,
                         highest_fid,
                         block,
-                        shard_chunk: Some(shard_chunk),
+                        shard_chunk,
                     });
                 }
                 snapshots
