@@ -99,7 +99,6 @@ impl BlockEngine {
         }
     }
 
-    #[cfg(test)]
     pub fn trie_root_hash(&self) -> Vec<u8> {
         self.trie.root_hash().unwrap()
     }

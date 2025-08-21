@@ -11,6 +11,7 @@ pub mod shard;
 pub mod stores;
 pub mod utils;
 
+pub mod block_engine_test_helpers;
 pub mod migrations;
 pub mod test_helper;
 

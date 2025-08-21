@@ -2,7 +2,7 @@ use std::time::Duration;
 use tokio::select;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::Instant;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::consensus::consensus::SystemMessage;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
@@ -81,6 +81,10 @@ impl BlockReceiver {
     }
 
     async fn sync_missing_blocks(&mut self, start_block_number: u64, stop_block_number: u64) {
+        info!(
+            start_block_number,
+            stop_block_number, "Syncing missing blocks",
+        );
         let mut current_block_number = start_block_number;
         while current_block_number <= stop_block_number {
             let (block_tx, block_rx) = oneshot::channel::<Option<Block>>();
@@ -97,6 +101,7 @@ impl BlockReceiver {
                 continue;
             }
             self.submit_block(&block).await;
+            current_block_number += 1;
         }
     }
 
@@ -128,7 +133,7 @@ impl BlockReceiver {
                     .get_last_block_event()
                     .unwrap();
                 let last_block_number = match &last_stored_event {
-                    None => 0,
+                    None => 1,
                     Some(last_event) => last_event.block_number(),
                 };
                 self.sync_missing_blocks(
@@ -144,14 +149,24 @@ impl BlockReceiver {
                     .await
                 {
                     // TODO(aditi): Right now, we will just wait for the next block with events and try again. In the future we may want better retry logic
+                    warn!(
+                        seqnum = first_event_in_block.seqnum() - 1,
+                        "Timed out waiting for confirmation",
+                    );
                     continue;
                 }
             };
             self.submit_block(&block).await;
             // If confirmation fails, we'll try move onto the next block and retry this block if needed.
-            let _ = self
+            if let Err(BlockReceiverError::ConfirmationTimedOut) = self
                 .wait_for_confirmation(last_event_in_block.seqnum(), Duration::from_secs(1))
-                .await;
+                .await
+            {
+                warn!(
+                    seqnum = last_event_in_block.seqnum(),
+                    "Timed out waiting for confirmation",
+                );
+            };
         }
     }
 }

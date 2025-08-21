@@ -7,3 +7,6 @@ mod mempool_test;
 
 #[cfg(test)]
 mod rate_limits_test;
+
+#[cfg(test)]
+mod block_receiver_test;
