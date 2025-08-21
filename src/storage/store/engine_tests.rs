@@ -14,8 +14,9 @@ mod tests {
     use crate::storage::store::mempool_poller::MempoolMessage;
     use crate::storage::store::stores::StoreLimits;
     use crate::storage::store::test_helper::{
-        self, commit_event, commit_event_at, commit_message_at, commit_messages,
-        default_custody_address, key_exists_in_trie, limits, EngineOptions, FID3_FOR_TEST,
+        self, assert_block_confirmed_event, block_event_exists, commit_block_events, commit_event,
+        commit_event_at, commit_message_at, commit_messages, default_custody_address,
+        key_exists_in_trie, limits, EngineOptions, FID3_FOR_TEST,
     };
     use crate::storage::store::test_helper::{
         commit_message, message_exists_in_trie, register_user, FID2_FOR_TEST, FID_FOR_TEST,
@@ -3772,5 +3773,38 @@ mod tests {
             result.is_ok(),
             "Post-commit hook should not block on receiver"
         );
+    }
+
+    #[tokio::test]
+    async fn test_merge_block_events() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let mut event_rx = engine.get_senders().events_tx.subscribe();
+
+        let block_event = events_factory::create_heartbeat_event(2);
+        commit_block_events(&mut engine, vec![&block_event]).await;
+        assert!(!block_event_exists(&engine, &block_event));
+        let block_confirmed = assert_block_confirmed_event(event_rx.recv().await.unwrap());
+        assert_eq!(block_confirmed.max_block_event_seqnum, 0);
+
+        let block_event1 = events_factory::create_heartbeat_event(1);
+        let block_event2 = events_factory::create_heartbeat_event(2);
+        commit_block_events(&mut engine, vec![&block_event2, &block_event1]).await;
+        assert!(block_event_exists(&engine, &block_event1));
+        assert!(!block_event_exists(&engine, &block_event2));
+        let block_confirmed = assert_block_confirmed_event(event_rx.recv().await.unwrap());
+        assert_eq!(block_confirmed.max_block_event_seqnum, 1);
+
+        let block_event3 = events_factory::create_heartbeat_event(3);
+        let block_event4 = events_factory::create_heartbeat_event(4);
+        commit_block_events(
+            &mut engine,
+            vec![&block_event2, &block_event3, &block_event4],
+        )
+        .await;
+        let block_confirmed = assert_block_confirmed_event(event_rx.recv().await.unwrap());
+        assert!(block_event_exists(&engine, &block_event2));
+        assert!(block_event_exists(&engine, &block_event3));
+        assert!(block_event_exists(&engine, &block_event4));
+        assert_eq!(block_confirmed.max_block_event_seqnum, 4);
     }
 }

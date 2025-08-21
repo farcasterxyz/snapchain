@@ -5,6 +5,7 @@ use crate::core::{
 };
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::message_data::Body;
+use crate::proto::BlockEvent;
 use crate::proto::{
     self, hub_event, FarcasterNetwork, HubEvent, HubEventType, MessageType, OnChainEvent,
     OnChainEventType, Protocol, ShardChunk, Transaction, UserDataType, UserNameProof,
@@ -1791,6 +1792,15 @@ impl ShardEngine {
                 error!("Error checking if sync id exists: {:?}", err);
                 false
             })
+    }
+
+    pub fn get_block_event(
+        &self,
+        seqnum: u64,
+    ) -> Result<Option<BlockEvent>, BlockEventStorageError> {
+        self.stores
+            .block_event_store
+            .get_block_event_by_seqnum(seqnum)
     }
 
     pub fn get_min_height(&self) -> Height {
