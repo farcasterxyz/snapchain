@@ -3780,20 +3780,22 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let mut event_rx = engine.get_senders().events_tx.subscribe();
 
-        let block_event = events_factory::create_heartbeat_event(2);
-        commit_block_events(&mut engine, vec![&block_event]).await;
-        assert!(!block_event_exists(&engine, &block_event));
+        // Don't merge event unless all previous have been merged
+        let block_event2 = events_factory::create_heartbeat_event(2);
+        commit_block_events(&mut engine, vec![&block_event2]).await;
+        assert!(!block_event_exists(&engine, &block_event2));
         let block_confirmed = assert_block_confirmed_event(event_rx.recv().await.unwrap());
         assert_eq!(block_confirmed.max_block_event_seqnum, 0);
 
+        // Ordering within a transaction matters
         let block_event1 = events_factory::create_heartbeat_event(1);
-        let block_event2 = events_factory::create_heartbeat_event(2);
         commit_block_events(&mut engine, vec![&block_event2, &block_event1]).await;
         assert!(block_event_exists(&engine, &block_event1));
         assert!(!block_event_exists(&engine, &block_event2));
         let block_confirmed = assert_block_confirmed_event(event_rx.recv().await.unwrap());
         assert_eq!(block_confirmed.max_block_event_seqnum, 1);
 
+        // Merge multiple block events in a single block
         let block_event3 = events_factory::create_heartbeat_event(3);
         let block_event4 = events_factory::create_heartbeat_event(4);
         commit_block_events(
