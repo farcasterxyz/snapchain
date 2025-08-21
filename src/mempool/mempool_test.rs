@@ -125,6 +125,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_duplicate_block_event_is_invalid() {
+        let (mut engine, _, mut mempool, _, _, _, _) = setup(None, false).await;
+        let block_event = events_factory::create_heartbeat_event(1);
+        let valid = mempool.message_is_valid(&MempoolMessage::BlockEvent {
+            for_shard: 1,
+            message: block_event.clone(),
+        });
+        assert!(valid.is_ok());
+
+        test_helper::commit_block_events(&mut engine, vec![&block_event]).await;
+        let valid = mempool.message_is_valid(&MempoolMessage::BlockEvent {
+            for_shard: 1,
+            message: block_event.clone(),
+        });
+        assert!(!valid.is_ok())
+    }
+
+    #[tokio::test]
     async fn test_duplicate_onchain_event_is_valid() {
         let (mut engine, _, mut mempool, _, _, _, _) = setup(None, false).await;
         let onchain_event = events_factory::create_rent_event(

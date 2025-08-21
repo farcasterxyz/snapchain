@@ -500,6 +500,15 @@ impl Mempool {
     }
 
     pub fn message_is_valid(&mut self, message: &MempoolMessage) -> Result<(), HubError> {
+        // Check for block events that have already been merged
+        if let MempoolMessage::BlockEvent { message, for_shard } = message {
+            let stores = self.read_node_mempool.shard_stores.get(&for_shard).unwrap();
+            if let Ok(max_seqnum) = stores.block_event_store.max_seqnum() {
+                if message.seqnum() <= max_seqnum {
+                    return Err(HubError::duplicate("message has already been merged"));
+                }
+            }
+        }
         let shard = self
             .read_node_mempool
             .message_router
