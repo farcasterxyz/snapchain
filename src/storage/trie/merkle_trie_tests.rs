@@ -3,6 +3,7 @@ mod tests {
     use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::IntoU8;
     use crate::storage::trie::merkle_trie::{Context, MerkleTrie, TrieKey};
+    use crate::storage::trie::util;
     use crate::utils::factory::{events_factory, messages_factory};
 
     fn random_hash() -> Vec<u8> {
@@ -137,5 +138,132 @@ mod tests {
                 .bytes()
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_attach_root() {
+        let ctx = &Context::new();
+        let tmp_path = tempfile::tempdir().unwrap();
+        let db = &RocksDB::new(tmp_path.path().to_str().unwrap());
+        db.open().unwrap();
+
+        let branching_factor = 16;
+        let key_conv = util::get_transform_functions(branching_factor).unwrap();
+
+        let mut trie = MerkleTrie::new(branching_factor).unwrap();
+        trie.initialize(db).unwrap();
+
+        let key_vecs: Vec<Vec<u8>> = (0..4)
+            .map(|_| (0..10).map(|_| rand::random::<u8>()).collect())
+            .collect();
+        let keys: Vec<&[u8]> = key_vecs.iter().map(|v| v.as_slice()).collect();
+
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        trie.insert(ctx, db, &mut txn_batch, keys.clone()).unwrap();
+        db.commit(txn_batch).unwrap();
+        let root_hash = trie.root_hash().unwrap();
+
+        // Key for the node to mess up and then re attach
+        let key = &key_vecs[0][0..6];
+        let xkey = (key_conv.expand)(key);
+        let xprefix = &xkey[0..xkey.len() - 1];
+        let child_char = xkey[xkey.len() - 1];
+
+        println!(
+            "Key[0] is {:?}, xkey is {:?}",
+            hex::encode(keys[0]),
+            hex::encode(xkey.clone())
+        );
+
+        // Assert that the 0th key is in the DB and in the trie
+        {
+            let root = trie.get_root_node().unwrap();
+            assert_eq!(root.items(), 4);
+
+            let prefix_node = root.get_node_from_trie(ctx, db, &xprefix, 0).unwrap();
+
+            // Now, intentionally remove this prefix->child from the trie, but keep it in the DB
+            let mut children = prefix_node.children().clone();
+            let removed = children.remove(&child_char);
+            prefix_node.set_children(children);
+            assert!(removed.is_some());
+
+            let mut child_hashes = prefix_node.child_hashes().clone();
+            let removed = child_hashes.remove(&child_char);
+            prefix_node.set_child_hashes(child_hashes);
+            assert!(removed.is_some());
+
+            // Mess up the hashes all the way to the root for the prefix
+            for i in (0..=xprefix.len() - 1).rev() {
+                let node = root.get_node_from_trie(ctx, db, &xprefix[..i], 0).unwrap();
+                let child_char = xprefix[i];
+                let mut child_hashes = node.child_hashes().clone();
+                child_hashes.insert(child_char, vec![0; 32]);
+                node.set_child_hashes(child_hashes);
+            }
+        }
+        assert_ne!(
+            hex::encode(trie.root_hash().unwrap()),
+            hex::encode(root_hash.clone())
+        );
+
+        // Now, attach the prefix node to the trie
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        let r = trie.attach_to_root(ctx, db, &mut txn_batch, &key);
+        db.commit(txn_batch).unwrap();
+
+        assert!(r.is_ok());
+        assert!(r.unwrap()); // Assert that it was attached
+
+        // Now, the root hashes should match the original
+        assert_eq!(
+            hex::encode(trie.root_hash().unwrap()),
+            hex::encode(root_hash)
+        );
+    }
+
+    #[test]
+    fn test_bulk_insert_matches_serial_insert() {
+        let ctx = &Context::new();
+
+        let tmp_path1 = tempfile::tempdir().unwrap();
+        let db1 = &RocksDB::new(tmp_path1.path().to_str().unwrap());
+        db1.open().unwrap();
+
+        let tmp_path2 = tempfile::tempdir().unwrap();
+        let db2 = &RocksDB::new(tmp_path2.path().to_str().unwrap());
+        db2.open().unwrap();
+
+        let branching_factor = 16;
+
+        let mut trie1 = MerkleTrie::new(branching_factor).unwrap();
+        trie1.initialize(db1).unwrap();
+
+        let mut trie2 = MerkleTrie::new(branching_factor).unwrap();
+        trie2.initialize(db2).unwrap();
+
+        // Generate 100 random keys of length 20
+        let key_vecs: Vec<Vec<u8>> = (0..100)
+            .map(|_| (0..20).map(|_| rand::random::<u8>()).collect())
+            .collect();
+        let keys: Vec<&[u8]> = key_vecs.iter().map(|v| v.as_slice()).collect();
+
+        // Insert one by one into trie1
+        for key in &keys {
+            let mut txn_batch = RocksDbTransactionBatch::new();
+            trie1.insert(ctx, db1, &mut txn_batch, vec![key]).unwrap();
+            db1.commit(txn_batch).unwrap();
+        }
+        let root_hash1 = trie1.root_hash().unwrap();
+
+        // Bulk insert into trie2
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        trie2
+            .insert(ctx, db2, &mut txn_batch, keys.clone())
+            .unwrap();
+        db2.commit(txn_batch).unwrap();
+        let root_hash2 = trie2.root_hash().unwrap();
+
+        assert_eq!(root_hash1, root_hash2);
     }
 }

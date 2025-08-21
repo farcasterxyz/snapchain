@@ -165,24 +165,24 @@ impl MerkleTrie {
         txn_batch: &mut RocksDbTransactionBatch,
         key: &[u8],
     ) -> Result<bool, TrieError> {
-        let key = (self.branch_xform.expand)(key);
+        let xkey = (self.branch_xform.expand)(key);
 
         if let Some(root) = self.root.as_mut() {
             // First, check if the key already exists in the trie. If it does, then there's nothing to do
-            if root.get_node_from_trie(ctx, db, &key, 0).is_some() {
+            if root.get_node_from_trie(ctx, db, &xkey, 0).is_some() {
                 return Ok(true);
             }
 
             // If it doesn't already exist in the trie, then check if it exists in the DB. If it is not in the
             // DB either, then there's nothing to do
-            let db_key = TrieNode::make_primary_key(&key, None);
+            let db_key = TrieNode::make_primary_key(&xkey, None);
             if db.get(&db_key).map_err(TrieError::wrap_database)?.is_none() {
                 return Ok(false);
             }
 
             // This node is in the Trie DB, but is not attached to the root. Now attach it
             let mut txn = RocksDbTransactionBatch::new();
-            root.attach_to_root(ctx, &mut HashMap::new(), db, &mut txn, 0, &key)?;
+            root.attach_to_root(ctx, &mut HashMap::new(), db, &mut txn, 0, &xkey)?;
 
             txn_batch.merge(txn);
             return Ok(true);
@@ -402,6 +402,11 @@ impl MerkleTrie {
 
     pub fn branching_factor(&self) -> u32 {
         self.branching_factor
+    }
+
+    #[cfg(test)]
+    pub fn get_root_node(&mut self) -> Option<&mut TrieNode> {
+        self.root.as_mut()
     }
 }
 

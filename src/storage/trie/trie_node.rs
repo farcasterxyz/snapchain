@@ -199,6 +199,21 @@ impl TrieNode {
         }
     }
 
+    #[cfg(test)]
+    pub fn set_children(&mut self, children: HashMap<u8, TrieNodeType>) {
+        self.children = children;
+    }
+
+    #[cfg(test)]
+    pub fn child_hashes(&self) -> &HashMap<u8, Vec<u8>> {
+        &self.child_hashes
+    }
+
+    #[cfg(test)]
+    pub fn set_child_hashes(&mut self, child_hashes: HashMap<u8, Vec<u8>>) {
+        self.child_hashes = child_hashes;
+    }
+
     pub fn children(&self) -> &HashMap<u8, TrieNodeType> {
         &self.children
     }
@@ -513,11 +528,18 @@ impl TrieNode {
         // If we're not yet at the child, we get the next level, make sure the next level is there
         if !self.children.contains_key(&child_char) {
             // Fetch the child node from the DB, and insert it into the DB
-            let child_node_from_db = self
-                .get_or_load_child(ctx, db, &prefix, child_char)?
-                .clone();
+            // This is a repair operation. If the child is not in the in-memory map,
+            // we must perform a direct DB lookup to see if it exists on disk.
+            let child_prefix = Self::make_primary_key(&prefix, Some(child_char));
+            let child_node = db
+                .get(&child_prefix)
+                .map_err(TrieError::wrap_database)?
+                .map(|b| TrieNode::deserialize(&b).unwrap())
+                .unwrap_or_default(); // If not in DB, then it's a new node.
+
             self.children
-                .insert(child_char, TrieNodeType::Node(child_node_from_db));
+                .insert(child_char, TrieNodeType::Node(child_node));
+            ctx.db_read_count.fetch_add(1, atomic::Ordering::Relaxed);
         }
 
         // temporarily taking child_hashes out of the node here to appease the borrow-checker
@@ -525,8 +547,18 @@ impl TrieNode {
             let mut my_child_hashes = std::mem::take(&mut self.child_hashes);
 
             let child_node = self.get_or_load_child(ctx, db, &prefix, child_char)?;
+
             // recurse down
-            child_node.attach_to_root(ctx, &mut my_child_hashes, db, txn, current_index + 1, key)?
+            child_node.attach_to_root(
+                ctx,
+                &mut my_child_hashes,
+                db,
+                txn,
+                current_index + 1,
+                key,
+            )?;
+
+            self.child_hashes = my_child_hashes;
         }
 
         // Update my hash in the parent's cache of child hashes
