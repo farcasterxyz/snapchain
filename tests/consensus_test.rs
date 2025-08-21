@@ -988,44 +988,36 @@ async fn test_cross_shard_interactions() {
 
     let fname = "erica";
 
-    let transfer1 = proto::ValidatorMessage {
-        on_chain_event: None,
-        fname_transfer: Some(proto::FnameTransfer {
-            id: 43782,
-            from_fid: 0,
-            proof: Some(proto::UserNameProof {
-                timestamp: 1741384226,
-                name: fname.as_bytes().to_vec(),
-                fid: second_fid,
-                owner: hex::decode("2b4d92e7626c5fc56cb4641f6f758563de1f6bdc").unwrap(),
-                signature: hex::decode("050b42fdda7b0a7309a1fb8a2cbc9a5f4bbf241aec74f53191f9665d9b9f572d4f452ac807911af7b6980219482d6f7fda7f99f23ab19c961b4701b9934fa2f91b").unwrap(),
-                r#type: proto::UserNameType::UsernameTypeFname as i32,
-            }),
+    let transfer1 = proto::FnameTransfer {
+        id: 43782,
+        from_fid: 0,
+        proof: Some(proto::UserNameProof {
+            timestamp: 1741384226,
+            name: fname.as_bytes().to_vec(),
+            fid: second_fid,
+            owner: hex::decode("2b4d92e7626c5fc56cb4641f6f758563de1f6bdc").unwrap(),
+            signature: hex::decode("050b42fdda7b0a7309a1fb8a2cbc9a5f4bbf241aec74f53191f9665d9b9f572d4f452ac807911af7b6980219482d6f7fda7f99f23ab19c961b4701b9934fa2f91b").unwrap(),
+            r#type: proto::UserNameType::UsernameTypeFname as i32,
         }),
-        block_event: None,
     };
 
-    let transfer2 = proto::ValidatorMessage {
-        on_chain_event: None,
-        fname_transfer: Some(proto::FnameTransfer {
-            id: 829595,
-            from_fid: second_fid,
-            proof: Some(proto::UserNameProof {
-                timestamp: 1741384226,
-                name: fname.as_bytes().to_vec(),
-                fid: first_fid,
-                owner: hex::decode("92ce59c18a97646e9a7e011653d8417d3a08bb2b").unwrap(),
-                signature: hex::decode("00c3601c515edffe208e7128f47f89c2fb7b8e0beaaf615158305ddf02818a71679a8e7062503be59a19d241bd0b47396a3c294cfafd0d5478db1ae8249463bd1c").unwrap(),
-                r#type: proto::UserNameType::UsernameTypeFname as i32,
-            }),
+    let transfer2 = proto::FnameTransfer {
+        id: 829595,
+        from_fid: second_fid,
+        proof: Some(proto::UserNameProof {
+            timestamp: 1741384226,
+            name: fname.as_bytes().to_vec(),
+            fid: first_fid,
+            owner: hex::decode("92ce59c18a97646e9a7e011653d8417d3a08bb2b").unwrap(),
+            signature: hex::decode("00c3601c515edffe208e7128f47f89c2fb7b8e0beaaf615158305ddf02818a71679a8e7062503be59a19d241bd0b47396a3c294cfafd0d5478db1ae8249463bd1c").unwrap(),
+            r#type: proto::UserNameType::UsernameTypeFname as i32,
         }),
-        block_event: None,
     };
 
     let node = &network.nodes[0];
 
     node.add_message(
-        MempoolMessage::FnameTransfer(transfer1.fname_transfer.clone().unwrap()),
+        MempoolMessage::FnameTransfer(transfer1),
         MempoolSource::Local,
         None,
     )
@@ -1033,7 +1025,7 @@ async fn test_cross_shard_interactions() {
     .unwrap();
 
     node.add_message(
-        MempoolMessage::FnameTransfer(transfer2.fname_transfer.clone().unwrap()),
+        MempoolMessage::FnameTransfer(transfer2),
         MempoolSource::Local,
         None,
     )
