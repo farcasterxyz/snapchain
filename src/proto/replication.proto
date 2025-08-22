@@ -6,10 +6,33 @@ service ReplicationService {
   rpc GetShardSnapshotMetadata(GetShardSnapshotMetadataRequest) returns (GetShardSnapshotMetadataResponse);
   rpc GetShardTransactions(GetShardTransactionsRequest) returns (GetShardTransactionsResponse);
 
+  rpc GetTrieDebugInfo(GetTrieDebugInfoRequest) returns (GetTrieDebugInfoResponse);
+
   // IMPORTANT: this is a temporary endpoint for debugging purposes only. It will eventually be
   // removed, and SHOULD NOT be used for production purposes.
   rpc GetReplicationTransactionsByFid(GetReplicationTransactionsByFidRequest)
     returns (GetReplicationTransactionsByFidResponse);
+}
+
+message GetTrieDebugInfoRequest {
+  uint32 shard_id = 1;
+  uint64 fid = 2;
+  uint64 height = 3;
+}
+
+message GetTrieDebugInfoResponse {
+  repeated TrieNodeDebugInfo debug_info = 1;
+}
+
+message TrieNodeDebugInfo {
+  bytes xprefix = 1;
+  bytes hash = 2;
+  repeated ChildHashDebugInfo child_hashes = 3;
+}
+
+message ChildHashDebugInfo {
+  uint32 char = 1;
+  bytes hash = 2;
 }
 
 message GetShardSnapshotMetadataRequest {

@@ -1,6 +1,6 @@
-use crate::proto::OnChainEventType;
+use crate::proto::{ChildHashDebugInfo, OnChainEventType, TrieNodeDebugInfo};
 use crate::storage::store::account::FID_BYTES;
-use crate::storage::trie::merkle_trie;
+use crate::storage::trie::{self, merkle_trie};
 use crate::{
     core::util,
     proto,
@@ -106,6 +106,55 @@ impl Replicator {
             system_messages_sort_order,
             user_messages_sort_order,
         )
+    }
+
+    pub fn get_trie_debug_info(
+        &self,
+        shard: u32,
+        fid: u64,
+        height: u64,
+    ) -> Result<Vec<TrieNodeDebugInfo>, String> {
+        match self.stores.get(shard, height) {
+            Some(stores) => {
+                let db = stores.db.clone();
+                let mut result = vec![];
+
+                let trie = stores.trie;
+                let fid_key = TrieKey::for_fid(fid);
+                let xfid_key = trie.get_x_key(&fid_key);
+
+                // For every prefix in xfid_key, get the node's hash
+                for i in 0..(xfid_key.len() + 1) {
+                    let xprefix = xfid_key[..i].to_vec();
+
+                    let node = trie.get_x_node(&db, &xprefix).ok_or_else(|| {
+                        format!("Failed to get trie node for prefix {:?}", xprefix)
+                    })?;
+                    let node_hash = node.hash();
+
+                    let child_hashes = node
+                        .child_hashes()
+                        .iter()
+                        .map(|(k, v)| ChildHashDebugInfo {
+                            char: *k as u32,
+                            hash: v.clone(),
+                        })
+                        .collect();
+
+                    let debug_info = TrieNodeDebugInfo {
+                        xprefix,
+                        hash: node_hash,
+                        child_hashes,
+                    };
+                    result.push(debug_info);
+                }
+
+                return Ok(result);
+            }
+            None => {
+                return Err(format!("No stores found for shard {}", shard));
+            }
+        };
     }
 
     pub fn latest_transactions_for_fid(

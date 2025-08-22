@@ -204,7 +204,7 @@ impl TrieNode {
         self.children = children;
     }
 
-    #[cfg(test)]
+    // TODO: This should be test only
     pub fn child_hashes(&self) -> &HashMap<u8, Vec<u8>> {
         &self.child_hashes
     }
@@ -527,18 +527,27 @@ impl TrieNode {
 
         // If we're not yet at the child, we get the next level, make sure the next level is there
         if !self.children.contains_key(&child_char) {
-            // Fetch the child node from the DB, and insert it into the DB
-            // This is a repair operation. If the child is not in the in-memory map,
-            // we must perform a direct DB lookup to see if it exists on disk.
-            let child_prefix = Self::make_primary_key(&prefix, Some(child_char));
-            let child_node = db
-                .get(&child_prefix)
-                .map_err(TrieError::wrap_database)?
-                .map(|b| TrieNode::deserialize(&b).unwrap())
-                .unwrap_or_default(); // If not in DB, then it's a new node.
+            // // Fetch the child node from the DB, and insert it into this node's children
+            // // Since the child is not in the in-memory map, we must perform a direct DB lookup to see if it exists on disk.
+            // let child_prefix = Self::make_primary_key(&prefix, Some(child_char));
 
-            self.children
-                .insert(child_char, TrieNodeType::Node(child_node));
+            // // See if this node is available in the txn first
+            // let child_node = match txn.batch.get(&child_prefix) {
+            //     // If it is in the txn, use this because this is the latest one that will be commited to the DB
+            //     Some(Some(bytes)) => TrieNode::deserialize(&bytes),
+            //     // If not in the current txn, get it from the DB
+            //     _ => db
+            //         .get(&child_prefix)
+            //         .map_err(TrieError::wrap_database)?
+            //         .map(|b| TrieNode::deserialize(&b))
+            //         // If not in the DB, create a default empty node
+            //         .unwrap_or(Ok(TrieNode::default())),
+            // }?;
+
+            self.children.insert(
+                child_char,
+                TrieNodeType::Serialized(SerializedTrieNode::new()),
+            );
             ctx.db_read_count.fetch_add(1, atomic::Ordering::Relaxed);
         }
 

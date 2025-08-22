@@ -68,6 +68,22 @@ impl ReplicationServer {
 
 #[tonic::async_trait]
 impl proto::replication_service_server::ReplicationService for ReplicationServer {
+    async fn get_trie_debug_info(
+        &self,
+        request: Request<proto::GetTrieDebugInfoRequest>,
+    ) -> Result<Response<proto::GetTrieDebugInfoResponse>, Status> {
+        let request = request.into_inner();
+
+        let debug_info = self
+            .replicator
+            .get_trie_debug_info(request.shard_id, request.fid, request.height)
+            .map_err(|e| Status::internal(format!("Failed to get trie debug info: {}", e)))?;
+
+        Ok(Response::new(proto::GetTrieDebugInfoResponse {
+            debug_info,
+        }))
+    }
+
     async fn get_shard_snapshot_metadata(
         &self,
         request: Request<proto::GetShardSnapshotMetadataRequest>,

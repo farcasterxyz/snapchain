@@ -133,6 +133,24 @@ impl MerkleTrie {
         Ok(())
     }
 
+    // ========= TEMP
+    pub fn get_x_key(&self, key: &[u8]) -> Vec<u8> {
+        (self.branch_xform.expand)(key)
+    }
+
+    pub fn get_x_node(&self, db: &RocksDB, xprefix: &[u8]) -> Option<TrieNode> {
+        let node_key = TrieNode::make_primary_key(&xprefix, None);
+
+        if let Some(node_bytes) = db.get(&node_key).ok().flatten() {
+            if let Ok(node) = TrieNode::deserialize(&node_bytes) {
+                return Some(node);
+            }
+        }
+
+        None
+    }
+    // ========= TEMP
+
     fn load_root(&self, db: &RocksDB) -> Result<Option<TrieNode>, TrieError> {
         let root_key = TrieNode::make_primary_key(&[], None);
 
@@ -158,26 +176,28 @@ impl MerkleTrie {
         }
     }
 
+    // Re-attach a trie node that is in the DB to the root of the trie, recalculating hashes as needed
+    // returns (is_attached, was_created)
     pub fn attach_to_root(
         &mut self,
         ctx: &Context,
         db: &RocksDB,
         txn_batch: &mut RocksDbTransactionBatch,
         key: &[u8],
-    ) -> Result<bool, TrieError> {
+    ) -> Result<(bool, bool), TrieError> {
         let xkey = (self.branch_xform.expand)(key);
 
         if let Some(root) = self.root.as_mut() {
             // First, check if the key already exists in the trie. If it does, then there's nothing to do
             if root.get_node_from_trie(ctx, db, &xkey, 0).is_some() {
-                return Ok(true);
+                return Ok((true, false));
             }
 
             // If it doesn't already exist in the trie, then check if it exists in the DB. If it is not in the
             // DB either, then there's nothing to do
             let db_key = TrieNode::make_primary_key(&xkey, None);
             if db.get(&db_key).map_err(TrieError::wrap_database)?.is_none() {
-                return Ok(false);
+                return Ok((false, false));
             }
 
             // This node is in the Trie DB, but is not attached to the root. Now attach it
@@ -185,7 +205,7 @@ impl MerkleTrie {
             root.attach_to_root(ctx, &mut HashMap::new(), db, &mut txn, 0, &xkey)?;
 
             txn_batch.merge(txn);
-            return Ok(true);
+            return Ok((true, true));
         } else {
             Err(TrieError::TrieNotInitialized)
         }

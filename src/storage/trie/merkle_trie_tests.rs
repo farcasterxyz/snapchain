@@ -164,10 +164,10 @@ mod tests {
         let root_hash = trie.root_hash().unwrap();
 
         // Key for the node to mess up and then re attach
-        let key = &key_vecs[0][0..6];
-        let xkey = (key_conv.expand)(key);
-        let xprefix = &xkey[0..xkey.len() - 1];
-        let child_char = xkey[xkey.len() - 1];
+        let key = &key_vecs[0][0..6]; // try to attach this node
+        let xkey = (key_conv.expand)(key); // with this expanded key
+        let xprefix = &xkey[0..xkey.len() - 1]; // parent's prefix
+        let child_char = xkey[xkey.len() - 1]; // child's character in the parent's children[]
 
         println!(
             "Key[0] is {:?}, xkey is {:?}",
@@ -193,7 +193,8 @@ mod tests {
             prefix_node.set_child_hashes(child_hashes);
             assert!(removed.is_some());
 
-            // Mess up the hashes all the way to the root for the prefix
+            // Mess up the hashes all the way to the root for the prefix. This should be fixed up by the
+            // attach_to_root operation
             for i in (0..=xprefix.len() - 1).rev() {
                 let node = root.get_node_from_trie(ctx, db, &xprefix[..i], 0).unwrap();
                 let child_char = xprefix[i];
@@ -213,13 +214,42 @@ mod tests {
         db.commit(txn_batch).unwrap();
 
         assert!(r.is_ok());
-        assert!(r.unwrap()); // Assert that it was attached
+
+        let (is_attached, was_created) = r.unwrap();
+        assert!(is_attached && was_created); // Assert that it was attached
 
         // Now, the root hashes should match the original
         assert_eq!(
             hex::encode(trie.root_hash().unwrap()),
+            hex::encode(root_hash.clone())
+        );
+
+        // Attaching it again should be a no-op
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        let r = trie.attach_to_root(ctx, db, &mut txn_batch, &key);
+        db.commit(txn_batch).unwrap();
+
+        assert!(r.is_ok());
+
+        let (is_attached, was_created) = r.unwrap();
+        assert!(is_attached && !was_created); // Assert that it was not created again
+
+        // root hashes should still match the original
+        assert_eq!(
+            hex::encode(trie.root_hash().unwrap()),
             hex::encode(root_hash)
         );
+
+        // Attempting to attach a non-existing node should not be an error, but is_attached and was_created should
+        // both be false
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        let r = trie.attach_to_root(ctx, db, &mut txn_batch, &[0; 16]);
+        db.commit(txn_batch).unwrap();
+
+        assert!(r.is_ok());
+
+        let (is_attached, was_created) = r.unwrap();
+        assert!(!is_attached && !was_created);
     }
 
     #[test]
@@ -263,7 +293,47 @@ mod tests {
             .unwrap();
         db2.commit(txn_batch).unwrap();
         let root_hash2 = trie2.root_hash().unwrap();
-
         assert_eq!(root_hash1, root_hash2);
+
+        // Adding the same 100 keys again should result in no-op for the batch add
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        let r = trie2.insert(ctx, db2, &mut txn_batch, keys.clone());
+        db2.commit(txn_batch).unwrap();
+
+        assert!(r.is_ok());
+        let root_hash2 = trie2.root_hash().unwrap();
+        assert_eq!(root_hash1, root_hash2);
+
+        trie1.reload(db1).unwrap();
+        trie2.reload(db2).unwrap();
+
+        // Create a second set of 100 keys
+        let key_vecs2: Vec<Vec<u8>> = (0..100)
+            .map(|_| (0..20).map(|_| rand::random::<u8>()).collect())
+            .collect();
+
+        // Add them serially
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        for key in &key_vecs2 {
+            trie1
+                .insert(ctx, db1, &mut txn_batch, vec![key.as_slice()])
+                .unwrap();
+        }
+        db1.commit(txn_batch).unwrap();
+
+        // Bulk add to trie 2
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        trie2
+            .insert(
+                ctx,
+                db2,
+                &mut txn_batch,
+                key_vecs2.iter().map(|v| v.as_slice()).collect(),
+            )
+            .unwrap();
+        db2.commit(txn_batch).unwrap();
+
+        // Root hashes should match again
+        assert_eq!(trie1.root_hash().unwrap(), trie2.root_hash().unwrap());
     }
 }

@@ -6,22 +6,25 @@ use crate::core::util::FarcasterTime;
 use crate::proto::get_shard_transactions_request::Cursor;
 use crate::proto::replication_service_client::ReplicationServiceClient;
 use crate::proto::{
-    GetShardSnapshotMetadataRequest, GetShardTransactionsRequest, SortOrderTypes, Transaction,
+    ChildHashDebugInfo, GetShardSnapshotMetadataRequest, GetShardTransactionsRequest,
+    ShardSnapshotMetadata, SortOrderTypes, Transaction, TrieNodeDebugInfo,
 };
 use crate::storage::constants::RootPrefix;
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::StoreOptions;
 use crate::storage::store::engine::ShardEngine;
 use crate::storage::store::stores::StoreLimits;
+use crate::storage::trie::errors::TrieError;
 use crate::storage::trie::merkle_trie::{self, TrieKey};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::EngineVersion;
+use base64::{engine::general_purpose, Engine as _};
 use futures::future::try_join_all;
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::{net, process, u64};
+use std::{net, u64};
 use tokio::signal::ctrl_c;
 use tokio::sync::{mpsc, oneshot};
 use tonic::transport::Channel;
@@ -256,10 +259,9 @@ impl ReplicatorBootstrap {
             .await
             .map_err(|e| BootstrapError::PeerConnectionError(e.to_string()))?;
 
-        let target_heights = self
-            .determine_target_height(&mut client, app_config.consensus.shard_ids.to_vec())
+        let shard_metadata = self
+            .get_shard_snapshots(&mut client, app_config.consensus.shard_ids.to_vec())
             .await?;
-        info!("Target heights for bootstrap: {:?}", target_heights);
 
         // Initialize databases and replay transactions for each shard
         // Note: We're not replicating shard 0 (block shard) for now as requested
@@ -290,8 +292,17 @@ impl ReplicatorBootstrap {
         let mut shard_tasks = Vec::new();
 
         for shard_id in shard_ids {
-            let target_height = target_heights.get(&shard_id).cloned().unwrap_or(0);
-            if target_height == 0 {
+            let metadata = shard_metadata.get(&shard_id).ok_or_else(|| {
+                BootstrapError::MetadataFetchError(format!(
+                    "No metadata found for shard {}",
+                    shard_id
+                ))
+            })?;
+
+            let target_height = metadata.height;
+            let highest_fid = metadata.highest_fid;
+
+            if target_height == 0 || highest_fid == 0 {
                 return Err(Box::new(HubError::unavailable(
                     format!(
                         "No valid snapshot found for shard {}. Skipping bootstrap.",
@@ -301,8 +312,8 @@ impl ReplicatorBootstrap {
                 )));
             }
             info!(
-                "Bootstrapping shard {} at height {}",
-                shard_id, target_height
+                "Bootstrapping shard {} at height {}, highest_fid = {}",
+                shard_id, target_height, highest_fid
             );
 
             // Clone necessary data for the spawned task
@@ -314,6 +325,8 @@ impl ReplicatorBootstrap {
 
             // Spawn a task for this shard
             let shutdown_signal = self.shutdown.clone();
+            let metadata = metadata.clone();
+
             let task = tokio::spawn(async move {
                 info!("Starting parallel bootstrap for shard {}", shard_id);
 
@@ -324,8 +337,10 @@ impl ReplicatorBootstrap {
                     shard_id,
                     trie_branching_factor,
                     target_height,
+                    highest_fid,
                     &statsd_client_clone,
                     &rocksdb_dir,
+                    metadata,
                     shutdown_signal,
                 )
                 .await;
@@ -407,12 +422,12 @@ impl ReplicatorBootstrap {
     }
 
     /// Determine the highest block for each shard.
-    async fn determine_target_height(
+    async fn get_shard_snapshots(
         &self,
         client: &mut ReplicationServiceClient<Channel>,
         all_shards: Vec<u32>,
-    ) -> Result<HashMap<u32, u64>, BootstrapError> {
-        let mut target_heights = HashMap::new();
+    ) -> Result<HashMap<u32, ShardSnapshotMetadata>, BootstrapError> {
+        let mut shard_metadata = HashMap::new();
 
         // TODO: Shard 0 doesn't have a snapshot, so we skip it?
 
@@ -423,14 +438,22 @@ impl ReplicatorBootstrap {
                 Ok(response) => {
                     let metadata_response = response.into_inner();
 
-                    // Go over the response, finding the highest block
-                    let mut highest_block = 0;
+                    if metadata_response.snapshots.is_empty() {
+                        error!("No snapshots found for shard {}", shard_id);
+                        return Err(BootstrapError::MetadataFetchError(
+                            "No snapshots found".into(),
+                        ));
+                    }
+
+                    // Find the largest height in the response, and use that
+                    let mut latest_snapshot = metadata_response.snapshots[0].clone();
                     for snapshot in metadata_response.snapshots {
-                        if snapshot.height > highest_block {
-                            highest_block = snapshot.height;
+                        if snapshot.height > latest_snapshot.height {
+                            latest_snapshot = snapshot;
                         }
                     }
-                    target_heights.insert(shard_id, highest_block);
+
+                    shard_metadata.insert(shard_id, latest_snapshot);
                 }
                 Err(e) => {
                     error!("Failed to get metadata for shard {}: {}", shard_id, e);
@@ -439,13 +462,7 @@ impl ReplicatorBootstrap {
             }
         }
 
-        if target_heights.is_empty() {
-            return Err(BootstrapError::MetadataFetchError(
-                "No valid snapshots found".to_string(),
-            ));
-        }
-
-        Ok(target_heights)
+        Ok(shard_metadata)
     }
 }
 
@@ -455,12 +472,31 @@ async fn start_shard_replication_outer(
     shard_id: u32,
     trie_branching_factor: u32,
     target_height: u64,
+    highest_fid: u64,
     statsd_client: &StatsdClientWrapper,
     rocksdb_dir: &str,
+    metadata: ShardSnapshotMetadata,
     shutdown_signal: Arc<AtomicBool>,
 ) -> Result<WorkUnitResponse, BootstrapError> {
-    // Go over the FIDs in chunks of 50k and import them into the DB in batches. This allows the
-    // DB to compact and flush every 50k FIDs, managing the SST files more efficiently.
+    // ============== TEMP
+    if let Err(e) = post_process_trie(
+        rocksdb_dir,
+        trie_branching_factor,
+        shard_id,
+        highest_fid,
+        metadata,
+        shutdown_signal,
+    )
+    .await
+    {
+        error!("Error post processing trie for shard {}: {}", shard_id, e);
+        return Err(BootstrapError::PostProcessError(e.to_string()));
+    }
+
+    return Ok(WorkUnitResponse::Stopped);
+
+    // Go over the FIDs in chunks of 10k and import them into the DB in batches. This allows the
+    // DB to compact and flush every 10k FIDs, managing the SST files more efficiently.
 
     let mut start_fid = 1;
     let step = 10_000;
@@ -485,15 +521,196 @@ async fn start_shard_replication_outer(
         .await?;
 
         if let WorkUnitResponse::NoMoreFIDs(_) = completed {
-            info!(
-                "No more FIDs to process for shard {}. Highest FID is {:?}",
-                shard_id, completed
-            );
+            info!("No more FIDs to process for shard {}. ", shard_id);
+
+            // if let Err(e) = post_process_trie(
+            //     rocksdb_dir,
+            //     trie_branching_factor,
+            //     shard_id,
+            //     highest_fid,
+            //     metadata,
+            //     shutdown_signal,
+            // )
+            // .await
+            // {
+            //     error!("Error post processing trie for shard {}: {}", shard_id, e);
+            //     return Err(BootstrapError::PostProcessError(e.to_string()));
+            // }
+
             return Ok(completed);
         }
 
         start_fid += step;
     }
+}
+
+fn pretty_print_debug_info(info: &TrieNodeDebugInfo) {
+    println!(
+        "xPrefix: {}",
+        general_purpose::STANDARD.encode(&info.xprefix)
+    );
+    println!("hash: {}", general_purpose::STANDARD.encode(&info.hash));
+    println!("'childHashes':");
+    for child in &info.child_hashes {
+        println!(
+            "{{ \n'char': {}\n'hash': {}\n }},\n",
+            child.char,
+            general_purpose::STANDARD.encode(&child.hash)
+        );
+    }
+    println!("]")
+}
+
+fn get_one_node_in_007(db: &RocksDB, trie: &merkle_trie::MerkleTrie) {
+    let mut xprefix = vec![1, 2, 0, 0, 0, 0, 7, 5];
+    let mut node;
+    while xprefix.len() != 10 {
+        let maybe_node = trie
+            .get_x_node(&db, &xprefix)
+            .ok_or_else(|| format!("Failed to get trie node for prefix {:?}", xprefix));
+        if maybe_node.is_err() {
+            error!("{}", maybe_node.err().unwrap());
+            return;
+        }
+        node = maybe_node.unwrap();
+        let first_child = node.children().keys().next().unwrap();
+        xprefix.push(*first_child as u8);
+    }
+
+    info!("007 root node is {:?}", xprefix);
+}
+
+fn get_trie_debug_info(
+    db: &RocksDB,
+    trie: &merkle_trie::MerkleTrie,
+    fid: u64,
+) -> Result<Vec<TrieNodeDebugInfo>, String> {
+    let mut result = vec![];
+
+    let fid_key = TrieKey::for_fid(fid);
+    let xfid_key = trie.get_x_key(&fid_key);
+
+    // For every prefix in xfid_key, get the node's hash
+    for i in 0..(xfid_key.len() + 1) {
+        let xprefix = xfid_key[..i].to_vec();
+
+        let node = trie
+            .get_x_node(&db, &xprefix)
+            .ok_or_else(|| format!("Failed to get trie node for prefix {:?}", xprefix))?;
+        let node_hash = node.hash();
+
+        let child_hashes = node
+            .child_hashes()
+            .iter()
+            .map(|(k, v)| ChildHashDebugInfo {
+                char: *k as u32,
+                hash: v.clone(),
+            })
+            .collect();
+
+        let debug_info = TrieNodeDebugInfo {
+            xprefix,
+            hash: node_hash,
+            child_hashes,
+        };
+        result.push(debug_info);
+    }
+
+    return Ok(result);
+}
+
+async fn post_process_trie(
+    rocksdb_dir: &str,
+    trie_branching_factor: u32,
+    shard_id: u32,
+    highest_fid: u64,
+    metadata: ShardSnapshotMetadata,
+    shutdown_signal: Arc<AtomicBool>,
+) -> Result<(), TrieError> {
+    info!(
+        "PPTrie: Post-processing trie for shard {}. Highest FID: {}",
+        shard_id, highest_fid
+    );
+
+    let db = RocksDB::open_bulk_write_shard_db(&rocksdb_dir, shard_id);
+    let mut trie = merkle_trie::MerkleTrie::new(trie_branching_factor)?;
+    trie.initialize(&db)?;
+
+    // =====================TEMP
+    // get_one_node_in_007(&db, &trie);
+    // return Ok(());
+
+    let fid3_debug_info = get_trie_debug_info(&db, &trie, 29974);
+    if let Ok(info) = fid3_debug_info {
+        for i in info {
+            pretty_print_debug_info(&i);
+        }
+    }
+    return Ok(());
+    // ====================TEMP
+
+    let trie_ctx = merkle_trie::Context::new();
+
+    // Go over all the keys for this FID in the trie
+    for fid in 0..highest_fid + 1 {
+        if shutdown_signal.load(Ordering::SeqCst) {
+            info!(
+                "PPTrie {}: Shutdown signal received during post-processing at FID {}. Stopping.",
+                shard_id, fid
+            );
+            return Ok(());
+        }
+
+        let fid_root_trie_key = TrieKey::for_fid(fid);
+        let mut txn_batch = RocksDbTransactionBatch::new();
+
+        match trie.attach_to_root(&trie_ctx, &db, &mut txn_batch, &fid_root_trie_key) {
+            Ok((is_attached, was_created)) => {
+                if is_attached && was_created {
+                    info!(
+                        "PPTrie {}: Successfully attached trie node for FID {}",
+                        shard_id, fid
+                    );
+                } else if is_attached && !was_created {
+                    info!(
+                        "PPTrie {}: Trie node for FID {} already exists, skipping attachment",
+                        shard_id, fid
+                    );
+                } else {
+                    info!(
+                        "PPTrie {}: Trie node for FID {} doesn't belong to shard",
+                        shard_id, fid
+                    );
+                }
+            }
+            Err(e) => {
+                error!(
+                    "PPTrie {}: Failed to attach trie node for FID {}: {:?}",
+                    shard_id, fid, e
+                );
+            }
+        }
+
+        if txn_batch.len() > 0 {
+            db.commit(txn_batch).map_err(|e| TrieError::DatabaseError {
+                source: Box::new(e),
+            })?;
+        }
+        trie.reload(&db)?;
+    }
+
+    // Get the trie root and see if it matches
+    let expected_shard_root = metadata.shard_chunk.unwrap().header.unwrap().shard_root;
+    let trie_root = trie.root_hash().unwrap();
+
+    info!(
+        "PPTrie: Finished post-processing trie for shard {}. expected: {:?} actual {:?}",
+        shard_id,
+        hex::encode(expected_shard_root),
+        hex::encode(trie_root)
+    );
+
+    Ok(())
 }
 
 async fn start_shard_replication(
@@ -1115,7 +1332,8 @@ async fn replay_shard_transactions(
                 {
                     info!("No next page token for shard {}", shard_id);
                     all_fids_exhausted = true;
-                    break;
+                    fids_to_check.push((last_fid, last_fid_account_root.clone()));
+                    break 'pagingloop;
                 } else {
                     page_token = response.next_page_token;
                 }

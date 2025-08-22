@@ -14,6 +14,9 @@ pub enum BootstrapError {
     #[error("Failed to replay transactions: {0}")]
     TransactionReplayError(String),
 
+    #[error("PostProcessing failed: {0}")]
+    PostProcessError(String),
+
     #[error(
         "State root verification failed for shard {shard_id}: expected {expected}, got {actual}"
     )]
