@@ -9,7 +9,9 @@ mod tests {
         core::util::to_farcaster_time,
         mempool::mempool::{self, Mempool, MempoolMessagesRequest},
         network::gossip::{Config, SnapchainGossip},
-        proto::{self, Height, ShardChunk, ShardHeader, Transaction, ValidatorMessage},
+        proto::{
+            self, FarcasterNetwork, Height, ShardChunk, ShardHeader, Transaction, ValidatorMessage,
+        },
         storage::store::{
             engine::ShardEngine,
             mempool_poller::MempoolMessage,
@@ -26,6 +28,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::mempool::mempool::{MempoolRequest, MempoolSource};
+    use crate::mempool::routing::{MessageRouter, ShardRouter};
     use crate::utils::factory::username_factory;
     use libp2p::identity::ed25519::Keypair;
     use messages_factory::casts::create_cast_add;
@@ -36,8 +39,9 @@ mod tests {
     async fn setup(
         config: Option<Config>,
         enable_rate_limits: bool,
+        num_shards: u32,
     ) -> (
-        ShardEngine,
+        HashMap<u32, ShardEngine>,
         Option<SnapchainGossip>,
         Mempool,
         mpsc::Sender<MempoolRequest>,
@@ -55,11 +59,15 @@ mod tests {
         let (mempool_tx, mempool_rx) = mpsc::channel(100);
         let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
-        let (engine, _) = test_helper::new_engine().await;
         let mut shard_senders = HashMap::new();
-        shard_senders.insert(1, engine.get_senders());
         let mut shard_stores = HashMap::new();
-        shard_stores.insert(1, engine.get_stores());
+        let mut engines = HashMap::new();
+        for i in 1..num_shards + 1 {
+            let (engine, _) = test_helper::new_engine().await;
+            shard_senders.insert(i, engine.get_senders());
+            shard_stores.insert(i, engine.get_stores());
+            engines.insert(i, engine);
+        }
 
         let gossip = match config {
             Some(config) => Some(
@@ -85,10 +93,10 @@ mod tests {
         mempool_config.enable_rate_limits = enable_rate_limits;
         let mempool = Mempool::new(
             mempool_config,
-            engine.network,
+            FarcasterNetwork::Devnet,
             mempool_rx,
             messages_request_rx,
-            1,
+            num_shards,
             shard_stores,
             gossip_tx,
             shard_decision_rx,
@@ -96,7 +104,7 @@ mod tests {
         );
 
         (
-            engine,
+            engines,
             gossip,
             mempool,
             mempool_tx,
@@ -108,7 +116,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_user_message_is_invalid() {
-        let (mut engine, _, mut mempool, _, _, _, _) = setup(None, false).await;
+        let (mut engines, _, mut mempool, _, _, _, _) = setup(None, false, 1).await;
+        let mut engine = engines.get_mut(&1).unwrap();
         test_helper::register_user(
             1234,
             default_signer(),
@@ -126,7 +135,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_onchain_event_is_valid() {
-        let (mut engine, _, mut mempool, _, _, _, _) = setup(None, false).await;
+        let (mut engines, _, mut mempool, _, _, _, _) = setup(None, false, 1).await;
+        let mut engine = engines.get_mut(&1).unwrap();
         let onchain_event = events_factory::create_rent_event(
             1234,
             10,
@@ -150,7 +160,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_fname_transfer_is_valid() {
-        let (mut engine, _, mut mempool, _, _, _, _) = setup(None, false).await;
+        let (mut engines, _, mut mempool, _, _, _, _) = setup(None, false, 1).await;
+        let mut engine = engines.get_mut(&1).unwrap();
         test_helper::register_user(
             1,
             default_signer(),
@@ -180,7 +191,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limits_applied() {
-        let (mut engine, _, mut mempool, _, _, _, _) = setup(None, true).await;
+        let (mut engines, _, mut mempool, _, _, _, _) = setup(None, true, 1).await;
+        let mut engine = engines.get_mut(&1).unwrap();
 
         let id_register_event = events_factory::create_id_register_event(
             FID_FOR_TEST,
@@ -210,9 +222,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_copying_fname_transfer() {
+        let (_, _, mut mempool, mempool_tx, _request_tx, _decision_tx, _) =
+            setup(None, false, 2).await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let first_fid = 20270;
+        let second_fid = 211428;
+        // Ensure that the two fids are routed to different shards
+        let router = ShardRouter {};
+        assert_ne!(
+            router.route_fid(first_fid, 2),
+            router.route_fid(second_fid, 2)
+        );
+
+        // Make sure both transfers are routed to both shards
+        let signer = alloy_signer_local::PrivateKeySigner::random();
+        let fname_transfer = username_factory::create_transfer(
+            first_fid,
+            "farcaster",
+            None,
+            Some(second_fid),
+            None,
+            signer.clone(),
+        );
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::ValidatorMessage(ValidatorMessage {
+                    on_chain_event: None,
+                    fname_transfer: Some(fname_transfer.clone()),
+                }),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        let fname_transfer = username_factory::create_transfer(
+            second_fid,
+            "farcaster",
+            None,
+            Some(first_fid),
+            None,
+            signer,
+        );
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::ValidatorMessage(ValidatorMessage {
+                    on_chain_event: None,
+                    fname_transfer: Some(fname_transfer.clone()),
+                }),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        let (req, res) = oneshot::channel();
+        mempool_tx.send(MempoolRequest::GetSize(req)).await.unwrap();
+        let size = res.await.unwrap();
+        assert_eq!(*size.get(&1).unwrap(), 2);
+        assert_eq!(*size.get(&2).unwrap(), 2);
+    }
+
+    #[tokio::test]
     async fn test_mempool_size() {
         let (_, _, mut mempool, mempool_tx, _request_tx, _decision_tx, _) =
-            setup(None, false).await;
+            setup(None, false, 1).await;
         tokio::spawn(async move {
             mempool.run().await;
         });
@@ -249,7 +327,7 @@ mod tests {
     #[tokio::test]
     async fn test_mempool_prioritization() {
         let (_, _, mut mempool, mempool_tx, messages_request_tx, _shard_decision_tx, _) =
-            setup(None, false).await;
+            setup(None, false, 1).await;
 
         // Spawn mempool task
         tokio::spawn(async move {
@@ -332,8 +410,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_mempool_eviction() {
-        let (mut engine, _, mut mempool, mempool_tx, messages_request_tx, shard_decision_tx, _) =
-            setup(None, false).await;
+        let (mut engines, _, mut mempool, mempool_tx, messages_request_tx, shard_decision_tx, _) =
+            setup(None, false, 1).await;
+        let mut engine = engines.get_mut(&1).unwrap();
         test_helper::register_user(
             1234,
             default_signer(),
@@ -429,7 +508,7 @@ mod tests {
         let config2 = Config::new(node2_addr.clone(), node1_addr.clone());
 
         let (_, gossip1, mut mempool1, mempool_tx1, _mempool_requests_tx1, _shard_decision_tx1, _) =
-            setup(Some(config1), false).await;
+            setup(Some(config1), false, 1).await;
         let (
             _,
             gossip2,
@@ -438,7 +517,7 @@ mod tests {
             mempool_requests_tx2,
             _shard_decision_tx1,
             mut system_rx2,
-        ) = setup(Some(config2), false).await;
+        ) = setup(Some(config2), false, 1).await;
 
         // Spawn gossip tasks
         tokio::spawn(async move {
@@ -530,8 +609,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_mempool_error() {
-        let (mut engine, _, mut mempool, mempool_tx, _request_tx, _decision_tx, _) =
-            setup(None, false).await;
+        let (mut engines, _, mut mempool, mempool_tx, _request_tx, _decision_tx, _) =
+            setup(None, false, 1).await;
+        let mut engine = engines.get_mut(&1).unwrap();
 
         test_helper::register_user(
             1234,
