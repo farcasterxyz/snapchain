@@ -236,6 +236,8 @@ mod tests {
             hex::encode(root_hash.clone())
         );
 
+        assert_eq!(trie.items().unwrap(), 4);
+
         // Attaching it again should be a no-op
         let mut txn_batch = RocksDbTransactionBatch::new();
         let r1 = trie.attach_to_root(ctx, db, &mut txn_batch, &key);

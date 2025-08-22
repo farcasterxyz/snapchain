@@ -93,6 +93,7 @@ pub struct MerkleTrie {
     branch_xform: util::BranchingFactorTransform,
     root: Option<TrieNode>,
     branching_factor: u32,
+    outdated_hash: bool,
 }
 
 impl MerkleTrie {
@@ -104,6 +105,7 @@ impl MerkleTrie {
             root: None,
             branch_xform,
             branching_factor,
+            outdated_hash: false,
         })
     }
 
@@ -187,6 +189,10 @@ impl MerkleTrie {
             // This node is in the Trie DB, but is not attached to the root. Now attach it
             root.attach_to_root(ctx, db, txn_batch, 0, &xkey)?;
 
+            // Set the outdated_hash flag to true, so that the root_hash() is not accidentally used without
+            // calling recalculate_hashes() first
+            self.outdated_hash = true;
+
             return Ok((true, true));
         } else {
             Err(TrieError::TrieNotInitialized)
@@ -207,6 +213,9 @@ impl MerkleTrie {
             let xkey = (self.branch_xform.expand)(&key);
 
             root.recalculate_hashes(ctx, &mut HashMap::new(), db, txn_batch, xkey.len(), &[])?;
+
+            // Indicate that the hash is now valid again
+            self.outdated_hash = false;
 
             return Ok(());
         } else {
@@ -347,6 +356,10 @@ impl MerkleTrie {
     }
 
     pub fn root_hash(&self) -> Result<Vec<u8>, TrieError> {
+        if self.outdated_hash {
+            return Err(TrieError::OutdatedHash);
+        }
+
         if let Some(root) = self.root.as_ref() {
             Ok(root.hash())
         } else {

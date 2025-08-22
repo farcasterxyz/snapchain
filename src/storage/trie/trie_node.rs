@@ -593,6 +593,7 @@ impl TrieNode {
                 }
             }
 
+            // Update total items
             self.items = total_child_items;
 
             // Now update my hash in the parent's cache of child hashes
@@ -605,9 +606,7 @@ impl TrieNode {
         } else {
             // current_index == max_key_len
             // Just update my hash in the parent's child hashes cache and return
-
-            self.update_hash(child_hashes, &prefix)?;
-            return Ok(());
+            self.update_hash(child_hashes, &prefix)
         }
     }
 
