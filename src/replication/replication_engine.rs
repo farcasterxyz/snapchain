@@ -34,7 +34,7 @@ impl ShardEngine {
         let mut tx_batch = RocksDbTransactionBatch::new();
         let ctx = merkle_trie::Context::new();
 
-        let (_, _, validation_errors) = self
+        let (_, _, validation_errors, _) = self
             .replay_snapchain_txn(
                 &ctx,
                 &tx,

@@ -1,5 +1,7 @@
 use crate::core::types::{Address, Vote};
 use crate::mempool::mempool::MempoolMessagesRequest;
+#[cfg(test)]
+use crate::proto::BlockEvent;
 use crate::storage::db::{self, RocksDB};
 use crate::storage::store::engine::ShardEngine;
 use crate::storage::store::stores::StoreLimits;
@@ -18,7 +20,8 @@ use crate::core::util::FarcasterTime;
 #[allow(unused_imports)] // Used by cfg(test)
 use crate::proto::{self, FnameTransfer};
 use crate::proto::{
-    CommitSignature, Commits, Height, ShardChunk, ShardHash, ShardHeader, Transaction,
+    hub_event, BlockConfirmedBody, CommitSignature, Commits, Height, HubEvent, ShardChunk,
+    ShardHash, ShardHeader, Transaction,
 };
 use crate::proto::{MessagesResponse, OnChainEvent};
 use crate::storage::store::account::MessagesPage;
@@ -191,14 +194,8 @@ pub async fn new_engine() -> (ShardEngine, tempfile::TempDir) {
 }
 
 pub async fn commit_event(engine: &mut ShardEngine, event: &OnChainEvent) -> ShardChunk {
-    let state_change = engine.propose_state_change(
-        1,
-        vec![MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
-            on_chain_event: Some(event.clone()),
-            fname_transfer: None,
-        })],
-        None,
-    );
+    let state_change =
+        engine.propose_state_change(1, vec![MempoolMessage::OnchainEvent(event.clone())], None);
 
     validate_and_commit_state_change(engine, &state_change).await
 }
@@ -210,10 +207,7 @@ pub async fn commit_event_at(
 ) -> ShardChunk {
     let state_change = engine.propose_state_change(
         1,
-        vec![MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
-            on_chain_event: Some(event.clone()),
-            fname_transfer: None,
-        })],
+        vec![MempoolMessage::OnchainEvent(event.clone())],
         Some(timestamp.clone()),
     );
     validate_and_commit_state_change(engine, &state_change).await
@@ -329,6 +323,14 @@ pub fn key_exists_in_trie(engine: &mut ShardEngine, key: &Vec<u8>) -> bool {
     engine.trie_key_exists(trie_ctx(), key)
 }
 
+#[cfg(test)]
+pub fn block_event_exists(engine: &ShardEngine, block_event: &BlockEvent) -> bool {
+    match engine.get_block_event(block_event.seqnum()).unwrap() {
+        None => false,
+        Some(event) => event == *block_event,
+    }
+}
+
 pub fn default_shard_chunk() -> ShardChunk {
     ShardChunk {
         header: Some(ShardHeader {
@@ -418,10 +420,7 @@ pub async fn register_user(
 pub async fn commit_fname_transfer(engine: &mut ShardEngine, transfer: &FnameTransfer) {
     let state_change = engine.propose_state_change(
         engine.shard_id(),
-        vec![MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
-            on_chain_event: None,
-            fname_transfer: Some(transfer.clone()),
-        })],
+        vec![MempoolMessage::FnameTransfer(transfer.clone())],
         None,
     );
 
@@ -430,6 +429,31 @@ pub async fn commit_fname_transfer(engine: &mut ShardEngine, transfer: &FnameTra
     // let proof = transfer.proof.as_ref().unwrap();
     // let name = String::from_utf8(proof.name.clone()).unwrap();
     // assert!(engine.trie_key_exists(trie_ctx(), &TrieKey::for_fname(proof.fid, &name)));
+}
+
+#[cfg(test)]
+pub async fn commit_block_events(engine: &mut ShardEngine, block_events: Vec<&BlockEvent>) {
+    let state_change = engine.propose_state_change(
+        engine.shard_id(),
+        block_events
+            .into_iter()
+            .map(|block_event| MempoolMessage::BlockEvent {
+                for_shard: engine.shard_id(),
+                message: block_event.clone(),
+            })
+            .collect(),
+        None,
+    );
+
+    validate_and_commit_state_change(engine, &state_change).await;
+}
+
+pub fn assert_block_confirmed_event(event: HubEvent) -> BlockConfirmedBody {
+    if let hub_event::Body::BlockConfirmedBody(body) = event.body.unwrap() {
+        return body;
+    } else {
+        panic!("invalid hub event")
+    }
 }
 
 #[cfg(test)]
@@ -456,10 +480,7 @@ pub async fn register_fname(
 
     let state_change = engine.propose_state_change(
         engine.shard_id(),
-        vec![MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
-            on_chain_event: None,
-            fname_transfer: Some(fname_transfer.clone()),
-        })],
+        vec![MempoolMessage::FnameTransfer(fname_transfer.clone())],
         None,
     );
 

@@ -145,6 +145,21 @@ impl BlockEventStore {
         put_block_event(block_event, txn)
     }
 
+    pub fn get_block_event_by_seqnum(
+        &self,
+        seqnum: u64,
+    ) -> Result<Option<BlockEvent>, BlockEventStorageError> {
+        let key = make_block_event_key(seqnum);
+        match self.db.get(&key)? {
+            None => Ok(None),
+            Some(event) => Ok(Some(BlockEvent::decode(event.as_slice())?)),
+        }
+    }
+
+    pub fn get_last_block_event(&self) -> Result<Option<BlockEvent>, BlockEventStorageError> {
+        get_last_block_event(&self.db)
+    }
+
     pub fn max_seqnum(&self) -> Result<u64, BlockEventStorageError> {
         match get_last_block_event(&self.db)? {
             None => Ok(0),

@@ -29,7 +29,7 @@ use crate::{
     proto::{
         on_chain_event, IdRegisterEventBody, IdRegisterEventType, OnChainEvent, OnChainEventType,
         SignerEventBody, SignerEventType, SignerMigratedEventBody, StorageRentEventBody,
-        ValidatorMessage, VerificationAddAddressBody,
+        VerificationAddAddressBody,
     },
     storage::store::mempool_poller::MempoolMessage,
     storage::store::node_local_state::LocalStateStore,
@@ -535,10 +535,7 @@ impl Subscriber {
         if let Err(err) = self
             .mempool_tx
             .send(MempoolRequest::AddMessage(
-                MempoolMessage::ValidatorMessage(ValidatorMessage {
-                    on_chain_event: Some(event.clone()),
-                    fname_transfer: None,
-                }),
+                MempoolMessage::OnchainEvent(event.clone()),
                 MempoolSource::Local,
                 None,
             ))
