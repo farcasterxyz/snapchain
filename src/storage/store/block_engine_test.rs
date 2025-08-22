@@ -188,6 +188,7 @@ mod tests {
             block_engine.trie_root_hash()
         );
         let storage_slot = block_engine
+            .stores()
             .onchain_event_store
             .get_storage_slot_for_fid(FID_FOR_TEST, FarcasterNetwork::Devnet, &[])
             .unwrap();

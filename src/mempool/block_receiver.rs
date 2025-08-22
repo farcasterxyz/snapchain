@@ -1,3 +1,4 @@
+use prost::Message;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -26,8 +27,36 @@ pub struct BlockReceiver {
 }
 
 impl BlockReceiver {
-    fn validate_block(&self, _block: &Block) -> bool {
-        // TODO(aditi): Fill this in
+    fn validate_block_events(&self, block: &Block) -> bool {
+        if block.events.len() == 0 {
+            return true;
+        }
+
+        let mut events_hasher = blake3::Hasher::new();
+        for event in &block.events {
+            if event.data.is_none() {
+                return false;
+            }
+
+            if event.hash
+                != blake3::hash(&event.data.as_ref().unwrap().encode_to_vec())
+                    .as_bytes()
+                    .to_vec()
+            {
+                return false;
+            }
+
+            events_hasher.update(&event.hash);
+        }
+
+        if block.header.as_ref().unwrap().events_hash
+            != events_hasher.finalize().as_bytes().to_vec()
+        {
+            return false;
+        }
+
+        // TODO(aditi): Validate signatures
+
         true
     }
 
@@ -58,7 +87,7 @@ impl BlockReceiver {
     }
 
     async fn submit_block(&mut self, block: &Block) {
-        if self.validate_block(&block) {
+        if self.validate_block_events(&block) {
             for event in block.events.iter() {
                 info!(
                     shard = self.shard_id.to_string(),

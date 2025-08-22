@@ -8,7 +8,7 @@ use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::network::gossip::GossipEvent;
 use crate::proto::{Block, FarcasterNetwork, ShardChunk};
 use crate::storage::db::RocksDB;
-use crate::storage::store::block_engine::BlockEngine;
+use crate::storage::store::block_engine::{BlockEngine, BlockStores};
 use crate::storage::store::engine::{PostCommitMessage, Senders, ShardEngine};
 use crate::storage::store::node_local_state::LocalStateStore;
 use crate::storage::store::stores::StoreLimits;
@@ -30,6 +30,7 @@ pub struct SnapchainNode {
     pub consensus_actors: BTreeMap<u32, MalachiteConsensusActors>,
     pub shard_stores: HashMap<u32, Stores>,
     pub shard_senders: HashMap<u32, Senders>,
+    pub block_stores: BlockStores,
     pub address: Address,
 }
 
@@ -149,6 +150,7 @@ impl SnapchainNode {
             network,
             config.heartbeat_block_interval,
         );
+        let block_stores = engine.stores();
         let block_proposer = BlockProposer::new(
             validator_address.clone(),
             block_shard.clone(),
@@ -191,6 +193,7 @@ impl SnapchainNode {
             address: validator_address,
             shard_senders,
             shard_stores,
+            block_stores,
         }
     }
 

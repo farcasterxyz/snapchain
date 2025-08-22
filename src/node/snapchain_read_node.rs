@@ -6,7 +6,7 @@ use crate::core::types::{Address, ShardId, SnapchainShard, SnapchainValidatorCon
 use crate::network::gossip::GossipEvent;
 use crate::proto;
 use crate::storage::db::RocksDB;
-use crate::storage::store::block_engine::BlockEngine;
+use crate::storage::store::block_engine::{BlockEngine, BlockStores};
 use crate::storage::store::engine::{PostCommitMessage, Senders, ShardEngine};
 use crate::storage::store::stores::{StoreLimits, Stores};
 use crate::storage::store::BlockStore;
@@ -26,6 +26,7 @@ pub struct SnapchainReadNode {
     pub consensus_actors: BTreeMap<u32, MalachiteReadNodeActors>,
     pub shard_stores: HashMap<u32, Stores>,
     pub shard_senders: HashMap<u32, Senders>,
+    pub block_stores: BlockStores,
     pub address: Address,
 }
 
@@ -124,6 +125,7 @@ impl SnapchainReadNode {
             farcaster_network,
             config.heartbeat_block_interval,
         );
+        let block_stores = engine.stores();
         let ctx = SnapchainValidatorContext::new(keypair.clone());
         let block_actor = MalachiteReadNodeActors::create_and_start(
             ctx,
@@ -147,6 +149,7 @@ impl SnapchainReadNode {
             address: validator_address,
             shard_senders,
             shard_stores,
+            block_stores,
         }
     }
 
