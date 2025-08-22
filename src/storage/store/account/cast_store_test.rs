@@ -3,15 +3,38 @@ mod tests {
     use super::super::super::test_helper::FID_FOR_TEST;
     use crate::proto::cast_add_body::Parent;
     use crate::proto::reaction_body::Target;
-    use crate::proto::{self as message, hub_event, CastType, HubEventType};
+    use crate::proto::{self as message, hub_event, CastType, HubEvent, HubEventType};
     use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
-    use crate::storage::store::account::{CastStore, CastStoreDef, Store, StoreEventHandler};
+    use crate::storage::store::account::{
+        CastStore, CastStoreDef, Store, StoreEventHandler, StoreOptions,
+    };
     use crate::utils::factory::{messages_factory, time};
     use std::sync::Arc;
     use tempfile::TempDir;
 
     fn create_test_store() -> (Store<CastStoreDef>, Arc<RocksDB>, TempDir) {
         create_test_store_with_prune_limit(10)
+    }
+
+    fn create_conflict_free_test_store() -> (Store<CastStoreDef>, Arc<RocksDB>, TempDir) {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = RocksDB::new(db_path.to_str().unwrap());
+        db.open().unwrap();
+        let db = Arc::new(db);
+
+        let event_handler = StoreEventHandler::new();
+        let store = CastStore::new_with_opts(
+            db.clone(),
+            event_handler.clone(),
+            10,
+            StoreOptions {
+                conflict_free: true,
+                save_hub_events: false,
+            },
+        );
+
+        (store, db.clone(), temp_dir)
     }
 
     fn create_test_store_with_prune_limit(
@@ -68,10 +91,13 @@ mod tests {
         store: &Store<CastStoreDef>,
         db: &Arc<RocksDB>,
         messages: Vec<&message::Message>,
-    ) {
+    ) -> Vec<HubEvent> {
         let mut txn = RocksDbTransactionBatch::new();
+        let mut events = Vec::new();
+
         for message in messages {
             let result = store.merge(message, &mut txn).unwrap();
+            events.push(result.clone());
             assert_eq!(result.r#type(), HubEventType::MergeMessage);
             match &result.body {
                 Some(hub_event::Body::MergeMessageBody(body)) => {
@@ -83,6 +109,7 @@ mod tests {
             }
         }
         db.commit(txn).unwrap();
+        events
     }
 
     fn revoke_message(store: &Store<CastStoreDef>, db: &Arc<RocksDB>, message: &message::Message) {
@@ -771,6 +798,35 @@ mod tests {
             "bad_request.duplicate".to_string(),
             "message has already been merged".to_string(),
         );
+    }
+
+    #[tokio::test]
+    async fn test_merge_cast_add_dup_success_for_conflict_free() {
+        let (store, db, _temp_dir) = create_conflict_free_test_store();
+
+        let cast_add =
+            messages_factory::casts::create_cast_add(FID_FOR_TEST, "Test cast", None, None);
+
+        let events = merge_messages(&store, &db, vec![&cast_add]);
+        let id1 = events[0].id;
+
+        // Merging the same message again should work, but overwrite the existing one
+        let events = merge_messages(&store, &db, vec![&cast_add]);
+        let id2 = events[0].id;
+
+        // Since we set generate hub events to false, both ids should be 0
+        assert_eq!(id1, 0);
+        assert_eq!(id2, 0);
+
+        // Read that there is only 1 message in the DB
+        let messages =
+            CastStore::get_cast_adds_by_fid(&store, FID_FOR_TEST, &PageOptions::default()).unwrap();
+        assert_eq!(messages.messages.len(), 1);
+
+        let db_hub_events = HubEvent::get_events(db, id1, None, None).unwrap();
+
+        // No events are saved to DB
+        assert_eq!(db_hub_events.events.len(), 0);
     }
 
     #[tokio::test]

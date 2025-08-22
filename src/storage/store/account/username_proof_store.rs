@@ -3,13 +3,13 @@ use super::{
     store::{Store, StoreDef},
     IntoU8, MessagesPage, StoreEventHandler, TS_HASH_LENGTH,
 };
-use crate::core::error::HubError;
 use crate::proto::message_data::Body;
 use crate::proto::{self, HubEvent, HubEventType, MergeUserNameProofBody, Message, MessageType};
 use crate::storage::constants::{RootPrefix, UserPostfix};
 use crate::storage::db::PageOptions;
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::util;
+use crate::{core::error::HubError, storage::store::account::StoreOptions};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -369,6 +369,20 @@ impl UsernameProofStore {
             db,
             store_event_handler,
             UsernameProofStoreDef { prune_size_limit },
+        )
+    }
+
+    pub fn new_with_opts(
+        db: Arc<RocksDB>,
+        store_event_handler: Arc<StoreEventHandler>,
+        prune_size_limit: u32,
+        options: StoreOptions,
+    ) -> Store<UsernameProofStoreDef> {
+        Store::new_with_store_def_opts(
+            db,
+            store_event_handler,
+            UsernameProofStoreDef { prune_size_limit },
+            options,
         )
     }
 
