@@ -478,12 +478,8 @@ impl BlockProposer {
 
     async fn publish_new_block(&self, block: Block) {
         if let Some(block_tx) = &self.block_tx {
-            match block_tx.send(block.clone()) {
-                Err(err) => {
-                    error!("Error publishing new block {:?}", err.to_string());
-                }
-                Ok(_) => {}
-            }
+            // No active receivers is not impossible
+            let _ = block_tx.send(block.clone());
         }
     }
 }
