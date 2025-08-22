@@ -51,7 +51,7 @@ pub struct BlockEngine {
     shard_id: u64,
     db: Arc<RocksDB>,
     metrics: Metrics,
-    heartbeat_block_interval: u64,
+    heartbeat_block_interval: Option<u64>,
 }
 
 // Shard state root and the transactions
@@ -73,7 +73,7 @@ impl BlockEngine {
         max_messages_per_block: u32,
         messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
         network: FarcasterNetwork,
-        heartbeat_block_interval: u64,
+        heartbeat_block_interval: Option<u64>,
     ) -> Self {
         trie.initialize(&db).unwrap();
         BlockEngine {
@@ -149,30 +149,32 @@ impl BlockEngine {
         txn: &mut RocksDbTransactionBatch,
     ) -> (Vec<BlockEvent>, Vec<u8>) {
         let mut events = vec![];
-        if height.block_number % self.heartbeat_block_interval == 0 {
-            let event_seqnum = self.block_event_store.max_seqnum().unwrap() + 1;
-            let data = BlockEventData {
-                seqnum: event_seqnum,
-                r#type: BlockEventType::Heartbeat as i32,
-                block_number: height.block_number,
-                event_index: events.len() as u64,
-                block_timestamp: timestamp.to_u64(),
-                body: Some(block_event_data::Body::HeartbeatEventBody(
-                    HeartbeatEventBody {},
-                )),
-            };
-            let hash = blake3::hash(data.encode_to_vec().as_slice())
-                .as_bytes()
-                .to_vec();
-            let event = BlockEvent {
-                hash,
-                data: Some(data),
-            };
-            // Store these events so
-            // (1) It's possible to figuure out the max seqnum easily
-            // (2) It's possible to query over them in an rpc and see what has been produced.
-            self.block_event_store.put_block_event(&event, txn).unwrap();
-            events.push(event);
+        if let Some(heartbeat_block_interval) = self.heartbeat_block_interval {
+            if height.block_number % heartbeat_block_interval == 0 {
+                let event_seqnum = self.block_event_store.max_seqnum().unwrap() + 1;
+                let data = BlockEventData {
+                    seqnum: event_seqnum,
+                    r#type: BlockEventType::Heartbeat as i32,
+                    block_number: height.block_number,
+                    event_index: events.len() as u64,
+                    block_timestamp: timestamp.to_u64(),
+                    body: Some(block_event_data::Body::HeartbeatEventBody(
+                        HeartbeatEventBody {},
+                    )),
+                };
+                let hash = blake3::hash(data.encode_to_vec().as_slice())
+                    .as_bytes()
+                    .to_vec();
+                let event = BlockEvent {
+                    hash,
+                    data: Some(data),
+                };
+                // Store these events so
+                // (1) It's possible to figuure out the max seqnum easily
+                // (2) It's possible to query over them in an rpc and see what has been produced.
+                self.block_event_store.put_block_event(&event, txn).unwrap();
+                events.push(event);
+            }
         }
 
         let events_hash = if events.is_empty() {

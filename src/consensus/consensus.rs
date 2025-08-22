@@ -56,7 +56,7 @@ pub struct Config {
     pub consensus_start_delay: u32,
     pub sync_request_timeout: Duration,
     pub sync_status_update_interval: Duration,
-    pub heartbeat_block_interval: u64,
+    pub heartbeat_block_interval: Option<u64>,
 }
 
 impl Config {
@@ -122,7 +122,7 @@ impl Default for Config {
             consensus_start_delay: 2,
             sync_request_timeout: Duration::from_secs(2),
             sync_status_update_interval: Duration::from_secs(10),
-            heartbeat_block_interval: 100,
+            heartbeat_block_interval: None,
         }
     }
 }

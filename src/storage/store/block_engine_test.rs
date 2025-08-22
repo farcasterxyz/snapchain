@@ -37,7 +37,7 @@ mod tests {
             100,
             Some(tx),
             network.unwrap_or(FarcasterNetwork::Devnet),
-            5, // heartbeat_block_interval
+            Some(5), // heartbeat_block_interval
         );
 
         (block_engine, temp_dir)
