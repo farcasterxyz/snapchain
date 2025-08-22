@@ -3,7 +3,7 @@ use super::errors::TrieError;
 use super::trie_node::{TrieNode, UNCOMPACTED_LENGTH};
 use crate::mempool::routing::{MessageRouter, ShardRouter};
 use crate::proto;
-use crate::storage::store::account::{make_fid_key, IntoU8};
+use crate::storage::store::account::{make_fid_key, IntoU8, FID_BYTES};
 use crate::storage::trie::{trie_node, util};
 use std::collections::HashMap;
 use tracing::info;
@@ -28,7 +28,7 @@ impl TrieKey {
     pub fn for_message_type(fid: u64, msg_type: u8) -> Vec<u8> {
         let fid_bytes = Self::for_fid(fid);
         let mut key = Vec::with_capacity(fid_bytes.len() + 1);
-        key.extend_from_slice(&Self::for_fid(fid));
+        key.extend_from_slice(&fid_bytes);
         // Left shift msg_ype by 3 bits so we don't collide with onchain event types.
         // Supports 8 reserved types (onchain events, fnames etc) and 32 message types
         key.push(msg_type << 3);
@@ -49,7 +49,7 @@ impl TrieKey {
     pub fn for_fname(fid: u64, name: &String) -> Vec<u8> {
         let fid_bytes = Self::for_fid(fid);
         let mut key = Vec::with_capacity(fid_bytes.len() + 1 + USERNAME_MAX_LENGTH as usize);
-        key.extend_from_slice(&Self::for_fid(fid));
+        key.extend_from_slice(&fid_bytes);
         key.push(7); // 1-6 is for onchain events, use 7 for fnames, and everything else for messages
 
         // Pad the name with null bytes to ensure all names have the same length. The trie cannot handle entries that are substrings for another (e.g. "net" and "network")
@@ -63,7 +63,7 @@ impl TrieKey {
 
     #[inline]
     pub fn for_fid(fid: u64) -> Vec<u8> {
-        let mut key = Vec::new();
+        let mut key = Vec::with_capacity(1 + FID_BYTES);
         key.push(Self::fid_shard(fid));
         key.extend_from_slice(&make_fid_key(fid));
         key
@@ -86,12 +86,6 @@ pub struct NodeMetadata {
     pub num_messages: usize,
     pub hash: String,
     pub children: HashMap<u8, NodeMetadata>,
-}
-
-pub struct TrieSnapshot {
-    pub prefix: Vec<u8>,
-    pub excluded_hashes: Vec<String>,
-    pub num_messages: usize,
 }
 
 #[derive(Clone)]
@@ -161,6 +155,62 @@ impl MerkleTrie {
                 Ok(())
             }
             None => Err(TrieError::UnableToReloadRoot),
+        }
+    }
+
+    /// Re-attach a trie node that is in the DB to the root of the trie, recalculating hashes as needed
+    /// returns (is_attached, was_created).
+    /// Note, you need to call recalculate_hashes() after this to update the hashes and item counts
+    /// properly.
+    pub fn attach_to_root(
+        &mut self,
+        ctx: &Context,
+        db: &RocksDB,
+        txn_batch: &mut RocksDbTransactionBatch,
+        key: &[u8],
+    ) -> Result<(bool, bool), TrieError> {
+        let xkey = (self.branch_xform.expand)(key);
+
+        if let Some(root) = self.root.as_mut() {
+            // First, check if the key already exists in the trie. If it does, then there's nothing to do
+            if root.get_node_from_trie(ctx, db, &xkey, 0).is_some() {
+                return Ok((true, false));
+            }
+
+            // If it doesn't already exist in the trie, then check if it exists in the DB. If it is not in the
+            // DB either, then there's nothing to do
+            let db_key = TrieNode::make_primary_key(&xkey, None);
+            if db.get(&db_key).map_err(TrieError::wrap_database)?.is_none() {
+                return Ok((false, false));
+            }
+
+            // This node is in the Trie DB, but is not attached to the root. Now attach it
+            root.attach_to_root(ctx, db, txn_batch, 0, &xkey)?;
+
+            return Ok((true, true));
+        } else {
+            Err(TrieError::TrieNotInitialized)
+        }
+    }
+
+    /// Recalculate hashes for all nodes in the trie upto the max_key_len level
+    pub fn recalculate_hashes(
+        &mut self,
+        ctx: &Context,
+        db: &RocksDB,
+        txn_batch: &mut RocksDbTransactionBatch,
+        max_key_len: usize,
+    ) -> Result<(), TrieError> {
+        if let Some(root) = self.root.as_mut() {
+            // We need to translate the key level count into the xform level count. Use a sample key to do the transform
+            let key = vec![0u8; max_key_len];
+            let xkey = (self.branch_xform.expand)(&key);
+
+            root.recalculate_hashes(ctx, &mut HashMap::new(), db, txn_batch, xkey.len(), &[])?;
+
+            return Ok(());
+        } else {
+            Err(TrieError::TrieNotInitialized)
         }
     }
 
@@ -329,19 +379,6 @@ impl MerkleTrie {
         }
     }
 
-    pub fn get_snapshot(
-        &mut self,
-        ctx: &Context,
-        db: &RocksDB,
-        prefix: &[u8],
-    ) -> Result<TrieSnapshot, TrieError> {
-        if let Some(root) = self.root.as_mut() {
-            root.get_snapshot(ctx, db, prefix, 0)
-        } else {
-            Err(TrieError::TrieNotInitialized)
-        }
-    }
-
     pub fn get_trie_node_metadata(
         &self,
         db: &RocksDB,
@@ -388,6 +425,11 @@ impl MerkleTrie {
 
     pub fn branching_factor(&self) -> u32 {
         self.branching_factor
+    }
+
+    #[cfg(test)]
+    pub fn get_root_node(&mut self) -> Option<&mut TrieNode> {
+        self.root.as_mut()
     }
 }
 
