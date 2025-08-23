@@ -176,12 +176,6 @@ mod tests {
         let xprefix = &xkey[0..xkey.len() - 1]; // parent's prefix
         let child_char = xkey[xkey.len() - 1]; // child's character in the parent's children[]
 
-        println!(
-            "Key[0] is {:?}, xkey is {:?}",
-            hex::encode(keys[0]),
-            hex::encode(xkey.clone())
-        );
-
         // Assert that the 0th key is in the DB and in the trie
         {
             let root = trie.get_root_node().unwrap();

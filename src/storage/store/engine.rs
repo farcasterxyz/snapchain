@@ -832,7 +832,8 @@ impl ShardEngine {
         let account_root =
             self.stores
                 .trie
-                .get_hash(&self.db, txn_batch, &TrieKey::for_fid(snapchain_txn.fid));
+                .get_hash(&self.db, txn_batch, &TrieKey::for_fid(snapchain_txn.fid))?;
+
         debug!(
             shard_id = self.shard_id,
             fid = snapchain_txn.fid,
