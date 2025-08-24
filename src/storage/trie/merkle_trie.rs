@@ -3,11 +3,12 @@ use super::errors::TrieError;
 use super::trie_node::{TrieNode, UNCOMPACTED_LENGTH};
 use crate::mempool::routing::{MessageRouter, ShardRouter};
 use crate::proto;
+use crate::proto::DbMerkleTrieMetadata;
 use crate::storage::constants::RootPrefix;
 use crate::storage::store::account::{make_fid_key, IntoU8, FID_BYTES};
 use crate::storage::trie::{trie_node, util};
+use prost::Message as _;
 use std::collections::HashMap;
-use std::io::{Error, ErrorKind};
 use tracing::info;
 pub use trie_node::Context;
 
@@ -169,45 +170,21 @@ impl MerkleTrie {
         // Define the key for metadata storage
         let db_key = vec![RootPrefix::MerkleTrieMetadata as u8];
 
-        // Serialization format:
-        // Byte 0: Version (current: 0x01)
-        // Byte 1: outdated_hash (0x00 = false, 0x01 = true)
-        // Future fields can be added after byte 1
-        let mut value = Vec::with_capacity(2);
-        value.push(0x01); // Version 1
-        value.push(if self.outdated_hash { 0x01 } else { 0x00 });
+        let db_metadata = DbMerkleTrieMetadata {
+            outdated_hash: self.outdated_hash,
+        };
 
-        txn_batch.put(db_key, value);
+        txn_batch.put(db_key, db_metadata.encode_to_vec());
     }
 
     fn read_metadata(db: &RocksDB) -> Result<bool, TrieError> {
         let db_key = vec![RootPrefix::MerkleTrieMetadata as u8];
 
-        let make_error = |msg| {
-            Err(TrieError::DeserializationError {
-                source: Box::new(Error::new(ErrorKind::InvalidData, msg)),
-            })
-        };
-
         match db.get(&db_key).map_err(TrieError::wrap_database)? {
             Some(bytes) => {
-                if bytes.is_empty() {
-                    return make_error("Empty metadata");
-                }
-
-                // Manual deserialization based on version
-                let version = bytes[0];
-                match version {
-                    0x01 => {
-                        // Version 1 format: byte 1 is outdated_hash
-                        if bytes.len() < 2 {
-                            return make_error("Insufficient data for version 1");
-                        }
-                        let outdated_hash = bytes[1] != 0x00;
-                        Ok(outdated_hash)
-                    }
-                    _ => make_error(&format!("Unsupported metadata version: {}", version)),
-                }
+                let db_metadata = DbMerkleTrieMetadata::decode(bytes.as_slice())
+                    .map_err(TrieError::wrap_deserialize)?;
+                Ok(db_metadata.outdated_hash)
             }
             None => Ok(false), // No metadata found, assume default values
         }
