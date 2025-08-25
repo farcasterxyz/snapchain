@@ -366,7 +366,7 @@ impl RocksDB {
             start_iterator_prefix
         } else {
             if let Some(page_token) = &page_options.page_token {
-                increment_vec_u8(&page_token)
+                [page_token.clone(), vec![0u8]].concat()
             } else {
                 start_iterator_prefix
             }
@@ -677,7 +677,7 @@ impl RocksDB {
 #[cfg(test)]
 mod tests {
     use crate::storage::{
-        db::{RocksDB, RocksDbTransactionBatch},
+        db::{PageOptions, RocksDB, RocksDbTransactionBatch},
         util::increment_vec_u8,
     };
 
@@ -928,5 +928,96 @@ mod tests {
         // Cleanup
         db.destroy().unwrap();
         db.open().unwrap();
+    }
+
+    // Helper function to test pagination through keys
+    fn test_pagination_helper(
+        db: &RocksDB,
+        expected_total_keys: usize,
+        page_size: usize,
+        start_prefix: Option<Vec<u8>>,
+        stop_prefix: Option<Vec<u8>>,
+    ) {
+        let mut last_key = None;
+        let mut processed_keys = 0;
+
+        loop {
+            let page_options = PageOptions {
+                page_size: Some(page_size),
+                page_token: last_key.clone(),
+                reverse: false,
+            };
+
+            let mut processed_this_pass = 0;
+            let all_done = db
+                .for_each_iterator_by_prefix_paged(
+                    start_prefix.clone(),
+                    stop_prefix.clone(),
+                    &page_options,
+                    |key, _value| {
+                        processed_this_pass += 1;
+
+                        if processed_this_pass == page_size {
+                            last_key = Some(key.to_vec());
+                            return Ok(true); // stop
+                        }
+
+                        return Ok(false); // continue
+                    },
+                )
+                .unwrap();
+            processed_keys += processed_this_pass;
+
+            if all_done {
+                assert_eq!(processed_this_pass, expected_total_keys % page_size);
+                break;
+            } else {
+                assert_eq!(processed_this_pass, page_size);
+            }
+        }
+
+        assert_eq!(processed_keys, expected_total_keys);
+    }
+
+    #[test]
+    fn test_iteration_pages_through_nested_keys() {
+        let tmp_path = tempfile::tempdir()
+            .unwrap()
+            .path()
+            .as_os_str()
+            .to_string_lossy()
+            .to_string();
+        let db = crate::storage::db::RocksDB::new(&tmp_path);
+        db.open().unwrap();
+
+        // Add 10 nested keys: [0], [0,1], [0,1,2], ..., [0,1,2,3,4,5,6,7,8,9]
+        for i in 0..10 {
+            let key: Vec<u8> = (0..=i).collect();
+            let value = format!("value{}", i).into_bytes();
+            db.put(&key, &value).unwrap();
+        }
+
+        test_pagination_helper(&db, 10, 3, Some(vec![0u8]), Some(vec![1u8]));
+    }
+
+    #[test]
+    fn test_iteration_pages_through_serial_keys() {
+        let tmp_path = tempfile::tempdir()
+            .unwrap()
+            .path()
+            .as_os_str()
+            .to_string_lossy()
+            .to_string();
+        let db = crate::storage::db::RocksDB::new(&tmp_path);
+        db.open().unwrap();
+
+        // Add 10 serial keys: [0,0,1], [0,0,2], [0,0,3], ..., [0,0,10]
+        for i in 1..=10 {
+            let key = vec![0u8, 0u8, i as u8];
+            let value = format!("value{}", i).into_bytes();
+            db.put(&key, &value).unwrap();
+        }
+
+        test_pagination_helper(&db, 10, 3, Some(vec![0u8]), Some(vec![1u8]));
     }
 }
