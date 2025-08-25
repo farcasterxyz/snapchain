@@ -694,7 +694,7 @@ impl OnchainEventStore {
         &self,
         fid: u64,
         network: FarcasterNetwork,
-        pending_events: Option<&[OnChainEvent]>,
+        pending_events: &[OnChainEvent],
     ) -> Result<StorageSlot, OnchainEventStorageError> {
         let rent_events =
             self.get_onchain_events(OnChainEventType::EventTypeStorageRent, Some(fid))?;
@@ -703,11 +703,9 @@ impl OnchainEventStore {
             storage_slot.merge(&StorageSlot::from_event(&rent_event, network)?);
         }
         // Now, virtually merge any pending rent events from the current transaction
-        if let Some(events) = pending_events {
-            for event in events {
-                if event.fid == fid && event.r#type() == OnChainEventType::EventTypeStorageRent {
-                    storage_slot.merge(&StorageSlot::from_event(event, network)?);
-                }
+        for event in pending_events {
+            if event.fid == fid && event.r#type() == OnChainEventType::EventTypeStorageRent {
+                storage_slot.merge(&StorageSlot::from_event(event, network)?);
             }
         }
         Ok(storage_slot)
