@@ -809,11 +809,16 @@ fn build_transaction_for_fid(
     }
 
     let fid = cursor.token.fid();
-    let fid_account_root = stores.trie.get_hash(
-        &stores.db,
-        &mut RocksDbTransactionBatch::new(),
-        &TrieKey::for_fid(fid),
-    );
+    let fid_account_root = stores
+        .trie
+        .get_hash(
+            &stores.db,
+            &mut RocksDbTransactionBatch::new(),
+            &TrieKey::for_fid(fid),
+        )
+        .map_err(|e| {
+            ReplicationError::InternalError(format!("Failed to get account root: {}", e))
+        })?;
 
     Ok(Some(proto::Transaction {
         fid,

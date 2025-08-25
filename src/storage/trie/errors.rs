@@ -25,6 +25,9 @@ pub enum TrieError {
     #[error("Merkle Trie is not initialized")]
     TrieNotInitialized,
 
+    #[error("New nodes were attached to the MerkleTrie but recalculate_hashes() was not called")]
+    OutdatedHash,
+
     #[error("No keys to insert")]
     NoKeysToInsert,
 

@@ -14,16 +14,19 @@ use crate::{
  *
  * This extension to the ShardEngine provides the ability to replicate FID state between
  * two nodes for a shard.
- *
+ * TODO: Remove this class with the replication client
  */
 impl ShardEngine {
     pub fn account_root_for_fid(&self, fid: u64) -> Vec<u8> {
         let stores = self.get_stores();
-        stores.trie.get_hash(
-            &stores.db,
-            &mut RocksDbTransactionBatch::new(),
-            &TrieKey::for_fid(fid),
-        )
+        stores
+            .trie
+            .get_hash(
+                &stores.db,
+                &mut RocksDbTransactionBatch::new(),
+                &TrieKey::for_fid(fid),
+            )
+            .unwrap()
     }
 
     pub fn replay_transaction(

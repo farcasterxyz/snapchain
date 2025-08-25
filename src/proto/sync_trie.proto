@@ -7,3 +7,6 @@ message DbTrieNode {
   map<uint32, bytes> childHashes = 4;
 }
 
+message DbMerkleTrieMetadata {
+  bool outdatedHash = 1;
+}

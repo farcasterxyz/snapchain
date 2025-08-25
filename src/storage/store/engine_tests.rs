@@ -1066,11 +1066,11 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         let txn = &mut RocksDbTransactionBatch::new();
-        let account_root =
-            engine
-                .get_stores()
-                .trie
-                .get_hash(&engine.db, txn, &TrieKey::for_fid(FID_FOR_TEST));
+        let account_root = engine
+            .get_stores()
+            .trie
+            .get_hash(&engine.db, txn, &TrieKey::for_fid(FID_FOR_TEST))
+            .unwrap();
         let shard_root = engine.get_stores().trie.root_hash().unwrap();
 
         // Account root and shard root is empty initially
@@ -1086,11 +1086,11 @@ mod tests {
         .await;
         commit_message(&mut engine, &cast).await;
 
-        let updated_account_root =
-            engine
-                .get_stores()
-                .trie
-                .get_hash(&engine.db, txn, &TrieKey::for_fid(FID_FOR_TEST));
+        let updated_account_root = engine
+            .get_stores()
+            .trie
+            .get_hash(&engine.db, txn, &TrieKey::for_fid(FID_FOR_TEST))
+            .unwrap();
         let updated_shard_root = engine.get_stores().trie.root_hash().unwrap();
         // Account root is not empty after a message is committed
         assert_eq!(updated_account_root.len() > 0, true);
@@ -1099,16 +1099,16 @@ mod tests {
         let another_fid_event = events_factory::create_onchain_event(FID_FOR_TEST + 1);
         test_helper::commit_event(&mut engine, &another_fid_event).await;
 
-        let account_root_another_fid =
-            engine
-                .get_stores()
-                .trie
-                .get_hash(&engine.db, txn, &TrieKey::for_fid(FID_FOR_TEST + 1));
-        let account_root_original_fid =
-            engine
-                .get_stores()
-                .trie
-                .get_hash(&engine.db, txn, &TrieKey::for_fid(FID_FOR_TEST));
+        let account_root_another_fid = engine
+            .get_stores()
+            .trie
+            .get_hash(&engine.db, txn, &TrieKey::for_fid(FID_FOR_TEST + 1))
+            .unwrap();
+        let account_root_original_fid = engine
+            .get_stores()
+            .trie
+            .get_hash(&engine.db, txn, &TrieKey::for_fid(FID_FOR_TEST))
+            .unwrap();
         let latest_shard_root = engine.get_stores().trie.root_hash().unwrap();
         // Only the account root for the new fid and the shard root is updated, original fid account root remains the same
         assert_eq!(account_root_another_fid.len() > 0, true);
