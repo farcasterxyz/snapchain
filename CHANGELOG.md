@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.1] - 2025-08-25
+
+### 🚀 Features
+
+- Add ability to batch insert into trie (#637)
+- Create a new bulk-optimized DB option (#638)
+- Allow conflict-free stores for replicator (#648)
+
+### 🐛 Bug Fixes
+
+- Don't return duplicate FIDs (#641)
+- Fix consensus tests (#644)
+- Fix build (#647)
+- Correctly route fnames to all shards (#650)
+
 ## [0.5.0] - 2025-08-18
 
 ### 🚀 Features
