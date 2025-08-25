@@ -254,8 +254,7 @@ impl MerkleTrie {
         txn_batch: &mut RocksDbTransactionBatch,
         prefix: &[u8],
     ) -> Option<TrieNode> {
-        let prefix = (self.branch_xform.expand)(prefix);
-        let node_key = TrieNode::make_primary_key(&prefix, None);
+        let node_key = self.get_node_key(&prefix, None);
 
         // First, attempt to get it from the DB cache
         if let Some(Some(node_bytes)) = txn_batch.batch.get(&node_key) {
@@ -342,6 +341,11 @@ impl MerkleTrie {
         }
     }
 
+    fn get_node_key(&self, prefix: &[u8], child_char: Option<u8>) -> Vec<u8> {
+        let expanded_prefix = (self.branch_xform.expand)(prefix);
+        return TrieNode::make_primary_key(&expanded_prefix, child_char);
+    }
+
     pub fn get_trie_node_metadata(
         &self,
         db: &RocksDB,
@@ -352,25 +356,46 @@ impl MerkleTrie {
             let mut children = HashMap::new();
 
             for char in node.children().keys() {
-                let mut child_prefix = prefix.to_vec();
-                child_prefix.push(*char);
+                let child_prefix = self.get_node_key(prefix, Some(*char));
 
-                let child_node = self.get_node(db, txn_batch, &child_prefix).ok_or(
-                    TrieError::ChildNotFound {
+                if let Some(Some(node_bytes)) = txn_batch.batch.get(&child_prefix) {
+                    if let Ok(child_node) = TrieNode::deserialize(&node_bytes) {
+                        children.insert(
+                            *char,
+                            NodeMetadata {
+                                prefix: child_prefix.clone(),
+                                num_messages: child_node.items(),
+                                hash: hex::encode(&child_node.hash()),
+                                children: HashMap::new(),
+                            },
+                        );
+                        break;
+                    }
+                }
+
+                if let Some(child_node_bytes) = db.get(&child_prefix).ok().flatten() {
+                    if let Ok(child_node) = TrieNode::deserialize(&child_node_bytes) {
+                        children.insert(
+                            *char,
+                            NodeMetadata {
+                                prefix: child_prefix,
+                                num_messages: child_node.items(),
+                                hash: hex::encode(&child_node.hash()),
+                                children: HashMap::new(),
+                            },
+                        );
+                    } else {
+                        return Err(TrieError::ChildNotFound {
+                            char: *char,
+                            prefix: prefix.to_vec(),
+                        });
+                    }
+                } else {
+                    return Err(TrieError::ChildNotFound {
                         char: *char,
                         prefix: prefix.to_vec(),
-                    },
-                )?;
-
-                children.insert(
-                    *char,
-                    NodeMetadata {
-                        prefix: child_prefix,
-                        num_messages: child_node.items(),
-                        hash: hex::encode(&child_node.hash()),
-                        children: HashMap::new(),
-                    },
-                );
+                    });
+                }
             }
 
             Ok(NodeMetadata {
