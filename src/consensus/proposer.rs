@@ -494,6 +494,7 @@ impl Proposer for BlockProposer {
         timeout: Duration,
     ) -> FullProposal {
         let mempool_timeout = Duration::from_millis(200);
+        // TODO(aditi): We have to actually route onchain events to shard 0 in the mempool to pick them up
         let messages = self
             .engine
             .mempool_poller
@@ -634,7 +635,7 @@ impl Proposer for BlockProposer {
                 return Validity::Invalid;
             }
 
-            let state_change = block_engine::ShardStateChange {
+            let state_change = block_engine::BlockStateChange {
                 timestamp,
                 new_state_root: header.state_root.clone(),
                 transactions: block.transactions.clone(),

@@ -7,7 +7,7 @@ mod tests {
         ValidatorMessage,
     };
     use crate::storage::db::RocksDB;
-    use crate::storage::store::block_engine::{BlockEngine, ShardStateChange};
+    use crate::storage::store::block_engine::{BlockEngine, BlockStateChange};
     use crate::storage::store::mempool_poller::MempoolMessage;
     use crate::storage::store::test_helper::{statsd_client, trie_ctx, FID_FOR_TEST};
     use crate::storage::store::BlockStore;
@@ -65,7 +65,7 @@ mod tests {
         }
     }
 
-    pub fn state_change_to_block(block_number: u64, change: &ShardStateChange) -> Block {
+    pub fn state_change_to_block(block_number: u64, change: &BlockStateChange) -> Block {
         let mut block = default_block();
 
         block.header.as_mut().unwrap().state_root = change.new_state_root.clone();
@@ -82,7 +82,7 @@ mod tests {
 
     pub fn validate_and_commit_state_change(
         engine: &mut BlockEngine,
-        state_change: &ShardStateChange,
+        state_change: &BlockStateChange,
     ) -> Block {
         let height = engine.get_confirmed_height().increment();
 
@@ -174,7 +174,7 @@ mod tests {
         let height = block_engine.get_confirmed_height().increment();
         validate_and_commit_state_change(
             &mut block_engine,
-            &ShardStateChange {
+            &BlockStateChange {
                 timestamp: FarcasterTime::from_unix_seconds(1752685200),
                 new_state_root: vec![],
                 events_hash: vec![],

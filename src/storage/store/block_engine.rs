@@ -56,7 +56,7 @@ pub struct BlockEngine {
 
 // Shard state root and the transactions
 #[derive(Clone, Debug)]
-pub struct ShardStateChange {
+pub struct BlockStateChange {
     pub timestamp: FarcasterTime,
     pub new_state_root: Vec<u8>,
     pub events_hash: Vec<u8>,
@@ -196,7 +196,7 @@ impl BlockEngine {
         messages: Vec<MempoolMessage>,
         height: Height,
         timestamp: &FarcasterTime,
-    ) -> Result<ShardStateChange, BlockEngineError> {
+    ) -> Result<BlockStateChange, BlockEngineError> {
         self.metrics.count(
             "recv_messages",
             messages.len() as u64,
@@ -248,7 +248,7 @@ impl BlockEngine {
 
         let new_root_hash = self.trie.root_hash()?;
 
-        let result = ShardStateChange {
+        let result = BlockStateChange {
             timestamp: timestamp.clone(),
             new_state_root: new_root_hash.clone(),
             transactions: snapchain_txns,
@@ -263,7 +263,7 @@ impl BlockEngine {
         &mut self,
         messages: Vec<MempoolMessage>,
         height: Height,
-    ) -> ShardStateChange {
+    ) -> BlockStateChange {
         let now = std::time::Instant::now();
         let mut txn = RocksDbTransactionBatch::new();
 
@@ -277,7 +277,7 @@ impl BlockEngine {
             self.trie.reload(&self.db).unwrap();
             result
         } else {
-            ShardStateChange {
+            BlockStateChange {
                 events: vec![],
                 new_state_root: vec![],
                 timestamp: FarcasterTime::current(),
@@ -384,7 +384,7 @@ impl BlockEngine {
 
     pub fn validate_state_change(
         &mut self,
-        shard_state_change: &ShardStateChange,
+        shard_state_change: &BlockStateChange,
         height: Height,
     ) -> bool {
         let version = EngineVersion::version_for(&shard_state_change.timestamp, self.network);
