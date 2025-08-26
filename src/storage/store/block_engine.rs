@@ -305,6 +305,7 @@ impl BlockEngine {
         timestamp: &FarcasterTime,
     ) -> Result<(), BlockEngineError> {
         let now = std::time::Instant::now();
+        // TODO(aditi): We probably only want to check this if we're in a test env (maybe only if the network is Devnet)
         // Validate that the trie is in a good place to start with
         match self.get_last_block() {
             None => { // There are places where it's hard to provide a parent hash-- e.g. tests so make this an option and skip validation if not present
