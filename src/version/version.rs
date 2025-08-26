@@ -70,7 +70,7 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
         version: EngineVersion::V7,
     },
     VersionSchedule {
-        active_at: 1757523600, // 2026-09-10 5PM UTC
+        active_at: 1756918800, // 2026-09-03 5PM UTC
         version: EngineVersion::V8,
     },
 ]
