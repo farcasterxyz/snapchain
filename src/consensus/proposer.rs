@@ -634,6 +634,13 @@ impl Proposer for BlockProposer {
         let height = commits.height.unwrap();
         if let Some(proposal) = self.proposed_blocks.get_by_shard_hash(&value) {
             let block = proposal.block(commits).unwrap();
+            for witness in &block.shard_witness.as_ref().unwrap().shard_chunk_witnesses {
+                self.statsd_client.gauge_with_shard(
+                    witness.height.unwrap().shard_index,
+                    "block_engine.shard_height",
+                    witness.height.unwrap().block_number,
+                );
+            }
             self.publish_new_block(block.clone()).await;
             self.engine.commit_block(&block);
             self.proposed_blocks.decide(height);
