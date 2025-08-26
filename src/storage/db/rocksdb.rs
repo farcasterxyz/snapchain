@@ -366,6 +366,9 @@ impl RocksDB {
             start_iterator_prefix
         } else {
             if let Some(page_token) = &page_options.page_token {
+                // In RocksDB, the lexicographically next key after [1,2,3] is [1,2,3,0] (and NOT [1,2,4])
+                // This is because RocksDB uses a prefix-based storage engine, and the next key is determined by the last byte
+                // with smaller keys sorting BEFORE longer keys with the same prefix
                 [page_token.clone(), vec![0u8]].concat()
             } else {
                 start_iterator_prefix
