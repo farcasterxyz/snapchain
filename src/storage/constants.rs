@@ -44,6 +44,8 @@ pub enum RootPrefix {
 
     /* Used to index blocks by timestamp */
     BlockIndex = 18,
+
+    /* Used to index blocks events by seqnum */
     BlockEvent = 19,
 }
 
