@@ -25,6 +25,15 @@ pub enum TrieError {
     #[error("Merkle Trie is not initialized")]
     TrieNotInitialized,
 
+    #[error("The page token is invalid {0}")]
+    InvalidPageToken(String),
+
+    #[error("Failed to decode trie page token: {0}")]
+    TokenDecodeError(String),
+
+    #[error("Invalid state in Trie: {0}")]
+    InvalidState(String),
+
     #[error("No keys to insert")]
     NoKeysToInsert,
 
