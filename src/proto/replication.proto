@@ -1,15 +1,11 @@
 syntax = "proto3";
 
-import "blocks.proto";
+import "message.proto";
 
 service ReplicationService {
   rpc GetShardSnapshotMetadata(GetShardSnapshotMetadataRequest) returns (GetShardSnapshotMetadataResponse);
   rpc GetShardTransactions(GetShardTransactionsRequest) returns (GetShardTransactionsResponse);
 
-  // IMPORTANT: this is a temporary endpoint for debugging purposes only. It will eventually be
-  // removed, and SHOULD NOT be used for production purposes.
-  rpc GetReplicationTransactionsByFid(GetReplicationTransactionsByFidRequest)
-    returns (GetReplicationTransactionsByFidResponse);
 }
 
 message GetShardSnapshotMetadataRequest {
@@ -27,20 +23,41 @@ message GetShardSnapshotMetadataResponse {
 }
 
 message GetShardTransactionsRequest {
+  // Shard + height of the snapshot. Only those combinations returned from the `GetShardSnapshotMetadata`
+  // are valid
   uint32 shard_id = 1;
   uint64 height = 2;
-  optional bytes page_token = 3;
+
+  // The trie prefix to iterate under. Only leaf node keys under this sub tree will be returned.
+  uint32 trie_virtual_shard = 3;
+
+  // If NONE, then start from the left-most leaf node under the prefix
+  optional string page_token = 4;
 }
 
 message GetShardTransactionsResponse {
-  repeated Transaction transactions = 1;
-  optional bytes next_page_token = 2;
+  // List of trie keys and its associated message
+  repeated ShardTrieEntryWithMessage messages = 1;
+
+  // For each (unique) FID that was sent in `messages` above, that FID's account root
+  // hash in the trie.
+  repeated FidAccountRootHash fid_account_roots = 2;
+
+  // If this is None, all entries under the prefix have been returned
+  optional string next_page_token = 3;
 }
 
-message GetReplicationTransactionsByFidRequest {
-  uint64 fid = 2;
+
+message ShardTrieEntryWithMessage {
+  // The trie key of the leaf node.   
+  bytes trie_key = 1;
+
+  // This should always be present, will be None only if a trie key's message
+  // was not found in the DB, which should be never happen..
+  optional Message message = 2;
 }
 
-message GetReplicationTransactionsByFidResponse {
-  Transaction transaction = 1;
+message FidAccountRootHash {
+  uint64 fid = 1;
+  bytes account_root_hash = 2;
 }

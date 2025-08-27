@@ -78,6 +78,31 @@ impl TrieKey {
         // 0-indexed, so it fits into 1 byte without overflow
         (TRIE_ROUTER.route_fid(fid, TRIE_SHARD_SIZE) - 1) as u8
     }
+
+    // Decode a trie key into (virtual_shard_id, fid, onchain_message_type, message_type, hash OR fname OR tx_hash+log_index)
+    pub fn decode(key: &[u8]) -> Result<(u8, u64, Option<u8>, Option<u8>, Vec<u8>), TrieError> {
+        if key.len() < 6 {
+            return Err(TrieError::KeyLengthTooShort);
+        }
+
+        let virtual_shard = key[0];
+        let fid = u64::from_be_bytes(key[1..6].try_into().unwrap());
+        if key.len() == 6 {
+            return Ok((virtual_shard, fid, None, None, vec![]));
+        }
+
+        let (onchain_message_type, message_type) = if key[6] < (1 << 3) {
+            // On-chain event
+            (Some(key[6]), None)
+        } else {
+            // Regular message
+            (None, Some(key[6] >> 3))
+        };
+
+        let rest = key[7..].to_vec();
+
+        Ok((virtual_shard, fid, onchain_message_type, message_type, rest))
+    }
 }
 
 #[derive(Debug)]

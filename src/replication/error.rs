@@ -1,5 +1,7 @@
 use std::fmt::Display;
 
+use crate::{core::error::HubError, storage::trie::errors::TrieError};
+
 #[derive(Debug)]
 pub enum ReplicationError {
     ShardStoreNotFound(u32),         // shard
@@ -7,6 +9,18 @@ pub enum ReplicationError {
     InternalError(String),           // message
     InvalidMessage(String),          // message
     TimestampTooOld(u32, u64, u64),  // shard, height, timestamp
+}
+
+impl From<TrieError> for ReplicationError {
+    fn from(err: TrieError) -> Self {
+        ReplicationError::InternalError(format!("Trie error: {}", err))
+    }
+}
+
+impl From<HubError> for ReplicationError {
+    fn from(err: HubError) -> Self {
+        ReplicationError::InternalError(format!("Hub error: {}", err))
+    }
 }
 
 impl From<ReplicationError> for tonic::Status {
