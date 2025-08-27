@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0] - 2025-08-27
+
+### 🐛 Bug Fixes
+
+- Paged iterator doesn't go through sub-keys (#652)
+
+### ⚙️ Miscellaneous Tasks
+
+- Push EngineVersion::V8 activation date up a week (#655)
+- Add metric for confirmed shard heights (#656)
+
 ## [0.5.1] - 2025-08-25
 
 ### 🚀 Features
