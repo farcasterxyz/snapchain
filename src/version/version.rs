@@ -3,7 +3,7 @@ use crate::proto::FarcasterNetwork;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
-const LATEST_PROTOCOL_VERSION: u32 = 5;
+const LATEST_PROTOCOL_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, EnumIter)]
 pub enum EngineVersion {
@@ -16,6 +16,7 @@ pub enum EngineVersion {
     V6 = 6,
     V7 = 7,
     V8 = 8,
+    V9 = 9,
 }
 
 pub enum ProtocolFeature {
@@ -74,6 +75,10 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
         active_at: 1756918800, // 2026-09-03 5PM UTC
         version: EngineVersion::V8,
     },
+    VersionSchedule {
+        active_at: 1757523600, // 2026-09-10 5PM UTC
+        version: EngineVersion::V9,
+    },
 ]
 .as_slice();
 
@@ -98,12 +103,16 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
         active_at: 1755709200, // 2026-08-20 5PM UTC
         version: EngineVersion::V8,
     },
+    VersionSchedule {
+        active_at: 1756918800, // 2026-09-03 5PM UTC
+        version: EngineVersion::V9,
+    },
 ]
 .as_slice();
 
 const ENGINE_VERSION_SCHEDULE_DEVNET: &[VersionSchedule] = [VersionSchedule {
     active_at: 0,
-    version: EngineVersion::V8,
+    version: EngineVersion::V9,
 }]
 .as_slice();
 
@@ -145,8 +154,8 @@ impl EngineVersion {
             | ProtocolFeature::PrimaryAddresses => self >= &EngineVersion::V5,
             ProtocolFeature::FutureTimestampValidation => self >= &EngineVersion::V6,
             ProtocolFeature::DependentMessagesInBulkSubmit => self >= &EngineVersion::V7,
-            ProtocolFeature::DecoupleShardZeroBlockProduction
-            | ProtocolFeature::WriteDataToShardZero => self >= &EngineVersion::V8,
+            ProtocolFeature::DecoupleShardZeroBlockProduction => self >= &EngineVersion::V8,
+            ProtocolFeature::WriteDataToShardZero => self >= &EngineVersion::V9,
         }
     }
 
@@ -160,7 +169,8 @@ impl EngineVersion {
             EngineVersion::V5 => 2,
             EngineVersion::V6 => 3,
             EngineVersion::V7 => 4,
-            EngineVersion::V8 => LATEST_PROTOCOL_VERSION,
+            EngineVersion::V8 => 5,
+            EngineVersion::V9 => LATEST_PROTOCOL_VERSION,
         }
     }
 
@@ -330,7 +340,7 @@ mod version_test {
 
     #[test]
     fn test_latest() {
-        assert_eq!(EngineVersion::latest(), EngineVersion::V8);
+        assert_eq!(EngineVersion::latest(), EngineVersion::V9);
         assert_eq!(
             EngineVersion::version_for(&FarcasterTime::current(), FarcasterNetwork::Devnet),
             EngineVersion::latest()

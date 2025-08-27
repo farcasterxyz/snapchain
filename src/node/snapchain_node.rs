@@ -147,7 +147,6 @@ impl SnapchainNode {
             config.max_messages_per_block,
             Some(messages_request_tx.clone()),
             network,
-            config.heartbeat_block_interval,
         );
         let block_proposer = BlockProposer::new(
             validator_address.clone(),
