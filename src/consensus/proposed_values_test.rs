@@ -18,6 +18,8 @@ mod tests {
                 header: None,
                 shard_witness: None,
                 commits: None,
+                events: vec![],
+                transactions: vec![],
             })),
         }
     }
