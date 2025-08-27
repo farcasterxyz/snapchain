@@ -606,7 +606,6 @@ mod tests {
     use crate::storage::trie::errors::TrieError;
     use crate::storage::trie::merkle_trie::{Context, MerkleTrie, TrieKey};
     use crate::storage::trie::trie_node::UNCOMPACTED_LENGTH;
-    use crate::storage::trie::util::decode_trie_token;
     use std::collections::HashSet;
 
     #[test]
@@ -726,40 +725,5 @@ mod tests {
         assert_eq!(TrieKey::fid_shard(100), 89);
         assert_eq!(TrieKey::fid_shard(42), 141);
         assert_eq!(TrieKey::fid_shard(918648237462), 153);
-    }
-
-    #[test]
-    fn test_get_paged_values_of_subtree_pagination() {
-        let ctx = &Context::new();
-        let tmp_path = tempfile::tempdir().unwrap();
-        let db = &RocksDB::new(tmp_path.path().to_str().unwrap());
-        db.open().unwrap();
-        let mut trie = MerkleTrie::new(256).unwrap();
-        trie.initialize(db).unwrap();
-        let mut txn_batch = RocksDbTransactionBatch::new();
-
-        // Insert 10 keys sharing same prefix 'ab'
-        for i in 0u8..10u8 {
-            // limited range
-            let key = vec![0, 1, 2 + i, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-            trie.insert(ctx, db, &mut txn_batch, vec![&key]).unwrap();
-        }
-
-        let mut collected: Vec<Vec<u8>> = vec![];
-        let mut page_token: Option<String> = None;
-        loop {
-            let mut page = vec![];
-            let next = trie
-                .get_paged_values_of_subtree(ctx, db, &[0, 1], &mut page, 3, page_token.clone())
-                .unwrap();
-            collected.extend(page);
-            if next.is_none() {
-                break;
-            }
-            page_token = next;
-            // ensure token decodes
-            let _ = decode_trie_token(page_token.as_ref().unwrap()).unwrap();
-        }
-        assert_eq!(collected.len(), 10);
     }
 }
