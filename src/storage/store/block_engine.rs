@@ -134,7 +134,7 @@ impl BlockEngine {
 
         let account_root =
             self.trie
-                .get_hash(&self.db, txn_batch, &TrieKey::for_fid(snapchain_txn.fid));
+                .get_hash(&self.db, txn_batch, &TrieKey::for_fid(snapchain_txn.fid))?;
 
         Ok(account_root)
     }
