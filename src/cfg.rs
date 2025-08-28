@@ -100,6 +100,7 @@ pub struct Config {
     pub http_server: http_server::Config,
     pub replication: ReplicationConfig,
     pub block_receiver: block_receiver::Config,
+    pub enable_revalidate_ens_proofs_job: bool,
 }
 
 impl Default for Config {
@@ -127,6 +128,7 @@ impl Default for Config {
             http_server: http_server::Config::default(),
             replication: ReplicationConfig::default(),
             block_receiver: block_receiver::Config::default(),
+            enable_revalidate_ens_proofs_job: false,
         }
     }
 }

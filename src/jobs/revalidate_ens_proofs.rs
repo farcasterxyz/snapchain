@@ -1,13 +1,17 @@
-use crate::connectors::onchain_events::ChainAPI;
 use crate::core::error::HubError;
+use crate::mempool::mempool::MempoolSource;
 use crate::proto::message_data::Body;
-use crate::proto::{Message, UserNameType};
+use crate::proto::{ExternalData, Message, RevalidateMessage};
 use crate::storage::constants::PAGE_SIZE_MAX;
 use crate::storage::db::PageOptions;
 use crate::storage::store::account::UsernameProofStore;
+use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::node_local_state::LocalStateStore;
 use crate::storage::store::stores::Stores;
+use crate::{connectors::onchain_events::ChainClients, mempool::mempool::MempoolRequest};
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio_cron_scheduler::{Job, JobSchedulerError};
 use tracing::{error, info, warn};
@@ -18,20 +22,27 @@ pub fn revalidate_ens_proofs_job(
     schedule: &str,
     shard_stores: HashMap<u32, Stores>,
     local_state_store: LocalStateStore,
-    chain_api: impl ChainAPI + Clone + 'static,
+    chain_clients: Arc<ChainClients>,
+    mempool_tx: mpsc::Sender<MempoolRequest>,
 ) -> Result<Job, JobSchedulerError> {
     Job::new_async(schedule, move |_, _| {
         let shard_stores = shard_stores.clone();
-        let chain_api = chain_api.clone();
         let local_state_store = local_state_store.clone();
+        let chain_clients = chain_clients.clone();
+        let mempool_tx = mempool_tx.clone();
         Box::pin(async move {
             info!("Starting ENS proof revalidation job");
 
             for (shard_id, stores) in shard_stores.iter() {
                 info!("Revalidating ENS proofs for shard {}", shard_id);
 
-                if let Err(e) =
-                    revalidate_ens_proofs_for_shard(stores, &local_state_store, &chain_api).await
+                if let Err(e) = revalidate_ens_proofs_for_shard(
+                    stores,
+                    &local_state_store,
+                    &chain_clients,
+                    &mempool_tx,
+                )
+                .await
                 {
                     error!(
                         "Failed to revalidate ENS proofs for shard {}: {}",
@@ -50,7 +61,8 @@ pub fn revalidate_ens_proofs_job(
 async fn revalidate_ens_proofs_for_shard(
     stores: &Stores,
     local_state_store: &LocalStateStore,
-    chain_api: &impl ChainAPI,
+    chain_clients: &ChainClients,
+    mempool_tx: &mpsc::Sender<MempoolRequest>,
 ) -> Result<(), HubError> {
     // Check if we have a previous run to resume from
     let start_fid = match local_state_store.get_last_processed_fid_for_ens_revalidation() {
@@ -106,11 +118,20 @@ async fn revalidate_ens_proofs_for_shard(
                             Ok(username_proofs_page) => {
                                 // Process all messages in this page
                                 for message in &username_proofs_page.messages {
-                                    if let Err(e) = validate_ens_proof(message, chain_api).await {
-                                        warn!("ENS proof validation failed for FID {}: {}", fid, e);
-                                    } else {
-                                        total_processed += 1;
+                                    if let Err(err) = validate_ens_proof(
+                                        message,
+                                        stores,
+                                        chain_clients,
+                                        &mempool_tx,
+                                    )
+                                    .await
+                                    {
+                                        error!(
+                                            "Unable to run ens proof validation : {}",
+                                            err.to_string()
+                                        );
                                     }
+                                    total_processed += 1;
                                 }
 
                                 // Check if there are more pages for this FID
@@ -133,7 +154,7 @@ async fn revalidate_ens_proofs_for_shard(
                         warn!("Failed to save progress for FID {}: {}", fid, e);
                     }
 
-                    if total_processed % 100 == 0 {
+                    if fid_count % 100 == 0 {
                         tokio::time::sleep(THROTTLE).await;
                         info!(
                             "Processed {} FIDs, validated {} ENS proofs so far (last FID: {})",
@@ -171,42 +192,45 @@ async fn revalidate_ens_proofs_for_shard(
     Ok(())
 }
 
-async fn validate_ens_proof(message: &Message, chain_api: &impl ChainAPI) -> Result<(), HubError> {
+async fn validate_ens_proof(
+    message: &Message,
+    stores: &Stores,
+    chain_clients: &ChainClients,
+    mempool_tx: &mpsc::Sender<MempoolRequest>,
+) -> Result<(), HubError> {
     let data = message
         .data
         .as_ref()
         .ok_or_else(|| HubError::validation_failure("Message data is missing"))?;
 
-    let username_proof_body = match &data.body {
+    let username_proof = match &data.body {
         Some(Body::UsernameProofBody(body)) => body,
         _ => return Err(HubError::validation_failure("Not a username proof message")),
     };
 
-    if username_proof_body.r#type != UserNameType::UsernameTypeEnsL1 as i32 {
-        return Ok(());
-    }
-
-    let ens_name = std::str::from_utf8(&username_proof_body.name)
-        .map_err(|_| HubError::validation_failure("ENS name is not valid UTF-8"))?;
-
-    if !ens_name.ends_with(".eth") {
-        return Ok(());
-    }
-
-    let resolved_address = chain_api
-        .resolve_ens_name(ens_name.to_string())
+    let resolved_address = chain_clients
+        .resolve_ens_address(&username_proof)
         .await
         .map_err(|e| {
-            HubError::validation_failure(
-                format!("Failed to resolve ENS name '{}': {}", ens_name, e).as_str(),
-            )
+            HubError::validation_failure(&format!("Failed to resolve ENS name: {}", e.to_string()))
         })?;
 
-    if resolved_address.to_vec() != username_proof_body.owner {
-        // TODO: Handle invalid ENS proof - consider removing or marking as invalid
-        return Err(HubError::validation_failure(
-            "ENS resolved address does not match proof owner",
-        ));
+    if let Err(_) =
+        stores.validate_ens_username_proof(message.fid(), &username_proof, &resolved_address)
+    {
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::RevalidateMessage(RevalidateMessage {
+                    message: Some(message.clone()),
+                    external_data: Some(ExternalData {
+                        ens_resolved_address: Some(resolved_address),
+                    }),
+                }),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .map_err(|_| HubError::unavailable("can't send message over mempool tx"))?;
     }
 
     Ok(())

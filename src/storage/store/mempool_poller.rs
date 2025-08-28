@@ -36,6 +36,7 @@ pub enum MempoolMessage {
         for_shard: u32,
         message: proto::BlockEvent,
     },
+    RevalidateMessage(proto::RevalidateMessage),
 }
 
 impl MempoolMessage {
@@ -48,6 +49,9 @@ impl MempoolMessage {
                 for_shard: _,
                 message: _,
             } => 0,
+            MempoolMessage::RevalidateMessage(revalidate_message) => {
+                revalidate_message.message.as_ref().unwrap().fid()
+            }
         }
     }
 
@@ -145,12 +149,14 @@ impl MempoolPoller {
                         on_chain_event: None,
                         fname_transfer: None,
                         block_event: Some(message.clone()),
+                        revalidate_message: None,
                     }),
                     MempoolMessage::FnameTransfer(fname_transfer) => {
                         transaction.system_messages.push(ValidatorMessage {
                             on_chain_event: None,
                             fname_transfer: Some(fname_transfer.clone()),
                             block_event: None,
+                            revalidate_message: None,
                         })
                     }
                     MempoolMessage::OnchainEvent(onchain_event) => {
@@ -158,6 +164,15 @@ impl MempoolPoller {
                             on_chain_event: Some(onchain_event.clone()),
                             fname_transfer: None,
                             block_event: None,
+                            revalidate_message: None,
+                        })
+                    }
+                    MempoolMessage::RevalidateMessage(revalidate_message) => {
+                        transaction.system_messages.push(ValidatorMessage {
+                            on_chain_event: None,
+                            fname_transfer: None,
+                            block_event: None,
+                            revalidate_message: Some(revalidate_message.clone()),
                         })
                     }
                 }

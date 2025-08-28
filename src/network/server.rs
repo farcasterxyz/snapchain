@@ -46,6 +46,7 @@ use moka::policy::EvictionPolicy;
 use moka::sync::{Cache, CacheBuilder};
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
@@ -65,7 +66,7 @@ pub struct MyHubService {
     num_shards: u32,
     message_router: Box<dyn routing::MessageRouter>,
     statsd_client: StatsdClientWrapper,
-    chain_clients: ChainClients,
+    chain_clients: Arc<ChainClients>,
     mempool_tx: mpsc::Sender<MempoolRequest>,
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     network: proto::FarcasterNetwork,
@@ -86,7 +87,7 @@ impl MyHubService {
         message_router: Box<dyn routing::MessageRouter>,
         mempool_tx: mpsc::Sender<MempoolRequest>,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
-        chain_clients: ChainClients,
+        chain_clients: Arc<ChainClients>,
         version: String,
         peer_id: String,
     ) -> Self {
