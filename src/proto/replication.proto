@@ -1,6 +1,8 @@
 syntax = "proto3";
 
 import "message.proto";
+import "onchain_event.proto";
+import "blocks.proto";
 
 service ReplicationService {
   rpc GetShardSnapshotMetadata(GetShardSnapshotMetadataRequest) returns (GetShardSnapshotMetadataResponse);
@@ -37,7 +39,7 @@ message GetShardTransactionsRequest {
 
 message GetShardTransactionsResponse {
   // List of trie keys and its associated message
-  repeated ShardTrieEntryWithMessage messages = 1;
+  repeated ShardTrieEntryWithMessage trie_messages = 1;
 
   // For each (unique) FID that was sent in `messages` above, that FID's account root
   // hash in the trie.
@@ -54,7 +56,11 @@ message ShardTrieEntryWithMessage {
 
   // This should always be present, will be None only if a trie key's message
   // was not found in the DB, which should be never happen..
-  optional Message message = 2;
+  oneof trie_message {
+    Message user_message = 2;
+    OnChainEvent on_chain_event = 3;
+    FnameTransfer fname_transfer = 4;
+  }
 }
 
 message FidAccountRootHash {

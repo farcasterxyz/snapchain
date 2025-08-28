@@ -1,11 +1,14 @@
 use crate::{
     core::util,
-    proto::{self, GetShardTransactionsResponse, MessageType},
+    proto::{
+        self, shard_trie_entry_with_message::TrieMessage, GetShardTransactionsResponse,
+        MessageType, OnChainEventType,
+    },
     replication::{error::ReplicationError, replication_stores::ReplicationStores},
     storage::{
         db::{PageOptions, RocksDbTransactionBatch},
         store::{
-            account::{LinkStore, UsernameProofStore, VerificationStore},
+            account::{LinkStore, UserDataStore, UsernameProofStore, VerificationStore},
             engine::PostCommitMessage,
             stores::Stores,
         },
@@ -21,21 +24,43 @@ use tokio::select;
 use tracing::{error, info};
 
 #[derive(Clone)]
+pub enum CacheEntry {
+    UserMessage(proto::Message),
+    OnChainEvent(proto::OnChainEvent),
+}
+
+/// Cache all messages for (fid, user_message_type) by hash, so we can easily get to a message from its hash
+#[derive(Clone)]
 pub struct FidMessageTypeCache {
     pub fid: u64,
-    pub user_message_type: proto::MessageType,
-    pub cache: Arc<HashMap<String, proto::Message>>,
+    pub user_message_type: Option<proto::MessageType>,
+    pub onchain_event_type: Option<proto::OnChainEventType>,
+    pub cache: Arc<HashMap<Vec<u8>, CacheEntry>>,
 }
 
 impl FidMessageTypeCache {
-    pub fn new(
+    pub fn new_user_message_type(
         fid: u64,
         user_message_type: proto::MessageType,
-        cache: Arc<HashMap<String, proto::Message>>,
+        cache: Arc<HashMap<Vec<u8>, CacheEntry>>,
     ) -> Self {
         Self {
             fid,
-            user_message_type,
+            user_message_type: Some(user_message_type),
+            onchain_event_type: None,
+            cache,
+        }
+    }
+
+    pub fn new_onchain_message_type(
+        fid: u64,
+        onchain_event_type: proto::OnChainEventType,
+        cache: Arc<HashMap<Vec<u8>, CacheEntry>>,
+    ) -> Self {
+        Self {
+            fid,
+            user_message_type: None,
+            onchain_event_type: Some(onchain_event_type),
             cache,
         }
     }
@@ -105,12 +130,12 @@ impl Replicator {
         }
     }
 
-    fn build_fid_user_message_type_cache(
+    fn build_fid_onchain_message_type_cache(
         &self,
         stores: &Stores,
         fid: u64,
-        user_message_type: proto::MessageType,
-    ) -> Result<Arc<HashMap<String, proto::Message>>, ReplicationError> {
+        onchain_event_type: proto::OnChainEventType,
+    ) -> Result<Arc<HashMap<Vec<u8>, CacheEntry>>, ReplicationError> {
         {
             // First see if this cache is already present
             let rw = self.fid_message_type_cache.read().map_err(|e| {
@@ -119,7 +144,66 @@ impl Replicator {
 
             // See if cache hit, we can use the cached value
             if let Some(fmc) = rw.as_ref() {
-                if fmc.fid == fid && fmc.user_message_type == user_message_type {
+                if fmc.fid == fid
+                    && fmc.onchain_event_type.is_some()
+                    && fmc.onchain_event_type.unwrap() == onchain_event_type
+                {
+                    return Ok(fmc.cache.clone());
+                }
+            }
+        }
+
+        let onchain_events = stores
+            .onchain_event_store
+            .get_onchain_events(onchain_event_type, Some(fid))
+            .map_err(|e| {
+                ReplicationError::InternalError(format!(
+                    "Failed to get onchain events for fid {} of type {:?}: {}",
+                    fid, onchain_event_type, e
+                ))
+            })?;
+
+        // Build a hashmap of message hash -> message and put it in the cache
+        let message_hash_map = Arc::new(
+            onchain_events
+                .into_iter()
+                .map(|m| (m.transaction_hash.clone(), CacheEntry::OnChainEvent(m)))
+                .collect::<HashMap<_, _>>(),
+        );
+
+        {
+            let mut rw = self.fid_message_type_cache.write().map_err(|e| {
+                ReplicationError::InternalError(format!("Failed to acquire write lock: {}", e))
+            })?;
+
+            *rw = Some(FidMessageTypeCache::new_onchain_message_type(
+                fid,
+                onchain_event_type,
+                message_hash_map.clone(),
+            ));
+        }
+
+        Ok(message_hash_map)
+    }
+
+    fn build_fid_user_message_type_cache(
+        &self,
+        stores: &Stores,
+        fid: u64,
+        user_message_type: proto::MessageType,
+    ) -> Result<Arc<HashMap<Vec<u8>, CacheEntry>>, ReplicationError> {
+        {
+            // First see if this cache is already present
+            let rw = self.fid_message_type_cache.read().map_err(|e| {
+                ReplicationError::InternalError(format!("Failed to acquire read lock: {}", e))
+            })?;
+
+            // See if cache hit, we can use the cached value
+            if let Some(fmc) = rw.as_ref() {
+                if fmc.fid == fid
+                    && fmc.user_message_type.is_some()
+                    && fmc.user_message_type.unwrap() == user_message_type
+                {
                     return Ok(fmc.cache.clone());
                 }
             }
@@ -220,7 +304,7 @@ impl Replicator {
         let message_hash_map = Arc::new(
             messages
                 .into_iter()
-                .map(|m| (m.hex_hash(), m))
+                .map(|m| (m.hash.clone(), CacheEntry::UserMessage(m)))
                 .collect::<HashMap<_, _>>(),
         );
 
@@ -229,7 +313,7 @@ impl Replicator {
                 ReplicationError::InternalError(format!("Failed to acquire write lock: {}", e))
             })?;
 
-            *rw = Some(FidMessageTypeCache::new(
+            *rw = Some(FidMessageTypeCache::new_user_message_type(
                 fid,
                 user_message_type,
                 message_hash_map.clone(),
@@ -273,7 +357,7 @@ impl Replicator {
         )?;
 
         let mut fids_in_page = HashSet::new();
-        let mut messages = vec![];
+        let mut trie_messages = vec![];
 
         // For each trie key, fetch the associated message.
         for trie_key in trie_keys {
@@ -292,10 +376,77 @@ impl Replicator {
                 (Some(onchain_event_type), None) => {
                     // On-chain event
                     if onchain_event_type == 7 {
-                        // fname
+                        // fname. Get directly from the DB
+                        let fname_bytes =
+                            rest.into_iter().take_while(|&b| b != 0).collect::<Vec<_>>();
+
+                        let fname_proof = UserDataStore::get_username_proof(
+                            &stores.user_data_store,
+                            &RocksDbTransactionBatch::new(),
+                            &fname_bytes,
+                        )?;
+
+                        if fname_proof.is_none() {
+                            return Err(ReplicationError::InternalError(format!(
+                                "Failed to retrieve fname proof for FID {} with fname_bytes {:?} ({})",
+                                fid, fname_bytes, String::from_utf8_lossy(&fname_bytes)
+                            )));
+                        }
+
+                        let fname_transfer = proto::FnameTransfer {
+                            proof: fname_proof,
+                            ..Default::default()
+                        };
+
+                        trie_messages.push(proto::ShardTrieEntryWithMessage {
+                            trie_key,
+                            trie_message: Some(
+                                proto::shard_trie_entry_with_message::TrieMessage::FnameTransfer(
+                                    fname_transfer,
+                                ),
+                            ),
+                        });
                     } else {
                         // onchain event
-                        // The "rest" vec is <
+
+                        // The "rest" vec contains type at byte 0, transaction_hash in bytes 1-33 and log_index in byte 34+
+                        let onchain_event_type = OnChainEventType::try_from(rest[0] as i32)
+                            .map_err(|e| {
+                                ReplicationError::InvalidMessage(format!(
+                                    "Invalid on-chain event type: {}. Error: {}",
+                                    rest[0], e
+                                ))
+                            })?;
+                        let transaction_hash = rest[1..33].to_vec();
+
+                        let cache = self.build_fid_onchain_message_type_cache(
+                            &stores,
+                            fid,
+                            onchain_event_type,
+                        )?;
+
+                        let cache_entry = cache.get(&transaction_hash).cloned();
+                        if cache_entry.is_none() {
+                            return Err(ReplicationError::InternalError(format!(
+                                "On-chain event not found in cache for FID {} and onchain_event_type {:?}: {:?}",
+                                fid, onchain_event_type, transaction_hash
+                            )));
+                        }
+
+                        let onchain_event = match cache_entry.unwrap() {
+                            CacheEntry::OnChainEvent(event) => event,
+                            CacheEntry::UserMessage(_) => {
+                                return Err(ReplicationError::InternalError(
+                                    "Expected OnChainEvent but found UserMessage in cache"
+                                        .to_string(),
+                                ));
+                            }
+                        };
+
+                        trie_messages.push(proto::ShardTrieEntryWithMessage {
+                            trie_key,
+                            trie_message: Some(TrieMessage::OnChainEvent(onchain_event)),
+                        });
                     }
                 }
                 (None, Some(message_type)) => {
@@ -312,9 +463,27 @@ impl Replicator {
                         })?,
                     )?;
 
-                    let message = cache.get(&hex::encode(hash)).cloned();
+                    let cache_entry = cache.get(&hash).cloned();
+                    if cache_entry.is_none() {
+                        return Err(ReplicationError::InternalError(format!(
+                            "User message not found in cache for FID {} and message_type {}: {:?}",
+                            fid, message_type, hash
+                        )));
+                    }
 
-                    messages.push(proto::ShardTrieEntryWithMessage { trie_key, message });
+                    let message = match cache_entry.unwrap() {
+                        CacheEntry::UserMessage(msg) => msg,
+                        CacheEntry::OnChainEvent(_) => {
+                            return Err(ReplicationError::InternalError(
+                                "Expected UserMessage but found OnChainEvent in cache".to_string(),
+                            ));
+                        }
+                    };
+
+                    trie_messages.push(proto::ShardTrieEntryWithMessage {
+                        trie_key,
+                        trie_message: Some(TrieMessage::UserMessage(message)),
+                    });
                 }
                 _ => {
                     return Err(ReplicationError::InternalError(format!(
@@ -342,7 +511,7 @@ impl Replicator {
         trie.reload(&stores.db)?;
 
         let response = proto::GetShardTransactionsResponse {
-            messages,
+            trie_messages,
             fid_account_roots,
             next_page_token,
         };
