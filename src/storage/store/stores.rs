@@ -328,7 +328,7 @@ impl Stores {
         let message_count = self.get_usage_by_store_type(fid, store_type, txn_batch)?;
         let slot = self
             .onchain_event_store
-            .get_storage_slot_for_fid(fid, self.network, None)
+            .get_storage_slot_for_fid(fid, self.network, &[])
             .map_err(|e| StoresError::OnchainEventError(e))?;
         let max_messages = self.store_limits.max_messages(&slot, store_type);
 
@@ -375,7 +375,7 @@ impl Stores {
     pub fn get_storage_limits(&self, fid: u64) -> Result<StorageLimitsResponse, StoresError> {
         let slot = self
             .onchain_event_store
-            .get_storage_slot_for_fid(fid, self.network, None)
+            .get_storage_slot_for_fid(fid, self.network, &[])
             .map_err(|e| StoresError::OnchainEventError(e))?;
 
         let txn_batch = &mut RocksDbTransactionBatch::new();

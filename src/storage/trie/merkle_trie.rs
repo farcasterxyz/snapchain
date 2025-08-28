@@ -9,6 +9,7 @@ use crate::storage::store::account::{make_fid_key, IntoU8, FID_BYTES};
 use crate::storage::trie::{trie_node, util};
 use prost::Message as _;
 use std::collections::HashMap;
+use std::str;
 use tracing::info;
 pub use trie_node::Context;
 
@@ -81,6 +82,73 @@ impl TrieKey {
         // 0-indexed, so it fits into 1 byte without overflow
         (TRIE_ROUTER.route_fid(fid, TRIE_SHARD_SIZE) - 1) as u8
     }
+
+    // Compute the keys that need to be updated in the trie. Returns (inserts, deletes)
+    pub fn for_hub_event(event: &proto::HubEvent) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+        let mut inserts = Vec::new();
+        let mut deletes = Vec::new();
+
+        match &event.body {
+            Some(proto::hub_event::Body::MergeMessageBody(merge)) => {
+                if let Some(msg) = &merge.message {
+                    inserts.push(TrieKey::for_message(&msg));
+                }
+                for deleted_message in &merge.deleted_messages {
+                    deletes.push(TrieKey::for_message(&deleted_message));
+                }
+            }
+            Some(proto::hub_event::Body::MergeOnChainEventBody(merge)) => {
+                if let Some(onchain_event) = &merge.on_chain_event {
+                    inserts.push(TrieKey::for_onchain_event(&onchain_event));
+                }
+            }
+            Some(proto::hub_event::Body::PruneMessageBody(prune)) => {
+                if let Some(msg) = &prune.message {
+                    deletes.push(TrieKey::for_message(&msg));
+                }
+            }
+
+            Some(proto::hub_event::Body::RevokeMessageBody(revoke)) => {
+                if let Some(msg) = &revoke.message {
+                    deletes.push(TrieKey::for_message(&msg));
+                }
+            }
+            Some(proto::hub_event::Body::MergeUsernameProofBody(merge)) => {
+                if let Some(msg) = &merge.username_proof_message {
+                    inserts.push(TrieKey::for_message(&msg));
+                }
+                if let Some(msg) = &merge.deleted_username_proof_message {
+                    deletes.push(TrieKey::for_message(&msg));
+                }
+                if let Some(proof) = &merge.username_proof {
+                    if proof.r#type == proto::UserNameType::UsernameTypeFname as i32
+                        && proof.fid != 0
+                    // Deletes should not be added to the trie
+                    {
+                        let name = str::from_utf8(&proof.name).unwrap().to_string();
+                        inserts.push(TrieKey::for_fname(proof.fid, &name));
+                    }
+                }
+                if let Some(proof) = &merge.deleted_username_proof {
+                    if proof.r#type == proto::UserNameType::UsernameTypeFname as i32 {
+                        let name = str::from_utf8(&proof.name).unwrap().to_string();
+                        deletes.push(TrieKey::for_fname(proof.fid, &name));
+                    }
+                }
+            }
+            Some(proto::hub_event::Body::MergeFailure(_)) => {
+                // Merge failures don't affect the trie. They are only for event subscribers
+            }
+            Some(proto::hub_event::Body::BlockConfirmedBody(_)) => {
+                // BLOCK_CONFIRMED events don't affect the trie state.
+            }
+            &None => {
+                // This should never happen
+                panic!("No body in event");
+            }
+        };
+        (inserts, deletes)
+    }
 }
 
 #[derive(Debug)]
@@ -110,6 +178,25 @@ impl MerkleTrie {
             branching_factor,
             outdated_hash: false,
         })
+    }
+
+    pub fn update_for_event(
+        &mut self,
+        ctx: &Context,
+        db: &RocksDB,
+        event: &proto::HubEvent,
+        txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Result<(), TrieError> {
+        let (inserts, deletes) = TrieKey::for_hub_event(event);
+
+        for key in inserts {
+            self.insert(ctx, db, txn_batch, vec![&key])?;
+        }
+        for key in deletes {
+            self.delete(ctx, db, txn_batch, vec![&key])?;
+        }
+
+        Ok(())
     }
 
     fn create_empty_root(&mut self, txn_batch: &mut RocksDbTransactionBatch) {

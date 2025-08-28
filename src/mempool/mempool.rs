@@ -501,7 +501,7 @@ impl Mempool {
                 // shard 1 to shard 2, and then transfer within shard 2, we will keep the transfer
                 // around forever on shard 1. See test_fname_transfer for an example.
                 if version.is_enabled(ProtocolFeature::UsernameShardRoutingFix) {
-                    for copy_shard in 1..self.read_node_mempool.num_shards {
+                    for copy_shard in 1..self.read_node_mempool.num_shards + 1 {
                         if copy_shard != original_shard_id {
                             let copy_result = self
                                 .insert_into_shard(copy_shard, message.clone(), source.clone())
