@@ -189,7 +189,6 @@ impl TrieNode {
         blake3_20(&concat_hashes)
     }
 
-    #[cfg(test)]
     pub fn value(&self) -> Option<Vec<u8>> {
         // Value is only defined for leaf nodes
         if self.is_leaf() {

@@ -1,10 +1,14 @@
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::IntoU8;
     use crate::storage::trie::merkle_trie::{Context, MerkleTrie, TrieKey};
     use crate::storage::trie::util;
+    use crate::storage::trie::util::decode_trie_token;
     use crate::utils::factory::{events_factory, messages_factory};
+    use rand::{thread_rng, Rng};
 
     fn random_hash() -> Vec<u8> {
         (0..32).map(|_| rand::random::<u8>()).collect()
@@ -140,8 +144,41 @@ mod tests {
         );
     }
 
+    fn collect_all_paged_values_from_trie(
+        trie: &mut MerkleTrie,
+        ctx: &Context,
+        db: &RocksDB,
+        prefix: &[u8],
+        page_size: usize,
+    ) -> Vec<Vec<u8>> {
+        let mut collected: Vec<Vec<u8>> = vec![];
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut page = vec![];
+            let next = trie
+                .get_paged_values_of_subtree(
+                    ctx,
+                    db,
+                    prefix,
+                    &mut page,
+                    page_size,
+                    page_token.clone(),
+                )
+                .unwrap();
+            assert!(page.len() <= page_size);
+            collected.extend(page);
+            if next.is_none() {
+                break;
+            }
+            page_token = next;
+            // ensure token decodes
+            let _ = decode_trie_token(page_token.as_ref().unwrap()).unwrap();
+        }
+        collected
+    }
+
     #[test]
-    fn test_attach_root() {
+    fn test_get_paged_values_of_subtree_pagination() {
         let ctx = &Context::new();
         let tmp_path = tempfile::tempdir().unwrap();
         let db = &RocksDB::new(tmp_path.path().to_str().unwrap());
@@ -347,5 +384,97 @@ mod tests {
 
         // Root hashes should match again
         assert_eq!(trie1.root_hash().unwrap(), trie2.root_hash().unwrap());
+        let mut trie = MerkleTrie::new(16).unwrap();
+        trie.initialize(db).unwrap();
+        let mut txn_batch = RocksDbTransactionBatch::new();
+
+        // Collecting on an empty trie should work
+        let collected = collect_all_paged_values_from_trie(&mut trie, ctx, db, &[], 3);
+        assert_eq!(collected.len(), 0);
+
+        // Insert 10 keys sharing same prefix '[0,1]'
+        for i in 0u8..10u8 {
+            // limited range
+            let key = vec![0, 1, 2 + i, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+            trie.insert(ctx, db, &mut txn_batch, vec![&key]).unwrap();
+        }
+
+        let collected = collect_all_paged_values_from_trie(&mut trie, ctx, db, &[0, 1], 3);
+        assert_eq!(collected.len(), 10);
+
+        // Now try collecting [0,1,2], which should yield only 1 item.
+        let collected = collect_all_paged_values_from_trie(&mut trie, ctx, db, &[0, 1, 2], 3);
+        assert_eq!(collected.len(), 1);
+
+        // Insert 10 more keys, under [0,2]
+        for i in 0u8..10u8 {
+            let key = vec![0, 2, 2 + i, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+            trie.insert(ctx, db, &mut txn_batch, vec![&key]).unwrap();
+        }
+
+        // Getting the keys for [0,1] and [0,2] should each yield 10 items
+        let prefixes_to_test = [[0, 1], [0, 2]];
+        for prefix_to_test in prefixes_to_test {
+            let collected =
+                collect_all_paged_values_from_trie(&mut trie, ctx, db, &prefix_to_test, 3);
+            assert_eq!(collected.len(), 10);
+        }
+
+        // Collecting with a large page size should return all the values too
+        for prefix_to_test in prefixes_to_test {
+            let collected =
+                collect_all_paged_values_from_trie(&mut trie, ctx, db, &prefix_to_test, 100);
+            assert_eq!(collected.len(), 10);
+        }
+
+        // Collecting from a non-existant prefix should be empty
+        let collected = collect_all_paged_values_from_trie(&mut trie, ctx, db, &[0, 3], 3);
+        assert_eq!(collected.len(), 0);
+    }
+
+    #[test]
+    fn test_get_paged_values_random() {
+        let ctx = &Context::new();
+        let tmp_path = tempfile::tempdir().unwrap();
+        let db = &RocksDB::new(tmp_path.path().to_str().unwrap());
+        db.open().unwrap();
+        let mut trie = MerkleTrie::new(16).unwrap();
+        trie.initialize(db).unwrap();
+        let mut txn_batch = RocksDbTransactionBatch::new();
+
+        // Generate 1000 random keys of random length between 6 and 20 bytes
+        let mut rng = thread_rng();
+        let mut original_keys = HashSet::with_capacity(1000);
+        for _ in 0..1000 {
+            let len = rng.gen_range(7..=20);
+            let key: Vec<u8> = (0..len).map(|_| rng.gen()).collect();
+
+            if original_keys.contains(&key) {
+                continue;
+            }
+
+            trie.insert(ctx, db, &mut txn_batch, vec![&key]).unwrap();
+            original_keys.insert(key);
+        }
+
+        // Collect all keys with page size 100
+        let collected = collect_all_paged_values_from_trie(&mut trie, ctx, db, &[], 100);
+        assert_eq!(collected.len(), 1000);
+
+        // Make sure each collected key is present in the original set
+        for key in &collected {
+            assert!(
+                original_keys.contains(key),
+                "Collected key not found in original keys"
+            );
+        }
+
+        // Make sure each original_key was collected
+        for key in &original_keys {
+            assert!(
+                collected.contains(key),
+                "Original key not found in collected keys"
+            );
+        }
     }
 }

@@ -149,6 +149,31 @@ impl TrieKey {
         };
         (inserts, deletes)
     }
+
+    // Decode a trie key into (virtual_shard_id, fid, onchain_message_type, message_type, hash OR fname OR tx_hash+log_index)
+    pub fn decode(key: &[u8]) -> Result<(u8, u64, Option<u8>, Option<u8>, Vec<u8>), TrieError> {
+        if key.len() < 6 {
+            return Err(TrieError::KeyLengthTooShort);
+        }
+
+        let virtual_shard = key[0];
+        let fid = u64::from_be_bytes(key[1..6].try_into().unwrap());
+        if key.len() == 6 {
+            return Ok((virtual_shard, fid, None, None, vec![]));
+        }
+
+        let (onchain_message_type, message_type) = if key[6] < (1 << 3) {
+            // On-chain event
+            (Some(key[6]), None)
+        } else {
+            // Regular message
+            (None, Some(key[6] >> 3))
+        };
+
+        let rest = key[7..].to_vec();
+
+        Ok((virtual_shard, fid, onchain_message_type, message_type, rest))
+    }
 }
 
 #[derive(Debug)]
@@ -523,6 +548,215 @@ impl MerkleTrie {
         } else {
             Err(TrieError::TrieNotInitialized)
         }
+    }
+
+    /// Get all the keys of the given subtree starting at `prefix`.
+    /// The `leaf_keys` is filled with the keys found, upto `max_items`
+    /// If there are more keys present, a `next_page_token` is returned, which should be sent back as the `page_token`
+    /// the next time to retrieve the remaining keys
+    pub fn get_paged_values_of_subtree(
+        &mut self,
+        ctx: &Context,
+        db: &RocksDB,
+        prefix: &[u8],
+        leaf_keys: &mut Vec<Vec<u8>>,
+        max_items: usize,
+        page_token: Option<String>,
+    ) -> Result<Option<String>, TrieError> {
+        if self.root.is_none() {
+            return Err(TrieError::TrieNotInitialized);
+        }
+
+        // if self.outdated_hash {
+        //     return Err(TrieError::OutdatedHash);
+        // }
+
+        // Expand the input prefix using the branching factor transform to match the trie's internal key format
+        let expanded_prefix = (self.branch_xform.expand)(prefix);
+
+        // Attempt to retrieve the subtree node starting from the root using the expanded prefix. We will visit all the leafs of this
+        // subtree
+        let subtree_node_opt =
+            self.root
+                .as_mut()
+                .unwrap()
+                .get_node_from_trie(ctx, db, &expanded_prefix, 0);
+
+        if subtree_node_opt.is_none() {
+            return Ok(None);
+        }
+        let subtree_node = subtree_node_opt.unwrap();
+
+        // This tracks the full current path from the root of the trie (including the expanded_prefix) to the node being processed.
+        // It is built by appending child chars as we traverse deeper and popping them when backtracking.
+        let mut path = expanded_prefix.clone();
+
+        // This tracks only the path segments added beyond the initial expanded_prefix (i.e., within the subtree). It mirrors the depth
+        // traversed in the subtree and is used to construct the page token for resumption.
+        let mut relative_path: Vec<u8> = vec![];
+
+        // A stack of Vec<u8> where each inner Vec represents the remaining child chars to explore at that depth level. Chars are sorted
+        // ascending and reversed so pop() yields the smallest (lex order). The stack size equals the current depth in the subtree plus
+        // one (for the current level).
+        let mut remaining_stack: Vec<Vec<u8>>;
+
+        // Record the initial length of leaf_keys to track how many new items are added in this call
+        let initial_len = leaf_keys.len();
+
+        // If a page_token is provided, resume the iteration from the saved state
+        let page_token = page_token
+            .map(|token_str| util::decode_trie_token(&token_str))
+            .transpose()?
+            .flatten();
+
+        if let Some(token) = page_token {
+            // Validate that the token is not empty; if it is, return an error
+            if token.is_empty() {
+                return Err(TrieError::InvalidPageToken("<Empty token>".to_string()));
+            }
+
+            // Extract the relative_path from the first element of the token
+            relative_path = token[0].clone();
+
+            // Extract the remaining_stack from the rest of the token
+            remaining_stack = token[1..].to_vec();
+
+            // Enforce the invariant: relative_path.len() should be remaining_stack.len() - 1 (or 0 if stack has 1 level)
+            if relative_path.len() != remaining_stack.len().saturating_sub(1) {
+                return Err(TrieError::InvalidPageToken(hex::encode(&relative_path)));
+            }
+            // Extend the full path with the relative_path to resume at the correct position in the trie
+            path.extend_from_slice(&relative_path);
+        } else {
+            // No page_token: start fresh from the subtree root
+            // If the subtree root is a leaf, collect its key if present and return None (no more pages)
+            if subtree_node.is_leaf() {
+                // Check if the leaf has a valid key
+                if let Some(key) = &subtree_node.value() {
+                    // Ensure the key is not empty before processing
+                    if key.is_empty() {
+                        return Err(TrieError::KeyLengthTooShort);
+                    }
+
+                    // Combine the key back to its original form using the transform
+                    let combined = (self.branch_xform.combine)(key.as_slice());
+                    // Append the combined key to the leaf_keys vector
+                    leaf_keys.push(combined);
+                }
+                // Since it's a single leaf, iteration is complete
+                return Ok(None);
+            } else {
+                // Subtree root is not a leaf; prepare to traverse its children
+                // Collect and sort the child chars for ordered traversal
+                let mut children: Vec<u8> = subtree_node.children().keys().cloned().collect();
+                // If no children, the subtree is empty, return None
+                if children.is_empty() {
+                    return Err(TrieError::InvalidState(format!(
+                        "Non-leaf node {:?} didn't have any children",
+                        expanded_prefix
+                    )));
+                }
+
+                // Sort children
+                children.sort();
+                // Reverse so that pop() yields the smallest char first
+                children.reverse();
+
+                // Initialize the remaining_stack with this level's children
+                remaining_stack = vec![children];
+            }
+        }
+
+        // Main iteration loop: performs iterative DFS traversal
+        loop {
+            // Check if we've collected the maximum number of items for this page
+            if leaf_keys.len() - initial_len >= max_items {
+                // Construct the page token: first element is relative_path, followed by remaining_stack levels
+                let mut token: Vec<Vec<u8>> = vec![relative_path.clone()];
+                token.extend(remaining_stack.into_iter());
+                let encoded = crate::storage::trie::util::encode_trie_token(&Some(token));
+                return Ok(Some(encoded));
+            }
+
+            // If the remaining_stack is empty, traversal is complete
+            if remaining_stack.is_empty() {
+                // No more items to process, return None
+                return Ok(None);
+            }
+
+            // Get mutable reference to the top level's remaining children
+            let remaining = remaining_stack.last_mut().unwrap();
+
+            // If the current level has no more children, backtrack
+            if remaining.is_empty() {
+                // Remove the exhausted level from the stack
+                remaining_stack.pop();
+                // If relative_path is not empty, pop the last segment (backtrack in path)
+                if !relative_path.is_empty() {
+                    // Remove the last char from relative_path
+                    relative_path.pop();
+                    // Also remove from the full path
+                    path.pop();
+                }
+                // Continue (i.e, process next set of remaining children at parent level)
+                continue;
+            }
+
+            // Pop the next child char to explore (smallest remaining due to reverse sort)
+            let next_char = remaining.pop().unwrap();
+
+            // Append the char to the full path
+            path.push(next_char);
+
+            // Append to the relative_path (subtree-specific path)
+            relative_path.push(next_char);
+
+            // Retrieve the node at the current path
+            let current_node_opt = self
+                .root
+                .as_mut()
+                .unwrap()
+                .get_node_from_trie(ctx, db, &path, 0);
+
+            // If the node should exist.
+            if current_node_opt.is_none() {
+                return Err(TrieError::NodeNotFound {
+                    prefix: path.clone(),
+                });
+            }
+            let current_node = current_node_opt.unwrap();
+
+            // If the current node is a leaf, collect its key
+            if current_node.is_leaf() {
+                // Check if the leaf has a valid key
+                if let Some(key) = &current_node.value() {
+                    // Ensure the key is not empty before processing
+                    if key.is_empty() {
+                        return Err(TrieError::KeyLengthTooShort);
+                    }
+                    // Combine the key back to original form
+                    let combined = (self.branch_xform.combine)(key.as_slice());
+                    // Append to leaf_keys
+                    leaf_keys.push(combined);
+                }
+
+                // Backtrack: remove the leaf's char from paths (no children to explore)
+                path.pop();
+                relative_path.pop();
+            } else {
+                // Current node is not a leaf; prepare to descend into its children
+                // Collect and sort child chars
+                let mut children: Vec<u8> = current_node.children().keys().cloned().collect();
+                // Sort ascending
+                children.sort();
+                // Reverse for pop() to yield smallest first
+                children.reverse();
+                // Push this new level onto the remaining_stack
+                remaining_stack.push(children);
+            }
+        }
+
+        // (Unreachable: loop returns on all paths)
     }
 
     pub fn get_trie_node_metadata(

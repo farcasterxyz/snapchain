@@ -13,8 +13,6 @@ pub struct ReplicationServer {
 }
 
 impl ReplicationServer {
-    const MESSAGE_LIMIT: usize = 1_000; // Maximum number of messages to fetch per page
-
     pub fn new(
         replicator: Arc<Replicator>,
         message_router: Box<dyn routing::MessageRouter>,
@@ -64,46 +62,28 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
     ) -> Result<Response<proto::GetShardTransactionsResponse>, Status> {
         let request = request.into_inner();
 
-        let results = self.replicator.transactions_for_shard_and_height(
+        if request.trie_virtual_shard > u8::MAX as u32 {
+            return Err(Status::invalid_argument(format!(
+                "trie_virtual_shard {} is out of range",
+                request.trie_virtual_shard
+            )));
+        }
+
+        let results = self.replicator.messages_for_trie_prefix(
             request.shard_id,
             request.height,
+            request.trie_virtual_shard as u8,
             request.page_token.clone(),
-            Self::MESSAGE_LIMIT,
         );
 
-        let response = match results {
-            Ok((transactions, page_token)) => proto::GetShardTransactionsResponse {
-                transactions,
-                next_page_token: page_token,
-            },
+        match results {
+            Ok(r) => Ok(Response::new(r)),
             Err(e) => {
                 return Err(Status::internal(format!(
                     "Failed to get transactions: {}",
                     e
                 )));
             }
-        };
-
-        Ok(Response::new(response))
-    }
-
-    // IMPORTANT: this is a temporary endpoint for debugging purposes only. It will eventually be
-    // removed, and SHOULD NOT be used for production purposes.
-    async fn get_replication_transactions_by_fid(
-        &self,
-        request: Request<proto::GetReplicationTransactionsByFidRequest>,
-    ) -> Result<Response<proto::GetReplicationTransactionsByFidResponse>, Status> {
-        let request = request.into_inner();
-        let shard = self.message_router.route_fid(request.fid, self.num_shards);
-        let transaction = self
-            .replicator
-            .latest_transactions_for_fid(shard, request.fid)?;
-
-        Ok(Response::new(
-            proto::GetReplicationTransactionsByFidResponse {
-                transaction: transaction,
-                ..Default::default()
-            },
-        ))
+        }
     }
 }
