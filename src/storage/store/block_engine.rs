@@ -41,10 +41,15 @@ pub enum BlockEngineError {
     OnchainEventError(#[from] OnchainEventStorageError),
 }
 
-pub struct BlockEngine {
-    block_store: BlockStore,
-    block_event_store: BlockEventStore,
+#[derive(Clone)]
+pub struct BlockStores {
+    pub block_store: BlockStore,
+    pub block_event_store: BlockEventStore,
     pub onchain_event_store: OnchainEventStore,
+}
+
+pub struct BlockEngine {
+    stores: BlockStores,
     trie: MerkleTrie,
     network: FarcasterNetwork,
     pub mempool_poller: MempoolPoller,
@@ -75,9 +80,11 @@ impl BlockEngine {
     ) -> Self {
         trie.initialize(&db).unwrap();
         BlockEngine {
-            block_store,
-            block_event_store: BlockEventStore { db: db.clone() },
-            onchain_event_store: OnchainEventStore::new(db.clone(), StoreEventHandler::new()),
+            stores: BlockStores {
+                block_store,
+                block_event_store: BlockEventStore { db: db.clone() },
+                onchain_event_store: OnchainEventStore::new(db.clone(), StoreEventHandler::new()),
+            },
             trie,
             shard_id: 0,
             mempool_poller: MempoolPoller {
@@ -96,7 +103,10 @@ impl BlockEngine {
         }
     }
 
-    #[cfg(test)]
+    pub fn stores(&self) -> BlockStores {
+        self.stores.clone()
+    }
+
     pub fn trie_root_hash(&self) -> Vec<u8> {
         self.trie.root_hash().unwrap()
     }
@@ -119,6 +129,7 @@ impl BlockEngine {
         for message in &snapchain_txn.system_messages {
             if let Some(ref onchain_event) = message.on_chain_event {
                 match self
+                    .stores
                     .onchain_event_store
                     .merge_onchain_event(onchain_event.clone(), txn_batch)
                 {
@@ -154,7 +165,7 @@ impl BlockEngine {
     ) -> (Vec<BlockEvent>, Vec<u8>) {
         let mut events = vec![];
         if height.block_number % self.heartbeat_block_interval() == 0 {
-            let event_seqnum = self.block_event_store.max_seqnum().unwrap() + 1;
+            let event_seqnum = self.stores.block_event_store.max_seqnum().unwrap() + 1;
             let data = BlockEventData {
                 seqnum: event_seqnum,
                 r#type: BlockEventType::Heartbeat as i32,
@@ -175,7 +186,10 @@ impl BlockEngine {
             // Store these events so
             // (1) It's possible to figuure out the max seqnum easily
             // (2) It's possible to query over them in an rpc and see what has been produced.
-            self.block_event_store.put_block_event(&event, txn).unwrap();
+            self.stores
+                .block_event_store
+                .put_block_event(&event, txn)
+                .unwrap();
             events.push(event);
         }
 
@@ -216,6 +230,7 @@ impl BlockEngine {
                     .collect();
 
                 let storage_slot = self
+                    .stores
                     .onchain_event_store
                     .get_storage_slot_for_fid(
                         transaction.fid,
@@ -466,7 +481,7 @@ impl BlockEngine {
                 }
                 Ok(()) => {
                     self.db.commit(txn).unwrap();
-                    let result = self.block_store.put_block(block);
+                    let result = self.stores.block_store.put_block(block);
                     if result.is_err() {
                         error!("Failed to store block: {:?}", result.err());
                     }
@@ -482,7 +497,7 @@ impl BlockEngine {
                 }
             }
         } else {
-            let result = self.block_store.put_block(block);
+            let result = self.stores.block_store.put_block(block);
             if result.is_err() {
                 error!("Failed to store block: {:?}", result.err());
             }
@@ -490,7 +505,7 @@ impl BlockEngine {
     }
 
     pub fn get_last_block(&self) -> Option<Block> {
-        match self.block_store.get_last_block() {
+        match self.stores.block_store.get_last_block() {
             Ok(block) => block,
             Err(err) => {
                 error!("Unable to obtain last block {:#?}", err);
@@ -509,7 +524,11 @@ impl BlockEngine {
 
             return None;
         }
-        match self.block_store.get_block_by_height(height.block_number) {
+        match self
+            .stores
+            .block_store
+            .get_block_by_height(height.block_number)
+        {
             Ok(block) => block,
             Err(err) => {
                 error!("No block at height {:#?}", err);
@@ -520,7 +539,7 @@ impl BlockEngine {
 
     pub fn get_confirmed_height(&self) -> Height {
         let shard_index = 0;
-        match self.block_store.max_block_number() {
+        match self.stores.block_store.max_block_number() {
             Ok(block_num) => Height::new(shard_index, block_num),
             Err(_) => Height::new(shard_index, 0),
         }
@@ -528,7 +547,7 @@ impl BlockEngine {
 
     pub fn get_min_height(&self) -> Height {
         let shard_index = 0;
-        match self.block_store.min_block_number() {
+        match self.stores.block_store.min_block_number() {
             Ok(block_num) => Height::new(shard_index, block_num),
             // In case of no blocks, return height 1
             Err(_) => Height::new(shard_index, 1),
