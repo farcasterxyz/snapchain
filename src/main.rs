@@ -52,7 +52,7 @@ async fn start_servers(
     shard_stores: HashMap<u32, Stores>,
     shard_senders: HashMap<u32, Senders>,
     block_store: BlockStore,
-    chain_clients: ChainClients,
+    chain_clients: Arc<ChainClients>,
     replicator: Option<Arc<replication::replicator::Replicator>>,
 ) {
     let grpc_addr = app_config.rpc_address.clone();
@@ -178,8 +178,11 @@ async fn schedule_background_jobs(
     app_config: &snapchain::cfg::Config,
     block_store: BlockStore,
     shard_stores: HashMap<u32, Stores>,
+    local_state_store: LocalStateStore,
     sync_complete_rx: watch::Receiver<bool>,
     statsd_client: StatsdClientWrapper,
+    chain_clients: Arc<ChainClients>,
+    mempool_tx: mpsc::Sender<MempoolRequest>,
 ) {
     let sched = JobScheduler::new().await.unwrap();
     let mut jobs = vec![];
@@ -205,6 +208,20 @@ async fn schedule_background_jobs(
     )
     .unwrap();
     jobs.push(event_pruning_job);
+
+    if !app_config.read_node && app_config.enable_revalidate_ens_proofs_job {
+        let schedule = "0 0 5 * * *"; // 10am UTC every day
+        let revalidate_ens_proofs_job =
+            snapchain::jobs::revalidate_ens_proofs::revalidate_ens_proofs_job(
+                schedule,
+                shard_stores.clone(),
+                local_state_store,
+                chain_clients,
+                mempool_tx,
+            )
+            .unwrap();
+        jobs.push(revalidate_ens_proofs_job)
+    }
 
     if app_config.snapshot.snapshot_upload_enabled() {
         let snapshot_upload_job = snapchain::jobs::snapshot_upload::snapshot_upload_job(
@@ -346,6 +363,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         block_store.max_block_number().unwrap()
     );
 
+    let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
+    let local_state_store = LocalStateStore::new(global_db);
+
     let keypair = app_config.consensus.keypair().clone();
 
     let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(1000);
@@ -389,7 +409,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let _ = Metrics::register(registry);
     let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
 
-    let chains_clients = ChainClients::new(&app_config);
+    let chains_clients = Arc::new(ChainClients::new(&app_config));
 
     let (sync_complete_tx, sync_complete_rx) = watch::channel(false);
 
@@ -426,8 +446,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             &app_config,
             block_store.clone(),
             node.shard_stores.clone(),
+            local_state_store,
             sync_complete_rx,
             statsd_client.clone(),
+            chains_clients.clone(),
+            mempool_tx.clone(),
         )
         .await;
 
@@ -538,9 +561,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             (None, None)
         };
 
-        let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
-        let local_state_store = LocalStateStore::new(global_db);
-
         let node = SnapchainNode::create(
             keypair.clone(),
             app_config.consensus.clone(),
@@ -564,8 +584,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             &app_config,
             block_store.clone(),
             node.shard_stores.clone(),
+            local_state_store.clone(),
             sync_complete_rx,
             statsd_client.clone(),
+            chains_clients.clone(),
+            mempool_tx.clone(),
         )
         .await;
 

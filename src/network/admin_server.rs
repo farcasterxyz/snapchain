@@ -119,6 +119,7 @@ impl AdminService for MyAdminService {
         self.mempool_tx
             .try_send(MempoolRequest::AddMessage(
                 MempoolMessage::ValidatorMessage(ValidatorMessage {
+                    revalidate_message: None,
                     on_chain_event: Some(onchain_event.clone()),
                     fname_transfer: None,
                 }),
@@ -171,6 +172,7 @@ impl AdminService for MyAdminService {
         self.mempool_tx
             .try_send(MempoolRequest::AddMessage(
                 MempoolMessage::ValidatorMessage(ValidatorMessage {
+                    revalidate_message: None,
                     on_chain_event: None,
                     fname_transfer: Some(FnameTransfer {
                         id: username_proof.fid,

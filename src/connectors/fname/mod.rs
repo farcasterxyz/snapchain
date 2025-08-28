@@ -221,6 +221,7 @@ impl Fetcher {
             .mempool_tx
             .send(MempoolRequest::AddMessage(
                 MempoolMessage::ValidatorMessage(ValidatorMessage {
+                    revalidate_message: None,
                     on_chain_event: None,
                     fname_transfer: Some(FnameTransfer {
                         id: t.id,

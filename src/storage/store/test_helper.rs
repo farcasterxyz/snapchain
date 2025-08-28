@@ -194,6 +194,7 @@ pub async fn commit_event(engine: &mut ShardEngine, event: &OnChainEvent) -> Sha
     let state_change = engine.propose_state_change(
         1,
         vec![MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
+            revalidate_message: None,
             on_chain_event: Some(event.clone()),
             fname_transfer: None,
         })],
@@ -211,6 +212,7 @@ pub async fn commit_event_at(
     let state_change = engine.propose_state_change(
         1,
         vec![MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
+            revalidate_message: None,
             on_chain_event: Some(event.clone()),
             fname_transfer: None,
         })],
@@ -419,6 +421,7 @@ pub async fn commit_fname_transfer(engine: &mut ShardEngine, transfer: &FnameTra
     let state_change = engine.propose_state_change(
         engine.shard_id(),
         vec![MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
+            revalidate_message: None,
             on_chain_event: None,
             fname_transfer: Some(transfer.clone()),
         })],
@@ -457,6 +460,7 @@ pub async fn register_fname(
     let state_change = engine.propose_state_change(
         engine.shard_id(),
         vec![MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
+            revalidate_message: None,
             on_chain_event: None,
             fname_transfer: Some(fname_transfer.clone()),
         })],
