@@ -510,7 +510,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
-                        SystemMessage::BlockRequest {block_number: _ , block_tx: _ } => {},
+                        SystemMessage::BlockRequest {block_event_seqnum: _ , block_tx: _ } => {},
                         SystemMessage::MalachiteNetwork(shard, event) => {
                             // Forward to appropriate consensus actors
                             node.dispatch_network_event(shard, event);
@@ -746,8 +746,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 warn!("Failed to add to local mempool: {:?}", e);
                             }
                         },
-                        SystemMessage::BlockRequest {block_number, block_tx } => {
-                            let block = block_store.get_block_by_height(block_number).unwrap();
+                        SystemMessage::BlockRequest {block_event_seqnum, block_tx } => {
+                            let block= node.block_stores.get_block_by_event_seqnum(block_event_seqnum);
                             block_tx.send(block).unwrap();
                         },
                         SystemMessage::DecidedValueForReadNode(_) => {

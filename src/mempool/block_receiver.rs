@@ -109,28 +109,23 @@ impl BlockReceiver {
         }
     }
 
-    async fn sync_missing_blocks(&mut self, start_block_number: u64, stop_block_number: u64) {
-        info!(
-            start_block_number,
-            stop_block_number, "Syncing missing blocks",
-        );
-        let mut current_block_number = start_block_number;
-        while current_block_number <= stop_block_number {
+    async fn sync_missing_block_events(&mut self, start_seqnum: u64, stop_seqnum: u64) {
+        info!(start_seqnum, stop_seqnum, "Syncing missing blocks",);
+        let mut currrent_seqnum = start_seqnum;
+        while currrent_seqnum <= stop_seqnum {
             let (block_tx, block_rx) = oneshot::channel::<Option<Block>>();
             self.system_tx
                 .send(SystemMessage::BlockRequest {
-                    block_number: current_block_number,
+                    block_event_seqnum: currrent_seqnum,
                     block_tx,
                 })
                 .await
                 .unwrap();
             let block = block_rx.await.unwrap().unwrap();
-            if block.events.len() == 0 {
-                current_block_number += 1;
-                continue;
-            }
             self.submit_block(&block).await;
-            current_block_number += 1;
+            if let Some(last_event) = block.events.last() {
+                currrent_seqnum = last_event.seqnum() + 1;
+            }
         }
     }
 
@@ -156,18 +151,9 @@ impl BlockReceiver {
 
             let first_event_in_block = block.events.first().unwrap();
             if first_event_in_block.seqnum() > last_stored_event_seqnum + 1 {
-                let last_stored_event = self
-                    .stores
-                    .block_event_store
-                    .get_last_block_event()
-                    .unwrap();
-                let last_block_number = match &last_stored_event {
-                    None => 1,
-                    Some(last_event) => last_event.block_number(),
-                };
-                self.sync_missing_blocks(
-                    last_block_number,
-                    block.header.as_ref().unwrap().height.unwrap().block_number - 1,
+                self.sync_missing_block_events(
+                    last_stored_event_seqnum + 1,
+                    first_event_in_block.seqnum() - 1,
                 )
                 .await;
                 if let Err(BlockReceiverError::ConfirmationTimedOut) = self

@@ -48,6 +48,18 @@ pub struct BlockStores {
     pub onchain_event_store: OnchainEventStore,
 }
 
+impl BlockStores {
+    pub fn get_block_by_event_seqnum(&self, seqnum: u64) -> Option<Block> {
+        let block_event = self
+            .block_event_store
+            .get_block_event_by_seqnum(seqnum)
+            .ok()??;
+        self.block_store
+            .get_block_by_height(block_event.block_number())
+            .ok()?
+    }
+}
+
 pub struct BlockEngine {
     stores: BlockStores,
     trie: MerkleTrie,

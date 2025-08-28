@@ -495,10 +495,12 @@ impl NodeForTest {
                             node_for_dispatch.dispatch(event_shard, event);
                         }
                         SystemMessage::BlockRequest {
-                            block_number,
+                            block_event_seqnum,
                             block_tx,
                         } => {
-                            let block = block_store.get_block_by_height(block_number).unwrap();
+                            let block = node_for_dispatch
+                                .block_stores
+                                .get_block_by_event_seqnum(block_event_seqnum);
                             block_tx.send(block).unwrap();
                         }
                         _ => {

@@ -3,7 +3,7 @@ mod tests {
     use crate::consensus::consensus::SystemMessage;
     use crate::mempool::block_receiver::BlockReceiver;
     use crate::mempool::mempool::{MempoolRequest, MempoolSource};
-    use crate::proto::{Block, Height};
+    use crate::proto::Block;
     use crate::storage::db::RocksDB;
     use crate::storage::store::block_engine::BlockEngine;
     use crate::storage::store::block_engine_test_helpers;
@@ -111,22 +111,20 @@ mod tests {
         }
     }
 
-    async fn sync_blocks(
+    async fn sync_block_events(
         block_engine: &BlockEngine,
         system_rx: &mut mpsc::Receiver<SystemMessage>,
-        num_blocks: u32,
+        num_events: u32,
     ) {
-        for _ in 0..num_blocks {
+        for _ in 0..num_events {
             if let SystemMessage::BlockRequest {
-                block_number,
+                block_event_seqnum,
                 block_tx,
             } = system_rx.recv().await.unwrap()
             {
+                let block_stores = block_engine.stores();
                 block_tx
-                    .send(block_engine.get_block_by_height(Height {
-                        shard_index: 0,
-                        block_number,
-                    }))
+                    .send(block_stores.get_block_by_event_seqnum(block_event_seqnum))
                     .unwrap();
             }
         }
@@ -163,7 +161,7 @@ mod tests {
 
         process_heartbeats(&mut setup.shard_engine, &mut setup.mempool_rx, 1).await;
 
-        let missed_blocks = generate_heartbeats(&mut setup.block_engine, None, 2);
+        generate_heartbeats(&mut setup.block_engine, None, 2);
         assert_eq!(setup.mempool_rx.len(), 0);
 
         generate_heartbeats(&mut setup.block_engine, Some(&setup.block_tx), 1);
@@ -171,12 +169,9 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        sync_blocks(
-            &setup.block_engine,
-            &mut setup.system_rx,
-            missed_blocks.len() as u32 + 1,
-        )
-        .await;
+        sync_block_events(&setup.block_engine, &mut setup.system_rx, 2).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // The last heartbeat won't be processed til all synced block events are confirmed
         process_heartbeats(&mut setup.shard_engine, &mut setup.mempool_rx, 2).await;
@@ -193,7 +188,7 @@ mod tests {
         let mut setup = setup_test().await;
         let handle = tokio::spawn(async move { setup.block_receiver.run().await });
 
-        let blocks = generate_heartbeats(&mut setup.block_engine, Some(&setup.block_tx), 2);
+        generate_heartbeats(&mut setup.block_engine, Some(&setup.block_tx), 2);
 
         // We time out waiting for confirmation on the first event. We sync it again.
         tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -201,12 +196,9 @@ mod tests {
         // Just drain the first block event from the mempool.
         setup.mempool_rx.recv().await.unwrap();
 
-        sync_blocks(
-            &setup.block_engine,
-            &mut setup.system_rx,
-            blocks.len() as u32 - 1, // The last block has the second event
-        )
-        .await;
+        sync_block_events(&setup.block_engine, &mut setup.system_rx, 1).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Wait for synced block to get confirmed
         process_heartbeats(&mut setup.shard_engine, &mut setup.mempool_rx, 1).await;

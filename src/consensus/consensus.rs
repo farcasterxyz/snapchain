@@ -23,7 +23,7 @@ pub enum SystemMessage {
     DecidedValueForReadNode(proto::DecidedValue),
 
     BlockRequest {
-        block_number: u64,
+        block_event_seqnum: u64,
         block_tx: oneshot::Sender<Option<Block>>,
     },
 
