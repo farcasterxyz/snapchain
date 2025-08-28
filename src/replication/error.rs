@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{fmt::Display, sync::PoisonError};
 
 use crate::{core::error::HubError, storage::trie::errors::TrieError};
 
@@ -20,6 +20,12 @@ impl From<TrieError> for ReplicationError {
 impl From<HubError> for ReplicationError {
     fn from(err: HubError) -> Self {
         ReplicationError::InternalError(format!("Hub error: {}", err))
+    }
+}
+
+impl<T> From<PoisonError<T>> for ReplicationError {
+    fn from(err: PoisonError<T>) -> Self {
+        ReplicationError::InternalError(format!("Lock poisoned: {}", err))
     }
 }
 

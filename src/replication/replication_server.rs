@@ -69,7 +69,7 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
             )));
         }
 
-        let results = self.replicator.transactions_for_trie_prefix(
+        let results = self.replicator.messages_for_trie_prefix(
             request.shard_id,
             request.height,
             request.trie_virtual_shard as u8,

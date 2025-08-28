@@ -29,7 +29,9 @@ pub enum CacheEntry {
     OnChainEvent(proto::OnChainEvent),
 }
 
-/// Cache all messages for (fid, user_message_type) by hash, so we can easily get to a message from its hash
+/// Cache all messages for (fid, (user/onchain)message_type) by hash, so we can easily get to a message from its hash. This is needed
+/// because the Trie only has the hash, but the Messages are stored in the DB by ts_hash, and the trie doesn't have a timestamp (the "ts" part)
+/// So, there's no way to read a message from the DB from just the (fid, hash). Hence this cache.
 #[derive(Clone)]
 pub struct FidMessageTypeCache {
     pub fid: u64,
@@ -138,9 +140,7 @@ impl Replicator {
     ) -> Result<Arc<HashMap<Vec<u8>, CacheEntry>>, ReplicationError> {
         {
             // First see if this cache is already present
-            let rw = self.fid_message_type_cache.read().map_err(|e| {
-                ReplicationError::InternalError(format!("Failed to acquire read lock: {}", e))
-            })?;
+            let rw = self.fid_message_type_cache.read()?;
 
             // See if cache hit, we can use the cached value
             if let Some(fmc) = rw.as_ref() {
@@ -163,7 +163,7 @@ impl Replicator {
                 ))
             })?;
 
-        // Build a hashmap of message hash -> message and put it in the cache
+        // Build a hashmap of transaction_hash -> onchain_event and put it in the cache
         let message_hash_map = Arc::new(
             onchain_events
                 .into_iter()
@@ -172,9 +172,7 @@ impl Replicator {
         );
 
         {
-            let mut rw = self.fid_message_type_cache.write().map_err(|e| {
-                ReplicationError::InternalError(format!("Failed to acquire write lock: {}", e))
-            })?;
+            let mut rw = self.fid_message_type_cache.write()?;
 
             *rw = Some(FidMessageTypeCache::new_onchain_message_type(
                 fid,
@@ -194,9 +192,7 @@ impl Replicator {
     ) -> Result<Arc<HashMap<Vec<u8>, CacheEntry>>, ReplicationError> {
         {
             // First see if this cache is already present
-            let rw = self.fid_message_type_cache.read().map_err(|e| {
-                ReplicationError::InternalError(format!("Failed to acquire read lock: {}", e))
-            })?;
+            let rw = self.fid_message_type_cache.read()?;
 
             // See if cache hit, we can use the cached value
             if let Some(fmc) = rw.as_ref() {
@@ -300,7 +296,7 @@ impl Replicator {
             }
         };
 
-        // Build a hashmap of message hash -> message and put it in the cache
+        // Build a hashmap of message_hash -> message and put it in the cache
         let message_hash_map = Arc::new(
             messages
                 .into_iter()
@@ -309,9 +305,7 @@ impl Replicator {
         );
 
         {
-            let mut rw = self.fid_message_type_cache.write().map_err(|e| {
-                ReplicationError::InternalError(format!("Failed to acquire write lock: {}", e))
-            })?;
+            let mut rw = self.fid_message_type_cache.write()?;
 
             *rw = Some(FidMessageTypeCache::new_user_message_type(
                 fid,
@@ -323,7 +317,7 @@ impl Replicator {
         Ok(message_hash_map)
     }
 
-    pub fn transactions_for_trie_prefix(
+    pub fn messages_for_trie_prefix(
         &self,
         shard_id: u32,
         height: u64,
@@ -552,14 +546,13 @@ impl Replicator {
         };
 
         let timestamp = msg.header.timestamp;
-        let oldest_valid_timestamp = self.oldest_valid_timestamp()?;
+        let oldest_valid_timestamp = 0; // self.oldest_valid_timestamp()?;
 
         // Clean up old snapshots
         self.stores
             .close_aged_snapshots(msg.shard_id, oldest_valid_timestamp);
 
         // Check if we can take a snapshot of this block
-
         if block_number > 0 && block_number % self.snapshot_options.interval != 0 {
             return Ok(());
         }
@@ -567,6 +560,13 @@ impl Replicator {
         // Check if the timestamp is expired
         if timestamp < oldest_valid_timestamp {
             return Ok(());
+        }
+
+        // Check if the number of existing snapshots exceeds 1
+        if let Ok(metadata) = self.stores.get_metadata(msg.shard_id) {
+            if metadata.len() > 1 {
+                return Ok(());
+            }
         }
 
         // Open a snapshot
