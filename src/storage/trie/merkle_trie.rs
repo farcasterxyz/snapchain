@@ -3,9 +3,13 @@ use super::errors::TrieError;
 use super::trie_node::{TrieNode, UNCOMPACTED_LENGTH};
 use crate::mempool::routing::{MessageRouter, ShardRouter};
 use crate::proto;
-use crate::storage::store::account::{make_fid_key, IntoU8};
+use crate::proto::DbMerkleTrieMetadata;
+use crate::storage::constants::RootPrefix;
+use crate::storage::store::account::{make_fid_key, IntoU8, FID_BYTES};
 use crate::storage::trie::{trie_node, util};
+use prost::Message as _;
 use std::collections::HashMap;
+use std::str;
 use tracing::info;
 pub use trie_node::Context;
 
@@ -28,7 +32,7 @@ impl TrieKey {
     pub fn for_message_type(fid: u64, msg_type: u8) -> Vec<u8> {
         let fid_bytes = Self::for_fid(fid);
         let mut key = Vec::with_capacity(fid_bytes.len() + 1);
-        key.extend_from_slice(&Self::for_fid(fid));
+        key.extend_from_slice(&fid_bytes);
         // Left shift msg_ype by 3 bits so we don't collide with onchain event types.
         // Supports 8 reserved types (onchain events, fnames etc) and 32 message types
         key.push(msg_type << 3);
@@ -49,7 +53,7 @@ impl TrieKey {
     pub fn for_fname(fid: u64, name: &String) -> Vec<u8> {
         let fid_bytes = Self::for_fid(fid);
         let mut key = Vec::with_capacity(fid_bytes.len() + 1 + USERNAME_MAX_LENGTH as usize);
-        key.extend_from_slice(&Self::for_fid(fid));
+        key.extend_from_slice(&fid_bytes);
         key.push(7); // 1-6 is for onchain events, use 7 for fnames, and everything else for messages
 
         // Pad the name with null bytes to ensure all names have the same length. The trie cannot handle entries that are substrings for another (e.g. "net" and "network")
@@ -63,7 +67,7 @@ impl TrieKey {
 
     #[inline]
     pub fn for_fid(fid: u64) -> Vec<u8> {
-        let mut key = Vec::new();
+        let mut key = Vec::with_capacity(1 + FID_BYTES);
         key.push(Self::fid_shard(fid));
         key.extend_from_slice(&make_fid_key(fid));
         key
@@ -103,6 +107,73 @@ impl TrieKey {
 
         Ok((virtual_shard, fid, onchain_message_type, message_type, rest))
     }
+
+    // Compute the keys that need to be updated in the trie. Returns (inserts, deletes)
+    pub fn for_hub_event(event: &proto::HubEvent) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+        let mut inserts = Vec::new();
+        let mut deletes = Vec::new();
+
+        match &event.body {
+            Some(proto::hub_event::Body::MergeMessageBody(merge)) => {
+                if let Some(msg) = &merge.message {
+                    inserts.push(TrieKey::for_message(&msg));
+                }
+                for deleted_message in &merge.deleted_messages {
+                    deletes.push(TrieKey::for_message(&deleted_message));
+                }
+            }
+            Some(proto::hub_event::Body::MergeOnChainEventBody(merge)) => {
+                if let Some(onchain_event) = &merge.on_chain_event {
+                    inserts.push(TrieKey::for_onchain_event(&onchain_event));
+                }
+            }
+            Some(proto::hub_event::Body::PruneMessageBody(prune)) => {
+                if let Some(msg) = &prune.message {
+                    deletes.push(TrieKey::for_message(&msg));
+                }
+            }
+
+            Some(proto::hub_event::Body::RevokeMessageBody(revoke)) => {
+                if let Some(msg) = &revoke.message {
+                    deletes.push(TrieKey::for_message(&msg));
+                }
+            }
+            Some(proto::hub_event::Body::MergeUsernameProofBody(merge)) => {
+                if let Some(msg) = &merge.username_proof_message {
+                    inserts.push(TrieKey::for_message(&msg));
+                }
+                if let Some(msg) = &merge.deleted_username_proof_message {
+                    deletes.push(TrieKey::for_message(&msg));
+                }
+                if let Some(proof) = &merge.username_proof {
+                    if proof.r#type == proto::UserNameType::UsernameTypeFname as i32
+                        && proof.fid != 0
+                    // Deletes should not be added to the trie
+                    {
+                        let name = str::from_utf8(&proof.name).unwrap().to_string();
+                        inserts.push(TrieKey::for_fname(proof.fid, &name));
+                    }
+                }
+                if let Some(proof) = &merge.deleted_username_proof {
+                    if proof.r#type == proto::UserNameType::UsernameTypeFname as i32 {
+                        let name = str::from_utf8(&proof.name).unwrap().to_string();
+                        deletes.push(TrieKey::for_fname(proof.fid, &name));
+                    }
+                }
+            }
+            Some(proto::hub_event::Body::MergeFailure(_)) => {
+                // Merge failures don't affect the trie. They are only for event subscribers
+            }
+            Some(proto::hub_event::Body::BlockConfirmedBody(_)) => {
+                // BLOCK_CONFIRMED events don't affect the trie state.
+            }
+            &None => {
+                // This should never happen
+                panic!("No body in event");
+            }
+        };
+        (inserts, deletes)
+    }
 }
 
 #[derive(Debug)]
@@ -113,17 +184,12 @@ pub struct NodeMetadata {
     pub children: HashMap<u8, NodeMetadata>,
 }
 
-pub struct TrieSnapshot {
-    pub prefix: Vec<u8>,
-    pub excluded_hashes: Vec<String>,
-    pub num_messages: usize,
-}
-
 #[derive(Clone)]
 pub struct MerkleTrie {
     branch_xform: util::BranchingFactorTransform,
     root: Option<TrieNode>,
     branching_factor: u32,
+    outdated_hash: bool,
 }
 
 impl MerkleTrie {
@@ -135,7 +201,27 @@ impl MerkleTrie {
             root: None,
             branch_xform,
             branching_factor,
+            outdated_hash: false,
         })
+    }
+
+    pub fn update_for_event(
+        &mut self,
+        ctx: &Context,
+        db: &RocksDB,
+        event: &proto::HubEvent,
+        txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Result<(), TrieError> {
+        let (inserts, deletes) = TrieKey::for_hub_event(event);
+
+        for key in inserts {
+            self.insert(ctx, db, txn_batch, vec![&key])?;
+        }
+        for key in deletes {
+            self.delete(ctx, db, txn_batch, vec![&key])?;
+        }
+
+        Ok(())
     }
 
     fn create_empty_root(&mut self, txn_batch: &mut RocksDbTransactionBatch) {
@@ -151,9 +237,10 @@ impl MerkleTrie {
     pub fn initialize(&mut self, db: &RocksDB) -> Result<(), TrieError> {
         // db must be "open" by now
 
-        let loaded = self.load_root(db)?;
+        let (loaded, outdated_hash) = self.load_root(db)?;
         if let Some(root_node) = loaded {
             self.root.replace(root_node);
+            self.outdated_hash = outdated_hash;
         } else {
             info!("Initializing empty merkle trie root");
             let mut txn_batch = RocksDbTransactionBatch::new();
@@ -164,28 +251,123 @@ impl MerkleTrie {
         Ok(())
     }
 
-    fn load_root(&self, db: &RocksDB) -> Result<Option<TrieNode>, TrieError> {
+    fn load_root(&self, db: &RocksDB) -> Result<(Option<TrieNode>, bool), TrieError> {
         let root_key = TrieNode::make_primary_key(&[], None);
 
         if let Some(root_bytes) = db.get(&root_key).map_err(TrieError::wrap_database)? {
             let root_node = TrieNode::deserialize(&root_bytes.as_slice())?;
-            Ok(Some(root_node))
+            let outdated_hash = Self::read_metadata(db)?;
+            Ok((Some(root_node), outdated_hash))
         } else {
-            Ok(None)
+            Ok((None, false))
         }
     }
 
     pub fn reload(&mut self, db: &RocksDB) -> Result<(), TrieError> {
         // Load the root node using the provided database reference
-        let loaded = self.load_root(db)?;
+        let (loaded, outdated_hash) = self.load_root(db)?;
 
         match loaded {
             Some(replacement_root) => {
                 // Replace the root node with the loaded node
                 self.root.replace(replacement_root);
+                self.outdated_hash = outdated_hash;
                 Ok(())
             }
             None => Err(TrieError::UnableToReloadRoot),
+        }
+    }
+
+    fn write_metadata(&self, txn_batch: &mut RocksDbTransactionBatch) {
+        // Define the key for metadata storage
+        let db_key = vec![RootPrefix::MerkleTrieMetadata as u8];
+
+        let db_metadata = DbMerkleTrieMetadata {
+            outdated_hash: self.outdated_hash,
+        };
+
+        txn_batch.put(db_key, db_metadata.encode_to_vec());
+    }
+
+    fn read_metadata(db: &RocksDB) -> Result<bool, TrieError> {
+        let db_key = vec![RootPrefix::MerkleTrieMetadata as u8];
+
+        match db.get(&db_key).map_err(TrieError::wrap_database)? {
+            Some(bytes) => {
+                let db_metadata = DbMerkleTrieMetadata::decode(bytes.as_slice())
+                    .map_err(TrieError::wrap_deserialize)?;
+                Ok(db_metadata.outdated_hash)
+            }
+            None => Ok(false), // No metadata found, assume default values
+        }
+    }
+
+    /// Re-attach a trie node that is in the DB to the root of the trie, recalculating hashes as needed
+    /// returns (is_attached, was_created).
+    /// Note, you need to call recalculate_hashes() after this to update the hashes and item counts
+    /// properly.
+    pub fn attach_to_root(
+        &mut self,
+        ctx: &Context,
+        db: &RocksDB,
+        txn_batch: &mut RocksDbTransactionBatch,
+        key: &[u8],
+    ) -> Result<(bool, bool), TrieError> {
+        let xkey = (self.branch_xform.expand)(key);
+
+        if let Some(root) = self.root.as_mut() {
+            // First, check if the key already exists in the trie. If it does, then there's nothing to do
+            if root.get_node_from_trie(ctx, db, &xkey, 0).is_some() {
+                return Ok((true, false));
+            }
+
+            // If it doesn't already exist in the trie, then check if it exists in the DB. If it is not in the
+            // DB either, then there's nothing to do
+            let db_key = TrieNode::make_primary_key(&xkey, None);
+            if db.get(&db_key).map_err(TrieError::wrap_database)?.is_none() {
+                return Ok((false, false));
+            }
+
+            // This node is in the Trie DB, but is not attached to the root. Now attach it
+            root.attach_to_root(ctx, db, txn_batch, 0, &xkey)?;
+
+            // Set the outdated_hash flag to true, so that the root_hash() is not accidentally used without
+            // calling recalculate_hashes() first
+            self.outdated_hash = true;
+
+            // Save the new updated metadata
+            self.write_metadata(txn_batch);
+
+            return Ok((true, true));
+        } else {
+            Err(TrieError::TrieNotInitialized)
+        }
+    }
+
+    /// Recalculate hashes for all nodes in the trie upto the max_key_len level
+    pub fn recalculate_hashes(
+        &mut self,
+        ctx: &Context,
+        db: &RocksDB,
+        txn_batch: &mut RocksDbTransactionBatch,
+        max_key_len: usize,
+    ) -> Result<(), TrieError> {
+        if let Some(root) = self.root.as_mut() {
+            // We need to translate the key level count into the xform level count. Use a sample key to do the transform
+            let key = vec![0u8; max_key_len];
+            let xkey = (self.branch_xform.expand)(&key);
+
+            root.recalculate_hashes(ctx, &mut HashMap::new(), db, txn_batch, xkey.len(), &[])?;
+
+            // Indicate that the hash is now valid again
+            self.outdated_hash = false;
+
+            // Save the new updated metadata
+            self.write_metadata(txn_batch);
+
+            return Ok(());
+        } else {
+            Err(TrieError::TrieNotInitialized)
         }
     }
 
@@ -304,10 +486,15 @@ impl MerkleTrie {
         db: &RocksDB,
         txn_batch: &mut RocksDbTransactionBatch,
         prefix: &[u8],
-    ) -> Vec<u8> {
-        self.get_node(db, txn_batch, prefix)
+    ) -> Result<Vec<u8>, TrieError> {
+        if self.outdated_hash {
+            return Err(TrieError::OutdatedHash);
+        }
+
+        Ok(self
+            .get_node(db, txn_batch, prefix)
             .map(|node| node.hash())
-            .unwrap_or(vec![])
+            .unwrap_or(vec![]))
     }
 
     pub fn get_count(
@@ -315,13 +502,22 @@ impl MerkleTrie {
         db: &RocksDB,
         txn_batch: &mut RocksDbTransactionBatch,
         prefix: &[u8],
-    ) -> u64 {
-        self.get_node(db, txn_batch, prefix)
-            .map(|node| node.items())
-            .unwrap_or(0) as u64
+    ) -> Result<u64, TrieError> {
+        if self.outdated_hash {
+            return Err(TrieError::OutdatedHash);
+        }
+
+        Ok(self
+            .get_node(db, txn_batch, prefix)
+            .map(|node| node.items() as u64)
+            .unwrap_or(0))
     }
 
     pub fn root_hash(&self) -> Result<Vec<u8>, TrieError> {
+        if self.outdated_hash {
+            return Err(TrieError::OutdatedHash);
+        }
+
         if let Some(root) = self.root.as_ref() {
             Ok(root.hash())
         } else {
@@ -563,25 +759,16 @@ impl MerkleTrie {
         // (Unreachable: loop returns on all paths)
     }
 
-    pub fn get_snapshot(
-        &mut self,
-        ctx: &Context,
-        db: &RocksDB,
-        prefix: &[u8],
-    ) -> Result<TrieSnapshot, TrieError> {
-        if let Some(root) = self.root.as_mut() {
-            root.get_snapshot(ctx, db, prefix, 0)
-        } else {
-            Err(TrieError::TrieNotInitialized)
-        }
-    }
-
     pub fn get_trie_node_metadata(
         &self,
         db: &RocksDB,
         txn_batch: &mut RocksDbTransactionBatch,
         prefix: &[u8],
     ) -> Result<NodeMetadata, TrieError> {
+        if self.outdated_hash {
+            return Err(TrieError::OutdatedHash);
+        }
+
         if let Some(node) = self.get_node(db, txn_batch, prefix) {
             let mut children = HashMap::new();
 
@@ -622,6 +809,11 @@ impl MerkleTrie {
 
     pub fn branching_factor(&self) -> u32 {
         self.branching_factor
+    }
+
+    #[cfg(test)]
+    pub fn get_root_node(&mut self) -> Option<&mut TrieNode> {
+        self.root.as_mut()
     }
 }
 

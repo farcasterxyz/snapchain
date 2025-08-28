@@ -2,6 +2,7 @@ pub use self::block::*;
 
 pub mod account;
 pub mod block;
+pub mod block_engine;
 pub mod engine;
 pub mod engine_metrics;
 pub mod mempool_poller;
@@ -13,6 +14,8 @@ pub mod utils;
 pub mod migrations;
 pub mod test_helper;
 
+#[cfg(test)]
+mod block_engine_test;
 #[cfg(test)]
 mod engine_tests;
 #[cfg(test)]

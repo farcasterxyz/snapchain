@@ -837,11 +837,10 @@ impl HubService for MyHubService {
 
         for (shard_index, shard_store) in self.shard_stores.iter() {
             let shard_approx_size = shard_store.db.approximate_size();
-            let shard_num_messages = shard_store.trie.get_count(
-                &shard_store.db,
-                &mut RocksDbTransactionBatch::new(),
-                &[],
-            );
+            let shard_num_messages = shard_store
+                .trie
+                .get_count(&shard_store.db, &mut RocksDbTransactionBatch::new(), &[])
+                .map_err(|err| Status::internal(err.to_string()))?;
             let shard_fid_registrations = shard_store
                 .db
                 .count_keys_at_prefix(vec![

@@ -495,7 +495,7 @@ impl Replicator {
                 &stores.db,
                 &mut RocksDbTransactionBatch::new(),
                 &TrieKey::for_fid(fid),
-            );
+            )?;
             fid_account_roots.push(proto::FidAccountRootHash {
                 fid,
                 account_root_hash,

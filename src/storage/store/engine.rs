@@ -6,9 +6,8 @@ use crate::core::{
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::message_data::Body;
 use crate::proto::{
-    self, hub_event, Block, FarcasterNetwork, HubEvent, HubEventType, MessageType, OnChainEvent,
-    OnChainEventType, Protocol, ShardChunk, ShardChunkWitness, Transaction, UserDataType,
-    UserNameProof,
+    self, hub_event, FarcasterNetwork, HubEvent, HubEventType, MessageType, OnChainEvent,
+    OnChainEventType, Protocol, ShardChunk, Transaction, UserDataType, UserNameProof,
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{CastStore, MessagesPage, VerificationStore};
@@ -16,7 +15,6 @@ use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
 use crate::storage::store::migrations::{MigrationContext, MigrationRunner};
 use crate::storage::store::stores::{StoreLimits, Stores};
-use crate::storage::store::BlockStore;
 use crate::storage::trie::{self, merkle_trie};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::{EngineVersion, ProtocolFeature};
@@ -244,9 +242,7 @@ impl ShardEngine {
         );
 
         let version = self.version_for(timestamp);
-        let mut snapchain_txns = self
-            .mempool_poller
-            .create_transactions_from_mempool(messages)?
+        let mut snapchain_txns = MempoolPoller::create_transactions_from_mempool(messages)?
             .into_iter()
             .filter_map(|mut transaction| {
                 // TODO(aditi): In the future, this seems like it should just be a part of the validation logic in replay_snapchain_txn.
@@ -258,9 +254,9 @@ impl ShardEngine {
 
                 let maybe_onchainevents =
                     if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
-                        Some(pending_onchain_events.as_slice())
+                        pending_onchain_events.as_slice()
                     } else {
-                        None
+                        &[]
                     };
 
                 let storage_slot = self
@@ -832,7 +828,8 @@ impl ShardEngine {
         let account_root =
             self.stores
                 .trie
-                .get_hash(&self.db, txn_batch, &TrieKey::for_fid(snapchain_txn.fid));
+                .get_hash(&self.db, txn_batch, &TrieKey::for_fid(snapchain_txn.fid))?;
+
         debug!(
             shard_id = self.shard_id,
             fid = snapchain_txn.fid,
@@ -1066,76 +1063,6 @@ impl ShardEngine {
         Ok(events)
     }
 
-    // Compute the keys that need to be updated in the trie. Returns (inserts, deletes)
-    fn get_trie_update_keys(
-        &self,
-        event: &proto::HubEvent,
-    ) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>), EngineError> {
-        let mut inserts = Vec::new();
-        let mut deletes = Vec::new();
-
-        match &event.body {
-            Some(proto::hub_event::Body::MergeMessageBody(merge)) => {
-                if let Some(msg) = &merge.message {
-                    inserts.push(TrieKey::for_message(&msg));
-                }
-                for deleted_message in &merge.deleted_messages {
-                    deletes.push(TrieKey::for_message(&deleted_message));
-                }
-            }
-            Some(proto::hub_event::Body::MergeOnChainEventBody(merge)) => {
-                if let Some(onchain_event) = &merge.on_chain_event {
-                    inserts.push(TrieKey::for_onchain_event(&onchain_event));
-                }
-            }
-            Some(proto::hub_event::Body::PruneMessageBody(prune)) => {
-                if let Some(msg) = &prune.message {
-                    deletes.push(TrieKey::for_message(&msg));
-                }
-            }
-
-            Some(proto::hub_event::Body::RevokeMessageBody(revoke)) => {
-                if let Some(msg) = &revoke.message {
-                    deletes.push(TrieKey::for_message(&msg));
-                }
-            }
-            Some(proto::hub_event::Body::MergeUsernameProofBody(merge)) => {
-                if let Some(msg) = &merge.username_proof_message {
-                    inserts.push(TrieKey::for_message(&msg));
-                }
-                if let Some(msg) = &merge.deleted_username_proof_message {
-                    deletes.push(TrieKey::for_message(&msg));
-                }
-                if let Some(proof) = &merge.username_proof {
-                    if proof.r#type == proto::UserNameType::UsernameTypeFname as i32
-                        && proof.fid != 0
-                    // Deletes should not be added to the trie
-                    {
-                        let name = str::from_utf8(&proof.name).unwrap().to_string();
-                        inserts.push(TrieKey::for_fname(proof.fid, &name));
-                    }
-                }
-                if let Some(proof) = &merge.deleted_username_proof {
-                    if proof.r#type == proto::UserNameType::UsernameTypeFname as i32 {
-                        let name = str::from_utf8(&proof.name).unwrap().to_string();
-                        deletes.push(TrieKey::for_fname(proof.fid, &name));
-                    }
-                }
-            }
-            Some(proto::hub_event::Body::MergeFailure(_)) => {
-                // Merge failures don't affect the trie. They are only for event subscribers
-            }
-            Some(proto::hub_event::Body::BlockConfirmedBody(_)) => {
-                // BLOCK_CONFIRMED events don't affect the trie state.
-            }
-            &None => {
-                // This should never happen
-                panic!("No body in event");
-            }
-        };
-        Ok((inserts, deletes))
-    }
-
     fn update_trie(
         &mut self,
         ctx: &merkle_trie::Context,
@@ -1143,18 +1070,10 @@ impl ShardEngine {
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<(), EngineError> {
         let now = std::time::Instant::now();
-        let (inserts, deletes) = self.get_trie_update_keys(event)?;
 
-        for key in inserts {
-            self.stores
-                .trie
-                .insert(ctx, &self.db, txn_batch, vec![&key])?;
-        }
-        for key in deletes {
-            self.stores
-                .trie
-                .delete(ctx, &self.db, txn_batch, vec![&key])?;
-        }
+        self.stores
+            .trie
+            .update_for_event(ctx, &self.db, event, txn_batch)?;
 
         let elapsed = now.elapsed();
         self.metrics
@@ -1176,7 +1095,7 @@ impl ShardEngine {
         let mut all_deletes = HashSet::new();
 
         for event in events {
-            let (inserts, deletes) = self.get_trie_update_keys(event)?;
+            let (inserts, deletes) = TrieKey::for_hub_event(event);
 
             // Merge the inserts and deletes
             for key in inserts {
@@ -1997,126 +1916,5 @@ impl ShardEngine {
             return false;
         }
         signer_event.event_type == proto::SignerEventType::Remove as i32
-    }
-}
-
-pub struct BlockEngine {
-    block_store: BlockStore,
-    statsd_client: StatsdClientWrapper,
-}
-
-impl BlockEngine {
-    pub fn new(block_store: BlockStore, statsd_client: StatsdClientWrapper) -> Self {
-        BlockEngine {
-            block_store,
-            statsd_client,
-        }
-    }
-
-    // statsd
-    fn count(&self, key: &str, count: u64) {
-        let key = format!("engine.{}", key);
-        self.statsd_client
-            .count_with_shard(0, key.as_str(), count, vec![]);
-    }
-
-    // statsd
-    fn gauge(&self, key: &str, value: u64) {
-        let key = format!("engine.{}", key);
-        self.statsd_client.gauge_with_shard(0, key.as_str(), value);
-    }
-
-    pub fn commit_block(&mut self, block: &Block) {
-        self.gauge(
-            "block_height",
-            block
-                .header
-                .as_ref()
-                .unwrap()
-                .height
-                .as_ref()
-                .unwrap()
-                .block_number,
-        );
-        let block_timestamp = block.header.as_ref().unwrap().timestamp;
-        self.gauge(
-            "block_delay_seconds",
-            FarcasterTime::current().to_u64() - block_timestamp,
-        );
-        self.count(
-            "block_shards",
-            block
-                .shard_witness
-                .as_ref()
-                .unwrap()
-                .shard_chunk_witnesses
-                .len() as u64,
-        );
-
-        let result = self.block_store.put_block(block);
-        if result.is_err() {
-            error!("Failed to store block: {:?}", result.err());
-        }
-    }
-
-    pub fn get_last_block(&self) -> Option<Block> {
-        match self.block_store.get_last_block() {
-            Ok(block) => block,
-            Err(err) => {
-                error!("Unable to obtain last block {:#?}", err);
-                None
-            }
-        }
-    }
-
-    pub fn get_block_by_height(&self, height: Height) -> Option<Block> {
-        if height.shard_index != 0 {
-            error!(
-                shard_id = 0,
-                requested_shard_id = height.shard_index,
-                "Requested shard chunk from incorrect shard"
-            );
-
-            return None;
-        }
-        match self.block_store.get_block_by_height(height.block_number) {
-            Ok(block) => block,
-            Err(err) => {
-                error!("No block at height {:#?}", err);
-                None
-            }
-        }
-    }
-
-    pub fn get_confirmed_height(&self) -> Height {
-        let shard_index = 0;
-        match self.block_store.max_block_number() {
-            Ok(block_num) => Height::new(shard_index, block_num),
-            Err(_) => Height::new(shard_index, 0),
-        }
-    }
-
-    pub fn get_min_height(&self) -> Height {
-        let shard_index = 0;
-        match self.block_store.min_block_number() {
-            Ok(block_num) => Height::new(shard_index, block_num),
-            // In case of no blocks, return height 1
-            Err(_) => Height::new(shard_index, 1),
-        }
-    }
-
-    pub fn get_last_shard_witness(
-        &self,
-        height: Height,
-        shard_id: u32,
-    ) -> Option<ShardChunkWitness> {
-        let previous_height = height.decrement()?;
-        let previous_block = self.get_block_by_height(previous_height)?;
-        let previous_shard_witness = previous_block.shard_witness?;
-        previous_shard_witness
-            .shard_chunk_witnesses
-            .iter()
-            .find(|witness| witness.height.unwrap().shard_index == shard_id)
-            .cloned()
     }
 }

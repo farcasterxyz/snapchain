@@ -1,3 +1,4 @@
+pub use self::block_event_store::*;
 pub use self::cast_store::*;
 pub use self::event::*;
 pub use self::link_store::*;
@@ -17,6 +18,7 @@ mod message;
 mod onchain_event_store;
 mod store;
 
+mod block_event_store;
 mod name_registry_events;
 mod reaction_store;
 mod user_data_store;

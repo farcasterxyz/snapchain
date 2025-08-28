@@ -34,6 +34,9 @@ pub enum TrieError {
     #[error("Invalid state in Trie: {0}")]
     InvalidState(String),
 
+    #[error("New nodes were attached to the MerkleTrie but recalculate_hashes() was not called")]
+    OutdatedHash,
+
     #[error("No keys to insert")]
     NoKeysToInsert,
 
