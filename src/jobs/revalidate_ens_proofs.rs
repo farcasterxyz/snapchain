@@ -75,7 +75,10 @@ async fn revalidate_ens_proofs_for_shard(
             0
         }
         Err(e) => {
-            warn!("Failed to get last processed FID, starting fresh: {}", e);
+            warn!(
+                "Failed to get last processed FID, starting fresh: {}",
+                e.to_string()
+            );
             0
         }
     };
@@ -130,12 +133,15 @@ async fn revalidate_ens_proofs_for_shard(
 
     // Clear the progress tracking since we've completed the job
     if let Err(e) = local_state_store.clear_ens_revalidation_job_state() {
-        warn!("Failed to clear ENS revalidation job state: {}", e);
+        warn!(
+            "Failed to clear ENS revalidation job state: {}",
+            e.to_string()
+        );
     } else {
         info!("Cleared ENS revalidation job state - all FIDs processed");
     }
 
-    info!("Completed ENS proof validation");
+    info!("Completed ENS proof validation",);
 
     Ok(())
 }
