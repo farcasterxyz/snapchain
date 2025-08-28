@@ -325,7 +325,7 @@ impl Stores {
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<(u32, u32), StoresError> {
         let store_type = Limits::message_type_to_store_type(message_type);
-        let message_count = self.get_usage_by_store_type(fid, store_type, txn_batch);
+        let message_count = self.get_usage_by_store_type(fid, store_type, txn_batch)?;
         let slot = self
             .onchain_event_store
             .get_storage_slot_for_fid(fid, self.network, &[])
@@ -341,17 +341,23 @@ impl Stores {
         fid: u64,
         store_type: StoreType,
         txn_batch: &mut RocksDbTransactionBatch,
-    ) -> u32 {
+    ) -> Result<u32, StoresError> {
         let mut total_count = 0;
         for each_message_type in Limits::store_type_to_message_types(store_type) {
-            let count = self.trie.get_count(
-                &self.db,
-                txn_batch,
-                &TrieKey::for_message_type(fid, each_message_type.into_u8()),
-            ) as u32;
+            let count = self
+                .trie
+                .get_count(
+                    &self.db,
+                    txn_batch,
+                    &TrieKey::for_message_type(fid, each_message_type.into_u8()),
+                )
+                .map_err(|e| StoresError::StoreError {
+                    inner: HubError::internal_db_error(&format!("Trie error: {}", e)),
+                    hash: TrieKey::for_message_type(fid, each_message_type.into_u8()).to_vec(),
+                })? as u32;
             total_count += count;
         }
-        total_count
+        Ok(total_count)
     }
 
     pub fn is_pro_user(
@@ -382,7 +388,7 @@ impl Stores {
             StoreType::Verifications,
             StoreType::UsernameProofs,
         ] {
-            let used = self.get_usage_by_store_type(fid, store_type, txn_batch);
+            let used = self.get_usage_by_store_type(fid, store_type, txn_batch)?;
             let max_messages = self.store_limits.max_messages(&slot, store_type);
             let name = match store_type {
                 StoreType::None => "NONE",

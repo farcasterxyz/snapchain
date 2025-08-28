@@ -17,6 +17,7 @@ pub enum RootPrefix {
 
     /* Sync Merkle Trie Node */
     SyncMerkleTrieNode = 8,
+
     /* Event log */
     HubEvents = 9,
     // /* The network ID that the rocksDB was created with */
@@ -47,6 +48,9 @@ pub enum RootPrefix {
 
     /* Used to index blocks events by seqnum */
     BlockEvent = 19,
+
+    /* Merkle Trie Metadata */
+    MerkleTrieMetadata = 20,
 }
 
 /** Copied from the JS code */
