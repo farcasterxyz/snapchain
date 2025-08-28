@@ -26,6 +26,9 @@ pub enum LocalStateError {
 
     #[error(transparent)]
     HubError(#[from] HubError),
+
+    #[error("invalid data for key")]
+    InvalidData,
 }
 
 #[derive(Clone)]
@@ -190,15 +193,13 @@ impl LocalStateStore {
     ) -> Result<Option<u64>, LocalStateError> {
         match self.db.get(&Self::make_ens_revalidation_job_key())? {
             Some(bytes) => {
-                if bytes.len() == 8 {
-                    let fid = u64::from_be_bytes([
-                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
-                        bytes[7],
-                    ]);
-                    Ok(Some(fid))
-                } else {
-                    Ok(None)
-                }
+                let bytes: [u8; 8] = bytes
+                    .get(0..8)
+                    .ok_or(LocalStateError::InvalidData)?
+                    .try_into()
+                    .map_err(|_| LocalStateError::InvalidData)?;
+                let fid = u64::from_be_bytes(bytes);
+                Ok(Some(fid))
             }
             None => Ok(None),
         }
