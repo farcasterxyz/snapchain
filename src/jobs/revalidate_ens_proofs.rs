@@ -86,7 +86,6 @@ async fn revalidate_ens_proofs_for_shard(
         reverse: false,
     };
 
-    let mut total_processed = 0;
     let mut fid_count = 0;
 
     // Paginate through all FIDs using the onchain event store
@@ -101,52 +100,8 @@ async fn revalidate_ens_proofs_for_shard(
 
                     fid_count += 1;
 
-                    // Get all username proofs for this FID (with pagination)
-                    let mut username_proof_page_options = PageOptions {
-                        page_size: Some(PAGE_SIZE_MAX),
-                        page_token: None,
-                        reverse: false,
-                    };
-
-                    // Paginate through all username proofs for this FID
-                    loop {
-                        match UsernameProofStore::get_username_proofs_by_fid(
-                            &stores.username_proof_store,
-                            fid,
-                            &username_proof_page_options,
-                        ) {
-                            Ok(username_proofs_page) => {
-                                // Process all messages in this page
-                                for message in &username_proofs_page.messages {
-                                    if let Err(err) = validate_ens_proof(
-                                        message,
-                                        stores,
-                                        chain_clients,
-                                        &mempool_tx,
-                                    )
-                                    .await
-                                    {
-                                        error!(
-                                            "Unable to run ens proof validation : {}",
-                                            err.to_string()
-                                        );
-                                    }
-                                    total_processed += 1;
-                                }
-
-                                // Check if there are more pages for this FID
-                                if let Some(page_token) = username_proofs_page.next_page_token {
-                                    username_proof_page_options.page_token = Some(page_token);
-                                } else {
-                                    break;
-                                }
-                            }
-                            Err(_) => {
-                                // FID has no username proofs, break out of pagination loop
-                                break;
-                            }
-                        }
-                    }
+                    revalidate_username_proofs_for_fid(fid, stores, chain_clients, mempool_tx)
+                        .await;
 
                     if let Err(e) =
                         local_state_store.set_last_processed_fid_for_ens_revalidation(fid)
@@ -156,10 +111,6 @@ async fn revalidate_ens_proofs_for_shard(
 
                     if fid_count % 100 == 0 {
                         tokio::time::sleep(THROTTLE).await;
-                        info!(
-                            "Processed {} FIDs, validated {} ENS proofs so far (last FID: {})",
-                            fid_count, total_processed, fid
-                        );
                     }
                 }
 
@@ -184,12 +135,62 @@ async fn revalidate_ens_proofs_for_shard(
         info!("Cleared ENS revalidation job state - all FIDs processed");
     }
 
-    info!(
-        "Completed ENS proof validation: processed {} FIDs, validated {} ENS proofs total",
-        fid_count, total_processed
-    );
+    info!("Completed ENS proof validation");
 
     Ok(())
+}
+
+async fn revalidate_username_proofs_for_fid(
+    fid: u64,
+    stores: &Stores,
+    chain_clients: &ChainClients,
+    mempool_tx: &mpsc::Sender<MempoolRequest>,
+) {
+    // Get all username proofs for this FID (with pagination)
+    let mut username_proof_page_options = PageOptions {
+        page_size: Some(PAGE_SIZE_MAX),
+        page_token: None,
+        reverse: false,
+    };
+
+    let mut num_messages_processed = 0;
+
+    // Paginate through all username proofs for this FID
+    loop {
+        match UsernameProofStore::get_username_proofs_by_fid(
+            &stores.username_proof_store,
+            fid,
+            &username_proof_page_options,
+        ) {
+            Ok(username_proofs_page) => {
+                // Process all messages in this page
+                for message in &username_proofs_page.messages {
+                    if let Err(err) =
+                        validate_ens_proof(message, stores, chain_clients, &mempool_tx).await
+                    {
+                        error!("Unable to run ens proof validation : {}", err.to_string());
+                    }
+                    num_messages_processed += 1;
+                }
+
+                // Check if there are more pages for this FID
+                if let Some(page_token) = username_proofs_page.next_page_token {
+                    username_proof_page_options.page_token = Some(page_token);
+                } else {
+                    break;
+                }
+            }
+            Err(_) => {
+                // FID has no username proofs, break out of pagination loop
+                break;
+            }
+        }
+    }
+
+    info!(
+        "Validated {} ens proofs for fid {}",
+        num_messages_processed, fid
+    );
 }
 
 async fn validate_ens_proof(
