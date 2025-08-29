@@ -4,9 +4,9 @@ mod tests {
         calculate_message_hash, from_farcaster_time, get_farcaster_time, FarcasterTime,
     };
     use crate::proto::reaction_body::Target;
+    use crate::proto::HubEvent;
     use crate::proto::{self, CastId, Embed, FarcasterNetwork, HubEventType, ReactionType};
     use crate::proto::{FnameTransfer, ShardChunk, UserNameProof};
-    use crate::proto::{HubEvent, ValidatorMessage};
     use crate::proto::{OnChainEvent, OnChainEventType};
     use crate::storage::db::{PageOptions, RocksDbTransactionBatch};
     use crate::storage::store::account::{HubEventIdGenerator, UserDataStore};
@@ -14,8 +14,9 @@ mod tests {
     use crate::storage::store::mempool_poller::MempoolMessage;
     use crate::storage::store::stores::StoreLimits;
     use crate::storage::store::test_helper::{
-        self, commit_event, commit_event_at, commit_message_at, commit_messages,
-        default_custody_address, key_exists_in_trie, limits, EngineOptions, FID3_FOR_TEST,
+        self, assert_block_confirmed_event, block_event_exists, commit_block_events, commit_event,
+        commit_event_at, commit_message_at, commit_messages, default_custody_address,
+        key_exists_in_trie, limits, EngineOptions, FID3_FOR_TEST,
     };
     use crate::storage::store::test_helper::{
         commit_message, message_exists_in_trie, register_user, FID2_FOR_TEST, FID_FOR_TEST,
@@ -224,10 +225,9 @@ mod tests {
         // Propose a message that doesn't require storage
         let state_change = engine.propose_state_change(
             1,
-            vec![MempoolMessage::ValidatorMessage(ValidatorMessage {
-                on_chain_event: Some(events_factory::create_onchain_event(FID_FOR_TEST)),
-                fname_transfer: None,
-            })],
+            vec![MempoolMessage::OnchainEvent(
+                events_factory::create_onchain_event(FID_FOR_TEST),
+            )],
             None,
         );
 
@@ -1868,18 +1868,9 @@ mod tests {
         );
 
         let messages_batch = vec![
-            MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
-                on_chain_event: Some(test_helper::default_storage_event(new_fid)),
-                fname_transfer: None,
-            }),
-            MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
-                on_chain_event: Some(id_register_event.clone()),
-                fname_transfer: None,
-            }),
-            MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
-                on_chain_event: Some(signer_add_event.clone()),
-                fname_transfer: None,
-            }),
+            MempoolMessage::OnchainEvent(test_helper::default_storage_event(new_fid)),
+            MempoolMessage::OnchainEvent(id_register_event.clone()),
+            MempoolMessage::OnchainEvent(signer_add_event.clone()),
             MempoolMessage::UserMessage(cast_add.clone()),
         ];
 
@@ -2098,10 +2089,7 @@ mod tests {
         let mut event_rx = engine.get_senders().events_tx.subscribe();
         let state_change = engine.propose_state_change(
             1,
-            vec![MempoolMessage::ValidatorMessage(ValidatorMessage {
-                on_chain_event: Some(onchain_event.clone()),
-                fname_transfer: None,
-            })],
+            vec![MempoolMessage::OnchainEvent(onchain_event.clone())],
             None,
         );
         assert_eq!(1, state_change.shard_id);
@@ -2610,10 +2598,7 @@ mod tests {
 
         let state_change = engine.propose_state_change(
             1,
-            vec![MempoolMessage::ValidatorMessage(ValidatorMessage {
-                on_chain_event: None,
-                fname_transfer: Some(fname_transfer.clone()),
-            })],
+            vec![MempoolMessage::FnameTransfer(fname_transfer.clone())],
             None,
         );
         test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
@@ -2669,10 +2654,7 @@ mod tests {
 
         let state_change = engine.propose_state_change(
             1,
-            vec![MempoolMessage::ValidatorMessage(ValidatorMessage {
-                on_chain_event: None,
-                fname_transfer: Some(fname_transfer.clone()),
-            })],
+            vec![MempoolMessage::FnameTransfer(fname_transfer.clone())],
             None,
         );
         test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
@@ -2706,10 +2688,7 @@ mod tests {
 
         let state_change = engine.propose_state_change(
             1,
-            vec![MempoolMessage::ValidatorMessage(ValidatorMessage {
-                on_chain_event: None,
-                fname_transfer: Some(fname_transfer.clone()),
-            })],
+            vec![MempoolMessage::FnameTransfer(fname_transfer.clone())],
             None,
         );
         test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
@@ -3191,10 +3170,7 @@ mod tests {
         };
         let state_change = engine.propose_state_change(
             1,
-            vec![MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
-                on_chain_event: None,
-                fname_transfer: Some(fname_transfer),
-            })],
+            vec![MempoolMessage::FnameTransfer(fname_transfer)],
             None,
         );
 
@@ -3797,5 +3773,40 @@ mod tests {
             result.is_ok(),
             "Post-commit hook should not block on receiver"
         );
+    }
+
+    #[tokio::test]
+    async fn test_merge_block_events() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let mut event_rx = engine.get_senders().events_tx.subscribe();
+
+        // Don't merge event unless all previous have been merged
+        let block_event2 = events_factory::create_heartbeat_event(2);
+        commit_block_events(&mut engine, vec![&block_event2]).await;
+        assert!(!block_event_exists(&engine, &block_event2));
+        let block_confirmed = assert_block_confirmed_event(event_rx.recv().await.unwrap());
+        assert_eq!(block_confirmed.max_block_event_seqnum, 0);
+
+        // Ordering within a transaction matters
+        let block_event1 = events_factory::create_heartbeat_event(1);
+        commit_block_events(&mut engine, vec![&block_event2, &block_event1]).await;
+        assert!(block_event_exists(&engine, &block_event1));
+        assert!(!block_event_exists(&engine, &block_event2));
+        let block_confirmed = assert_block_confirmed_event(event_rx.recv().await.unwrap());
+        assert_eq!(block_confirmed.max_block_event_seqnum, 1);
+
+        // Merge multiple block events in a single block
+        let block_event3 = events_factory::create_heartbeat_event(3);
+        let block_event4 = events_factory::create_heartbeat_event(4);
+        commit_block_events(
+            &mut engine,
+            vec![&block_event2, &block_event3, &block_event4],
+        )
+        .await;
+        let block_confirmed = assert_block_confirmed_event(event_rx.recv().await.unwrap());
+        assert!(block_event_exists(&engine, &block_event2));
+        assert!(block_event_exists(&engine, &block_event3));
+        assert!(block_event_exists(&engine, &block_event4));
+        assert_eq!(block_confirmed.max_block_event_seqnum, 4);
     }
 }

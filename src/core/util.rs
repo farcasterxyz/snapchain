@@ -1,5 +1,12 @@
+use informalsystems_malachitebft_core_types::{NilOrVal, ThresholdParams};
+use libp2p::identity::ed25519::PublicKey;
+
+use crate::consensus::validator::StoredValidatorSets;
 use crate::core::error::HubError;
-use crate::core::types::FARCASTER_EPOCH;
+use crate::core::types::{Vote, FARCASTER_EPOCH};
+use crate::proto::{self};
+use itertools::Itertools;
+use tracing::error;
 
 #[derive(Clone, Debug, PartialEq, PartialOrd, Eq, Ord)]
 pub struct FarcasterTime {
@@ -90,6 +97,48 @@ pub fn get_farcaster_time() -> Result<u64, HubError> {
 
 pub fn calculate_message_hash(data_bytes: &[u8]) -> Vec<u8> {
     blake3::hash(data_bytes).as_bytes()[0..20].to_vec()
+}
+
+pub fn verify_signatures(commits: &proto::Commits, validator_sets: &StoredValidatorSets) -> bool {
+    let certificate = commits.to_commit_certificate();
+
+    let validator_set = validator_sets.get_validator_set(certificate.height.as_u64());
+
+    let mut expected_pubkeys = validator_set
+        .validators
+        .iter()
+        .map(|validator| validator.public_key.to_bytes());
+
+    if !ThresholdParams::default().quorum.is_met(
+        certificate.aggregated_signature.signatures.len() as u64,
+        expected_pubkeys.len() as u64,
+    ) {
+        error!(%certificate.height, "Block did not have quorum");
+        return false;
+    }
+
+    for signature in certificate.aggregated_signature.signatures {
+        let address_bytes = &signature.address.0;
+        if !expected_pubkeys.contains(address_bytes) {
+            error!(%certificate.height, "Block contained signatures from unexpected signers");
+            return false;
+        }
+
+        let vote = Vote::new_precommit(
+            certificate.height,
+            certificate.round,
+            NilOrVal::Val(certificate.value_id.clone()),
+            signature.address.clone(),
+        );
+
+        let public_key = PublicKey::try_from_bytes(address_bytes).unwrap();
+        if !public_key.verify(&vote.to_sign_bytes(), &signature.signature.0) {
+            error!(%certificate.height, "Block contained invalid signatures");
+            return false;
+        }
+    }
+
+    true
 }
 
 #[cfg(test)]

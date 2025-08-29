@@ -13,8 +13,9 @@ use crate::proto::{MessageType, TierDetails};
 use crate::storage::constants::{RootPrefix, PAGE_SIZE_MAX};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch, RocksdbError};
 use crate::storage::store::account::{
-    CastStore, CastStoreDef, IntoU8, LinkStore, OnchainEventStorageError, OnchainEventStore, Store,
-    StoreEventHandler, StoreOptions, UsernameProofStore, UsernameProofStoreDef,
+    BlockEventStore, CastStore, CastStoreDef, IntoU8, LinkStore, OnchainEventStorageError,
+    OnchainEventStore, Store, StoreEventHandler, StoreOptions, UsernameProofStore,
+    UsernameProofStoreDef,
 };
 use crate::storage::store::shard::ShardStore;
 use crate::storage::trie::merkle_trie;
@@ -43,6 +44,7 @@ pub enum StoresError {
 
 #[derive(Clone)]
 pub struct Stores {
+    pub block_event_store: BlockEventStore,
     pub shard_store: ShardStore,
     pub cast_store: Store<CastStoreDef>,
     pub link_store: Store<LinkStore>,
@@ -293,12 +295,13 @@ impl Stores {
             verification_store,
             onchain_event_store,
             username_proof_store,
-            db,
+            db: db.clone(),
             store_limits,
             event_handler,
             network,
             statsd,
             prune_lock: Arc::new(RwLock::new(false)),
+            block_event_store: BlockEventStore { db: db.clone() },
         }
     }
 

@@ -9,9 +9,7 @@ mod tests {
         core::util::to_farcaster_time,
         mempool::mempool::{self, Mempool, MempoolMessagesRequest},
         network::gossip::{Config, SnapchainGossip},
-        proto::{
-            self, FarcasterNetwork, Height, ShardChunk, ShardHeader, Transaction, ValidatorMessage,
-        },
+        proto::{self, FarcasterNetwork, Height, ShardChunk, ShardHeader, Transaction},
         storage::store::{
             engine::ShardEngine,
             mempool_poller::MempoolMessage,
@@ -134,6 +132,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_duplicate_block_event_is_invalid() {
+        let (mut engines, _, mut mempool, _, _, _, _) = setup(None, false, 1).await;
+        let mut engine = engines.get_mut(&1).unwrap();
+        let block_event = events_factory::create_heartbeat_event(1);
+        let valid = mempool.message_is_valid(&MempoolMessage::BlockEvent {
+            for_shard: 1,
+            message: block_event.clone(),
+        });
+        assert!(valid.is_ok());
+
+        test_helper::commit_block_events(&mut engine, vec![&block_event]).await;
+        let valid = mempool.message_is_valid(&MempoolMessage::BlockEvent {
+            for_shard: 1,
+            message: block_event.clone(),
+        });
+        assert!(!valid.is_ok())
+    }
+
+    #[tokio::test]
     async fn test_duplicate_onchain_event_is_valid() {
         let (mut engines, _, mut mempool, _, _, _, _) = setup(None, false, 1).await;
         let mut engine = engines.get_mut(&1).unwrap();
@@ -144,16 +161,10 @@ mod tests {
             false,
             proto::FarcasterNetwork::Devnet,
         );
-        let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
-            on_chain_event: Some(onchain_event.clone()),
-            fname_transfer: None,
-        }));
+        let valid = mempool.message_is_valid(&MempoolMessage::OnchainEvent(onchain_event.clone()));
         assert!(valid.is_ok());
         test_helper::commit_event(&mut engine, &onchain_event).await;
-        let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
-            on_chain_event: Some(onchain_event.clone()),
-            fname_transfer: None,
-        }));
+        let valid = mempool.message_is_valid(&MempoolMessage::OnchainEvent(onchain_event.clone()));
         // Mempool allows duplicate on-chain events
         assert!(valid.is_ok())
     }
@@ -172,20 +183,15 @@ mod tests {
         let signer = alloy_signer_local::PrivateKeySigner::random();
         let fname_transfer =
             username_factory::create_transfer(1, "farcaster", None, None, None, signer.clone());
-        let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
-            on_chain_event: None,
-            fname_transfer: Some(fname_transfer.clone()),
-        }));
+        let valid =
+            mempool.message_is_valid(&MempoolMessage::FnameTransfer(fname_transfer.clone()));
         assert!(valid.is_ok());
         test_helper::commit_fname_transfer(&mut engine, &fname_transfer).await;
 
         // Transferring the same fname again should be valid
         let fname_transfer =
             username_factory::create_transfer(2, "farcaster", None, Some(1), None, signer);
-        let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
-            on_chain_event: None,
-            fname_transfer: Some(fname_transfer),
-        }));
+        let valid = mempool.message_is_valid(&MempoolMessage::FnameTransfer(fname_transfer));
         assert!(valid.is_ok())
     }
 
@@ -250,10 +256,7 @@ mod tests {
         );
         mempool_tx
             .send(MempoolRequest::AddMessage(
-                MempoolMessage::ValidatorMessage(ValidatorMessage {
-                    on_chain_event: None,
-                    fname_transfer: Some(fname_transfer.clone()),
-                }),
+                MempoolMessage::FnameTransfer(fname_transfer.clone()),
                 MempoolSource::Local,
                 None,
             ))
@@ -270,10 +273,7 @@ mod tests {
         );
         mempool_tx
             .send(MempoolRequest::AddMessage(
-                MempoolMessage::ValidatorMessage(ValidatorMessage {
-                    on_chain_event: None,
-                    fname_transfer: Some(fname_transfer.clone()),
-                }),
+                MempoolMessage::FnameTransfer(fname_transfer.clone()),
                 MempoolSource::Local,
                 None,
             ))
@@ -362,10 +362,7 @@ mod tests {
 
         mempool_tx
             .send(MempoolRequest::AddMessage(
-                MempoolMessage::ValidatorMessage(ValidatorMessage {
-                    on_chain_event: Some(onchain_event),
-                    fname_transfer: None,
-                }),
+                MempoolMessage::OnchainEvent(onchain_event),
                 MempoolSource::Local,
                 None,
             ))
@@ -397,12 +394,16 @@ mod tests {
             MempoolMessage::UserMessage(_) => {
                 panic!("Expected validator message, got user message")
             }
-            MempoolMessage::ValidatorMessage(_) => {}
+            MempoolMessage::OnchainEvent(_)
+            | MempoolMessage::FnameTransfer(_)
+            | MempoolMessage::BlockEvent { .. } => {}
         }
 
         match pull_message().await {
             MempoolMessage::UserMessage(_) => {}
-            MempoolMessage::ValidatorMessage(_) => {
+            MempoolMessage::OnchainEvent(_)
+            | MempoolMessage::FnameTransfer(_)
+            | MempoolMessage::BlockEvent { .. } => {
                 panic!("Expected user message, got validator message")
             }
         }
