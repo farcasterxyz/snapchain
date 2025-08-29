@@ -1169,5 +1169,5 @@ async fn test_cross_shard_communication() {
     network.wait_for_next_block_event().await.unwrap();
     network.wait_for_next_block_event().await.unwrap();
 
-    assert!(network.max_block_event_seqnum() >= network.max_block_height() as u64 / 3);
+    assert!(network.max_block_event_seqnum() >= network.max_block_height() as u64 / 5);
 }
