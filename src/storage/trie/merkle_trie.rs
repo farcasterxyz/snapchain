@@ -85,22 +85,24 @@ impl TrieKey {
 
     // Decode a trie key into (virtual_shard_id, fid, onchain_message_type, message_type, hash OR fname OR tx_hash+log_index)
     pub fn decode(key: &[u8]) -> Result<(u8, u64, Option<u8>, Option<u8>, Vec<u8>), TrieError> {
-        if key.len() < 6 {
+        if key.len() < UNCOMPACTED_LENGTH {
             return Err(TrieError::KeyLengthTooShort);
         }
+
+        let message_type_pos = 1 + FID_BYTES;
 
         let virtual_shard = key[0];
         let fid = read_fid_key(&key, 1);
 
-        let (onchain_message_type, message_type) = if key[5] < (1 << 3) {
+        let (onchain_message_type, message_type) = if key[message_type_pos] < (1 << 3) {
             // On-chain event
-            (Some(key[5]), None)
+            (Some(key[message_type_pos]), None)
         } else {
             // Regular message
-            (None, Some(key[5] >> 3))
+            (None, Some(key[message_type_pos] >> 3))
         };
 
-        let rest = key[6..].to_vec();
+        let rest = key[(message_type_pos + 1)..].to_vec();
 
         Ok((virtual_shard, fid, onchain_message_type, message_type, rest))
     }

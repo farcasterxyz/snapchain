@@ -8,7 +8,7 @@ use crate::{
     storage::{
         db::{PageOptions, RocksDbTransactionBatch},
         store::{
-            account::{LinkStore, UserDataStore, UsernameProofStore, VerificationStore},
+            account::{LinkStore, UserDataStore, UsernameProofStore, VerificationStore, FID_BYTES},
             engine::PostCommitMessage,
             stores::Stores,
         },
@@ -163,11 +163,16 @@ impl Replicator {
                 ))
             })?;
 
-        // Build a hashmap of transaction_hash -> onchain_event and put it in the cache
+        // Build a hashmap of hash -> onchain_event and put it in the cache
         let message_hash_map = Arc::new(
             onchain_events
                 .into_iter()
-                .map(|m| (m.transaction_hash.clone(), CacheEntry::OnChainEvent(m)))
+                .map(|m| {
+                    // tx_hash + log_index is the key
+                    let hash = TrieKey::for_onchain_event(&m)[(1 + FID_BYTES + 1)..].to_vec();
+
+                    (hash, CacheEntry::OnChainEvent(m))
+                })
                 .collect::<HashMap<_, _>>(),
         );
 
@@ -411,7 +416,9 @@ impl Replicator {
                                     rest[0], e
                                 ))
                             })?;
-                        let transaction_hash = rest[..32].to_vec();
+
+                        // `rest` is tx_hash + log_index.to_be_bytes(), which is the "hash" part of the trie key
+                        let hash = rest.to_vec();
 
                         let cache = self.build_fid_onchain_message_type_cache(
                             &stores,
@@ -419,11 +426,11 @@ impl Replicator {
                             onchain_event_type,
                         )?;
 
-                        let cache_entry = cache.get(&transaction_hash).cloned();
+                        let cache_entry = cache.get(&hash).cloned();
                         if cache_entry.is_none() {
                             return Err(ReplicationError::InternalError(format!(
                                 "On-chain event not found in cache for FID {} and onchain_event_type {:?}: {:?}",
-                                fid, onchain_event_type, transaction_hash
+                                fid, onchain_event_type, hash
                             )));
                         }
 
