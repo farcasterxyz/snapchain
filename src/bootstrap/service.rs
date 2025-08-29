@@ -3,8 +3,8 @@ use crate::cfg::Config;
 use crate::proto::replication_service_client::ReplicationServiceClient;
 use crate::proto::shard_trie_entry_with_message::TrieMessage;
 use crate::proto::{
-    self, GetShardSnapshotMetadataRequest, GetShardTransactionsRequest, ReplicationTriePartStatus,
-    ShardSnapshotMetadata,
+    self, FidAccountRootHash, GetShardSnapshotMetadataRequest, GetShardTransactionsRequest,
+    ReplicationTriePartStatus, ShardSnapshotMetadata,
 };
 use crate::storage::constants::RootPrefix;
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
@@ -81,7 +81,6 @@ impl ReplicatorBootstrap {
         shard_id: u32,
         virtual_trie_shard: u32,
     ) -> Result<Option<proto::ReplicationTriePartStatus>, BootstrapError> {
-        info!("Reading work using for {},{}", shard_id, virtual_trie_shard);
         let key = Self::make_work_unit_key(shard_id as u8, virtual_trie_shard as u8);
         match db.get(&key) {
             Ok(Some(bytes)) => match proto::ReplicationTriePartStatus::decode(&bytes[..]) {
@@ -100,10 +99,6 @@ impl ReplicatorBootstrap {
         txn_batch: &mut RocksDbTransactionBatch,
         status: &proto::ReplicationTriePartStatus,
     ) {
-        info!(
-            "Writing work using for {},{}",
-            status.shard_id, status.virtual_trie_shard
-        );
         let key = Self::make_work_unit_key(status.shard_id as u8, status.virtual_trie_shard as u8);
         let bytes = status.encode_to_vec();
 
@@ -186,6 +181,9 @@ impl ReplicatorBootstrap {
             cadence::StatsdClient::builder(app_config.statsd.prefix.as_str(), sink).build();
         let statsd_client = StatsdClientWrapper::new(statsd_client, app_config.statsd.use_tags);
 
+        // Create tasks for each shard to run in parallel
+        let mut shard_tasks = Vec::new();
+
         for shard_id in [1]
         /*shard_ids*/
         {
@@ -220,23 +218,62 @@ impl ReplicatorBootstrap {
             let shutdown_signal = self.shutdown.clone();
             let metadata = metadata.clone();
 
-            // Replay transactions for this shard
-            let result = Self::start_shard_replication(
-                &peer_address_clone,
-                network,
-                shard_id,
-                trie_branching_factor,
-                target_height,
-                &statsd_client_clone,
-                &rocksdb_dir,
-                metadata,
-                shutdown_signal,
-            )
-            .await;
+            let task = tokio::spawn(async move {
+                // Replay transactions for this shard
+                let result = Self::start_shard_replication(
+                    &peer_address_clone,
+                    network,
+                    shard_id,
+                    trie_branching_factor,
+                    target_height,
+                    &statsd_client_clone,
+                    &rocksdb_dir,
+                    metadata,
+                    shutdown_signal,
+                )
+                .await;
 
-            match &result {
-                Ok(_) => info!("Completed bootstrap for shard {}", shard_id),
-                Err(e) => error!("Failed bootstrap for shard {}: {}", shard_id, e),
+                match &result {
+                    Ok(_) => info!("Completed bootstrap for shard {}", shard_id),
+                    Err(e) => error!("Failed bootstrap for shard {}: {}", shard_id, e),
+                }
+            });
+
+            shard_tasks.push(task);
+        }
+
+        // Wait for either all shard tasks to complete or a shutdown signal
+        let results;
+        info!("Waiting for shutdown signal or shard tasks to complete");
+        tokio::select! {
+            // Wait for all shard tasks to complete normally
+            res = try_join_all(&mut shard_tasks) => {
+                results = res.map_err(|e| {
+                    BootstrapError::TransactionReplayError(format!(
+                        "Shard task join error: {}",
+                        e
+                    ))
+                })?;
+            }
+            // Handle shutdown signal
+            _ = ctrl_c() => {
+                info!("Shutdown signal received, stopping all shard replication tasks");
+
+                // Broadcast shutdown to all shard tasks
+                self.shutdown.store(true, Ordering::SeqCst);
+
+                // After sending the shutdown signal, we still need to wait for the tasks
+                // to finish their cleanup. We can re-await the `try_join_all` future.
+                // We expect it to return errors as tasks might be cancelled, which is okay.
+                info!("Waiting for shard tasks to shut down gracefully...");
+
+                // We re-assign `shard_tasks` into the `try_join_all` to consume it.
+                // The result is ignored here because we are intentionally shutting down.
+                // The tasks should handle the shutdown signal and exit gracefully.
+                let _ = try_join_all(shard_tasks).await;
+
+                info!("All shard tasks have been shut down.");
+                return Ok(WorkUnitResponse::Stopped);
             }
         }
 
@@ -297,6 +334,14 @@ impl ReplicatorBootstrap {
 
         // Go over each Trie's Virtual Trie Shard (vts) and sync for it.
         for vts in 0..merkle_trie::TRIE_SHARD_SIZE {
+            if shutdown_signal.load(Ordering::SeqCst) {
+                info!(
+                    "Shutdown signal received, stopping processing for shard {}",
+                    shard_id
+                );
+                break;
+            }
+
             info!("Shard {} vts loop for vts: {}", shard_id, vts);
 
             // 1. Read the progress for this from the DB
@@ -384,7 +429,16 @@ impl ReplicatorBootstrap {
         let mut thread_client =
             ReplicationServiceClient::connect(work_item.peer_address.clone()).await?;
 
+        // When we get an FID's messages, we don't know if they will spill over to the next page until we get the next
+        // page. So, we need to save this page's last_fid's account_root, because we may need it in the next pass to
+        // verify the account root hash. If the next page doesn't have any messages for last_fid, it won't contain the
+        // account_root, so we need to save it.
+        let mut last_fid_account_root = vec![];
+
         loop {
+            let mut last_fid = status.last_fid;
+            let mut fids_to_check = vec![];
+
             // 2. Use the next_page_token to fetch the page of messages from the server
             let messages_page = thread_client
                 .get_shard_transactions(GetShardTransactionsRequest {
@@ -397,30 +451,37 @@ impl ReplicatorBootstrap {
                 .into_inner();
 
             let trie_messages = messages_page.trie_messages;
-            let fid_account_roots = messages_page.fid_account_roots;
+            let mut fid_account_roots: HashMap<u64, Vec<u8>> = messages_page
+                .fid_account_roots
+                .iter()
+                .map(|r| (r.fid, r.account_root_hash.clone()))
+                .collect();
+            // Extend the fid_account_roots with the one from last time, it will be verified in this pass
+            if !last_fid_account_root.is_empty() && last_fid.is_some() {
+                fid_account_roots.insert(last_fid.unwrap(), last_fid_account_root);
+            }
+
             let next_page_token = messages_page.next_page_token;
 
             debug!(
                 "Transactions page has {} messages, and the fids are {:?}",
                 trie_messages.len(),
-                fid_account_roots.iter().map(|f| f.fid).collect::<Vec<_>>()
+                fid_account_roots.iter().map(|(f, _)| f).collect::<Vec<_>>()
             );
 
             // 3. Start going through all onchain_events and messages for fids > work_item.last_fid
-            let mut last_fid = status.last_fid;
-            let mut fids_to_check = vec![];
 
             let mut trie_keys = vec![];
             let num_messages = trie_messages.len();
             for trie_message_entry in trie_messages {
                 let trie_key = trie_message_entry.trie_key;
-                trie_keys.push(trie_key);
+                trie_keys.push(trie_key.clone());
 
                 // TODO: Merge the message
-                let fid = match trie_message_entry.trie_message {
+                let fid = match &trie_message_entry.trie_message {
                     Some(TrieMessage::UserMessage(m)) => m.fid(),
                     Some(TrieMessage::OnChainEvent(e)) => e.fid,
-                    Some(TrieMessage::FnameTransfer(f)) => match f.proof {
+                    Some(TrieMessage::FnameTransfer(f)) => match &f.proof {
                         Some(p) => p.fid,
                         None => {
                             return Err(BootstrapError::GenericError(
@@ -476,40 +537,13 @@ impl ReplicatorBootstrap {
             thread_engine.get_stores().trie.reload(&db)?;
 
             // 6. Verify account root for fid, update last_fid in the DB
-            for fid in fids_to_check {
-                let expected_root = fid_account_roots
-                    .iter()
-                    .find(|r| r.fid == fid)
-                    .map(|r| r.account_root_hash.clone())
-                    .ok_or_else(|| {
-                        BootstrapError::GenericError(format!(
-                            "No account root found for fid {} at height {}",
-                            fid, status.height
-                        ))
-                    })?;
+            Self::check_fid_roots(&thread_engine, &db, fids_to_check, &fid_account_roots)?;
 
-                let actual_root = thread_engine.get_stores().trie.get_hash(
-                    &db,
-                    &mut RocksDbTransactionBatch::new(),
-                    &TrieKey::for_fid(fid),
-                )?;
-
-                if expected_root != actual_root {
-                    return Err(BootstrapError::AccountRootMismatch(format!(
-                        "Account root mismatch for fid {} at height {}: expected {}, got {}",
-                        fid,
-                        status.height,
-                        hex::encode(expected_root),
-                        hex::encode(actual_root)
-                    )));
-                } else {
-                    info!(
-                        "Account root matched for fid {}: {}",
-                        fid,
-                        hex::encode(actual_root)
-                    );
-                }
-            }
+            // Keep the last_fid's account_root_hash, because we might need to verify it next pass
+            last_fid_account_root = fid_account_roots
+                .get(&last_fid.unwrap())
+                .cloned()
+                .unwrap_or(vec![]);
 
             // Check if shutdown signal is set, if it is, break out
             if work_item.shutdown_signal.load(Ordering::Relaxed) {
@@ -529,6 +563,46 @@ impl ReplicatorBootstrap {
                 return Ok(WorkUnitResponse::Finished);
             }
         } // loop to next page from the server
+    }
+
+    fn check_fid_roots(
+        thread_engine: &ShardEngine,
+        db: &RocksDB,
+        fids_to_check: Vec<u64>,
+        fid_account_roots: &HashMap<u64, Vec<u8>>,
+    ) -> Result<(), BootstrapError> {
+        for fid in fids_to_check {
+            let expected_root = fid_account_roots.get(&fid).cloned().ok_or_else(|| {
+                BootstrapError::GenericError(format!(
+                    "No account root found for fid {}. FIDs are {:?}",
+                    fid,
+                    fid_account_roots.iter().map(|(f, _)| f).collect::<Vec<_>>()
+                ))
+            })?;
+
+            let actual_root = thread_engine.get_stores().trie.get_hash(
+                &db,
+                &mut RocksDbTransactionBatch::new(),
+                &TrieKey::for_fid(fid),
+            )?;
+
+            if expected_root != actual_root {
+                return Err(BootstrapError::AccountRootMismatch(format!(
+                    "Account root mismatch for fid {}. expected {}, got {}",
+                    fid,
+                    hex::encode(expected_root),
+                    hex::encode(actual_root)
+                )));
+            } else {
+                info!(
+                    "Account root matched for fid {}: {}",
+                    fid,
+                    hex::encode(actual_root)
+                );
+            }
+        }
+
+        Ok(())
     }
 
     /// Determine the highest block for each shard.
