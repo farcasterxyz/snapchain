@@ -31,23 +31,31 @@ use tokio::sync::mpsc;
 use tonic::transport::Channel;
 use tracing::{debug, error, info};
 
+#[derive(Clone, Debug, PartialEq)]
 pub enum WorkUnitResponse {
     None = 0,
     // Still working on it
     Working = 1,
     // User manually stopped it (CTRL+C). Will resume after snapchain is restarted
     Stopped = 2,
+    // DB Session expired
+    DbStopped = 3,
     // Bootstrap was finished, but there were some errors. Should continue with startup
-    PartiallyComplete = 3,
+    PartiallyComplete = 4,
     // Successfully finished, ready to continue with startup
-    Finished = 4,
+    Finished = 5,
 }
 
 /// Request to commit a transaction batch to the database
+enum DbCommitResponse {
+    Continue,
+    Stop,
+}
+
 struct DbCommitRequest {
     txn_batch: RocksDbTransactionBatch,
     num_messages: usize,
-    response_tx: oneshot::Sender<Result<(), BootstrapError>>,
+    response_tx: oneshot::Sender<Result<DbCommitResponse, BootstrapError>>,
 }
 
 struct WorkUnit {
@@ -184,9 +192,7 @@ impl ReplicatorBootstrap {
         // Create tasks for each shard to run in parallel
         let mut shard_tasks = Vec::new();
 
-        for shard_id in [1]
-        /*shard_ids*/
-        {
+        for shard_id in shard_ids {
             let metadata = shard_metadata.get(&shard_id).ok_or_else(|| {
                 BootstrapError::MetadataFetchError(format!(
                     "No metadata found for shard {}",
@@ -202,10 +208,6 @@ impl ReplicatorBootstrap {
                     shard_id
                 )));
             }
-            info!(
-                "Bootstrapping shard {} at height {}",
-                shard_id, target_height
-            );
 
             // Clone necessary data for the spawned task
             let peer_address_clone = peer_address.to_string();
@@ -214,13 +216,18 @@ impl ReplicatorBootstrap {
             let statsd_client_clone = statsd_client.clone();
             let rocksdb_dir = format!("{}.snapshot", app_config.rocksdb_dir.clone());
 
+            info!(
+                "Bootstrapping shard {} at height {} with trie_branching_factor {}",
+                shard_id, target_height, trie_branching_factor
+            );
+
             // Spawn a task for this shard
             let shutdown_signal = self.shutdown.clone();
             let metadata = metadata.clone();
 
             let task = tokio::spawn(async move {
                 // Replay transactions for this shard
-                let result = Self::start_shard_replication(
+                let result = Self::start_shard_replication_outer(
                     &peer_address_clone,
                     network,
                     shard_id,
@@ -280,6 +287,63 @@ impl ReplicatorBootstrap {
         Ok(WorkUnitResponse::Stopped)
     }
 
+    async fn start_shard_replication_outer(
+        peer_address: &str,
+        network: crate::proto::FarcasterNetwork,
+        shard_id: u32,
+        trie_branching_factor: u32,
+        target_height: u64,
+        statsd_client: &StatsdClientWrapper,
+        rocksdb_dir: &str,
+        metadata: ShardSnapshotMetadata,
+        shutdown_signal: Arc<AtomicBool>,
+    ) -> Result<WorkUnitResponse, BootstrapError> {
+        loop {
+            if shutdown_signal.load(Ordering::SeqCst) {
+                info!("Shutdown signal received, stopping shard replication");
+                return Ok(WorkUnitResponse::Stopped);
+            }
+
+            let result = Self::start_shard_replication(
+                peer_address,
+                network,
+                shard_id,
+                trie_branching_factor,
+                target_height,
+                statsd_client,
+                rocksdb_dir,
+                metadata.clone(),
+                shutdown_signal.clone(),
+            )
+            .await?;
+
+            match result {
+                WorkUnitResponse::DbStopped => {
+                    info!(
+                        "DB session expired, restarting shard replication for shard {}",
+                        shard_id
+                    );
+                    continue;
+                }
+                WorkUnitResponse::Stopped => {
+                    info!("Shard replication stopped for shard {}", shard_id);
+                    return Ok(WorkUnitResponse::Stopped);
+                }
+                WorkUnitResponse::PartiallyComplete | WorkUnitResponse::Finished => {
+                    info!("Shard replication completed for shard {}", shard_id);
+
+                    // TODO: PostProcess the trie
+
+                    return Ok(result);
+                }
+                WorkUnitResponse::Working | WorkUnitResponse::None => {
+                    let reason = format!("Shard {} work stopped for an unknown reason", shard_id);
+                    return Err(BootstrapError::GenericError(reason));
+                }
+            }
+        }
+    }
+
     async fn start_shard_replication(
         peer_address: &str,
         network: crate::proto::FarcasterNetwork,
@@ -299,6 +363,8 @@ impl ReplicatorBootstrap {
         // Clone db for the DB writer thread
         let db_writer = db.clone();
 
+        let max_messages_in_write_session = 1_000_000;
+
         // Spawn the DB writer thread
         let db_writer_task = tokio::spawn(async move {
             info!("DB writer thread started for shard {}", shard_id);
@@ -309,36 +375,57 @@ impl ReplicatorBootstrap {
                 let start_time = std::time::Instant::now();
                 total_messages += commit_request.num_messages;
 
-                let result = db_writer.commit(commit_request.txn_batch).map_err(|e| {
-                    error!("DB writer - Failed to commit transaction: {}", e);
-                    BootstrapError::DatabaseError(format!("Failed to commit transaction: {}", e))
-                });
+                let result = db_writer.commit(commit_request.txn_batch);
                 let elapsed_time = start_time.elapsed();
                 let total_elapsed = total_start_time.elapsed();
                 info!(
-                "DB writer({}) - Commit took {:?}. Writing at {:.1}k msg/sec {:.2}M total messages",
-                shard_id,
-                elapsed_time,
-                total_messages as f64 / 1000.0 / total_elapsed.as_secs_f64(),
-                total_messages as f64 / 1_000_000.0
-            );
+                    "DB writer({}) - Commit took {:?}. Writing at {:.1}k msg/sec {:.2}M total messages",
+                    shard_id,
+                    elapsed_time,
+                    total_messages as f64 / 1000.0 / total_elapsed.as_secs_f64(),
+                    total_messages as f64 / 1_000_000.0
+                );
+
+                let response = match result {
+                    Ok(()) => {
+                        // If we've exceeded the total number of messages in the write session, stop the writer
+                        // and allow the DB to reload
+                        if total_messages > max_messages_in_write_session {
+                            Ok(DbCommitResponse::Stop)
+                        } else {
+                            Ok(DbCommitResponse::Continue)
+                        }
+                    }
+                    Err(e) => {
+                        error!("DB writer - Failed to commit transaction: {}", e);
+                        Err(BootstrapError::DatabaseError(format!(
+                            "Failed to commit transaction: {}",
+                            e
+                        )))
+                    }
+                };
 
                 // Send the result back to the requesting thread
-                if let Err(_) = commit_request.response_tx.send(result) {
-                    error!("DB writer - Failed to send commit result - receiver dropped");
+                if let Err(_) = commit_request.response_tx.send(response) {
+                    error!("Failed to send DB commit response from DB Writer thread");
+                    break;
                 }
             }
 
             info!("DB writer thread finished for shard {}", shard_id);
         });
 
+        let mut stopped = false;
+
         // Go over each Trie's Virtual Trie Shard (vts) and sync for it.
+        let mut vts_results = vec![WorkUnitResponse::None; merkle_trie::TRIE_SHARD_SIZE as usize];
         for vts in 0..merkle_trie::TRIE_SHARD_SIZE {
             if shutdown_signal.load(Ordering::SeqCst) {
                 info!(
                     "Shutdown signal received, stopping processing for shard {}",
                     shard_id
                 );
+                stopped = true;
                 break;
             }
 
@@ -346,6 +433,10 @@ impl ReplicatorBootstrap {
 
             // 1. Read the progress for this from the DB
             let current_status = Self::get_or_gen_vts_status(&db, shard_id, vts, &metadata)?;
+            if current_status.last_response == WorkUnitResponse::Finished as u32 {
+                info!("Shard {} vts {} already finished, skipping", shard_id, vts);
+                continue;
+            }
 
             // 2. Create a work item for this VSI
             let peer_address = peer_address.to_string();
@@ -370,6 +461,11 @@ impl ReplicatorBootstrap {
                 db.clone(),
             )
             .await?;
+
+            vts_results[vts as usize] = result.clone();
+            if let WorkUnitResponse::DbStopped = result {
+                break;
+            }
         }
 
         // Drop the original sender so the DB writer thread can exit
@@ -386,7 +482,25 @@ impl ReplicatorBootstrap {
 
         db.close();
 
-        Ok(WorkUnitResponse::Finished)
+        if stopped {
+            return Ok(WorkUnitResponse::Stopped);
+        }
+
+        // If any of the vts_results is "DbStopped", then return stopped
+        if vts_results
+            .iter()
+            .any(|r| *r == WorkUnitResponse::DbStopped)
+        {
+            return Ok(WorkUnitResponse::DbStopped);
+        }
+
+        // If ALL of the vts results are "finished", return finished
+        if vts_results.iter().all(|r| *r == WorkUnitResponse::Finished) {
+            return Ok(WorkUnitResponse::Finished);
+        }
+
+        // Say we are partially complete
+        return Ok(WorkUnitResponse::PartiallyComplete);
     }
 
     async fn process_vts_work_item(
@@ -458,7 +572,7 @@ impl ReplicatorBootstrap {
                 .collect();
             // Extend the fid_account_roots with the one from last time, it will be verified in this pass
             if !last_fid_account_root.is_empty() && last_fid.is_some() {
-                fid_account_roots.insert(last_fid.unwrap(), last_fid_account_root);
+                fid_account_roots.insert(last_fid.unwrap(), last_fid_account_root.clone());
             }
 
             let next_page_token = messages_page.next_page_token;
@@ -514,6 +628,15 @@ impl ReplicatorBootstrap {
                 trie_keys,
             )?;
 
+            // Verify account root for fid, update last_fid in the DB
+            Self::check_fid_roots(
+                &thread_engine,
+                &db,
+                &mut txn_batch,
+                fids_to_check,
+                &fid_account_roots,
+            )?;
+
             // 5. commit to DB via db_commit_tx
 
             // First, add the work status to the txn_batch so it gets commited atomically with the work done
@@ -531,19 +654,18 @@ impl ReplicatorBootstrap {
             })?;
 
             // Wait for the commit to complete. The double ?? are to handle both the channel cancelled and the DB writer errors
-            response_rx.await??;
+            let db_response = response_rx.await??;
 
             // Reload the trie after commit
             thread_engine.get_stores().trie.reload(&db)?;
 
-            // 6. Verify account root for fid, update last_fid in the DB
-            Self::check_fid_roots(&thread_engine, &db, fids_to_check, &fid_account_roots)?;
-
             // Keep the last_fid's account_root_hash, because we might need to verify it next pass
-            last_fid_account_root = fid_account_roots
-                .get(&last_fid.unwrap())
-                .cloned()
-                .unwrap_or(vec![]);
+            if last_fid.is_some() {
+                last_fid_account_root = fid_account_roots
+                    .get(&last_fid.unwrap())
+                    .cloned()
+                    .unwrap_or(vec![]);
+            }
 
             // Check if shutdown signal is set, if it is, break out
             if work_item.shutdown_signal.load(Ordering::Relaxed) {
@@ -551,15 +673,40 @@ impl ReplicatorBootstrap {
                     "Shutdown signal received, stopping replication for shard {}, vts {}",
                     shard_id, status.virtual_trie_shard
                 );
-                status.last_response = WorkUnitResponse::Stopped as u32;
 
                 return Ok(WorkUnitResponse::Stopped);
             }
 
+            if let DbCommitResponse::Stop = db_response {
+                info!(
+                    "DB writer requested stop after {} messages, shard {}, vts {}",
+                    num_messages, shard_id, status.virtual_trie_shard
+                );
+
+                return Ok(WorkUnitResponse::DbStopped);
+            }
+
             if next_page_token.is_none() {
-                // All done, break
+                // All done.
 
                 // TODO: Check the last fid
+
+                // Write to the DB that we're all done
+                status.last_response = WorkUnitResponse::Finished as u32;
+                let mut txn_batch = RocksDbTransactionBatch::new();
+                Self::write_work_unit(&mut txn_batch, &status);
+
+                // commit via db_commit_tx
+                let (response_tx, response_rx) = oneshot::channel();
+                work_item.db_commit_tx.send(DbCommitRequest {
+                    txn_batch,
+                    num_messages: 0,
+                    response_tx,
+                })?;
+
+                // Wait for the commit to complete. The double ?? are to handle both the channel cancelled and the DB writer errors
+                response_rx.await??;
+
                 return Ok(WorkUnitResponse::Finished);
             }
         } // loop to next page from the server
@@ -568,6 +715,7 @@ impl ReplicatorBootstrap {
     fn check_fid_roots(
         thread_engine: &ShardEngine,
         db: &RocksDB,
+        txn_batch: &mut RocksDbTransactionBatch,
         fids_to_check: Vec<u64>,
         fid_account_roots: &HashMap<u64, Vec<u8>>,
     ) -> Result<(), BootstrapError> {
@@ -580,11 +728,11 @@ impl ReplicatorBootstrap {
                 ))
             })?;
 
-            let actual_root = thread_engine.get_stores().trie.get_hash(
-                &db,
-                &mut RocksDbTransactionBatch::new(),
-                &TrieKey::for_fid(fid),
-            )?;
+            let actual_root =
+                thread_engine
+                    .get_stores()
+                    .trie
+                    .get_hash(&db, txn_batch, &TrieKey::for_fid(fid))?;
 
             if expected_root != actual_root {
                 return Err(BootstrapError::AccountRootMismatch(format!(
