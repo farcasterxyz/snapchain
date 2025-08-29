@@ -1,15 +1,23 @@
 use crate::bootstrap::error::BootstrapError;
 use crate::cfg::Config;
 use crate::proto::replication_service_client::ReplicationServiceClient;
-use crate::proto::{self, GetShardSnapshotMetadataRequest, ShardSnapshotMetadata};
+use crate::proto::shard_trie_entry_with_message::TrieMessage;
+use crate::proto::{
+    self, GetShardSnapshotMetadataRequest, GetShardTransactionsRequest, ReplicationTriePartStatus,
+    ShardSnapshotMetadata,
+};
 use crate::storage::constants::RootPrefix;
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
+use crate::storage::store::account::StoreOptions;
+use crate::storage::store::engine::ShardEngine;
+use crate::storage::store::stores::StoreLimits;
 use crate::storage::trie::merkle_trie::{self, TrieKey};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::EngineVersion;
 use base64::{engine::general_purpose, Engine as _};
 use futures::channel::oneshot;
 use futures::future::try_join_all;
+use prost::Message;
 use rand::seq::IteratorRandom;
 use rand::seq::SliceRandom;
 use std::collections::{HashMap, VecDeque};
@@ -24,6 +32,7 @@ use tonic::transport::Channel;
 use tracing::{debug, error, info};
 
 pub enum WorkUnitResponse {
+    None = 0,
     // Still working on it
     Working = 1,
     // User manually stopped it (CTRL+C). Will resume after snapchain is restarted
@@ -37,7 +46,7 @@ pub enum WorkUnitResponse {
 /// Request to commit a transaction batch to the database
 struct DbCommitRequest {
     txn_batch: RocksDbTransactionBatch,
-    num_messages: u64,
+    num_messages: usize,
     response_tx: oneshot::Sender<Result<(), BootstrapError>>,
 }
 
@@ -46,7 +55,6 @@ struct WorkUnit {
     peer_address: String,
     shutdown_signal: Arc<AtomicBool>,
     db_commit_tx: mpsc::UnboundedSender<DbCommitRequest>,
-    response_tx: oneshot::Sender<Result<WorkUnitResponse, BootstrapError>>,
 }
 
 pub struct ReplicatorBootstrap {
@@ -68,6 +76,71 @@ impl ReplicatorBootstrap {
         key
     }
 
+    fn read_work_unit(
+        db: &RocksDB,
+        shard_id: u32,
+        virtual_trie_shard: u32,
+    ) -> Result<Option<proto::ReplicationTriePartStatus>, BootstrapError> {
+        info!("Reading work using for {},{}", shard_id, virtual_trie_shard);
+        let key = Self::make_work_unit_key(shard_id as u8, virtual_trie_shard as u8);
+        match db.get(&key) {
+            Ok(Some(bytes)) => match proto::ReplicationTriePartStatus::decode(&bytes[..]) {
+                Ok(status) => Ok(Some(status)),
+                Err(e) => Err(BootstrapError::GenericError(format!(
+                    "Failed to decode ReplicationTriePartStatus: {}",
+                    e
+                ))),
+            },
+            Ok(None) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn write_work_unit(
+        txn_batch: &mut RocksDbTransactionBatch,
+        status: &proto::ReplicationTriePartStatus,
+    ) {
+        info!(
+            "Writing work using for {},{}",
+            status.shard_id, status.virtual_trie_shard
+        );
+        let key = Self::make_work_unit_key(status.shard_id as u8, status.virtual_trie_shard as u8);
+        let bytes = status.encode_to_vec();
+
+        txn_batch.put(key, bytes)
+    }
+
+    fn get_or_gen_vts_status(
+        db: &RocksDB,
+        shard_id: u32,
+        virtual_trie_shard: u32,
+        metadata: &ShardSnapshotMetadata,
+    ) -> Result<ReplicationTriePartStatus, BootstrapError> {
+        let status = Self::read_work_unit(db, shard_id, virtual_trie_shard)?;
+
+        // If there's no status for this shard/vts, create an empty Status
+        match status {
+            Some(status) => {
+                info!("Read existing status {:?}", status);
+                Ok(status)
+            }
+            None => {
+                info!(
+                    "Creating new status for {} height {} vts {}",
+                    shard_id, metadata.height, virtual_trie_shard
+                );
+                Ok(ReplicationTriePartStatus {
+                    shard_id,
+                    height: metadata.height,
+                    virtual_trie_shard,
+                    last_response: 0,
+                    last_fid: None,
+                    next_page_token: None,
+                })
+            }
+        }
+    }
+
     /// Bootstrap a node from replication instead of snapshot download
     pub async fn bootstrap_using_replication(
         &self,
@@ -78,13 +151,13 @@ impl ReplicatorBootstrap {
         // Fetch metadata and determine target height
         // Get the peer address from the client's channel
         let peer_address = "http://127.0.0.1:3383";
-        let mut client = ReplicationServiceClient::connect(peer_address)
-            .await
-            .map_err(|e| BootstrapError::PeerConnectionError(e.to_string()))?;
 
-        let shard_metadata = self
-            .get_shard_snapshots(&mut client, app_config.consensus.shard_ids.to_vec())
-            .await?;
+        let shard_metadata = {
+            let mut client = ReplicationServiceClient::connect(peer_address).await?;
+
+            self.get_shard_snapshots(&mut client, app_config.consensus.shard_ids.to_vec())
+                .await?
+        };
 
         // Initialize databases and replay transactions for each shard
         // Note: We're not replicating shard 0 (block shard) for now as requested
@@ -113,7 +186,9 @@ impl ReplicatorBootstrap {
             cadence::StatsdClient::builder(app_config.statsd.prefix.as_str(), sink).build();
         let statsd_client = StatsdClientWrapper::new(statsd_client, app_config.statsd.use_tags);
 
-        for shard_id in shard_ids {
+        for shard_id in [1]
+        /*shard_ids*/
+        {
             let metadata = shard_metadata.get(&shard_id).ok_or_else(|| {
                 BootstrapError::MetadataFetchError(format!(
                     "No metadata found for shard {}",
@@ -220,13 +295,36 @@ impl ReplicatorBootstrap {
             info!("DB writer thread finished for shard {}", shard_id);
         });
 
-        // Go over each Trie's Virtual Shard ID (VSI) and sync for it.
-        for vsi in 0..merkle_trie::TRIE_SHARD_SIZE {
+        // Go over each Trie's Virtual Trie Shard (vts) and sync for it.
+        for vts in 0..merkle_trie::TRIE_SHARD_SIZE {
+            info!("Shard {} vts loop for vts: {}", shard_id, vts);
+
             // 1. Read the progress for this from the DB
+            let current_status = Self::get_or_gen_vts_status(&db, shard_id, vts, &metadata)?;
 
             // 2. Create a work item for this VSI
+            let peer_address = peer_address.to_string();
+            let shutdown_signal = shutdown_signal.clone();
+            let db_commit_tx = db_commit_tx.clone();
+
+            let work_item = WorkUnit {
+                current_status,
+                peer_address,
+                shutdown_signal,
+                db_commit_tx,
+            };
 
             // 3. Start iterating over this VSI and merging messages
+            let result = Self::process_vts_work_item(
+                work_item,
+                network,
+                shard_id,
+                trie_branching_factor,
+                target_height,
+                statsd_client,
+                db.clone(),
+            )
+            .await?;
         }
 
         // Drop the original sender so the DB writer thread can exit
@@ -244,6 +342,193 @@ impl ReplicatorBootstrap {
         db.close();
 
         Ok(WorkUnitResponse::Finished)
+    }
+
+    async fn process_vts_work_item(
+        work_item: WorkUnit,
+        network: crate::proto::FarcasterNetwork,
+        shard_id: u32,
+        trie_branching_factor: u32,
+        target_height: u64,
+        statsd_client: &StatsdClientWrapper,
+        db: Arc<RocksDB>,
+    ) -> Result<WorkUnitResponse, BootstrapError> {
+        // 1. Create the engine and trie objects
+        let mut status = work_item.current_status;
+
+        let network = network.clone();
+        let statsd_client = statsd_client.clone();
+
+        let store_opts = StoreOptions {
+            conflict_free: true, // All messages will be free of conflicts, since these are from a already-merged snapshot
+            save_hub_events: false, // No need for HubEvents, which are emitted only from "live" nodes
+        };
+
+        let trie = merkle_trie::MerkleTrie::new(trie_branching_factor).unwrap();
+        let mut thread_engine = ShardEngine::new_with_opts(
+            db.clone(),
+            network,
+            trie,
+            shard_id,
+            StoreLimits::default(),
+            statsd_client,
+            256,
+            None,
+            None,
+            None,
+            store_opts.clone(),
+        )
+        .await
+        .map_err(|e| BootstrapError::DatabaseError(e.to_string()))?;
+
+        let mut thread_client =
+            ReplicationServiceClient::connect(work_item.peer_address.clone()).await?;
+
+        loop {
+            // 2. Use the next_page_token to fetch the page of messages from the server
+            let messages_page = thread_client
+                .get_shard_transactions(GetShardTransactionsRequest {
+                    shard_id: status.shard_id,
+                    height: status.height,
+                    trie_virtual_shard: status.virtual_trie_shard,
+                    page_token: status.next_page_token.clone(),
+                })
+                .await?
+                .into_inner();
+
+            let trie_messages = messages_page.trie_messages;
+            let fid_account_roots = messages_page.fid_account_roots;
+            let next_page_token = messages_page.next_page_token;
+
+            debug!(
+                "Transactions page has {} messages, and the fids are {:?}",
+                trie_messages.len(),
+                fid_account_roots.iter().map(|f| f.fid).collect::<Vec<_>>()
+            );
+
+            // 3. Start going through all onchain_events and messages for fids > work_item.last_fid
+            let mut last_fid = status.last_fid;
+            let mut fids_to_check = vec![];
+
+            let mut trie_keys = vec![];
+            let num_messages = trie_messages.len();
+            for trie_message_entry in trie_messages {
+                let trie_key = trie_message_entry.trie_key;
+                trie_keys.push(trie_key);
+
+                // TODO: Merge the message
+                let fid = match trie_message_entry.trie_message {
+                    Some(TrieMessage::UserMessage(m)) => m.fid(),
+                    Some(TrieMessage::OnChainEvent(e)) => e.fid,
+                    Some(TrieMessage::FnameTransfer(f)) => match f.proof {
+                        Some(p) => p.fid,
+                        None => {
+                            return Err(BootstrapError::GenericError(
+                                "FnameTransfer proof is missing".into(),
+                            ))
+                        }
+                    },
+                    _ => {
+                        return Err(BootstrapError::GenericError(
+                            "Unknown trie_message type".into(),
+                        ))
+                    }
+                };
+
+                if last_fid.is_none() {
+                    last_fid = Some(fid);
+                }
+
+                if fid > last_fid.unwrap() {
+                    fids_to_check.push(last_fid.unwrap());
+                    last_fid = Some(fid);
+                }
+            }
+
+            // 4. Merge all onchain_events and messages for fid
+            let mut txn_batch = RocksDbTransactionBatch::new();
+            thread_engine.replay_replicator_message(
+                &merkle_trie::Context::new(),
+                &mut txn_batch,
+                trie_keys,
+            )?;
+
+            // 5. commit to DB via db_commit_tx
+
+            // First, add the work status to the txn_batch so it gets commited atomically with the work done
+            status.last_fid = last_fid;
+            status.next_page_token = next_page_token.clone();
+            status.last_response = WorkUnitResponse::Working as u32;
+            Self::write_work_unit(&mut txn_batch, &status);
+
+            // commit via db_commit_tx
+            let (response_tx, response_rx) = oneshot::channel();
+            work_item.db_commit_tx.send(DbCommitRequest {
+                txn_batch,
+                num_messages,
+                response_tx,
+            })?;
+
+            // Wait for the commit to complete. The double ?? are to handle both the channel cancelled and the DB writer errors
+            response_rx.await??;
+
+            // Reload the trie after commit
+            thread_engine.get_stores().trie.reload(&db)?;
+
+            // 6. Verify account root for fid, update last_fid in the DB
+            for fid in fids_to_check {
+                let expected_root = fid_account_roots
+                    .iter()
+                    .find(|r| r.fid == fid)
+                    .map(|r| r.account_root_hash.clone())
+                    .ok_or_else(|| {
+                        BootstrapError::GenericError(format!(
+                            "No account root found for fid {} at height {}",
+                            fid, status.height
+                        ))
+                    })?;
+
+                let actual_root = thread_engine.get_stores().trie.get_hash(
+                    &db,
+                    &mut RocksDbTransactionBatch::new(),
+                    &TrieKey::for_fid(fid),
+                )?;
+
+                if expected_root != actual_root {
+                    return Err(BootstrapError::AccountRootMismatch(format!(
+                        "Account root mismatch for fid {} at height {}: expected {}, got {}",
+                        fid,
+                        status.height,
+                        hex::encode(expected_root),
+                        hex::encode(actual_root)
+                    )));
+                } else {
+                    info!(
+                        "Account root matched for fid {}: {}",
+                        fid,
+                        hex::encode(actual_root)
+                    );
+                }
+            }
+
+            // Check if shutdown signal is set, if it is, break out
+            if work_item.shutdown_signal.load(Ordering::Relaxed) {
+                info!(
+                    "Shutdown signal received, stopping replication for shard {}, vts {}",
+                    shard_id, status.virtual_trie_shard
+                );
+                status.last_response = WorkUnitResponse::Stopped as u32;
+
+                return Ok(WorkUnitResponse::Stopped);
+            }
+
+            if next_page_token.is_none() {
+                // All done, break
+
+                // TODO: Check the last fid
+                return Ok(WorkUnitResponse::Finished);
+            }
+        } // loop to next page from the server
     }
 
     /// Determine the highest block for each shard.
@@ -278,6 +563,10 @@ impl ReplicatorBootstrap {
                         }
                     }
 
+                    info!(
+                        "Added metadata for shard {} at height {}",
+                        shard_id, latest_snapshot.height
+                    );
                     shard_metadata.insert(shard_id, latest_snapshot);
                 }
                 Err(e) => {
