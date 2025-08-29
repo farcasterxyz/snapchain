@@ -83,6 +83,28 @@ impl TrieKey {
         (TRIE_ROUTER.route_fid(fid, TRIE_SHARD_SIZE) - 1) as u8
     }
 
+    // Decode a trie key into (virtual_shard_id, fid, onchain_message_type, message_type, hash OR fname OR tx_hash+log_index)
+    pub fn decode(key: &[u8]) -> Result<(u8, u64, Option<u8>, Option<u8>, Vec<u8>), TrieError> {
+        if key.len() < 6 {
+            return Err(TrieError::KeyLengthTooShort);
+        }
+
+        let virtual_shard = key[0];
+        let fid = read_fid_key(&key, 1);
+
+        let (onchain_message_type, message_type) = if key[5] < (1 << 3) {
+            // On-chain event
+            (Some(key[5]), None)
+        } else {
+            // Regular message
+            (None, Some(key[5] >> 3))
+        };
+
+        let rest = key[6..].to_vec();
+
+        Ok((virtual_shard, fid, onchain_message_type, message_type, rest))
+    }
+
     // Compute the keys that need to be updated in the trie. Returns (inserts, deletes)
     pub fn for_hub_event(event: &proto::HubEvent) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
         let mut inserts = Vec::new();
@@ -148,28 +170,6 @@ impl TrieKey {
             }
         };
         (inserts, deletes)
-    }
-
-    // Decode a trie key into (virtual_shard_id, fid, onchain_message_type, message_type, hash OR fname OR tx_hash+log_index)
-    pub fn decode(key: &[u8]) -> Result<(u8, u64, Option<u8>, Option<u8>, Vec<u8>), TrieError> {
-        if key.len() < 6 {
-            return Err(TrieError::KeyLengthTooShort);
-        }
-
-        let virtual_shard = key[0];
-        let fid = read_fid_key(&key, 1);
-
-        let (onchain_message_type, message_type) = if key[5] < (1 << 3) {
-            // On-chain event
-            (Some(key[5]), None)
-        } else {
-            // Regular message
-            (None, Some(key[5] >> 3))
-        };
-
-        let rest = key[6..].to_vec();
-
-        Ok((virtual_shard, fid, onchain_message_type, message_type, rest))
     }
 }
 
