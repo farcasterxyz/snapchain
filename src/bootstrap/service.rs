@@ -124,11 +124,11 @@ impl ReplicatorBootstrap {
         // If there's no status for this shard/vts, create an empty Status
         match status {
             Some(status) => {
-                info!("Read existing status {:?}", status);
+                debug!("Read existing status {:?}", status);
                 Ok(status)
             }
             None => {
-                info!(
+                debug!(
                     "Creating new status for {} height {} vts {}",
                     shard_id, metadata.height, virtual_trie_shard
                 );
@@ -363,7 +363,7 @@ impl ReplicatorBootstrap {
         // Clone db for the DB writer thread
         let db_writer = db.clone();
 
-        let max_messages_in_write_session = 1_000_000;
+        let max_messages_in_write_session = 100_000;
 
         // Spawn the DB writer thread
         let db_writer_task = tokio::spawn(async move {
@@ -429,14 +429,14 @@ impl ReplicatorBootstrap {
                 break;
             }
 
-            info!("Shard {} vts loop for vts: {}", shard_id, vts);
-
             // 1. Read the progress for this from the DB
             let current_status = Self::get_or_gen_vts_status(&db, shard_id, vts, &metadata)?;
             if current_status.last_response == WorkUnitResponse::Finished as u32 {
-                info!("Shard {} vts {} already finished, skipping", shard_id, vts);
+                debug!("Shard {} vts {} already finished, skipping", shard_id, vts);
                 continue;
             }
+
+            info!("Shard {} vts loop for vts: {}", shard_id, vts);
 
             // 2. Create a work item for this VSI
             let peer_address = peer_address.to_string();
@@ -583,32 +583,28 @@ impl ReplicatorBootstrap {
                 fid_account_roots.iter().map(|(f, _)| f).collect::<Vec<_>>()
             );
 
-            // 3. Start going through all onchain_events and messages for fids > work_item.last_fid
+            // Set the block height to 0 (by resetting the event id) for bootstrap. This makes the hub events
+            // get proper IDs.
+            thread_engine.reset_event_id();
 
             let mut trie_keys = vec![];
             let num_messages = trie_messages.len();
+            let mut txn_batch = RocksDbTransactionBatch::new();
+
+            // 3. Start going through all onchain_events and messages for fids > work_item.last_fid
             for trie_message_entry in trie_messages {
-                let trie_key = trie_message_entry.trie_key;
+                let trie_key = trie_message_entry.trie_key.clone();
                 trie_keys.push(trie_key.clone());
 
-                // TODO: Merge the message
-                let fid = match &trie_message_entry.trie_message {
-                    Some(TrieMessage::UserMessage(m)) => m.fid(),
-                    Some(TrieMessage::OnChainEvent(e)) => e.fid,
-                    Some(TrieMessage::FnameTransfer(f)) => match &f.proof {
-                        Some(p) => p.fid,
-                        None => {
-                            return Err(BootstrapError::GenericError(
-                                "FnameTransfer proof is missing".into(),
-                            ))
-                        }
-                    },
-                    _ => {
-                        return Err(BootstrapError::GenericError(
-                            "Unknown trie_message type".into(),
-                        ))
-                    }
-                };
+                let (fid, generated_trie_key, hub_event) =
+                    thread_engine.replay_replicator_message(&mut txn_batch, &trie_message_entry)?;
+
+                if generated_trie_key != trie_key {
+                    return Err(BootstrapError::GenericError(format!(
+                        "Generated trie key {:?} does not match expected trie key {:?} for {:?}. HubEvent {:?}",
+                        generated_trie_key, trie_key, trie_message_entry, hub_event
+                    )));
+                }
 
                 if last_fid.is_none() {
                     last_fid = Some(fid);
@@ -620,10 +616,9 @@ impl ReplicatorBootstrap {
                 }
             }
 
-            // 4. Merge all onchain_events and messages for fid
-            let mut txn_batch = RocksDbTransactionBatch::new();
-            thread_engine.replay_replicator_message(
-                &merkle_trie::Context::new(),
+            // Insert all the trie keys into the trie
+            thread_engine.update_trie_batch(
+                &merkle_trie::Context::new(), // Not tracking trie perf during replication
                 &mut txn_batch,
                 trie_keys,
             )?;
@@ -637,7 +632,7 @@ impl ReplicatorBootstrap {
                 &fid_account_roots,
             )?;
 
-            // 5. commit to DB via db_commit_tx
+            // 5. Now that the account roots match, commit to DB via db_commit_tx
 
             // First, add the work status to the txn_batch so it gets commited atomically with the work done
             status.last_fid = last_fid;
@@ -678,11 +673,6 @@ impl ReplicatorBootstrap {
             }
 
             if let DbCommitResponse::Stop = db_response {
-                info!(
-                    "DB writer requested stop after {} messages, shard {}, vts {}",
-                    num_messages, shard_id, status.virtual_trie_shard
-                );
-
                 return Ok(WorkUnitResponse::DbStopped);
             }
 

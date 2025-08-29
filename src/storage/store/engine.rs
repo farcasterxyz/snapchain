@@ -5,9 +5,11 @@ use crate::core::{
 };
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::message_data::Body;
+use crate::proto::shard_trie_entry_with_message::TrieMessage;
 use crate::proto::{
     self, hub_event, FarcasterNetwork, HubEvent, HubEventType, MessageType, OnChainEvent,
-    OnChainEventType, Protocol, ShardChunk, Transaction, UserDataType, UserNameProof,
+    OnChainEventType, Protocol, ShardChunk, ShardTrieEntryWithMessage, Transaction, UserDataType,
+    UserNameProof,
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{CastStore, MessagesPage, StoreOptions, VerificationStore};
@@ -58,6 +60,9 @@ pub enum EngineError {
 
     #[error(transparent)]
     MempoolPollerError(#[from] MempoolPollerError),
+
+    #[error("Replicator merge error: {0}")]
+    ReplicatorError(String),
 }
 
 #[derive(Error, Debug, Clone)]
@@ -538,23 +543,71 @@ impl ShardEngine {
         Ok(events)
     }
 
+    // Reset the event id generator to 0. This is used when doing replication, when we're merging in events from another node
+    // and not from blocks (so no blockheight to use)
+    pub(crate) fn reset_event_id(&mut self) {
+        self.stores.event_handler.set_current_height(0);
+    }
+
     pub(crate) fn replay_replicator_message(
         &mut self,
-        trie_ctx: &merkle_trie::Context,
         txn_batch: &mut RocksDbTransactionBatch,
-        trie_keys: Vec<Vec<u8>>,
-    ) -> Result<(), EngineError> {
-        let r = self.stores.trie.insert(
-            &merkle_trie::Context::new(),
-            &self.db,
-            txn_batch,
-            trie_keys
-                .iter()
-                .map(|v| v.as_slice())
-                .collect::<Vec<&[u8]>>(),
-        )?;
+        trie_message: &ShardTrieEntryWithMessage,
+    ) -> Result<(u64, Vec<u8>, HubEvent), EngineError> {
+        let (hub_event, fid) = match &trie_message.trie_message {
+            Some(TrieMessage::UserMessage(m)) => {
+                let event = self.merge_message(m, txn_batch)?;
+                (event, m.fid())
+            }
+            Some(TrieMessage::OnChainEvent(oe)) => {
+                let event = self
+                    .stores
+                    .onchain_event_store
+                    .merge_onchain_event(oe.clone(), txn_batch)?;
 
-        Ok(())
+                (event, oe.fid)
+            }
+            Some(TrieMessage::FnameTransfer(f)) => match &f.proof {
+                None => {
+                    return Err(EngineError::ReplicatorError(format!(
+                        "FnameTransfer proof is missing for fname message {:?}",
+                        f
+                    )));
+                }
+                Some(p) => {
+                    let event = UserDataStore::merge_username_proof(
+                        &self.stores.user_data_store,
+                        p,
+                        txn_batch,
+                    )?;
+                    (event, p.fid)
+                }
+            },
+            _ => {
+                return Err(EngineError::ReplicatorError(format!(
+                    "Unknown trie_message type {:?}",
+                    trie_message
+                )))
+            }
+        };
+
+        let (inserts, deletes) = TrieKey::for_hub_event(&hub_event);
+
+        if inserts.len() != 1 {
+            return Err(EngineError::ReplicatorError(format!(
+                "Message {:?} generated incorrect number of inserts from Hub Event {:?}",
+                trie_message, hub_event
+            )));
+        }
+
+        if !deletes.is_empty() {
+            return Err(EngineError::ReplicatorError(format!(
+                "Message {:?} generated deletes. HubEvent {:?}",
+                trie_message, hub_event
+            )));
+        }
+
+        Ok((fid, inserts[0].clone(), hub_event))
     }
 
     pub(crate) fn replay_snapchain_txn(
@@ -1130,54 +1183,21 @@ impl ShardEngine {
         Ok(())
     }
 
-    /// Insert a vec of events all at once into the trie
-    #[allow(dead_code)]
-    fn update_trie_batch(
+    /// Insert a vec of events all at once into the trie    
+    pub fn update_trie_batch(
         &mut self,
         ctx: &merkle_trie::Context,
-        events: &Vec<proto::HubEvent>,
         txn_batch: &mut RocksDbTransactionBatch,
+        trie_keys: Vec<Vec<u8>>,
     ) -> Result<(), EngineError> {
         let now = std::time::Instant::now();
 
-        let mut all_inserts = HashSet::new();
-        let mut all_deletes = HashSet::new();
-
-        for event in events {
-            let (inserts, deletes) = TrieKey::for_hub_event(event);
-
-            // Merge the inserts and deletes
-            for key in inserts {
-                if all_deletes.contains(&key) {
-                    all_deletes.remove(&key);
-                }
-                all_inserts.insert(key);
-            }
-
-            for key in deletes {
-                if all_inserts.contains(&key) {
-                    all_inserts.remove(&key);
-                }
-                all_deletes.insert(key);
-            }
-        }
-
-        // Batch insert and delete into the trie
+        // Batch insert  into the trie
         self.stores.trie.insert(
             ctx,
             &self.db,
             txn_batch,
-            all_inserts
-                .iter()
-                .map(|v| v.as_slice())
-                .collect::<Vec<&[u8]>>(),
-        )?;
-
-        self.stores.trie.delete(
-            ctx,
-            &self.db,
-            txn_batch,
-            all_deletes
+            trie_keys
                 .iter()
                 .map(|v| v.as_slice())
                 .collect::<Vec<&[u8]>>(),
