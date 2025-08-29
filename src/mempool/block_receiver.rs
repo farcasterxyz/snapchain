@@ -11,7 +11,29 @@ use crate::core::util::verify_signatures;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::proto::{hub_event, Block, HubEvent};
 use crate::storage::store::{mempool_poller::MempoolMessage, stores::Stores};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Config {
+    #[serde(with = "humantime_serde")]
+    pub single_block_confirmation_timeout: Duration,
+    #[serde(with = "humantime_serde")]
+    pub sync_confirmation_timeout: Duration,
+    pub sync_batch_size: u64,
+    pub enabled: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            single_block_confirmation_timeout: Duration::from_secs(5),
+            sync_confirmation_timeout: Duration::from_secs(10),
+            sync_batch_size: 500,
+            enabled: false,
+        }
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum BlockReceiverError {
@@ -27,6 +49,7 @@ pub struct BlockReceiver {
     pub event_rx: broadcast::Receiver<HubEvent>,
     pub stores: Stores,
     pub validator_sets: StoredValidatorSets,
+    pub config: Config,
 }
 
 impl BlockReceiver {
@@ -112,7 +135,11 @@ impl BlockReceiver {
         }
     }
 
-    async fn sync_missing_block_events(&mut self, start_seqnum: u64, stop_seqnum: u64) {
+    async fn sync_missing_block_events(
+        &mut self,
+        start_seqnum: u64,
+        stop_seqnum: u64,
+    ) -> Result<(), BlockReceiverError> {
         info!(start_seqnum, stop_seqnum, "Syncing missing blocks",);
         let mut currrent_seqnum = start_seqnum;
         while currrent_seqnum <= stop_seqnum {
@@ -126,10 +153,29 @@ impl BlockReceiver {
                 .unwrap();
             let block = block_rx.await.unwrap().unwrap();
             self.submit_block(&block).await;
+
             if let Some(last_event) = block.events.last() {
+                let num_events_processed = last_event.seqnum() - start_seqnum;
+                // If we've completed a batch or completed the full sync, wait for confirmation
+                if (num_events_processed > 0
+                    && num_events_processed % self.config.sync_batch_size == 0)
+                    || last_event.seqnum() >= stop_seqnum
+                {
+                    if let Err(BlockReceiverError::ConfirmationTimedOut) = self
+                        .wait_for_confirmation(
+                            last_event.seqnum(),
+                            self.config.sync_confirmation_timeout,
+                        )
+                        .await
+                    {
+                        return Err(BlockReceiverError::ConfirmationTimedOut);
+                    }
+                }
                 currrent_seqnum = last_event.seqnum() + 1;
             }
         }
+
+        Ok(())
     }
 
     pub async fn run(&mut self) {
@@ -154,30 +200,26 @@ impl BlockReceiver {
 
             let first_event_in_block = block.events.first().unwrap();
             if first_event_in_block.seqnum() > last_stored_event_seqnum + 1 {
-                self.sync_missing_block_events(
-                    last_stored_event_seqnum + 1,
-                    first_event_in_block.seqnum() - 1,
-                )
-                .await;
                 if let Err(BlockReceiverError::ConfirmationTimedOut) = self
-                    .wait_for_confirmation(
+                    .sync_missing_block_events(
+                        last_stored_event_seqnum + 1,
                         first_event_in_block.seqnum() - 1,
-                        Duration::from_secs(10),
                     )
                     .await
                 {
                     // TODO(aditi): Right now, we will just wait for the next block with events and try again. In the future we may want better retry logic
-                    warn!(
-                        seqnum = first_event_in_block.seqnum() - 1,
-                        "Timed out waiting for confirmation",
-                    );
+                    warn!("Timed out waiting for confirmation. Sync ended early");
                     continue;
                 }
             };
+
             self.submit_block(&block).await;
-            // If confirmation fails, we'll try move onto the next block and retry this block if needed.
+            // If confirmation fails, we'll try move onto the next block and retry this block if needed. Conservative timeout here is better so we don't keep retrying the same block events.
             if let Err(BlockReceiverError::ConfirmationTimedOut) = self
-                .wait_for_confirmation(last_event_in_block.seqnum(), Duration::from_secs(1))
+                .wait_for_confirmation(
+                    last_event_in_block.seqnum(),
+                    self.config.single_block_confirmation_timeout,
+                )
                 .await
             {
                 warn!(

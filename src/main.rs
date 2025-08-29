@@ -661,7 +661,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             None
         };
 
-        if app_config.read_block_events {
+        if app_config.block_receiver.enabled {
             for shard_id in app_config.consensus.shard_ids.iter() {
                 let senders = node.shard_senders.get(shard_id).unwrap();
                 let mut block_receiver = BlockReceiver {
@@ -672,6 +672,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     system_tx: system_tx.clone(),
                     event_rx: senders.events_tx.subscribe(),
                     validator_sets: app_config.consensus.to_stored_validator_sets(*shard_id),
+                    config: app_config.block_receiver.clone(),
                 };
                 tokio::spawn(async move { block_receiver.run().await });
             }

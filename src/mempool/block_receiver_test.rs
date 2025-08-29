@@ -5,7 +5,7 @@ mod tests {
     use crate::core::types::{
         Address, ShardId, SnapchainShard, SnapchainValidator, SnapchainValidatorSet, Vote,
     };
-    use crate::mempool::block_receiver::BlockReceiver;
+    use crate::mempool::block_receiver::{BlockReceiver, Config};
     use crate::mempool::mempool::{MempoolRequest, MempoolSource};
     use crate::proto::{Block, CommitSignature, Commits, ShardHash};
     use crate::storage::db::RocksDB;
@@ -81,6 +81,12 @@ mod tests {
             event_rx: shard_engine.get_senders().events_tx.subscribe(),
             stores: shard_engine.get_stores(),
             validator_sets,
+            config: Config {
+                single_block_confirmation_timeout: Duration::from_secs(1),
+                sync_confirmation_timeout: Duration::from_secs(10),
+                sync_batch_size: 500,
+                enabled: true,
+            },
         };
 
         TestSetup {
@@ -328,6 +334,67 @@ mod tests {
 
         // No events should be processed since the signature is invalid
         assert_eq!(setup.mempool_rx.len(), 0);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_sync_respects_batch_size() {
+        let mut setup = setup_test().await;
+
+        // Override config with smaller batch size for testing
+        setup.block_receiver.config.sync_batch_size = 2;
+
+        let handle = tokio::spawn(async move { setup.block_receiver.run().await });
+
+        // Generate 3 heartbeats without sending them to block_rx (simulating dropped blocks)
+        // This will create a gap that needs to be synced
+        generate_heartbeats(&mut setup.block_engine, None, &setup.validator_keypair, 3);
+
+        // Now send a heartbeat that will trigger sync of the 3 missing blocks
+        generate_heartbeats(
+            &mut setup.block_engine,
+            Some(&setup.block_tx),
+            &setup.validator_keypair,
+            1,
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // The sync should request the 3 missing blocks in batches
+        // First batch: 2 blocks (batch size = 2)
+        sync_block_events(
+            &setup.block_engine,
+            &mut setup.system_rx,
+            &setup.validator_keypair,
+            2,
+        )
+        .await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Process the first batch - should get 2 heartbeat events
+        process_heartbeats(&mut setup.shard_engine, &mut setup.mempool_rx, 2).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Second batch: remaining 1 block
+        sync_block_events(
+            &setup.block_engine,
+            &mut setup.system_rx,
+            &setup.validator_keypair,
+            1,
+        )
+        .await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Process the remaining events (1 from second batch + 1 from the final heartbeat)
+        process_heartbeats(&mut setup.shard_engine, &mut setup.mempool_rx, 1).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        process_heartbeats(&mut setup.shard_engine, &mut setup.mempool_rx, 1).await;
 
         handle.abort();
     }

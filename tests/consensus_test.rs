@@ -6,7 +6,7 @@ use serial_test::serial;
 use snapchain::connectors::onchain_events::ChainClients;
 use snapchain::consensus::consensus::{SystemMessage, ValidatorSetConfig};
 use snapchain::consensus::proposer::GENESIS_MESSAGE;
-use snapchain::mempool::block_receiver::BlockReceiver;
+use snapchain::mempool::block_receiver::{self, BlockReceiver};
 use snapchain::mempool::mempool::{
     self, Mempool, MempoolMessagesRequest, MempoolRequest, MempoolSource,
 };
@@ -481,6 +481,10 @@ impl NodeForTest {
                 system_tx: system_tx.clone(),
                 event_rx: senders.events_tx.subscribe(),
                 validator_sets: consensus_config.to_stored_validator_sets(shard_id),
+                config: block_receiver::Config {
+                    enabled: true,
+                    ..block_receiver::Config::default()
+                },
             };
             let handle = tokio::spawn(async move { block_receiver.run().await });
             join_handles.push(handle);
