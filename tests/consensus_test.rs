@@ -1065,7 +1065,7 @@ async fn test_cross_shard_interactions() {
         id: 829595,
         from_fid: second_fid,
         proof: Some(proto::UserNameProof {
-            timestamp: 1741384226,
+            timestamp: 1741384227,
             name: fname.as_bytes().to_vec(),
             fid: first_fid,
             owner: hex::decode("92ce59c18a97646e9a7e011653d8417d3a08bb2b").unwrap(),
