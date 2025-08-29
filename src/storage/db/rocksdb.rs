@@ -119,6 +119,15 @@ impl RocksDB {
         }
     }
 
+    pub fn open_bulk_write_shard_db(db_dir: &str, shard_id: u32) -> Arc<RocksDB> {
+        let db = RocksDB::new_with_options(
+            format!("{}/shard-{}", db_dir, shard_id).as_str(),
+            SnapchainDbOptimizationType::BulkWriteOptimized,
+        );
+        db.open().unwrap();
+        Arc::new(db)
+    }
+
     pub fn open_shard_db(db_dir: &str, shard_id: u32) -> Arc<RocksDB> {
         let db = RocksDB::new(format!("{}/shard-{}", db_dir, shard_id).as_str());
         db.open().unwrap();

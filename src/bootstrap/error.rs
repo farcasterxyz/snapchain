@@ -1,4 +1,8 @@
+use futures::channel::oneshot;
 use thiserror::Error;
+use tokio::sync::mpsc::error::SendError;
+
+use crate::storage::{db::RocksdbError, store::engine::EngineError, trie::errors::TrieError};
 
 #[derive(Error, Debug)]
 pub enum BootstrapError {
@@ -29,6 +33,9 @@ pub enum BootstrapError {
     #[error("Database operation failed: {0}")]
     DatabaseError(String),
 
+    #[error("Trie error: {0}")]
+    TrieError(#[from] TrieError),
+
     #[error("RPC error: {0}")]
     RpcError(#[from] tonic::Status),
 
@@ -37,4 +44,52 @@ pub enum BootstrapError {
 
     #[error("Account root mismatch: {0}")]
     AccountRootMismatch(String),
+
+    #[error("Parse error: {0}")]
+    ParseError(#[from] std::num::ParseIntError),
+
+    #[error("{0}")]
+    GenericError(String),
+}
+
+impl From<&str> for BootstrapError {
+    fn from(s: &str) -> Self {
+        BootstrapError::GenericError(s.to_string())
+    }
+}
+
+impl From<String> for BootstrapError {
+    fn from(s: String) -> Self {
+        BootstrapError::GenericError(s)
+    }
+}
+
+impl From<RocksdbError> for BootstrapError {
+    fn from(err: RocksdbError) -> Self {
+        BootstrapError::DatabaseError(err.to_string())
+    }
+}
+
+impl From<tonic::transport::Error> for BootstrapError {
+    fn from(err: tonic::transport::Error) -> Self {
+        BootstrapError::PeerConnectionError(err.to_string())
+    }
+}
+
+impl From<EngineError> for BootstrapError {
+    fn from(err: EngineError) -> Self {
+        BootstrapError::TransactionReplayError(err.to_string())
+    }
+}
+
+impl<T> From<SendError<T>> for BootstrapError {
+    fn from(err: SendError<T>) -> Self {
+        BootstrapError::GenericError(err.to_string())
+    }
+}
+
+impl From<oneshot::Canceled> for BootstrapError {
+    fn from(_: oneshot::Canceled) -> Self {
+        BootstrapError::GenericError("DB writer response channel cancelled".to_string())
+    }
 }

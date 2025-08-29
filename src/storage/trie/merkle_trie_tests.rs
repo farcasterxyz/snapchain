@@ -555,4 +555,102 @@ mod tests {
         // Root hashes should match again
         assert_eq!(trie1.root_hash().unwrap(), trie2.root_hash().unwrap());
     }
+
+    #[test]
+    fn test_bulk_insert_overwrite() {
+        let ctx = &Context::new();
+
+        let tmp_path = tempfile::tempdir().unwrap();
+        let db = &RocksDB::new(tmp_path.path().to_str().unwrap());
+        db.open().unwrap();
+
+        let branching_factor = 16;
+        let mut trie = MerkleTrie::new(branching_factor).unwrap();
+        trie.initialize(db).unwrap();
+
+        // 1. Generate 100 keys (set1) and bulk insert them
+        let mut rng = thread_rng();
+        let set1: Vec<Vec<u8>> = (0..100)
+            .map(|_| {
+                let len = rng.gen_range(12..=20);
+                (0..len).map(|_| rand::random::<u8>()).collect()
+            })
+            .collect();
+        let set1_refs: Vec<&[u8]> = set1.iter().map(|v| v.as_slice()).collect();
+
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        trie.insert(ctx, db, &mut txn_batch, set1_refs.clone())
+            .unwrap();
+        db.commit(txn_batch).unwrap();
+
+        // 2. Assert all 100 keys are present
+        for key in &set1 {
+            assert!(
+                trie.exists(ctx, db, key).unwrap(),
+                "Key from set1 should exist"
+            );
+        }
+        assert_eq!(trie.items().unwrap(), 100);
+
+        // 3. Generate 50 more keys (set2). Get 50 keys from the first set and extend set2 to include set1
+        let mut set2: Vec<Vec<u8>> = (0..50)
+            .map(|_| {
+                let len = rng.gen_range(12..=20);
+                (0..len).map(|_| rand::random::<u8>()).collect()
+            })
+            .collect();
+
+        // Get 50 keys from set1 and add them to set2
+        set2.extend(set1.iter().take(50).cloned());
+        // Now set2 has 100 keys (50 new + 50 from set1)
+
+        let set2_refs: Vec<&[u8]> = set2.iter().map(|v| v.as_slice()).collect();
+
+        // 4. Bulk insert set2
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        trie.insert(ctx, db, &mut txn_batch, set2_refs).unwrap();
+        db.commit(txn_batch).unwrap();
+
+        // 5. Assert that all 150 keys are present in the trie
+        // Check all keys from set1 (100 keys)
+        for key in &set1 {
+            assert!(
+                trie.exists(ctx, db, key).unwrap(),
+                "Key from set1 should still exist"
+            );
+        }
+
+        // Check the new keys from set2 (first 50 keys which are new)
+        for key in &set2 {
+            assert!(
+                trie.exists(ctx, db, key).unwrap(),
+                "New key from set2 should exist"
+            );
+        }
+
+        // Total should be 150 unique keys (100 from set1 + 50 new from set2)
+        assert_eq!(trie.items().unwrap(), 150);
+
+        // Create a new trie and insert items linearly
+        let tmp_path_new = tempfile::tempdir().unwrap();
+        let db_new = &RocksDB::new(tmp_path_new.path().to_str().unwrap());
+        db_new.open().unwrap();
+
+        let mut trie_new = MerkleTrie::new(branching_factor).unwrap();
+        trie_new.initialize(db_new).unwrap();
+
+        let mut all_keys = set1.clone();
+        all_keys.extend(set2.clone());
+
+        for key in &all_keys {
+            let mut txn_batch = RocksDbTransactionBatch::new();
+            trie_new
+                .insert(ctx, db_new, &mut txn_batch, vec![key.as_slice()])
+                .unwrap();
+            db_new.commit(txn_batch).unwrap();
+        }
+
+        // Assert that the root hashes match
+        assert_eq!(trie.root_hash().unwrap(), trie_new.root_hash().unwrap());
+    }
 }

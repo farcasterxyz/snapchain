@@ -67,3 +67,14 @@ message FidAccountRootHash {
   uint64 fid = 1;
   bytes account_root_hash = 2;
 }
+
+message ReplicationTriePartStatus {
+  uint32 shard_id = 1;
+  uint64 height = 2;
+  uint32 virtual_trie_shard = 3;
+  uint32 last_response = 4;
+
+  // The last FID that was verified to have account roots matched
+  optional uint64 last_fid = 5;
+  optional string next_page_token = 6;
+}

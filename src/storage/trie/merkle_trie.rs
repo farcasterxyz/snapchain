@@ -16,7 +16,7 @@ pub use trie_node::Context;
 pub const TRIE_DBPATH_PREFIX: &str = "trieDb";
 pub const USERNAME_MAX_LENGTH: u32 = 20;
 
-const TRIE_SHARD_SIZE: u32 = 256; // So it fits into 1 byte
+pub const TRIE_SHARD_SIZE: u32 = 256; // So it fits into 1 byte
 
 pub struct TrieKey {}
 

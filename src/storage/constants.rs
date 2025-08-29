@@ -51,6 +51,9 @@ pub enum RootPrefix {
 
     /* Merkle Trie Metadata */
     MerkleTrieMetadata = 20,
+
+    /* Replication Bootstrap status */
+    ReplicationBootstrapStatus = 21,
 }
 
 /** Copied from the JS code */

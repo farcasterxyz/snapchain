@@ -10,7 +10,7 @@ use crate::proto::{
     OnChainEventType, Protocol, ShardChunk, Transaction, UserDataType, UserNameProof,
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
-use crate::storage::store::account::{CastStore, MessagesPage, VerificationStore};
+use crate::storage::store::account::{CastStore, MessagesPage, StoreOptions, VerificationStore};
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
 use crate::storage::store::migrations::{MigrationContext, MigrationRunner};
@@ -156,13 +156,43 @@ impl ShardEngine {
         fname_signer_address: Option<alloy_primitives::Address>,
         post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
     ) -> Result<ShardEngine, HubError> {
-        let stores = Stores::new(
+        Self::new_with_opts(
+            db,
+            network,
+            trie,
+            shard_id,
+            store_limits,
+            statsd_client,
+            max_messages_per_block,
+            messages_request_tx,
+            fname_signer_address,
+            post_commit_tx,
+            StoreOptions::default(),
+        )
+        .await
+    }
+
+    pub async fn new_with_opts(
+        db: Arc<RocksDB>,
+        network: proto::FarcasterNetwork,
+        trie: merkle_trie::MerkleTrie,
+        shard_id: u32,
+        store_limits: StoreLimits,
+        statsd_client: StatsdClientWrapper,
+        max_messages_per_block: u32,
+        messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
+        fname_signer_address: Option<alloy_primitives::Address>,
+        post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
+        store_opts: StoreOptions,
+    ) -> Result<ShardEngine, HubError> {
+        let stores = Stores::new_with_opts(
             db.clone(),
             shard_id,
             trie,
             store_limits,
             network,
             statsd_client.clone(),
+            store_opts,
         );
 
         // No migrations on devnet (during tests)
@@ -506,6 +536,25 @@ impl ShardEngine {
         self.metrics
             .time_with_shard("replay_proposal_time", elapsed.as_millis() as u64);
         Ok(events)
+    }
+
+    pub(crate) fn replay_replicator_message(
+        &mut self,
+        trie_ctx: &merkle_trie::Context,
+        txn_batch: &mut RocksDbTransactionBatch,
+        trie_keys: Vec<Vec<u8>>,
+    ) -> Result<(), EngineError> {
+        let r = self.stores.trie.insert(
+            &merkle_trie::Context::new(),
+            &self.db,
+            txn_batch,
+            trie_keys
+                .iter()
+                .map(|v| v.as_slice())
+                .collect::<Vec<&[u8]>>(),
+        )?;
+
+        Ok(())
     }
 
     pub(crate) fn replay_snapchain_txn(
