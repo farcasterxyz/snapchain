@@ -6,6 +6,8 @@ use tokio::time::Instant;
 use tracing::{info, warn};
 
 use crate::consensus::consensus::SystemMessage;
+use crate::consensus::validator::StoredValidatorSets;
+use crate::core::util::verify_signatures;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::proto::{hub_event, Block, HubEvent};
 use crate::storage::store::{mempool_poller::MempoolMessage, stores::Stores};
@@ -24,6 +26,7 @@ pub struct BlockReceiver {
     pub system_tx: mpsc::Sender<SystemMessage>,
     pub event_rx: broadcast::Receiver<HubEvent>,
     pub stores: Stores,
+    pub validator_sets: StoredValidatorSets,
 }
 
 impl BlockReceiver {
@@ -55,9 +58,9 @@ impl BlockReceiver {
             return false;
         }
 
-        // TODO(aditi): Validate signatures
+        let commits = block.commits.as_ref().unwrap();
 
-        true
+        return verify_signatures(&commits, &self.validator_sets);
     }
 
     async fn wait_for_confirmation(

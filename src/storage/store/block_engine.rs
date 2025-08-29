@@ -505,6 +505,10 @@ impl BlockEngine {
                         block.events.len() as u64,
                         Metrics::proposal_source_tags(ProposalSource::Commit),
                     );
+                    let max_block_event_seqnum =
+                        self.stores.block_event_store.max_seqnum().unwrap();
+                    self.metrics
+                        .gauge("block_event_seqnum", max_block_event_seqnum);
                     // TODO(aditi): We need to add the post-commit hooks for replication for shard 0.
                 }
             }

@@ -671,6 +671,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     mempool_tx: mempool_tx.clone(),
                     system_tx: system_tx.clone(),
                     event_rx: senders.events_tx.subscribe(),
+                    validator_sets: app_config.consensus.to_stored_validator_sets(*shard_id),
                 };
                 tokio::spawn(async move { block_receiver.run().await });
             }

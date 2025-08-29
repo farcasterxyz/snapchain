@@ -1,4 +1,7 @@
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
+use crate::consensus::validator::StoredValidatorSet;
+use crate::consensus::validator::StoredValidatorSets;
+use crate::core::types::ShardId;
 use crate::mempool::mempool::MempoolRequest;
 use crate::proto;
 use crate::proto::Block;
@@ -111,6 +114,16 @@ impl Config {
         }
 
         panic!("No validator configuration provided")
+    }
+
+    pub fn to_stored_validator_sets(&self, shard_id: u32) -> StoredValidatorSets {
+        let validator_set_config = self.get_validator_set_config(shard_id);
+        let validator_sets = validator_set_config
+            .iter()
+            .map(|config| StoredValidatorSet::new(ShardId::new(shard_id), &config))
+            .collect();
+
+        StoredValidatorSets::new(shard_id, validator_sets)
     }
 }
 

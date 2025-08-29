@@ -364,7 +364,7 @@ impl NodeForTest {
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
         let node = SnapchainNode::create(
             keypair.clone(),
-            consensus_config,
+            consensus_config.clone(),
             peer_id,
             gossip_tx.clone(),
             shard_decision_tx,
@@ -481,6 +481,7 @@ impl NodeForTest {
                 mempool_tx: mempool_tx.clone(),
                 system_tx: system_tx.clone(),
                 event_rx: senders.events_tx.subscribe(),
+                validator_sets: consensus_config.to_stored_validator_sets(shard_id),
             };
             let handle = tokio::spawn(async move { block_receiver.run().await });
             join_handles.push(handle);

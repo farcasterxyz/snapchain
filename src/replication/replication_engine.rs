@@ -1,6 +1,6 @@
 use crate::{
     consensus::proposer::ProposalSource,
-    core::util::FarcasterTime,
+    core::{error::HubError, util::FarcasterTime},
     proto,
     storage::{
         db::RocksDbTransactionBatch,
@@ -36,6 +36,11 @@ impl ShardEngine {
         let db = self.get_stores().db.clone();
         let mut tx_batch = RocksDbTransactionBatch::new();
         let ctx = merkle_trie::Context::new();
+        let max_block_event_seqnum = self
+            .get_stores()
+            .block_event_store
+            .max_seqnum()
+            .map_err(|err| HubError::internal_db_error(&err.to_string()))?;
 
         let (_, _, validation_errors, _) = self
             .replay_snapchain_txn(
@@ -47,6 +52,7 @@ impl ShardEngine {
                 // EngineVersion::version_for(snapshot_block_timestamp, network)
                 EngineVersion::current(self.network),
                 &FarcasterTime::current(),
+                max_block_event_seqnum,
             )
             .unwrap();
 
