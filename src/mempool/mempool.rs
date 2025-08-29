@@ -197,11 +197,7 @@ impl proto::ValidatorMessage {
             MempoolKey::new(
                 MempoolMessageKind::ValidatorMessage,
                 block_event.block_timestamp(),
-                format!(
-                    "{}-{}",
-                    block_event.block_number(),
-                    block_event.event_index()
-                ),
+                block_event.seqnum().to_string(),
             )
         } else {
             MempoolKey::new(
