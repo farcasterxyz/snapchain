@@ -333,7 +333,6 @@ impl NodeForTest {
         // consensus_config.precommit_time = time::Duration::from_millis(100);
         // consensus_config.step_delta = time::Duration::from_millis(100);
         consensus_config.sync_status_update_interval = time::Duration::from_millis(250); // This is aggressive but makes sync faster in the tests
-        consensus_config.heartbeat_block_interval = Some(3);
 
         let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
         let fc_network = FarcasterNetwork::Devnet;
