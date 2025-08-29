@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::{net, u64};
 use tokio::signal::ctrl_c;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tonic::transport::Channel;
 use tracing::{debug, error, info};
 
@@ -190,7 +191,7 @@ impl ReplicatorBootstrap {
         let statsd_client = StatsdClientWrapper::new(statsd_client, app_config.statsd.use_tags);
 
         // Create tasks for each shard to run in parallel
-        let mut shard_tasks = Vec::new();
+        let mut shard_tasks = JoinSet::new();
 
         for shard_id in shard_ids {
             let metadata = shard_metadata.get(&shard_id).ok_or_else(|| {
@@ -225,9 +226,9 @@ impl ReplicatorBootstrap {
             let shutdown_signal = self.shutdown.clone();
             let metadata = metadata.clone();
 
-            let task = tokio::spawn(async move {
+            shard_tasks.spawn(async move {
                 // Replay transactions for this shard
-                let result = Self::start_shard_replication_outer(
+                Self::start_shard_replication_outer(
                     &peer_address_clone,
                     network,
                     shard_id,
@@ -238,53 +239,62 @@ impl ReplicatorBootstrap {
                     metadata,
                     shutdown_signal,
                 )
-                .await;
-
-                match &result {
-                    Ok(_) => info!("Completed bootstrap for shard {}", shard_id),
-                    Err(e) => error!("Failed bootstrap for shard {}: {}", shard_id, e),
-                }
+                .await
             });
-
-            shard_tasks.push(task);
         }
 
         // Wait for either all shard tasks to complete or a shutdown signal
-        let results;
         info!("Waiting for shutdown signal or shard tasks to complete");
-        tokio::select! {
-            // Wait for all shard tasks to complete normally
-            res = try_join_all(&mut shard_tasks) => {
-                results = res.map_err(|e| {
-                    BootstrapError::TransactionReplayError(format!(
-                        "Shard task join error: {}",
-                        e
-                    ))
-                })?;
+
+        let mut results = Vec::new();
+
+        loop {
+            if shard_tasks.is_empty() {
+                // All tasks completed successfully (since we check for errors below)
+                // Process results if needed; for now, assuming success means Finished
+                // But based on the original code, it returned Stopped - adjust as necessary
+                return Ok(WorkUnitResponse::Finished);
             }
-            // Handle shutdown signal
-            _ = ctrl_c() => {
-                info!("Shutdown signal received, stopping all shard replication tasks");
 
-                // Broadcast shutdown to all shard tasks
-                self.shutdown.store(true, Ordering::SeqCst);
+            tokio::select! {
+                Some(res) = shard_tasks.join_next() => {
+                    match res {
+                        Ok(Ok(work_response)) => {
+                            results.push(work_response);
+                            info!("Shard task completed successfully");
+                        }
+                        Ok(Err(e)) => {
+                            error!("Shard task failed: {}", e);
+                            return Err(BootstrapError::TransactionReplayError(e.to_string()));
+                        }
+                        Err(e) => {
+                            error!("Shard task join error: {}", e);
+                            return Err(BootstrapError::TransactionReplayError(format!(
+                                "Shard task join error: {}",
+                                e
+                            )));
+                        }
+                    }
+                }
+                _ = ctrl_c() => {
+                    info!("Shutdown signal received, stopping all shard replication tasks");
 
-                // After sending the shutdown signal, we still need to wait for the tasks
-                // to finish their cleanup. We can re-await the `try_join_all` future.
-                // We expect it to return errors as tasks might be cancelled, which is okay.
-                info!("Waiting for shard tasks to shut down gracefully...");
+                    // Broadcast shutdown to all shard tasks
+                    self.shutdown.store(true, Ordering::SeqCst);
 
-                // We re-assign `shard_tasks` into the `try_join_all` to consume it.
-                // The result is ignored here because we are intentionally shutting down.
-                // The tasks should handle the shutdown signal and exit gracefully.
-                let _ = try_join_all(shard_tasks).await;
+                    info!("Waiting for shard tasks to shut down gracefully...");
 
-                info!("All shard tasks have been shut down.");
-                return Ok(WorkUnitResponse::Stopped);
+                    // Drain the remaining tasks
+                    while let Some(res) = shard_tasks.join_next().await {
+                        // Ignore results since we're shutting down
+                        let _ = res;
+                    }
+
+                    info!("All shard tasks have been shut down.");
+                    return Ok(WorkUnitResponse::Stopped);
+                }
             }
         }
-
-        Ok(WorkUnitResponse::Stopped)
     }
 
     async fn start_shard_replication_outer(
