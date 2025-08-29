@@ -5,7 +5,7 @@ use crate::mempool::routing::{MessageRouter, ShardRouter};
 use crate::proto;
 use crate::proto::DbMerkleTrieMetadata;
 use crate::storage::constants::RootPrefix;
-use crate::storage::store::account::{make_fid_key, IntoU8, FID_BYTES};
+use crate::storage::store::account::{make_fid_key, read_fid_key, IntoU8, FID_BYTES};
 use crate::storage::trie::{trie_node, util};
 use prost::Message as _;
 use std::collections::HashMap;
@@ -90,20 +90,17 @@ impl TrieKey {
         }
 
         let virtual_shard = key[0];
-        let fid = u64::from_be_bytes(key[1..6].try_into().unwrap());
-        if key.len() == 6 {
-            return Ok((virtual_shard, fid, None, None, vec![]));
-        }
+        let fid = read_fid_key(&key, 1);
 
-        let (onchain_message_type, message_type) = if key[6] < (1 << 3) {
+        let (onchain_message_type, message_type) = if key[5] < (1 << 3) {
             // On-chain event
-            (Some(key[6]), None)
+            (Some(key[5]), None)
         } else {
             // Regular message
-            (None, Some(key[6] >> 3))
+            (None, Some(key[5] >> 3))
         };
 
-        let rest = key[7..].to_vec();
+        let rest = key[6..].to_vec();
 
         Ok((virtual_shard, fid, onchain_message_type, message_type, rest))
     }

@@ -404,14 +404,14 @@ impl Replicator {
                         // onchain event
 
                         // The "rest" vec contains type at byte 0, transaction_hash in bytes 1-33 and log_index in byte 34+
-                        let onchain_event_type = OnChainEventType::try_from(rest[0] as i32)
-                            .map_err(|e| {
+                        let onchain_event_type =
+                            OnChainEventType::try_from(onchain_event_type as i32).map_err(|e| {
                                 ReplicationError::InvalidMessage(format!(
                                     "Invalid on-chain event type: {}. Error: {}",
                                     rest[0], e
                                 ))
                             })?;
-                        let transaction_hash = rest[1..33].to_vec();
+                        let transaction_hash = rest[..32].to_vec();
 
                         let cache = self.build_fid_onchain_message_type_cache(
                             &stores,

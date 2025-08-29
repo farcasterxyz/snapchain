@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
+use tracing::{error, info};
 
 use crate::mempool::routing;
 use crate::proto;
@@ -42,7 +43,7 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
                     height,
                     timestamp,
                 })
-                .collect(),
+                .collect::<Vec<_>>(),
             Err(e) => {
                 return Err(Status::internal(format!(
                     "Failed to get snapshot metadata: {}",
