@@ -562,6 +562,7 @@ impl Mempool {
             vec![fid_shard]
         };
 
+        let mut errors = vec![];
         for shard_id in shard_ids {
             if let Err(err) = self
                 .insert_into_shard(shard_id, message.clone(), source.clone())
@@ -571,8 +572,14 @@ impl Mempool {
                     shard_id = shard_id.to_string(),
                     "Unable to insert message into mempool for shard: {}",
                     err.to_string()
-                )
+                );
+                errors.push(err)
             }
+        }
+
+        if !errors.is_empty() {
+            // Just pick the first error because we need to return some error
+            return Err(errors[0].clone());
         }
 
         Ok(())
