@@ -18,6 +18,8 @@ message ShardSnapshotMetadata {
   uint32 shard_id = 1;
   uint64 height = 2;
   uint64 timestamp = 3;
+  optional ShardChunk shard_chunk = 5;
+  optional Block block = 6;
 }
 
 message GetShardSnapshotMetadataResponse {

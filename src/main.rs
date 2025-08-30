@@ -91,6 +91,7 @@ async fn start_servers(
             replicator,
             Box::new(routing::ShardRouter {}),
             app_config.consensus.num_shards,
+            block_store.clone(),
         );
         let service = ReplicationServiceServer::new(server);
         Some(service)
