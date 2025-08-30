@@ -32,6 +32,7 @@ pub enum CacheEntry {
 /// Cache all messages for (fid, (user/onchain)message_type) by hash, so we can easily get to a message from its hash. This is needed
 /// because the Trie only has the hash, but the Messages are stored in the DB by ts_hash, and the trie doesn't have a timestamp (the "ts" part)
 /// So, there's no way to read a message from the DB from just the (fid, hash). Hence this cache.
+/// Note that the cache itself is an Arc, so this object can be cloned without a memory penalty.
 #[derive(Clone)]
 pub struct FidMessageTypeCache {
     pub fid: u64,
@@ -521,6 +522,25 @@ impl Replicator {
 
     pub fn get_snapshot_metadata(&self, shard: u32) -> Result<Vec<(u64, u64)>, ReplicationError> {
         self.stores.get_metadata(shard)
+    }
+
+    pub fn get_shard_chunk_by_height(
+        &self,
+        shard_id: u32,
+        height: u64,
+    ) -> Result<Option<proto::ShardChunk>, ReplicationError> {
+        let stores = match self.stores.get(shard_id, height) {
+            Some(stores) => stores,
+            None => {
+                // This case is valid, it just means no snapshot exists for this height.
+                return Ok(None);
+            }
+        };
+
+        stores
+            .shard_store
+            .get_chunk_by_height(height)
+            .map_err(|e| ReplicationError::InternalError(e.to_string()))
     }
 
     // Calculates the oldest timestamp that is still valid for snapshots.

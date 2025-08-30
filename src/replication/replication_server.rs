@@ -6,23 +6,29 @@ use tracing::{error, info};
 use crate::mempool::routing;
 use crate::proto;
 use crate::replication::replicator::Replicator;
+use crate::storage::store::BlockStore;
 
 pub struct ReplicationServer {
     replicator: Arc<Replicator>,
     message_router: Box<dyn routing::MessageRouter>,
     num_shards: u32,
+    block_store: BlockStore,
 }
 
 impl ReplicationServer {
+    const MESSAGE_LIMIT: usize = 2_000; // Maximum number of messages to fetch per page
+
     pub fn new(
         replicator: Arc<Replicator>,
         message_router: Box<dyn routing::MessageRouter>,
         num_shards: u32,
+        block_store: BlockStore,
     ) -> Self {
         ReplicationServer {
             replicator,
             message_router,
             num_shards,
+            block_store,
         }
     }
 }
@@ -36,14 +42,42 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
         let request = request.into_inner();
 
         let snapshots = match self.replicator.get_snapshot_metadata(request.shard_id) {
-            Ok(metadata) => metadata
-                .into_iter()
-                .map(|(height, timestamp)| proto::ShardSnapshotMetadata {
-                    shard_id: request.shard_id,
-                    height,
-                    timestamp,
-                })
-                .collect::<Vec<_>>(),
+            Ok(metadata) => {
+                let mut snapshots = Vec::new();
+                for (height, timestamp) in metadata {
+                    // Fetch the block for the given height
+                    let block = if request.shard_id == 0 {
+                        self.block_store.get_block_by_height(height).map_err(|e| {
+                            Status::internal(format!("Failed to get block by height: {}", e))
+                        })?
+                    } else {
+                        None
+                    };
+
+                    // Fetch the ShardChunk for the given shard and height from the replicator for non-zero shard_id
+                    let shard_chunk = if request.shard_id != 0 {
+                        self.replicator
+                            .get_shard_chunk_by_height(request.shard_id, height)
+                            .map_err(|e| {
+                                Status::internal(format!(
+                                    "Failed to get shard chunk by height: {}",
+                                    e
+                                ))
+                            })?
+                    } else {
+                        None
+                    };
+
+                    snapshots.push(proto::ShardSnapshotMetadata {
+                        shard_id: request.shard_id,
+                        height,
+                        timestamp,
+                        block,
+                        shard_chunk,
+                    });
+                }
+                snapshots
+            }
             Err(e) => {
                 return Err(Status::internal(format!(
                     "Failed to get snapshot metadata: {}",
