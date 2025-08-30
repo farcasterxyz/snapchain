@@ -595,16 +595,16 @@ impl ShardEngine {
 
         if inserts.len() != 1 {
             return Err(EngineError::ReplicatorError(format!(
-                "Message {:?} generated incorrect number of inserts from Hub Event {:?}",
+                "Message generated incorrect number of inserts. Message:{:?}\nHubEvent {:?}",
                 trie_message, hub_event
             )));
         }
 
         if !deletes.is_empty() {
-            return Err(EngineError::ReplicatorError(format!(
-                "Message {:?} generated deletes. HubEvent {:?}",
+            warn!(
+                "Message generated deletes, ignoring them. Message {:?}\nHubEvent {:?}",
                 trie_message, hub_event
-            )));
+            );
         }
 
         Ok((fid, inserts[0].clone(), hub_event))

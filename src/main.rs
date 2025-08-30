@@ -304,9 +304,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         match app_config.snapshot.bootstrap_method {
             BootstrapMethod::Replicate => {
                 info!("Starting node with replication bootstrap");
-                let replicator = ReplicatorBootstrap::new();
+                let replicator = ReplicatorBootstrap::new(&app_config);
 
-                match replicator.bootstrap_using_replication(&app_config).await {
+                match replicator.bootstrap_using_replication().await {
                     Ok(r) => {
                         // TODO: Process r
 

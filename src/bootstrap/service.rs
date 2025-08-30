@@ -1,24 +1,32 @@
 use crate::bootstrap::error::BootstrapError;
 use crate::cfg::Config;
-use crate::proto::replication_service_client::ReplicationServiceClient;
 use crate::proto::{
-    self, GetShardSnapshotMetadataRequest, GetShardTransactionsRequest, ReplicationTriePartStatus,
-    ShardSnapshotMetadata,
+    self, replication_service_client::ReplicationServiceClient, GetShardSnapshotMetadataRequest,
+    GetShardTransactionsRequest, ReplicationTriePartStatus, ShardSnapshotMetadata,
 };
-use crate::storage::constants::RootPrefix;
-use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
-use crate::storage::store::account::{make_fid_key, StoreOptions};
-use crate::storage::store::engine::{EngineError, ShardEngine};
-use crate::storage::store::stores::StoreLimits;
-use crate::storage::trie::merkle_trie::{self, TrieKey};
+use crate::storage::trie::errors::TrieError;
+use crate::storage::{
+    constants::RootPrefix,
+    db::{RocksDB, RocksDbTransactionBatch},
+    store::{
+        account::{make_fid_key, StoreOptions},
+        engine::{EngineError, ShardEngine},
+        stores::StoreLimits,
+    },
+    trie::merkle_trie::{self, TrieKey},
+};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use futures::channel::oneshot;
-use prost::Message;
-use std::collections::HashMap;
-use std::net::UdpSocket;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::u64;
+use prost::Message as _;
+use std::{
+    collections::HashMap,
+    net::UdpSocket,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    u64,
+};
 use tokio::signal::ctrl_c;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -52,6 +60,7 @@ struct DbCommitRequest {
     response_tx: oneshot::Sender<Result<DbCommitResponse, BootstrapError>>,
 }
 
+#[derive(Clone)]
 struct WorkUnit {
     current_status: proto::ReplicationTriePartStatus,
     peer_address: String,
@@ -59,17 +68,46 @@ struct WorkUnit {
     db_commit_tx: mpsc::UnboundedSender<DbCommitRequest>,
 }
 
+#[derive(Clone)]
 pub struct ReplicatorBootstrap {
     shutdown: Arc<AtomicBool>,
+    network: crate::proto::FarcasterNetwork,
+    trie_branching_factor: u32,
+    statsd_client: StatsdClientWrapper,
+    shard_ids: Vec<u32>,
+    rocksdb_dir: String,
 }
 
 const WORK_UNIT_POSTFIX: u8 = 1u8;
 const FID_ACCOUNT_ROOT_POSTFIX: u8 = 2u8;
 
 impl ReplicatorBootstrap {
-    pub fn new() -> Self {
+    pub fn new(app_config: &Config) -> Self {
+        let (statsd_host, statsd_port) = match app_config.statsd.addr.split_once(':') {
+            Some((host, port)) => {
+                if host.is_empty() || port.is_empty() {
+                    panic!("statsd address must be in the format host:port");
+                }
+                (host.to_string(), port.parse::<u16>().unwrap())
+            }
+            None => panic!("invalid statsd address: {}", app_config.statsd.addr),
+        };
+
+        let host = (statsd_host, statsd_port);
+        let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
+        let sink = cadence::UdpMetricSink::from(host, socket).unwrap();
+        let statsd_client_inner =
+            cadence::StatsdClient::builder(app_config.statsd.prefix.as_str(), sink).build();
+        let statsd_client =
+            StatsdClientWrapper::new(statsd_client_inner, app_config.statsd.use_tags);
+
         Self {
             shutdown: Arc::new(AtomicBool::new(false)),
+            network: app_config.fc_network,
+            trie_branching_factor: app_config.trie_branching_factor,
+            statsd_client,
+            shard_ids: app_config.consensus.shard_ids.clone(),
+            rocksdb_dir: app_config.rocksdb_dir.clone(),
         }
     }
 
@@ -188,10 +226,7 @@ impl ReplicatorBootstrap {
     }
 
     /// Bootstrap a node from replication instead of snapshot download
-    pub async fn bootstrap_using_replication(
-        &self,
-        app_config: &Config,
-    ) -> Result<WorkUnitResponse, BootstrapError> {
+    pub async fn bootstrap_using_replication(&self) -> Result<WorkUnitResponse, BootstrapError> {
         info!("Starting replication-based bootstrap");
 
         // Fetch metadata and determine target height
@@ -201,36 +236,13 @@ impl ReplicatorBootstrap {
         let shard_metadata = {
             let mut client = ReplicationServiceClient::connect(peer_address).await?;
 
-            self.get_shard_snapshots(&mut client, app_config.consensus.shard_ids.to_vec())
+            self.get_shard_snapshots(&mut client, self.shard_ids.clone())
                 .await?
         };
 
         // Initialize databases and replay transactions for each shard
         // Note: We're not replicating shard 0 (block shard) for now as requested
-        let shard_ids = app_config.consensus.shard_ids.clone();
-
-        // Initialize statsd client for engines
-        let (statsd_host, statsd_port) = match app_config.statsd.addr.split_once(':') {
-            Some((host, port)) => {
-                if host.is_empty() || port.is_empty() {
-                    return Err("statsd address must be in the format host:port".into());
-                }
-                Ok((host.to_string(), port.parse::<u16>()?))
-            }
-            None => Err(format!(
-                "invalid statsd address: {}",
-                app_config.statsd.addr
-            )),
-        }?;
-
-        let host = (statsd_host, statsd_port);
-        let socket = UdpSocket::bind("0.0.0.0:0")?;
-        let sink = cadence::UdpMetricSink::from(host, socket).map_err(|e| {
-            BootstrapError::GenericError(format!("Failed to create UDP metric sink: {}", e))
-        })?;
-        let statsd_client =
-            cadence::StatsdClient::builder(app_config.statsd.prefix.as_str(), sink).build();
-        let statsd_client = StatsdClientWrapper::new(statsd_client, app_config.statsd.use_tags);
+        let shard_ids = self.shard_ids.clone();
 
         // Create tasks for each shard to run in parallel
         let mut shard_tasks = JoinSet::new();
@@ -254,34 +266,30 @@ impl ReplicatorBootstrap {
 
             // Clone necessary data for the spawned task
             let peer_address_clone = peer_address.to_string();
-            let network = app_config.fc_network;
-            let trie_branching_factor = app_config.trie_branching_factor;
-            let statsd_client_clone = statsd_client.clone();
-            let rocksdb_dir = format!("{}.snapshot", app_config.rocksdb_dir.clone());
+            let rocksdb_dir = format!("{}.snapshot", self.rocksdb_dir);
 
             info!(
                 "Bootstrapping shard {} at height {} with trie_branching_factor {}",
-                shard_id, target_height, trie_branching_factor
+                shard_id, target_height, self.trie_branching_factor
             );
 
             // Spawn a task for this shard
             let shutdown_signal = self.shutdown.clone();
             let metadata = metadata.clone();
 
+            let self_clone = self.clone();
             shard_tasks.spawn(async move {
                 // Replay transactions for this shard
-                Self::start_shard_replication_outer(
-                    &peer_address_clone,
-                    network,
-                    shard_id,
-                    trie_branching_factor,
-                    target_height,
-                    &statsd_client_clone,
-                    &rocksdb_dir,
-                    metadata,
-                    shutdown_signal,
-                )
-                .await
+                self_clone
+                    .start_shard_replication_outer(
+                        &peer_address_clone,
+                        shard_id,
+                        target_height,
+                        &rocksdb_dir,
+                        metadata,
+                        shutdown_signal,
+                    )
+                    .await
             });
         }
 
@@ -340,12 +348,10 @@ impl ReplicatorBootstrap {
     }
 
     async fn start_shard_replication_outer(
+        &self,
         peer_address: &str,
-        network: crate::proto::FarcasterNetwork,
         shard_id: u32,
-        trie_branching_factor: u32,
-        target_height: u64,
-        statsd_client: &StatsdClientWrapper,
+        _target_height: u64,
         rocksdb_dir: &str,
         metadata: ShardSnapshotMetadata,
         shutdown_signal: Arc<AtomicBool>,
@@ -356,18 +362,16 @@ impl ReplicatorBootstrap {
                 return Ok(WorkUnitResponse::Stopped);
             }
 
-            let result = Self::start_shard_replication(
-                peer_address,
-                network,
-                shard_id,
-                trie_branching_factor,
-                target_height,
-                statsd_client,
-                rocksdb_dir,
-                metadata.clone(),
-                shutdown_signal.clone(),
-            )
-            .await?;
+            let result = self
+                .start_shard_replication(
+                    peer_address,
+                    shard_id,
+                    _target_height,
+                    rocksdb_dir,
+                    metadata.clone(),
+                    shutdown_signal.clone(),
+                )
+                .await?;
 
             match result {
                 WorkUnitResponse::DbStopped => {
@@ -384,7 +388,9 @@ impl ReplicatorBootstrap {
                 WorkUnitResponse::PartiallyComplete | WorkUnitResponse::Finished => {
                     info!("Shard replication completed for shard {}", shard_id);
 
-                    // TODO: PostProcess the trie
+                    // PostProcess the trie
+                    self.post_process_trie(rocksdb_dir, shard_id, metadata)
+                        .await?;
 
                     return Ok(result);
                 }
@@ -397,12 +403,10 @@ impl ReplicatorBootstrap {
     }
 
     async fn start_shard_replication(
+        &self,
         peer_address: &str,
-        network: crate::proto::FarcasterNetwork,
         shard_id: u32,
-        trie_branching_factor: u32,
-        target_height: u64,
-        statsd_client: &StatsdClientWrapper,
+        _target_height: u64,
         rocksdb_dir: &str,
         metadata: ShardSnapshotMetadata,
         shutdown_signal: Arc<AtomicBool>,
@@ -467,28 +471,18 @@ impl ReplicatorBootstrap {
             info!("DB writer thread finished for shard {}", shard_id);
         });
 
-        let mut stopped = false;
-
         // Go over each Trie's Virtual Trie Shard (vts) and sync for it.
         let mut vts_results = vec![WorkUnitResponse::None; merkle_trie::TRIE_SHARD_SIZE as usize];
-        for vts in 0..merkle_trie::TRIE_SHARD_SIZE {
-            if shutdown_signal.load(Ordering::SeqCst) {
-                info!(
-                    "Shutdown signal received, stopping processing for shard {}",
-                    shard_id
-                );
-                stopped = true;
-                break;
-            }
+        let mut work_units: Vec<(u32, WorkUnit)> = vec![];
 
+        for vts in 0..merkle_trie::TRIE_SHARD_SIZE {
             // 1. Read the progress for this from the DB
             let current_status = Self::get_or_gen_vts_status(&db, shard_id, vts, &metadata)?;
             if current_status.last_response == WorkUnitResponse::Finished as u32 {
                 debug!("Shard {} vts {} already finished, skipping", shard_id, vts);
+                vts_results[vts as usize] = WorkUnitResponse::Finished;
                 continue;
             }
-
-            info!("Shard {} vts loop for vts: {}", shard_id, vts);
 
             // 2. Create a work item for this VSI
             let peer_address = peer_address.to_string();
@@ -502,26 +496,71 @@ impl ReplicatorBootstrap {
                 db_commit_tx,
             };
 
-            // 3. Start iterating over this VSI and merging messages
-            let result = Self::process_vts_work_item(
-                work_item,
-                network,
-                shard_id,
-                trie_branching_factor,
-                target_height,
-                statsd_client,
-                db.clone(),
-            )
-            .await?;
+            work_units.push((vts, work_item));
+        }
 
-            vts_results[vts as usize] = result.clone();
-            if let WorkUnitResponse::DbStopped = result {
+        // Now process the collected work units, up to 2 at a time
+        let mut join_set: JoinSet<Result<(u32, WorkUnitResponse), BootstrapError>> = JoinSet::new();
+        let mut work_index = 0;
+
+        let mut stop_more_work = false;
+
+        loop {
+            if shutdown_signal.load(Ordering::SeqCst) {
+                stop_more_work = true;
+            }
+
+            // Spawn up to 2 tasks if not stopped
+            while !stop_more_work && join_set.len() < 1 && work_index < work_units.len() {
+                let (vts, work_item) = work_units[work_index].clone();
+                let db_clone = db.clone();
+
+                let self_clone = self.clone();
+                join_set.spawn(async move {
+                    self_clone
+                        .process_vts_work_item(work_item, db_clone)
+                        .await
+                        .map(|res| (vts, res))
+                });
+
+                work_index += 1;
+            }
+
+            if join_set.is_empty() {
+                // No more tasks to process. We are either stopped or finished, either way just exit
                 break;
+            }
+
+            // Wait for at least one task to complete
+
+            if let Some(join_res) = join_set.join_next().await {
+                match join_res {
+                    Ok(Ok((vts, result))) => {
+                        vts_results[vts as usize] = result.clone();
+                        if result == WorkUnitResponse::DbStopped {
+                            stop_more_work = true;
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        // Propagate errors immediately, as in the original
+                        return Err(e);
+                    }
+                    Err(e) => {
+                        if !e.is_cancelled() {
+                            error!("Task join error: {}", e);
+                            return Err(BootstrapError::GenericError(format!(
+                                "Task join error: {}",
+                                e
+                            )));
+                        }
+                    }
+                }
             }
         }
 
-        // Drop the original sender so the DB writer thread can exit
+        // Drop the original sender and any unfinished work_units so the DB writer thread can exit
         drop(db_commit_tx);
+        drop(work_units);
 
         // Wait for the DB writer thread to finish
         if let Err(e) = db_writer_task.await {
@@ -533,10 +572,6 @@ impl ReplicatorBootstrap {
         }
 
         db.close();
-
-        if stopped {
-            return Ok(WorkUnitResponse::Stopped);
-        }
 
         // If any of the vts_results is "DbStopped", then return stopped
         if vts_results
@@ -551,38 +586,37 @@ impl ReplicatorBootstrap {
             return Ok(WorkUnitResponse::Finished);
         }
 
-        // Say we are partially complete
-        return Ok(WorkUnitResponse::PartiallyComplete);
+        // Say we are stopped, and can resume
+        return Ok(WorkUnitResponse::Stopped);
     }
 
     async fn process_vts_work_item(
+        &self,
         work_item: WorkUnit,
-        network: crate::proto::FarcasterNetwork,
-        shard_id: u32,
-        trie_branching_factor: u32,
-        target_height: u64,
-        statsd_client: &StatsdClientWrapper,
         db: Arc<RocksDB>,
     ) -> Result<WorkUnitResponse, BootstrapError> {
+        let shard_id = work_item.current_status.shard_id;
+        info!(
+            "Processing Shard:{} vts: {}",
+            shard_id, work_item.current_status.virtual_trie_shard
+        );
+
         // 1. Create the engine and trie objects
         let mut status = work_item.current_status;
-
-        let network = network.clone();
-        let statsd_client = statsd_client.clone();
 
         let store_opts = StoreOptions {
             conflict_free: true, // All messages will be free of conflicts, since these are from a already-merged snapshot
             save_hub_events: false, // No need for HubEvents, which are emitted only from "live" nodes
         };
 
-        let trie = merkle_trie::MerkleTrie::new(trie_branching_factor).unwrap();
+        let trie = merkle_trie::MerkleTrie::new(self.trie_branching_factor).unwrap();
         let mut thread_engine = ShardEngine::new_with_opts(
             db.clone(),
-            network,
+            self.network,
             trie,
             shard_id,
             StoreLimits::default(),
-            statsd_client,
+            self.statsd_client.clone(),
             256,
             None,
             None,
@@ -661,9 +695,14 @@ impl ReplicatorBootstrap {
                         // We'll ignore duplicate errors. If the message is already in the DB, then great, we move on.
                         if let EngineError::StoreError(he) = &e {
                             if he.code != "bad_request.duplicate" {
+                                error!(
+                                    "store/error: Failed to replay message with error: {:?}",
+                                    he
+                                );
                                 return Err(e.into());
                             }
                         } else {
+                            error!("other/error: Failed to replay message with error: {:?}", e);
                             return Err(e.into());
                         }
                     }
@@ -775,19 +814,51 @@ impl ReplicatorBootstrap {
 
             if expected_root != actual_root {
                 return Err(BootstrapError::AccountRootMismatch(format!(
-                    "Account root mismatch for fid {}. expected {}, got {}",
+                    "Account root mismatch for fid  ({}-{}){}. expected {}, got {}",
+                    shard_id,
+                    virtual_trie_shard,
                     fid,
                     hex::encode(expected_root),
                     hex::encode(actual_root)
                 )));
             } else {
                 info!(
-                    "Account root matched for fid {}: {}",
+                    "Account root matched for fid ({}-{}){}: {}",
+                    shard_id,
+                    virtual_trie_shard,
                     fid,
                     hex::encode(actual_root)
                 );
             }
         }
+
+        Ok(())
+    }
+
+    async fn post_process_trie(
+        &self,
+        rocksdb_dir: &str,
+        shard_id: u32,
+        metadata: ShardSnapshotMetadata,
+    ) -> Result<(), TrieError> {
+        info!("PPTrie: Post-processing trie for shard {}.", shard_id);
+
+        let db = RocksDB::open_bulk_write_shard_db(&rocksdb_dir, shard_id);
+        let mut trie = merkle_trie::MerkleTrie::new(self.trie_branching_factor)?;
+        trie.initialize(&db)?;
+
+        // TODO: Do attach_to_root and recalculate_hashes on all the vts
+
+        // Get the trie root and see if it matches
+        let expected_shard_root = metadata.shard_chunk.unwrap().header.unwrap().shard_root;
+        let trie_root = trie.root_hash().unwrap();
+
+        info!(
+            "PPTrie: Finished post-processing trie for shard {}. expected: {:?} actual {:?}",
+            shard_id,
+            hex::encode(expected_shard_root),
+            hex::encode(trie_root)
+        );
 
         Ok(())
     }
