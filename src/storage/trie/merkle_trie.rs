@@ -457,7 +457,7 @@ impl MerkleTrie {
     fn get_node(
         &self,
         db: &RocksDB,
-        txn_batch: &mut RocksDbTransactionBatch,
+        txn_batch: &RocksDbTransactionBatch,
         prefix: &[u8],
     ) -> Option<TrieNode> {
         let prefix = (self.branch_xform.expand)(prefix);
@@ -483,7 +483,7 @@ impl MerkleTrie {
     pub fn get_hash(
         &self,
         db: &RocksDB,
-        txn_batch: &mut RocksDbTransactionBatch,
+        txn_batch: &RocksDbTransactionBatch,
         prefix: &[u8],
     ) -> Result<Vec<u8>, TrieError> {
         if self.outdated_hash {
@@ -499,7 +499,7 @@ impl MerkleTrie {
     pub fn get_count(
         &self,
         db: &RocksDB,
-        txn_batch: &mut RocksDbTransactionBatch,
+        txn_batch: &RocksDbTransactionBatch,
         prefix: &[u8],
     ) -> Result<u64, TrieError> {
         if self.outdated_hash {

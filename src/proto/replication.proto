@@ -77,8 +77,7 @@ message ReplicationTriePartStatus {
   uint32 virtual_trie_shard = 3;
   uint32 last_response = 4;
 
-  // The last FID that had messages. This FID's messages might be incomplete, and might be in the next page, 
-  // so it will need to be verified after the next page is fetched and merged
+  // The last FID that was verified to have account roots matched
   optional uint64 last_fid = 5;
   optional string next_page_token = 6;
 }
