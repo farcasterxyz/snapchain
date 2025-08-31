@@ -1,5 +1,8 @@
 use crate::bootstrap::error::BootstrapError;
 use crate::cfg::Config;
+use crate::core::validations;
+use crate::core::validations::message::validate_message_hash;
+use crate::proto::shard_trie_entry_with_message::TrieMessage;
 use crate::proto::{
     self, replication_service_client::ReplicationServiceClient, GetShardSnapshotMetadataRequest,
     GetShardTransactionsRequest, ReplicationTriePartStatus, ShardSnapshotMetadata,
@@ -16,6 +19,7 @@ use crate::storage::{
     trie::merkle_trie::{self, TrieKey},
 };
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use ed25519_dalek::{Signature, VerifyingKey};
 use futures::channel::oneshot;
 use prost::Message as _;
 use std::{
@@ -532,7 +536,6 @@ impl ReplicatorBootstrap {
             }
 
             // Wait for at least one task to complete
-
             if let Some(join_res) = join_set.join_next().await {
                 match join_res {
                     Ok(Ok((vts, result))) => {
@@ -668,12 +671,15 @@ impl ReplicatorBootstrap {
             let mut trie_keys = vec![];
             let num_messages = trie_messages.len();
 
+            // Validate all the message signatures
+            Self::validate_messages_signatures(&trie_messages)?;
+
             // 3. Start going through all onchain_events and messages for fids > work_item.last_fid
-            for trie_message_entry in trie_messages {
+            for trie_message_entry in &trie_messages {
                 let trie_key = trie_message_entry.trie_key.clone();
                 trie_keys.push(trie_key.clone());
 
-                match thread_engine.replay_replicator_message(&mut txn_batch, &trie_message_entry) {
+                match thread_engine.replay_replicator_message(&mut txn_batch, trie_message_entry) {
                     Ok((fid, generated_trie_key, hub_event)) => {
                         if generated_trie_key != trie_key {
                             return Err(BootstrapError::GenericError(format!(
@@ -909,5 +915,65 @@ impl ReplicatorBootstrap {
         }
 
         Ok(shard_metadata)
+    }
+
+    fn validate_messages_signatures(
+        trie_messages: &Vec<proto::ShardTrieEntryWithMessage>,
+    ) -> Result<(), BootstrapError> {
+        // We'll collect all info needed to verify signatures as we process messages
+        let len = trie_messages.len();
+        let mut signatures = Vec::with_capacity(len);
+        let mut verifying_keys = Vec::with_capacity(len);
+        let mut message_hashes = Vec::with_capacity(len);
+
+        for trie_message_entry in trie_messages.iter() {
+            if let Some(TrieMessage::UserMessage(m)) = &trie_message_entry.trie_message {
+                // Validate message hash first
+                if m.data_bytes.is_some() {
+                    validate_message_hash(m.hash_scheme, &m.data_bytes.as_ref().unwrap(), &m.hash)?;
+                } else {
+                    if m.data.is_none() {
+                        return Err(BootstrapError::ValidationError(
+                            validations::error::ValidationError::MissingData,
+                        ));
+                    }
+
+                    validate_message_hash(
+                        m.hash_scheme,
+                        &m.data.as_ref().unwrap().encode_to_vec(),
+                        &m.hash,
+                    )?;
+                }
+
+                if let (Ok(sig), Ok(key)) = (
+                    Signature::from_slice(&m.signature),
+                    VerifyingKey::from_bytes(m.signer.as_slice().try_into().unwrap()),
+                ) {
+                    signatures.push(sig);
+                    verifying_keys.push(key);
+                    message_hashes.push(m.hash.as_slice());
+                } else {
+                    error!("Failed to parse signature fid:{} message:{:?}", m.fid(), m);
+                    return Err(BootstrapError::ValidationError(
+                        validations::error::ValidationError::InvalidSignature,
+                    ));
+                }
+            }
+        }
+
+        if !signatures.is_empty() {
+            ed25519_dalek::verify_batch(&message_hashes, &signatures, &verifying_keys).map_err(
+                |e| {
+                    // Since we cannot know which message failed, we will not process any
+                    // messages in this batch if the verification fails.
+                    error!("Batch signature verification failed: {}", e);
+                    BootstrapError::ValidationError(
+                        validations::error::ValidationError::InvalidSignature,
+                    )
+                },
+            )?;
+        }
+
+        Ok(())
     }
 }

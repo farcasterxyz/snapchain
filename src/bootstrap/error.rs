@@ -2,7 +2,10 @@ use futures::channel::oneshot;
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 
-use crate::storage::{db::RocksdbError, store::engine::EngineError, trie::errors::TrieError};
+use crate::{
+    core::validations,
+    storage::{db::RocksdbError, store::engine::EngineError, trie::errors::TrieError},
+};
 
 #[derive(Error, Debug)]
 pub enum BootstrapError {
@@ -47,6 +50,9 @@ pub enum BootstrapError {
 
     #[error("Parse error: {0}")]
     ParseError(#[from] std::num::ParseIntError),
+
+    #[error("Message validation error: {0}")]
+    ValidationError(#[from] validations::error::ValidationError),
 
     #[error("{0}")]
     GenericError(String),
