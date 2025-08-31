@@ -18,13 +18,15 @@ use crate::{
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tokio::select;
 use tracing::{error, info};
 
+const MAX_MESSAGE_HASH_CACHE_ENTRIES: usize = 100_000;
+
 #[derive(Clone)]
-pub enum CacheEntry {
+pub enum CacheMessageEntry {
     UserMessage(proto::Message),
     OnChainEvent(proto::OnChainEvent),
 }
@@ -33,39 +35,110 @@ pub enum CacheEntry {
 /// because the Trie only has the hash, but the Messages are stored in the DB by ts_hash, and the trie doesn't have a timestamp (the "ts" part)
 /// So, there's no way to read a message from the DB from just the (fid, hash). Hence this cache.
 /// Note that the cache itself is an Arc, so this object can be cloned without a memory penalty.
-#[derive(Clone)]
-pub struct FidMessageTypeCache {
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct MessageHashCacheKey {
+    pub shard_id: u32,
     pub fid: u64,
     pub user_message_type: Option<proto::MessageType>,
     pub onchain_event_type: Option<proto::OnChainEventType>,
-    pub cache: Arc<HashMap<Vec<u8>, CacheEntry>>,
 }
 
-impl FidMessageTypeCache {
-    pub fn new_user_message_type(
+impl MessageHashCacheKey {
+    pub fn new_for_user_message(
+        shard_id: u32,
         fid: u64,
         user_message_type: proto::MessageType,
-        cache: Arc<HashMap<Vec<u8>, CacheEntry>>,
     ) -> Self {
         Self {
+            shard_id,
             fid,
             user_message_type: Some(user_message_type),
             onchain_event_type: None,
-            cache,
         }
     }
 
-    pub fn new_onchain_message_type(
+    pub fn new_for_onchain_event(
+        shard_id: u32,
         fid: u64,
         onchain_event_type: proto::OnChainEventType,
-        cache: Arc<HashMap<Vec<u8>, CacheEntry>>,
     ) -> Self {
         Self {
+            shard_id,
             fid,
             user_message_type: None,
             onchain_event_type: Some(onchain_event_type),
-            cache,
         }
+    }
+}
+
+struct MessageHashCache {
+    cache_size: usize,
+
+    // Key (shard, fid, message_type) -> HashMap<hash, Message>
+    cache: HashMap<MessageHashCacheKey, Arc<HashMap<Vec<u8>, CacheMessageEntry>>>,
+
+    // Key (shard, fid, message_type) -> Last used timestamp
+    cache_lru: HashMap<MessageHashCacheKey, SystemTime>,
+}
+
+impl MessageHashCache {
+    pub fn new() -> Self {
+        Self {
+            cache_size: 0,
+            cache: HashMap::new(),
+            cache_lru: HashMap::new(),
+        }
+    }
+
+    pub fn get(
+        &mut self,
+        key: &MessageHashCacheKey,
+    ) -> Option<Arc<HashMap<Vec<u8>, CacheMessageEntry>>> {
+        match self.cache.get(key) {
+            Some(entry) => {
+                self.cache_lru.insert(key.clone(), SystemTime::now());
+                Some(entry.clone())
+            }
+            None => None,
+        }
+    }
+
+    pub fn insert(
+        &mut self,
+        key: MessageHashCacheKey,
+        value: Arc<HashMap<Vec<u8>, CacheMessageEntry>>,
+    ) {
+        let mut new_cache_size = self.cache_size + value.len();
+
+        // Don't let the cache size be more than max entries allowed
+        if new_cache_size > MAX_MESSAGE_HASH_CACHE_ENTRIES {
+            // Drop the last recently used caches until we are either under MAX_MESSAGE_HASH_CACHE_ENTRIES or the cache is empty
+            let mut lru_keys = self.cache_lru.iter().collect::<Vec<_>>();
+            lru_keys.sort_by_key(|(_, &ts)| ts);
+
+            // Collect keys to remove to avoid mutable/immutable borrow conflict
+            let keys_to_remove = lru_keys
+                .iter()
+                .map(|(k, _)| (*k).clone())
+                .collect::<Vec<_>>();
+
+            for lru_key in keys_to_remove {
+                let removed = self.cache.remove(&lru_key);
+                self.cache_lru.remove(&lru_key);
+
+                // Recalculate new size
+                new_cache_size -= removed.map(|v| v.len()).unwrap_or(0);
+
+                if new_cache_size <= MAX_MESSAGE_HASH_CACHE_ENTRIES {
+                    break;
+                }
+            }
+        }
+
+        self.cache_lru.insert(key.clone(), SystemTime::now());
+        self.cache.insert(key, value);
+        self.cache_size = new_cache_size;
     }
 }
 
@@ -104,11 +177,10 @@ impl Default for ReplicatorSnapshotOptions {
     }
 }
 
-#[derive(Clone)]
 pub struct Replicator {
     stores: Arc<ReplicationStores>,
     snapshot_options: ReplicatorSnapshotOptions,
-    fid_message_type_cache: Arc<RwLock<Option<FidMessageTypeCache>>>,
+    message_hash_cache: RwLock<MessageHashCache>,
 }
 
 impl Replicator {
@@ -129,29 +201,23 @@ impl Replicator {
         Replicator {
             stores,
             snapshot_options,
-            fid_message_type_cache: Arc::new(RwLock::new(None)),
+            message_hash_cache: RwLock::new(MessageHashCache::new()),
         }
     }
 
     fn build_fid_onchain_message_type_cache(
         &self,
         stores: &Stores,
+        shard_id: u32,
         fid: u64,
         onchain_event_type: proto::OnChainEventType,
-    ) -> Result<Arc<HashMap<Vec<u8>, CacheEntry>>, ReplicationError> {
-        {
-            // First see if this cache is already present
-            let rw = self.fid_message_type_cache.read()?;
+    ) -> Result<Arc<HashMap<Vec<u8>, CacheMessageEntry>>, ReplicationError> {
+        let cache_key =
+            MessageHashCacheKey::new_for_onchain_event(shard_id, fid, onchain_event_type);
 
-            // See if cache hit, we can use the cached value
-            if let Some(fmc) = rw.as_ref() {
-                if fmc.fid == fid
-                    && fmc.onchain_event_type.is_some()
-                    && fmc.onchain_event_type.unwrap() == onchain_event_type
-                {
-                    return Ok(fmc.cache.clone());
-                }
-            }
+        // First see if this cache is already present
+        if let Some(cache) = self.message_hash_cache.write().unwrap().get(&cache_key) {
+            return Ok(cache.clone());
         }
 
         let onchain_events = stores
@@ -172,43 +238,30 @@ impl Replicator {
                     // tx_hash + log_index is the key
                     let hash = TrieKey::for_onchain_event(&m)[(1 + FID_BYTES + 1)..].to_vec();
 
-                    (hash, CacheEntry::OnChainEvent(m))
+                    (hash, CacheMessageEntry::OnChainEvent(m))
                 })
                 .collect::<HashMap<_, _>>(),
         );
 
-        {
-            let mut rw = self.fid_message_type_cache.write()?;
+        self.message_hash_cache
+            .write()
+            .unwrap()
+            .insert(cache_key, message_hash_map.clone());
 
-            *rw = Some(FidMessageTypeCache::new_onchain_message_type(
-                fid,
-                onchain_event_type,
-                message_hash_map.clone(),
-            ));
-        }
-
+        // Return the newly created hash map
         Ok(message_hash_map)
     }
 
     fn build_fid_user_message_type_cache(
         &self,
         stores: &Stores,
+        shard_id: u32,
         fid: u64,
         user_message_type: proto::MessageType,
-    ) -> Result<Arc<HashMap<Vec<u8>, CacheEntry>>, ReplicationError> {
-        {
-            // First see if this cache is already present
-            let rw = self.fid_message_type_cache.read()?;
-
-            // See if cache hit, we can use the cached value
-            if let Some(fmc) = rw.as_ref() {
-                if fmc.fid == fid
-                    && fmc.user_message_type.is_some()
-                    && fmc.user_message_type.unwrap() == user_message_type
-                {
-                    return Ok(fmc.cache.clone());
-                }
-            }
+    ) -> Result<Arc<HashMap<Vec<u8>, CacheMessageEntry>>, ReplicationError> {
+        let cache_key = MessageHashCacheKey::new_for_user_message(shard_id, fid, user_message_type);
+        if let Some(cache) = self.message_hash_cache.write().unwrap().get(&cache_key) {
+            return Ok(cache.clone());
         }
 
         let mut page_options = PageOptions::default();
@@ -306,19 +359,14 @@ impl Replicator {
         let message_hash_map = Arc::new(
             messages
                 .into_iter()
-                .map(|m| (m.hash.clone(), CacheEntry::UserMessage(m)))
+                .map(|m| (m.hash.clone(), CacheMessageEntry::UserMessage(m)))
                 .collect::<HashMap<_, _>>(),
         );
 
-        {
-            let mut rw = self.fid_message_type_cache.write()?;
-
-            *rw = Some(FidMessageTypeCache::new_user_message_type(
-                fid,
-                user_message_type,
-                message_hash_map.clone(),
-            ));
-        }
+        self.message_hash_cache
+            .write()
+            .unwrap()
+            .insert(cache_key, message_hash_map.clone());
 
         Ok(message_hash_map)
     }
@@ -371,6 +419,14 @@ impl Replicator {
             }
 
             fids_in_page.insert(fid);
+            // if fid == 14451 {
+            //     let count = trie.get_count(
+            //         &stores.db,
+            //         &mut RocksDbTransactionBatch::new(),
+            //         &TrieKey::for_fid(fid),
+            //     )?;
+            //     info!("Aditya: fid {} has {} items", fid, count);
+            // }
 
             match (onchain_message_type, message_type) {
                 (Some(onchain_event_type), None) => {
@@ -423,25 +479,29 @@ impl Replicator {
 
                         let cache = self.build_fid_onchain_message_type_cache(
                             &stores,
+                            shard_id,
                             fid,
                             onchain_event_type,
                         )?;
 
                         let cache_entry = cache.get(&hash).cloned();
                         if cache_entry.is_none() {
-                            return Err(ReplicationError::InternalError(format!(
+                            let error_msg =  format!(
                                 "On-chain event not found in cache for FID {} and onchain_event_type {:?}: {:?}",
                                 fid, onchain_event_type, hash
-                            )));
+                            );
+                            error!(error_msg);
+                            return Err(ReplicationError::InternalError(error_msg));
                         }
 
                         let onchain_event = match cache_entry.unwrap() {
-                            CacheEntry::OnChainEvent(event) => event,
-                            CacheEntry::UserMessage(_) => {
-                                return Err(ReplicationError::InternalError(
+                            CacheMessageEntry::OnChainEvent(event) => event,
+                            CacheMessageEntry::UserMessage(_) => {
+                                let error_msg =
                                     "Expected OnChainEvent but found UserMessage in cache"
-                                        .to_string(),
-                                ));
+                                        .to_string();
+                                error!(error_msg);
+                                return Err(ReplicationError::InternalError(error_msg));
                             }
                         };
 
@@ -456,6 +516,7 @@ impl Replicator {
                     let hash = rest;
                     let cache = self.build_fid_user_message_type_cache(
                         &stores,
+                        shard_id,
                         fid,
                         MessageType::try_from(message_type as i32).map_err(|e| {
                             ReplicationError::InvalidMessage(format!(
@@ -467,15 +528,17 @@ impl Replicator {
 
                     let cache_entry = cache.get(&hash).cloned();
                     if cache_entry.is_none() {
-                        return Err(ReplicationError::InternalError(format!(
+                        let error_msg = format!(
                             "User message not found in cache for FID {} and message_type {}: {:?}",
                             fid, message_type, hash
-                        )));
+                        );
+                        error!(error_msg);
+                        return Err(ReplicationError::InternalError(error_msg));
                     }
 
                     let message = match cache_entry.unwrap() {
-                        CacheEntry::UserMessage(msg) => msg,
-                        CacheEntry::OnChainEvent(_) => {
+                        CacheMessageEntry::UserMessage(msg) => msg,
+                        CacheMessageEntry::OnChainEvent(_) => {
                             return Err(ReplicationError::InternalError(
                                 "Expected UserMessage but found OnChainEvent in cache".to_string(),
                             ));
@@ -499,14 +562,16 @@ impl Replicator {
         // For each FID in the page, get its account root hash
         let mut fid_account_roots = vec![];
         for fid in fids_in_page {
-            let account_root_hash = trie.get_hash(
-                &stores.db,
-                &mut RocksDbTransactionBatch::new(),
-                &TrieKey::for_fid(fid),
-            )?;
+            let mut empty_txn = RocksDbTransactionBatch::new();
+            let account_root_hash =
+                trie.get_hash(&stores.db, &mut empty_txn, &TrieKey::for_fid(fid))?;
+            let num_messages =
+                trie.get_count(&stores.db, &mut empty_txn, &TrieKey::for_fid(fid))?;
+
             fid_account_roots.push(proto::FidAccountRootHash {
                 fid,
                 account_root_hash,
+                num_messages,
             });
         }
 

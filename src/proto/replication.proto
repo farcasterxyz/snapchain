@@ -68,6 +68,7 @@ message ShardTrieEntryWithMessage {
 message FidAccountRootHash {
   uint64 fid = 1;
   bytes account_root_hash = 2;
+  uint64 num_messages = 3;
 }
 
 message ReplicationTriePartStatus {
