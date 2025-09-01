@@ -49,7 +49,7 @@ pub enum RootPrefix {
     /* Used to index blocks events by seqnum */
     BlockEvent = 19,
 
-    /* Merkle Trie Metadata */
+    /* Merkle Trie Metadata. Reserved, not used right now */
     MerkleTrieMetadata = 20,
 
     /* Replication Bootstrap status */

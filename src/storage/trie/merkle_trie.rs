@@ -3,11 +3,8 @@ use super::errors::TrieError;
 use super::trie_node::{TrieNode, UNCOMPACTED_LENGTH};
 use crate::mempool::routing::{MessageRouter, ShardRouter};
 use crate::proto;
-use crate::proto::DbMerkleTrieMetadata;
-use crate::storage::constants::RootPrefix;
 use crate::storage::store::account::{make_fid_key, read_fid_key, IntoU8, FID_BYTES};
 use crate::storage::trie::{trie_node, util};
-use prost::Message as _;
 use std::collections::HashMap;
 use std::str;
 use tracing::info;
@@ -188,7 +185,6 @@ pub struct MerkleTrie {
     branch_xform: util::BranchingFactorTransform,
     root: Option<TrieNode>,
     branching_factor: u32,
-    outdated_hash: bool,
 }
 
 impl MerkleTrie {
@@ -200,7 +196,6 @@ impl MerkleTrie {
             root: None,
             branch_xform,
             branching_factor,
-            outdated_hash: false,
         })
     }
 
@@ -236,10 +231,9 @@ impl MerkleTrie {
     pub fn initialize(&mut self, db: &RocksDB) -> Result<(), TrieError> {
         // db must be "open" by now
 
-        let (loaded, outdated_hash) = self.load_root(db)?;
+        let loaded = self.load_root(db)?;
         if let Some(root_node) = loaded {
             self.root.replace(root_node);
-            self.outdated_hash = outdated_hash;
         } else {
             info!("Initializing empty merkle trie root");
             let mut txn_batch = RocksDbTransactionBatch::new();
@@ -250,123 +244,28 @@ impl MerkleTrie {
         Ok(())
     }
 
-    fn load_root(&self, db: &RocksDB) -> Result<(Option<TrieNode>, bool), TrieError> {
+    fn load_root(&self, db: &RocksDB) -> Result<Option<TrieNode>, TrieError> {
         let root_key = TrieNode::make_primary_key(&[], None);
 
         if let Some(root_bytes) = db.get(&root_key).map_err(TrieError::wrap_database)? {
             let root_node = TrieNode::deserialize(&root_bytes.as_slice())?;
-            let outdated_hash = Self::read_metadata(db)?;
-            Ok((Some(root_node), outdated_hash))
+            Ok(Some(root_node))
         } else {
-            Ok((None, false))
+            Ok(None)
         }
     }
 
     pub fn reload(&mut self, db: &RocksDB) -> Result<(), TrieError> {
         // Load the root node using the provided database reference
-        let (loaded, outdated_hash) = self.load_root(db)?;
+        let loaded = self.load_root(db)?;
 
         match loaded {
             Some(replacement_root) => {
                 // Replace the root node with the loaded node
                 self.root.replace(replacement_root);
-                self.outdated_hash = outdated_hash;
                 Ok(())
             }
             None => Err(TrieError::UnableToReloadRoot),
-        }
-    }
-
-    fn write_metadata(&self, txn_batch: &mut RocksDbTransactionBatch) {
-        // Define the key for metadata storage
-        let db_key = vec![RootPrefix::MerkleTrieMetadata as u8];
-
-        let db_metadata = DbMerkleTrieMetadata {
-            outdated_hash: self.outdated_hash,
-        };
-
-        txn_batch.put(db_key, db_metadata.encode_to_vec());
-    }
-
-    fn read_metadata(db: &RocksDB) -> Result<bool, TrieError> {
-        let db_key = vec![RootPrefix::MerkleTrieMetadata as u8];
-
-        match db.get(&db_key).map_err(TrieError::wrap_database)? {
-            Some(bytes) => {
-                let db_metadata = DbMerkleTrieMetadata::decode(bytes.as_slice())
-                    .map_err(TrieError::wrap_deserialize)?;
-                Ok(db_metadata.outdated_hash)
-            }
-            None => Ok(false), // No metadata found, assume default values
-        }
-    }
-
-    /// Re-attach a trie node that is in the DB to the root of the trie, recalculating hashes as needed
-    /// returns (is_attached, was_created).
-    /// Note, you need to call recalculate_hashes() after this to update the hashes and item counts
-    /// properly.
-    pub fn attach_to_root(
-        &mut self,
-        ctx: &Context,
-        db: &RocksDB,
-        txn_batch: &mut RocksDbTransactionBatch,
-        key: &[u8],
-    ) -> Result<(bool, bool), TrieError> {
-        let xkey = (self.branch_xform.expand)(key);
-
-        if let Some(root) = self.root.as_mut() {
-            // First, check if the key already exists in the trie. If it does, then there's nothing to do
-            if root.get_node_from_trie(ctx, db, &xkey, 0).is_some() {
-                return Ok((true, false));
-            }
-
-            // If it doesn't already exist in the trie, then check if it exists in the DB. If it is not in the
-            // DB either, then there's nothing to do
-            let db_key = TrieNode::make_primary_key(&xkey, None);
-            if db.get(&db_key).map_err(TrieError::wrap_database)?.is_none() {
-                return Ok((false, false));
-            }
-
-            // This node is in the Trie DB, but is not attached to the root. Now attach it
-            root.attach_to_root(ctx, db, txn_batch, 0, &xkey)?;
-
-            // Set the outdated_hash flag to true, so that the root_hash() is not accidentally used without
-            // calling recalculate_hashes() first
-            self.outdated_hash = true;
-
-            // Save the new updated metadata
-            self.write_metadata(txn_batch);
-
-            return Ok((true, true));
-        } else {
-            Err(TrieError::TrieNotInitialized)
-        }
-    }
-
-    /// Recalculate hashes for all nodes in the trie upto the max_key_len level
-    pub fn recalculate_hashes(
-        &mut self,
-        ctx: &Context,
-        db: &RocksDB,
-        txn_batch: &mut RocksDbTransactionBatch,
-        max_key_len: usize,
-    ) -> Result<(), TrieError> {
-        if let Some(root) = self.root.as_mut() {
-            // We need to translate the key level count into the xform level count. Use a sample key to do the transform
-            let key = vec![0u8; max_key_len];
-            let xkey = (self.branch_xform.expand)(&key);
-
-            root.recalculate_hashes(ctx, &mut HashMap::new(), db, txn_batch, xkey.len(), &[])?;
-
-            // Indicate that the hash is now valid again
-            self.outdated_hash = false;
-
-            // Save the new updated metadata
-            self.write_metadata(txn_batch);
-
-            return Ok(());
-        } else {
-            Err(TrieError::TrieNotInitialized)
         }
     }
 
@@ -486,10 +385,6 @@ impl MerkleTrie {
         txn_batch: &RocksDbTransactionBatch,
         prefix: &[u8],
     ) -> Result<Vec<u8>, TrieError> {
-        if self.outdated_hash {
-            return Err(TrieError::OutdatedHash);
-        }
-
         Ok(self
             .get_node(db, txn_batch, prefix)
             .map(|node| node.hash())
@@ -502,10 +397,6 @@ impl MerkleTrie {
         txn_batch: &RocksDbTransactionBatch,
         prefix: &[u8],
     ) -> Result<u64, TrieError> {
-        if self.outdated_hash {
-            return Err(TrieError::OutdatedHash);
-        }
-
         Ok(self
             .get_node(db, txn_batch, prefix)
             .map(|node| node.items() as u64)
@@ -513,10 +404,6 @@ impl MerkleTrie {
     }
 
     pub fn root_hash(&self) -> Result<Vec<u8>, TrieError> {
-        if self.outdated_hash {
-            return Err(TrieError::OutdatedHash);
-        }
-
         if let Some(root) = self.root.as_ref() {
             Ok(root.hash())
         } else {
@@ -764,10 +651,6 @@ impl MerkleTrie {
         txn_batch: &mut RocksDbTransactionBatch,
         prefix: &[u8],
     ) -> Result<NodeMetadata, TrieError> {
-        if self.outdated_hash {
-            return Err(TrieError::OutdatedHash);
-        }
-
         if let Some(node) = self.get_node(db, txn_batch, prefix) {
             let mut children = HashMap::new();
 

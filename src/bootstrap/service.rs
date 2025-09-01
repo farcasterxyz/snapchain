@@ -22,7 +22,6 @@ use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use ed25519_dalek::{Signature, VerifyingKey};
 use futures::channel::oneshot;
 use prost::Message as _;
-use std::sync::RwLock;
 use std::{
     collections::HashMap,
     net::UdpSocket,
@@ -87,7 +86,6 @@ pub struct ReplicatorBootstrap {
     statsd_client: StatsdClientWrapper,
     shard_ids: Vec<u32>,
     rocksdb_dir: String,
-    fid_msg_counts: Arc<RwLock<HashMap<(u32, u64), u64>>>,
 }
 
 const WORK_UNIT_POSTFIX: u8 = 1u8;
@@ -120,7 +118,6 @@ impl ReplicatorBootstrap {
             statsd_client,
             shard_ids: app_config.consensus.shard_ids.clone(),
             rocksdb_dir: app_config.rocksdb_dir.clone(),
-            fid_msg_counts: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -748,13 +745,6 @@ impl ReplicatorBootstrap {
                             )));
                         }
 
-                        *self
-                            .fid_msg_counts
-                            .write()
-                            .unwrap()
-                            .entry((shard_id, fid))
-                            .or_insert(0) += 1;
-
                         if last_fid.is_none() {
                             last_fid = Some(fid);
                         }
@@ -806,7 +796,6 @@ impl ReplicatorBootstrap {
                 &db,
                 &mut txn_batch,
                 fids_to_check,
-                self.fid_msg_counts.clone(),
             )?;
 
             // 5. Now that the account roots match, commit to DB via db_commit_tx
@@ -878,7 +867,6 @@ impl ReplicatorBootstrap {
         db: &RocksDB,
         txn_batch: &mut RocksDbTransactionBatch,
         fids_to_check: Vec<u64>,
-        num_messages_map: Arc<RwLock<HashMap<(u32, u64), u64>>>,
     ) -> Result<(), BootstrapError> {
         for fid in &fids_to_check {
             let expected_account =
@@ -896,21 +884,16 @@ impl ReplicatorBootstrap {
                 txn_batch,
                 &TrieKey::for_fid(*fid),
             )?;
-            let actual_num_messages_received = num_messages_map
-                .read()
-                .unwrap()
-                .get(&(shard_id, *fid))
-                .cloned()
-                .unwrap_or(0);
-
             let expected_num_messages = expected_account.num_messages;
 
-            if expected_num_messages != actual_num_messages_trie
-                || expected_num_messages != actual_num_messages_received
-            {
+            if expected_num_messages != actual_num_messages_trie {
                 error!(
-                    "Message count mismatch for fid  {}/{}/{}. expected {}, got {} in trie, {} in received",
-                    shard_id, virtual_trie_shard, fid, expected_num_messages, actual_num_messages_trie, actual_num_messages_received
+                    "Message count mismatch for fid  {}/{}/{}. expected {}, got {} in trie",
+                    shard_id,
+                    virtual_trie_shard,
+                    fid,
+                    expected_num_messages,
+                    actual_num_messages_trie
                 );
             }
 
