@@ -1,6 +1,6 @@
 use futures::channel::oneshot;
 use thiserror::Error;
-use tokio::sync::mpsc::error::SendError;
+use tokio::{sync::mpsc::error::SendError, task::JoinError};
 
 use crate::{
     core::validations,
@@ -97,5 +97,11 @@ impl<T> From<SendError<T>> for BootstrapError {
 impl From<oneshot::Canceled> for BootstrapError {
     fn from(_: oneshot::Canceled) -> Self {
         BootstrapError::GenericError("DB writer response channel cancelled".to_string())
+    }
+}
+
+impl From<JoinError> for BootstrapError {
+    fn from(err: JoinError) -> Self {
+        BootstrapError::GenericError(format!("tokio thread join error: {}", err))
     }
 }

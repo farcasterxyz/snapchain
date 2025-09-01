@@ -65,12 +65,18 @@ struct DbCommitRequest {
     response_tx: oneshot::Sender<Result<DbCommitResponse, BootstrapError>>,
 }
 
+struct TrieInsertRequest {
+    trie_keys: Vec<Vec<u8>>,
+    response_tx: oneshot::Sender<Result<RocksDbTransactionBatch, BootstrapError>>,
+}
+
 #[derive(Clone)]
 struct WorkUnit {
     current_status: proto::ReplicationTriePartStatus,
     peer_address: String,
     shutdown_signal: Arc<AtomicBool>,
     db_commit_tx: mpsc::UnboundedSender<DbCommitRequest>,
+    trie_insert_tx: mpsc::UnboundedSender<TrieInsertRequest>,
 }
 
 #[derive(Clone)]
@@ -429,7 +435,8 @@ impl ReplicatorBootstrap {
         // Clone db for the DB writer thread
         let db_writer = db.clone();
 
-        let max_messages_in_write_session = 100_000;
+        let max_messages_in_write_session = 5_000_000;
+        let max_num_parallel_vts = 4;
 
         // Spawn the DB writer thread
         let db_writer_task = tokio::spawn(async move {
@@ -481,6 +488,41 @@ impl ReplicatorBootstrap {
             info!("DB writer thread finished for shard {}", shard_id);
         });
 
+        // Spawn a thread to handle trie merges
+        let tbf = self.trie_branching_factor;
+        let trie_db = db.clone();
+        let (trie_insert_tx, mut trie_insert_rx) = mpsc::unbounded_channel::<TrieInsertRequest>();
+        let trie_merges_task = tokio::spawn(async move {
+            info!("Trie merges thread started for shard {}", shard_id);
+            let mut trie = merkle_trie::MerkleTrie::new(tbf).unwrap();
+            trie.initialize(&trie_db).unwrap();
+
+            while let Some(insert_request) = trie_insert_rx.recv().await {
+                let mut txn_batch = RocksDbTransactionBatch::new();
+                let trie_keys = insert_request.trie_keys;
+
+                let result = trie.insert(
+                    &merkle_trie::Context::new(), // Not tracking trie perf during replication
+                    &trie_db,
+                    &mut txn_batch,
+                    trie_keys
+                        .iter()
+                        .map(|v| v.as_slice())
+                        .collect::<Vec<&[u8]>>(),
+                );
+
+                let response = match result {
+                    Ok(_) => Ok(txn_batch),
+                    Err(e) => Err(BootstrapError::TrieError(e)),
+                };
+
+                if insert_request.response_tx.send(response).is_err() {
+                    error!("Failed to send response for trie insert request");
+                }
+            }
+            info!("Trie merges thread finished for shard {}", shard_id);
+        });
+
         // Go over each Trie's Virtual Trie Shard (vts) and sync for it.
         let mut vts_results = vec![WorkUnitResponse::None; merkle_trie::TRIE_SHARD_SIZE as usize];
         let mut work_units: Vec<(u32, WorkUnit)> = vec![];
@@ -498,12 +540,14 @@ impl ReplicatorBootstrap {
             let peer_address = peer_address.to_string();
             let shutdown_signal = shutdown_signal.clone();
             let db_commit_tx = db_commit_tx.clone();
+            let trie_insert_tx = trie_insert_tx.clone();
 
             let work_item = WorkUnit {
                 current_status,
                 peer_address,
                 shutdown_signal,
                 db_commit_tx,
+                trie_insert_tx,
             };
 
             work_units.push((vts, work_item));
@@ -525,7 +569,10 @@ impl ReplicatorBootstrap {
             }
 
             // Spawn up to 2 tasks if not stopped
-            while !stop_more_work && join_set.len() < 1 && work_index < work_units.len() {
+            while !stop_more_work
+                && join_set.len() < max_num_parallel_vts
+                && work_index < work_units.len()
+            {
                 let (vts, work_item) = work_units[work_index].clone();
 
                 let db_clone = db.clone();
@@ -575,16 +622,12 @@ impl ReplicatorBootstrap {
 
         // Drop the original sender and any unfinished work_units so the DB writer thread can exit
         drop(db_commit_tx);
+        drop(trie_insert_tx);
         drop(work_units);
 
-        // Wait for the DB writer thread to finish
-        if let Err(e) = db_writer_task.await {
-            error!("DB writer task failed: {}", e);
-            return Err(BootstrapError::DatabaseError(format!(
-                "DB writer task failed: {}",
-                e
-            )));
-        }
+        // Wait for both the DB writer and trie merges tasks to finish concurrently and propagate any errors
+        db_writer_task.await?;
+        trie_merges_task.await?;
 
         db.close();
 
@@ -740,11 +783,20 @@ impl ReplicatorBootstrap {
             }
 
             // Insert all the trie keys into the trie
-            thread_engine.update_trie_batch(
-                &merkle_trie::Context::new(), // Not tracking trie perf during replication
-                &mut txn_batch,
+            let (response_tx, response_rx) = oneshot::channel();
+            work_item.trie_insert_tx.send(TrieInsertRequest {
                 trie_keys,
-            )?;
+                response_tx,
+            })?;
+            let trie_txn_batch = response_rx.await??;
+
+            // let mut trie_txn_batch = RocksDbTransactionBatch::new();
+            // thread_engine.update_trie_batch(
+            //     &merkle_trie::Context::new(), // Not tracking trie perf during replication
+            //     &mut trie_txn_batch,
+            //     trie_keys,
+            // )?;
+            txn_batch.merge(trie_txn_batch);
 
             // Verify account root for fid, update last_fid in the DB
             Self::check_fid_roots(
@@ -879,7 +931,7 @@ impl ReplicatorBootstrap {
                     hex::encode(actual_root),
                 )));
             } else {
-                info!(
+                debug!(
                     "Account root matched for fid {}/{}/{}: {}",
                     shard_id,
                     virtual_trie_shard,

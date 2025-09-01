@@ -1183,32 +1183,6 @@ impl ShardEngine {
         Ok(())
     }
 
-    /// Insert a vec of events all at once into the trie    
-    pub fn update_trie_batch(
-        &mut self,
-        ctx: &merkle_trie::Context,
-        txn_batch: &mut RocksDbTransactionBatch,
-        trie_keys: Vec<Vec<u8>>,
-    ) -> Result<(), EngineError> {
-        let now = std::time::Instant::now();
-
-        // Batch insert  into the trie
-        self.stores.trie.insert(
-            ctx,
-            &self.db,
-            txn_batch,
-            trie_keys
-                .iter()
-                .map(|v| v.as_slice())
-                .collect::<Vec<&[u8]>>(),
-        )?;
-
-        let elapsed = now.elapsed();
-        self.metrics
-            .time_with_shard("update_trie_time_us", elapsed.as_micros() as u64);
-        Ok(())
-    }
-
     pub(crate) fn validate_user_message(
         &self,
         message: &proto::Message,
