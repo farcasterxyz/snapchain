@@ -2,7 +2,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
-use snapchain::bootstrap::ReplicatorBootstrap;
+use snapchain::bootstrap::{service::WorkUnitResponse, ReplicatorBootstrap};
 use snapchain::connectors::fname::FnameRequest;
 use snapchain::connectors::onchain_events::{ChainClients, OnchainEventsRequest};
 use snapchain::consensus::consensus::SystemMessage;
@@ -308,16 +308,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 match replicator.bootstrap_using_replication().await {
                     Ok(r) => {
-                        // TODO: Process r
+                        // Check for the specific success response
+                        if r == WorkUnitResponse::Finished {
+                            info!("Replication bootstrap finished. Promoting snapshot to main DB.");
+                            let snapshot_dir = format!("{}.snapshot", &app_config.rocksdb_dir);
 
-                        // Successful, continue with startup
-                        info!("Replication bootstrap successfull. Continuing with startup");
-                        return Ok(());
+                            // Atomically rename the completed snapshot DB to the main DB name
+                            if let Err(e) = std::fs::rename(&snapshot_dir, &app_config.rocksdb_dir)
+                            {
+                                error!("FATAL: Failed to rename snapshot DB: {}. Please do it manually or clear the DB directory.", e);
+                                process::exit(1);
+                            }
+                            info!("Replication bootstrap successful. Continuing with startup.");
+                        } else {
+                            error!(
+                                "Replication bootstrap stopped with status: {:?}. Exiting.",
+                                r
+                            );
+                            process::exit(1);
+                        }
                     }
                     Err(e) => {
                         error!("Replication bootstrap failed:\n{}\nPlease clear the database directory and try again.", e);
-                        // Clean up partially created DB
-                        let _ = std::fs::remove_dir_all(&app_config.rocksdb_dir);
                         process::exit(1);
                     }
                 }

@@ -13,7 +13,9 @@ use crate::storage::{
     db::{RocksDB, RocksDbTransactionBatch},
     store::{
         account::{make_fid_key, StoreOptions},
+        block::BlockStore,
         engine::{EngineError, ShardEngine},
+        shard::ShardStore,
         stores::StoreLimits,
     },
     trie::merkle_trie::{self, TrieKey},
@@ -119,6 +121,10 @@ impl ReplicatorBootstrap {
             shard_ids: app_config.consensus.shard_ids.clone(),
             rocksdb_dir: app_config.rocksdb_dir.clone(),
         }
+    }
+
+    fn get_snapshot_rocksdb_dir(&self) -> String {
+        format!("{}.snapshot", self.rocksdb_dir)
     }
 
     fn make_work_unit_key(shard_id: u8, virtual_trie_shard: u8) -> Vec<u8> {
@@ -276,7 +282,7 @@ impl ReplicatorBootstrap {
 
             // Clone necessary data for the spawned task
             let peer_address_clone = peer_address.to_string();
-            let rocksdb_dir = format!("{}.snapshot", self.rocksdb_dir);
+            let rocksdb_dir = self.get_snapshot_rocksdb_dir();
 
             info!(
                 "Bootstrapping shard {} at height {} with trie_branching_factor {}",
@@ -321,9 +327,11 @@ impl ReplicatorBootstrap {
 
         loop {
             if shard_tasks.is_empty() {
-                // All tasks completed successfully (since we check for errors below)
-                // Process results if needed; for now, assuming success means Finished
-                // But based on the original code, it returned Stopped - adjust as necessary
+                // All tasks completed successfully
+                // Write the final metadata from the server into the new DB.
+                self.write_final_metadata_to_db(&shard_metadata, &self.get_snapshot_rocksdb_dir())
+                    .await?;
+
                 return Ok(WorkUnitResponse::Finished);
             }
 
@@ -998,11 +1006,13 @@ impl ReplicatorBootstrap {
     async fn get_shard_snapshots(
         &self,
         client: &mut ReplicationServiceClient<Channel>,
-        all_shards: Vec<u32>,
+        shards: Vec<u32>,
     ) -> Result<HashMap<u32, ShardSnapshotMetadata>, BootstrapError> {
         let mut shard_metadata = HashMap::new();
 
-        // TODO: Shard 0 doesn't have a snapshot, so we skip it?
+        // Add shard-0 to the list of shards to fetch the metadata for.
+        let mut all_shards = vec![0];
+        all_shards.extend(shards);
 
         for shard_id in all_shards {
             let request = GetShardSnapshotMetadataRequest { shard_id };
@@ -1099,6 +1109,72 @@ impl ReplicatorBootstrap {
             )?;
         }
 
+        Ok(())
+    }
+
+    async fn write_final_metadata_to_db(
+        &self,
+        shard_metadata: &std::collections::HashMap<u32, crate::proto::ShardSnapshotMetadata>,
+        rocksdb_dir: &str,
+    ) -> Result<(), BootstrapError> {
+        info!("Writing final block and shard chunks to database...");
+
+        for (shard_id, metadata) in shard_metadata {
+            if *shard_id == 0 {
+                // Handle Block for Shard 0
+                if let Some(block) = &metadata.block {
+                    info!(
+                        "Writing block for shard 0 at height {}",
+                        block
+                            .header
+                            .as_ref()
+                            .unwrap()
+                            .height
+                            .as_ref()
+                            .unwrap()
+                            .block_number
+                    );
+                    let block_db = RocksDB::open_shard_db(rocksdb_dir, 0);
+                    let block_store = BlockStore::new(block_db);
+                    block_store
+                        .put_block(block)
+                        .map_err(|e| BootstrapError::DatabaseError(e.to_string()))?;
+                } else {
+                    return Err(BootstrapError::MetadataFetchError(format!(
+                        "No block found for shard 0. Metadata = {:?}",
+                        metadata
+                    )));
+                }
+            } else {
+                // Handle ShardChunk for Data Shards
+                if let Some(shard_chunk) = &metadata.shard_chunk {
+                    info!(
+                        "Writing ShardChunk for shard {} at height {}",
+                        shard_id,
+                        shard_chunk
+                            .header
+                            .as_ref()
+                            .unwrap()
+                            .height
+                            .as_ref()
+                            .unwrap()
+                            .block_number
+                    );
+                    let shard_db = RocksDB::open_shard_db(rocksdb_dir, *shard_id);
+                    let shard_store = ShardStore::new(shard_db, *shard_id);
+                    shard_store
+                        .put_shard_chunk(shard_chunk)
+                        .map_err(|e| BootstrapError::DatabaseError(e.to_string()))?;
+                } else {
+                    return Err(BootstrapError::MetadataFetchError(format!(
+                        "No ShardChunk found for shard {}. Metadata = {:?}",
+                        shard_id, metadata
+                    )));
+                }
+            }
+        }
+
+        info!("Successfully wrote final metadata.");
         Ok(())
     }
 }
