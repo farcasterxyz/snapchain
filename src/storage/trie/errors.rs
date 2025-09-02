@@ -25,6 +25,15 @@ pub enum TrieError {
     #[error("Merkle Trie is not initialized")]
     TrieNotInitialized,
 
+    #[error("The page token is invalid {0}")]
+    InvalidPageToken(String),
+
+    #[error("Failed to decode trie page token: {0}")]
+    TokenDecodeError(String),
+
+    #[error("Invalid state in Trie: {0}")]
+    InvalidState(String),
+
     #[error("New nodes were attached to the MerkleTrie but recalculate_hashes() was not called")]
     OutdatedHash,
 

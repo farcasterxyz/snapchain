@@ -95,7 +95,7 @@ impl TrieNode {
     #[inline]
     pub(crate) fn make_primary_key(prefix: &[u8], child_char: Option<u8>) -> Vec<u8> {
         let mut key = Vec::with_capacity(1 + prefix.len() + 1);
-        key.push(RootPrefix::SyncMerkleTrieNode as u8);
+        key.push(RootPrefix::MerkleTrieNode as u8);
         key.extend_from_slice(prefix);
         if let Some(char) = child_char {
             key.push(char);
@@ -189,7 +189,6 @@ impl TrieNode {
         blake3_20(&concat_hashes)
     }
 
-    #[cfg(test)]
     pub fn value(&self) -> Option<Vec<u8>> {
         // Value is only defined for leaf nodes
         if self.is_leaf() {
@@ -501,113 +500,6 @@ impl TrieNode {
         }
 
         Ok(results)
-    }
-
-    /// Attach a key to the root. Recurse down until we reach the key, make sure it is in all the parent's
-    /// `children`.
-    pub fn attach_to_root(
-        &mut self,
-        ctx: &Context,
-        db: &RocksDB,
-        txn: &mut RocksDbTransactionBatch,
-        current_index: usize,
-        key: &[u8], // key of the node to attach
-    ) -> Result<(), TrieError> {
-        let prefix = key[..current_index].to_vec();
-
-        if current_index == key.len() {
-            // We are at the node that is supposed to be attached. no need to go down any further
-            return Ok(());
-        }
-
-        let child_char = key[current_index];
-
-        // If we're not yet at the child, we get the next level, make sure the next level is there
-        if !self.children.contains_key(&child_char) {
-            // Fetch the child node from the DB, and insert it into this node's children
-            // Since the child is not in the in-memory map, we must perform a direct DB lookup to see if it exists on disk.
-            let child_prefix = Self::make_primary_key(&prefix, Some(child_char));
-
-            // See if this node is available in the txn first
-            let child_node = match txn.batch.get(&child_prefix) {
-                // If it is in the txn, use this because this is the latest one that will be commited to the DB
-                Some(Some(bytes)) => TrieNode::deserialize(&bytes),
-                // If not in the current txn, get it from the DB
-                _ => db
-                    .get(&child_prefix)
-                    .map_err(TrieError::wrap_database)?
-                    .map(|b| TrieNode::deserialize(&b))
-                    // If not in the DB, create a default empty node
-                    .unwrap_or(Ok(TrieNode::default())),
-            }?;
-
-            self.children
-                .insert(child_char, TrieNodeType::Node(child_node));
-            ctx.db_read_count.fetch_add(1, atomic::Ordering::Relaxed);
-        }
-
-        // recurse down, return whatever the result of the recursion was
-        let child_node = self.get_or_load_child(ctx, db, &prefix, child_char)?;
-        child_node.attach_to_root(ctx, db, txn, current_index + 1, key)
-    }
-
-    // Recursively recalculate hashes upto key_len
-    pub fn recalculate_hashes(
-        &mut self,
-        ctx: &Context,
-        child_hashes: &mut HashMap<u8, Vec<u8>>,
-        db: &RocksDB,
-        txn: &mut RocksDbTransactionBatch,
-        max_key_len: usize,
-        prefix: &[u8],
-    ) -> Result<(), TrieError> {
-        let current_index = prefix.len();
-
-        if current_index <= max_key_len {
-            // Recurse down
-            let child_chars = self.children.keys().map(|c| *c).collect::<Vec<_>>();
-            let mut total_child_items = 0;
-            for child_char in child_chars {
-                // compute child's prefix
-                let mut child_prefix = prefix.to_vec();
-                child_prefix.push(child_char);
-
-                // temporarily taking child_hashes out of the node here to appease the borrow-checker
-                {
-                    let mut my_child_hashes = std::mem::take(&mut self.child_hashes);
-
-                    let child = self.get_or_load_child(ctx, db, &prefix, child_char)?;
-                    total_child_items += child.items();
-
-                    // recurse
-                    child.recalculate_hashes(
-                        ctx,
-                        &mut my_child_hashes,
-                        db,
-                        txn,
-                        max_key_len,
-                        &child_prefix,
-                    )?;
-
-                    self.child_hashes = my_child_hashes;
-                }
-            }
-
-            // Update total items
-            self.items = total_child_items;
-
-            // Now update my hash in the parent's cache of child hashes
-            self.update_hash(child_hashes, &prefix)?;
-
-            // Save
-            self.put_to_txn(txn, &prefix);
-
-            return Ok(());
-        } else {
-            // current_index == max_key_len
-            // Just update my hash in the parent's child hashes cache and return
-            self.update_hash(child_hashes, &prefix)
-        }
     }
 
     pub fn exists(
