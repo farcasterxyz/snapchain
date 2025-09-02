@@ -5,6 +5,7 @@ use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::fname::FnameRequest;
 use snapchain::connectors::onchain_events::{ChainClients, OnchainEventsRequest};
 use snapchain::consensus::consensus::SystemMessage;
+use snapchain::mempool::block_receiver::BlockReceiver;
 use snapchain::mempool::mempool::{Mempool, MempoolRequest, ReadNodeMempool};
 use snapchain::mempool::routing;
 use snapchain::network::admin_server::MyAdminService;
@@ -509,6 +510,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        SystemMessage::BlockRequest {block_event_seqnum: _ , block_tx: _ } => {},
                         SystemMessage::MalachiteNetwork(shard, event) => {
                             // Forward to appropriate consensus actors
                             node.dispatch_network_event(shard, event);
@@ -529,6 +531,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } else {
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
 
+        let (block_tx, _block_rx) = broadcast::channel(1000);
+
         // Setup post-commit channel if replication is enabled
         let (engine_post_commit_tx, engine_post_commit_rx) = if app_config.replication.enable {
             // TODO: consider increasing the buffer size to prevent blocking across multiple shards
@@ -547,7 +551,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             local_peer_id,
             gossip_tx.clone(),
             shard_decision_tx,
-            None,
+            Some(block_tx.clone()),
             messages_request_tx,
             block_store.clone(),
             local_state_store.clone(),
@@ -657,6 +661,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
             None
         };
 
+        if app_config.block_receiver.enabled {
+            for shard_id in app_config.consensus.shard_ids.iter() {
+                let senders = node.shard_senders.get(shard_id).unwrap();
+                let mut block_receiver = BlockReceiver {
+                    shard_id: *shard_id,
+                    stores: node.shard_stores.get(shard_id).unwrap().clone(),
+                    block_rx: block_tx.subscribe(),
+                    mempool_tx: mempool_tx.clone(),
+                    system_tx: system_tx.clone(),
+                    event_rx: senders.events_tx.subscribe(),
+                    validator_sets: app_config.consensus.to_stored_validator_sets(*shard_id),
+                    config: app_config.block_receiver.clone(),
+                };
+                tokio::spawn(async move { block_receiver.run().await });
+            }
+        }
+
         start_servers(
             &app_config,
             gossip,
@@ -726,6 +747,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             if let Err(e) = res {
                                 warn!("Failed to add to local mempool: {:?}", e);
                             }
+                        },
+                        SystemMessage::BlockRequest {block_event_seqnum, block_tx } => {
+                            let block= node.block_stores.get_block_by_event_seqnum(block_event_seqnum);
+                            block_tx.send(block).unwrap();
                         },
                         SystemMessage::DecidedValueForReadNode(_) => {
                             // Ignore these for validator nodes

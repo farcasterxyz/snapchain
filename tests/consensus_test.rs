@@ -6,6 +6,7 @@ use serial_test::serial;
 use snapchain::connectors::onchain_events::ChainClients;
 use snapchain::consensus::consensus::{SystemMessage, ValidatorSetConfig};
 use snapchain::consensus::proposer::GENESIS_MESSAGE;
+use snapchain::mempool::block_receiver::{self, BlockReceiver};
 use snapchain::mempool::mempool::{
     self, Mempool, MempoolMessagesRequest, MempoolRequest, MempoolSource,
 };
@@ -19,6 +20,7 @@ use snapchain::proto::{self, Height, StorageUnitType};
 use snapchain::proto::{Block, FarcasterNetwork, IdRegisterEventType, SignerEventType};
 use snapchain::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use snapchain::storage::store::account::{CastStore, OnchainEventStore, UserDataStore};
+use snapchain::storage::store::block_engine::BlockStores;
 use snapchain::storage::store::mempool_poller::MempoolMessage;
 use snapchain::storage::store::node_local_state::LocalStateStore;
 use snapchain::storage::store::stores::Stores;
@@ -78,12 +80,13 @@ where
 }
 
 trait Node {
-    fn block_store(&self) -> &BlockStore;
+    fn block_stores(&self) -> &BlockStores;
     fn shard_stores(&self) -> &HashMap<u32, Stores>;
 
     fn num_blocks(&self) -> usize {
         let blocks_page = self
-            .block_store()
+            .block_stores()
+            .block_store
             .get_blocks(0, None, &PageOptions::default())
             .unwrap();
         blocks_page.blocks.len()
@@ -104,6 +107,10 @@ trait Node {
             }
         }
         messages_count
+    }
+
+    fn num_block_events(&self) -> u64 {
+        self.block_stores().block_event_store.max_seqnum().unwrap()
     }
 
     fn fid_registered(&self, fid: u64) -> Option<proto::OnChainEvent> {
@@ -153,14 +160,13 @@ trait Node {
 struct NodeForTest {
     node: SnapchainNode,
     db: Arc<RocksDB>,
-    block_store: BlockStore,
     mempool_tx: mpsc::Sender<MempoolRequest>,
     handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Node for NodeForTest {
-    fn block_store(&self) -> &BlockStore {
-        &self.block_store
+    fn block_stores(&self) -> &BlockStores {
+        &self.node.block_stores
     }
     fn shard_stores(&self) -> &HashMap<u32, Stores> {
         &self.node.shard_stores
@@ -184,13 +190,12 @@ struct ReadNodeForTest {
     handles: Vec<tokio::task::JoinHandle<()>>,
     node: SnapchainReadNode,
     db: Arc<RocksDB>,
-    block_store: BlockStore,
     _messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
 }
 
 impl Node for ReadNodeForTest {
-    fn block_store(&self) -> &BlockStore {
-        &self.block_store
+    fn block_stores(&self) -> &BlockStores {
+        &self.node.block_stores
     }
     fn shard_stores(&self) -> &HashMap<u32, Stores> {
         &self.node.shard_stores
@@ -296,7 +301,6 @@ impl ReadNodeForTest {
             handles: join_handles,
             node,
             db: db.clone(),
-            block_store,
             _messages_request_rx: messages_request_rx,
         }
     }
@@ -348,7 +352,7 @@ impl NodeForTest {
         let registry = SharedRegistry::global();
         let peer_id = gossip.swarm.local_peer_id().clone();
         println!("StartNode validator peer id: {}", peer_id.to_string());
-        let (block_tx, mut block_rx) = mpsc::channel::<Block>(100);
+        let (block_tx, mut block_rx) = broadcast::channel::<Block>(100);
         let data_dir = &make_tmp_path();
         let db = Arc::new(RocksDB::new(data_dir));
         db.open().unwrap();
@@ -359,11 +363,11 @@ impl NodeForTest {
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
         let node = SnapchainNode::create(
             keypair.clone(),
-            consensus_config,
+            consensus_config.clone(),
             peer_id,
             gossip_tx.clone(),
             shard_decision_tx,
-            Some(block_tx),
+            Some(block_tx.clone()),
             messages_request_tx,
             block_store.clone(),
             node_local_store,
@@ -406,7 +410,7 @@ impl NodeForTest {
         let mut join_handles = Vec::new();
 
         let handle = tokio::spawn(async move {
-            while let Some(block) = block_rx.recv().await {
+            while let Ok(block) = block_rx.recv().await {
                 assert_valid_block(&block);
             }
         });
@@ -467,6 +471,25 @@ impl NodeForTest {
         });
         join_handles.push(handle);
 
+        for shard_id in 1..num_shards + 1 {
+            let senders = node.shard_senders.get(&shard_id).unwrap();
+            let mut block_receiver = BlockReceiver {
+                shard_id: shard_id,
+                stores: node.shard_stores.get(&shard_id).unwrap().clone(),
+                block_rx: block_tx.subscribe(),
+                mempool_tx: mempool_tx.clone(),
+                system_tx: system_tx.clone(),
+                event_rx: senders.events_tx.subscribe(),
+                validator_sets: consensus_config.to_stored_validator_sets(shard_id),
+                config: block_receiver::Config {
+                    enabled: true,
+                    ..block_receiver::Config::default()
+                },
+            };
+            let handle = tokio::spawn(async move { block_receiver.run().await });
+            join_handles.push(handle);
+        }
+
         let node_for_dispatch = node.clone();
         let handle = tokio::spawn(async move {
             loop {
@@ -474,6 +497,15 @@ impl NodeForTest {
                     match system_event {
                         SystemMessage::MalachiteNetwork(event_shard, event) => {
                             node_for_dispatch.dispatch(event_shard, event);
+                        }
+                        SystemMessage::BlockRequest {
+                            block_event_seqnum,
+                            block_tx,
+                        } => {
+                            let block = node_for_dispatch
+                                .block_stores
+                                .get_block_by_event_seqnum(block_event_seqnum);
+                            block_tx.send(block).unwrap();
                         }
                         _ => {
                             // noop
@@ -487,7 +519,6 @@ impl NodeForTest {
         Self {
             node,
             db: db.clone(),
-            block_store,
             mempool_tx,
             handles: join_handles,
         }
@@ -584,6 +615,14 @@ impl TestNetwork {
         }
     }
 
+    pub fn max_block_event_seqnum(&self) -> u64 {
+        self.nodes
+            .iter()
+            .map(|node| node.num_block_events())
+            .max()
+            .unwrap_or(0)
+    }
+
     pub fn max_block_height(&self) -> usize {
         self.nodes
             .iter()
@@ -630,10 +669,7 @@ impl TestNetwork {
         for event in on_chain_events {
             let result = self.nodes[0]
                 .add_message(
-                    MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
-                        on_chain_event: Some(event),
-                        fname_transfer: None,
-                    }),
+                    MempoolMessage::OnchainEvent(event),
                     MempoolSource::Local,
                     None,
                 )
@@ -711,6 +747,30 @@ impl TestNetwork {
                 }
 
                 None
+            },
+            tokio::time::Duration::from_secs(15),
+            tokio::time::Duration::from_millis(100),
+        )
+        .await
+    }
+
+    pub async fn wait_for_next_block_event(&self) -> Option<()> {
+        let target_seqnum = self.max_block_event_seqnum() + 1;
+        wait_for(
+            || {
+                for node in &self.nodes {
+                    if node.block_stores().block_event_store.max_seqnum().unwrap() != target_seqnum
+                    {
+                        return None;
+                    }
+
+                    for stores in node.shard_stores().values() {
+                        if stores.block_event_store.max_seqnum().unwrap() != target_seqnum {
+                            return None;
+                        }
+                    }
+                }
+                Some(())
             },
             tokio::time::Duration::from_secs(15),
             tokio::time::Duration::from_millis(100),
@@ -991,42 +1051,36 @@ async fn test_cross_shard_interactions() {
 
     let fname = "erica";
 
-    let transfer1 = proto::ValidatorMessage {
-        on_chain_event: None,
-        fname_transfer: Some(proto::FnameTransfer {
-            id: 43782,
-            from_fid: 0,
-            proof: Some(proto::UserNameProof {
-                timestamp: 1741384226,
-                name: fname.as_bytes().to_vec(),
-                fid: second_fid,
-                owner: hex::decode("2b4d92e7626c5fc56cb4641f6f758563de1f6bdc").unwrap(),
-                signature: hex::decode("050b42fdda7b0a7309a1fb8a2cbc9a5f4bbf241aec74f53191f9665d9b9f572d4f452ac807911af7b6980219482d6f7fda7f99f23ab19c961b4701b9934fa2f91b").unwrap(),
-                r#type: proto::UserNameType::UsernameTypeFname as i32,
-            }),
-        })
+    let transfer1 = proto::FnameTransfer {
+        id: 43782,
+        from_fid: 0,
+        proof: Some(proto::UserNameProof {
+            timestamp: 1741384226,
+            name: fname.as_bytes().to_vec(),
+            fid: second_fid,
+            owner: hex::decode("2b4d92e7626c5fc56cb4641f6f758563de1f6bdc").unwrap(),
+            signature: hex::decode("050b42fdda7b0a7309a1fb8a2cbc9a5f4bbf241aec74f53191f9665d9b9f572d4f452ac807911af7b6980219482d6f7fda7f99f23ab19c961b4701b9934fa2f91b").unwrap(),
+            r#type: proto::UserNameType::UsernameTypeFname as i32,
+        }),
     };
 
-    let transfer2 = proto::ValidatorMessage {
-        on_chain_event: None,
-        fname_transfer: Some(proto::FnameTransfer {
-            id: 829595,
-            from_fid: second_fid,
-            proof: Some(proto::UserNameProof {
-                timestamp: 1741384227,
-                name: fname.as_bytes().to_vec(),
-                fid: first_fid,
-                owner: hex::decode("92ce59c18a97646e9a7e011653d8417d3a08bb2b").unwrap(),
-                signature: hex::decode("00c3601c515edffe208e7128f47f89c2fb7b8e0beaaf615158305ddf02818a71679a8e7062503be59a19d241bd0b47396a3c294cfafd0d5478db1ae8249463bd1c").unwrap(),
-                r#type: proto::UserNameType::UsernameTypeFname as i32,
-            }),
-        })
+    let transfer2 = proto::FnameTransfer {
+        id: 829595,
+        from_fid: second_fid,
+        proof: Some(proto::UserNameProof {
+            timestamp: 1741384227,
+            name: fname.as_bytes().to_vec(),
+            fid: first_fid,
+            owner: hex::decode("92ce59c18a97646e9a7e011653d8417d3a08bb2b").unwrap(),
+            signature: hex::decode("00c3601c515edffe208e7128f47f89c2fb7b8e0beaaf615158305ddf02818a71679a8e7062503be59a19d241bd0b47396a3c294cfafd0d5478db1ae8249463bd1c").unwrap(),
+            r#type: proto::UserNameType::UsernameTypeFname as i32,
+        }),
     };
 
     let node = &network.nodes[0];
 
     node.add_message(
-        MempoolMessage::ValidatorMessage(transfer1.clone()),
+        MempoolMessage::FnameTransfer(transfer1),
         MempoolSource::Local,
         None,
     )
@@ -1034,7 +1088,7 @@ async fn test_cross_shard_interactions() {
     .unwrap();
 
     node.add_message(
-        MempoolMessage::ValidatorMessage(transfer2.clone()),
+        MempoolMessage::FnameTransfer(transfer2),
         MempoolSource::Local,
         None,
     )
@@ -1090,6 +1144,7 @@ async fn test_decoupling_shard_0_from_other_shards() {
         .unwrap();
 
     let last_block = network.nodes[0]
+        .block_stores()
         .block_store
         .get_last_block()
         .unwrap()
@@ -1098,10 +1153,24 @@ async fn test_decoupling_shard_0_from_other_shards() {
     assert_eq!(last_shard_witnesses.len() as u32, num_shards);
 
     let previous_block = network.nodes[0]
+        .block_stores()
         .block_store
         .get_block_by_height(last_block.header.unwrap().height.unwrap().block_number - 1)
         .unwrap()
         .unwrap();
     let prev_shard_witnesses = previous_block.shard_witness.unwrap().shard_chunk_witnesses;
     assert_eq!(last_shard_witnesses, prev_shard_witnesses);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_cross_shard_communication() {
+    let num_shards = 2;
+    let mut network = TestNetwork::create(3, num_shards).await;
+    network.start_validators().await;
+
+    network.wait_for_next_block_event().await.unwrap();
+    network.wait_for_next_block_event().await.unwrap();
+
+    assert!(network.max_block_event_seqnum() >= network.max_block_height() as u64 / 5);
 }

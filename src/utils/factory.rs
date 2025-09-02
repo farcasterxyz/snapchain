@@ -52,9 +52,32 @@ pub mod time {
 pub mod events_factory {
     use super::*;
     use crate::{
-        proto::{self, StorageUnitType, TierPurchaseBody, TierType},
+        proto::{
+            self, BlockEvent, BlockEventData, BlockEventType, HeartbeatEventBody, StorageUnitType,
+            TierPurchaseBody, TierType,
+        },
         storage::store::account::{StorageSlot, UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP},
     };
+
+    pub fn create_heartbeat_event(seqnum: u64) -> BlockEvent {
+        let data = BlockEventData {
+            seqnum,
+            r#type: BlockEventType::Heartbeat as i32,
+            block_number: 0,
+            event_index: 0,
+            block_timestamp: 0,
+            body: Some(message::block_event_data::Body::HeartbeatEventBody(
+                HeartbeatEventBody {},
+            )),
+        };
+        let hash = blake3::hash(data.encode_to_vec().as_slice())
+            .as_bytes()
+            .to_vec();
+        BlockEvent {
+            hash,
+            data: Some(data),
+        }
+    }
 
     pub fn create_onchain_event(fid: u64) -> OnChainEvent {
         OnChainEvent {

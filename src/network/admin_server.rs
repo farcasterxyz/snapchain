@@ -7,7 +7,7 @@ use crate::network::server::MEMPOOL_ADD_REQUEST_TIMEOUT;
 use crate::proto::admin_service_server::AdminService;
 use crate::proto::{
     self, Empty, FarcasterNetwork, FnameTransfer, OnChainEvent, RetryFnameRequest,
-    RetryOnchainEventsRequest, UploadSnapshotRequest, UserNameProof, ValidatorMessage,
+    RetryOnchainEventsRequest, UploadSnapshotRequest, UserNameProof,
 };
 use crate::storage;
 use crate::storage::store::mempool_poller::MempoolMessage;
@@ -118,10 +118,7 @@ impl AdminService for MyAdminService {
         let (tx, rx) = oneshot::channel();
         self.mempool_tx
             .try_send(MempoolRequest::AddMessage(
-                MempoolMessage::ValidatorMessage(ValidatorMessage {
-                    on_chain_event: Some(onchain_event.clone()),
-                    fname_transfer: None,
-                }),
+                MempoolMessage::OnchainEvent(onchain_event.clone()),
                 MempoolSource::RPC,
                 Some(tx),
             ))
@@ -170,13 +167,10 @@ impl AdminService for MyAdminService {
         let (tx, rx) = oneshot::channel();
         self.mempool_tx
             .try_send(MempoolRequest::AddMessage(
-                MempoolMessage::ValidatorMessage(ValidatorMessage {
-                    on_chain_event: None,
-                    fname_transfer: Some(FnameTransfer {
-                        id: username_proof.fid,
-                        from_fid: 0, // Assume the username is being transfer from the "root" fid to the one in the username proof
-                        proof: Some(username_proof.clone()),
-                    }),
+                MempoolMessage::FnameTransfer(FnameTransfer {
+                    id: username_proof.fid,
+                    from_fid: 0, // Assume the username is being transfer from the "root" fid to the one in the username proof
+                    proof: Some(username_proof.clone()),
                 }),
                 MempoolSource::RPC,
                 Some(tx),
