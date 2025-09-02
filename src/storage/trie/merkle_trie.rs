@@ -453,10 +453,6 @@ impl MerkleTrie {
             return Err(TrieError::TrieNotInitialized);
         }
 
-        // if self.outdated_hash {
-        //     return Err(TrieError::OutdatedHash);
-        // }
-
         // Expand the input prefix using the branching factor transform to match the trie's internal key format
         let expanded_prefix = (self.branch_xform.expand)(prefix);
 
@@ -511,6 +507,7 @@ impl MerkleTrie {
             if relative_path.len() != remaining_stack.len().saturating_sub(1) {
                 return Err(TrieError::InvalidPageToken(hex::encode(&relative_path)));
             }
+
             // Extend the full path with the relative_path to resume at the correct position in the trie
             path.extend_from_slice(&relative_path);
         } else {
@@ -529,6 +526,7 @@ impl MerkleTrie {
                     // Append the combined key to the leaf_keys vector
                     leaf_keys.push(combined);
                 }
+
                 // Since it's a single leaf, iteration is complete
                 return Ok(None);
             } else {
@@ -604,7 +602,7 @@ impl MerkleTrie {
                 .unwrap()
                 .get_node_from_trie(ctx, db, &path, 0);
 
-            // If the node should exist.
+            // The node should exist, error if not. This should never happen
             if current_node_opt.is_none() {
                 return Err(TrieError::NodeNotFound {
                     prefix: path.clone(),
@@ -641,8 +639,6 @@ impl MerkleTrie {
                 remaining_stack.push(children);
             }
         }
-
-        // (Unreachable: loop returns on all paths)
     }
 
     pub fn get_trie_node_metadata(
