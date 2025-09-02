@@ -655,6 +655,8 @@ impl ReplicatorBootstrap {
         work_item: WorkUnit,
         db: Arc<RocksDB>,
     ) -> Result<WorkUnitResponse, BootstrapError> {
+        let response;
+
         let shard_id = work_item.current_status.shard_id;
         info!(
             "Processing Shard:{} vts: {}",
@@ -686,23 +688,56 @@ impl ReplicatorBootstrap {
         .await
         .map_err(|e| BootstrapError::DatabaseError(e.to_string()))?;
 
-        let mut thread_client =
-            ReplicationServiceClient::connect(work_item.peer_address.clone()).await?;
+        // Buffer size is 2, so it will prefetch the next page without waiting
+        let (messages_page_tx, mut messages_page_rx) = tokio::sync::mpsc::channel(2);
+
+        let rpc_shutdown_signal = Arc::new(AtomicBool::new(false));
+        let rpc_shutdown_signal_clone = rpc_shutdown_signal.clone();
+        let rpc_client_handle = tokio::spawn(async move {
+            let mut thread_client =
+                ReplicationServiceClient::connect(work_item.peer_address.clone())
+                    .await
+                    .unwrap(); // TODO: Handle RPC failure
+
+            let mut request = GetShardTransactionsRequest {
+                shard_id: status.shard_id,
+                height: status.height,
+                trie_virtual_shard: status.virtual_trie_shard,
+                page_token: status.next_page_token,
+            };
+
+            // Keep getting messages_page from the peer_address until we get a shutdown signal
+            loop {
+                // Get a messages page
+                let messages_page = thread_client
+                    .get_shard_transactions(request.clone())
+                    .await
+                    .unwrap() // TODO: Handle RPC failures
+                    .into_inner();
+
+                if rpc_shutdown_signal.load(Ordering::Relaxed) {
+                    return;
+                }
+
+                let next_page_token = messages_page.next_page_token.clone();
+
+                // Send the RPC response
+                messages_page_tx.send(messages_page).await.unwrap();
+
+                // If all pages are done, exit
+                if next_page_token.is_none() || next_page_token.as_ref().unwrap().is_empty() {
+                    return;
+                }
+                request.page_token = next_page_token;
+            }
+        });
 
         loop {
             let mut last_fid = status.last_fid;
             let mut fids_to_check = vec![];
 
             // 2. Use the next_page_token to fetch the page of messages from the server
-            let messages_page = thread_client
-                .get_shard_transactions(GetShardTransactionsRequest {
-                    shard_id: status.shard_id,
-                    height: status.height,
-                    trie_virtual_shard: status.virtual_trie_shard,
-                    page_token: status.next_page_token.clone(),
-                })
-                .await?
-                .into_inner();
+            let messages_page = messages_page_rx.recv().await.unwrap();
 
             let trie_messages = messages_page.trie_messages;
 
@@ -780,12 +815,6 @@ impl ReplicatorBootstrap {
             })?;
             let trie_txn_batch = response_rx.await??;
 
-            // let mut trie_txn_batch = RocksDbTransactionBatch::new();
-            // thread_engine.update_trie_batch(
-            //     &merkle_trie::Context::new(), // Not tracking trie perf during replication
-            //     &mut trie_txn_batch,
-            //     trie_keys,
-            // )?;
             txn_batch.merge(trie_txn_batch);
 
             // Verify account root for fid, update last_fid in the DB
@@ -827,11 +856,13 @@ impl ReplicatorBootstrap {
                     shard_id, status.virtual_trie_shard
                 );
 
-                return Ok(WorkUnitResponse::Stopped);
+                response = Ok(WorkUnitResponse::Stopped);
+                break;
             }
 
             if let DbCommitResponse::Stop = db_response {
-                return Ok(WorkUnitResponse::DbStopped);
+                response = Ok(WorkUnitResponse::DbStopped);
+                break;
             }
 
             if next_page_token.is_none() {
@@ -855,9 +886,17 @@ impl ReplicatorBootstrap {
                 // Wait for the commit to complete. The double ?? are to handle both the channel cancelled and the DB writer errors
                 response_rx.await??;
 
-                return Ok(WorkUnitResponse::Finished);
+                response = Ok(WorkUnitResponse::Finished);
+                break;
             }
         } // loop to next page from the server
+
+        // Drain all the pending message_pages so the messages thread can exit
+        rpc_shutdown_signal_clone.store(true, Ordering::Relaxed);
+        while let Some(_) = messages_page_rx.recv().await {}
+        rpc_client_handle.await?;
+
+        return response;
     }
 
     fn check_fid_roots(
