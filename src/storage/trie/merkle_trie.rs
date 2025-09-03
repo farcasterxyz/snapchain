@@ -15,6 +15,14 @@ pub const USERNAME_MAX_LENGTH: u32 = 20;
 
 pub const TRIE_SHARD_SIZE: u32 = 256; // So it fits into 1 byte
 
+pub struct DecodedTrieKey {
+    pub virtual_shard: u8,
+    pub fid: u64,
+    pub onchain_message_type: Option<u8>,
+    pub message_type: Option<u8>,
+    pub rest: Vec<u8>, // The rest of the (undecoded) key if any
+}
+
 pub struct TrieKey {}
 
 impl TrieKey {
@@ -81,7 +89,7 @@ impl TrieKey {
     }
 
     // Decode a trie key into (virtual_shard_id, fid, onchain_message_type, message_type, hash OR fname OR tx_hash+log_index)
-    pub fn decode(key: &[u8]) -> Result<(u8, u64, Option<u8>, Option<u8>, Vec<u8>), TrieError> {
+    pub fn decode(key: &[u8]) -> Result<DecodedTrieKey, TrieError> {
         if key.len() < UNCOMPACTED_LENGTH {
             return Err(TrieError::KeyLengthTooShort);
         }
@@ -101,7 +109,13 @@ impl TrieKey {
 
         let rest = key[(message_type_pos + 1)..].to_vec();
 
-        Ok((virtual_shard, fid, onchain_message_type, message_type, rest))
+        Ok(DecodedTrieKey {
+            virtual_shard,
+            fid,
+            onchain_message_type,
+            message_type,
+            rest,
+        })
     }
 
     // Compute the keys that need to be updated in the trie. Returns (inserts, deletes)
