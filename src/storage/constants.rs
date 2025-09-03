@@ -51,6 +51,8 @@ pub enum RootPrefix {
 
     /* Merkle Trie Metadata */
     MerkleTrieMetadata = 20,
+
+    LendStorageByRecipient = 21,
 }
 
 /** Copied from the JS code */
@@ -101,6 +103,8 @@ pub enum UserPostfix {
 
     /* Link Compact State set */
     LinkCompactStateMessage = 100,
+
+    LendStorageMessage = 101,
 }
 
 impl UserPostfix {

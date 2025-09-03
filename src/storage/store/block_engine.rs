@@ -1,9 +1,11 @@
 use crate::consensus::proposer::ProposalSource;
+use crate::core::error::HubError;
+use crate::core::validations;
 use crate::core::{types::Height, util::FarcasterTime};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::{
-    block_event_data, Block, BlockEvent, BlockEventData, BlockEventType, FarcasterNetwork,
-    HeartbeatEventBody, OnChainEvent, ShardChunkWitness, Transaction,
+    self, block_event_data, Block, BlockEvent, BlockEventData, BlockEventType, FarcasterNetwork,
+    HeartbeatEventBody, LendStorageBody, MessageType, OnChainEvent, ShardChunkWitness, Transaction,
 };
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
@@ -39,6 +41,26 @@ pub enum BlockEngineError {
 
     #[error(transparent)]
     OnchainEventError(#[from] OnchainEventStorageError),
+}
+#[derive(Error, Debug, Clone)]
+pub enum MessageValidationError {
+    #[error("message has no data")]
+    NoMessageData,
+
+    #[error("unknown fid")]
+    MissingFid,
+
+    #[error("invalid signer")]
+    MissingSigner,
+
+    #[error("invalid message type")]
+    InvalidMessageType,
+
+    #[error(transparent)]
+    HubError(#[from] HubError),
+
+    #[error(transparent)]
+    MessageValidationError(#[from] validations::error::ValidationError),
 }
 
 #[derive(Clone)]
@@ -132,6 +154,66 @@ impl BlockEngine {
             })
     }
 
+    pub fn validate_user_message(
+        &self,
+        message: &proto::Message,
+        timestamp: &FarcasterTime,
+        version: EngineVersion,
+        txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Result<(), MessageValidationError> {
+        // Ensure message data is present
+        let message_data = message
+            .data
+            .as_ref()
+            .ok_or(MessageValidationError::NoMessageData)?;
+
+        let is_pro_user = self
+            .stores
+            .onchain_event_store
+            .is_tier_subscription_active_at(proto::TierType::Pro, message.fid(), timestamp)
+            .map_err(|err| HubError::internal_db_error(&err.to_string()))?;
+
+        validations::message::validate_message(
+            message,
+            self.network,
+            is_pro_user,
+            timestamp,
+            version,
+        )?;
+
+        // 1. Check that the user has a custody address
+        // If not in the temp cache, fall back to the DB
+        self.stores
+            .onchain_event_store
+            .get_id_register_event_by_fid(message_data.fid, Some(txn_batch))
+            .map_err(|_| MessageValidationError::MissingFid)?
+            .ok_or(MessageValidationError::MissingFid)?;
+
+        // 2. Check that the user has a valid signer
+        self.stores
+            .onchain_event_store
+            .get_active_signer(message_data.fid, message.signer.clone(), Some(txn_batch))
+            .map_err(|_| MessageValidationError::MissingSigner)?
+            .ok_or(MessageValidationError::MissingSigner)?;
+
+        match message_data
+            .body
+            .ok_or(MessageValidationError::NoMessageData)?
+        {
+            crate::proto::message_data::Body::LendStorageBody(lend_storage) => {
+                let from_fid = message.fid();
+                let storage_slot = self.stores.onchain_event_store.get_storage_slot_for_fid(
+                    from_fid,
+                    self.network,
+                    &[],
+                );
+            }
+            _ => return Err(MessageValidationError::InvalidMessageType),
+        }
+
+        Ok(())
+    }
+
     pub(crate) fn replay_snapchain_txn(
         &mut self,
         trie_ctx: &merkle_trie::Context,
@@ -152,6 +234,13 @@ impl BlockEngine {
                         error!("Unable to merge onchain event: {:#?}", err.to_string())
                     }
                 }
+            }
+        }
+
+        for message in &snapchain_txn.user_messages {
+            match self.validate_user_message(message, timestamp, version, txn_batch) {
+                Ok(()) => {}
+                Err(err) => {}
             }
         }
 
