@@ -135,6 +135,7 @@ impl Limits {
             MessageType::UserDataAdd => StoreType::UserData,
             MessageType::UsernameProof => StoreType::UsernameProofs,
             MessageType::FrameAction => StoreType::None,
+            MessageType::LendStorage => StoreType::StorageLends,
             MessageType::None => StoreType::None,
         }
     }
@@ -154,6 +155,7 @@ impl Limits {
                 MessageType::VerificationRemove,
             ],
             StoreType::UsernameProofs => vec![MessageType::UsernameProof],
+            StoreType::StorageLends => vec![MessageType::LendStorage],
             StoreType::None => vec![],
         }
     }
@@ -166,6 +168,7 @@ impl Limits {
             StoreType::UserData => self.user_data,
             StoreType::Verifications => self.verifications,
             StoreType::UsernameProofs => self.user_name_proofs,
+            StoreType::StorageLends => 100, // TODO(aditi): need to figure out reasonable limit
             StoreType::None => 0,
         }
     }
@@ -401,6 +404,7 @@ impl Stores {
                 StoreType::UserData => "USER_DATA",
                 StoreType::Verifications => "VERIFICATIONS",
                 StoreType::UsernameProofs => "USERNAME_PROOFS",
+                StoreType::StorageLends => "STORAGE_LENDS",
             };
             let limit = StorageLimit {
                 store_type: store_type.try_into().unwrap(),

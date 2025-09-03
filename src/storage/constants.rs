@@ -54,6 +54,8 @@ pub enum RootPrefix {
 
     /* Replication Bootstrap status */
     ReplicationBootstrapStatus = 21,
+
+    LendStorageByRecipient = 22,
 }
 
 /** Copied from the JS code */
@@ -104,6 +106,8 @@ pub enum UserPostfix {
 
     /* Link Compact State set */
     LinkCompactStateMessage = 100,
+
+    LendStorageMessage = 101,
 }
 
 impl UserPostfix {
