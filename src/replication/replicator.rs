@@ -73,6 +73,7 @@ impl MessageHashCacheKey {
 }
 
 struct MessageHashCache {
+    // The number of messages in the cache
     cache_size: usize,
 
     // Key (shard, fid, message_type) -> HashMap<hash, Message>
@@ -419,15 +420,6 @@ impl Replicator {
             }
 
             fids_in_page.insert(fid);
-            // if fid == 14451 {
-            //     let count = trie.get_count(
-            //         &stores.db,
-            //         &mut RocksDbTransactionBatch::new(),
-            //         &TrieKey::for_fid(fid),
-            //     )?;
-            //     info!("Aditya: fid {} has {} items", fid, count);
-            // }
-
             match (onchain_message_type, message_type) {
                 (Some(onchain_event_type), None) => {
                     // On-chain event

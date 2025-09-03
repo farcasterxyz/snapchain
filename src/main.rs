@@ -16,7 +16,7 @@ use snapchain::node::snapchain_read_node::SnapchainReadNode;
 use snapchain::proto::admin_service_server::AdminServiceServer;
 use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::proto::replication_service_server::ReplicationServiceServer;
-use snapchain::replication;
+use snapchain::replication::{self, ReplicationServer};
 use snapchain::storage::db::snapshot::download_snapshots;
 use snapchain::storage::db::RocksDB;
 use snapchain::storage::store::engine::{PostCommitMessage, Senders};
@@ -87,13 +87,8 @@ async fn start_servers(
     ));
 
     let replication_service = if let Some(replicator) = replicator {
-        let server = replication::replication_server::ReplicationServer::new(
-            replicator,
-            Box::new(routing::ShardRouter {}),
-            app_config.consensus.num_shards,
-            block_store.clone(),
-        );
-        let service = ReplicationServiceServer::new(server);
+        let service =
+            ReplicationServiceServer::new(ReplicationServer::new(replicator, block_store.clone()));
         Some(service)
     } else {
         None
