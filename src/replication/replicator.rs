@@ -410,14 +410,18 @@ impl Replicator {
 
         // For each trie key, fetch the associated message.
         for trie_key in trie_keys {
-            let (key_virtual_shard, fid, onchain_message_type, message_type, rest) =
-                TrieKey::decode(&trie_key)?;
-            if key_virtual_shard != trie_virtual_shard {
+            let decoded_key = TrieKey::decode(&trie_key)?;
+            if decoded_key.virtual_shard != trie_virtual_shard {
                 return Err(ReplicationError::InternalError(format!(
                     "Virtual shard ID mismatch: expected {}, got {}",
-                    trie_virtual_shard, key_virtual_shard
+                    trie_virtual_shard, decoded_key.virtual_shard
                 )));
             }
+
+            let fid = decoded_key.fid;
+            let onchain_message_type = decoded_key.onchain_message_type;
+            let message_type = decoded_key.message_type;
+            let rest = decoded_key.rest;
 
             fids_in_page.insert(fid);
             match (onchain_message_type, message_type) {

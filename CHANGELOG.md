@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2025-09-03
+
+### 🚀 Features
+
+- Produce transactions and events in shard 0 (#634)
+- Allow attaching orphaned nodes to the merkle trie (#651)
+- Read block events from shard 0 in other shards (#639)
+
 ## [0.6.0] - 2025-08-27
 
 ### 🐛 Bug Fixes

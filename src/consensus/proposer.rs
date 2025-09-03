@@ -16,7 +16,7 @@ use prost::Message;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use tokio::time::Instant;
 use tokio::{select, time};
 use tracing::{error, warn};
@@ -233,6 +233,7 @@ impl Proposer for ShardProposer {
                 return Validity::Invalid;
             }
 
+            // TODO(aditi): Something seems wrong here. The proposer shouldn't need to provide [events] and [max_block_event_seqnum] becuase those are derived from [transactions]. We probably need a different type for this. We're providing empty values here because the engine needs to compute them.
             let state = ShardStateChange {
                 shard_id: height.shard_index,
                 timestamp,
@@ -240,6 +241,7 @@ impl Proposer for ShardProposer {
                 new_state_root: header.shard_root.clone(),
                 transactions: chunk.transactions.clone(),
                 events: vec![],
+                max_block_event_seqnum: 0,
             };
             return if self.engine.validate_state_change(&state) {
                 Validity::Valid
@@ -336,7 +338,7 @@ pub struct BlockProposer {
     shard_stores: HashMap<u32, Stores>,
     num_shards: u32,
     network: proto::FarcasterNetwork,
-    block_tx: Option<mpsc::Sender<Block>>,
+    block_tx: Option<broadcast::Sender<Block>>,
     engine: BlockEngine,
     statsd_client: StatsdClientWrapper,
 }
@@ -348,7 +350,7 @@ impl BlockProposer {
         shard_stores: HashMap<u32, Stores>,
         num_shards: u32,
         network: proto::FarcasterNetwork,
-        block_tx: Option<mpsc::Sender<Block>>,
+        block_tx: Option<broadcast::Sender<Block>>,
         engine: BlockEngine,
         statsd_client: StatsdClientWrapper,
     ) -> BlockProposer {
@@ -476,12 +478,8 @@ impl BlockProposer {
 
     async fn publish_new_block(&self, block: Block) {
         if let Some(block_tx) = &self.block_tx {
-            match block_tx.send(block.clone()).await {
-                Err(err) => {
-                    error!("Error publishing new block {:?}", err.to_string());
-                }
-                Ok(_) => {}
-            }
+            // No active receivers is not impossible
+            let _ = block_tx.send(block.clone());
         }
     }
 }
@@ -642,7 +640,6 @@ impl Proposer for BlockProposer {
                 events_hash: header.events_hash.clone(),
                 events: block.events.clone(),
             };
-
             if !self.engine.validate_state_change(&state_change, height) {
                 return Validity::Invalid;
             };

@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::{
-    proto::{FnameTransfer, UserNameProof, UserNameType, ValidatorMessage},
+    proto::{FnameTransfer, UserNameProof, UserNameType},
     storage::store::mempool_poller::MempoolMessage,
     storage::store::node_local_state::LocalStateStore,
     utils::statsd_wrapper::StatsdClientWrapper,
@@ -220,13 +220,10 @@ impl Fetcher {
         if let Err(err) = self
             .mempool_tx
             .send(MempoolRequest::AddMessage(
-                MempoolMessage::ValidatorMessage(ValidatorMessage {
-                    on_chain_event: None,
-                    fname_transfer: Some(FnameTransfer {
-                        id: t.id,
-                        from_fid: t.from,
-                        proof: Some(username_proof),
-                    }),
+                MempoolMessage::FnameTransfer(FnameTransfer {
+                    id: t.id,
+                    from_fid: t.from,
+                    proof: Some(username_proof),
                 }),
                 MempoolSource::Local,
                 None,

@@ -5,10 +5,10 @@ mod tests {
     use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::IntoU8;
     use crate::storage::trie::merkle_trie::{Context, MerkleTrie, TrieKey};
-    use crate::storage::trie::util;
-    use crate::storage::trie::util::decode_trie_token;
+    use crate::storage::trie::util::decode_trie_page_token;
     use crate::utils::factory::{events_factory, messages_factory};
-    use rand::{thread_rng, Rng};
+    use rand::{thread_rng, Rng as _};
+    use std::collections::HashSet;
 
     fn random_hash() -> Vec<u8> {
         (0..32).map(|_| rand::random::<u8>()).collect()
@@ -172,7 +172,7 @@ mod tests {
             }
             page_token = next;
             // ensure token decodes
-            let _ = decode_trie_token(page_token.as_ref().unwrap()).unwrap();
+            let _ = decode_trie_page_token(page_token.as_ref().unwrap()).unwrap();
         }
         collected
     }
@@ -185,120 +185,70 @@ mod tests {
         db.open().unwrap();
 
         let branching_factor = 16;
-        let key_conv = util::get_transform_functions(branching_factor).unwrap();
-
         let mut trie = MerkleTrie::new(branching_factor).unwrap();
         trie.initialize(db).unwrap();
 
-        let key_vecs: Vec<Vec<u8>> = (0..4)
-            .map(|_| (0..10).map(|_| rand::random::<u8>()).collect())
-            .collect();
-        let keys: Vec<&[u8]> = key_vecs.iter().map(|v| v.as_slice()).collect();
-
-        let mut txn_batch = RocksDbTransactionBatch::new();
-        trie.insert(ctx, db, &mut txn_batch, keys.clone()).unwrap();
-        db.commit(txn_batch).unwrap();
-        let root_hash = trie.root_hash().unwrap();
-
-        // Just do recalculate hashes first, this should be a no-op
-        let mut txn_batch = RocksDbTransactionBatch::new();
-        trie.recalculate_hashes(ctx, db, &mut txn_batch, 6).unwrap();
-        db.commit(txn_batch).unwrap();
-
-        assert_eq!(trie.root_hash().unwrap(), root_hash);
-
-        // Key for the node to mess up and then re attach
-        let key = &key_vecs[0][0..6]; // try to attach this node
-        let xkey = (key_conv.expand)(key); // with this expanded key
-        let xprefix = &xkey[0..xkey.len() - 1]; // parent's prefix
-        let child_char = xkey[xkey.len() - 1]; // child's character in the parent's children[]
-
-        // Assert that the 0th key is in the DB and in the trie
-        {
-            let root = trie.get_root_node().unwrap();
-            assert_eq!(root.items(), 4);
-
-            let prefix_node = root.get_node_from_trie(ctx, db, &xprefix, 0).unwrap();
-
-            // Now, intentionally remove this prefix->child from the trie, but keep it in the DB
-            let mut children = prefix_node.children().clone();
-            let removed = children.remove(&child_char);
-            prefix_node.set_children(children);
-            assert!(removed.is_some());
-
-            let mut child_hashes = prefix_node.child_hashes().clone();
-            let removed = child_hashes.remove(&child_char);
-            prefix_node.set_child_hashes(child_hashes);
-            assert!(removed.is_some());
-
-            // Mess up the hashes all the way to the root for the prefix. This should be fixed up by the
-            // attach_to_root operation
-            for i in (0..=xprefix.len() - 1).rev() {
-                let node = root.get_node_from_trie(ctx, db, &xprefix[..i], 0).unwrap();
-                let child_char = xprefix[i];
-                let mut child_hashes = node.child_hashes().clone();
-                child_hashes.insert(child_char, vec![0; 32]);
-                node.set_child_hashes(child_hashes);
-            }
+        let mut all_keys = vec![];
+        // Make 10 keys with the prefix [1,2] like [1,2,0,0,0,0,0,1]
+        for i in 0..10 {
+            let key = vec![1, 2, 0, 0, 0, 0, 0, i];
+            all_keys.push(key);
         }
-        assert_ne!(
-            hex::encode(trie.root_hash().unwrap()),
-            hex::encode(root_hash.clone())
-        );
 
-        // Now, attach the prefix node to the trie
+        // 10 more keys with the prefix [1,3]
+        for i in 0..10 {
+            let key = vec![1, 3, 0, 0, 0, 0, 0, i];
+            all_keys.push(key);
+        }
+
+        // And then 5 more individual keys like [1,4] [1,5]...
+        for i in 0..5 {
+            let key = vec![1, 4 + i, 0, 0, 0, 0, 0, 0];
+            all_keys.push(key);
+        }
+
+        // Insert all keys
         let mut txn_batch = RocksDbTransactionBatch::new();
-        let r1 = trie.attach_to_root(ctx, db, &mut txn_batch, &key);
-        db.commit(txn_batch).unwrap();
-        trie.reload(db).unwrap();
-        assert!(r1.is_ok());
-
-        let mut txn_batch = RocksDbTransactionBatch::new();
-        let r = trie.recalculate_hashes(ctx, db, &mut txn_batch, 6);
-        db.commit(txn_batch).unwrap();
-        assert!(r.is_ok());
-
-        let (is_attached, was_created) = r1.unwrap();
-        assert!(is_attached && was_created); // Assert that it was attached
-
-        // Now, the root hashes should match the original
-        assert_eq!(
-            hex::encode(trie.root_hash().unwrap()),
-            hex::encode(root_hash.clone())
-        );
-
-        assert_eq!(trie.items().unwrap(), 4);
-
-        // Attaching it again should be a no-op
-        let mut txn_batch = RocksDbTransactionBatch::new();
-        let r1 = trie.attach_to_root(ctx, db, &mut txn_batch, &key);
-        db.commit(txn_batch).unwrap();
-        assert!(r1.is_ok());
-
-        let mut txn_batch = RocksDbTransactionBatch::new();
-        let r = trie.recalculate_hashes(ctx, db, &mut txn_batch, 6);
-        db.commit(txn_batch).unwrap();
-        assert!(r.is_ok());
-
-        let (is_attached, was_created) = r1.unwrap();
-        assert!(is_attached && !was_created); // Assert that it was not created again
-
-        // root hashes should still match the original
-        assert_eq!(
-            hex::encode(trie.root_hash().unwrap()),
-            hex::encode(root_hash)
-        );
-
-        // Attempting to attach a non-existing node should not be an error, but is_attached and was_created should
-        // both be false
-        let mut txn_batch = RocksDbTransactionBatch::new();
-        let r = trie.attach_to_root(ctx, db, &mut txn_batch, &[0; 16]);
+        trie.insert(
+            ctx,
+            db,
+            &mut txn_batch,
+            all_keys.iter().map(|k| k.as_slice()).collect(),
+        )
+        .unwrap();
         db.commit(txn_batch).unwrap();
 
-        assert!(r.is_ok());
+        // Get all keys with prefix [1,2] should yield all 10
+        let collected = collect_all_paged_values_from_trie(&mut trie, ctx, db, &[1, 2], 100);
+        assert_eq!(collected.len(), 10);
+        // assert that they are the same as the first 10 keys
+        for (i, key) in collected.iter().enumerate() {
+            assert_eq!(key, &all_keys[i]);
+        }
 
-        let (is_attached, was_created) = r.unwrap();
-        assert!(!is_attached && !was_created);
+        // Collecting them with page size 1 should also work
+        let collected = collect_all_paged_values_from_trie(&mut trie, ctx, db, &[1, 2], 1);
+        assert_eq!(collected.len(), 10);
+
+        // with page size 10 should also work
+        let collected = collect_all_paged_values_from_trie(&mut trie, ctx, db, &[1, 2], 10);
+        assert_eq!(collected.len(), 10);
+
+        // Collecting [1,3] should also yield 10 keys
+        let collected = collect_all_paged_values_from_trie(&mut trie, ctx, db, &[1, 3], 4);
+        assert_eq!(collected.len(), 10);
+
+        // Collecting [1,4] should also yield 1 key
+        let collected = collect_all_paged_values_from_trie(&mut trie, ctx, db, &[1, 4], 4);
+        assert_eq!(collected.len(), 1);
+
+        // Collecting [1] should yield all keys
+        let collected = collect_all_paged_values_from_trie(&mut trie, ctx, db, &[1], 4);
+        assert_eq!(collected.len(), all_keys.len());
+
+        // Collecting [0] should yield no keys
+        let collected = collect_all_paged_values_from_trie(&mut trie, ctx, db, &[0], 4);
+        assert_eq!(collected.len(), 0);
     }
 
     #[test]
@@ -316,7 +266,7 @@ mod tests {
         let mut original_keys = HashSet::with_capacity(1000);
         for _ in 0..1000 {
             let len = rng.gen_range(7..=20);
-            let key: Vec<u8> = (0..len).map(|_| rng.gen()).collect();
+            let key: Vec<u8> = (0..len).map(|_| rng.gen::<u8>()).collect();
 
             if original_keys.contains(&key) {
                 continue;
@@ -345,130 +295,22 @@ mod tests {
                 "Original key not found in collected keys"
             );
         }
-    }
 
-    #[test]
-    fn test_attach_root() {
-        let ctx = &Context::new();
-        let tmp_path = tempfile::tempdir().unwrap();
-        let db = &RocksDB::new(tmp_path.path().to_str().unwrap());
-        db.open().unwrap();
+        // Collect with page size 1
+        let collected = collect_all_paged_values_from_trie(&mut trie, ctx, db, &[], 1);
+        assert_eq!(collected.len(), 1000);
 
-        let branching_factor = 16;
-        let key_conv = util::get_transform_functions(branching_factor).unwrap();
+        // with page size 99
+        let collected = collect_all_paged_values_from_trie(&mut trie, ctx, db, &[], 99);
+        assert_eq!(collected.len(), 1000);
 
-        let mut trie = MerkleTrie::new(branching_factor).unwrap();
-        trie.initialize(db).unwrap();
+        // with page size 1000
+        let collected = collect_all_paged_values_from_trie(&mut trie, ctx, db, &[], 1000);
+        assert_eq!(collected.len(), 1000);
 
-        let key_vecs: Vec<Vec<u8>> = (0..4)
-            .map(|_| (0..10).map(|_| rand::random::<u8>()).collect())
-            .collect();
-        let keys: Vec<&[u8]> = key_vecs.iter().map(|v| v.as_slice()).collect();
-
-        let mut txn_batch = RocksDbTransactionBatch::new();
-        trie.insert(ctx, db, &mut txn_batch, keys.clone()).unwrap();
-        db.commit(txn_batch).unwrap();
-        let root_hash = trie.root_hash().unwrap();
-
-        // Just do recalculate hashes first, this should be a no-op
-        let mut txn_batch = RocksDbTransactionBatch::new();
-        trie.recalculate_hashes(ctx, db, &mut txn_batch, 6).unwrap();
-        db.commit(txn_batch).unwrap();
-
-        assert_eq!(trie.root_hash().unwrap(), root_hash);
-
-        // Key for the node to mess up and then re attach
-        let key = &key_vecs[0][0..6]; // try to attach this node
-        let xkey = (key_conv.expand)(key); // with this expanded key
-        let xprefix = &xkey[0..xkey.len() - 1]; // parent's prefix
-        let child_char = xkey[xkey.len() - 1]; // child's character in the parent's children[]
-
-        // Assert that the 0th key is in the DB and in the trie
-        {
-            let root = trie.get_root_node().unwrap();
-            assert_eq!(root.items(), 4);
-
-            let prefix_node = root.get_node_from_trie(ctx, db, &xprefix, 0).unwrap();
-
-            // Now, intentionally remove this prefix->child from the trie, but keep it in the DB
-            let mut children = prefix_node.children().clone();
-            let removed = children.remove(&child_char);
-            prefix_node.set_children(children);
-            assert!(removed.is_some());
-
-            let mut child_hashes = prefix_node.child_hashes().clone();
-            let removed = child_hashes.remove(&child_char);
-            prefix_node.set_child_hashes(child_hashes);
-            assert!(removed.is_some());
-
-            // Mess up the hashes all the way to the root for the prefix. This should be fixed up by the
-            // attach_to_root operation
-            for i in (0..=xprefix.len() - 1).rev() {
-                let node = root.get_node_from_trie(ctx, db, &xprefix[..i], 0).unwrap();
-                let child_char = xprefix[i];
-                let mut child_hashes = node.child_hashes().clone();
-                child_hashes.insert(child_char, vec![0; 32]);
-                node.set_child_hashes(child_hashes);
-            }
-        }
-        assert_ne!(
-            hex::encode(trie.root_hash().unwrap()),
-            hex::encode(root_hash.clone())
-        );
-
-        // Now, attach the prefix node to the trie
-        let mut txn_batch = RocksDbTransactionBatch::new();
-        let r1 = trie.attach_to_root(ctx, db, &mut txn_batch, &key);
-        db.commit(txn_batch).unwrap();
-        trie.reload(db).unwrap();
-        assert!(r1.is_ok());
-
-        let mut txn_batch = RocksDbTransactionBatch::new();
-        let r = trie.recalculate_hashes(ctx, db, &mut txn_batch, 6);
-        db.commit(txn_batch).unwrap();
-        assert!(r.is_ok());
-
-        let (is_attached, was_created) = r1.unwrap();
-        assert!(is_attached && was_created); // Assert that it was attached
-
-        // Now, the root hashes should match the original
-        assert_eq!(
-            hex::encode(trie.root_hash().unwrap()),
-            hex::encode(root_hash.clone())
-        );
-
-        assert_eq!(trie.items().unwrap(), 4);
-
-        // Attaching it again should be a no-op
-        let mut txn_batch = RocksDbTransactionBatch::new();
-        let r1 = trie.attach_to_root(ctx, db, &mut txn_batch, &key);
-        db.commit(txn_batch).unwrap();
-        assert!(r1.is_ok());
-
-        let mut txn_batch = RocksDbTransactionBatch::new();
-        let r = trie.recalculate_hashes(ctx, db, &mut txn_batch, 6);
-        db.commit(txn_batch).unwrap();
-        assert!(r.is_ok());
-
-        let (is_attached, was_created) = r1.unwrap();
-        assert!(is_attached && !was_created); // Assert that it was not created again
-
-        // root hashes should still match the original
-        assert_eq!(
-            hex::encode(trie.root_hash().unwrap()),
-            hex::encode(root_hash)
-        );
-
-        // Attempting to attach a non-existing node should not be an error, but is_attached and was_created should
-        // both be false
-        let mut txn_batch = RocksDbTransactionBatch::new();
-        let r = trie.attach_to_root(ctx, db, &mut txn_batch, &[0; 16]);
-        db.commit(txn_batch).unwrap();
-
-        assert!(r.is_ok());
-
-        let (is_attached, was_created) = r.unwrap();
-        assert!(!is_attached && !was_created);
+        // with page size 1001
+        let collected = collect_all_paged_values_from_trie(&mut trie, ctx, db, &[], 1001);
+        assert_eq!(collected.len(), 1000);
     }
 
     #[test]
