@@ -153,7 +153,7 @@ impl Fetcher {
 
     fn gauge(&self, key: &str, value: u64) {
         self.statsd_client
-            .gauge(format!("fnames.{}", key).as_str(), value);
+            .gauge(format!("fnames.{}", key).as_str(), value, vec![]);
     }
 
     async fn fetch(&mut self) -> Result<(), FetchError> {
