@@ -9,5 +9,5 @@ pub mod replication_server;
 pub mod replication_stores;
 pub mod replicator;
 
-// #[cfg(test)]
-// mod replication_engine_tests;
+#[cfg(test)]
+mod replication_server_test;

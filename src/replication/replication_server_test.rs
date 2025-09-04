@@ -1,24 +1,27 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        proto,
+        proto::{self, replication_service_server::ReplicationService},
         replication::{
             replication_stores::ReplicationStores,
             replicator::{self, Replicator, ReplicatorSnapshotOptions},
+            ReplicationServer,
         },
         storage::{
-            db::{RocksDB, RocksdbError},
+            db::{RocksDB, RocksDbTransactionBatch, RocksdbError},
             store::{
                 account::UserDataStore,
                 engine::{PostCommitMessage, ShardEngine},
                 mempool_poller::MempoolMessage,
                 test_helper::{self, EngineOptions},
+                BlockStore,
             },
-            trie::merkle_trie::TrieKey,
+            trie::merkle_trie::{Context, MerkleTrie, TrieKey},
         },
         utils::factory::{self, messages_factory, username_factory},
     };
     use std::{collections::HashMap, sync::Arc, time::Duration};
+    use tempfile::TempDir;
 
     fn opendb(path: &str) -> Result<Arc<RocksDB>, RocksdbError> {
         let milliseconds_timestamp: u128 = std::time::SystemTime::now()
@@ -235,7 +238,7 @@ mod tests {
         link
     }
 
-    fn setup_replicator(engine: &mut ShardEngine) -> Arc<Replicator> {
+    fn setup_replicator(engine: &mut ShardEngine) -> (Arc<Replicator>, ReplicationServer) {
         let statsd_client = crate::utils::statsd_wrapper::StatsdClientWrapper::new(
             cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
             true,
@@ -259,97 +262,171 @@ mod tests {
             },
         ));
 
-        replicator
+        let block_store = BlockStore::new(engine.db.clone());
+
+        // Set up the replication server with the given replicator
+        let replication_server = ReplicationServer::new(replicator.clone(), block_store);
+
+        (replicator, replication_server)
     }
 
-    fn fetch_transactions(
-        replicator: &Arc<Replicator>,
+    async fn fetch_transactions(
+        replication_server: &ReplicationServer,
         shard_id: u32,
         height: u64,
-        message_limit: usize,
-    ) -> Vec<proto::Transaction> {
-        let mut next_page_token = None;
-        let mut transactions = vec![];
+    ) -> Result<
+        (
+            Vec<proto::ShardTrieEntryWithMessage>,
+            Vec<proto::FidAccountRootHash>,
+            proto::GetShardSnapshotMetadataResponse,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        // Fetch shard snapshot metadata for shard_id: 1
+        let snapshot_request = proto::GetShardSnapshotMetadataRequest { shard_id: 1 };
+        let snapshot_response = replication_server
+            .get_shard_snapshot_metadata(tonic::Request::new(snapshot_request))
+            .await?
+            .into_inner();
 
-        loop {
-            let results = replicator.transactions_for_shard_and_height(
-                shard_id,
-                height,
-                next_page_token.clone(),
-                message_limit,
-            );
+        let mut trie_messages = vec![];
+        let mut fid_account_roots = vec![];
 
-            let (results, next_page) = match results {
-                Ok(res) => res,
-                Err(e) => {
-                    panic!(
-                        "Error fetching transactions for shard {} and height {}: {}",
-                        shard_id, height, e
-                    );
+        for vts in 0..255 {
+            let mut next_page_token: Option<String> = None;
+
+            loop {
+                let request = proto::GetShardTransactionsRequest {
+                    shard_id,
+                    trie_virtual_shard: vts,
+                    height,
+                    page_token: next_page_token.clone(),
+                };
+
+                // Call the server method and handle the Result
+                let response = replication_server
+                    .get_shard_transactions(tonic::Request::new(request))
+                    .await?
+                    .into_inner();
+
+                // Extend trie_messages and fid_account_roots with the response
+                trie_messages.extend(response.trie_messages);
+                fid_account_roots.extend(response.fid_account_roots);
+
+                // Update the page token for the next iteration
+                next_page_token = response.next_page_token;
+
+                // If no more pages, break out of the inner loop and move to the next vts
+                if next_page_token.is_none() {
+                    break;
                 }
-            };
-
-            transactions.extend(results);
-            next_page_token = next_page;
-
-            if next_page_token.is_none() {
-                break;
             }
         }
 
-        transactions
+        Ok((trie_messages, fid_account_roots, snapshot_response))
     }
 
-    fn replicate_engine(
+    async fn replicate_engine(
         source_engine: &ShardEngine,
         dest_engine: &mut ShardEngine,
-        replicator: Arc<Replicator>,
+        replication_server: &ReplicationServer,
+        fids: Vec<u64>,
     ) {
         let height = source_engine.get_confirmed_height().block_number;
-        let transactions = fetch_transactions(
-            &replicator,
-            source_engine.shard_id(),
-            height,
-            1, // intentionally using a small limit to exercise pagination
-        );
+        let (trie_messages, fid_account_roots, snapshot_metadata) =
+            fetch_transactions(replication_server, source_engine.shard_id(), height)
+                .await
+                .unwrap();
 
-        let mut synced_fids = HashMap::new();
+        // There are 14 messages inserted, and all of them should be returned
+        assert_eq!(trie_messages.len(), 14);
+        // 2 FIDs were used, and both should be returned
+        assert_eq!(fid_account_roots.len(), 2);
+        // Multiple snapshots are present
+        assert!(snapshot_metadata.snapshots.len() > 1);
 
-        for tx in &transactions {
-            synced_fids.insert(tx.fid, tx.account_root.clone());
+        // Find the highest snapshot
+        let snapshot = snapshot_metadata
+            .snapshots
+            .iter()
+            .reduce(|a, b| if a.height > b.height { a } else { b })
+            .unwrap();
 
-            // Replay the system and user transactions
-            dest_engine
-                .replay_transaction(tx)
-                .expect("Failed to replay transactions");
+        // Header of the highest snapshot
+        let shard_chunk_header = snapshot
+            .shard_chunk
+            .as_ref()
+            .unwrap()
+            .clone()
+            .header
+            .as_ref()
+            .unwrap()
+            .clone();
+
+        assert_eq!(snapshot.shard_id, 1);
+        assert_eq!(shard_chunk_header.height.as_ref().unwrap().shard_index, 1);
+
+        // The trie root should match this
+        let metadata_shard_root = shard_chunk_header.shard_root.clone();
+
+        // First, we'll try to reconstruct the trie independently from the trie keys, to see if we get the same hashes
+        let dest_db = dest_engine.db.clone();
+        let mut trie = MerkleTrie::new(16).unwrap();
+        trie.initialize(&dest_db).unwrap();
+
+        let all_trie_keys = trie_messages
+            .iter()
+            .map(|te| te.trie_key.clone())
+            .collect::<Vec<_>>();
+
+        // Add all the trie keys
+        let inserted = trie
+            .insert(
+                &Context::new(),
+                &dest_db,
+                &mut RocksDbTransactionBatch::new(),
+                all_trie_keys
+                    .iter()
+                    .map(|k| k.as_slice())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+
+        assert!(inserted.iter().all(|b| *b));
+
+        // The roots should match, so we know that all the trie entries came over correctly.
+        assert_eq!(metadata_shard_root, trie.root_hash().unwrap());
+        // Reload the trie to reset it. We'll insert the keys again when we merge the messages
+        trie.reload(&dest_db).unwrap();
+
+        // Now, go over the individual messages, insert into the dest engine
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        for trie_message in trie_messages {
+            let inserted = dest_engine
+                .replay_replicator_message(&mut txn_batch, &trie_message)
+                .expect("Failed to replay replicator message");
+            assert!(fids.contains(&inserted.fid));
+            assert!(all_trie_keys.contains(&inserted.trie_key));
+            assert!(inserted.hub_event.body.is_some());
+
+            trie.insert(
+                &Context::new(),
+                &dest_db,
+                &mut txn_batch,
+                vec![inserted.trie_key.as_slice()],
+            )
+            .unwrap();
         }
+        dest_db.commit(txn_batch).unwrap();
 
-        // Check the account roots match for both engines
-        for (fid, account_root_from_tx) in synced_fids {
-            let root1 = source_engine.account_root_for_fid(fid);
-            let root2 = dest_engine.account_root_for_fid(fid);
-
-            assert_eq!(
-                root1,
-                root2,
-                "Account roots do not match for fid {}, source root: {} vs replicated root: {}",
-                fid,
-                hex::encode(&root1),
-                hex::encode(&root2)
-            );
-
-            assert_eq!(
-                account_root_from_tx, root1,
-                "Account root from transaction does not match for fid {}",
-                fid
-            );
-        }
+        // The roots should match
+        assert_eq!(metadata_shard_root, trie.root_hash().unwrap());
     }
 
     #[tokio::test]
     async fn test_replication() {
         // open tmp dir for database
-        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let tmp_dir = TempDir::new().unwrap();
 
         let (post_commit_tx, post_commit_rx) = tokio::sync::mpsc::channel::<PostCommitMessage>(1);
 
@@ -357,7 +434,7 @@ mod tests {
             new_engine_with_fname_signer(&tmp_dir, Some(post_commit_tx)).await; // source engine
         let (_, mut new_engine) = new_engine_with_fname_signer(&tmp_dir, None).await; // engine to replicate to
 
-        let replicator = setup_replicator(&mut engine);
+        let (replicator, replication_server) = setup_replicator(&mut engine);
         let spawned_replicator = replicator.clone();
         tokio::spawn(async move {
             replicator::run(spawned_replicator, post_commit_rx).await;
@@ -467,9 +544,16 @@ mod tests {
             timestamp as u64,
             Some(&fid_signer),
         );
-
         commit_message(&mut engine, &username_proof_add).await;
 
-        replicate_engine(&engine, &mut new_engine, replicator);
+        // Note that snapshots are added to the replicator as we commit messages
+
+        replicate_engine(
+            &engine,
+            &mut new_engine,
+            &replication_server,
+            vec![fid, fid2],
+        )
+        .await;
     }
 }

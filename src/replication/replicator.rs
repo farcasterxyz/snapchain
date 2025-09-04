@@ -634,7 +634,7 @@ impl Replicator {
         };
 
         let timestamp = msg.header.timestamp;
-        let oldest_valid_timestamp = 0; // self.oldest_valid_timestamp()?;
+        let oldest_valid_timestamp = self.oldest_valid_timestamp()?;
 
         // Clean up old snapshots
         self.stores
@@ -648,13 +648,6 @@ impl Replicator {
         // Check if the timestamp is expired
         if timestamp < oldest_valid_timestamp {
             return Ok(());
-        }
-
-        // Check if the number of existing snapshots exceeds 1
-        if let Ok(metadata) = self.stores.get_metadata(msg.shard_id) {
-            if metadata.len() > 1 {
-                return Ok(());
-            }
         }
 
         // Open a snapshot

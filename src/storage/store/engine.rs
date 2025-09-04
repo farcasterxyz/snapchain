@@ -64,6 +64,9 @@ pub enum EngineError {
 
     #[error(transparent)]
     BlockEventStoreError(#[from] BlockEventStorageError),
+
+    #[error("Replicator merge error: {0}")]
+    ReplicatorError(String),
 }
 
 #[derive(Error, Debug, Clone)]
@@ -100,6 +103,12 @@ pub enum MessageValidationError {
 
     #[error("invalid seqnum for block event")]
     InvalidSeqnumForBlockEvent,
+}
+
+pub struct MergedReplicatorMessage {
+    pub fid: u64,
+    pub trie_key: Vec<u8>,
+    pub hub_event: HubEvent,
 }
 
 // Shard state root and the transactions
@@ -526,6 +535,75 @@ impl ShardEngine {
         self.metrics
             .time_with_shard("replay_proposal_time", elapsed.as_millis() as u64);
         Ok((events, max_block_event_seqnum))
+    }
+
+    // Temporarily mark this for tests, since this is used by the client, which will be added shortly.
+    #[cfg(test)]
+    pub(crate) fn replay_replicator_message(
+        &mut self,
+        txn_batch: &mut RocksDbTransactionBatch,
+        trie_message: &crate::proto::ShardTrieEntryWithMessage,
+    ) -> Result<MergedReplicatorMessage, EngineError> {
+        use crate::proto::shard_trie_entry_with_message::TrieMessage;
+
+        let (hub_event, fid) = match &trie_message.trie_message {
+            Some(TrieMessage::UserMessage(m)) => {
+                let event = self.merge_message(m, txn_batch)?;
+                (event, m.fid())
+            }
+            Some(TrieMessage::OnChainEvent(oe)) => {
+                let event = self
+                    .stores
+                    .onchain_event_store
+                    .merge_onchain_event(oe.clone(), txn_batch)?;
+
+                (event, oe.fid)
+            }
+            Some(TrieMessage::FnameTransfer(f)) => match &f.proof {
+                None => {
+                    return Err(EngineError::ReplicatorError(format!(
+                        "FnameTransfer proof is missing for fname message {:?}",
+                        f
+                    )));
+                }
+                Some(p) => {
+                    let event = UserDataStore::merge_username_proof(
+                        &self.stores.user_data_store,
+                        p,
+                        txn_batch,
+                    )?;
+                    (event, p.fid)
+                }
+            },
+            _ => {
+                return Err(EngineError::ReplicatorError(format!(
+                    "Unknown trie_message type {:?}",
+                    trie_message
+                )))
+            }
+        };
+
+        let (inserts, deletes) = TrieKey::for_hub_event(&hub_event);
+
+        if inserts.len() != 1 {
+            return Err(EngineError::ReplicatorError(format!(
+                "Message generated incorrect number of inserts. Message:{:?}\nHubEvent {:?}",
+                trie_message, hub_event
+            )));
+        }
+
+        if !deletes.is_empty() {
+            warn!(
+                "Message generated deletes, ignoring them. Message {:?}\nHubEvent {:?}",
+                trie_message, hub_event
+            );
+        }
+
+        Ok(MergedReplicatorMessage {
+            fid,
+            trie_key: inserts[0].clone(),
+            hub_event,
+        })
     }
 
     pub(crate) fn replay_snapchain_txn(
