@@ -26,7 +26,6 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct StorageLendStoreDef {
     prune_size_limit: u32,
-    onchain_event_store: OnchainEventStore,
 }
 
 impl StoreDef for StorageLendStoreDef {
@@ -176,22 +175,18 @@ impl StorageLendStoreDef {
     }
 }
 
-struct StorageLendStore {}
+pub struct StorageLendStore {}
 
 impl StorageLendStore {
     pub fn new(
         db: Arc<RocksDB>,
         store_event_handler: Arc<StoreEventHandler>,
-        onchain_event_store: OnchainEventStore,
         prune_size_limit: u32,
     ) -> Store<StorageLendStoreDef> {
         Store::new_with_store_def(
             db,
             store_event_handler,
-            StorageLendStoreDef {
-                prune_size_limit,
-                onchain_event_store,
-            },
+            StorageLendStoreDef { prune_size_limit },
         )
     }
 
@@ -199,16 +194,12 @@ impl StorageLendStore {
         db: Arc<RocksDB>,
         store_event_handler: Arc<StoreEventHandler>,
         prune_size_limit: u32,
-        onchain_event_store: OnchainEventStore,
         options: StoreOptions,
     ) -> Store<StorageLendStoreDef> {
         Store::new_with_store_def_opts(
             db,
             store_event_handler,
-            StorageLendStoreDef {
-                prune_size_limit,
-                onchain_event_store,
-            },
+            StorageLendStoreDef { prune_size_limit },
             options,
         )
     }
@@ -231,7 +222,7 @@ impl StorageLendStore {
             )?;
 
             for storage_lend in page.messages {
-                match &storage_lend.data.as_ref().unwrap().body.unwrap() {
+                match &storage_lend.data.as_ref().unwrap().body.as_ref().unwrap() {
                     Body::LendStorageBody(lend_storage_body) => {
                         storage_slot.merge(&StorageSlot::from_storage_lend(lend_storage_body));
                     }

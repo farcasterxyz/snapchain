@@ -5,11 +5,13 @@ use crate::core::{types::Height, util::FarcasterTime};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::{
     self, block_event_data, Block, BlockEvent, BlockEventData, BlockEventType, FarcasterNetwork,
-    HeartbeatEventBody, LendStorageBody, MessageType, OnChainEvent, ShardChunkWitness, Transaction,
+    HeartbeatEventBody, HubEventType, LendStorageBody, MessageType, OnChainEvent,
+    ShardChunkWitness, Transaction,
 };
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
-    BlockEventStore, OnchainEventStorageError, OnchainEventStore, StoreEventHandler,
+    BlockEventStore, OnchainEventStorageError, OnchainEventStore, StorageLendStore,
+    StorageLendStoreDef, StorageSlot, Store, StoreEventHandler,
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
@@ -42,7 +44,7 @@ pub enum BlockEngineError {
     #[error(transparent)]
     OnchainEventError(#[from] OnchainEventStorageError),
 }
-#[derive(Error, Debug, Clone)]
+#[derive(Error, Debug)]
 pub enum MessageValidationError {
     #[error("message has no data")]
     NoMessageData,
@@ -56,11 +58,17 @@ pub enum MessageValidationError {
     #[error("invalid message type")]
     InvalidMessageType,
 
+    #[error("insufficient storage")]
+    InsufficientStorage,
+
     #[error(transparent)]
     HubError(#[from] HubError),
 
     #[error(transparent)]
     MessageValidationError(#[from] validations::error::ValidationError),
+
+    #[error(transparent)]
+    OnchainEventError(#[from] OnchainEventStorageError),
 }
 
 #[derive(Clone)]
@@ -68,6 +76,7 @@ pub struct BlockStores {
     pub block_store: BlockStore,
     pub block_event_store: BlockEventStore,
     pub onchain_event_store: OnchainEventStore,
+    pub storage_lend_store: Store<StorageLendStoreDef>,
 }
 
 impl BlockStores {
@@ -113,11 +122,20 @@ impl BlockEngine {
         network: FarcasterNetwork,
     ) -> Self {
         trie.initialize(&db).unwrap();
+        let store_event_handler = StoreEventHandler::new();
         BlockEngine {
             stores: BlockStores {
                 block_store,
                 block_event_store: BlockEventStore { db: db.clone() },
-                onchain_event_store: OnchainEventStore::new(db.clone(), StoreEventHandler::new()),
+                onchain_event_store: OnchainEventStore::new(
+                    db.clone(),
+                    store_event_handler.clone(),
+                ),
+                storage_lend_store: StorageLendStore::new(
+                    db.clone(),
+                    store_event_handler.clone(),
+                    100,
+                ),
             },
             trie,
             shard_id: 0,
@@ -157,6 +175,7 @@ impl BlockEngine {
     pub fn validate_user_message(
         &self,
         message: &proto::Message,
+        storage_slot: &StorageSlot,
         timestamp: &FarcasterTime,
         version: EngineVersion,
         txn_batch: &mut RocksDbTransactionBatch,
@@ -198,15 +217,14 @@ impl BlockEngine {
 
         match message_data
             .body
+            .as_ref()
             .ok_or(MessageValidationError::NoMessageData)?
         {
             crate::proto::message_data::Body::LendStorageBody(lend_storage) => {
-                let from_fid = message.fid();
-                let storage_slot = self.stores.onchain_event_store.get_storage_slot_for_fid(
-                    from_fid,
-                    self.network,
-                    &[],
-                );
+                let num_units_available = storage_slot.units_for(lend_storage.unit_type());
+                if num_units_available < lend_storage.num_units as u32 {
+                    return Err(MessageValidationError::InsufficientStorage);
+                }
             }
             _ => return Err(MessageValidationError::InvalidMessageType),
         }
@@ -219,6 +237,8 @@ impl BlockEngine {
         trie_ctx: &merkle_trie::Context,
         snapchain_txn: &Transaction,
         txn_batch: &mut RocksDbTransactionBatch,
+        timestamp: &FarcasterTime,
+        version: EngineVersion,
     ) -> Result<Vec<u8>, BlockEngineError> {
         for message in &snapchain_txn.system_messages {
             if let Some(ref onchain_event) = message.on_chain_event {
@@ -238,8 +258,18 @@ impl BlockEngine {
         }
 
         for message in &snapchain_txn.user_messages {
-            match self.validate_user_message(message, timestamp, version, txn_batch) {
-                Ok(()) => {}
+            match self.validate_user_message(message, storage_slot, timestamp, version, txn_batch) {
+                Ok(()) => match message.msg_type() {
+                    MessageType::LendStorage => {
+                        if let Ok(event) = self.stores.storage_lend_store.merge(message, txn_batch)
+                        {
+                            if event.r#type() == HubEventType::MergeMessage {
+                                storage_slot.merge(&StorageSlot::from_storage_lend())
+                            }
+                        }
+                    }
+                    _ => {}
+                },
                 Err(err) => {}
             }
         }
@@ -313,6 +343,7 @@ impl BlockEngine {
         messages: Vec<MempoolMessage>,
         height: Height,
         timestamp: &FarcasterTime,
+        version: EngineVersion,
     ) -> Result<BlockStateChange, BlockEngineError> {
         self.metrics.count(
             "recv_messages",
@@ -330,6 +361,12 @@ impl BlockEngine {
                     .filter_map(|vm| vm.on_chain_event.clone())
                     .collect();
 
+                let lent_storage = StorageLendStore::get_lent_from_storage(
+                    &self.stores.storage_lend_store,
+                    transaction.fid,
+                )
+                .ok()?;
+
                 let storage_slot = self
                     .stores
                     .onchain_event_store
@@ -337,6 +374,7 @@ impl BlockEngine {
                         transaction.fid,
                         self.network,
                         pending_onchain_events.as_slice(),
+                        &lent_storage,
                     )
                     .ok()?;
 
@@ -354,8 +392,13 @@ impl BlockEngine {
             .collect_vec();
 
         for snapchain_txn in &mut snapchain_txns {
-            let account_root =
-                self.replay_snapchain_txn(&merkle_trie::Context::new(), &snapchain_txn, txn_batch)?;
+            let account_root = self.replay_snapchain_txn(
+                &merkle_trie::Context::new(),
+                &snapchain_txn,
+                txn_batch,
+                timestamp,
+                version,
+            )?;
             snapchain_txn.account_root = account_root;
         }
 
@@ -389,7 +432,7 @@ impl BlockEngine {
         let version = EngineVersion::version_for(&timestamp, self.network);
         let state_change = if version.is_enabled(ProtocolFeature::WriteDataToShardZero) {
             let result = self
-                .prepare_proposal(&mut txn, messages, height, &timestamp)
+                .prepare_proposal(&mut txn, messages, height, &timestamp, version)
                 .unwrap();
 
             self.trie.reload(&self.db).unwrap();
@@ -421,6 +464,7 @@ impl BlockEngine {
         source: ProposalSource,
         height: Height,
         timestamp: &FarcasterTime,
+        version: EngineVersion,
     ) -> Result<(), BlockEngineError> {
         let now = std::time::Instant::now();
         // TODO(aditi): We probably only want to check this if we're in a test env (maybe only if the network is Devnet)
@@ -451,8 +495,13 @@ impl BlockEngine {
         }
 
         for snapchain_txn in transactions {
-            let account_root =
-                self.replay_snapchain_txn(&merkle_trie::Context::new(), snapchain_txn, txn_batch)?;
+            let account_root = self.replay_snapchain_txn(
+                &merkle_trie::Context::new(),
+                snapchain_txn,
+                txn_batch,
+                timestamp,
+                version,
+            )?;
             // Reject early if account roots fail to match (shard roots will definitely fail)
             if &account_root != &snapchain_txn.account_root {
                 warn!(
@@ -524,6 +573,7 @@ impl BlockEngine {
             ProposalSource::Validate,
             height,
             &shard_state_change.timestamp,
+            version,
         );
 
         if let Err(ref err) = proposal_result {
@@ -575,6 +625,7 @@ impl BlockEngine {
                 ProposalSource::Commit,
                 height,
                 &FarcasterTime::new(block_timestamp),
+                version,
             ) {
                 Err(err) => {
                     error!("State change commit failed: {}", err);
