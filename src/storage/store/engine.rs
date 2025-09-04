@@ -6,13 +6,16 @@ use crate::core::{
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::message_data::Body;
 use crate::proto::shard_trie_entry_with_message::TrieMessage;
+use crate::proto::BlockEvent;
 use crate::proto::{
     self, hub_event, FarcasterNetwork, HubEvent, HubEventType, MessageType, OnChainEvent,
     OnChainEventType, Protocol, ShardChunk, ShardTrieEntryWithMessage, Transaction, UserDataType,
     UserNameProof,
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
-use crate::storage::store::account::{CastStore, MessagesPage, StoreOptions, VerificationStore};
+use crate::storage::store::account::{
+    BlockEventStorageError, CastStore, MessagesPage, StoreOptions, VerificationStore,
+};
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
 use crate::storage::store::migrations::{MigrationContext, MigrationRunner};
@@ -61,6 +64,9 @@ pub enum EngineError {
     #[error(transparent)]
     MempoolPollerError(#[from] MempoolPollerError),
 
+    #[error(transparent)]
+    BlockEventStoreError(#[from] BlockEventStorageError),
+
     #[error("Replicator merge error: {0}")]
     ReplicatorError(String),
 }
@@ -96,6 +102,15 @@ pub enum MessageValidationError {
 
     #[error("address is not part of any verification")]
     AddressNotPartOfVerification,
+
+    #[error("invalid seqnum for block event")]
+    InvalidSeqnumForBlockEvent,
+}
+
+pub struct MergedReplicatorMessage {
+    pub fid: u64,
+    pub trie_key: Vec<u8>,
+    pub hub_event: HubEvent,
 }
 
 // Shard state root and the transactions
@@ -107,6 +122,7 @@ pub struct ShardStateChange {
     pub transactions: Vec<Transaction>,
     pub events: Vec<HubEvent>,
     pub version: EngineVersion,
+    pub max_block_event_seqnum: u64,
 }
 
 #[derive(Clone)]
@@ -132,6 +148,7 @@ pub struct PostCommitMessage {
 struct CachedTransaction {
     shard_root: Vec<u8>,
     events: Vec<HubEvent>,
+    max_block_event_seqnum: u64,
     txn: RocksDbTransactionBatch,
 }
 
@@ -315,19 +332,22 @@ impl ShardEngine {
 
         let mut events = vec![];
         let mut validation_error_count = 0;
-        let version = self.version_for(timestamp);
+        let mut max_block_event_seqnum = self.stores.block_event_store.max_seqnum()?;
         for snapchain_txn in &mut snapchain_txns {
-            let (account_root, txn_events, validation_errors) = self.replay_snapchain_txn(
-                trie_ctx,
-                &snapchain_txn,
-                txn_batch,
-                ProposalSource::Propose,
-                version,
-                timestamp,
-            )?;
+            let (account_root, txn_events, validation_errors, last_block_event_seqnum) = self
+                .replay_snapchain_txn(
+                    trie_ctx,
+                    &snapchain_txn,
+                    txn_batch,
+                    ProposalSource::Propose,
+                    version,
+                    timestamp,
+                    max_block_event_seqnum,
+                )?;
             snapchain_txn.account_root = account_root;
             events.extend(txn_events);
             validation_error_count += validation_errors.len();
+            max_block_event_seqnum = last_block_event_seqnum;
         }
 
         self.metrics
@@ -347,6 +367,7 @@ impl ShardEngine {
             new_state_root: new_root_hash.clone(),
             transactions: snapchain_txns,
             events,
+            max_block_event_seqnum,
         };
 
         Ok(result)
@@ -396,6 +417,7 @@ impl ShardEngine {
             shard_root: result.new_state_root.clone(),
             events: result.events.clone(),
             txn,
+            max_block_event_seqnum: result.max_block_event_seqnum,
         });
 
         let proposal_duration = now.elapsed();
@@ -468,9 +490,10 @@ impl ShardEngine {
         source: ProposalSource,
         version: EngineVersion,
         timestamp: &FarcasterTime,
-    ) -> Result<Vec<HubEvent>, EngineError> {
+    ) -> Result<(Vec<HubEvent>, u64), EngineError> {
         let now = std::time::Instant::now();
         let mut events = vec![];
+        let mut max_block_event_seqnum = self.stores.block_event_store.max_seqnum()?;
         // Validate that the trie is in a good place to start with
         match self.get_last_shard_chunk() {
             None => { // There are places where it's hard to provide a parent hash-- e.g. tests so make this an option and skip validation if not present
@@ -498,14 +521,16 @@ impl ShardEngine {
         }
 
         for snapchain_txn in transactions {
-            let (account_root, txn_events, _) = self.replay_snapchain_txn(
-                trie_ctx,
-                snapchain_txn,
-                txn_batch,
-                source.clone(),
-                version,
-                timestamp,
-            )?;
+            let (account_root, txn_events, _, last_block_event_seqnum) = self
+                .replay_snapchain_txn(
+                    trie_ctx,
+                    snapchain_txn,
+                    txn_batch,
+                    source.clone(),
+                    version,
+                    timestamp,
+                    max_block_event_seqnum,
+                )?;
             // Reject early if account roots fail to match (shard roots will definitely fail)
             if &account_root != &snapchain_txn.account_root {
                 warn!(
@@ -521,6 +546,7 @@ impl ShardEngine {
                 return Err(EngineError::HashMismatch);
             }
             events.extend(txn_events);
+            max_block_event_seqnum = last_block_event_seqnum;
         }
 
         let root1 = self.stores.trie.root_hash()?;
@@ -540,20 +566,14 @@ impl ShardEngine {
         let elapsed = now.elapsed();
         self.metrics
             .time_with_shard("replay_proposal_time", elapsed.as_millis() as u64);
-        Ok(events)
-    }
-
-    // Reset the event id generator to 0. This is used when doing replication, when we're merging in events from another node
-    // and not from blocks (so no blockheight to use)
-    pub(crate) fn reset_event_id(&mut self) {
-        self.stores.event_handler.set_current_height(0);
+        Ok((events, max_block_event_seqnum))
     }
 
     pub(crate) fn replay_replicator_message(
         &mut self,
         txn_batch: &mut RocksDbTransactionBatch,
         trie_message: &ShardTrieEntryWithMessage,
-    ) -> Result<(u64, Vec<u8>, HubEvent), EngineError> {
+    ) -> Result<MergedReplicatorMessage, EngineError> {
         let (hub_event, fid) = match &trie_message.trie_message {
             Some(TrieMessage::UserMessage(m)) => {
                 let event = self.merge_message(m, txn_batch)?;
@@ -607,7 +627,17 @@ impl ShardEngine {
             );
         }
 
-        Ok((fid, inserts[0].clone(), hub_event))
+        Ok(MergedReplicatorMessage {
+            fid,
+            trie_key: inserts[0].clone(),
+            hub_event,
+        })
+    }
+
+    // Reset the event id generator to 0. This is used when doing replication, when we're merging in events from another node
+    // and not from blocks (so no blockheight to use)
+    pub(crate) fn reset_event_id(&mut self) {
+        self.stores.event_handler.set_current_height(0);
     }
 
     pub(crate) fn replay_snapchain_txn(
@@ -618,7 +648,8 @@ impl ShardEngine {
         source: ProposalSource,
         version: EngineVersion,
         timestamp: &FarcasterTime,
-    ) -> Result<(Vec<u8>, Vec<HubEvent>, Vec<MessageValidationError>), EngineError> {
+        mut last_block_event_seqnum: u64,
+    ) -> Result<(Vec<u8>, Vec<HubEvent>, Vec<MessageValidationError>, u64), EngineError> {
         let now = std::time::Instant::now();
         let total_user_messages = snapchain_txn.user_messages.len();
         let total_system_messages = snapchain_txn.system_messages.len();
@@ -769,6 +800,26 @@ impl ShardEngine {
                             }
                         }
                     }
+                }
+            }
+
+            if let Some(block_event) = &msg.block_event {
+                // TODO(aditi): Validate hash and insert into any other relevant stores and trie if the message is relevant
+                if version.is_enabled(ProtocolFeature::ReadDataFromShardZero)
+                    && block_event.seqnum() == last_block_event_seqnum + 1
+                {
+                    if let Err(err) = self
+                        .stores
+                        .block_event_store
+                        .put_block_event(block_event, txn_batch)
+                    {
+                        error!(
+                            seqnum = block_event.seqnum().to_string(),
+                            "Error merging block event: {}",
+                            err.to_string()
+                        );
+                    }
+                    last_block_event_seqnum += 1;
                 }
             }
         }
@@ -948,6 +999,7 @@ impl ShardEngine {
             new_account_root = hex::encode(&account_root),
             tx_account_root = hex::encode(&snapchain_txn.account_root),
             source = source.to_string(),
+            last_block_event_seqnum,
             "Replayed transaction"
         );
         let elapsed = now.elapsed();
@@ -955,7 +1007,12 @@ impl ShardEngine {
             .time_with_shard("replay_txn_time_us", elapsed.as_micros() as u64);
 
         // Return the new account root hash
-        Ok((account_root, events, validation_errors))
+        Ok((
+            account_root,
+            events,
+            validation_errors,
+            last_block_event_seqnum,
+        ))
     }
 
     /// Checks if a removed verification was set as the user's primary address and revokes it if necessary.
@@ -1407,11 +1464,12 @@ impl ShardEngine {
                 error!("State change validation failed: {}", err);
                 result = false;
             }
-            Ok(events) => {
+            Ok((events, max_block_event_seqnum)) => {
                 self.pending_txn = Some(CachedTransaction {
                     shard_root: shard_root.clone(),
                     txn,
                     events,
+                    max_block_event_seqnum,
                 });
             }
         }
@@ -1444,6 +1502,7 @@ impl ShardEngine {
         &mut self,
         shard_chunk: &ShardChunk,
         mut events: Vec<HubEvent>,
+        max_block_event_seqnum: u64,
         mut txn: RocksDbTransactionBatch,
     ) {
         let header = shard_chunk.header.as_ref().unwrap();
@@ -1459,6 +1518,7 @@ impl ShardEngine {
                 block_hash: shard_chunk.hash.clone(),
                 total_events: (events.len() + 1) as u64, // +1 for BLOCK_CONFIRMED itself
                 event_counts_by_type,
+                max_block_event_seqnum,
             }),
         );
         let _block_confirmed_id = self
@@ -1467,6 +1527,9 @@ impl ShardEngine {
             .commit_transaction(&mut txn, &mut block_confirmed)
             .unwrap();
         events.insert(0, block_confirmed);
+
+        self.metrics
+            .gauge("block_event_seqnum", max_block_event_seqnum);
 
         _ = self.emit_commit_metrics(&shard_chunk, &events);
 
@@ -1599,8 +1662,13 @@ impl ShardEngine {
         if let Some(cached_txn) = self.pending_txn.clone() {
             if &cached_txn.shard_root == shard_root {
                 applied_cached_txn = true;
-                self.commit_and_emit_events(shard_chunk, cached_txn.events, cached_txn.txn)
-                    .await;
+                self.commit_and_emit_events(
+                    shard_chunk,
+                    cached_txn.events,
+                    cached_txn.max_block_event_seqnum,
+                    cached_txn.txn,
+                )
+                .await;
             } else {
                 error!(
                     shard_id = self.shard_id,
@@ -1646,8 +1714,9 @@ impl ShardEngine {
                     error!("State change commit failed: {}", err);
                     panic!("State change commit failed: {}", err);
                 }
-                Ok(events) => {
-                    self.commit_and_emit_events(shard_chunk, events, txn).await;
+                Ok((events, max_block_event_seqnum)) => {
+                    self.commit_and_emit_events(shard_chunk, events, max_block_event_seqnum, txn)
+                        .await;
                 }
             }
         }
@@ -1665,6 +1734,7 @@ impl ShardEngine {
             user_messages: vec![message.clone()],
         };
         let version = self.version_for(&FarcasterTime::current());
+        let max_block_event_seqnum = self.stores.block_event_store.max_seqnum().unwrap_or(0);
         let result = self.replay_snapchain_txn(
             &merkle_trie::Context::new(),
             &snapchain_txn,
@@ -1672,10 +1742,11 @@ impl ShardEngine {
             ProposalSource::Simulate,
             version,
             &FarcasterTime::current(),
+            max_block_event_seqnum,
         );
 
         match result {
-            Ok((_, _, errors)) => {
+            Ok((_, _, errors, _)) => {
                 self.stores.trie.reload(&self.db).map_err(|e| {
                     MessageValidationError::StoreError(HubError::invalid_internal_state(
                         &*e.to_string(),
@@ -1719,6 +1790,7 @@ impl ShardEngine {
 
         // Initialize results vector with placeholder values
         let mut results: Vec<Result<(), MessageValidationError>> = vec![Ok(()); messages.len()];
+        let mut max_block_event_seqnum = self.stores.block_event_store.max_seqnum().unwrap_or(0);
 
         // Process each FID group
         for (fid, fid_messages) in messages_by_fid {
@@ -1740,8 +1812,9 @@ impl ShardEngine {
                 ProposalSource::Simulate,
                 version,
                 &timestamp,
+                max_block_event_seqnum,
             ) {
-                Ok((_, _, validation_errors)) => {
+                Ok((_, _, validation_errors, latest_block_event_seqnum)) => {
                     // If there are any validation errors, assign them to the results
                     if !validation_errors.is_empty() {
                         let error = validation_errors[0].clone();
@@ -1749,6 +1822,7 @@ impl ShardEngine {
                             results[original_index] = Err(error.clone());
                         }
                     }
+                    max_block_event_seqnum = latest_block_event_seqnum;
                 }
                 Err(err) => {
                     // If replay_snapchain_txn fails, all messages for this FID fail
@@ -1784,6 +1858,15 @@ impl ShardEngine {
                 error!("Error checking if sync id exists: {:?}", err);
                 false
             })
+    }
+
+    pub fn get_block_event(
+        &self,
+        seqnum: u64,
+    ) -> Result<Option<BlockEvent>, BlockEventStorageError> {
+        self.stores
+            .block_event_store
+            .get_block_event_by_seqnum(seqnum)
     }
 
     pub fn get_min_height(&self) -> Height {

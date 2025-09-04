@@ -73,6 +73,7 @@ impl MessageHashCacheKey {
 }
 
 struct MessageHashCache {
+    // The number of messages in the cache
     cache_size: usize,
 
     // Key (shard, fid, message_type) -> HashMap<hash, Message>
@@ -409,25 +410,20 @@ impl Replicator {
 
         // For each trie key, fetch the associated message.
         for trie_key in trie_keys {
-            let (key_virtual_shard, fid, onchain_message_type, message_type, rest) =
-                TrieKey::decode(&trie_key)?;
-            if key_virtual_shard != trie_virtual_shard {
+            let decoded_key = TrieKey::decode(&trie_key)?;
+            if decoded_key.virtual_shard != trie_virtual_shard {
                 return Err(ReplicationError::InternalError(format!(
                     "Virtual shard ID mismatch: expected {}, got {}",
-                    trie_virtual_shard, key_virtual_shard
+                    trie_virtual_shard, decoded_key.virtual_shard
                 )));
             }
 
-            fids_in_page.insert(fid);
-            // if fid == 14451 {
-            //     let count = trie.get_count(
-            //         &stores.db,
-            //         &mut RocksDbTransactionBatch::new(),
-            //         &TrieKey::for_fid(fid),
-            //     )?;
-            //     info!("Aditya: fid {} has {} items", fid, count);
-            // }
+            let fid = decoded_key.fid;
+            let onchain_message_type = decoded_key.onchain_message_type;
+            let message_type = decoded_key.message_type;
+            let rest = decoded_key.rest;
 
+            fids_in_page.insert(fid);
             match (onchain_message_type, message_type) {
                 (Some(onchain_event_type), None) => {
                     // On-chain event
@@ -638,7 +634,7 @@ impl Replicator {
         };
 
         let timestamp = msg.header.timestamp;
-        let oldest_valid_timestamp = 0; // self.oldest_valid_timestamp()?;
+        let oldest_valid_timestamp = self.oldest_valid_timestamp()?;
 
         // Clean up old snapshots
         self.stores
@@ -652,13 +648,6 @@ impl Replicator {
         // Check if the timestamp is expired
         if timestamp < oldest_valid_timestamp {
             return Ok(());
-        }
-
-        // Check if the number of existing snapshots exceeds 1
-        if let Ok(metadata) = self.stores.get_metadata(msg.shard_id) {
-            if metadata.len() > 1 {
-                return Ok(());
-            }
         }
 
         // Open a snapshot

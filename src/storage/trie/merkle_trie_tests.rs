@@ -3,7 +3,7 @@ mod tests {
     use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::IntoU8;
     use crate::storage::trie::merkle_trie::{Context, MerkleTrie, TrieKey};
-    use crate::storage::trie::util::decode_trie_token;
+    use crate::storage::trie::util::decode_trie_page_token;
     use crate::utils::factory::{events_factory, messages_factory};
     use rand::{thread_rng, Rng as _};
     use std::collections::HashSet;
@@ -170,7 +170,7 @@ mod tests {
             }
             page_token = next;
             // ensure token decodes
-            let _ = decode_trie_token(page_token.as_ref().unwrap()).unwrap();
+            let _ = decode_trie_page_token(page_token.as_ref().unwrap()).unwrap();
         }
         collected
     }

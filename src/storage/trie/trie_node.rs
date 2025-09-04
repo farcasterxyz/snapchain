@@ -95,7 +95,7 @@ impl TrieNode {
     #[inline]
     pub(crate) fn make_primary_key(prefix: &[u8], child_char: Option<u8>) -> Vec<u8> {
         let mut key = Vec::with_capacity(1 + prefix.len() + 1);
-        key.push(RootPrefix::SyncMerkleTrieNode as u8);
+        key.push(RootPrefix::MerkleTrieNode as u8);
         key.extend_from_slice(prefix);
         if let Some(char) = child_char {
             key.push(char);

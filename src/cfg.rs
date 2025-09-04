@@ -1,6 +1,7 @@
 use crate::{
     connectors::{self},
-    consensus, mempool,
+    consensus,
+    mempool::{self, block_receiver},
     network::{self, http_server},
     proto::FarcasterNetwork,
     storage,
@@ -99,6 +100,7 @@ pub struct Config {
     pub pruning: PruningConfig,
     pub http_server: http_server::Config,
     pub replication: ReplicationConfig,
+    pub block_receiver: block_receiver::Config,
 }
 
 impl Default for Config {
@@ -126,6 +128,7 @@ impl Default for Config {
             pruning: PruningConfig::default(),
             http_server: http_server::Config::default(),
             replication: ReplicationConfig::default(),
+            block_receiver: block_receiver::Config::default(),
         }
     }
 }

@@ -87,7 +87,7 @@ pub fn get_transform_functions(branching_factor: u32) -> Option<BranchingFactorT
 /// [u8;4] big endian number of segments (N) followed by N repetitions of:
 ///   [u8;4] big endian segment length (L) followed by L bytes of segment.
 /// Returns empty string if token is None or empty.
-pub fn encode_trie_token(token: &Option<Vec<Vec<u8>>>) -> String {
+pub fn encode_trie_page_token(token: &Option<Vec<Vec<u8>>>) -> String {
     use base64::Engine;
     if token.is_none() {
         return String::new();
@@ -110,7 +110,7 @@ pub fn encode_trie_token(token: &Option<Vec<Vec<u8>>>) -> String {
 
 /// Decode a base64 string produced by `encode_trie_token` back into a token structure.
 /// Returns Ok(None) if input is empty.
-pub fn decode_trie_token(encoded: &str) -> Result<Option<Vec<Vec<u8>>>, TrieError> {
+pub fn decode_trie_page_token(encoded: &str) -> Result<Option<Vec<Vec<u8>>>, TrieError> {
     if encoded.is_empty() {
         return Ok(None);
     }
@@ -153,20 +153,20 @@ pub fn decode_trie_token(encoded: &str) -> Result<Option<Vec<Vec<u8>>>, TrieErro
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::trie::util::{decode_trie_token, encode_trie_token};
+    use crate::storage::trie::util::{decode_trie_page_token, encode_trie_page_token};
 
     #[test]
     fn test_encode_decode_trie_token() {
         let original: Option<Vec<Vec<u8>>> = Some(vec![vec![1, 2, 3], vec![], vec![255]]);
-        let encoded = encode_trie_token(&original);
+        let encoded = encode_trie_page_token(&original);
         assert!(!encoded.is_empty());
-        let decoded = decode_trie_token(&encoded).unwrap();
+        let decoded = decode_trie_page_token(&encoded).unwrap();
         assert_eq!(decoded, Some(vec![vec![1, 2, 3], vec![], vec![255]]));
 
         // Empty / None handling
-        assert_eq!(encode_trie_token(&None), "");
-        assert_eq!(decode_trie_token("").unwrap(), None);
+        assert_eq!(encode_trie_page_token(&None), "");
+        assert_eq!(decode_trie_page_token("").unwrap(), None);
         let empty: Option<Vec<Vec<u8>>> = Some(vec![]);
-        assert_eq!(encode_trie_token(&empty), "");
+        assert_eq!(encode_trie_page_token(&empty), "");
     }
 }

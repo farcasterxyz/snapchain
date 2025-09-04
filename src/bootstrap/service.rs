@@ -780,11 +780,14 @@ impl ReplicatorBootstrap {
                 trie_keys.push(trie_key.clone());
 
                 match thread_engine.replay_replicator_message(&mut txn_batch, trie_message_entry) {
-                    Ok((fid, generated_trie_key, hub_event)) => {
+                    Ok(m) => {
+                        let generated_trie_key = m.trie_key;
+                        let fid = m.fid;
+
                         if generated_trie_key != trie_key {
                             return Err(BootstrapError::GenericError(format!(
-                                "Generated trie key {:?} does not match expected trie key {:?} for {:?}. HubEvent {:?}",
-                                generated_trie_key, trie_key, trie_message_entry, hub_event
+                                "Generated trie key {:?} does not match expected trie key {:?} for {:?}",
+                                generated_trie_key, trie_key, trie_message_entry
                             )));
                         }
 
@@ -875,9 +878,6 @@ impl ReplicatorBootstrap {
 
             if next_page_token.is_none() {
                 // All done.
-
-                // TODO: Check the last fid
-
                 // Write to the DB that we're all done
                 status.last_response = WorkUnitResponse::Finished as u32;
                 let mut txn_batch = RocksDbTransactionBatch::new();

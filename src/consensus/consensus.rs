@@ -1,11 +1,16 @@
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
+use crate::consensus::validator::StoredValidatorSet;
+use crate::consensus::validator::StoredValidatorSets;
+use crate::core::types::ShardId;
 use crate::mempool::mempool::MempoolRequest;
 use crate::proto;
+use crate::proto::Block;
 pub use informalsystems_malachitebft_core_consensus::Params as ConsensusParams;
 pub use informalsystems_malachitebft_core_consensus::State as ConsensusState;
 use libp2p::identity::ed25519::{Keypair, SecretKey};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tokio::sync::oneshot;
 
 #[derive(Clone, Debug)]
 pub enum MalachiteEventShard {
@@ -20,7 +25,14 @@ pub enum SystemMessage {
 
     DecidedValueForReadNode(proto::DecidedValue),
 
-    ReadNodeFinishedInitialSync { shard_id: u32 },
+    BlockRequest {
+        block_event_seqnum: u64,
+        block_tx: oneshot::Sender<Option<Block>>,
+    },
+
+    ReadNodeFinishedInitialSync {
+        shard_id: u32,
+    },
     ExitWithError(String),
 }
 
@@ -100,6 +112,16 @@ impl Config {
         }
 
         panic!("No validator configuration provided")
+    }
+
+    pub fn to_stored_validator_sets(&self, shard_id: u32) -> StoredValidatorSets {
+        let validator_set_config = self.get_validator_set_config(shard_id);
+        let validator_sets = validator_set_config
+            .iter()
+            .map(|config| StoredValidatorSet::new(ShardId::new(shard_id), &config))
+            .collect();
+
+        StoredValidatorSets::new(shard_id, validator_sets)
     }
 }
 

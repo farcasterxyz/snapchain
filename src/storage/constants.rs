@@ -15,8 +15,8 @@ pub enum RootPrefix {
     /* Used to index reactions by target  */
     ReactionsByTarget = 7,
 
-    /* Sync Merkle Trie Node */
-    SyncMerkleTrieNode = 8,
+    /* Merkle Trie Node */
+    MerkleTrieNode = 8,
 
     /* Event log */
     HubEvents = 9,

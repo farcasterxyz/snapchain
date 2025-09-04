@@ -1,10 +1,3 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
-
-use tracing::{debug, error, info};
-
 use crate::{
     proto,
     replication::error::ReplicationError,
@@ -15,6 +8,11 @@ use crate::{
     },
     utils::statsd_wrapper::StatsdClientWrapper,
 };
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
+use tracing::{debug, error};
 
 type TimestampedStore = (u64, Stores); // (farcaster timestamp, Stores)
 
