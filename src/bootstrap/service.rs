@@ -22,7 +22,6 @@ use crate::storage::{
 };
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use ed25519_dalek::{Signature, VerifyingKey};
-use futures::channel::oneshot;
 use prost::Message as _;
 use std::{
     collections::HashMap,
@@ -35,7 +34,9 @@ use std::{
 };
 use tokio::signal::ctrl_c;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::task::JoinSet;
+use tokio::time;
 use tonic::transport::Channel;
 use tracing::{debug, error, info};
 
@@ -46,7 +47,7 @@ pub enum WorkUnitResponse {
     Working = 1,
     // User manually stopped it (CTRL+C). Will resume after snapchain is restarted
     Stopped = 2,
-    // DB Session expired
+    // DB Session expired (i.e., batch is full)
     DbStopped = 3,
     // Bootstrap was finished, but there were some errors. Should continue with startup
     PartiallyComplete = 4,
@@ -90,10 +91,10 @@ pub struct ReplicatorBootstrap {
     rocksdb_dir: String,
 }
 
-const WORK_UNIT_POSTFIX: u8 = 1u8;
-const FID_ACCOUNT_ROOT_POSTFIX: u8 = 2u8;
-
 impl ReplicatorBootstrap {
+    const WORK_UNIT_POSTFIX: u8 = 1u8;
+    const FID_ACCOUNT_ROOT_POSTFIX: u8 = 2u8;
+
     pub fn new(app_config: &Config) -> Self {
         let (statsd_host, statsd_port) = match app_config.statsd.addr.split_once(':') {
             Some((host, port)) => {
@@ -132,7 +133,7 @@ impl ReplicatorBootstrap {
         key.push(RootPrefix::ReplicationBootstrapStatus as u8);
         key.push(shard_id);
         key.push(virtual_trie_shard);
-        key.push(WORK_UNIT_POSTFIX);
+        key.push(Self::WORK_UNIT_POSTFIX);
         key
     }
 
@@ -141,7 +142,7 @@ impl ReplicatorBootstrap {
         key.push(RootPrefix::ReplicationBootstrapStatus as u8);
         key.push(shard_id as u8);
         key.push(virtual_trie_shard);
-        key.push(FID_ACCOUNT_ROOT_POSTFIX);
+        key.push(Self::FID_ACCOUNT_ROOT_POSTFIX);
         key.extend(make_fid_key(fid));
         key
     }
@@ -297,10 +298,9 @@ impl ReplicatorBootstrap {
             shard_tasks.spawn(async move {
                 // Replay transactions for this shard
                 self_clone
-                    .start_shard_replication_outer(
+                    .start_shard_replication_main(
                         &peer_address_clone,
                         shard_id,
-                        target_height,
                         &rocksdb_dir,
                         metadata,
                         shutdown_signal,
@@ -368,11 +368,10 @@ impl ReplicatorBootstrap {
         }
     }
 
-    async fn start_shard_replication_outer(
+    async fn start_shard_replication_main(
         &self,
         peer_address: &str,
         shard_id: u32,
-        _target_height: u64,
         rocksdb_dir: &str,
         metadata: ShardSnapshotMetadata,
         shutdown_signal: Arc<AtomicBool>,
@@ -384,10 +383,9 @@ impl ReplicatorBootstrap {
             }
 
             let result = self
-                .start_shard_replication(
+                .start_shard_replication_batch(
                     peer_address,
                     shard_id,
-                    _target_height,
                     rocksdb_dir,
                     metadata.clone(),
                     shutdown_signal.clone(),
@@ -423,28 +421,26 @@ impl ReplicatorBootstrap {
         }
     }
 
-    async fn start_shard_replication(
+    /// Create a dedicated thread to write transactions into the DB. The RocksDB we use is multi threaded,
+    /// but writing to the DB directly from multiple threads creates a lot of lock contention, and we don't want to
+    /// write a lot of retry logic. Plus, by keeping the DB writer on one thread, we can create "backpressure" to all
+    /// the other threads, slowing down them as needed without overwhelming RocksDB
+    fn create_db_writer_task(
         &self,
-        peer_address: &str,
+        db: Arc<RocksDB>,
         shard_id: u32,
-        _target_height: u64,
-        rocksdb_dir: &str,
-        metadata: ShardSnapshotMetadata,
-        shutdown_signal: Arc<AtomicBool>,
-    ) -> Result<WorkUnitResponse, BootstrapError> {
-        let db = RocksDB::open_bulk_write_shard_db(&rocksdb_dir, shard_id);
-
-        // Create a channel for DB commit requests
-        let (db_commit_tx, mut db_commit_rx) = mpsc::unbounded_channel::<DbCommitRequest>();
-
-        // Clone db for the DB writer thread
-        let db_writer = db.clone();
-
+        mut db_commit_rx: mpsc::UnboundedReceiver<DbCommitRequest>,
+    ) -> tokio::task::JoinHandle<()> {
+        // Important Note: We will write these many messages to the DB in a single "batch" (See start_shard_replication_batch)
+        // The DB type we use is optimized for bulk writing, but unfortunately doesn't allow us to compact or flush the keys.
+        // They are flushed and the DB compacted only when it is closed.
+        // If we do nothing and write continuously, the writes slow down A LOT, bringing the replication to a crawl.
+        // So, as a work around, every 5M messages, we close and reopen the DB. This flushes and finializes all the keys written
+        // so far, saves progress, and creates a proper "checkpoint" for us to resume, in case things go wrong or the user
+        // presses CTRL+C etc...
         let max_messages_in_write_session = 5_000_000;
-        let max_num_parallel_vts = 4;
 
-        // Spawn the DB writer thread
-        let db_writer_task = tokio::spawn(async move {
+        tokio::spawn(async move {
             info!("DB writer thread started for shard {}", shard_id);
             let mut total_messages = 0;
             let total_start_time = std::time::Instant::now();
@@ -453,7 +449,7 @@ impl ReplicatorBootstrap {
                 let start_time = std::time::Instant::now();
                 total_messages += commit_request.num_messages;
 
-                let result = db_writer.commit(commit_request.txn_batch);
+                let result = db.commit(commit_request.txn_batch);
                 let elapsed_time = start_time.elapsed();
                 let total_elapsed = total_start_time.elapsed();
                 info!(
@@ -491,15 +487,23 @@ impl ReplicatorBootstrap {
             }
 
             info!("DB writer thread finished for shard {}", shard_id);
-        });
+        })
+    }
 
-        // Spawn a thread to handle trie merges
-        let tbf = self.trie_branching_factor;
-        let trie_db = db.clone();
-        let (trie_insert_tx, mut trie_insert_rx) = mpsc::unbounded_channel::<TrieInsertRequest>();
-        let trie_merges_task = tokio::spawn(async move {
-            info!("Trie merges thread started for shard {}", shard_id);
-            let mut trie = merkle_trie::MerkleTrie::new(tbf).unwrap();
+    /// Create a dedicated thread (per shard) to write to the Trie. This way, we can keep all the trie nodes
+    /// in memory (upto the max limit, see the DB_writer thread), which allows us to save ~12 db reads per insert
+    /// speeding up the insertion of trie keys.
+    fn create_trie_merges_task(
+        &self,
+        trie_db: Arc<RocksDB>,
+        shard_id: u32,
+        mut trie_insert_rx: mpsc::UnboundedReceiver<TrieInsertRequest>,
+    ) -> tokio::task::JoinHandle<()> {
+        let trie_branching_factor = self.trie_branching_factor;
+
+        tokio::spawn(async move {
+            debug!("Trie merges thread started for shard {}", shard_id);
+            let mut trie = merkle_trie::MerkleTrie::new(trie_branching_factor).unwrap();
             trie.initialize(&trie_db).unwrap();
 
             while let Some(insert_request) = trie_insert_rx.recv().await {
@@ -523,10 +527,37 @@ impl ReplicatorBootstrap {
 
                 if insert_request.response_tx.send(response).is_err() {
                     error!("Failed to send response for trie insert request");
+                    break;
                 }
             }
-            info!("Trie merges thread finished for shard {}", shard_id);
-        });
+            debug!("Trie merges thread finished for shard {}", shard_id);
+        })
+    }
+
+    /// Replicate one "batch" of the shard's tries. This method will spawn upto 4 threads, each working on an independent part of the
+    /// trie (by virtual trie shard or "vts"). It will pick up from where it left off, and fetch the next set of pages for each vts
+    /// and attempt to merge them. If there's an error, it will stop immediately and return
+    /// When the DB writer task instructs to exit, it saves its progress and closes all the threads and returns.
+    /// It will also save progress and return if the main loop instructs it to via `shutdown_signal` if for eg. CTRL+C is pressed
+    async fn start_shard_replication_batch(
+        &self,
+        peer_address: &str,
+        shard_id: u32,
+        rocksdb_dir: &str,
+        metadata: ShardSnapshotMetadata,
+        shutdown_signal: Arc<AtomicBool>,
+    ) -> Result<WorkUnitResponse, BootstrapError> {
+        let db = RocksDB::open_bulk_write_shard_db(&rocksdb_dir, shard_id);
+
+        // Create a channel for DB commit requests
+        let (db_commit_tx, db_commit_rx) = mpsc::unbounded_channel::<DbCommitRequest>();
+
+        // Spawn the DB writer thread
+        let db_writer_task = self.create_db_writer_task(db.clone(), shard_id, db_commit_rx);
+
+        // Spawn a thread to handle trie merges
+        let (trie_insert_tx, trie_insert_rx) = mpsc::unbounded_channel::<TrieInsertRequest>();
+        let trie_merges_task = self.create_trie_merges_task(db.clone(), shard_id, trie_insert_rx);
 
         // Go over each Trie's Virtual Trie Shard (vts) and sync for it.
         let mut vts_results = vec![WorkUnitResponse::None; merkle_trie::TRIE_SHARD_SIZE as usize];
@@ -567,6 +598,11 @@ impl ReplicatorBootstrap {
 
         // Track if there were any errors on any of the threads
         let mut errored = None;
+
+        // Fetch upto these many virtual trie shards in parallel. Note that this can't be too big, as we are
+        // primarily bottlenecked by DB writing. Increasing this wont help performance much because of the backpressure
+        // from the DB writer thread.
+        let max_num_parallel_vts = 4;
 
         loop {
             if shutdown_signal.load(Ordering::SeqCst) {
@@ -614,7 +650,6 @@ impl ReplicatorBootstrap {
                     }
                     Err(e) => {
                         if !e.is_cancelled() {
-                            error!("Task join error: {}", e);
                             return Err(BootstrapError::GenericError(format!(
                                 "Task join error: {}",
                                 e
@@ -625,12 +660,12 @@ impl ReplicatorBootstrap {
             }
         }
 
-        // Drop the original sender and any unfinished work_units so the DB writer thread can exit
+        // Drop the original sender and any unfinished work_units so the DB/trie writer threads can exit
         drop(db_commit_tx);
         drop(trie_insert_tx);
         drop(work_units);
 
-        // Wait for both the DB writer and trie merges tasks to finish concurrently and propagate any errors
+        // Wait for both the DB writer and trie merges tasks to finish and propagate any errors
         db_writer_task.await?;
         trie_merges_task.await?;
 
@@ -703,9 +738,16 @@ impl ReplicatorBootstrap {
         let rpc_shutdown_signal_clone = rpc_shutdown_signal.clone();
         let rpc_client_handle = tokio::spawn(async move {
             let mut thread_client =
-                ReplicationServiceClient::connect(work_item.peer_address.clone())
-                    .await
-                    .unwrap(); // TODO: Handle RPC failure
+                match ReplicationServiceClient::connect(work_item.peer_address.clone()).await {
+                    Ok(client) => client,
+                    Err(e) => {
+                        error!(
+                            "Failed to connect to RPC server({}) for shard {} vts {}: {}",
+                            work_item.peer_address, status.shard_id, status.virtual_trie_shard, e
+                        );
+                        return;
+                    }
+                };
 
             let mut request = GetShardTransactionsRequest {
                 shard_id: status.shard_id,
@@ -714,14 +756,35 @@ impl ReplicatorBootstrap {
                 page_token: status.next_page_token,
             };
 
+            // Keep track of number of attempts
+            let mut attempts = 0;
+
             // Keep getting messages_page from the peer_address until we get a shutdown signal
             loop {
-                // Get a messages page
-                let messages_page = thread_client
-                    .get_shard_transactions(request.clone())
-                    .await
-                    .unwrap() // TODO: Handle RPC failures
-                    .into_inner();
+                // Get a messages page. Up to 3 tries, will respond with an error and exit the thread if >3 errors occur
+                const MAX_ATTEMPTS: usize = 3;
+                let messages_page =
+                    match thread_client.get_shard_transactions(request.clone()).await {
+                        Ok(m) => m.into_inner(),
+                        Err(e) => {
+                            attempts += 1;
+
+                            if attempts >= MAX_ATTEMPTS {
+                                error!("Max attempts reached, breaking out of loop");
+                                messages_page_tx.send(Err(e)).await.unwrap();
+                                return;
+                            } else {
+                                // Add a small delay before retrying
+                                time::sleep(time::Duration::from_secs(1)).await;
+                            }
+
+                            info!(
+                                "RPC Error while connecting to {}. Will retry ({}): {:?}",
+                                work_item.peer_address, attempts, e
+                            );
+                            continue; // try again
+                        }
+                    };
 
                 if rpc_shutdown_signal.load(Ordering::Relaxed) {
                     return;
@@ -730,7 +793,7 @@ impl ReplicatorBootstrap {
                 let next_page_token = messages_page.next_page_token.clone();
 
                 // Send the RPC response
-                messages_page_tx.send(messages_page).await.unwrap();
+                messages_page_tx.send(Ok(messages_page)).await.unwrap();
 
                 // If all pages are done, exit
                 if next_page_token.is_none() || next_page_token.as_ref().unwrap().is_empty() {
@@ -745,7 +808,23 @@ impl ReplicatorBootstrap {
             let mut fids_to_check = vec![];
 
             // 2. Use the next_page_token to fetch the page of messages from the server
-            let messages_page = messages_page_rx.recv().await.unwrap();
+            let messages_page = match messages_page_rx.recv().await {
+                None => {
+                    // No more messages pages, some error occurred
+                    response = Err(BootstrapError::GenericError(
+                        "Unexpectedly No more messages_pages".into(),
+                    ));
+                    break;
+                }
+                Some(Ok(page)) => page,
+                Some(Err(e)) => {
+                    response = Err(BootstrapError::GenericError(format!(
+                        "Failed to receive messages_page on shard {} vts {}: {:?}",
+                        status.shard_id, status.virtual_trie_shard, e
+                    )));
+                    break; // Explicit error, just bail
+                }
+            };
 
             let trie_messages = messages_page.trie_messages;
 
@@ -1123,16 +1202,15 @@ impl ReplicatorBootstrap {
             if *shard_id == 0 {
                 // Handle Block for Shard 0
                 if let Some(block) = &metadata.block {
+                    let header = block.header.as_ref().ok_or_else(|| {
+                        BootstrapError::MetadataFetchError("Block header is missing".to_string())
+                    })?;
+                    let height = header.height.as_ref().ok_or_else(|| {
+                        BootstrapError::MetadataFetchError("Block height is missing".to_string())
+                    })?;
                     info!(
                         "Writing block for shard 0 at height {}",
-                        block
-                            .header
-                            .as_ref()
-                            .unwrap()
-                            .height
-                            .as_ref()
-                            .unwrap()
-                            .block_number
+                        height.block_number
                     );
                     let block_db = RocksDB::open_shard_db(rocksdb_dir, 0);
                     let block_store = BlockStore::new(block_db);
@@ -1148,17 +1226,21 @@ impl ReplicatorBootstrap {
             } else {
                 // Handle ShardChunk for Data Shards
                 if let Some(shard_chunk) = &metadata.shard_chunk {
+                    let header = shard_chunk.header.as_ref().ok_or_else(|| {
+                        BootstrapError::MetadataFetchError(format!(
+                            "ShardChunk header is missing for shard {}",
+                            shard_id
+                        ))
+                    })?;
+                    let height = header.height.as_ref().ok_or_else(|| {
+                        BootstrapError::MetadataFetchError(format!(
+                            "ShardChunk height is missing for shard {}",
+                            shard_id
+                        ))
+                    })?;
                     info!(
                         "Writing ShardChunk for shard {} at height {}",
-                        shard_id,
-                        shard_chunk
-                            .header
-                            .as_ref()
-                            .unwrap()
-                            .height
-                            .as_ref()
-                            .unwrap()
-                            .block_number
+                        shard_id, height.block_number
                     );
                     let shard_db = RocksDB::open_shard_db(rocksdb_dir, *shard_id);
                     let shard_store = ShardStore::new(shard_db, *shard_id);

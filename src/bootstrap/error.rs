@@ -1,5 +1,5 @@
-use futures::channel::oneshot;
 use thiserror::Error;
+use tokio::sync::oneshot::error::RecvError;
 use tokio::{sync::mpsc::error::SendError, task::JoinError};
 
 use crate::{
@@ -94,8 +94,8 @@ impl<T> From<SendError<T>> for BootstrapError {
     }
 }
 
-impl From<oneshot::Canceled> for BootstrapError {
-    fn from(_: oneshot::Canceled) -> Self {
+impl From<RecvError> for BootstrapError {
+    fn from(_: RecvError) -> Self {
         BootstrapError::GenericError("DB writer response channel cancelled".to_string())
     }
 }
