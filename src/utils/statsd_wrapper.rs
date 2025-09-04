@@ -64,7 +64,7 @@ impl StatsdClientWrapper {
 
     pub fn gauge(&self, key: &str, value: u64, extra_tags: Vec<(&str, &str)>) {
         if self.use_tags {
-            let mut metric = self.client.count_with_tags(key, value);
+            let mut metric = self.client.gauge_with_tags(key, value);
             for (key, value) in extra_tags {
                 metric = metric.with_tag(key, value);
             }
