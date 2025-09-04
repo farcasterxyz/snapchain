@@ -153,6 +153,7 @@ where
                 statsd.gauge(
                     "sync.pending_outbound_requests",
                     outbound_requests.len() as u64,
+                    vec![],
                 );
                 reply_to.send(sync::OutboundRequestId::new(request_id))?;
             }
@@ -162,6 +163,7 @@ where
                 statsd.gauge(
                     "sync.pending_inbound_requests",
                     inbound_requests.len() as u64,
+                    vec![],
                 );
                 if let Some(request_id) = request_id {
                     gossip_tx
@@ -279,6 +281,7 @@ where
                     statsd.gauge(
                         "sync.pending_inbound_requests",
                         inbound_requests.len() as u64,
+                        vec![],
                     );
 
                     output_port.send(NetworkEvent::Request(
@@ -321,6 +324,7 @@ where
                     statsd.gauge(
                         "sync.pending_outbound_requests",
                         outbound_requests.len() as u64,
+                        vec![],
                     );
 
                     output_port.send(NetworkEvent::Response(

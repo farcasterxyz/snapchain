@@ -62,8 +62,16 @@ impl StatsdClientWrapper {
         }
     }
 
-    pub fn gauge(&self, key: &str, value: u64) {
-        _ = self.client.gauge(key, value)
+    pub fn gauge(&self, key: &str, value: u64, extra_tags: Vec<(&str, &str)>) {
+        if self.use_tags {
+            let mut metric = self.client.count_with_tags(key, value);
+            for (key, value) in extra_tags {
+                metric = metric.with_tag(key, value);
+            }
+            metric.send();
+        } else {
+            _ = self.client.gauge(key, value)
+        }
     }
 
     pub fn time_with_shard(&self, shard_id: u32, key: &str, value: u64) {

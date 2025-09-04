@@ -456,9 +456,12 @@ impl Subscriber {
             .count(format!("onchain_events.{}", key).as_str(), value);
     }
 
-    fn gauge(&self, key: &str, value: u64) {
-        self.statsd_client
-            .gauge(format!("onchain_events.{}", key).as_str(), value);
+    fn gauge(&self, key: &str, value: u64, extra_tags: Vec<(&str, &str)>) {
+        self.statsd_client.gauge(
+            format!("onchain_events.{}", key).as_str(),
+            value,
+            extra_tags,
+        );
     }
 
     async fn add_onchain_event(
@@ -517,21 +520,26 @@ impl Subscriber {
         match &event.body {
             Some(on_chain_event::Body::IdRegisterEventBody(id_register_event_body)) => {
                 if id_register_event_body.event_type() == IdRegisterEventType::Register {
-                    self.gauge("latest_fid_registered", fid);
+                    self.gauge("latest_fid_registered", fid, vec![]);
                 }
             }
             _ => {}
         }
         self.gauge(
-            &format!("latest_block_number_on_{}", self.chain.to_string()),
+            "latest_block_number",
             block_number as u64,
+            vec![("chain", &self.chain.to_string())],
         );
         let delay = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64
             - (event.block_timestamp * 1000);
-        self.gauge("on_chain_to_ingest_delay", delay);
+        self.gauge(
+            "on_chain_to_ingest_delay",
+            delay,
+            vec![("chain", &self.chain.to_string())],
+        );
         if let Err(err) = self
             .mempool_tx
             .send(MempoolRequest::AddMessage(

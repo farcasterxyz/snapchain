@@ -109,6 +109,7 @@ impl RateLimits {
         self.statsd_client.gauge(
             "mempool.rate_limiter_entries",
             self.rate_limits_by_fid.entry_count(),
+            vec![],
         );
         match rate_limiter {
             Some(rate_limiter) => rate_limiter.check().is_ok(),
