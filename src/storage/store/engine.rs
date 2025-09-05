@@ -315,6 +315,12 @@ impl ShardEngine {
                         &[]
                     };
 
+                let lent_storage = StorageLendStore::get_lent_from_storage(
+                    &self.stores.storage_lend_store,
+                    transaction.fid,
+                )
+                .ok()?;
+
                 let storage_slot = self
                     .stores
                     .get_storage_slot_for_fid(transaction.fid, true, maybe_onchainevents)
