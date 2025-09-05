@@ -3,6 +3,7 @@ use super::{
     store::{Store, StoreDef},
     StoreEventHandler,
 };
+use crate::proto::message_data::Body;
 use crate::storage::{constants::UserPostfix, db::PageOptions, store::account::StorageSlot};
 use crate::{
     core::error::HubError,

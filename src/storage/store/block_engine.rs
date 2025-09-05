@@ -367,6 +367,7 @@ impl BlockEngine {
                                 }
                                 hub_events.push(event);
                             }
+                            hub_events.push(event);
                         }
                     }
                     _ => {}
