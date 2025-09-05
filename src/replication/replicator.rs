@@ -131,25 +131,24 @@ impl MessageHashCache {
         // Don't let the cache size be more than max entries allowed
         if new_cache_size > Self::MAX_MESSAGE_HASH_CACHE_ENTRIES {
             // Drop the last recently used caches until we are either under MAX_MESSAGE_HASH_CACHE_ENTRIES or the cache is empty
-            let mut lru_keys = self.cache_lru.iter().collect::<Vec<_>>();
-            lru_keys.sort_by_key(|(_, &ts)| ts);
-
-            // Collect keys to remove to avoid mutable/immutable borrow conflict
-            let keys_to_remove = lru_keys
+            let mut lru_keys = self
+                .cache_lru
                 .iter()
-                .map(|(k, _)| (*k).clone())
+                .map(|(k, v)| (k.clone(), v.clone())) // Clone everything
                 .collect::<Vec<_>>();
+            lru_keys.sort_by_key(|(_, ts)| *ts);
 
-            for lru_key in keys_to_remove {
+            // Remove entries until we are under the limit or remove entries older than 1 day
+            for (lru_key, _ts) in lru_keys {
+                if new_cache_size <= Self::MAX_MESSAGE_HASH_CACHE_ENTRIES {
+                    break;
+                }
+
                 let removed = self.cache.remove(&lru_key);
                 self.cache_lru.remove(&lru_key);
 
                 // Recalculate new size
                 new_cache_size -= removed.map(|v| v.len()).unwrap_or(0);
-
-                if new_cache_size <= Self::MAX_MESSAGE_HASH_CACHE_ENTRIES {
-                    break;
-                }
             }
         }
 
@@ -158,7 +157,7 @@ impl MessageHashCache {
         self.cache_size = new_cache_size;
 
         self.statsd_client
-            .gauge(Self::MESSAGE_HASH_CACHE_SIZE, new_cache_size as u64);
+            .gauge(Self::MESSAGE_HASH_CACHE_SIZE, new_cache_size as u64, vec![]);
     }
 }
 
