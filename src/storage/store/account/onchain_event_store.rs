@@ -722,6 +722,7 @@ impl OnchainEventStore {
         network: FarcasterNetwork,
         pending_events: &[OnChainEvent],
         lent_storage: &StorageSlot,
+        borrowed_storage: &StorageSlot,
     ) -> Result<StorageSlot, OnchainEventStorageError> {
         let rent_events =
             self.get_onchain_events(OnChainEventType::EventTypeStorageRent, Some(fid))?;
@@ -737,6 +738,7 @@ impl OnchainEventStore {
         }
 
         storage_slot.sub(lent_storage);
+        storage_slot.merge(borrowed_storage);
 
         Ok(storage_slot)
     }

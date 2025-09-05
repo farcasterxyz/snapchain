@@ -157,6 +157,7 @@ mod tests {
                 FarcasterNetwork::Mainnet,
                 &[],
                 &StorageSlot::new(0, 0, 0, 0),
+                &StorageSlot::new(0, 0, 0, 0),
             )
             .unwrap();
         assert_eq!(storage_slot.is_active(), false);
@@ -240,6 +241,7 @@ mod tests {
                 FarcasterNetwork::Mainnet,
                 &[],
                 &StorageSlot::new(0, 0, 0, 0),
+                &StorageSlot::new(0, 0, 0, 0),
             )
             .unwrap();
         assert_eq!(storage_slot_different_fid.is_active(), true);
@@ -262,6 +264,7 @@ mod tests {
                 FarcasterNetwork::Mainnet,
                 &[],
                 &StorageSlot::new(0, 0, 0, 0),
+                &StorageSlot::new(0, 0, 0, 0),
             )
             .unwrap();
         assert_eq!(storage_slot.is_active(), true);
@@ -273,6 +276,7 @@ mod tests {
                 12,
                 FarcasterNetwork::Mainnet,
                 &[],
+                &StorageSlot::new(0, 0, 0, 0),
                 &StorageSlot::new(0, 0, 0, 0),
             )
             .unwrap();

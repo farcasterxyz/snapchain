@@ -2,7 +2,6 @@
 mod tests {
     use crate::core::util::FarcasterTime;
     use crate::proto::{FarcasterNetwork, StorageUnitType};
-    use crate::storage::store::account::StorageSlot;
     use crate::storage::store::block_engine::BlockStateChange;
     use crate::storage::store::block_engine_test_helpers::*;
     use crate::storage::store::mempool_poller::MempoolMessage;
@@ -190,13 +189,7 @@ mod tests {
         );
         let storage_slot = block_engine
             .stores()
-            .onchain_event_store
-            .get_storage_slot_for_fid(
-                FID_FOR_TEST,
-                FarcasterNetwork::Devnet,
-                &[],
-                &StorageSlot::new(0, 0, 0, 0),
-            )
+            .get_storage_slot_for_fid(FID_FOR_TEST, &vec![], true)
             .unwrap();
         assert_eq!(storage_slot.units_for(StorageUnitType::UnitType2025), 1);
     }

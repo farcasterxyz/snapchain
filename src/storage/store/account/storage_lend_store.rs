@@ -3,8 +3,11 @@ use super::{
     store::{Store, StoreDef},
     StoreEventHandler,
 };
-use crate::proto::message_data::Body;
-use crate::storage::{constants::UserPostfix, db::PageOptions, store::account::StorageSlot};
+use crate::storage::{
+    constants::UserPostfix,
+    db::PageOptions,
+    store::account::{message_decode, StorageSlot},
+};
 use crate::{
     core::error::HubError,
     proto::SignatureScheme,
@@ -13,6 +16,7 @@ use crate::{
         store::account::{make_fid_key, TRUE_VALUE, TS_HASH_LENGTH},
     },
 };
+use crate::{proto::message_data::Body, storage::util::increment_vec_u8};
 use crate::{
     proto::MessageType,
     storage::db::{RocksDB, RocksDbTransactionBatch},
@@ -204,7 +208,7 @@ impl StorageLendStore {
         )
     }
 
-    pub fn get_lent_from_storage(
+    pub fn get_lent_storage(
         store: &Store<StorageLendStoreDef>,
         fid: u64,
     ) -> Result<StorageSlot, HubError> {
@@ -236,6 +240,40 @@ impl StorageLendStore {
 
             next_page_token = page.next_page_token
         }
+
+        Ok(storage_slot)
+    }
+
+    pub fn get_borrowed_storage(
+        store: &Store<StorageLendStoreDef>,
+        fid: u64,
+    ) -> Result<StorageSlot, HubError> {
+        let mut storage_slot = StorageSlot::new(0, 0, 0, 0);
+
+        // Create the prefix for the secondary index (RootPrefix::LendStorageByRecipient + to_fid)
+        let mut prefix = Vec::with_capacity(1 + 24);
+        prefix.push(RootPrefix::LendStorageByRecipient as u8);
+        prefix.extend_from_slice(&make_fid_key(fid));
+
+        // No pagination
+        store.db().for_each_iterator_by_prefix(
+            Some(prefix.clone()),
+            Some(increment_vec_u8(&prefix)),
+            &PageOptions::default(),
+            |_, primary_key| {
+                // Get the actual storage lend message using get_add with the primary key
+                if let Some(message_bytes) = store.db().get(&primary_key)? {
+                    let message = message_decode(&message_bytes)?;
+                    if let Some(data) = message.data {
+                        if let Some(Body::LendStorageBody(lend_storage_body)) = data.body {
+                            storage_slot.merge(&StorageSlot::from_storage_lend(&lend_storage_body));
+                        }
+                    }
+                }
+
+                Ok(false)
+            },
+        )?;
 
         Ok(storage_slot)
     }
