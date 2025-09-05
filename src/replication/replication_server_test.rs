@@ -256,6 +256,7 @@ mod tests {
 
         let replicator = Arc::new(Replicator::new_with_options(
             replication_stores.clone(),
+            statsd_client,
             ReplicatorSnapshotOptions {
                 interval: 1,
                 max_age: Duration::from_secs(10),
@@ -393,6 +394,13 @@ mod tests {
             .unwrap();
 
         assert!(inserted.iter().all(|b| *b));
+
+        // The total messages across all FIDs should match exactly the number of keys we inserted
+        let total_num_messages = fid_account_roots
+            .iter()
+            .map(|r| r.num_messages as usize)
+            .sum::<usize>();
+        assert_eq!(all_trie_keys.len(), total_num_messages);
 
         // The roots should match, so we know that all the trie entries came over correctly.
         assert_eq!(metadata_shard_root, trie.root_hash().unwrap());

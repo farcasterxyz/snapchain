@@ -14,6 +14,7 @@ use crate::{
         },
         trie::merkle_trie::{self, TrieKey},
     },
+    utils::statsd_wrapper::StatsdClientWrapper,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -22,8 +23,6 @@ use std::{
 };
 use tokio::select;
 use tracing::{error, info};
-
-const MAX_MESSAGE_HASH_CACHE_ENTRIES: usize = 100_000;
 
 #[derive(Clone)]
 pub enum CacheMessageEntry {
@@ -35,9 +34,9 @@ pub enum CacheMessageEntry {
 /// because the Trie only has the hash, but the Messages are stored in the DB by ts_hash, and the trie doesn't have a timestamp (the "ts" part)
 /// So, there's no way to read a message from the DB from just the (fid, hash). Hence this cache.
 /// Note that the cache itself is an Arc, so this object can be cloned without a memory penalty.
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct MessageHashCacheKey {
+    pub height: u64,
     pub shard_id: u32,
     pub fid: u64,
     pub user_message_type: Option<proto::MessageType>,
@@ -46,11 +45,13 @@ struct MessageHashCacheKey {
 
 impl MessageHashCacheKey {
     pub fn new_for_user_message(
+        height: u64,
         shard_id: u32,
         fid: u64,
         user_message_type: proto::MessageType,
     ) -> Self {
         Self {
+            height,
             shard_id,
             fid,
             user_message_type: Some(user_message_type),
@@ -59,11 +60,13 @@ impl MessageHashCacheKey {
     }
 
     pub fn new_for_onchain_event(
+        height: u64,
         shard_id: u32,
         fid: u64,
         onchain_event_type: proto::OnChainEventType,
     ) -> Self {
         Self {
+            height,
             shard_id,
             fid,
             user_message_type: None,
@@ -73,6 +76,8 @@ impl MessageHashCacheKey {
 }
 
 struct MessageHashCache {
+    statsd_client: StatsdClientWrapper,
+
     // The number of messages in the cache
     cache_size: usize,
 
@@ -84,8 +89,15 @@ struct MessageHashCache {
 }
 
 impl MessageHashCache {
-    pub fn new() -> Self {
+    const MESSAGE_HASH_CACHE_SIZE: &'static str = "replicator.messagehashcache.size";
+    const MESSAGE_HASH_CACHE_HIT: &'static str = "replicator.messagehashcache.hit";
+    const MESSAGE_HASH_CACHE_MISS: &'static str = "replicator.messagehashcache.miss";
+
+    const MAX_MESSAGE_HASH_CACHE_ENTRIES: usize = 100_000;
+
+    pub fn new(statsd_client: StatsdClientWrapper) -> Self {
         Self {
+            statsd_client,
             cache_size: 0,
             cache: HashMap::new(),
             cache_lru: HashMap::new(),
@@ -99,9 +111,13 @@ impl MessageHashCache {
         match self.cache.get(key) {
             Some(entry) => {
                 self.cache_lru.insert(key.clone(), SystemTime::now());
+                self.statsd_client.incr(Self::MESSAGE_HASH_CACHE_HIT);
                 Some(entry.clone())
             }
-            None => None,
+            None => {
+                self.statsd_client.incr(Self::MESSAGE_HASH_CACHE_MISS);
+                None
+            }
         }
     }
 
@@ -113,33 +129,35 @@ impl MessageHashCache {
         let mut new_cache_size = self.cache_size + value.len();
 
         // Don't let the cache size be more than max entries allowed
-        if new_cache_size > MAX_MESSAGE_HASH_CACHE_ENTRIES {
+        if new_cache_size > Self::MAX_MESSAGE_HASH_CACHE_ENTRIES {
             // Drop the last recently used caches until we are either under MAX_MESSAGE_HASH_CACHE_ENTRIES or the cache is empty
-            let mut lru_keys = self.cache_lru.iter().collect::<Vec<_>>();
-            lru_keys.sort_by_key(|(_, &ts)| ts);
-
-            // Collect keys to remove to avoid mutable/immutable borrow conflict
-            let keys_to_remove = lru_keys
+            let mut lru_keys = self
+                .cache_lru
                 .iter()
-                .map(|(k, _)| (*k).clone())
+                .map(|(k, v)| (k.clone(), v.clone())) // Clone everything
                 .collect::<Vec<_>>();
+            lru_keys.sort_by_key(|(_, ts)| *ts);
 
-            for lru_key in keys_to_remove {
+            // Remove entries until we are under the limit or remove entries older than 1 day
+            for (lru_key, _ts) in lru_keys {
+                if new_cache_size <= Self::MAX_MESSAGE_HASH_CACHE_ENTRIES {
+                    break;
+                }
+
                 let removed = self.cache.remove(&lru_key);
                 self.cache_lru.remove(&lru_key);
 
                 // Recalculate new size
                 new_cache_size -= removed.map(|v| v.len()).unwrap_or(0);
-
-                if new_cache_size <= MAX_MESSAGE_HASH_CACHE_ENTRIES {
-                    break;
-                }
             }
         }
 
         self.cache_lru.insert(key.clone(), SystemTime::now());
         self.cache.insert(key, value);
         self.cache_size = new_cache_size;
+
+        self.statsd_client
+            .gauge(Self::MESSAGE_HASH_CACHE_SIZE, new_cache_size as u64, vec![]);
     }
 }
 
@@ -187,12 +205,13 @@ pub struct Replicator {
 impl Replicator {
     const MESSAGE_LIMIT: usize = 1_000; // Maximum number of messages to fetch per page
 
-    pub fn new(stores: Arc<ReplicationStores>) -> Self {
-        Self::new_with_options(stores, ReplicatorSnapshotOptions::default())
+    pub fn new(stores: Arc<ReplicationStores>, statsd_client: StatsdClientWrapper) -> Self {
+        Self::new_with_options(stores, statsd_client, ReplicatorSnapshotOptions::default())
     }
 
     pub fn new_with_options(
         stores: Arc<ReplicationStores>,
+        statsd_client: StatsdClientWrapper,
         snapshot_options: ReplicatorSnapshotOptions,
     ) -> Self {
         if snapshot_options.interval == 0 {
@@ -202,19 +221,20 @@ impl Replicator {
         Replicator {
             stores,
             snapshot_options,
-            message_hash_cache: RwLock::new(MessageHashCache::new()),
+            message_hash_cache: RwLock::new(MessageHashCache::new(statsd_client)),
         }
     }
 
     fn build_fid_onchain_message_type_cache(
         &self,
         stores: &Stores,
+        height: u64,
         shard_id: u32,
         fid: u64,
         onchain_event_type: proto::OnChainEventType,
     ) -> Result<Arc<HashMap<Vec<u8>, CacheMessageEntry>>, ReplicationError> {
         let cache_key =
-            MessageHashCacheKey::new_for_onchain_event(shard_id, fid, onchain_event_type);
+            MessageHashCacheKey::new_for_onchain_event(height, shard_id, fid, onchain_event_type);
 
         // First see if this cache is already present
         if let Some(cache) = self.message_hash_cache.write().unwrap().get(&cache_key) {
@@ -256,11 +276,13 @@ impl Replicator {
     fn build_fid_user_message_type_cache(
         &self,
         stores: &Stores,
+        height: u64,
         shard_id: u32,
         fid: u64,
         user_message_type: proto::MessageType,
     ) -> Result<Arc<HashMap<Vec<u8>, CacheMessageEntry>>, ReplicationError> {
-        let cache_key = MessageHashCacheKey::new_for_user_message(shard_id, fid, user_message_type);
+        let cache_key =
+            MessageHashCacheKey::new_for_user_message(height, shard_id, fid, user_message_type);
         if let Some(cache) = self.message_hash_cache.write().unwrap().get(&cache_key) {
             return Ok(cache.clone());
         }
@@ -427,7 +449,7 @@ impl Replicator {
             match (onchain_message_type, message_type) {
                 (Some(onchain_event_type), None) => {
                     // On-chain event
-                    if onchain_event_type == 7 {
+                    if onchain_event_type == merkle_trie::FNAME_MESSAGE_TYPE {
                         // fname. Get directly from the DB
                         let fname_bytes =
                             rest.into_iter().take_while(|&b| b != 0).collect::<Vec<_>>();
@@ -475,6 +497,7 @@ impl Replicator {
 
                         let cache = self.build_fid_onchain_message_type_cache(
                             &stores,
+                            height,
                             shard_id,
                             fid,
                             onchain_event_type,
@@ -512,6 +535,7 @@ impl Replicator {
                     let hash = rest;
                     let cache = self.build_fid_user_message_type_cache(
                         &stores,
+                        height,
                         shard_id,
                         fid,
                         MessageType::try_from(message_type as i32).map_err(|e| {
