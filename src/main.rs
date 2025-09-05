@@ -236,11 +236,12 @@ fn create_replicator(
     let replication_stores = Arc::new(replication::ReplicationStores::new(
         shard_stores,
         app_config.trie_branching_factor,
-        statsd_client,
+        statsd_client.clone(),
         app_config.fc_network.clone(),
     ));
     let replicator = replication::Replicator::new_with_options(
         replication_stores,
+        statsd_client,
         replication::ReplicatorSnapshotOptions {
             interval: app_config.replication.snapshot_interval,
             max_age: app_config.replication.snapshot_max_age,

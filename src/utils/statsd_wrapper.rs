@@ -1,4 +1,4 @@
-use cadence::{Counted, Gauged, StatsdClient, Timed};
+use cadence::{Counted, CountedExt, Gauged, StatsdClient, Timed};
 use std::sync::Arc;
 
 pub struct StatsdClientWrapper {
@@ -21,6 +21,10 @@ impl StatsdClientWrapper {
             client: Arc::new(client),
             use_tags,
         }
+    }
+
+    pub fn incr(&self, key: &str) {
+        _ = self.client.incr(key);
     }
 
     pub fn count_with_shard(
