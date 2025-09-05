@@ -105,6 +105,7 @@ enum UserDataType {
   USER_DATA_TYPE_BANNER = 10; // Banner image for the user
   USER_DATA_PRIMARY_ADDRESS_ETHEREUM = 11; // Primary address for the user on Ethereum
   USER_DATA_PRIMARY_ADDRESS_SOLANA = 12; // Primary address for the user on Solana
+  USER_DATA_TYPE_PROFILE_TOKEN = 13; // Profile token in CAIP-19 format
 }
 
 message Embed {
