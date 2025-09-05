@@ -3,11 +3,7 @@ use super::{
     store::{Store, StoreDef},
     StoreEventHandler,
 };
-use crate::storage::{
-    constants::UserPostfix,
-    db::PageOptions,
-    store::account::{message_decode, StorageSlot},
-};
+use crate::storage::{constants::UserPostfix, db::PageOptions, store::account::StorageSlot};
 use crate::{
     core::error::HubError,
     proto::SignatureScheme,
