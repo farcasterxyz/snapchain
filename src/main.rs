@@ -300,30 +300,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if db_is_empty {
         match app_config.snapshot.bootstrap_method {
             BootstrapMethod::Replicate => {
-                info!("Starting node with replication bootstrap");
-                let replicator = ReplicatorBootstrap::new(&app_config);
+                // info!("Starting node with replication bootstrap");
+                // let replicator = ReplicatorBootstrap::new(&app_config);
 
-                match replicator
-                    .bootstrap_using_replication("http://127.0.0.1:3383".to_string())
-                    .await
-                {
-                    Ok(r) => {
-                        // Check for the specific success response
-                        if r == WorkUnitResponse::Finished {
-                            info!("Replication bootstrap successful. Continuing with startup.");
-                        } else {
-                            error!(
-                                "Replication bootstrap stopped with status: {:?}. Exiting.",
-                                r
-                            );
-                            process::exit(1);
-                        }
-                    }
-                    Err(e) => {
-                        error!("Replication bootstrap failed:\n{}\nPlease clear the database directory and try again.", e);
-                        process::exit(1);
-                    }
-                }
+                // match replicator
+                //     .bootstrap_using_replication("http://127.0.0.1:3383".to_string())
+                //     .await
+                // {
+                //     Ok(r) => {
+                //         // Check for the specific success response
+                //         if r == WorkUnitResponse::Finished {
+                //             info!("Replication bootstrap successful. Continuing with startup.");
+                //         } else {
+                //             error!(
+                //                 "Replication bootstrap stopped with status: {:?}. Exiting.",
+                //                 r
+                //             );
+                //             process::exit(1);
+                //         }
+                //     }
+                //     Err(e) => {
+                //         error!("Replication bootstrap failed:\n{}\nPlease clear the database directory and try again.", e);
+                //         process::exit(1);
+                //     }
+                // }
+                error!("Not yet active");
+                process::exit(1);
             }
             BootstrapMethod::Snapshot => {
                 if app_config.snapshot.force_load_db_from_snapshot
