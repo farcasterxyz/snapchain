@@ -6,8 +6,8 @@ use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
 use crate::network::http_server::TierType;
 use crate::proto::{
-    self, HubEvent, StorageLimit, StorageLimitsResponse, StorageUnitDetails, StorageUnitType,
-    StoreType,
+    self, HubEvent, OnChainEvent, StorageLimit, StorageLimitsResponse, StorageUnitDetails,
+    StorageUnitType, StoreType,
 };
 use crate::proto::{MessageType, TierDetails};
 use crate::storage::constants::{RootPrefix, PAGE_SIZE_MAX};
@@ -333,6 +333,37 @@ impl Stores {
             .put(&Self::make_schema_version_key(), &version.to_be_bytes())
     }
 
+    pub fn get_storage_slot_for_fid(
+        &self,
+        fid: u64,
+        pending_events: &[OnChainEvent],
+    ) -> Result<StorageSlot, StoresError> {
+        let lent_storage = StorageLendStore::get_lent_storage(&self.storage_lend_store, fid)
+            .map_err(|err| StoresError::StoreError {
+                inner: err,
+                hash: vec![],
+            })?;
+        let borrowed_storage =
+            StorageLendStore::get_borrowed_storage(&self.storage_lend_store, fid).map_err(
+                |err| StoresError::StoreError {
+                    inner: err,
+                    hash: vec![],
+                },
+            )?;
+        let slot = self
+            .onchain_event_store
+            .get_storage_slot_for_fid(
+                fid,
+                self.network,
+                pending_events,
+                &lent_storage,
+                &borrowed_storage,
+            )
+            .map_err(|e| StoresError::OnchainEventError(e))?;
+
+        Ok(slot)
+    }
+
     pub fn get_usage(
         &self,
         fid: u64,
@@ -341,12 +372,7 @@ impl Stores {
     ) -> Result<(u32, u32), StoresError> {
         let store_type = Limits::message_type_to_store_type(message_type);
         let message_count = self.get_usage_by_store_type(fid, store_type, txn_batch)?;
-        let lent_storage = StorageLendStore::get_lent_from_storage(&self.storage_lend_store, fid)
-            .unwrap_or_else(|_| StorageSlot::new(0, 0, 0, 0));
-        let slot = self
-            .onchain_event_store
-            .get_storage_slot_for_fid(fid, self.network, &[], &lent_storage)
-            .map_err(|e| StoresError::OnchainEventError(e))?;
+        let slot = self.get_storage_slot_for_fid(fid, &[])?;
         let max_messages = self.store_limits.max_messages(&slot, store_type);
 
         Ok((message_count, max_messages))
@@ -390,12 +416,7 @@ impl Stores {
     }
 
     pub fn get_storage_limits(&self, fid: u64) -> Result<StorageLimitsResponse, StoresError> {
-        let lent_storage = StorageLendStore::get_lent_from_storage(&self.storage_lend_store, fid)
-            .unwrap_or_else(|_| StorageSlot::new(0, 0, 0, 0));
-        let slot = self
-            .onchain_event_store
-            .get_storage_slot_for_fid(fid, self.network, &[], &lent_storage)
-            .map_err(|e| StoresError::OnchainEventError(e))?;
+        let slot = self.get_storage_slot_for_fid(fid, &[])?;
 
         let txn_batch = &mut RocksDbTransactionBatch::new();
         let mut limits = vec![];

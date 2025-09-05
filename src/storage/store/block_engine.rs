@@ -77,6 +77,7 @@ pub struct BlockStores {
     pub block_event_store: BlockEventStore,
     pub onchain_event_store: OnchainEventStore,
     pub storage_lend_store: Store<StorageLendStoreDef>,
+    pub network: FarcasterNetwork,
 }
 
 impl BlockStores {
@@ -88,6 +89,32 @@ impl BlockStores {
         self.block_store
             .get_block_by_height(block_event.block_number())
             .ok()?
+    }
+
+    pub fn get_storage_slot_for_fid(
+        &self,
+        fid: u64,
+        pending_onchain_events: &Vec<OnChainEvent>,
+        count_borrowed_storage: bool,
+    ) -> Option<StorageSlot> {
+        let lent_storage =
+            StorageLendStore::get_lent_storage(&self.storage_lend_store, fid).ok()?;
+
+        let borrowed_storage = if count_borrowed_storage {
+            StorageLendStore::get_borrowed_storage(&self.storage_lend_store, fid).ok()?
+        } else {
+            StorageSlot::new(0, 0, 0, 0)
+        };
+
+        self.onchain_event_store
+            .get_storage_slot_for_fid(
+                fid,
+                self.network,
+                pending_onchain_events.as_slice(),
+                &lent_storage,
+                &borrowed_storage,
+            )
+            .ok()
     }
 }
 
@@ -136,6 +163,7 @@ impl BlockEngine {
                     store_event_handler.clone(),
                     100,
                 ),
+                network,
             },
             trie,
             shard_id: 0,
@@ -300,7 +328,9 @@ impl BlockEngine {
             }
         }
 
-        let mut storage_slot = self.storage_slot_for_transaction(snapchain_txn).unwrap();
+        let mut storage_slot = self
+            .storage_slot_for_transaction(snapchain_txn, false)
+            .unwrap();
 
         for message in &snapchain_txn.user_messages {
             match self.validate_user_message(message, &storage_slot, timestamp, version, txn_batch)
@@ -438,28 +468,22 @@ impl BlockEngine {
         (events, events_hash)
     }
 
-    fn storage_slot_for_transaction(&self, snapchain_txn: &Transaction) -> Option<StorageSlot> {
+    fn storage_slot_for_transaction(
+        &self,
+        snapchain_txn: &Transaction,
+        count_borrowed_storage: bool,
+    ) -> Option<StorageSlot> {
         let pending_onchain_events: Vec<OnChainEvent> = snapchain_txn
             .system_messages
             .iter()
             .filter_map(|vm| vm.on_chain_event.clone())
             .collect();
 
-        let lent_storage = StorageLendStore::get_lent_from_storage(
-            &self.stores.storage_lend_store,
+        self.stores.get_storage_slot_for_fid(
             snapchain_txn.fid,
+            &pending_onchain_events,
+            count_borrowed_storage,
         )
-        .ok()?;
-
-        self.stores
-            .onchain_event_store
-            .get_storage_slot_for_fid(
-                snapchain_txn.fid,
-                self.network,
-                pending_onchain_events.as_slice(),
-                &lent_storage,
-            )
-            .ok()
     }
 
     fn prepare_proposal(
@@ -480,7 +504,7 @@ impl BlockEngine {
             .into_iter()
             .filter_map(|mut transaction| {
                 // TODO(aditi): We could share this code with the shard engine but there may be other things we want to add here. For example, it may make sense to exclude validator messages and user messages that aren't intended for shard 0 here so a bug in the mempool won't impact the protocol in a significant way.
-                let storage_slot = self.storage_slot_for_transaction(&transaction)?;
+                let storage_slot = self.storage_slot_for_transaction(&transaction, true)?;
 
                 // Drop events if storage slot is inactive
                 if !storage_slot.is_active() {

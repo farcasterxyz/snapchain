@@ -12,7 +12,7 @@ use crate::proto::{
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
-    BlockEventStorageError, CastStore, MessagesPage, StorageLendStore, VerificationStore,
+    BlockEventStorageError, CastStore, MessagesPage, VerificationStore,
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
@@ -270,21 +270,9 @@ impl ShardEngine {
                         &[]
                     };
 
-                let lent_storage = StorageLendStore::get_lent_from_storage(
-                    &self.stores.storage_lend_store,
-                    transaction.fid,
-                )
-                .ok()?;
-
                 let storage_slot = self
                     .stores
-                    .onchain_event_store
-                    .get_storage_slot_for_fid(
-                        transaction.fid,
-                        self.network,
-                        maybe_onchainevents,
-                        &lent_storage,
-                    )
+                    .get_storage_slot_for_fid(transaction.fid, maybe_onchainevents)
                     .ok()?;
 
                 // Drop events if storage slot is inactive
