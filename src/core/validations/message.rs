@@ -456,6 +456,10 @@ pub fn validate_caip19_format(input: &String) -> Result<(), ValidationError> {
         return Ok(());
     }
 
+    if input.len() > 256 {
+        return Err(ValidationError::Caip19TooLong);
+    }
+
     // CAIP-19 format: chain_id + "/" + asset_namespace + ":" + asset_reference
     // Optional asset_id: chain_id + "/" + asset_namespace + ":" + asset_reference + "/" + token_id
     // Example: eip155:1/erc20:0x6b175474e89094c44da98b954eedeac495271d0f

@@ -592,5 +592,9 @@ mod tests {
         assert!(validate_caip19_format(&"eip155:1/erc721:0x123/456/789".to_string()).is_err());
         // Empty token_id
         assert!(validate_caip19_format(&"eip155:1/erc721:0x123/".to_string()).is_err());
+
+        // Too long
+        let long_caip19 = format!("eip155:1/erc20:0x123/{}", "a".repeat(250));
+        assert!(validate_caip19_format(&long_caip19).is_err());
     }
 }
