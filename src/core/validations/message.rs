@@ -450,6 +450,50 @@ pub fn validate_user_data_primary_address_solana(input: &String) -> Result<(), V
     Ok(())
 }
 
+pub fn validate_caip19_format(input: &String) -> Result<(), ValidationError> {
+    // Empty string is allowed for unsetting the profile token
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    // CAIP-19 format: chain_id + "/" + asset_namespace + ":" + asset_reference
+    // Optional asset_id: chain_id + "/" + asset_namespace + ":" + asset_reference + "/" + token_id
+    // Example: eip155:1/erc20:0x6b175474e89094c44da98b954eedeac495271d0f
+    // Example with token_id: eip155:1/erc721:0x06012c8cf97BEaD5deAe237070F9587f8E7A266d/771769
+
+    // Basic regex pattern for CAIP-19 format
+    // chain_id: namespace:reference (CAIP-2 format)
+    // asset_namespace: [-a-z0-9]{3,8}
+    // asset_reference: [-.%a-zA-Z0-9]{1,128}
+    // optional token_id: any alphanumeric string after the last /
+    let caip19_regex =
+        r"^[a-z0-9]+:[a-zA-Z0-9]+/[a-z0-9-]{3,8}:[-.%a-zA-Z0-9]{1,128}(/[a-zA-Z0-9]+)?$";
+
+    if !Regex::new(caip19_regex)
+        .unwrap()
+        .is_match(input)
+        .map_err(|_| ValidationError::InvalidData)?
+    {
+        return Err(ValidationError::InvalidData);
+    }
+
+    // Additional validation: ensure the asset_reference part doesn't exceed 128 characters
+    let parts: Vec<&str> = input.split('/').collect();
+    if parts.len() < 2 || parts.len() > 3 {
+        return Err(ValidationError::InvalidData);
+    }
+
+    let asset_part = parts[1];
+    if let Some(colon_pos) = asset_part.find(':') {
+        let asset_reference = &asset_part[colon_pos + 1..];
+        if asset_reference.len() > 128 {
+            return Err(ValidationError::InvalidData);
+        }
+    }
+
+    Ok(())
+}
+
 pub fn validate_user_location(location: &str) -> Result<(), ValidationError> {
     if location.is_empty() {
         return Ok(());
@@ -547,6 +591,12 @@ pub fn validate_user_data_add_body(
                 return Err(ValidationError::UnsupportedFeature);
             }
             validate_user_data_primary_address_solana(&body.value)?;
+        }
+        UserDataType::ProfileToken => {
+            if !version.is_enabled(ProtocolFeature::UserProfileToken) {
+                return Err(ValidationError::UnsupportedFeature);
+            }
+            validate_caip19_format(&body.value)?;
         }
         UserDataType::None => return Err(ValidationError::InvalidUserDataType),
     }
