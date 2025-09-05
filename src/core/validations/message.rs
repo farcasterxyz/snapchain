@@ -207,6 +207,9 @@ pub fn validate_message(
         Some(proto::message_data::Body::FrameActionBody(frame_action_body)) => {
             validate_frame_action_body(&frame_action_body)?;
         }
+        Some(proto::message_data::Body::LendStorageBody(_lend_storage_body)) => {
+            // All the validations are stateful
+        }
         None => {}
     }
 

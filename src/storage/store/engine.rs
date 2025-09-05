@@ -14,7 +14,8 @@ use crate::proto::{
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
-    BlockEventStorageError, CastStore, MessagesPage, StoreOptions, VerificationStore,
+    BlockEventStorageError, CastStore, MessagesPage, StorageLendStore, StoreOptions,
+    VerificationStore,
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
@@ -311,10 +312,21 @@ impl ShardEngine {
                         &[]
                     };
 
+                let lent_storage = StorageLendStore::get_lent_from_storage(
+                    &self.stores.storage_lend_store,
+                    transaction.fid,
+                )
+                .ok()?;
+
                 let storage_slot = self
                     .stores
                     .onchain_event_store
-                    .get_storage_slot_for_fid(transaction.fid, self.network, maybe_onchainevents)
+                    .get_storage_slot_for_fid(
+                        transaction.fid,
+                        self.network,
+                        maybe_onchainevents,
+                        &lent_storage,
+                    )
                     .ok()?;
 
                 // Drop events if storage slot is inactive
@@ -819,6 +831,41 @@ impl ShardEngine {
                             err.to_string()
                         );
                     }
+
+                    // Process storage lend messages from block events
+                    if let Some(block_event_data) = &block_event.data {
+                        if let Some(proto::block_event_data::Body::LendStorageEventBody(
+                            lend_storage_event,
+                        )) = &block_event_data.body
+                        {
+                            if let Some(lend_storage_message) =
+                                &lend_storage_event.lend_storage_message
+                            {
+                                match self
+                                    .stores
+                                    .storage_lend_store
+                                    .merge(lend_storage_message, txn_batch)
+                                {
+                                    Ok(hub_event) => {
+                                        merged_messages_count += 1;
+                                        self.update_trie(trie_ctx, &hub_event, txn_batch)?;
+                                        events.push(hub_event);
+                                        message_types.insert(lend_storage_message.msg_type());
+                                    }
+                                    Err(err) => {
+                                        if source != ProposalSource::Simulate {
+                                            warn!(
+                                                seqnum = block_event.seqnum(),
+                                                "Error merging storage lend from block event: {}",
+                                                err.to_string()
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     last_block_event_seqnum += 1;
                 }
             }
