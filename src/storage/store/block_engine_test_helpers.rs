@@ -1,12 +1,17 @@
 use crate::core::types::Height;
 use crate::core::util::FarcasterTime;
-use crate::proto::{Block, BlockHeader, FarcasterNetwork, OnChainEvent, ShardWitness};
+use crate::proto::{
+    self, Block, BlockEvent, BlockHeader, FarcasterNetwork, OnChainEvent, ShardWitness,
+    StorageUnitType,
+};
 use crate::storage::db::RocksDB;
 use crate::storage::store::block_engine::{BlockEngine, BlockStateChange};
 use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::test_helper::statsd_client;
 use crate::storage::store::BlockStore;
-use crate::storage::trie::merkle_trie::MerkleTrie;
+use crate::storage::trie::merkle_trie::{self, MerkleTrie, TrieKey};
+use crate::utils::factory::events_factory;
+use ed25519_dalek::SigningKey;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -94,4 +99,142 @@ pub fn commit_event(engine: &mut BlockEngine, event: &OnChainEvent) -> Block {
         engine.propose_state_change(vec![MempoolMessage::OnchainEvent(event.clone())], height);
 
     validate_and_commit_state_change(engine, &state_change)
+}
+
+#[derive(Clone)]
+pub enum Validity {
+    Valid,
+    Invalid,
+}
+
+pub fn commit_message(
+    engine: &mut BlockEngine,
+    msg: &crate::proto::Message,
+    validity: Validity,
+) -> Block {
+    let height = engine.get_confirmed_height().increment();
+    let state_change =
+        engine.propose_state_change(vec![MempoolMessage::UserMessage(msg.clone())], height);
+    if state_change.transactions.is_empty() {
+        panic!("Failed to propose message");
+    }
+    let block = validate_and_commit_state_change(engine, &state_change);
+
+    let in_trie = engine.trie_key_exists(&merkle_trie::Context::new(), &TrieKey::for_message(&msg));
+
+    let should_be_in_trie = match validity {
+        Validity::Valid => true,
+        Validity::Invalid => false,
+    };
+
+    assert_eq!(in_trie, should_be_in_trie);
+
+    block
+}
+
+pub fn commit_messages(
+    engine: &mut BlockEngine,
+    msgs: Vec<(&crate::proto::Message, Validity)>,
+) -> Block {
+    use itertools::Itertools;
+
+    let height = engine.get_confirmed_height().increment();
+    let state_change = engine.propose_state_change(
+        msgs.clone()
+            .into_iter()
+            .map(|(msg, _)| MempoolMessage::UserMessage(msg.clone()))
+            .collect_vec(),
+        height,
+    );
+
+    if state_change.transactions.is_empty() {
+        panic!("Failed to propose message");
+    }
+
+    let block = validate_and_commit_state_change(engine, &state_change);
+    assert_eq!(
+        state_change.new_state_root,
+        block.header.as_ref().unwrap().state_root
+    );
+
+    for (msg, validity) in msgs {
+        let in_trie =
+            engine.trie_key_exists(&merkle_trie::Context::new(), &TrieKey::for_message(&msg));
+
+        let should_be_in_trie = match validity {
+            Validity::Valid => true,
+            Validity::Invalid => false,
+        };
+
+        assert_eq!(in_trie, should_be_in_trie);
+    }
+
+    block
+}
+
+pub fn register_user(
+    fid: u64,
+    signer: SigningKey,
+    custody_address: Vec<u8>,
+    storage_units: u32,
+    engine: &mut BlockEngine,
+) {
+    // Create storage rent event with specified units
+    let storage_event = events_factory::create_rent_event(
+        fid,
+        storage_units,
+        StorageUnitType::UnitType2025,
+        false,
+        FarcasterNetwork::Devnet,
+    );
+    commit_event(engine, &storage_event);
+
+    // Create ID register event
+    let id_register_event = events_factory::create_id_register_event(
+        fid,
+        crate::proto::IdRegisterEventType::Register,
+        custody_address,
+        None,
+    );
+    commit_event(engine, &id_register_event);
+
+    // Create signer event
+    let signer_event = events_factory::create_signer_event(
+        fid,
+        signer,
+        crate::proto::SignerEventType::Add,
+        None,
+        None,
+    );
+    commit_event(engine, &signer_event);
+}
+
+pub fn assert_storage_lend_event(block_event: &BlockEvent, message: &proto::Message) {
+    assert_eq!(
+        block_event.data.as_ref().unwrap().r#type,
+        crate::proto::BlockEventType::LendStorage as i32
+    );
+    if let Some(crate::proto::block_event_data::Body::LendStorageEventBody(lend_event)) =
+        &block_event.data.as_ref().unwrap().body
+    {
+        assert_eq!(lend_event.lend_storage_message.as_ref().unwrap(), message);
+    } else {
+        panic!("Expected LendStorageEventBody");
+    }
+}
+
+pub fn assert_storage_balance(
+    block_engine: &BlockEngine,
+    fid: u64,
+    unit_type: StorageUnitType,
+    num_units: u32,
+) {
+    assert_eq!(
+        block_engine
+            .stores()
+            .get_storage_slot_for_fid(fid, &vec![], true)
+            .unwrap()
+            .units_for(unit_type),
+        num_units
+    )
 }

@@ -8,6 +8,22 @@ mod tests {
     use crate::storage::store::test_helper::{trie_ctx, FID_FOR_TEST};
     use crate::storage::trie::merkle_trie::TrieKey;
     use crate::utils::factory::{events_factory, messages_factory};
+    use ed25519_dalek::{SecretKey, SigningKey};
+    use hex::FromHex;
+    use prost::Message;
+
+    pub fn default_custody_address() -> Vec<u8> {
+        "000000000000000000".to_string().encode_to_vec()
+    }
+
+    pub fn default_signer() -> SigningKey {
+        SigningKey::from_bytes(
+            &SecretKey::from_hex(
+                "1000000000000000000000000000000000000000000000000000000000000000",
+            )
+            .unwrap(),
+        )
+    }
 
     #[tokio::test]
     async fn test_trie_updated_only_on_commit() {
@@ -235,5 +251,256 @@ mod tests {
         );
         assert_eq!(state_change.events[0].data.as_ref().unwrap().event_index, 0);
         validate_and_commit_state_change(&mut block_engine, &state_change);
+    }
+
+    #[tokio::test]
+    async fn test_storage_lend_message_merged() {
+        let (mut block_engine, _temp_dir) = setup(None);
+
+        // Register user with storage
+        register_user(
+            FID_FOR_TEST,
+            default_signer(),
+            default_custody_address(),
+            1000,
+            &mut block_engine,
+        );
+
+        let lend_message = messages_factory::storage_lend::create_storage_lend(
+            FID_FOR_TEST,
+            FID_FOR_TEST + 1,
+            100,
+            StorageUnitType::UnitType2025,
+            None,
+            None,
+        );
+
+        let block = commit_message(&mut block_engine, &lend_message, Validity::Valid);
+
+        // Should generate one block event for the storage lend
+        assert_eq!(block.events.len(), 1);
+        assert_storage_lend_event(&block.events[0], &lend_message);
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST,
+            StorageUnitType::UnitType2025,
+            900,
+        );
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST + 1,
+            StorageUnitType::UnitType2025,
+            100,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multiple_storage_lends_in_same_transaction() {
+        let (mut block_engine, _temp_dir) = setup(None);
+
+        // Register user with only 250 units of storage - not enough for all lends
+        register_user(
+            FID_FOR_TEST,
+            default_signer(),
+            default_custody_address(),
+            400, // Only 300 units - insufficient for all lends (100 + 200 + 150 = 450)
+            &mut block_engine,
+        );
+
+        // Create multiple lend messages from same FID to different recipients
+        let lend_message1 = messages_factory::storage_lend::create_storage_lend(
+            FID_FOR_TEST,
+            FID_FOR_TEST + 1,
+            100, // This should succeed (250 - 100 = 150 remaining)
+            StorageUnitType::UnitType2025,
+            None,
+            None,
+        );
+        let lend_message2 = messages_factory::storage_lend::create_storage_lend(
+            FID_FOR_TEST,
+            FID_FOR_TEST + 2,
+            200, // This should fail (only 150 remaining, need 200)
+            StorageUnitType::UnitType2025,
+            None,
+            None,
+        );
+        let lend_message3 = messages_factory::storage_lend::create_storage_lend(
+            FID_FOR_TEST,
+            FID_FOR_TEST + 3,
+            150, // This should also fail (still insufficient storage)
+            StorageUnitType::UnitType2025,
+            None,
+            None,
+        );
+
+        let block = commit_messages(
+            &mut block_engine,
+            vec![
+                (&lend_message1, Validity::Valid),
+                (&lend_message2, Validity::Valid),
+                (&lend_message3, Validity::Invalid),
+            ],
+        );
+
+        // Should only generate one block event for the successful lend (the first one)
+        // The other two should fail during merge due to insufficient storage
+        assert_eq!(block.events.len(), 2);
+        assert_eq!(block.events[1].seqnum(), block.events[0].seqnum() + 1);
+        assert_storage_lend_event(&block.events[0], &lend_message1);
+        assert_storage_lend_event(&block.events[1], &lend_message2);
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST,
+            StorageUnitType::UnitType2025,
+            100,
+        );
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST + 1,
+            StorageUnitType::UnitType2025,
+            100,
+        );
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST + 2,
+            StorageUnitType::UnitType2025,
+            200,
+        );
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST + 3,
+            StorageUnitType::UnitType2025,
+            0,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_borrowed_storage_cannot_be_lent() {
+        let (mut block_engine, _temp_dir) = setup(None);
+
+        // Register FID_FOR_TEST + 1 with some storage to lend to FID_FOR_TEST + 2
+        register_user(
+            FID_FOR_TEST + 1,
+            default_signer(),
+            default_custody_address(),
+            500,
+            &mut block_engine,
+        );
+
+        // Register FID_FOR_TEST + 2 so they can receive lent storage
+        register_user(
+            FID_FOR_TEST + 2,
+            default_signer(),
+            default_custody_address(),
+            0, // No initial storage
+            &mut block_engine,
+        );
+
+        // FID_FOR_TEST + 1 lends storage to FID_FOR_TEST + 2
+        let lend_message1 = messages_factory::storage_lend::create_storage_lend(
+            FID_FOR_TEST + 1,
+            FID_FOR_TEST + 2,
+            300,
+            StorageUnitType::UnitType2025,
+            None,
+            None,
+        );
+        let block = commit_message(&mut block_engine, &lend_message1, Validity::Valid);
+        assert_storage_lend_event(&block.events[0], &lend_message1);
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST + 1,
+            StorageUnitType::UnitType2025,
+            200,
+        );
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST + 2,
+            StorageUnitType::UnitType2025,
+            300,
+        );
+
+        // Now FID_FOR_TEST + 2 tries to lend storage they don't own
+        // They have 300 borrowed units, but 0 owned units
+        let lend_message2 = messages_factory::storage_lend::create_storage_lend(
+            FID_FOR_TEST + 2, // Borrower trying to lend
+            FID_FOR_TEST,     // Different recipient
+            100,              // Amount they don't actually own
+            StorageUnitType::UnitType2025,
+            None,
+            None,
+        );
+
+        let block = commit_message(&mut block_engine, &lend_message2, Validity::Invalid);
+
+        // No block events should be generated for failed storage lend
+        assert_eq!(block.events.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_lender_can_take_back_storage_by_setting_to_zero() {
+        let (mut block_engine, _temp_dir) = setup(None);
+
+        // Register lender with storage
+        register_user(
+            FID_FOR_TEST,
+            default_signer(),
+            default_custody_address(),
+            500,
+            &mut block_engine,
+        );
+
+        // Lender lends 300 units to borrower
+        let lend_message1 = messages_factory::storage_lend::create_storage_lend(
+            FID_FOR_TEST,
+            FID_FOR_TEST + 1,
+            300,
+            StorageUnitType::UnitType2025,
+            None,
+            None,
+        );
+        let block1 = commit_message(&mut block_engine, &lend_message1, Validity::Valid);
+        assert_eq!(block1.events.len(), 1);
+        assert_storage_lend_event(&block1.events[0], &lend_message1);
+
+        // Verify initial balances after lending
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST,
+            StorageUnitType::UnitType2025,
+            200,
+        ); // 500 - 300
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST + 1,
+            StorageUnitType::UnitType2025,
+            300,
+        ); // borrowed
+
+        // Lender takes back storage by setting lend to 0
+        let lend_message2 = messages_factory::storage_lend::create_storage_lend(
+            FID_FOR_TEST,
+            FID_FOR_TEST + 1,
+            0, // Setting to 0 takes back the storage
+            StorageUnitType::UnitType2025,
+            Some(lend_message1.data.as_ref().unwrap().timestamp + 1),
+            None,
+        );
+        let block2 = commit_message(&mut block_engine, &lend_message2, Validity::Valid);
+        assert_storage_lend_event(&block2.events[0], &lend_message2);
+
+        // Verify balances after taking back storage
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST,
+            StorageUnitType::UnitType2025,
+            500,
+        ); // Back to original
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST + 1,
+            StorageUnitType::UnitType2025,
+            0,
+        ); // No more borrowed storage
     }
 }
