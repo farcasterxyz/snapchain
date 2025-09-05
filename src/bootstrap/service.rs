@@ -243,15 +243,15 @@ impl ReplicatorBootstrap {
     }
 
     /// Bootstrap a node from replication instead of snapshot download
-    pub async fn bootstrap_using_replication(&self) -> Result<WorkUnitResponse, BootstrapError> {
+    pub async fn bootstrap_using_replication(
+        &self,
+        peer_address: String, // TODO: Implement multi-peer syncing
+    ) -> Result<WorkUnitResponse, BootstrapError> {
         info!("Starting replication-based bootstrap");
 
         // Fetch metadata and determine target height
-        // Get the peer address from the client's channel
-        let peer_address = "http://127.0.0.1:3383";
-
         let shard_metadata = {
-            let mut client = ReplicationServiceClient::connect(peer_address).await?;
+            let mut client = ReplicationServiceClient::connect(peer_address.clone()).await?;
 
             self.get_shard_snapshots(&mut client, self.shard_ids.clone())
                 .await?
@@ -282,7 +282,7 @@ impl ReplicatorBootstrap {
             }
 
             // Clone necessary data for the spawned task
-            let peer_address_clone = peer_address.to_string();
+            let peer_address_clone = peer_address.clone();
             let rocksdb_dir = self.get_snapshot_rocksdb_dir();
 
             info!(
