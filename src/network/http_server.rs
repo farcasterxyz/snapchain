@@ -1855,6 +1855,13 @@ fn map_proto_message_data_to_json_message_data(
                 link_compact_state_body: None,
             });
         }
+        Some(Body::LendStorageBody(_lend_storage_body)) => {
+            // TODO: Implement LendStorageBody mapping when needed
+            Err(ErrorResponse {
+                error: "LendStorageBody not yet supported in HTTP API".to_string(),
+                error_detail: None,
+            })
+        }
         None => Err(ErrorResponse {
             error: "No message data".to_string(),
             error_detail: None,

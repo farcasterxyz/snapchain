@@ -247,6 +247,7 @@ enum MessageType {
     UserDataMessages = 12,
     VerificationMessages = 13,
     UsernameProofsMessages = 14,
+    LendStorageMessages = 15,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -317,6 +318,7 @@ impl Into<MessageType> for proto::MessageType {
             proto::MessageType::FrameAction => {
                 panic!("FrameAction is not a replicated message type")
             }
+            proto::MessageType::LendStorage => MessageType::LendStorageMessages,
             proto::MessageType::None => {
                 panic!("None is not a replicated message type")
             }

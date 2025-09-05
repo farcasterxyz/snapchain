@@ -5,8 +5,8 @@ use crate::core::{types::Height, util::FarcasterTime};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::{
     self, block_event_data, Block, BlockEvent, BlockEventData, BlockEventType, FarcasterNetwork,
-    HeartbeatEventBody, HubEventType, LendStorageBody, MessageType, OnChainEvent,
-    ShardChunkWitness, Transaction,
+    HeartbeatEventBody, HubEvent, MergeMessageBody, MessageType, OnChainEvent, ShardChunkWitness,
+    Transaction,
 };
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
@@ -232,6 +232,46 @@ impl BlockEngine {
         Ok(())
     }
 
+    fn merge_message(
+        &self,
+        message: &proto::Message,
+        txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Result<proto::HubEvent, MessageValidationError> {
+        match message.msg_type() {
+            MessageType::LendStorage => {
+                Ok(self.stores.storage_lend_store.merge(message, txn_batch)?)
+            }
+            _ => return Err(MessageValidationError::InvalidMessageType),
+        }
+    }
+
+    fn on_merge_message(storage_slot: &mut StorageSlot, merge_message_body: &MergeMessageBody) {
+        if let Some(added_message) = &merge_message_body.message {
+            match added_message.data.as_ref().unwrap().body.as_ref().unwrap() {
+                proto::message_data::Body::LendStorageBody(lend_storage_body) => {
+                    storage_slot.sub(&StorageSlot::from_storage_lend(&lend_storage_body));
+                }
+                _ => {}
+            }
+        }
+
+        for deleted_message in &merge_message_body.deleted_messages {
+            match deleted_message
+                .data
+                .as_ref()
+                .unwrap()
+                .body
+                .as_ref()
+                .unwrap()
+            {
+                proto::message_data::Body::LendStorageBody(lend_storage_body) => {
+                    storage_slot.merge(&StorageSlot::from_storage_lend(&lend_storage_body));
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub(crate) fn replay_snapchain_txn(
         &mut self,
         trie_ctx: &merkle_trie::Context,
@@ -239,7 +279,8 @@ impl BlockEngine {
         txn_batch: &mut RocksDbTransactionBatch,
         timestamp: &FarcasterTime,
         version: EngineVersion,
-    ) -> Result<Vec<u8>, BlockEngineError> {
+    ) -> Result<(Vec<u8>, Vec<HubEvent>), BlockEngineError> {
+        let mut hub_events = vec![];
         for message in &snapchain_txn.system_messages {
             if let Some(ref onchain_event) = message.on_chain_event {
                 match self
@@ -247,9 +288,11 @@ impl BlockEngine {
                     .onchain_event_store
                     .merge_onchain_event(onchain_event.clone(), txn_batch)
                 {
-                    Ok(event) => self
-                        .trie
-                        .update_for_event(trie_ctx, &self.db, &event, txn_batch)?,
+                    Ok(event) => {
+                        self.trie
+                            .update_for_event(trie_ctx, &self.db, &event, txn_batch)?;
+                        hub_events.push(event);
+                    }
                     Err(err) => {
                         error!("Unable to merge onchain event: {:#?}", err.to_string())
                     }
@@ -257,20 +300,34 @@ impl BlockEngine {
             }
         }
 
+        let mut storage_slot = self.storage_slot_for_transaction(snapchain_txn).unwrap();
+
         for message in &snapchain_txn.user_messages {
-            match self.validate_user_message(message, storage_slot, timestamp, version, txn_batch) {
+            match self.validate_user_message(message, &storage_slot, timestamp, version, txn_batch)
+            {
                 Ok(()) => match message.msg_type() {
                     MessageType::LendStorage => {
-                        if let Ok(event) = self.stores.storage_lend_store.merge(message, txn_batch)
-                        {
-                            if event.r#type() == HubEventType::MergeMessage {
-                                storage_slot.merge(&StorageSlot::from_storage_lend())
+                        if let Ok(event) = self.merge_message(message, txn_batch) {
+                            self.trie
+                                .update_for_event(trie_ctx, &self.db, &event, txn_batch)?;
+                            match event.body.as_ref().unwrap() {
+                                proto::hub_event::Body::MergeMessageBody(merge_message_body) => {
+                                    Self::on_merge_message(&mut storage_slot, &merge_message_body);
+                                }
+                                _ => {}
                             }
+                            hub_events.push(event);
                         }
                     }
                     _ => {}
                 },
-                Err(err) => {}
+                Err(err) => {
+                    warn!(
+                        fid = snapchain_txn.fid,
+                        "Error merging message {}",
+                        err.to_string()
+                    );
+                }
             }
         }
 
@@ -278,7 +335,7 @@ impl BlockEngine {
             self.trie
                 .get_hash(&self.db, txn_batch, &TrieKey::for_fid(snapchain_txn.fid))?;
 
-        Ok(account_root)
+        Ok((account_root, hub_events))
     }
 
     fn heartbeat_block_interval(&self) -> u64 {
@@ -288,17 +345,64 @@ impl BlockEngine {
         }
     }
 
+    fn build_block_event(data: BlockEventData) -> BlockEvent {
+        let hash = blake3::hash(data.encode_to_vec().as_slice())
+            .as_bytes()
+            .to_vec();
+        BlockEvent {
+            hash,
+            data: Some(data),
+        }
+    }
+
     fn generate_block_events(
         &self,
         height: Height,
         timestamp: &FarcasterTime,
+        hub_events: Vec<HubEvent>,
         txn: &mut RocksDbTransactionBatch,
     ) -> (Vec<BlockEvent>, Vec<u8>) {
         let mut events = vec![];
+        let mut max_block_event_seqnum = self.stores.block_event_store.max_seqnum().unwrap();
+        for hub_event in hub_events {
+            match hub_event.body.unwrap() {
+                proto::hub_event::Body::MergeMessageBody(merge_message_body) => {
+                    if let Some(message) = merge_message_body.message {
+                        match message.msg_type() {
+                            MessageType::LendStorage => {
+                                max_block_event_seqnum += 1;
+                                // TODO(aditi): Maybe we want a general merge message event?
+                                let data = BlockEventData {
+                                    seqnum: max_block_event_seqnum,
+                                    r#type: BlockEventType::LendStorage as i32,
+                                    block_number: height.block_number,
+                                    event_index: events.len() as u64,
+                                    block_timestamp: timestamp.to_u64(),
+                                    body: Some(block_event_data::Body::LendStorageEventBody(
+                                        proto::LendStorageEventBody {
+                                            lend_storage_message: Some(message),
+                                        },
+                                    )),
+                                };
+                                let event = Self::build_block_event(data);
+                                self.stores
+                                    .block_event_store
+                                    .put_block_event(&event, txn)
+                                    .unwrap();
+                                events.push(event);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
         if height.block_number % self.heartbeat_block_interval() == 0 {
-            let event_seqnum = self.stores.block_event_store.max_seqnum().unwrap() + 1;
+            max_block_event_seqnum += 1;
             let data = BlockEventData {
-                seqnum: event_seqnum,
+                seqnum: max_block_event_seqnum,
                 r#type: BlockEventType::Heartbeat as i32,
                 block_number: height.block_number,
                 event_index: events.len() as u64,
@@ -307,21 +411,18 @@ impl BlockEngine {
                     HeartbeatEventBody {},
                 )),
             };
-            let hash = blake3::hash(data.encode_to_vec().as_slice())
-                .as_bytes()
-                .to_vec();
-            let event = BlockEvent {
-                hash,
-                data: Some(data),
-            };
+            let event = Self::build_block_event(data);
             // Store these events so
             // (1) It's possible to figuure out the max seqnum easily
             // (2) It's possible to query over them in an rpc and see what has been produced.
+            events.push(event);
+        }
+
+        for event in events.iter() {
             self.stores
                 .block_event_store
                 .put_block_event(&event, txn)
                 .unwrap();
-            events.push(event);
         }
 
         let events_hash = if events.is_empty() {
@@ -335,6 +436,30 @@ impl BlockEngine {
         };
 
         (events, events_hash)
+    }
+
+    fn storage_slot_for_transaction(&self, snapchain_txn: &Transaction) -> Option<StorageSlot> {
+        let pending_onchain_events: Vec<OnChainEvent> = snapchain_txn
+            .system_messages
+            .iter()
+            .filter_map(|vm| vm.on_chain_event.clone())
+            .collect();
+
+        let lent_storage = StorageLendStore::get_lent_from_storage(
+            &self.stores.storage_lend_store,
+            snapchain_txn.fid,
+        )
+        .ok()?;
+
+        self.stores
+            .onchain_event_store
+            .get_storage_slot_for_fid(
+                snapchain_txn.fid,
+                self.network,
+                pending_onchain_events.as_slice(),
+                &lent_storage,
+            )
+            .ok()
     }
 
     fn prepare_proposal(
@@ -355,28 +480,7 @@ impl BlockEngine {
             .into_iter()
             .filter_map(|mut transaction| {
                 // TODO(aditi): We could share this code with the shard engine but there may be other things we want to add here. For example, it may make sense to exclude validator messages and user messages that aren't intended for shard 0 here so a bug in the mempool won't impact the protocol in a significant way.
-                let pending_onchain_events: Vec<OnChainEvent> = transaction
-                    .system_messages
-                    .iter()
-                    .filter_map(|vm| vm.on_chain_event.clone())
-                    .collect();
-
-                let lent_storage = StorageLendStore::get_lent_from_storage(
-                    &self.stores.storage_lend_store,
-                    transaction.fid,
-                )
-                .ok()?;
-
-                let storage_slot = self
-                    .stores
-                    .onchain_event_store
-                    .get_storage_slot_for_fid(
-                        transaction.fid,
-                        self.network,
-                        pending_onchain_events.as_slice(),
-                        &lent_storage,
-                    )
-                    .ok()?;
+                let storage_slot = self.storage_slot_for_transaction(&transaction)?;
 
                 // Drop events if storage slot is inactive
                 if !storage_slot.is_active() {
@@ -391,8 +495,9 @@ impl BlockEngine {
             })
             .collect_vec();
 
+        let mut all_hub_events = vec![];
         for snapchain_txn in &mut snapchain_txns {
-            let account_root = self.replay_snapchain_txn(
+            let (account_root, hub_events) = self.replay_snapchain_txn(
                 &merkle_trie::Context::new(),
                 &snapchain_txn,
                 txn_batch,
@@ -400,9 +505,11 @@ impl BlockEngine {
                 version,
             )?;
             snapchain_txn.account_root = account_root;
+            all_hub_events.extend_from_slice(&hub_events);
         }
 
-        let (events, events_hash) = self.generate_block_events(height, timestamp, txn_batch);
+        let (events, events_hash) =
+            self.generate_block_events(height, timestamp, all_hub_events, txn_batch);
 
         self.metrics
             .publish_transaction_counts(&snapchain_txns, ProposalSource::Propose);
@@ -494,8 +601,9 @@ impl BlockEngine {
             },
         }
 
+        let mut all_hub_events = vec![];
         for snapchain_txn in transactions {
-            let account_root = self.replay_snapchain_txn(
+            let (account_root, hub_events) = self.replay_snapchain_txn(
                 &merkle_trie::Context::new(),
                 snapchain_txn,
                 txn_batch,
@@ -515,10 +623,12 @@ impl BlockEngine {
                 );
                 return Err(BlockEngineError::HashMismatch);
             }
+
+            all_hub_events.extend_from_slice(&hub_events);
         }
 
         let (_block_events, computed_events_hash) =
-            self.generate_block_events(height, timestamp, txn_batch);
+            self.generate_block_events(height, timestamp, all_hub_events, txn_batch);
 
         if computed_events_hash != *events_hash {
             warn!(

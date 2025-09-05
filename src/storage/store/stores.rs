@@ -14,8 +14,8 @@ use crate::storage::constants::{RootPrefix, PAGE_SIZE_MAX};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch, RocksdbError};
 use crate::storage::store::account::{
     BlockEventStore, CastStore, CastStoreDef, IntoU8, LinkStore, OnchainEventStorageError,
-    OnchainEventStore, Store, StoreEventHandler, StoreOptions, UsernameProofStore,
-    UsernameProofStoreDef,
+    OnchainEventStore, StorageLendStore, StorageLendStoreDef, Store, StoreEventHandler,
+    StoreOptions, UsernameProofStore, UsernameProofStoreDef,
 };
 use crate::storage::store::shard::ShardStore;
 use crate::storage::trie::merkle_trie;
@@ -53,6 +53,7 @@ pub struct Stores {
     pub verification_store: Store<VerificationStoreDef>,
     pub onchain_event_store: OnchainEventStore,
     pub username_proof_store: Store<UsernameProofStoreDef>,
+    pub storage_lend_store: Store<StorageLendStoreDef>,
     pub db: Arc<RocksDB>,
     pub trie: merkle_trie::MerkleTrie,
     pub store_limits: StoreLimits,
@@ -287,6 +288,13 @@ impl Stores {
         let onchain_event_store =
             OnchainEventStore::new_with_opts(db.clone(), event_handler.clone(), store_opts.clone());
 
+        let storage_lend_store = StorageLendStore::new_with_opts(
+            db.clone(),
+            event_handler.clone(),
+            100,
+            store_opts.clone(),
+        );
+
         Stores {
             shard_id,
             trie,
@@ -298,6 +306,7 @@ impl Stores {
             verification_store,
             onchain_event_store,
             username_proof_store,
+            storage_lend_store,
             db: db.clone(),
             store_limits,
             event_handler,
@@ -332,9 +341,11 @@ impl Stores {
     ) -> Result<(u32, u32), StoresError> {
         let store_type = Limits::message_type_to_store_type(message_type);
         let message_count = self.get_usage_by_store_type(fid, store_type, txn_batch)?;
+        let lent_storage = StorageLendStore::get_lent_from_storage(&self.storage_lend_store, fid)
+            .unwrap_or_else(|_| StorageSlot::new(0, 0, 0, 0));
         let slot = self
             .onchain_event_store
-            .get_storage_slot_for_fid(fid, self.network, &[])
+            .get_storage_slot_for_fid(fid, self.network, &[], &lent_storage)
             .map_err(|e| StoresError::OnchainEventError(e))?;
         let max_messages = self.store_limits.max_messages(&slot, store_type);
 
@@ -379,9 +390,11 @@ impl Stores {
     }
 
     pub fn get_storage_limits(&self, fid: u64) -> Result<StorageLimitsResponse, StoresError> {
+        let lent_storage = StorageLendStore::get_lent_from_storage(&self.storage_lend_store, fid)
+            .unwrap_or_else(|_| StorageSlot::new(0, 0, 0, 0));
         let slot = self
             .onchain_event_store
-            .get_storage_slot_for_fid(fid, self.network, &[])
+            .get_storage_slot_for_fid(fid, self.network, &[], &lent_storage)
             .map_err(|e| StoresError::OnchainEventError(e))?;
 
         let txn_batch = &mut RocksDbTransactionBatch::new();

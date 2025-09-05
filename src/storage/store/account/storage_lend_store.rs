@@ -3,6 +3,7 @@ use super::{
     store::{Store, StoreDef},
     StoreEventHandler,
 };
+use crate::proto::message_data::Body;
 use crate::storage::{constants::UserPostfix, db::PageOptions, store::account::StorageSlot};
 use crate::{
     core::error::HubError,
@@ -12,7 +13,6 @@ use crate::{
         store::account::{make_fid_key, TRUE_VALUE, TS_HASH_LENGTH},
     },
 };
-use crate::{proto::message_data::Body, storage::store::account::OnchainEventStore};
 use crate::{
     proto::MessageType,
     storage::db::{RocksDB, RocksDbTransactionBatch},
