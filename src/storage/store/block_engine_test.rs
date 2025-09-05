@@ -189,8 +189,7 @@ mod tests {
         );
         let storage_slot = block_engine
             .stores()
-            .onchain_event_store
-            .get_storage_slot_for_fid(FID_FOR_TEST, FarcasterNetwork::Devnet, &[])
+            .get_storage_slot_for_fid(FID_FOR_TEST, &vec![], true)
             .unwrap();
         assert_eq!(storage_slot.units_for(StorageUnitType::UnitType2025), 1);
     }
