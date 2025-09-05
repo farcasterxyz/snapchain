@@ -65,11 +65,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     {
         // common metrics thread
         let handle = thread::spawn(move || loop {
-            statsd_client.gauge("branching_factor", args.branching_factor as u64);
-            statsd_client.gauge("messages_per_block", args.messages_per_block as u64);
-            statsd_client.gauge("turbohash", turbohash);
-            statsd_client.gauge("users_per_shard", args.users_per_shard as u64);
-            statsd_client.gauge("shard_count", args.shard_count as u64);
+            statsd_client.gauge("branching_factor", args.branching_factor as u64, vec![]);
+            statsd_client.gauge("messages_per_block", args.messages_per_block as u64, vec![]);
+            statsd_client.gauge("turbohash", turbohash, vec![]);
+            statsd_client.gauge("users_per_shard", args.users_per_shard as u64, vec![]);
+            statsd_client.gauge("shard_count", args.shard_count as u64, vec![]);
 
             thread::sleep(Duration::from_secs(1));
         });

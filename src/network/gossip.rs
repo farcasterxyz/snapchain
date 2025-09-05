@@ -425,7 +425,7 @@ impl SnapchainGossip {
             tokio::select! {
                 _ = reconnect_timer.tick() => {
                     self.check_and_reconnect_to_bootstrap_peers().await;
-                    self.statsd_client.gauge("gossip.connected_peers", self.swarm.connected_peers().count() as u64);
+                    self.statsd_client.gauge("gossip.connected_peers", self.swarm.connected_peers().count() as u64, vec![]);
                 },
                 _ = publish_contact_info_timer.tick() => {
                     if self.read_node {
