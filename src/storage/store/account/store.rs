@@ -655,7 +655,7 @@ impl<T: StoreDef + Clone> Store<T> {
         let compact_state_key = self.store_def.make_compact_state_add_key(message)?;
         let existing_compact_state = get_from_db_or_txn(&self.db, txn, &compact_state_key)?;
 
-        if existing_compact_state.is_some() {
+        if !self.store_opts.conflict_free && existing_compact_state.is_some() {
             if let Ok(existing_compact_state_message) =
                 message_decode(existing_compact_state.unwrap().as_ref())
             {

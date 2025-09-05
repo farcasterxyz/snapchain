@@ -238,7 +238,7 @@ fn validate_signature(
     Ok(())
 }
 
-fn validate_message_hash(
+pub fn validate_message_hash(
     hash_scheme: i32,
     data_bytes: &Vec<u8>,
     hash: &Vec<u8>,
