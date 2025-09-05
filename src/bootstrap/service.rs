@@ -7,7 +7,6 @@ use crate::proto::{
     self, replication_service_client::ReplicationServiceClient, GetShardSnapshotMetadataRequest,
     GetShardTransactionsRequest, ReplicationTriePartStatus, ShardSnapshotMetadata,
 };
-use crate::storage::trie::errors::TrieError;
 use crate::storage::{
     constants::RootPrefix,
     db::{RocksDB, RocksDbTransactionBatch},
@@ -331,6 +330,15 @@ impl ReplicatorBootstrap {
                 // Write the final metadata from the server into the new DB.
                 self.write_final_metadata_to_db(&shard_metadata, &self.get_snapshot_rocksdb_dir())
                     .await?;
+
+                info!("Replication bootstrap finished. Promoting snapshot to main DB.");
+
+                // Rename the completed snapshot DB to the main DB name
+                if let Err(e) = std::fs::rename(&self.get_snapshot_rocksdb_dir(), &self.rocksdb_dir)
+                {
+                    error!("FATAL: Failed to rename snapshot DB: {}. Please do it manually or clear the DB directory.", e);
+                    return Ok(WorkUnitResponse::PartiallyComplete);
+                }
 
                 return Ok(WorkUnitResponse::Finished);
             }
@@ -1058,8 +1066,8 @@ impl ReplicatorBootstrap {
         rocksdb_dir: &str,
         shard_id: u32,
         metadata: ShardSnapshotMetadata,
-    ) -> Result<(), TrieError> {
-        info!("PPTrie: Post-processing trie for shard {}.", shard_id);
+    ) -> Result<(), BootstrapError> {
+        info!("Post-processing trie for shard {}.", shard_id);
 
         let db = RocksDB::open_bulk_write_shard_db(&rocksdb_dir, shard_id);
         let mut trie = merkle_trie::MerkleTrie::new(self.trie_branching_factor)?;
@@ -1071,14 +1079,27 @@ impl ReplicatorBootstrap {
         let expected_shard_root = metadata.shard_chunk.unwrap().header.unwrap().shard_root;
         let trie_root = trie.root_hash().unwrap();
 
-        info!(
-            "PPTrie: Finished post-processing trie for shard {}. expected: {:?} actual {:?}",
-            shard_id,
-            hex::encode(expected_shard_root),
-            hex::encode(trie_root)
-        );
+        if expected_shard_root == trie_root {
+            info!(
+                "Trie root matched for shard {}: {}",
+                shard_id,
+                hex::encode(&trie_root)
+            );
+            Ok(())
+        } else {
+            let expected = hex::encode(&expected_shard_root);
+            let actual = hex::encode(&trie_root);
+            error!(
+                "Trie Root mismatch for shard {}. expected: {:?} actual {:?}",
+                shard_id, expected, actual
+            );
 
-        Ok(())
+            return Err(BootstrapError::StateRootMismatch {
+                shard_id,
+                expected,
+                actual,
+            });
+        }
     }
 
     /// Determine the highest block for each shard.
@@ -1213,10 +1234,11 @@ impl ReplicatorBootstrap {
                         height.block_number
                     );
                     let block_db = RocksDB::open_shard_db(rocksdb_dir, 0);
-                    let block_store = BlockStore::new(block_db);
+                    let block_store = BlockStore::new(block_db.clone());
                     block_store
                         .put_block(block)
                         .map_err(|e| BootstrapError::DatabaseError(e.to_string()))?;
+                    block_db.close();
                 } else {
                     return Err(BootstrapError::MetadataFetchError(format!(
                         "No block found for shard 0. Metadata = {:?}",
@@ -1243,10 +1265,11 @@ impl ReplicatorBootstrap {
                         shard_id, height.block_number
                     );
                     let shard_db = RocksDB::open_shard_db(rocksdb_dir, *shard_id);
-                    let shard_store = ShardStore::new(shard_db, *shard_id);
+                    let shard_store = ShardStore::new(shard_db.clone(), *shard_id);
                     shard_store
                         .put_shard_chunk(shard_chunk)
                         .map_err(|e| BootstrapError::DatabaseError(e.to_string()))?;
+                    shard_db.close();
                 } else {
                     return Err(BootstrapError::MetadataFetchError(format!(
                         "No ShardChunk found for shard {}. Metadata = {:?}",

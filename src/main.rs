@@ -310,15 +310,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     Ok(r) => {
                         // Check for the specific success response
                         if r == WorkUnitResponse::Finished {
-                            info!("Replication bootstrap finished. Promoting snapshot to main DB.");
-                            let snapshot_dir = format!("{}.snapshot", &app_config.rocksdb_dir);
-
-                            // Atomically rename the completed snapshot DB to the main DB name
-                            if let Err(e) = std::fs::rename(&snapshot_dir, &app_config.rocksdb_dir)
-                            {
-                                error!("FATAL: Failed to rename snapshot DB: {}. Please do it manually or clear the DB directory.", e);
-                                process::exit(1);
-                            }
                             info!("Replication bootstrap successful. Continuing with startup.");
                         } else {
                             error!(
