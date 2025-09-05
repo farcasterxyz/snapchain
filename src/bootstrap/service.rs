@@ -91,6 +91,7 @@ pub struct ReplicatorBootstrap {
 }
 
 impl ReplicatorBootstrap {
+    // Postfixes used to store progress data into the DB
     const WORK_UNIT_POSTFIX: u8 = 1u8;
     const FID_ACCOUNT_ROOT_POSTFIX: u8 = 2u8;
 
@@ -416,7 +417,7 @@ impl ReplicatorBootstrap {
                     info!("Shard replication completed for shard {}", shard_id);
 
                     // PostProcess the trie
-                    self.post_process_trie(rocksdb_dir, shard_id, metadata)
+                    self.verify_shard_roots(rocksdb_dir, shard_id, metadata)
                         .await?;
 
                     return Ok(result);
@@ -701,6 +702,7 @@ impl ReplicatorBootstrap {
         return Ok(WorkUnitResponse::Stopped);
     }
 
+    // Actually fetch and merge messages into the DB and trie from the remote node for this shard/vts
     async fn process_vts_work_item(
         &self,
         work_item: WorkUnit,
@@ -1061,7 +1063,8 @@ impl ReplicatorBootstrap {
         Ok(())
     }
 
-    async fn post_process_trie(
+    // Check that the shard roots match
+    async fn verify_shard_roots(
         &self,
         rocksdb_dir: &str,
         shard_id: u32,
@@ -1072,8 +1075,6 @@ impl ReplicatorBootstrap {
         let db = RocksDB::open_bulk_write_shard_db(&rocksdb_dir, shard_id);
         let mut trie = merkle_trie::MerkleTrie::new(self.trie_branching_factor)?;
         trie.initialize(&db)?;
-
-        // TODO: Do attach_to_root and recalculate_hashes on all the vts
 
         // Get the trie root and see if it matches
         let expected_shard_root = metadata.shard_chunk.unwrap().header.unwrap().shard_root;
@@ -1152,6 +1153,7 @@ impl ReplicatorBootstrap {
         Ok(shard_metadata)
     }
 
+    // Bulk validate all the signatures. We use the dalek library for batch verification
     fn validate_messages_signatures(
         trie_messages: &Vec<proto::ShardTrieEntryWithMessage>,
     ) -> Result<(), BootstrapError> {
@@ -1212,6 +1214,8 @@ impl ReplicatorBootstrap {
         Ok(())
     }
 
+    // At the end of the bootstrap process, we need to write the final metadata to the database
+    // which includes the highest ShardChunks for shard-1 and shard-2 and the highest block for shard-0
     async fn write_final_metadata_to_db(
         &self,
         shard_metadata: &std::collections::HashMap<u32, crate::proto::ShardSnapshotMetadata>,
