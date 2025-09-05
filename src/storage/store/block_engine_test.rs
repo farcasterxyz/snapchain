@@ -2,6 +2,7 @@
 mod tests {
     use crate::core::util::FarcasterTime;
     use crate::proto::{FarcasterNetwork, StorageUnitType};
+    use crate::storage::store::account::StorageSlot;
     use crate::storage::store::block_engine::BlockStateChange;
     use crate::storage::store::block_engine_test_helpers::*;
     use crate::storage::store::mempool_poller::MempoolMessage;
