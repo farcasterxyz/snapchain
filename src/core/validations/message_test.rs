@@ -544,4 +544,57 @@ mod tests {
         );
         assert_valid(&msg);
     }
+
+    #[test]
+    fn test_validate_caip19_format() {
+        use crate::core::validations::message::validate_caip19_format;
+
+        // Valid CAIP-19 formats
+        // Empty string is valid (for unsetting)
+        assert!(validate_caip19_format(&"".to_string()).is_ok());
+        // ETH
+        assert!(validate_caip19_format(&"eip155:1/slip44:60".to_string()).is_ok());
+        //SOL
+        assert!(validate_caip19_format(
+            &"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp/slip44:501".to_string()
+        )
+        .is_ok());
+        // Mainnet WETH (ERC-20)
+        assert!(validate_caip19_format(
+            &"eip155:1/erc20:0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string()
+        )
+        .is_ok());
+
+        // Base USDC
+        assert!(validate_caip19_format(
+            &"eip155:8453/erc20:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".to_string()
+        )
+        .is_ok());
+        // Solana USDC (SPL)
+        assert!(validate_caip19_format(&"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp/token:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string()).is_ok());
+
+        // Invalid CAIP-19 formats
+        // Missing chain_id
+        assert!(validate_caip19_format(
+            &"/erc20:0x6b175474e89094c44da98b954eedeac495271d0f".to_string()
+        )
+        .is_err());
+        // Missing asset namespace
+        assert!(validate_caip19_format(
+            &"eip155:1/:0x6b175474e89094c44da98b954eedeac495271d0f".to_string()
+        )
+        .is_err());
+        // Missing asset reference
+        assert!(validate_caip19_format(&"eip155:1/erc20:".to_string()).is_err());
+        // Invalid chain_id format (missing reference)
+        assert!(validate_caip19_format(&"eip155/erc20:0x123".to_string()).is_err());
+        // Too many slashes
+        assert!(validate_caip19_format(&"eip155:1/erc721:0x123/456/789".to_string()).is_err());
+        // Empty token_id
+        assert!(validate_caip19_format(&"eip155:1/erc721:0x123/".to_string()).is_err());
+
+        // Too long
+        let long_caip19 = format!("eip155:1/erc20:0x123/{}", "a".repeat(250));
+        assert!(validate_caip19_format(&long_caip19).is_err());
+    }
 }
