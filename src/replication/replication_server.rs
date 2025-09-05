@@ -57,15 +57,6 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
                 Ok(metadata) => {
                     let mut snapshots = Vec::new();
                     for (height, timestamp) in metadata {
-                        // Fetch the block for the given height
-                        let block = if request.shard_id == 0 {
-                            self.block_store.get_last_block().map_err(|e| {
-                                Status::internal(format!("Failed to get block by height: {}", e))
-                            })?
-                        } else {
-                            None
-                        };
-
                         // Fetch the ShardChunk for the given shard and height from the replicator for non-zero shard_id
                         let shard_chunk = if request.shard_id != 0 {
                             self.replicator
@@ -84,7 +75,7 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
                             shard_id: request.shard_id,
                             height,
                             timestamp,
-                            block,
+                            block: None,
                             shard_chunk,
                         });
                     }
