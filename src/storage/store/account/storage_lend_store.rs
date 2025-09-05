@@ -3,17 +3,13 @@ use super::{
     store::{Store, StoreDef},
     StoreEventHandler,
 };
-use crate::storage::{
-    constants::UserPostfix,
-    db::PageOptions,
-    store::account::{message_decode, StorageSlot},
-};
+use crate::storage::{constants::UserPostfix, db::PageOptions, store::account::StorageSlot};
 use crate::{
     core::error::HubError,
     proto::SignatureScheme,
     storage::{
         constants::RootPrefix,
-        store::account::{make_fid_key, TRUE_VALUE, TS_HASH_LENGTH},
+        store::account::{make_fid_key, read_fid_key, TRUE_VALUE, TS_HASH_LENGTH},
     },
 };
 use crate::{proto::message_data::Body, storage::util::increment_vec_u8};
@@ -95,8 +91,8 @@ impl StoreDef for StorageLendStoreDef {
         _ts_hash: &[u8; TS_HASH_LENGTH],
         message: &proto::Message,
     ) -> Result<(), HubError> {
-        if let Ok(to_fid_key) = Self::by_to_fid_secondary_index_key(message) {
-            txn.put(to_fid_key, vec![TRUE_VALUE]);
+        if let Ok(secondary_key) = Self::by_borrower_secondary_index_key(message) {
+            txn.put(secondary_key, vec![TRUE_VALUE]);
         }
         Ok(())
     }
@@ -107,7 +103,7 @@ impl StoreDef for StorageLendStoreDef {
         _ts_hash: &[u8; TS_HASH_LENGTH],
         message: &proto::Message,
     ) -> Result<(), HubError> {
-        let to_fid_key = Self::by_to_fid_secondary_index_key(message);
+        let to_fid_key = Self::by_borrower_secondary_index_key(message);
 
         if let Ok(to_fid_key) = to_fid_key {
             txn.delete(to_fid_key);
@@ -149,17 +145,16 @@ impl StoreDef for StorageLendStoreDef {
 impl StorageLendStoreDef {
     #[inline]
     fn make_storage_lend_primary_key(from_fid: u64, to_fid: u64) -> Vec<u8> {
-        let mut key = Vec::with_capacity(33 + 1);
-
-        key.extend_from_slice(&make_user_key(from_fid));
+        let mut key = vec![];
+        key.extend(make_user_key(from_fid));
         key.push(UserPostfix::UserDataAdds as u8);
         // TODO(aditi): Maybe we want to use ts hash
-        key.extend_from_slice(&make_fid_key(to_fid));
+        key.extend(make_fid_key(to_fid));
 
         key
     }
 
-    fn by_to_fid_secondary_index_key(message: &proto::Message) -> Result<Vec<u8>, HubError> {
+    fn by_borrower_secondary_index_key(message: &proto::Message) -> Result<Vec<u8>, HubError> {
         let to_fid = match &message.data.as_ref().unwrap().body {
             Some(Body::LendStorageBody(lend_storage_body)) => lend_storage_body.to_fid,
             _ => {
@@ -171,11 +166,28 @@ impl StorageLendStoreDef {
         };
 
         // TODO(aditi): Maybe we want to use ts hash
-        let mut key = Vec::with_capacity(1 + 28 + 24 + 4);
+        let mut key = vec![];
         key.push(RootPrefix::LendStorageByRecipient as u8);
-        key.extend_from_slice(&make_fid_key(to_fid));
-        key.extend_from_slice(&make_fid_key(message.fid()));
+        key.extend(make_fid_key(to_fid));
+        key.extend(make_fid_key(message.fid()));
         Ok(key)
+    }
+
+    #[inline]
+    fn read_borrower_from_secondary_key(key: &[u8]) -> u64 {
+        // Secondary index key format: RootPrefix::LendStorageByRecipient + make_fid_key(to_fid) + make_fid_key(from_fid)
+        // RootPrefix::LendStorageByRecipient = 1 byte
+        // So the borrower FID (to_fid) starts at offset 1
+        read_fid_key(key, 1)
+    }
+
+    #[inline]
+    fn read_lender_from_secondary_key(key: &[u8]) -> u64 {
+        // Secondary index key format: RootPrefix::LendStorageByRecipient + make_fid_key(to_fid) + make_fid_key(from_fid)
+        // RootPrefix::LendStorageByRecipient = 1 byte
+        // make_fid_key(to_fid) = 4 bytes
+        // So the lender FID (from_fid) starts at offset 5
+        read_fid_key(key, 5)
     }
 }
 
@@ -260,10 +272,26 @@ impl StorageLendStore {
             Some(prefix.clone()),
             Some(increment_vec_u8(&prefix)),
             &PageOptions::default(),
-            |_, primary_key| {
-                // Get the actual storage lend message using get_add with the primary key
-                if let Some(message_bytes) = store.db().get(&primary_key)? {
-                    let message = message_decode(&message_bytes)?;
+            |secondary_key, _| {
+                // Extract lender and borrower FIDs from the secondary index key
+                let lender_fid = StorageLendStoreDef::read_lender_from_secondary_key(secondary_key);
+                let borrower_fid =
+                    StorageLendStoreDef::read_borrower_from_secondary_key(secondary_key);
+
+                // Create partial message to use with get_add
+                let partial_message = proto::Message {
+                    data: Some(proto::MessageData {
+                        fid: lender_fid,
+                        body: Some(Body::LendStorageBody(proto::LendStorageBody {
+                            to_fid: borrower_fid,
+                            ..Default::default()
+                        })),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+
+                if let Ok(Some(message)) = store.get_add(&partial_message, None) {
                     if let Some(data) = message.data {
                         if let Some(Body::LendStorageBody(lend_storage_body)) = data.body {
                             storage_slot.merge(&StorageSlot::from_storage_lend(&lend_storage_body));
@@ -278,3 +306,7 @@ impl StorageLendStore {
         Ok(storage_slot)
     }
 }
+
+#[cfg(test)]
+#[path = "storage_lend_store_test.rs"]
+mod storage_lend_store_test;

@@ -70,6 +70,10 @@ pub fn type_to_set_postfix(message_type: MessageType) -> Result<UserPostfix, Hub
         return Ok(UserPostfix::UsernameProofMessage);
     }
 
+    if message_type == MessageType::LendStorage {
+        return Ok(UserPostfix::LendStorageMessage);
+    }
+
     return Err(HubError {
         code: "internal_error".to_string(),
         message: format!(

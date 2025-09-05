@@ -546,6 +546,34 @@ pub mod messages_factory {
         }
     }
 
+    pub mod storage_lend {
+        use message::LendStorageBody;
+
+        use super::*;
+
+        pub fn create_storage_lend(
+            from_fid: u64,
+            to_fid: u64,
+            units: u64,
+            unit_type: message::StorageUnitType,
+            timestamp: Option<u32>,
+            private_key: Option<&SigningKey>,
+        ) -> message::Message {
+            let lend_storage_body = LendStorageBody {
+                to_fid,
+                num_units: units,
+                unit_type: unit_type as i32,
+            };
+            create_message_with_data(
+                from_fid,
+                MessageType::LendStorage,
+                message::message_data::Body::LendStorageBody(lend_storage_body),
+                timestamp,
+                private_key,
+            )
+        }
+    }
+
     pub mod verifications {
         use message::{VerificationAddAddressBody, VerificationRemoveBody};
 
