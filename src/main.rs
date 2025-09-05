@@ -17,7 +17,7 @@ use snapchain::node::snapchain_read_node::SnapchainReadNode;
 use snapchain::proto::admin_service_server::AdminServiceServer;
 use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::proto::replication_service_server::ReplicationServiceServer;
-use snapchain::replication;
+use snapchain::replication::{self, ReplicationServer};
 use snapchain::storage::db::snapshot::download_snapshots;
 use snapchain::storage::db::RocksDB;
 use snapchain::storage::store::engine::{PostCommitMessage, Senders};
@@ -88,12 +88,8 @@ async fn start_servers(
     ));
 
     let replication_service = if let Some(replicator) = replicator {
-        let server = replication::replication_server::ReplicationServer::new(
-            replicator,
-            Box::new(routing::ShardRouter {}),
-            app_config.consensus.num_shards,
-        );
-        let service = ReplicationServiceServer::new(server);
+        let service =
+            ReplicationServiceServer::new(ReplicationServer::new(replicator, block_store.clone()));
         Some(service)
     } else {
         None
@@ -240,11 +236,12 @@ fn create_replicator(
     let replication_stores = Arc::new(replication::ReplicationStores::new(
         shard_stores,
         app_config.trie_branching_factor,
-        statsd_client,
+        statsd_client.clone(),
         app_config.fc_network.clone(),
     ));
     let replicator = replication::Replicator::new_with_options(
         replication_stores,
+        statsd_client,
         replication::ReplicatorSnapshotOptions {
             interval: app_config.replication.snapshot_interval,
             max_age: app_config.replication.snapshot_max_age,

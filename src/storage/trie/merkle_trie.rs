@@ -12,6 +12,7 @@ pub use trie_node::Context;
 
 pub const TRIE_DBPATH_PREFIX: &str = "trieDb";
 pub const USERNAME_MAX_LENGTH: u32 = 20;
+pub const FNAME_MESSAGE_TYPE: u8 = 7;
 
 pub const TRIE_SHARD_SIZE: u32 = 256; // So it fits into 1 byte
 
@@ -59,7 +60,7 @@ impl TrieKey {
         let fid_bytes = Self::for_fid(fid);
         let mut key = Vec::with_capacity(fid_bytes.len() + 1 + USERNAME_MAX_LENGTH as usize);
         key.extend_from_slice(&fid_bytes);
-        key.push(7); // 1-6 is for onchain events, use 7 for fnames, and everything else for messages
+        key.push(FNAME_MESSAGE_TYPE); // 1-6 is for onchain events, use 7 for fnames, and everything else for messages
 
         // Pad the name with null bytes to ensure all names have the same length. The trie cannot handle entries that are substrings for another (e.g. "net" and "network")
         let name_bytes = name.as_bytes();
@@ -521,7 +522,6 @@ impl MerkleTrie {
             if relative_path.len() != remaining_stack.len().saturating_sub(1) {
                 return Err(TrieError::InvalidPageToken(hex::encode(&relative_path)));
             }
-
             // Extend the full path with the relative_path to resume at the correct position in the trie
             path.extend_from_slice(&relative_path);
         } else {
@@ -540,7 +540,6 @@ impl MerkleTrie {
                     // Append the combined key to the leaf_keys vector
                     leaf_keys.push(combined);
                 }
-
                 // Since it's a single leaf, iteration is complete
                 return Ok(None);
             } else {

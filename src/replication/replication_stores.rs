@@ -1,10 +1,3 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
-
-use tracing::{error, info};
-
 use crate::{
     proto,
     replication::error::ReplicationError,
@@ -15,6 +8,11 @@ use crate::{
     },
     utils::statsd_wrapper::StatsdClientWrapper,
 };
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
+use tracing::{debug, error};
 
 type TimestampedStore = (u64, Stores); // (farcaster timestamp, Stores)
 
@@ -176,7 +174,7 @@ impl ReplicationStores {
             Some(shard_stores) => {
                 shard_stores.retain(|&_, &mut (timestamp, _)| timestamp >= min_timestamp)
             }
-            None => info!("Shard {} has no snapshots in read_only_stores", shard),
+            None => debug!("Shard {} has no snapshots in read_only_stores", shard),
         }
 
         self.capture_snapshot_metrics(&stores);
