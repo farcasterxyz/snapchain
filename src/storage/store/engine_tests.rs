@@ -22,6 +22,7 @@ mod tests {
         commit_message, message_exists_in_trie, register_user, FID2_FOR_TEST, FID_FOR_TEST,
     };
     use crate::storage::trie::merkle_trie::TrieKey;
+    use crate::utils::factory::events_factory::create_storage_lend_event;
     use crate::utils::factory::signers::generate_signer;
     use crate::utils::factory::{self, events_factory, messages_factory, time, username_factory};
     use crate::version::version::{EngineVersion, ProtocolFeature};
@@ -3808,5 +3809,89 @@ mod tests {
         assert!(block_event_exists(&engine, &block_event3));
         assert!(block_event_exists(&engine, &block_event4));
         assert_eq!(block_confirmed.max_block_event_seqnum, 4);
+    }
+
+    #[tokio::test]
+    async fn test_storage_lending() {
+        let (mut engine, _temp_dir) = test_helper::new_engine().await;
+
+        let lender_fid = FID_FOR_TEST;
+        register_user(
+            lender_fid,
+            generate_signer(),
+            default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let borrower_fid = FID2_FOR_TEST;
+        register_user(
+            borrower_fid,
+            generate_signer(),
+            default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let lend_message = messages_factory::storage_lend::create_storage_lend(
+            lender_fid,
+            borrower_fid,
+            1, // Lend 1 unit
+            crate::proto::StorageUnitType::UnitType2025,
+            None,
+            None,
+        );
+        let storage_lend_block_event = create_storage_lend_event(lend_message, 1);
+        commit_block_events(&mut engine, vec![&storage_lend_block_event]).await;
+
+        // Verify the borrower now has storage
+        let borrower_storage = engine
+            .get_stores()
+            .get_storage_slot_for_fid(borrower_fid, &vec![])
+            .unwrap();
+        assert_eq!(
+            borrower_storage.units_for(crate::proto::StorageUnitType::UnitType2025),
+            2
+        );
+        // Verify the lender's storage was reduced
+        let lender_storage = engine
+            .get_stores()
+            .get_storage_slot_for_fid(lender_fid, &vec![])
+            .unwrap();
+        // Lender should have default storage minus 1 unit lent
+        assert_eq!(
+            lender_storage.units_for(crate::proto::StorageUnitType::UnitType2025),
+            0
+        );
+
+        // Reclaim the lent storage
+        let lend_message = messages_factory::storage_lend::create_storage_lend(
+            borrower_fid,
+            lender_fid,
+            1, // Lend 1 unit
+            crate::proto::StorageUnitType::UnitType2025,
+            None,
+            None,
+        );
+        let storage_lend_block_event = create_storage_lend_event(lend_message, 2);
+        commit_block_events(&mut engine, vec![&storage_lend_block_event]).await;
+
+        // Verify the lender's storage was returned
+        let borrower_storage = engine
+            .get_stores()
+            .get_storage_slot_for_fid(borrower_fid, &vec![])
+            .unwrap();
+        assert_eq!(
+            borrower_storage.units_for(crate::proto::StorageUnitType::UnitType2025),
+            1
+        );
+        let lender_storage = engine
+            .get_stores()
+            .get_storage_slot_for_fid(lender_fid, &vec![])
+            .unwrap();
+        assert_eq!(
+            lender_storage.units_for(crate::proto::StorageUnitType::UnitType2025),
+            1
+        );
     }
 }

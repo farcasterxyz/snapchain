@@ -53,8 +53,8 @@ pub mod events_factory {
     use super::*;
     use crate::{
         proto::{
-            self, BlockEvent, BlockEventData, BlockEventType, HeartbeatEventBody, StorageUnitType,
-            TierPurchaseBody, TierType,
+            self, BlockEvent, BlockEventData, BlockEventType, HeartbeatEventBody, LendStorageBody,
+            LendStorageEventBody, StorageUnitType, TierPurchaseBody, TierType,
         },
         storage::store::account::{StorageSlot, UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP},
     };
@@ -68,6 +68,28 @@ pub mod events_factory {
             block_timestamp: 0,
             body: Some(message::block_event_data::Body::HeartbeatEventBody(
                 HeartbeatEventBody {},
+            )),
+        };
+        let hash = blake3::hash(data.encode_to_vec().as_slice())
+            .as_bytes()
+            .to_vec();
+        BlockEvent {
+            hash,
+            data: Some(data),
+        }
+    }
+
+    pub fn create_storage_lend_event(message: proto::Message, seqnum: u64) -> BlockEvent {
+        let data = BlockEventData {
+            seqnum,
+            r#type: BlockEventType::Heartbeat as i32,
+            block_number: 0,
+            event_index: 0,
+            block_timestamp: 0,
+            body: Some(message::block_event_data::Body::LendStorageEventBody(
+                LendStorageEventBody {
+                    lend_storage_message: Some(message),
+                },
             )),
         };
         let hash = blake3::hash(data.encode_to_vec().as_slice())
