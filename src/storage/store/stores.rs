@@ -169,7 +169,7 @@ impl Limits {
             StoreType::UserData => self.user_data,
             StoreType::Verifications => self.verifications,
             StoreType::UsernameProofs => self.user_name_proofs,
-            StoreType::StorageLends => 100, // TODO(aditi): need to figure out reasonable limit
+            StoreType::StorageLends => u32::MAX, // There's no explicit limit for storage lends
             StoreType::None => 0,
         }
     }
