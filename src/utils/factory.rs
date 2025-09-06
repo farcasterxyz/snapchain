@@ -53,7 +53,7 @@ pub mod events_factory {
     use super::*;
     use crate::{
         proto::{
-            self, BlockEvent, BlockEventData, BlockEventType, HeartbeatEventBody, LendStorageBody,
+            self, BlockEvent, BlockEventData, BlockEventType, HeartbeatEventBody,
             LendStorageEventBody, StorageUnitType, TierPurchaseBody, TierType,
         },
         storage::store::account::{StorageSlot, UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP},

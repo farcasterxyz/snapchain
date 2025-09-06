@@ -820,41 +820,43 @@ impl ShardEngine {
                         );
                     }
 
-                    // Process storage lend messages from block events
-                    if let Some(block_event_data) = &block_event.data {
-                        if let Some(proto::block_event_data::Body::LendStorageEventBody(
-                            lend_storage_event,
-                        )) = &block_event_data.body
-                        {
-                            if let Some(lend_storage_message) =
-                                &lend_storage_event.lend_storage_message
+                    if version.is_enabled(ProtocolFeature::StorageLending) {
+                        // Process storage lend messages from block events
+                        if let Some(block_event_data) = &block_event.data {
+                            if let Some(proto::block_event_data::Body::LendStorageEventBody(
+                                lend_storage_event,
+                            )) = &block_event_data.body
                             {
-                                match self
-                                    .stores
-                                    .storage_lend_store
-                                    .merge(lend_storage_message, txn_batch)
+                                if let Some(lend_storage_message) =
+                                    &lend_storage_event.lend_storage_message
                                 {
-                                    Ok(hub_event) => {
-                                        merged_messages_count += 1;
-                                        self.update_trie(trie_ctx, &hub_event, txn_batch)?;
-                                        events.push(hub_event);
-                                        message_types.insert(lend_storage_message.msg_type());
-                                    }
-                                    Err(err) => {
-                                        if source != ProposalSource::Simulate {
-                                            warn!(
+                                    match self
+                                        .stores
+                                        .storage_lend_store
+                                        .merge(lend_storage_message, txn_batch)
+                                    {
+                                        Ok(hub_event) => {
+                                            merged_messages_count += 1;
+                                            self.update_trie(trie_ctx, &hub_event, txn_batch)?;
+                                            events.push(hub_event);
+                                            message_types.insert(lend_storage_message.msg_type());
+                                        }
+                                        Err(err) => {
+                                            if source != ProposalSource::Simulate {
+                                                warn!(
                                                 seqnum = block_event.seqnum(),
                                                 "Error merging storage lend from block event: {}",
                                                 err.to_string()
                                             );
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    last_block_event_seqnum += 1;
+                        last_block_event_seqnum += 1;
+                    }
                 }
             }
         }

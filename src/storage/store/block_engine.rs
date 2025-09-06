@@ -338,16 +338,23 @@ impl BlockEngine {
             {
                 Ok(()) => match message.msg_type() {
                     MessageType::LendStorage => {
-                        if let Ok(event) = self.merge_message(message, txn_batch) {
-                            self.trie
-                                .update_for_event(trie_ctx, &self.db, &event, txn_batch)?;
-                            match event.body.as_ref().unwrap() {
-                                proto::hub_event::Body::MergeMessageBody(merge_message_body) => {
-                                    Self::on_merge_message(&mut storage_slot, &merge_message_body);
+                        if version.is_enabled(ProtocolFeature::StorageLending) {
+                            if let Ok(event) = self.merge_message(message, txn_batch) {
+                                self.trie
+                                    .update_for_event(trie_ctx, &self.db, &event, txn_batch)?;
+                                match event.body.as_ref().unwrap() {
+                                    proto::hub_event::Body::MergeMessageBody(
+                                        merge_message_body,
+                                    ) => {
+                                        Self::on_merge_message(
+                                            &mut storage_slot,
+                                            &merge_message_body,
+                                        );
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
+                                hub_events.push(event);
                             }
-                            hub_events.push(event);
                         }
                     }
                     _ => {}
