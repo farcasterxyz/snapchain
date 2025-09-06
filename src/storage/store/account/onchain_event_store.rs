@@ -491,7 +491,7 @@ impl StorageSlot {
     }
 
     pub fn sub(&mut self, other: &StorageSlot) {
-        if self.is_active() && other.is_active() {
+        if other.is_active() {
             self.units_legacy -= other.units_legacy;
             self.units_2024 -= other.units_2024;
             self.units_2025 -= other.units_2025;

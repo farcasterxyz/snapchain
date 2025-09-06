@@ -115,9 +115,12 @@ mod tests {
         merge_message_success(&store, &db, &storage_lend);
 
         // Try to merge the same message again
-        let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&storage_lend, &mut txn);
-        assert!(result.is_err());
+        merge_message_failure(
+            &store,
+            &storage_lend,
+            "bad_request.duplicate",
+            "message has already been merged",
+        );
     }
 
     #[test]
@@ -127,9 +130,12 @@ mod tests {
         let cast_add =
             messages_factory::casts::create_cast_add(FID_FOR_TEST, "Hello, world!", None, None);
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&cast_add, &mut txn);
-        assert!(result.is_err());
+        merge_message_failure(
+            &store,
+            &cast_add,
+            "bad_request.validation_failure",
+            "invalid message type",
+        );
     }
 
     #[test]
@@ -151,9 +157,12 @@ mod tests {
             data.body = None;
         }
 
-        let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&storage_lend, &mut txn);
-        assert!(result.is_err());
+        merge_message_failure(
+            &store,
+            &storage_lend,
+            "bad_request.validation_failure",
+            "invalid message type",
+        );
     }
 
     // Primary Index Tests (get_lent_storage)
@@ -190,6 +199,7 @@ mod tests {
         assert_eq!(result.units_for(StorageUnitType::UnitType2024), 100);
         assert_eq!(result.units_for(StorageUnitType::UnitTypeLegacy), 0);
         assert_eq!(result.units_for(StorageUnitType::UnitType2025), 0);
+        assert!(result.is_active());
     }
 
     #[test]
@@ -230,6 +240,7 @@ mod tests {
         assert_eq!(result.units_for(StorageUnitType::UnitType2024), 150); // 100 + 50
         assert_eq!(result.units_for(StorageUnitType::UnitTypeLegacy), 25);
         assert_eq!(result.units_for(StorageUnitType::UnitType2025), 0);
+        assert!(result.is_active());
     }
 
     #[test]
@@ -290,6 +301,7 @@ mod tests {
         assert_eq!(result.units_for(StorageUnitType::UnitType2024), 100);
         assert_eq!(result.units_for(StorageUnitType::UnitTypeLegacy), 0);
         assert_eq!(result.units_for(StorageUnitType::UnitType2025), 0);
+        assert!(result.is_active());
     }
 
     #[test]
@@ -330,6 +342,7 @@ mod tests {
         assert_eq!(result.units_for(StorageUnitType::UnitType2024), 150); // 100 + 50
         assert_eq!(result.units_for(StorageUnitType::UnitTypeLegacy), 25);
         assert_eq!(result.units_for(StorageUnitType::UnitType2025), 0);
+        assert!(result.is_active());
     }
 
     #[test]
@@ -378,6 +391,7 @@ mod tests {
         // Check that lender's lent storage shows the lend
         let lent_result = StorageLendStore::get_lent_storage(&store, lender_fid).unwrap();
         assert_eq!(lent_result.units_for(StorageUnitType::UnitType2024), 100);
+        assert!(lent_result.is_active());
 
         // Check that borrower's borrowed storage shows the lend
         let borrowed_result = StorageLendStore::get_borrowed_storage(&store, borrower_fid).unwrap();
@@ -385,6 +399,7 @@ mod tests {
             borrowed_result.units_for(StorageUnitType::UnitType2024),
             100
         );
+        assert!(borrowed_result.is_active());
 
         // Verify that the amounts match
         assert_eq!(
@@ -428,18 +443,24 @@ mod tests {
         let fid1_borrowed = StorageLendStore::get_borrowed_storage(&store, fid1).unwrap();
         assert_eq!(fid1_lent.units_for(StorageUnitType::UnitType2024), 100);
         assert_eq!(fid1_borrowed.units_for(StorageUnitType::UnitType2024), 0);
+        assert!(fid1_lent.is_active());
+        assert!(!fid1_borrowed.is_active());
 
         // FID2 should have 50 lent, 100 borrowed
         let fid2_lent = StorageLendStore::get_lent_storage(&store, fid2).unwrap();
         let fid2_borrowed = StorageLendStore::get_borrowed_storage(&store, fid2).unwrap();
         assert_eq!(fid2_lent.units_for(StorageUnitType::UnitType2024), 50);
         assert_eq!(fid2_borrowed.units_for(StorageUnitType::UnitType2024), 100);
+        assert!(fid2_lent.is_active());
+        assert!(fid2_borrowed.is_active());
 
         // FID3 should have 0 lent, 50 borrowed
         let fid3_lent = StorageLendStore::get_lent_storage(&store, fid3).unwrap();
         let fid3_borrowed = StorageLendStore::get_borrowed_storage(&store, fid3).unwrap();
         assert_eq!(fid3_lent.units_for(StorageUnitType::UnitType2024), 0);
         assert_eq!(fid3_borrowed.units_for(StorageUnitType::UnitType2024), 50);
+        assert!(!fid3_lent.is_active());
+        assert!(fid3_borrowed.is_active());
     }
 
     // Storage Slot Aggregation Tests
@@ -487,6 +508,7 @@ mod tests {
                 + result.units_for(StorageUnitType::UnitType2025),
             350
         ); // Total units
+        assert!(result.is_active());
     }
 
     // Conflict Resolution Tests
@@ -524,12 +546,14 @@ mod tests {
         // Verify only the newer message is stored
         let lent_result = StorageLendStore::get_lent_storage(&store, lender_fid).unwrap();
         assert_eq!(lent_result.units_for(StorageUnitType::UnitType2024), 200);
+        assert!(lent_result.is_active());
 
         let borrowed_result = StorageLendStore::get_borrowed_storage(&store, borrower_fid).unwrap();
         assert_eq!(
             borrowed_result.units_for(StorageUnitType::UnitType2024),
             200
         );
+        assert!(borrowed_result.is_active());
     }
 
     #[test]
@@ -570,12 +594,14 @@ mod tests {
         // Verify original message is still stored
         let lent_result = StorageLendStore::get_lent_storage(&store, lender_fid).unwrap();
         assert_eq!(lent_result.units_for(StorageUnitType::UnitType2024), 100);
+        assert!(lent_result.is_active());
 
         let borrowed_result = StorageLendStore::get_borrowed_storage(&store, borrower_fid).unwrap();
         assert_eq!(
             borrowed_result.units_for(StorageUnitType::UnitType2024),
             100
         );
+        assert!(borrowed_result.is_active());
     }
 
     #[test]
@@ -632,11 +658,13 @@ mod tests {
             lent_result.units_for(StorageUnitType::UnitType2024),
             higher_units
         );
+        assert!(lent_result.is_active());
 
         let borrowed_result = StorageLendStore::get_borrowed_storage(&store, borrower_fid).unwrap();
         assert_eq!(
             borrowed_result.units_for(StorageUnitType::UnitType2024),
             higher_units
         );
+        assert!(borrowed_result.is_active());
     }
 }

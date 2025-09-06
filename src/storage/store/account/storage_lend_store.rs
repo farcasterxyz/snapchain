@@ -147,8 +147,7 @@ impl StorageLendStoreDef {
     fn make_storage_lend_primary_key(from_fid: u64, to_fid: u64) -> Vec<u8> {
         let mut key = vec![];
         key.extend(make_user_key(from_fid));
-        key.push(UserPostfix::UserDataAdds as u8);
-        // TODO(aditi): Maybe we want to use ts hash
+        key.push(UserPostfix::LendStorageMessage as u8);
         key.extend(make_fid_key(to_fid));
 
         key
@@ -165,7 +164,6 @@ impl StorageLendStoreDef {
             }
         };
 
-        // TODO(aditi): Maybe we want to use ts hash
         let mut key = vec![];
         key.push(RootPrefix::LendStorageByRecipient as u8);
         key.extend(make_fid_key(to_fid));
@@ -263,7 +261,7 @@ impl StorageLendStore {
         let mut storage_slot = StorageSlot::new(0, 0, 0, 0);
 
         // Create the prefix for the secondary index (RootPrefix::LendStorageByRecipient + to_fid)
-        let mut prefix = Vec::with_capacity(1 + 24);
+        let mut prefix = vec![];
         prefix.push(RootPrefix::LendStorageByRecipient as u8);
         prefix.extend_from_slice(&make_fid_key(fid));
 
