@@ -1181,6 +1181,7 @@ impl ShardEngine {
                 result.map_err(|e| MessageValidationError::StoreError(e))
             }
             unhandled_type => {
+                // Return a validation error if a storage lend gets routed to the shard engine directly
                 return Err(MessageValidationError::InvalidMessageType(
                     unhandled_type as i32,
                 ));
@@ -1322,6 +1323,13 @@ impl ShardEngine {
             .get_active_signer(message_data.fid, message.signer.clone(), Some(txn_batch))
             .map_err(|_| MessageValidationError::MissingSigner)?
             .ok_or(MessageValidationError::MissingSigner)?;
+
+        // Don't allow storage lends to be merged directly without going through shard 0
+        if message_data.r#type() == MessageType::LendStorage {
+            return Err(MessageValidationError::InvalidMessageType(
+                message_data.r#type,
+            ));
+        }
 
         // State-dependent verifications:
         match &message_data.body {
