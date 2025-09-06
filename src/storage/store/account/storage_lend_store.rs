@@ -124,7 +124,7 @@ impl StoreDef for StorageLendStoreDef {
     fn make_compact_state_add_key(&self, _message: &proto::Message) -> Result<Vec<u8>, HubError> {
         Err(HubError {
             code: "bad_request.invalid_param".to_string(),
-            message: "UserDataStore doesn't support compact state".to_string(),
+            message: "StorageLendStore doesn't support compact state".to_string(),
         })
     }
 
@@ -132,7 +132,7 @@ impl StoreDef for StorageLendStoreDef {
     fn make_compact_state_prefix(&self, _fid: u64) -> Result<Vec<u8>, HubError> {
         Err(HubError {
             code: "bad_request.invalid_param".to_string(),
-            message: "UserDataStore doesn't support compact state".to_string(),
+            message: "StorageLendStore doesn't support compact state".to_string(),
         })
     }
 
@@ -147,7 +147,7 @@ impl StorageLendStoreDef {
     fn make_storage_lend_primary_key(from_fid: u64, to_fid: u64) -> Vec<u8> {
         let mut key = vec![];
         key.extend(make_user_key(from_fid));
-        key.push(UserPostfix::LendStorageMessage as u8);
+        key.push(UserPostfix::LendStorages as u8);
         key.extend(make_fid_key(to_fid));
 
         key
