@@ -62,7 +62,7 @@ pub fn onchain_events_migration_job(
                 }
             }
 
-            if let Err(err) = wait_for_mempool_to_clear(shard_id, &mempool_tx).await {
+            if let Err(err) = wait_for_mempool_to_clear(&mempool_tx).await {
                 error!("Error polling mempool for size {}", err)
             }
         })
@@ -70,7 +70,6 @@ pub fn onchain_events_migration_job(
 }
 
 async fn wait_for_mempool_to_clear(
-    shard_id: u32,
     mempool_tx: &mpsc::Sender<MempoolRequest>,
 ) -> Result<(), String> {
     loop {
@@ -79,7 +78,7 @@ async fn wait_for_mempool_to_clear(
             return Err(format!("Error sending message to mempool: {}", e));
         }
         if let Ok(sizes) = rx.await {
-            let size = sizes.get(&shard_id).unwrap();
+            let size = sizes.get(&0).unwrap();
             if *size < MAX_MEMPOOL_SIZE {
                 return Ok(());
             }
