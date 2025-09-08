@@ -173,7 +173,7 @@ pub async fn new_engine_with_options(options: EngineOptions) -> (ShardEngine, te
         ShardEngine::new(
             db,
             options.network.unwrap_or(proto::FarcasterNetwork::Devnet), // So all protocol features are enabled by default
-            merkle_trie::MerkleTrie::new(16).unwrap(),
+            merkle_trie::MerkleTrie::new().unwrap(),
             options.shard_id,
             test_limits,
             statsd_client,

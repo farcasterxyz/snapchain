@@ -249,7 +249,6 @@ mod tests {
 
         let replication_stores = Arc::new(ReplicationStores::new(
             shard_stores.clone(),
-            16,
             statsd_client.clone(),
             engine.network.clone(),
         ));
@@ -372,7 +371,7 @@ mod tests {
 
         // First, we'll try to reconstruct the trie independently from the trie keys, to see if we get the same hashes
         let dest_db = dest_engine.db.clone();
-        let mut trie = MerkleTrie::new(16).unwrap();
+        let mut trie = MerkleTrie::new().unwrap();
         trie.initialize(&dest_db).unwrap();
 
         let all_trie_keys = trie_messages

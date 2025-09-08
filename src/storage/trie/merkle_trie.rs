@@ -4,6 +4,7 @@ use super::trie_node::{TrieNode, UNCOMPACTED_LENGTH};
 use crate::mempool::routing::{MessageRouter, ShardRouter};
 use crate::proto;
 use crate::storage::store::account::{make_fid_key, read_fid_key, IntoU8, FID_BYTES};
+use crate::storage::trie::util::{combine_nibbles, expand_nibbles};
 use crate::storage::trie::{trie_node, util};
 use std::collections::HashMap;
 use std::str;
@@ -197,21 +198,12 @@ pub struct NodeMetadata {
 
 #[derive(Clone)]
 pub struct MerkleTrie {
-    branch_xform: util::BranchingFactorTransform,
     root: Option<TrieNode>,
-    branching_factor: u32,
 }
 
 impl MerkleTrie {
-    pub fn new(branching_factor: u32) -> Result<Self, TrieError> {
-        let branch_xform = util::get_transform_functions(branching_factor)
-            .ok_or(TrieError::UnknownBranchingFactor)?;
-
-        Ok(MerkleTrie {
-            root: None,
-            branch_xform,
-            branching_factor,
-        })
+    pub fn new() -> Result<Self, TrieError> {
+        Ok(MerkleTrie { root: None })
     }
 
     pub fn update_for_event(
@@ -291,7 +283,7 @@ impl MerkleTrie {
         txn_batch: &mut RocksDbTransactionBatch,
         keys: Vec<&[u8]>,
     ) -> Result<Vec<bool>, TrieError> {
-        let keys: Vec<Vec<u8>> = keys.into_iter().map(self.branch_xform.expand).collect();
+        let keys: Vec<Vec<u8>> = keys.into_iter().map(expand_nibbles).collect();
 
         if keys.is_empty() {
             return Ok(Vec::new());
@@ -325,7 +317,7 @@ impl MerkleTrie {
         txn_batch: &mut RocksDbTransactionBatch,
         keys: Vec<&[u8]>,
     ) -> Result<Vec<bool>, TrieError> {
-        let keys: Vec<Vec<u8>> = keys.into_iter().map(self.branch_xform.expand).collect();
+        let keys: Vec<Vec<u8>> = keys.into_iter().map(expand_nibbles).collect();
 
         if keys.is_empty() {
             return Ok(Vec::new());
@@ -351,7 +343,7 @@ impl MerkleTrie {
     }
 
     pub fn exists(&mut self, ctx: &Context, db: &RocksDB, key: &[u8]) -> Result<bool, TrieError> {
-        let key: Vec<u8> = (self.branch_xform.expand)(key);
+        let key: Vec<u8> = expand_nibbles(key);
 
         if let Some(root) = self.root.as_mut() {
             root.exists(ctx, db, &key, 0)
@@ -368,30 +360,38 @@ impl MerkleTrie {
         }
     }
 
-    fn get_node(
-        &self,
+    fn get_node_from_txn_or_db(
         db: &RocksDB,
         txn_batch: &RocksDbTransactionBatch,
-        prefix: &[u8],
+        node_key: &[u8],
     ) -> Option<TrieNode> {
-        let prefix = (self.branch_xform.expand)(prefix);
-        let node_key = TrieNode::make_primary_key(&prefix, None);
-
         // First, attempt to get it from the DB cache
-        if let Some(Some(node_bytes)) = txn_batch.batch.get(&node_key) {
+        if let Some(Some(node_bytes)) = txn_batch.batch.get(node_key) {
             if let Ok(node) = TrieNode::deserialize(&node_bytes) {
                 return Some(node);
             }
         }
 
         // Else, get it directly from the DB
-        if let Some(node_bytes) = db.get(&node_key).ok().flatten() {
+        if let Some(node_bytes) = db.get(node_key).ok().flatten() {
             if let Ok(node) = TrieNode::deserialize(&node_bytes) {
                 return Some(node);
             }
         }
 
         None
+    }
+
+    fn get_node(
+        &self,
+        db: &RocksDB,
+        txn_batch: &RocksDbTransactionBatch,
+        prefix: &[u8],
+    ) -> Option<TrieNode> {
+        let prefix = expand_nibbles(prefix);
+        let node_key = TrieNode::make_primary_key(&prefix, None);
+
+        return Self::get_node_from_txn_or_db(db, txn_batch, &node_key);
     }
 
     pub fn get_hash(
@@ -432,14 +432,14 @@ impl MerkleTrie {
         db: &RocksDB,
         prefix: &[u8],
     ) -> Result<Vec<Vec<u8>>, TrieError> {
-        let prefix = (self.branch_xform.expand)(prefix);
+        let prefix = expand_nibbles(prefix);
 
         if let Some(root) = self.root.as_mut() {
             if let Some(node) = root.get_node_from_trie(ctx, db, &prefix, 0) {
                 match node.get_all_values(ctx, db, &prefix) {
                     Ok(values) => Ok(values
                         .into_iter()
-                        .map(|v| (self.branch_xform.combine)(v.as_slice()))
+                        .map(|v| combine_nibbles(v.as_slice()))
                         .collect()),
                     Err(e) => Err(e),
                 }
@@ -469,7 +469,7 @@ impl MerkleTrie {
         }
 
         // Expand the input prefix using the branching factor transform to match the trie's internal key format
-        let expanded_prefix = (self.branch_xform.expand)(prefix);
+        let expanded_prefix = expand_nibbles(prefix);
 
         // Attempt to retrieve the subtree node starting from the root using the expanded prefix. We will visit all the leafs of this
         // subtree
@@ -536,7 +536,7 @@ impl MerkleTrie {
                     }
 
                     // Combine the key back to its original form using the transform
-                    let combined = (self.branch_xform.combine)(key.as_slice());
+                    let combined = combine_nibbles(key.as_slice());
                     // Append the combined key to the leaf_keys vector
                     leaf_keys.push(combined);
                 }
@@ -632,7 +632,7 @@ impl MerkleTrie {
                         return Err(TrieError::KeyLengthTooShort);
                     }
                     // Combine the key back to original form
-                    let combined = (self.branch_xform.combine)(key.as_slice());
+                    let combined = combine_nibbles(key.as_slice());
                     // Append to leaf_keys
                     leaf_keys.push(combined);
                 }
@@ -664,10 +664,11 @@ impl MerkleTrie {
             let mut children = HashMap::new();
 
             for char in node.children().keys() {
-                let mut child_prefix = prefix.to_vec();
+                let mut child_prefix = expand_nibbles(prefix);
                 child_prefix.push(*char);
+                let node_key = TrieNode::make_primary_key(&child_prefix, None);
 
-                let child_node = self.get_node(db, txn_batch, &child_prefix).ok_or(
+                let child_node = Self::get_node_from_txn_or_db(db, txn_batch, &node_key).ok_or(
                     TrieError::ChildNotFound {
                         char: *char,
                         prefix: prefix.to_vec(),
@@ -698,10 +699,6 @@ impl MerkleTrie {
         }
     }
 
-    pub fn branching_factor(&self) -> u32 {
-        self.branching_factor
-    }
-
     #[cfg(test)]
     pub fn get_root_node(&mut self) -> Option<&mut TrieNode> {
         self.root.as_mut()
@@ -711,9 +708,9 @@ impl MerkleTrie {
 #[cfg(test)]
 mod tests {
     use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
-    use crate::storage::trie::errors::TrieError;
     use crate::storage::trie::merkle_trie::{Context, MerkleTrie, TrieKey};
     use crate::storage::trie::trie_node::UNCOMPACTED_LENGTH;
+    use crate::storage::trie::util::expand_nibbles;
     use std::collections::HashSet;
 
     #[test]
@@ -730,48 +727,41 @@ mod tests {
         let db = &RocksDB::new(&tmp_path);
         db.open().unwrap();
 
-        // TODO: this test needs to be able to work with different branching factors
-        let mut trie = MerkleTrie::new(256).unwrap();
+        let mut trie = MerkleTrie::new().unwrap();
         trie.initialize(db).unwrap();
         let mut txn_batch = RocksDbTransactionBatch::new();
 
-        let result = trie.insert(ctx, db, &mut txn_batch, vec![&[1, 2, 3, 4, 5, 6, 7, 8, 9]]);
-        assert!(result.is_err());
-        if let Err(TrieError::KeyLengthTooShort) = result {
-            //ok
-        } else {
-            panic!("Unexpected error type");
-        }
-
-        let key1: Vec<_> = "120000482712".bytes().collect();
+        let key1 = b"12345\x00".to_vec();
         trie.insert(ctx, db, &mut txn_batch, vec![&key1.clone()])
             .unwrap();
 
         let node = trie.get_node(db, &mut txn_batch, &key1).unwrap();
-        assert_eq!(node.value().unwrap(), key1);
+        assert_eq!(node.value().unwrap(), expand_nibbles(&key1));
 
         // Add another key
-        let key2: Vec<_> = "120000482713".bytes().collect();
+        let key2 = b"12345\x80".to_vec();
         trie.insert(ctx, db, &mut txn_batch, vec![&key2.clone()])
             .unwrap();
 
         // The get node should still work for both keys
         let node = trie.get_node(db, &mut txn_batch, &key1).unwrap();
-        assert_eq!(node.value().unwrap(), key1);
+        assert_eq!(node.value().unwrap(), expand_nibbles(&key1));
         let node = trie.get_node(db, &mut txn_batch, &key2).unwrap();
-        assert_eq!(node.value().unwrap(), key2);
+        assert_eq!(node.value().unwrap(), expand_nibbles(&key2));
 
-        // Getting the node with first 11 bytes should return the node with key1
+        // Getting the node with first 5 bytes should return the node with key1
         let common_node = trie
-            .get_node(db, &mut txn_batch, &key1[0..11].to_vec())
+            .get_node(db, &mut txn_batch, &key1[0..5].to_vec())
             .unwrap();
+
         assert_eq!(common_node.is_leaf(), false);
+        assert_eq!(common_node.items(), 2);
         assert_eq!(common_node.children().len(), 2);
         let mut children_keys: Vec<_> = common_node.children().keys().collect();
         children_keys.sort();
 
-        assert_eq!(*children_keys[0], key1[11]);
-        assert_eq!(*children_keys[1], key2[11]);
+        assert_eq!(*children_keys[0], expand_nibbles(&key1)[2 * 5]);
+        assert_eq!(*children_keys[1], expand_nibbles(&key2)[2 * 5]);
 
         // Get the metadata for the root node
         let root_metadata = trie
@@ -782,7 +772,7 @@ mod tests {
         assert_eq!(root_metadata.children.len(), 1);
 
         let metadata = trie
-            .get_trie_node_metadata(db, &mut txn_batch, &key1[0..11])
+            .get_trie_node_metadata(db, &mut txn_batch, &key1[0..5])
             .unwrap();
 
         // Get the children
@@ -792,12 +782,13 @@ mod tests {
             .map(|(k, v)| (k, v))
             .collect::<Vec<_>>();
         children.sort_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(children[0].0, key1[11]);
-        assert_eq!(children[0].1.prefix, key1);
+
+        assert_eq!(children[0].0, expand_nibbles(&key1)[2 * 5]);
+        assert_eq!(children[0].1.prefix, expand_nibbles(&key1)[..11]);
         assert_eq!(children[0].1.num_messages, 1);
 
-        assert_eq!(children[1].0, key2[11]);
-        assert_eq!(children[1].1.prefix, key2);
+        assert_eq!(children[1].0, expand_nibbles(&key2)[2 * 5]);
+        assert_eq!(children[1].1.prefix, expand_nibbles(&key2)[..11]);
         assert_eq!(children[1].1.num_messages, 1);
 
         db.close();

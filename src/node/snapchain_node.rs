@@ -47,7 +47,6 @@ impl SnapchainNode {
         local_state_store: LocalStateStore,
         rocksdb_dir: String,
         statsd_client: StatsdClientWrapper,
-        trie_branching_factor: u32,
         network: FarcasterNetwork,
         registry: &SharedRegistry,
         engine_post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
@@ -71,7 +70,7 @@ impl SnapchainNode {
             let ctx = SnapchainValidatorContext::new(keypair.clone());
 
             let db = RocksDB::open_shard_db(rocksdb_dir.clone().as_str(), shard_id);
-            let trie = merkle_trie::MerkleTrie::new(trie_branching_factor).unwrap(); //TODO: don't unwrap()
+            let trie = merkle_trie::MerkleTrie::new().unwrap(); //TODO: don't unwrap()
             let engine = match ShardEngine::new(
                 db.clone(),
                 network,
@@ -139,7 +138,7 @@ impl SnapchainNode {
         let block_shard = SnapchainShard::new(0);
 
         // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
-        let trie = MerkleTrie::new(trie_branching_factor).unwrap();
+        let trie = MerkleTrie::new().unwrap();
         let engine = BlockEngine::new(
             block_store.clone(),
             trie,

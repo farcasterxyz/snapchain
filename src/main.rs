@@ -235,7 +235,6 @@ fn create_replicator(
 ) -> Arc<replication::Replicator> {
     let replication_stores = Arc::new(replication::ReplicationStores::new(
         shard_stores,
-        app_config.trie_branching_factor,
         statsd_client.clone(),
         app_config.fc_network.clone(),
     ));
@@ -413,7 +412,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             block_store.clone(),
             app_config.rocksdb_dir.clone(),
             statsd_client.clone(),
-            app_config.trie_branching_factor,
             app_config.fc_network,
             registry,
             engine_post_commit_tx,
@@ -554,7 +552,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             local_state_store.clone(),
             app_config.rocksdb_dir.clone(),
             statsd_client.clone(),
-            app_config.trie_branching_factor,
             app_config.fc_network,
             registry,
             engine_post_commit_tx,
