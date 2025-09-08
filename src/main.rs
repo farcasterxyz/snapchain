@@ -20,6 +20,7 @@ use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::proto::replication_service_server::ReplicationServiceServer;
 use snapchain::storage::db::snapshot::{download_snapshots, BootstrapMethod};
 use snapchain::storage::db::RocksDB;
+use snapchain::storage::store::block_engine::BlockStores;
 use snapchain::storage::store::engine::{PostCommitMessage, Senders};
 use snapchain::storage::store::node_local_state::{self, LocalStateStore};
 use snapchain::storage::store::stores::Stores;
@@ -177,6 +178,9 @@ async fn schedule_background_jobs(
     shard_stores: HashMap<u32, Stores>,
     sync_complete_rx: watch::Receiver<bool>,
     statsd_client: StatsdClientWrapper,
+    mempool_tx: mpsc::Sender<MempoolRequest>,
+    block_stores: BlockStores,
+    local_state_store: LocalStateStore,
 ) {
     let sched = JobScheduler::new().await.unwrap();
     let mut jobs = vec![];
@@ -209,11 +213,29 @@ async fn schedule_background_jobs(
             app_config.snapshot.clone(),
             app_config.fc_network,
             block_store,
-            shard_stores,
+            shard_stores.clone(),
             statsd_client,
         )
         .unwrap();
         jobs.push(snapshot_upload_job);
+    }
+
+    // Add onchain events migration jobs if enabled
+    if app_config.onchain_events_migration_enabled && !app_config.read_node {
+        // Create one migration job per shard
+        for shard_store in shard_stores.values() {
+            // Only migrate from non-zero shards to shard 0
+            let migration_job =
+                snapchain::jobs::migrate_onchain_events::onchain_events_migration_job(
+                    "0 0 7 * * *", // Every 5 minutes
+                    shard_store.clone(),
+                    block_stores.clone(),
+                    mempool_tx.clone(),
+                    local_state_store.clone(),
+                )
+                .unwrap();
+            jobs.push(migration_job);
+        }
     }
 
     for job in jobs {
@@ -438,6 +460,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (onchain_events_request_tx, onchain_events_request_rx) = broadcast::channel(100);
     let (fname_request_tx, fname_request_rx) = broadcast::channel(100);
 
+    let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
+    let local_state_store = LocalStateStore::new(global_db);
+
     if app_config.read_node {
         // Setup post-commit channel if replication is enabled
         let (engine_post_commit_tx, engine_post_commit_rx) = if app_config.replication.enable {
@@ -469,6 +494,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.shard_stores.clone(),
             sync_complete_rx,
             statsd_client.clone(),
+            mempool_tx.clone(),
+            node.block_stores.clone(),
+            local_state_store.clone(),
         )
         .await;
 
@@ -582,9 +610,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             (None, None)
         };
 
-        let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
-        let local_state_store = LocalStateStore::new(global_db);
-
         let node = SnapchainNode::create(
             keypair.clone(),
             app_config.consensus.clone(),
@@ -609,6 +634,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.shard_stores.clone(),
             sync_complete_rx,
             statsd_client.clone(),
+            mempool_tx.clone(),
+            node.block_stores.clone(),
+            local_state_store.clone(),
         )
         .await;
 

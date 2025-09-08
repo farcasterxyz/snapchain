@@ -231,7 +231,8 @@ impl MempoolMessage {
     pub fn mempool_key(&self) -> MempoolKey {
         match self {
             MempoolMessage::UserMessage(msg) => msg.mempool_key(),
-            MempoolMessage::OnchainEvent(event) => {
+            MempoolMessage::OnchainEvent(event)
+            | MempoolMessage::OnchainEventForMigration(event) => {
                 let validator_message = proto::ValidatorMessage {
                     on_chain_event: Some(event.clone()),
                     fname_transfer: None,
@@ -335,6 +336,7 @@ impl ReadNodeMempool {
                     }
                 },
                 MempoolMessage::OnchainEvent(_)
+                | MempoolMessage::OnchainEventForMigration(_)
                 | MempoolMessage::FnameTransfer(_)
                 | MempoolMessage::BlockEvent { .. } => {
                     // Don't do duplicate checks for validator messages. They are infrequent, and engine can handle duplicates.
@@ -461,6 +463,7 @@ impl Mempool {
                 }
             }
             MempoolMessage::OnchainEvent(_)
+            | MempoolMessage::OnchainEventForMigration(_)
             | MempoolMessage::FnameTransfer(_)
             | MempoolMessage::BlockEvent { .. } => false,
         }
@@ -549,6 +552,10 @@ impl Mempool {
             } else {
                 vec![fid_shard]
             }
+        } else if let MempoolMessage::OnchainEventForMigration(_) = &message {
+            vec![0]
+        } else if let MempoolMessage::OnchainEvent(_) = &message {
+            vec![0, fid_shard]
         } else if let MempoolMessage::BlockEvent {
             for_shard,
             message: _,
