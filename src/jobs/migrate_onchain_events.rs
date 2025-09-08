@@ -9,7 +9,6 @@ use tokio::time::Duration;
 use tokio_cron_scheduler::{Job, JobSchedulerError};
 use tracing::{error, info};
 
-const THROTTLE: Duration = Duration::from_millis(100);
 const MIGRATION_BATCH_SIZE: usize = 100;
 const MAX_MEMPOOL_SIZE: u64 = 1_000;
 
@@ -30,8 +29,6 @@ pub fn onchain_events_migration_job(
             info!("Starting onchain events migration");
 
             let shard_id = shard_stores.shard_id;
-
-            // Process events from each non-zero shard
 
             let page_token = local_state_store
                 .get_onchain_events_migration_page_token(shard_id)
@@ -88,7 +85,7 @@ async fn wait_for_mempool_to_clear(
             }
         }
 
-        tokio::time::sleep(THROTTLE).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
