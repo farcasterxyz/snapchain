@@ -19,7 +19,7 @@ mod tests {
         let db = db::RocksDB::new(db_path.to_str().unwrap());
         db.open().unwrap();
 
-        let trie = trie::merkle_trie::MerkleTrie::new(16).unwrap();
+        let trie = trie::merkle_trie::MerkleTrie::new().unwrap();
         let limits = stores::StoreLimits::new(
             test_helper::limits::test(),
             test_helper::limits::zero(),

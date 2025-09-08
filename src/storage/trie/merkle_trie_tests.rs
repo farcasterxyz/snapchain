@@ -26,7 +26,7 @@ mod tests {
         let db = &RocksDB::new(&tmp_path);
         db.open().unwrap();
 
-        let mut trie = MerkleTrie::new(16).unwrap();
+        let mut trie = MerkleTrie::new().unwrap();
         trie.initialize(db).unwrap();
 
         let mut txn_batch = RocksDbTransactionBatch::new();
@@ -62,7 +62,7 @@ mod tests {
         let db = &RocksDB::new(&tmp_path);
         db.open().unwrap();
 
-        let mut trie = MerkleTrie::new(16).unwrap();
+        let mut trie = MerkleTrie::new().unwrap();
         trie.initialize(db).unwrap();
 
         let mut first_txn = RocksDbTransactionBatch::new();
@@ -182,8 +182,7 @@ mod tests {
         let db = &RocksDB::new(tmp_path.path().to_str().unwrap());
         db.open().unwrap();
 
-        let branching_factor = 16;
-        let mut trie = MerkleTrie::new(branching_factor).unwrap();
+        let mut trie = MerkleTrie::new().unwrap();
         trie.initialize(db).unwrap();
 
         let mut all_keys = vec![];
@@ -255,7 +254,7 @@ mod tests {
         let tmp_path = tempfile::tempdir().unwrap();
         let db = &RocksDB::new(tmp_path.path().to_str().unwrap());
         db.open().unwrap();
-        let mut trie = MerkleTrie::new(16).unwrap();
+        let mut trie = MerkleTrie::new().unwrap();
         trie.initialize(db).unwrap();
         let mut txn_batch = RocksDbTransactionBatch::new();
 
@@ -323,12 +322,10 @@ mod tests {
         let db2 = &RocksDB::new(tmp_path2.path().to_str().unwrap());
         db2.open().unwrap();
 
-        let branching_factor = 16;
-
-        let mut trie1 = MerkleTrie::new(branching_factor).unwrap();
+        let mut trie1 = MerkleTrie::new().unwrap();
         trie1.initialize(db1).unwrap();
 
-        let mut trie2 = MerkleTrie::new(branching_factor).unwrap();
+        let mut trie2 = MerkleTrie::new().unwrap();
         trie2.initialize(db2).unwrap();
 
         // Generate 100 random keys of length 20
