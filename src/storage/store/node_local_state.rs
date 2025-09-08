@@ -40,6 +40,7 @@ pub enum DataType {
     OptimismOnchainEvent = 1,
     FnameTransfer = 2,
     BaseOnchainEvent = 3,
+    OnchainEventsMigrationPageToken = 4,
 }
 
 #[derive(Clone, Copy, strum_macros::Display)]
@@ -253,6 +254,49 @@ impl LocalStateStore {
                 );
                 None
             }
+        }
+    }
+
+    fn make_onchain_events_migration_page_token_key(shard_id: u32) -> Vec<u8> {
+        let mut key = vec![
+            RootPrefix::NodeLocalState as u8,
+            DataType::OnchainEventsMigrationPageToken as u8,
+        ];
+        key.extend_from_slice(&shard_id.to_be_bytes());
+        key
+    }
+
+    pub fn get_onchain_events_migration_page_token(
+        &self,
+        shard_id: u32,
+    ) -> Result<Option<Vec<u8>>, LocalStateError> {
+        match self
+            .db
+            .get(&Self::make_onchain_events_migration_page_token_key(
+                shard_id,
+            ))? {
+            Some(bytes) => Ok(Some(bytes)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_onchain_events_migration_page_token(
+        &self,
+        shard_id: u32,
+        token: Option<Vec<u8>>,
+    ) -> Result<(), LocalStateError> {
+        if let Some(token) = token {
+            Ok(self.db.put(
+                &Self::make_onchain_events_migration_page_token_key(shard_id),
+                &token,
+            )?)
+        } else {
+            // Clear the token if None is passed
+            Ok(self
+                .db
+                .del(&Self::make_onchain_events_migration_page_token_key(
+                    shard_id,
+                ))?)
         }
     }
 }
