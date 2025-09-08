@@ -104,6 +104,7 @@ pub struct Config {
     pub http_server: http_server::Config,
     pub replication: ReplicationConfig,
     pub block_receiver: block_receiver::Config,
+    pub onchain_events_migration_enabled: bool,
 }
 
 impl Default for Config {
@@ -131,6 +132,7 @@ impl Default for Config {
             http_server: http_server::Config::default(),
             replication: ReplicationConfig::default(),
             block_receiver: block_receiver::Config::default(),
+            onchain_events_migration_enabled: false,
         }
     }
 }
