@@ -172,7 +172,6 @@ fn build_secondary_indices_for_signer(
         let mut next_page_token = None;
         let mut start_prefix = make_onchain_event_type_prefix(OnChainEventType::EventTypeSigner);
         start_prefix.extend(make_fid_key(onchain_event.fid));
-
         let stop_prefix = increment_vec_u8(&start_prefix);
 
         loop {
@@ -318,11 +317,9 @@ where
     F: Fn(&OnChainEvent) -> bool,
 {
     let mut start_prefix = make_onchain_event_type_prefix(event_type);
-
     if let Some(fid) = &fid {
         start_prefix.extend(make_fid_key(*fid));
     }
-
     let stop_prefix = increment_vec_u8(&start_prefix);
 
     let mut onchain_events = vec![];
@@ -567,11 +564,9 @@ impl OnchainEventStore {
         let mut onchain_events = vec![];
         let mut next_page_token = None;
         let mut start_prefix = make_onchain_event_type_prefix(event_type);
-
         if let Some(fid) = &fid {
             start_prefix.extend(make_fid_key(*fid));
         }
-
         let stop_prefix = increment_vec_u8(&start_prefix);
 
         loop {
