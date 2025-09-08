@@ -177,7 +177,6 @@ mod tests {
         config.rocksdb_dir = dest_rocksdb_dir.clone();
         config.consensus.shard_ids = vec![1]; // Only shard 1 for this test
         config.fc_network = source_engine.network.clone();
-        config.trie_branching_factor = 16;
         config.statsd.addr = "127.0.0.1:8125".to_string();
         config.statsd.prefix = "test".to_string();
         config.statsd.use_tags = true;
@@ -198,7 +197,7 @@ mod tests {
 
         // Open the destination DB and check the root
         let dest_db = RocksDB::open_shard_db(&dest_rocksdb_dir, 1);
-        let mut dest_trie = MerkleTrie::new(16).unwrap();
+        let mut dest_trie = MerkleTrie::new().unwrap();
         dest_trie.initialize(&dest_db).unwrap();
         let dest_root = dest_trie.root_hash().unwrap();
 

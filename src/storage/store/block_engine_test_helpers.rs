@@ -19,7 +19,7 @@ pub fn setup(network: Option<FarcasterNetwork>) -> (BlockEngine, TempDir) {
     let db = Arc::new(db);
 
     let block_store = BlockStore::new(db.clone());
-    let trie = MerkleTrie::new(16).unwrap();
+    let trie = MerkleTrie::new().unwrap();
     let statsd_client = statsd_client();
     let (tx, _rx) = mpsc::channel(100);
 

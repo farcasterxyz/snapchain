@@ -1582,12 +1582,6 @@ impl ShardEngine {
         self.metrics
             .publish_transaction_counts(&shard_chunk.transactions, ProposalSource::Commit);
 
-        // useful to see on perf test dashboards
-        self.metrics.gauge(
-            "trie.branching_factor",
-            self.stores.trie.branching_factor() as u64,
-        );
-
         for event in events {
             self.metrics.count(
                 "commit.emitted_event",

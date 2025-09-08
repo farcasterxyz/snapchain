@@ -96,7 +96,7 @@ fn run_shard(
     let db = db::RocksDB::new(db_path_str);
     db.open()?;
 
-    let mut t = merkle_trie::MerkleTrie::new(args.branching_factor)?;
+    let mut t = merkle_trie::MerkleTrie::new()?;
     t.initialize(&db)?;
 
     let gen_type = GeneratorTypes::MultiUser;

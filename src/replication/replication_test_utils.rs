@@ -250,7 +250,6 @@ pub mod replication_test_utils {
 
         let replication_stores = Arc::new(ReplicationStores::new(
             shard_stores.clone(),
-            16,
             statsd_client.clone(),
             engine.network.clone(),
         ));

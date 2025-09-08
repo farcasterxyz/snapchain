@@ -221,7 +221,7 @@ mod tests {
         let shard1_stores = Stores::new(
             db1,
             1,
-            merkle_trie::MerkleTrie::new(16).unwrap(),
+            merkle_trie::MerkleTrie::new().unwrap(),
             limits.clone(),
             proto::FarcasterNetwork::Devnet,
             test_helper::statsd_client(),
@@ -231,7 +231,7 @@ mod tests {
         let shard2_stores = Stores::new(
             db2,
             2,
-            merkle_trie::MerkleTrie::new(16).unwrap(),
+            merkle_trie::MerkleTrie::new().unwrap(),
             limits.clone(),
             proto::FarcasterNetwork::Devnet,
             test_helper::statsd_client(),

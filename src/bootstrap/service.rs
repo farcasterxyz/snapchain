@@ -84,7 +84,6 @@ struct WorkUnit {
 pub struct ReplicatorBootstrap {
     shutdown: Arc<AtomicBool>,
     network: crate::proto::FarcasterNetwork,
-    trie_branching_factor: u32,
     statsd_client: StatsdClientWrapper,
     shard_ids: Vec<u32>,
     rocksdb_dir: String,
@@ -117,7 +116,6 @@ impl ReplicatorBootstrap {
         Self {
             shutdown: Arc::new(AtomicBool::new(false)),
             network: app_config.fc_network,
-            trie_branching_factor: app_config.trie_branching_factor,
             statsd_client,
             shard_ids: app_config.consensus.shard_ids.clone(),
             rocksdb_dir: app_config.rocksdb_dir.clone(),
@@ -286,8 +284,8 @@ impl ReplicatorBootstrap {
             let rocksdb_dir = self.get_snapshot_rocksdb_dir();
 
             info!(
-                "Bootstrapping shard {} at height {} with trie_branching_factor {}",
-                shard_id, target_height, self.trie_branching_factor
+                "Bootstrapping shard {} at height {}",
+                shard_id, target_height
             );
 
             // Spawn a task for this shard
@@ -508,11 +506,9 @@ impl ReplicatorBootstrap {
         shard_id: u32,
         mut trie_insert_rx: mpsc::UnboundedReceiver<TrieInsertRequest>,
     ) -> tokio::task::JoinHandle<()> {
-        let trie_branching_factor = self.trie_branching_factor;
-
         tokio::spawn(async move {
             debug!("Trie merges thread started for shard {}", shard_id);
-            let mut trie = merkle_trie::MerkleTrie::new(trie_branching_factor).unwrap();
+            let mut trie = merkle_trie::MerkleTrie::new().unwrap();
             trie.initialize(&trie_db).unwrap();
 
             while let Some(insert_request) = trie_insert_rx.recv().await {
@@ -724,7 +720,7 @@ impl ReplicatorBootstrap {
             save_hub_events: false, // No need for HubEvents, which are emitted only from "live" nodes
         };
 
-        let trie = merkle_trie::MerkleTrie::new(self.trie_branching_factor).unwrap();
+        let trie = merkle_trie::MerkleTrie::new().unwrap();
         let mut thread_engine = ShardEngine::new_with_opts(
             db.clone(),
             self.network,
@@ -1073,7 +1069,7 @@ impl ReplicatorBootstrap {
         info!("Post-processing trie for shard {}.", shard_id);
 
         let db = RocksDB::open_bulk_write_shard_db(&rocksdb_dir, shard_id);
-        let mut trie = merkle_trie::MerkleTrie::new(self.trie_branching_factor)?;
+        let mut trie = merkle_trie::MerkleTrie::new()?;
         trie.initialize(&db)?;
 
         // Get the trie root and see if it matches
