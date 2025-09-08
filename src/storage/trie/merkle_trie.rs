@@ -699,10 +699,6 @@ impl MerkleTrie {
         }
     }
 
-    pub fn branching_factor(&self) -> u32 {
-        16
-    }
-
     #[cfg(test)]
     pub fn get_root_node(&mut self) -> Option<&mut TrieNode> {
         self.root.as_mut()
