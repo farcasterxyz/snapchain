@@ -1,5 +1,5 @@
 use crate::cfg::Config as AppConfig;
-use crate::proto::TierPurchaseBody;
+use crate::proto::{TierPurchaseBody, UserNameProof, UserNameType};
 use crate::storage::store::node_local_state;
 use alloy_primitives::U256;
 use alloy_primitives::{address, ruint::FromUintError, Address, FixedBytes};
@@ -218,6 +218,51 @@ impl ChainClients {
                 format!("No client configured for chain: {:?}", chain).as_str(),
             )),
         }
+    }
+
+    pub async fn resolve_ens_address(&self, proof: &UserNameProof) -> Result<Vec<u8>, HubError> {
+        let name = std::str::from_utf8(&proof.name)
+            .map_err(|_| HubError::validation_failure("ENS name is not utf8"))?;
+
+        let chain_api = match UserNameType::try_from(proof.r#type) {
+            Ok(UserNameType::UsernameTypeEnsL1) => {
+                if !name.ends_with(".eth") {
+                    return Err(HubError::validation_failure(
+                        "ENS name does not end with .eth",
+                    ));
+                }
+                self.for_chain(Chain::EthMainnet)?
+            }
+            Ok(UserNameType::UsernameTypeBasename) => {
+                if !name.ends_with(".base.eth") {
+                    return Err(HubError::validation_failure(
+                        "Basename does not end with base.eth",
+                    ));
+                }
+                self.for_chain(Chain::BaseMainnet)?
+            }
+            _ => {
+                return Err(HubError::validation_failure(
+                    format!(
+                        "unsupported username type: {} for name: {}",
+                        proof.r#type, name,
+                    )
+                    .as_str(),
+                ))
+            }
+        };
+
+        let resolved_ens_address = chain_api
+            .resolve_ens_name(name.to_string())
+            .await
+            .map_err(|err| {
+                HubError::validation_failure(
+                    format!("ENS resolution error: {}", err.to_string()).as_str(),
+                )
+            })?
+            .to_vec();
+
+        Ok(resolved_ens_address)
     }
 }
 

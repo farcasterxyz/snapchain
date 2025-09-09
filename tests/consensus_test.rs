@@ -442,9 +442,9 @@ impl NodeForTest {
             Box::new(routing::EvenOddRouterForTest {}),
             mempool_tx.clone(),
             gossip_tx.clone(),
-            ChainClients {
+            Arc::new(ChainClients {
                 chain_api_map: Default::default(),
-            },
+            }),
             "".to_string(),
             "".to_string(),
         );

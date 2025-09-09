@@ -291,7 +291,7 @@ mod tests {
                 message_router,
                 mempool_tx.clone(),
                 gossip_tx.clone(),
-                chain_clients,
+                Arc::new(chain_clients),
                 "0.1.2".to_string(),
                 "asddef".to_string(),
             ),

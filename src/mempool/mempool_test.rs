@@ -395,6 +395,7 @@ mod tests {
                 panic!("Expected validator message, got user message")
             }
             MempoolMessage::OnchainEvent(_)
+            | MempoolMessage::RevalidateMessage(_)
             | MempoolMessage::FnameTransfer(_)
             | MempoolMessage::BlockEvent { .. } => {}
         }
@@ -402,6 +403,7 @@ mod tests {
         match pull_message().await {
             MempoolMessage::UserMessage(_) => {}
             MempoolMessage::OnchainEvent(_)
+            | MempoolMessage::RevalidateMessage(_)
             | MempoolMessage::FnameTransfer(_)
             | MempoolMessage::BlockEvent { .. } => {
                 panic!("Expected user message, got validator message")

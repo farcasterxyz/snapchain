@@ -26,6 +26,9 @@ pub enum LocalStateError {
 
     #[error(transparent)]
     HubError(#[from] HubError),
+
+    #[error("invalid data for key")]
+    InvalidData,
 }
 
 #[derive(Clone)]
@@ -37,6 +40,7 @@ pub enum DataType {
     OptimismOnchainEvent = 1,
     FnameTransfer = 2,
     BaseOnchainEvent = 3,
+    EnsRevalidationJob = 4,
 }
 
 #[derive(Clone, Copy, strum_macros::Display)]
@@ -166,5 +170,42 @@ impl LocalStateStore {
             Some(state) => Ok(Some(FnameState::decode(state.as_slice())?.last_fname_proof)),
             None => Ok(None),
         }
+    }
+
+    fn make_ens_revalidation_job_key() -> Vec<u8> {
+        vec![
+            RootPrefix::NodeLocalState as u8,
+            DataType::EnsRevalidationJob as u8,
+        ]
+    }
+
+    pub fn set_last_processed_fid_for_ens_revalidation(
+        &self,
+        fid: u64,
+    ) -> Result<(), LocalStateError> {
+        Ok(self
+            .db
+            .put(&Self::make_ens_revalidation_job_key(), &fid.to_be_bytes())?)
+    }
+
+    pub fn get_last_processed_fid_for_ens_revalidation(
+        &self,
+    ) -> Result<Option<u64>, LocalStateError> {
+        match self.db.get(&Self::make_ens_revalidation_job_key())? {
+            Some(bytes) => {
+                let bytes: [u8; 8] = bytes
+                    .get(0..8)
+                    .ok_or(LocalStateError::InvalidData)?
+                    .try_into()
+                    .map_err(|_| LocalStateError::InvalidData)?;
+                let fid = u64::from_be_bytes(bytes);
+                Ok(Some(fid))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn clear_ens_revalidation_job_state(&self) -> Result<(), LocalStateError> {
+        Ok(self.db.del(&Self::make_ens_revalidation_job_key())?)
     }
 }
