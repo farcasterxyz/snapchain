@@ -444,6 +444,30 @@ impl Stores {
         Ok(response)
     }
 
+    pub fn revoke_message(
+        &mut self,
+        message: &proto::Message,
+        txn: &mut RocksDbTransactionBatch,
+    ) -> Result<HubEvent, HubError> {
+        match message.msg_type() {
+            MessageType::FrameAction | MessageType::None => {
+                Err(HubError::internal_db_error("invalid message type"))
+            }
+            MessageType::CastAdd | MessageType::CastRemove => self.cast_store.revoke(message, txn),
+            MessageType::ReactionAdd | MessageType::ReactionRemove => {
+                self.reaction_store.revoke(message, txn)
+            }
+            MessageType::LinkCompactState | MessageType::LinkAdd | MessageType::LinkRemove => {
+                self.link_store.revoke(message, txn)
+            }
+            MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => {
+                self.verification_store.revoke(message, txn)
+            }
+            MessageType::UserDataAdd => self.user_data_store.revoke(message, txn),
+            MessageType::UsernameProof => self.username_proof_store.revoke(message, txn),
+        }
+    }
+
     pub fn revoke_messages(
         &self,
         fid: u64,
@@ -644,6 +668,51 @@ impl Stores {
             elapsed.as_secs()
         );
         Ok(count)
+    }
+
+    pub fn validate_ens_username_proof(
+        &self,
+        fid: u64,
+        proof: &proto::UserNameProof,
+        resolved_ens_address: &Vec<u8>,
+    ) -> Result<(), HubError> {
+        if *resolved_ens_address != proof.owner {
+            return Err(HubError::validation_failure(
+                "invalid ens name, resolved address doesn't match proof owner address",
+            ));
+        }
+
+        let id_register = self
+            .onchain_event_store
+            .get_id_register_event_by_fid(fid, None)
+            .map_err(|_| HubError::internal_db_error("Could not fetch id registration"))?;
+
+        match id_register {
+            None => return Err(HubError::validation_failure("missing fid registration")),
+            Some(id_register) => {
+                match id_register.body {
+                    Some(proto::on_chain_event::Body::IdRegisterEventBody(id_register)) => {
+                        // Check verified addresses if the resolved address doesn't match the custody address
+                        if id_register.to != *resolved_ens_address {
+                            let verification = VerificationStore::get_verification_add(
+                                &self.verification_store,
+                                fid,
+                                &resolved_ens_address,
+                                None,
+                            )?;
+
+                            match verification {
+                                None => Err(HubError::validation_failure("invalid ens proof, no matching custody address or verified addresses")),
+                                Some(_) => Ok(()),
+                            }
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    _ => return Err(HubError::validation_failure("missing fid registration")),
+                }
+            }
+        }
     }
 }
 

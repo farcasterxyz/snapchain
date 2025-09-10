@@ -200,6 +200,19 @@ impl proto::ValidatorMessage {
                 block_event.block_timestamp(),
                 block_event.seqnum().to_string(),
             )
+        } else if let Some(revalidate_message) = &self.revalidate_message {
+            MempoolKey::new(
+                MempoolMessageKind::ValidatorMessage,
+                revalidate_message
+                    .message
+                    .as_ref()
+                    .unwrap()
+                    .data
+                    .as_ref()
+                    .map(|data| data.timestamp)
+                    .unwrap_or(0) as u64,
+                hex::encode(revalidate_message.message.as_ref().unwrap().hash.clone()),
+            )
         } else {
             MempoolKey::new(
                 MempoolMessageKind::ValidatorMessage,
@@ -236,6 +249,7 @@ impl MempoolMessage {
                     on_chain_event: Some(event.clone()),
                     fname_transfer: None,
                     block_event: None,
+                    revalidate_message: None,
                 };
                 validator_message.mempool_key()
             }
@@ -244,6 +258,7 @@ impl MempoolMessage {
                     on_chain_event: None,
                     fname_transfer: Some(fname.clone()),
                     block_event: None,
+                    revalidate_message: None,
                 };
                 validator_message.mempool_key()
             }
@@ -255,6 +270,16 @@ impl MempoolMessage {
                     on_chain_event: None,
                     fname_transfer: None,
                     block_event: Some(block_event.clone()),
+                    revalidate_message: None,
+                };
+                validator_message.mempool_key()
+            }
+            MempoolMessage::RevalidateMessage(revalidate_message) => {
+                let validator_message = proto::ValidatorMessage {
+                    on_chain_event: None,
+                    fname_transfer: None,
+                    block_event: None,
+                    revalidate_message: Some(revalidate_message.clone()),
                 };
                 validator_message.mempool_key()
             }
@@ -335,6 +360,7 @@ impl ReadNodeMempool {
                     }
                 },
                 MempoolMessage::OnchainEvent(_)
+                | MempoolMessage::RevalidateMessage(_)
                 | MempoolMessage::FnameTransfer(_)
                 | MempoolMessage::BlockEvent { .. } => {
                     // Don't do duplicate checks for validator messages. They are infrequent, and engine can handle duplicates.
@@ -461,6 +487,7 @@ impl Mempool {
                 }
             }
             MempoolMessage::OnchainEvent(_)
+            | MempoolMessage::RevalidateMessage(_)
             | MempoolMessage::FnameTransfer(_)
             | MempoolMessage::BlockEvent { .. } => false,
         }

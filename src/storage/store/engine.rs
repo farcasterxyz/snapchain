@@ -8,7 +8,8 @@ use crate::proto::message_data::Body;
 use crate::proto::BlockEvent;
 use crate::proto::{
     self, hub_event, FarcasterNetwork, HubEvent, HubEventType, MessageType, OnChainEvent,
-    OnChainEventType, Protocol, ShardChunk, Transaction, UserDataType, UserNameProof,
+    OnChainEventType, Protocol, RevalidateMessage, ShardChunk, Transaction, UserDataType,
+    UserNameProof,
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
@@ -606,6 +607,35 @@ impl ShardEngine {
         })
     }
 
+    fn revalidate_user_message(
+        &mut self,
+        revalidate_message: &RevalidateMessage,
+        timestamp: &FarcasterTime,
+        version: EngineVersion,
+        txn_batch: &RocksDbTransactionBatch,
+    ) -> bool {
+        let message = revalidate_message.message.as_ref().unwrap();
+        match &message.data.as_ref().unwrap().body {
+            Some(Body::UsernameProofBody(username_proof)) => {
+                if let Some(external_data) = &revalidate_message.external_data {
+                    if let Some(ens_resolved_address) = &external_data.ens_resolved_address {
+                        if let Err(_) = self.stores.validate_ens_username_proof(
+                            message.fid(),
+                            &username_proof,
+                            ens_resolved_address,
+                        ) {
+                            return false;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        };
+
+        self.validate_user_message(&message, timestamp, version, true, txn_batch)
+            .is_ok()
+    }
+
     pub(crate) fn replay_snapchain_txn(
         &mut self,
         trie_ctx: &merkle_trie::Context,
@@ -650,6 +680,29 @@ impl ShardEngine {
             }
         });
         for msg in sorted_system_messages {
+            if version.is_enabled(ProtocolFeature::RevalidateMessage) {
+                if let Some(revalidate_message) = &msg.revalidate_message {
+                    let is_valid = self.revalidate_user_message(
+                        &revalidate_message,
+                        timestamp,
+                        version,
+                        txn_batch,
+                    );
+
+                    if !is_valid {
+                        if let Ok(event) = self.stores.revoke_message(
+                            &revalidate_message.message.as_ref().unwrap(),
+                            txn_batch,
+                        ) {
+                            self.update_trie(trie_ctx, &event, txn_batch)?;
+                            events.push(event);
+                        }
+                    }
+
+                    system_messages_count += 1;
+                }
+            }
+
             if let Some(onchain_event) = &msg.on_chain_event {
                 if onchain_event.r#type() == OnChainEventType::EventTypeTierPurchase
                     && !version.is_enabled(ProtocolFeature::FarcasterPro)
@@ -854,7 +907,11 @@ impl ShardEngine {
 
         for msg in &sorted_user_messages {
             // Errors are validated based on the shard root
-            match self.validate_user_message(msg, timestamp, version, txn_batch) {
+            let is_pro_user = self
+                .stores
+                .is_pro_user(msg.fid(), timestamp)
+                .map_err(|err| HubError::internal_db_error(&err.to_string()))?;
+            match self.validate_user_message(msg, timestamp, version, is_pro_user, txn_batch) {
                 Ok(()) => {
                     let result = self.merge_message(msg, txn_batch);
                     match result {
@@ -1270,6 +1327,7 @@ impl ShardEngine {
         message: &proto::Message,
         timestamp: &FarcasterTime,
         version: EngineVersion,
+        is_pro_user: bool,
         txn_batch: &RocksDbTransactionBatch,
     ) -> Result<(), MessageValidationError> {
         let now = std::time::Instant::now();
@@ -1286,10 +1344,6 @@ impl ShardEngine {
             .as_ref()
             .ok_or(MessageValidationError::NoMessageData)?;
 
-        let is_pro_user = self
-            .stores
-            .is_pro_user(message.fid(), timestamp)
-            .map_err(|err| HubError::internal_db_error(&err.to_string()))?;
         validations::message::validate_message(
             message,
             self.network,

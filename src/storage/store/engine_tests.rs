@@ -3809,4 +3809,135 @@ mod tests {
         assert!(block_event_exists(&engine, &block_event4));
         assert_eq!(block_confirmed.max_block_event_seqnum, 4);
     }
+
+    #[tokio::test]
+    async fn test_revalidate_message_username_proof_with_valid_ens() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let signer = test_helper::default_signer();
+        let timestamp = messages_factory::farcaster_time();
+        let ens_address = test_helper::default_custody_address();
+
+        test_helper::register_user(
+            FID_FOR_TEST,
+            signer.clone(),
+            ens_address.clone(),
+            &mut engine,
+        )
+        .await;
+
+        // Create and commit a username proof message first
+        let username_proof = messages_factory::username_proof::create_username_proof(
+            FID_FOR_TEST as u64,
+            proto::UserNameType::UsernameTypeEnsL1,
+            "test.eth".to_string(),
+            ens_address.clone(),
+            "signature".to_string(),
+            timestamp as u64,
+            Some(&signer),
+        );
+
+        test_helper::commit_message(&mut engine, &username_proof).await;
+
+        // Create external data for valid ENS resolution
+        let external_data = proto::ExternalData {
+            ens_resolved_address: Some(ens_address),
+        };
+
+        // Process revalidation request with valid ENS data
+        test_helper::commit_revalidate_message(
+            &mut engine,
+            &username_proof,
+            Some(external_data),
+            test_helper::Validity::Valid,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_revalidate_message_username_proof_with_invalid_ens() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let signer = test_helper::default_signer();
+        let timestamp = messages_factory::farcaster_time();
+
+        test_helper::register_user(
+            FID_FOR_TEST,
+            signer.clone(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        // Create and commit a username proof message first
+        let username_proof = messages_factory::username_proof::create_username_proof(
+            FID_FOR_TEST as u64,
+            proto::UserNameType::UsernameTypeEnsL1,
+            "test.eth".to_string(),
+            "owner".to_string().encode_to_vec(),
+            "signature".to_string(),
+            timestamp as u64,
+            Some(&signer),
+        );
+
+        test_helper::commit_message(&mut engine, &username_proof).await;
+
+        // Create external data with invalid ENS address (different from custody address)
+        let invalid_address = vec![0u8; 20]; // Invalid/different address
+        let external_data = proto::ExternalData {
+            ens_resolved_address: Some(invalid_address),
+        };
+
+        // Process revalidation request with invalid ENS data - should mark as invalid
+        test_helper::commit_revalidate_message(
+            &mut engine,
+            &username_proof,
+            Some(external_data),
+            test_helper::Validity::Invalid,
+        )
+        .await;
+        assert!(engine
+            .get_username_proofs_by_fid(FID_FOR_TEST)
+            .unwrap()
+            .messages
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_revalidate_message_invalid_message_validation() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let signer = test_helper::default_signer();
+
+        test_helper::register_user(
+            FID_FOR_TEST,
+            signer.clone(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        // Create a message with invalid timestamp (in the future)
+        let future_timestamp = get_farcaster_time().unwrap() + 3600; // 1 hour in the future
+        let invalid_cast = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "invalid cast",
+            Some(future_timestamp as u32),
+            Some(&signer),
+        );
+
+        // These messages were allowed in the past but aren't allowed now
+        commit_message_at(&mut engine, &invalid_cast, &FarcasterTime::new(0)).await;
+
+        // Revalidation should treat the message as invalid and get rid of it
+        test_helper::commit_revalidate_message(
+            &mut engine,
+            &invalid_cast,
+            None,
+            test_helper::Validity::Invalid,
+        )
+        .await;
+        assert!(engine
+            .get_casts_by_fid(FID_FOR_TEST)
+            .unwrap()
+            .messages
+            .is_empty());
+    }
 }
