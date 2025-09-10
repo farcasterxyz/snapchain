@@ -203,7 +203,14 @@ impl proto::ValidatorMessage {
         } else if let Some(revalidate_message) = &self.revalidate_message {
             MempoolKey::new(
                 MempoolMessageKind::ValidatorMessage,
-                0, // TODO(aditi): Figure out what ot use here
+                revalidate_message
+                    .message
+                    .as_ref()
+                    .unwrap()
+                    .data
+                    .as_ref()
+                    .map(|data| data.timestamp)
+                    .unwrap_or(0) as u64,
                 hex::encode(revalidate_message.message.as_ref().unwrap().hash.clone()),
             )
         } else {
