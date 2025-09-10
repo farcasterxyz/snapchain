@@ -7,11 +7,11 @@ use crate::proto::{
     self, replication_service_client::ReplicationServiceClient, GetShardSnapshotMetadataRequest,
     GetShardTransactionsRequest, ReplicationTriePartStatus, ShardSnapshotMetadata,
 };
+use crate::storage::store::node_local_state::LocalStateStore;
 use crate::storage::{
-    constants::RootPrefix,
     db::{RocksDB, RocksDbTransactionBatch},
     store::{
-        account::{make_fid_key, StoreOptions},
+        account::StoreOptions,
         block::BlockStore,
         engine::{EngineError, ShardEngine},
         shard::ShardStore,
@@ -90,10 +90,6 @@ pub struct ReplicatorBootstrap {
 }
 
 impl ReplicatorBootstrap {
-    // Postfixes used to store progress data into the DB
-    const WORK_UNIT_POSTFIX: u8 = 1u8;
-    const FID_ACCOUNT_ROOT_POSTFIX: u8 = 2u8;
-
     pub fn new(app_config: &Config) -> Self {
         let (statsd_host, statsd_port) = match app_config.statsd.addr.split_once(':') {
             Some((host, port)) => {
@@ -126,96 +122,16 @@ impl ReplicatorBootstrap {
         format!("{}.snapshot", self.rocksdb_dir)
     }
 
-    fn make_work_unit_key(shard_id: u8, virtual_trie_shard: u8) -> Vec<u8> {
-        let mut key = Vec::with_capacity(3);
-        key.push(RootPrefix::ReplicationBootstrapStatus as u8);
-        key.push(shard_id);
-        key.push(virtual_trie_shard);
-        key.push(Self::WORK_UNIT_POSTFIX);
-        key
-    }
-
-    fn make_account_root_key(shard_id: u32, virtual_trie_shard: u8, fid: u64) -> Vec<u8> {
-        let mut key = Vec::with_capacity(3);
-        key.push(RootPrefix::ReplicationBootstrapStatus as u8);
-        key.push(shard_id as u8);
-        key.push(virtual_trie_shard);
-        key.push(Self::FID_ACCOUNT_ROOT_POSTFIX);
-        key.extend(make_fid_key(fid));
-        key
-    }
-
-    fn read_work_unit(
-        db: &RocksDB,
-        shard_id: u32,
-        virtual_trie_shard: u32,
-    ) -> Result<Option<proto::ReplicationTriePartStatus>, BootstrapError> {
-        let key = Self::make_work_unit_key(shard_id as u8, virtual_trie_shard as u8);
-        match db.get(&key) {
-            Ok(Some(bytes)) => match proto::ReplicationTriePartStatus::decode(&bytes[..]) {
-                Ok(status) => Ok(Some(status)),
-                Err(e) => Err(BootstrapError::GenericError(format!(
-                    "Failed to decode ReplicationTriePartStatus: {}",
-                    e
-                ))),
-            },
-            Ok(None) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    fn write_work_unit(
-        txn_batch: &mut RocksDbTransactionBatch,
-        status: &proto::ReplicationTriePartStatus,
-    ) {
-        let key = Self::make_work_unit_key(status.shard_id as u8, status.virtual_trie_shard as u8);
-        let bytes = status.encode_to_vec();
-
-        txn_batch.put(key, bytes)
-    }
-
-    fn write_account_root(
-        shard_id: u32,
-        virtual_trie_shard: u8,
-        fid: u64,
-        txn_batch: &mut RocksDbTransactionBatch,
-        account_root: &proto::FidAccountRootHash,
-    ) {
-        let key = Self::make_account_root_key(shard_id, virtual_trie_shard, fid);
-
-        txn_batch.put(key, account_root.encode_to_vec())
-    }
-
-    fn read_account_root(
-        shard_id: u32,
-        virtual_trie_shard: u8,
-        fid: u64,
-        txn_batch: &mut RocksDbTransactionBatch,
-        db: &RocksDB,
-    ) -> Option<proto::FidAccountRootHash> {
-        let key = Self::make_account_root_key(shard_id, virtual_trie_shard, fid);
-
-        if let Some(Some(bytes)) = txn_batch.batch.get(&key) {
-            return Some(proto::FidAccountRootHash::decode(&bytes[..]).ok()?);
-        }
-
-        match db.get(&key) {
-            Ok(Some(bytes)) => Some(proto::FidAccountRootHash::decode(&bytes[..]).ok()?),
-            Ok(None) => None,
-            Err(e) => {
-                error!("Failed to read account root: {}", e);
-                None
-            }
-        }
-    }
-
     fn get_or_gen_vts_status(
         db: &RocksDB,
         shard_id: u32,
         virtual_trie_shard: u32,
         metadata: &ShardSnapshotMetadata,
     ) -> Result<ReplicationTriePartStatus, BootstrapError> {
-        let status = Self::read_work_unit(db, shard_id, virtual_trie_shard)?;
+        let status =
+            LocalStateStore::read_work_unit(db, shard_id, virtual_trie_shard).map_err(|e| {
+                BootstrapError::DatabaseError(format!("Failed to read work unit: {:?}", e))
+            })?;
 
         // If there's no status for this shard/vts, create an empty Status
         match status {
@@ -499,7 +415,8 @@ impl ReplicatorBootstrap {
 
     /// Create a dedicated thread (per shard) to write to the Trie. This way, we can keep all the trie nodes
     /// in memory (upto the max limit, see the DB_writer thread), which allows us to save ~12 db reads per insert
-    /// speeding up the insertion of trie keys.
+    /// speeding up the insertion of trie keys. Additionally, we'll always keep the trie hashes correct, since the writes
+    /// from multiple parts of the trie are serialized.
     fn create_trie_merges_task(
         &self,
         trie_db: Arc<RocksDB>,
@@ -838,11 +755,11 @@ impl ReplicatorBootstrap {
 
             // Write the account roots to the DB, so we may check them later
             for fid_root in &messages_page.fid_account_roots {
-                Self::write_account_root(
+                LocalStateStore::write_account_root(
+                    &mut txn_batch,
                     status.shard_id,
                     status.virtual_trie_shard as u8,
                     fid_root.fid,
-                    &mut txn_batch,
                     fid_root,
                 );
             }
@@ -929,7 +846,7 @@ impl ReplicatorBootstrap {
             status.last_fid = last_fid;
             status.next_page_token = next_page_token.clone();
             status.last_response = WorkUnitResponse::Working as u32;
-            Self::write_work_unit(&mut txn_batch, &status);
+            LocalStateStore::write_work_unit(&mut txn_batch, &status);
 
             // commit via db_commit_tx
             let (response_tx, response_rx) = oneshot::channel();
@@ -942,7 +859,8 @@ impl ReplicatorBootstrap {
             // Wait for the commit to complete. The double ?? are to handle both the channel cancelled and the DB writer errors
             let db_response = response_rx.await??;
 
-            // Reload the trie after commit
+            // Reload the trie after commit, so we get the correct numbers from the DB. Note that the trie thread has it's own copy of the
+            // in memory trie, so we need to reload from the DB here to get the correct numbers
             thread_engine.get_stores().trie.reload(&db)?;
 
             // Check if shutdown signal is set, if it is, break out
@@ -966,7 +884,7 @@ impl ReplicatorBootstrap {
                 // Write to the DB that we're all done
                 status.last_response = WorkUnitResponse::Finished as u32;
                 let mut txn_batch = RocksDbTransactionBatch::new();
-                Self::write_work_unit(&mut txn_batch, &status);
+                LocalStateStore::write_work_unit(&mut txn_batch, &status);
 
                 // commit via db_commit_tx
                 let (response_tx, response_rx) = oneshot::channel();
@@ -1001,14 +919,19 @@ impl ReplicatorBootstrap {
         fids_to_check: Vec<u64>,
     ) -> Result<(), BootstrapError> {
         for fid in &fids_to_check {
-            let expected_account =
-                Self::read_account_root(shard_id, virtual_trie_shard, *fid, txn_batch, db)
-                    .ok_or_else(|| {
-                        BootstrapError::AccountRootMismatch(format!(
-                            "No account root found for fid {}. FIDs are {:?}",
-                            fid, fids_to_check
-                        ))
-                    })?;
+            let expected_account = LocalStateStore::read_account_root(
+                db,
+                shard_id,
+                virtual_trie_shard,
+                *fid,
+                txn_batch,
+            )
+            .ok_or_else(|| {
+                BootstrapError::AccountRootMismatch(format!(
+                    "No account root found for fid {}. FIDs are {:?}",
+                    fid, fids_to_check
+                ))
+            })?;
 
             // First check if the number of messages is correct
             let actual_num_messages_trie = thread_engine.get_stores().trie.get_count(
