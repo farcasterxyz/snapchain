@@ -239,7 +239,6 @@ pub async fn sign_chunk(keypair: &Keypair, mut shard_chunk: ShardChunk) -> Shard
     shard_chunk
 }
 
-#[cfg(test)]
 pub async fn commit_message(engine: &mut ShardEngine, msg: &proto::Message) -> ShardChunk {
     let state_change =
         engine.propose_state_change(1, vec![MempoolMessage::UserMessage(msg.clone())], None);
@@ -255,6 +254,40 @@ pub async fn commit_message(engine: &mut ShardEngine, msg: &proto::Message) -> S
     );
     assert!(engine.trie_key_exists(trie_ctx(), &TrieKey::for_message(msg)));
     chunk
+}
+
+pub enum Validity {
+    Valid,
+    Invalid,
+}
+
+pub async fn commit_revalidate_message(
+    engine: &mut ShardEngine,
+    message: &proto::Message,
+    external_data: Option<proto::ExternalData>,
+    validity: Validity,
+) -> ShardChunk {
+    let state_change = engine.propose_state_change(
+        engine.shard_id(),
+        vec![MempoolMessage::RevalidateMessage(
+            proto::RevalidateMessage {
+                message: Some(message.clone()),
+                external_data,
+            },
+        )],
+        None,
+    );
+
+    let shard_chunk = validate_and_commit_state_change(engine, &state_change).await;
+    let expect_trie_key_exists = match validity {
+        Validity::Invalid => false,
+        Validity::Valid => true,
+    };
+    assert_eq!(
+        engine.trie_key_exists(trie_ctx(), &TrieKey::for_message(message)),
+        expect_trie_key_exists
+    );
+    shard_chunk
 }
 
 // Note, this function does not check that the commit was successful, unlike `commit_message`.
@@ -308,7 +341,6 @@ pub async fn commit_messages(engine: &mut ShardEngine, msgs: Vec<proto::Message>
     chunk
 }
 
-#[cfg(test)]
 pub fn trie_ctx() -> &'static mut merkle_trie::Context<'static> {
     Box::leak(Box::new(merkle_trie::Context::new()))
 }
