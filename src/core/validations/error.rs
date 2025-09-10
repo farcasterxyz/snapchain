@@ -148,4 +148,8 @@ pub enum ValidationError {
     TimestampTooFarInFuture,
     #[error(transparent)]
     HubError(#[from] HubError),
+    #[error("invalid storage unit type")]
+    InvalidStorageUnitType,
+    #[error("num storage units too large")]
+    ExceededMaxStorageUnits,
 }

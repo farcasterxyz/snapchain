@@ -207,10 +207,25 @@ pub fn validate_message(
         Some(proto::message_data::Body::FrameActionBody(frame_action_body)) => {
             validate_frame_action_body(&frame_action_body)?;
         }
-        Some(proto::message_data::Body::LendStorageBody(_lend_storage_body)) => {
-            // All the validations are stateful
+        Some(proto::message_data::Body::LendStorageBody(lend_storage_body)) => {
+            validate_lend_storage_body(&lend_storage_body)?;
         }
         None => {}
+    }
+
+    Ok(())
+}
+
+fn validate_lend_storage_body(
+    lend_storage_body: &proto::LendStorageBody,
+) -> Result<(), ValidationError> {
+    if lend_storage_body.unit_type > 2 {
+        return Err(ValidationError::InvalidStorageUnitType);
+    }
+
+    // This is $1,000 worth of storage units and provides more storage than anybody would currently use.
+    if lend_storage_body.num_units > 5000 {
+        return Err(ValidationError::ExceededMaxStorageUnits);
     }
 
     Ok(())

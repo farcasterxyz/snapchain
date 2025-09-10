@@ -7,6 +7,7 @@ mod tests {
     use crate::storage::util::blake3_20;
     use crate::utils::factory::frame_action_factory::create_frame_action;
     use crate::utils::factory::messages_factory::links::create_link_compact_state;
+    use crate::utils::factory::messages_factory::storage_lend::create_storage_lend;
     use crate::utils::factory::messages_factory::user_data::create_user_data_add;
     use crate::utils::factory::signers::generate_signer;
     use crate::utils::factory::{messages_factory, time};
@@ -52,6 +53,23 @@ mod tests {
             EngineVersion::latest(),
         );
         assert!(result.is_ok());
+    }
+
+    fn assert_mutated_invalid(msg: &mut proto::Message, expected_error: ValidationError) {
+        // Recalculate hash and signature based on the new data
+        msg.hash = calculate_message_hash(&msg.data.as_ref().unwrap().encode_to_vec());
+        let signer = generate_signer();
+        msg.signer = signer.verifying_key().to_bytes().to_vec();
+        msg.signature = signer.sign(&msg.hash).to_bytes().to_vec();
+        let result = validate_message(
+            msg,
+            FarcasterNetwork::Testnet,
+            false,
+            &FarcasterTime::current(),
+            EngineVersion::latest(),
+        );
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap(), expected_error);
     }
 
     #[test]
@@ -596,5 +614,66 @@ mod tests {
         // Too long
         let long_caip19 = format!("eip155:1/erc20:0x123/{}", "a".repeat(250));
         assert!(validate_caip19_format(&long_caip19).is_err());
+    }
+
+    #[test]
+    fn test_validate_lend_storage_body() {
+        // Valid storage lend messages
+        let msg = create_storage_lend(
+            1234, // from_fid
+            5678, // to_fid
+            100,  // units
+            proto::StorageUnitType::UnitTypeLegacy,
+            None,
+            None,
+        );
+        assert_valid(&msg);
+
+        let msg = create_storage_lend(
+            1234,
+            5678,
+            5000, // max units
+            proto::StorageUnitType::UnitType2024,
+            None,
+            None,
+        );
+        assert_valid(&msg);
+
+        let msg = create_storage_lend(
+            1234,
+            5678,
+            1,
+            proto::StorageUnitType::UnitType2025,
+            None,
+            None,
+        );
+        assert_valid(&msg);
+
+        // Invalid unit type (> 2)
+        let mut msg = create_storage_lend(
+            1234,
+            5678,
+            100,
+            proto::StorageUnitType::UnitTypeLegacy,
+            None,
+            None,
+        );
+        if let Some(proto::message_data::Body::LendStorageBody(ref mut lend_storage_body)) =
+            msg.data.as_mut().unwrap().body.as_mut()
+        {
+            lend_storage_body.unit_type = 3; // Invalid unit type
+        }
+        assert_mutated_invalid(&mut msg, ValidationError::InvalidStorageUnitType);
+
+        // Exceeded max storage units (> 5000)
+        let msg = create_storage_lend(
+            1234,
+            5678,
+            5001, // exceeds max
+            proto::StorageUnitType::UnitTypeLegacy,
+            None,
+            None,
+        );
+        assert_validation_error(&msg, ValidationError::ExceededMaxStorageUnits);
     }
 }
