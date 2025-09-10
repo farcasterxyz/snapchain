@@ -680,25 +680,27 @@ impl ShardEngine {
             }
         });
         for msg in sorted_system_messages {
-            if let Some(revalidate_message) = &msg.revalidate_message {
-                let is_valid = self.revalidate_user_message(
-                    &revalidate_message,
-                    timestamp,
-                    version,
-                    txn_batch,
-                );
+            if version.is_enabled(ProtocolFeature::RevalidateMessage) {
+                if let Some(revalidate_message) = &msg.revalidate_message {
+                    let is_valid = self.revalidate_user_message(
+                        &revalidate_message,
+                        timestamp,
+                        version,
+                        txn_batch,
+                    );
 
-                if !is_valid {
-                    if let Ok(event) = self
-                        .stores
-                        .revoke_message(&revalidate_message.message.as_ref().unwrap(), txn_batch)
-                    {
-                        self.update_trie(trie_ctx, &event, txn_batch)?;
-                        events.push(event);
+                    if !is_valid {
+                        if let Ok(event) = self.stores.revoke_message(
+                            &revalidate_message.message.as_ref().unwrap(),
+                            txn_batch,
+                        ) {
+                            self.update_trie(trie_ctx, &event, txn_batch)?;
+                            events.push(event);
+                        }
                     }
-                }
 
-                system_messages_count += 1;
+                    system_messages_count += 1;
+                }
             }
 
             if let Some(onchain_event) = &msg.on_chain_event {

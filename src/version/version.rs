@@ -34,6 +34,7 @@ pub enum ProtocolFeature {
     WriteDataToShardZero,
     ReadDataFromShardZero,
     UserProfileToken,
+    RevalidateMessage,
 }
 
 pub struct VersionSchedule {
@@ -167,9 +168,9 @@ impl EngineVersion {
             ProtocolFeature::DependentMessagesInBulkSubmit => self >= &EngineVersion::V7,
             ProtocolFeature::DecoupleShardZeroBlockProduction => self >= &EngineVersion::V8,
             ProtocolFeature::WriteDataToShardZero => self >= &EngineVersion::V9,
-            ProtocolFeature::ReadDataFromShardZero | ProtocolFeature::UserProfileToken => {
-                self >= &EngineVersion::V10
-            }
+            ProtocolFeature::ReadDataFromShardZero
+            | ProtocolFeature::UserProfileToken
+            | ProtocolFeature::RevalidateMessage => self >= &EngineVersion::V10,
         }
     }
 
