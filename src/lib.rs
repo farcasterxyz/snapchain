@@ -1,3 +1,4 @@
+pub mod bootstrap;
 pub mod cfg;
 pub mod connectors;
 pub mod consensus;

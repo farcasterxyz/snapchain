@@ -36,7 +36,7 @@ pub fn setup(network: Option<FarcasterNetwork>) -> (BlockEngine, TempDir) {
     (block_engine, temp_dir)
 }
 
-fn default_block() -> Block {
+pub fn default_block() -> Block {
     Block {
         header: Some(BlockHeader {
             height: Some(Height::new(0, 1)),

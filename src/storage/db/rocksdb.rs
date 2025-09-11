@@ -1,6 +1,6 @@
 use crate::core::error::HubError;
 use crate::storage::util::increment_vec_u8;
-use rocksdb::{Options, TransactionDB, WriteOptions, DB};
+use rocksdb::{Options, TransactionDB, DB};
 use std::collections::HashMap;
 use std::fs::{self};
 use std::path::Path;
@@ -117,6 +117,15 @@ impl RocksDB {
             path: path.to_string(),
             db_options_type,
         }
+    }
+
+    pub fn open_bulk_write_shard_db(db_dir: &str, shard_id: u32) -> Arc<RocksDB> {
+        let db = RocksDB::new_with_options(
+            format!("{}/shard-{}", db_dir, shard_id).as_str(),
+            SnapchainDbOptimizationType::BulkWriteOptimized,
+        );
+        db.open().unwrap();
+        Arc::new(db)
     }
 
     pub fn open_shard_db(db_dir: &str, shard_id: u32) -> Arc<RocksDB> {
@@ -306,21 +315,7 @@ impl RocksDB {
     pub fn commit(&self, batch: RocksDbTransactionBatch) -> Result<(), RocksdbError> {
         match self.db().as_ref() {
             Some(DBProvider::Transaction(db)) => {
-                let txn = if self.db_options_type == SnapchainDbOptimizationType::BulkWriteOptimized
-                {
-                    // Create a WriteOptions object for this specific transaction.
-                    let mut write_opts = WriteOptions::default();
-
-                    // Disabling the WAL (Write Ahead Log) provides a significant performance boost
-                    // for bulk writes. If you have BulkWriteOptimized enabled, this can greatly improve
-                    // write performance, but a crash means recent data will be lost and need to be re-written.
-                    write_opts.disable_wal(true);
-
-                    // Use the custom write options to create the transaction.
-                    db.transaction_opt(&write_opts, &Default::default())
-                } else {
-                    db.transaction()
-                };
+                let txn = db.transaction();
 
                 for (key, value) in batch.batch {
                     if value.is_none() {

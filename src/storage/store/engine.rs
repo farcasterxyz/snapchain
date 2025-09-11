@@ -5,14 +5,16 @@ use crate::core::{
 };
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::message_data::Body;
+use crate::proto::shard_trie_entry_with_message::TrieMessage;
 use crate::proto::BlockEvent;
 use crate::proto::{
     self, hub_event, FarcasterNetwork, HubEvent, HubEventType, MessageType, OnChainEvent,
-    OnChainEventType, Protocol, ShardChunk, Transaction, UserDataType, UserNameProof,
+    OnChainEventType, Protocol, ShardChunk, ShardTrieEntryWithMessage, Transaction, UserDataType,
+    UserNameProof,
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
-    BlockEventStorageError, CastStore, MessagesPage, VerificationStore,
+    BlockEventStorageError, CastStore, MessagesPage, StoreOptions, VerificationStore,
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
@@ -176,13 +178,43 @@ impl ShardEngine {
         fname_signer_address: Option<alloy_primitives::Address>,
         post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
     ) -> Result<ShardEngine, HubError> {
-        let stores = Stores::new(
+        Self::new_with_opts(
+            db,
+            network,
+            trie,
+            shard_id,
+            store_limits,
+            statsd_client,
+            max_messages_per_block,
+            messages_request_tx,
+            fname_signer_address,
+            post_commit_tx,
+            StoreOptions::default(),
+        )
+        .await
+    }
+
+    pub async fn new_with_opts(
+        db: Arc<RocksDB>,
+        network: proto::FarcasterNetwork,
+        trie: merkle_trie::MerkleTrie,
+        shard_id: u32,
+        store_limits: StoreLimits,
+        statsd_client: StatsdClientWrapper,
+        max_messages_per_block: u32,
+        messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
+        fname_signer_address: Option<alloy_primitives::Address>,
+        post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
+        store_opts: StoreOptions,
+    ) -> Result<ShardEngine, HubError> {
+        let stores = Stores::new_with_opts(
             db.clone(),
             shard_id,
             trie,
             store_limits,
             network,
             statsd_client.clone(),
+            store_opts,
         );
 
         // No migrations on devnet (during tests)
@@ -537,15 +569,11 @@ impl ShardEngine {
         Ok((events, max_block_event_seqnum))
     }
 
-    // Temporarily mark this for tests, since this is used by the client, which will be added shortly.
-    #[cfg(test)]
     pub(crate) fn replay_replicator_message(
         &mut self,
         txn_batch: &mut RocksDbTransactionBatch,
-        trie_message: &crate::proto::ShardTrieEntryWithMessage,
+        trie_message: &ShardTrieEntryWithMessage,
     ) -> Result<MergedReplicatorMessage, EngineError> {
-        use crate::proto::shard_trie_entry_with_message::TrieMessage;
-
         let (hub_event, fid) = match &trie_message.trie_message {
             Some(TrieMessage::UserMessage(m)) => {
                 let event = self.merge_message(m, txn_batch)?;
@@ -604,6 +632,12 @@ impl ShardEngine {
             trie_key: inserts[0].clone(),
             hub_event,
         })
+    }
+
+    // Reset the event id generator to 0. This is used when doing replication, when we're merging in events from another node
+    // and not from blocks (so no blockheight to use)
+    pub(crate) fn reset_event_id(&mut self) {
+        self.stores.event_handler.set_current_height(0);
     }
 
     pub(crate) fn replay_snapchain_txn(
@@ -1199,65 +1233,6 @@ impl ShardEngine {
         self.stores
             .trie
             .update_for_event(ctx, &self.db, event, txn_batch)?;
-
-        let elapsed = now.elapsed();
-        self.metrics
-            .time_with_shard("update_trie_time_us", elapsed.as_micros() as u64);
-        Ok(())
-    }
-
-    /// Insert a vec of events all at once into the trie
-    #[allow(dead_code)]
-    fn update_trie_batch(
-        &mut self,
-        ctx: &merkle_trie::Context,
-        events: &Vec<proto::HubEvent>,
-        txn_batch: &mut RocksDbTransactionBatch,
-    ) -> Result<(), EngineError> {
-        let now = std::time::Instant::now();
-
-        let mut all_inserts = HashSet::new();
-        let mut all_deletes = HashSet::new();
-
-        for event in events {
-            let (inserts, deletes) = TrieKey::for_hub_event(event);
-
-            // Merge the inserts and deletes
-            for key in inserts {
-                if all_deletes.contains(&key) {
-                    all_deletes.remove(&key);
-                }
-                all_inserts.insert(key);
-            }
-
-            for key in deletes {
-                if all_inserts.contains(&key) {
-                    all_inserts.remove(&key);
-                }
-                all_deletes.insert(key);
-            }
-        }
-
-        // Batch insert and delete into the trie
-        self.stores.trie.insert(
-            ctx,
-            &self.db,
-            txn_batch,
-            all_inserts
-                .iter()
-                .map(|v| v.as_slice())
-                .collect::<Vec<&[u8]>>(),
-        )?;
-
-        self.stores.trie.delete(
-            ctx,
-            &self.db,
-            txn_batch,
-            all_deletes
-                .iter()
-                .map(|v| v.as_slice())
-                .collect::<Vec<&[u8]>>(),
-        )?;
 
         let elapsed = now.elapsed();
         self.metrics

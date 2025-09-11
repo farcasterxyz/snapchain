@@ -76,4 +76,8 @@ message ReplicationTriePartStatus {
   uint64 height = 2;
   uint32 virtual_trie_shard = 3;
   optional string next_page_token = 4;
+
+  // These fields are used by the client to store the progress in the DB
+  uint32 last_response = 5; // The WorkUnitResponse from the last pass
+  optional uint64 last_fid = 6; // The last FID processed (to continue from last pass)
 }

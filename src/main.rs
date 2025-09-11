@@ -18,7 +18,7 @@ use snapchain::proto::admin_service_server::AdminServiceServer;
 use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::proto::replication_service_server::ReplicationServiceServer;
 use snapchain::replication::{self, ReplicationServer};
-use snapchain::storage::db::snapshot::download_snapshots;
+use snapchain::storage::db::snapshot::{download_snapshots, BootstrapMethod};
 use snapchain::storage::db::RocksDB;
 use snapchain::storage::store::engine::{PostCommitMessage, Senders};
 use snapchain::storage::store::node_local_state::{self, LocalStateStore};
@@ -292,15 +292,63 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // We only use snapshots if the db directory doesn't exist or is empty.
     // If the user sets [force_load_db_from_snapshot], load the snapshot without checking directory contents.
-    if app_config.snapshot.force_load_db_from_snapshot
-        || (app_config.snapshot.load_db_from_snapshot
-            && (!fs::exists(app_config.rocksdb_dir.clone()).unwrap()
-                || is_dir_empty(&app_config.rocksdb_dir).unwrap()))
-    {
-        info!("Downloading snapshots");
+    let db_is_empty = !fs::exists(app_config.rocksdb_dir.clone()).unwrap()
+        || is_dir_empty(&app_config.rocksdb_dir).unwrap();
+
+    if db_is_empty {
+        match app_config.snapshot.bootstrap_method {
+            BootstrapMethod::Replicate => {
+                // info!("Starting node with replication bootstrap");
+                // let replicator = ReplicatorBootstrap::new(&app_config);
+
+                // match replicator
+                //     .bootstrap_using_replication("http://127.0.0.1:3383".to_string())
+                //     .await
+                // {
+                //     Ok(r) => {
+                //         // Check for the specific success response
+                //         if r == WorkUnitResponse::Finished {
+                //             info!("Replication bootstrap successful. Continuing with startup.");
+                //         } else {
+                //             error!(
+                //                 "Replication bootstrap stopped with status: {:?}. Exiting.",
+                //                 r
+                //             );
+                //             process::exit(1);
+                //         }
+                //     }
+                //     Err(e) => {
+                //         error!("Replication bootstrap failed:\n{}\nPlease clear the database directory and try again.", e);
+                //         process::exit(1);
+                //     }
+                // }
+                error!("Not yet active");
+                process::exit(1);
+            }
+            BootstrapMethod::Snapshot => {
+                if app_config.snapshot.force_load_db_from_snapshot
+                    || app_config.snapshot.load_db_from_snapshot
+                {
+                    info!("Downloading snapshots (legacy method)");
+                    let mut shard_ids = app_config.consensus.shard_ids.clone();
+                    shard_ids.push(0);
+                    // Raise if the download fails. If there's a persistent issue, disable snapshot download.
+                    download_snapshots(
+                        app_config.fc_network,
+                        &app_config.snapshot,
+                        app_config.rocksdb_dir.clone(),
+                        shard_ids,
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+        }
+    } else if app_config.snapshot.force_load_db_from_snapshot {
+        // Force snapshot load even if DB exists
+        info!("Force downloading snapshots");
         let mut shard_ids = app_config.consensus.shard_ids.clone();
         shard_ids.push(0);
-        // Raise if the download fails. If there's a persistent issue, disable snapshot download.
         download_snapshots(
             app_config.fc_network,
             &app_config.snapshot,

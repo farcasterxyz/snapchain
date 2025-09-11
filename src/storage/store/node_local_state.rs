@@ -5,10 +5,13 @@ use crate::proto::FnameState;
 use crate::proto::FullProposal;
 use crate::proto::Height;
 use crate::proto::OnChainEventState;
+use crate::proto::{FidAccountRootHash, ReplicationTriePartStatus};
 use crate::storage::constants::RootPrefix;
 use crate::storage::db::PageOptions;
 use crate::storage::db::RocksDB;
+use crate::storage::db::RocksDbTransactionBatch;
 use crate::storage::db::RocksdbError;
+use crate::storage::store::account::make_fid_key;
 use crate::storage::util::increment_vec_u8;
 use informalsystems_malachitebft_core_types::Round;
 use prost::DecodeError;
@@ -43,6 +46,12 @@ pub enum DataType {
 pub enum Chain {
     Optimism = 1,
     Base = 2,
+}
+
+#[derive(Clone, Copy)]
+pub enum BootstrapDataType {
+    WorkUnit = 1,
+    FidAccountRoot = 2,
 }
 
 impl LocalStateStore {
@@ -165,6 +174,85 @@ impl LocalStateStore {
         match self.db.get(&Self::make_fname_transfer_primary_key())? {
             Some(state) => Ok(Some(FnameState::decode(state.as_slice())?.last_fname_proof)),
             None => Ok(None),
+        }
+    }
+
+    fn make_work_unit_key(shard_id: u8, virtual_trie_shard: u8) -> Vec<u8> {
+        let mut key = Vec::with_capacity(4);
+        key.push(RootPrefix::ReplicationBootstrapStatus as u8);
+        key.push(shard_id);
+        key.push(virtual_trie_shard);
+        key.push(BootstrapDataType::WorkUnit as u8);
+        key
+    }
+
+    fn make_account_root_key(shard_id: u32, virtual_trie_shard: u8, fid: u64) -> Vec<u8> {
+        let mut key = Vec::with_capacity(4 + 8);
+        key.push(RootPrefix::ReplicationBootstrapStatus as u8);
+        key.push(shard_id as u8);
+        key.push(virtual_trie_shard);
+        key.push(BootstrapDataType::FidAccountRoot as u8);
+        key.extend(make_fid_key(fid));
+        key
+    }
+
+    pub fn read_work_unit(
+        db: &RocksDB,
+        shard_id: u32,
+        virtual_trie_shard: u32,
+    ) -> Result<Option<ReplicationTriePartStatus>, LocalStateError> {
+        let key = Self::make_work_unit_key(shard_id as u8, virtual_trie_shard as u8);
+        match db.get(&key) {
+            Ok(Some(bytes)) => match ReplicationTriePartStatus::decode(&bytes[..]) {
+                Ok(status) => Ok(Some(status)),
+                Err(e) => Err(LocalStateError::DecodeError(e)),
+            },
+            Ok(None) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn write_work_unit(
+        txn_batch: &mut RocksDbTransactionBatch,
+        status: &ReplicationTriePartStatus,
+    ) {
+        let key = Self::make_work_unit_key(status.shard_id as u8, status.virtual_trie_shard as u8);
+        let bytes = status.encode_to_vec();
+        txn_batch.put(key, bytes)
+    }
+
+    pub fn write_account_root(
+        txn_batch: &mut RocksDbTransactionBatch,
+        shard_id: u32,
+        virtual_trie_shard: u8,
+        fid: u64,
+        account_root: &FidAccountRootHash,
+    ) {
+        let key = Self::make_account_root_key(shard_id, virtual_trie_shard, fid);
+        txn_batch.put(key, account_root.encode_to_vec())
+    }
+
+    pub fn read_account_root(
+        db: &RocksDB,
+        shard_id: u32,
+        virtual_trie_shard: u8,
+        fid: u64,
+        txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Option<FidAccountRootHash> {
+        let key = Self::make_account_root_key(shard_id, virtual_trie_shard, fid);
+        if let Some(Some(bytes)) = txn_batch.batch.get(&key) {
+            return Some(FidAccountRootHash::decode(&bytes[..]).ok()?);
+        }
+        match db.get(&key) {
+            Ok(Some(bytes)) => Some(FidAccountRootHash::decode(&bytes[..]).ok()?),
+            Ok(None) => None,
+            Err(e) => {
+                error!(
+                    "Failed to read account root for fid {}. Will retry FID. Error was: {}.",
+                    fid, e
+                );
+                None
+            }
         }
     }
 }
