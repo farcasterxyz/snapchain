@@ -389,6 +389,8 @@ impl BlockEngine {
             }
         }
 
+        // TODO(aditi): We don't support pruning for any messages processed by shard 0 yet.
+
         for event in &hub_events {
             self.trie
                 .update_for_event(trie_ctx, &self.db, &event, txn_batch)?;
@@ -447,10 +449,6 @@ impl BlockEngine {
                                     )),
                                 };
                                 let event = Self::build_block_event(data);
-                                self.stores
-                                    .block_event_store
-                                    .put_block_event(&event, txn)
-                                    .unwrap();
                                 events.push(event);
                             }
                             _ => {}
@@ -475,10 +473,6 @@ impl BlockEngine {
                                     )),
                                 };
                                 let event = Self::build_block_event(data);
-                                self.stores
-                                    .block_event_store
-                                    .put_block_event(&event, txn)
-                                    .unwrap();
                                 events.push(event);
                             }
                             _ => {}
