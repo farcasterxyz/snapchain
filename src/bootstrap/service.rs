@@ -76,8 +76,8 @@ struct WorkUnit {
     current_status: proto::ReplicationTriePartStatus,
     peer_address: String,
     shutdown_signal: Arc<AtomicBool>,
-    db_commit_tx: mpsc::UnboundedSender<DbCommitRequest>,
-    trie_insert_tx: mpsc::UnboundedSender<TrieInsertRequest>,
+    db_commit_tx: mpsc::Sender<DbCommitRequest>,
+    trie_insert_tx: mpsc::Sender<TrieInsertRequest>,
 }
 
 #[derive(Clone)]
@@ -352,7 +352,7 @@ impl ReplicatorBootstrap {
         &self,
         db: Arc<RocksDB>,
         shard_id: u32,
-        mut db_commit_rx: mpsc::UnboundedReceiver<DbCommitRequest>,
+        mut db_commit_rx: mpsc::Receiver<DbCommitRequest>,
     ) -> tokio::task::JoinHandle<()> {
         // Important Note: We will write these many messages to the DB in a single "batch" (See start_shard_replication_batch)
         // The DB type we use is optimized for bulk writing, but unfortunately doesn't allow us to compact or flush the keys.
@@ -421,7 +421,7 @@ impl ReplicatorBootstrap {
         &self,
         trie_db: Arc<RocksDB>,
         shard_id: u32,
-        mut trie_insert_rx: mpsc::UnboundedReceiver<TrieInsertRequest>,
+        mut trie_insert_rx: mpsc::Receiver<TrieInsertRequest>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             debug!("Trie merges thread started for shard {}", shard_id);
@@ -469,16 +469,22 @@ impl ReplicatorBootstrap {
         metadata: ShardSnapshotMetadata,
         shutdown_signal: Arc<AtomicBool>,
     ) -> Result<WorkUnitResponse, BootstrapError> {
+        // Fetch upto these many virtual trie shards in parallel. Note that this can't be too big, as we are
+        // primarily bottlenecked by DB writing. Increasing this wont help performance much because of the backpressure
+        // from the DB writer thread.
+        let max_num_parallel_vts = 4;
+
         let db = RocksDB::open_bulk_write_shard_db(&rocksdb_dir, shard_id);
 
         // Create a channel for DB commit requests
-        let (db_commit_tx, db_commit_rx) = mpsc::unbounded_channel::<DbCommitRequest>();
+        let (db_commit_tx, db_commit_rx) = mpsc::channel::<DbCommitRequest>(max_num_parallel_vts);
 
         // Spawn the DB writer thread
         let db_writer_task = self.create_db_writer_task(db.clone(), shard_id, db_commit_rx);
 
         // Spawn a thread to handle trie merges
-        let (trie_insert_tx, trie_insert_rx) = mpsc::unbounded_channel::<TrieInsertRequest>();
+        let (trie_insert_tx, trie_insert_rx) =
+            mpsc::channel::<TrieInsertRequest>(max_num_parallel_vts);
         let trie_merges_task = self.create_trie_merges_task(db.clone(), shard_id, trie_insert_rx);
 
         // Go over each Trie's Virtual Trie Shard (vts) and sync for it.
@@ -520,11 +526,6 @@ impl ReplicatorBootstrap {
 
         // Track if there were any errors on any of the threads
         let mut errored = None;
-
-        // Fetch upto these many virtual trie shards in parallel. Note that this can't be too big, as we are
-        // primarily bottlenecked by DB writing. Increasing this wont help performance much because of the backpressure
-        // from the DB writer thread.
-        let max_num_parallel_vts = 4;
 
         loop {
             if shutdown_signal.load(Ordering::SeqCst) {
@@ -822,10 +823,13 @@ impl ReplicatorBootstrap {
 
             // Insert all the trie keys into the trie
             let (response_tx, response_rx) = oneshot::channel();
-            work_item.trie_insert_tx.send(TrieInsertRequest {
-                trie_keys,
-                response_tx,
-            })?;
+            work_item
+                .trie_insert_tx
+                .send(TrieInsertRequest {
+                    trie_keys,
+                    response_tx,
+                })
+                .await?;
             let trie_txn_batch = response_rx.await??;
 
             txn_batch.merge(trie_txn_batch);
@@ -850,11 +854,14 @@ impl ReplicatorBootstrap {
 
             // commit via db_commit_tx
             let (response_tx, response_rx) = oneshot::channel();
-            work_item.db_commit_tx.send(DbCommitRequest {
-                txn_batch,
-                num_messages,
-                response_tx,
-            })?;
+            work_item
+                .db_commit_tx
+                .send(DbCommitRequest {
+                    txn_batch,
+                    num_messages,
+                    response_tx,
+                })
+                .await?;
 
             // Wait for the commit to complete. The double ?? are to handle both the channel cancelled and the DB writer errors
             let db_response = response_rx.await??;
@@ -888,11 +895,14 @@ impl ReplicatorBootstrap {
 
                 // commit via db_commit_tx
                 let (response_tx, response_rx) = oneshot::channel();
-                work_item.db_commit_tx.send(DbCommitRequest {
-                    txn_batch,
-                    num_messages: 0,
-                    response_tx,
-                })?;
+                work_item
+                    .db_commit_tx
+                    .send(DbCommitRequest {
+                        txn_batch,
+                        num_messages: 0,
+                        response_tx,
+                    })
+                    .await?;
 
                 // Wait for the commit to complete. The double ?? are to handle both the channel cancelled and the DB writer errors
                 response_rx.await??;
