@@ -332,15 +332,19 @@ impl BlockEngine {
                 {
                     Ok(event) => {
                         hub_events.push(event);
-                        if let Some(proto::on_chain_event::Body::SignerEventBody(signer_event)) =
-                            &onchain_event.body
-                        {
-                            if signer_event.event_type == proto::SignerEventType::Remove as i32 {
-                                hub_events.extend(self.stores.revoke_messages(
-                                    onchain_event.fid,
-                                    &signer_event.key,
-                                    txn_batch,
-                                )?);
+                        if version.is_enabled(ProtocolFeature::StorageLending) {
+                            if let Some(proto::on_chain_event::Body::SignerEventBody(
+                                signer_event,
+                            )) = &onchain_event.body
+                            {
+                                if signer_event.event_type == proto::SignerEventType::Remove as i32
+                                {
+                                    hub_events.extend(self.stores.revoke_messages(
+                                        onchain_event.fid,
+                                        &signer_event.key,
+                                        txn_batch,
+                                    )?);
+                                }
                             }
                         }
                     }
