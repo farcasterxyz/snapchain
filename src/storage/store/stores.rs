@@ -489,22 +489,10 @@ impl Stores {
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<HubEvent, HubError> {
         match message.msg_type() {
-            MessageType::FrameAction | MessageType::None => {
-                Err(HubError::internal_db_error("invalid message type"))
-            }
-            MessageType::CastAdd | MessageType::CastRemove => self.cast_store.revoke(message, txn),
-            MessageType::ReactionAdd | MessageType::ReactionRemove => {
-                self.reaction_store.revoke(message, txn)
-            }
-            MessageType::LinkCompactState | MessageType::LinkAdd | MessageType::LinkRemove => {
-                self.link_store.revoke(message, txn)
-            }
-            MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => {
-                self.verification_store.revoke(message, txn)
-            }
-            MessageType::UserDataAdd => self.user_data_store.revoke(message, txn),
-            MessageType::UsernameProof => self.username_proof_store.revoke(message, txn),
             MessageType::LendStorage => self.storage_lend_store.revoke(message, txn),
+            _ => Err(HubError::invalid_internal_state(
+                "attempting to revoke invalid message",
+            )),
         }
     }
 

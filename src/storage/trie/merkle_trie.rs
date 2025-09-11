@@ -35,6 +35,7 @@ impl TrieKey {
         key.extend_from_slice(&msg.hash);
         keys.push(key);
 
+        // Storage lend messages are put into the trie in 2 places, one for the lender and one for the borrower. This produces the borrower key.
         match &msg.data.as_ref().unwrap().body {
             Some(proto::message_data::Body::LendStorageBody(lend_storage_body)) => {
                 let mut key =
