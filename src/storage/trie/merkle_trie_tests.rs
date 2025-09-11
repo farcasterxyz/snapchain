@@ -97,7 +97,7 @@ mod tests {
         assert_eq!(fid_key[1..5], (1234u32).to_be_bytes().to_vec());
 
         let message = messages_factory::casts::create_cast_add(1234, "test", None, None);
-        let message_key = TrieKey::for_message(&message);
+        let message_key = TrieKey::for_message(&message)[0].clone();
         assert_eq!(message_key[0], TrieKey::fid_shard(1234));
         assert_eq!(message_key[0..5], TrieKey::for_fid(1234));
         assert_eq!(message_key[5], message.msg_type().into_u8() << 3);
@@ -105,7 +105,7 @@ mod tests {
 
         let delete_message =
             messages_factory::casts::create_cast_remove(321456, &message.hash, None, None);
-        let delete_message_key = TrieKey::for_message(&delete_message);
+        let delete_message_key = TrieKey::for_message(&delete_message)[0].clone();
         assert_eq!(delete_message_key[0], TrieKey::fid_shard(321456));
         assert_eq!(delete_message_key[0..5], TrieKey::for_fid(321456));
         assert_eq!(

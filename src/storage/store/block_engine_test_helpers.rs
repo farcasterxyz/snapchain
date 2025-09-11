@@ -120,7 +120,9 @@ pub fn commit_message(
     }
     let block = validate_and_commit_state_change(engine, &state_change);
 
-    let in_trie = engine.trie_key_exists(&merkle_trie::Context::new(), &TrieKey::for_message(&msg));
+    let in_trie = TrieKey::for_message(&msg)
+        .iter()
+        .all(|key| engine.trie_key_exists(&merkle_trie::Context::new(), &key));
 
     let should_be_in_trie = match validity {
         Validity::Valid => true,
@@ -158,8 +160,9 @@ pub fn commit_messages(
     );
 
     for (msg, validity) in msgs {
-        let in_trie =
-            engine.trie_key_exists(&merkle_trie::Context::new(), &TrieKey::for_message(&msg));
+        let in_trie = TrieKey::for_message(&msg)
+            .iter()
+            .all(|key| engine.trie_key_exists(&merkle_trie::Context::new(), &key));
 
         let should_be_in_trie = match validity {
             Validity::Valid => true,
@@ -209,15 +212,15 @@ pub fn register_user(
     commit_event(engine, &signer_event);
 }
 
-pub fn assert_storage_lend_event(block_event: &BlockEvent, message: &proto::Message) {
+pub fn assert_merge_message_event(block_event: &BlockEvent, message: &proto::Message) {
     assert_eq!(
         block_event.data.as_ref().unwrap().r#type,
-        crate::proto::BlockEventType::LendStorage as i32
+        crate::proto::BlockEventType::MergeMessage as i32
     );
-    if let Some(crate::proto::block_event_data::Body::LendStorageEventBody(lend_event)) =
+    if let Some(crate::proto::block_event_data::Body::MergeMessageEventBody(merge_message_event)) =
         &block_event.data.as_ref().unwrap().body
     {
-        assert_eq!(lend_event.lend_storage_message.as_ref().unwrap(), message);
+        assert_eq!(merge_message_event.message.as_ref().unwrap(), message);
     } else {
         panic!("Expected LendStorageEventBody");
     }

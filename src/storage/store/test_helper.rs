@@ -253,7 +253,7 @@ pub async fn commit_message(engine: &mut ShardEngine, msg: &proto::Message) -> S
         state_change.new_state_root,
         chunk.header.as_ref().unwrap().shard_root
     );
-    assert!(engine.trie_key_exists(trie_ctx(), &TrieKey::for_message(msg)));
+    assert!(message_exists_in_trie(engine, &msg));
     chunk
 }
 
@@ -303,7 +303,7 @@ pub async fn commit_messages(engine: &mut ShardEngine, msgs: Vec<proto::Message>
         chunk.header.as_ref().unwrap().shard_root
     );
     for msg in msgs {
-        assert!(engine.trie_key_exists(trie_ctx(), &TrieKey::for_message(&msg)));
+        assert!(message_exists_in_trie(engine, &msg))
     }
     chunk
 }
@@ -315,7 +315,9 @@ pub fn trie_ctx() -> &'static mut merkle_trie::Context<'static> {
 
 #[cfg(test)]
 pub fn message_exists_in_trie(engine: &mut ShardEngine, msg: &proto::Message) -> bool {
-    engine.trie_key_exists(trie_ctx(), &TrieKey::for_message(msg))
+    TrieKey::for_message(&msg)
+        .iter()
+        .all(|key| engine.trie_key_exists(&trie_ctx(), &key))
 }
 
 #[cfg(test)]

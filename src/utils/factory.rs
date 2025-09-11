@@ -54,7 +54,7 @@ pub mod events_factory {
     use crate::{
         proto::{
             self, BlockEvent, BlockEventData, BlockEventType, HeartbeatEventBody,
-            LendStorageEventBody, StorageUnitType, TierPurchaseBody, TierType,
+            MergeMessageEventBody, StorageUnitType, TierPurchaseBody, TierType,
         },
         storage::store::account::{StorageSlot, UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP},
     };
@@ -79,16 +79,16 @@ pub mod events_factory {
         }
     }
 
-    pub fn create_storage_lend_event(message: proto::Message, seqnum: u64) -> BlockEvent {
+    pub fn create_merge_message_event(message: proto::Message, seqnum: u64) -> BlockEvent {
         let data = BlockEventData {
             seqnum,
-            r#type: BlockEventType::Heartbeat as i32,
+            r#type: BlockEventType::MergeMessage as i32,
             block_number: 0,
             event_index: 0,
             block_timestamp: 0,
-            body: Some(message::block_event_data::Body::LendStorageEventBody(
-                LendStorageEventBody {
-                    lend_storage_message: Some(message),
+            body: Some(message::block_event_data::Body::MergeMessageEventBody(
+                MergeMessageEventBody {
+                    message: Some(message),
                 },
             )),
         };

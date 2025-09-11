@@ -43,6 +43,9 @@ pub enum BlockEngineError {
 
     #[error(transparent)]
     OnchainEventError(#[from] OnchainEventStorageError),
+
+    #[error(transparent)]
+    HubError(#[from] HubError),
 }
 #[derive(Error, Debug)]
 pub enum MessageValidationError {
@@ -115,6 +118,16 @@ impl BlockStores {
                 &borrowed_storage,
             )
             .ok()
+    }
+
+    pub fn revoke_messages(
+        &self,
+        fid: u64,
+        key: &Vec<u8>,
+        txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Result<Vec<HubEvent>, HubError> {
+        self.storage_lend_store
+            .revoke_messages_by_signer(fid, key, txn_batch)
     }
 }
 
@@ -318,9 +331,18 @@ impl BlockEngine {
                     .merge_onchain_event(onchain_event.clone(), txn_batch)
                 {
                     Ok(event) => {
-                        self.trie
-                            .update_for_event(trie_ctx, &self.db, &event, txn_batch)?;
                         hub_events.push(event);
+                        if let Some(proto::on_chain_event::Body::SignerEventBody(signer_event)) =
+                            &onchain_event.body
+                        {
+                            if signer_event.event_type == proto::SignerEventType::Remove as i32 {
+                                hub_events.extend(self.stores.revoke_messages(
+                                    onchain_event.fid,
+                                    &signer_event.key,
+                                    txn_batch,
+                                )?);
+                            }
+                        }
                     }
                     Err(err) => {
                         error!("Unable to merge onchain event: {:#?}", err.to_string())
@@ -340,8 +362,6 @@ impl BlockEngine {
                     MessageType::LendStorage => {
                         if version.is_enabled(ProtocolFeature::StorageLending) {
                             if let Ok(event) = self.merge_message(message, txn_batch) {
-                                self.trie
-                                    .update_for_event(trie_ctx, &self.db, &event, txn_batch)?;
                                 match event.body.as_ref().unwrap() {
                                     proto::hub_event::Body::MergeMessageBody(
                                         merge_message_body,
@@ -367,6 +387,11 @@ impl BlockEngine {
                     );
                 }
             }
+        }
+
+        for event in &hub_events {
+            self.trie
+                .update_for_event(trie_ctx, &self.db, &event, txn_batch)?;
         }
 
         let account_root =
@@ -409,16 +434,43 @@ impl BlockEngine {
                         match message.msg_type() {
                             MessageType::LendStorage => {
                                 max_block_event_seqnum += 1;
-                                // TODO(aditi): Maybe we want a general merge message event?
                                 let data = BlockEventData {
                                     seqnum: max_block_event_seqnum,
-                                    r#type: BlockEventType::LendStorage as i32,
+                                    r#type: BlockEventType::MergeMessage as i32,
                                     block_number: height.block_number,
                                     event_index: events.len() as u64,
                                     block_timestamp: timestamp.to_u64(),
-                                    body: Some(block_event_data::Body::LendStorageEventBody(
-                                        proto::LendStorageEventBody {
-                                            lend_storage_message: Some(message),
+                                    body: Some(block_event_data::Body::MergeMessageEventBody(
+                                        proto::MergeMessageEventBody {
+                                            message: Some(message),
+                                        },
+                                    )),
+                                };
+                                let event = Self::build_block_event(data);
+                                self.stores
+                                    .block_event_store
+                                    .put_block_event(&event, txn)
+                                    .unwrap();
+                                events.push(event);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                proto::hub_event::Body::RevokeMessageBody(revoke_message_body) => {
+                    if let Some(message) = revoke_message_body.message {
+                        match message.msg_type() {
+                            MessageType::LendStorage => {
+                                max_block_event_seqnum += 1;
+                                let data = BlockEventData {
+                                    seqnum: max_block_event_seqnum,
+                                    r#type: BlockEventType::RevokeMessage as i32,
+                                    block_number: height.block_number,
+                                    event_index: events.len() as u64,
+                                    block_timestamp: timestamp.to_u64(),
+                                    body: Some(block_event_data::Body::RevokeMessageEventBody(
+                                        proto::RevokeMessageEventBody {
+                                            message: Some(message.clone()),
                                         },
                                     )),
                                 };

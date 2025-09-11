@@ -102,14 +102,19 @@ message ConsensusMessage {
 
 enum BlockEventType {
   BLOCK_EVENT_TYPE_HEARTBEAT = 0;
-  BLOCK_EVENT_TYPE_LEND_STORAGE = 1;
+  BLOCK_EVENT_TYPE_MERGE_MESSAGE = 1;
+  BLOCK_EVENT_TYPE_REVOKE_MESSAGE = 2;
 }
 
 message HeartbeatEventBody {
 }
 
-message LendStorageEventBody {
-  Message lend_storage_message = 1;
+message MergeMessageEventBody {
+  Message message = 1;
+} 
+
+message RevokeMessageEventBody {
+  Message message = 1;
 } 
 
 message BlockEventData {
@@ -120,7 +125,8 @@ message BlockEventData {
   uint64 block_timestamp = 5;
   oneof body {
     HeartbeatEventBody heartbeat_event_body = 6;
-    LendStorageEventBody lend_storage_event_body = 7;
+    MergeMessageEventBody merge_message_event_body = 7;
+    RevokeMessageEventBody revoke_message_event_body = 8;
   };
 }
 

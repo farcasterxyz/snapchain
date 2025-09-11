@@ -420,6 +420,7 @@ impl Stores {
 
         let txn_batch = &mut RocksDbTransactionBatch::new();
         let mut limits = vec![];
+        // Don't count storage lend message limits here. The limit is artificially set to u32::MAX.
         for store_type in vec![
             StoreType::Casts,
             StoreType::Links,
@@ -480,6 +481,31 @@ impl Stores {
             }],
         };
         Ok(response)
+    }
+
+    pub fn revoke_message(
+        &mut self,
+        message: &proto::Message,
+        txn: &mut RocksDbTransactionBatch,
+    ) -> Result<HubEvent, HubError> {
+        match message.msg_type() {
+            MessageType::FrameAction | MessageType::None => {
+                Err(HubError::internal_db_error("invalid message type"))
+            }
+            MessageType::CastAdd | MessageType::CastRemove => self.cast_store.revoke(message, txn),
+            MessageType::ReactionAdd | MessageType::ReactionRemove => {
+                self.reaction_store.revoke(message, txn)
+            }
+            MessageType::LinkCompactState | MessageType::LinkAdd | MessageType::LinkRemove => {
+                self.link_store.revoke(message, txn)
+            }
+            MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => {
+                self.verification_store.revoke(message, txn)
+            }
+            MessageType::UserDataAdd => self.user_data_store.revoke(message, txn),
+            MessageType::UsernameProof => self.username_proof_store.revoke(message, txn),
+            MessageType::LendStorage => self.storage_lend_store.revoke(message, txn),
+        }
     }
 
     pub fn revoke_messages(

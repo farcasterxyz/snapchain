@@ -16,13 +16,13 @@ mod tests {
     use crate::storage::store::test_helper::{
         self, assert_block_confirmed_event, block_event_exists, commit_block_events, commit_event,
         commit_event_at, commit_message_at, commit_messages, default_custody_address,
-        key_exists_in_trie, limits, EngineOptions, FID3_FOR_TEST,
+        key_exists_in_trie, limits, trie_ctx, EngineOptions, FID3_FOR_TEST,
     };
     use crate::storage::store::test_helper::{
         commit_message, message_exists_in_trie, register_user, FID2_FOR_TEST, FID_FOR_TEST,
     };
     use crate::storage::trie::merkle_trie::TrieKey;
-    use crate::utils::factory::events_factory::create_storage_lend_event;
+    use crate::utils::factory::events_factory::create_merge_message_event;
     use crate::utils::factory::signers::generate_signer;
     use crate::utils::factory::{self, events_factory, messages_factory, time, username_factory};
     use crate::version::version::{EngineVersion, ProtocolFeature};
@@ -1015,13 +1015,9 @@ mod tests {
             false
         );
         commit_message_at(&mut engine, &base_username_proof_add, before_base_support).await;
-        assert_eq!(
-            engine.trie_key_exists(
-                test_helper::trie_ctx(),
-                &TrieKey::for_message(&base_username_proof_add)
-            ),
-            false
-        );
+        assert!(!TrieKey::for_message(&base_username_proof_add)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
 
         // Works on the latest engine version
         commit_message(&mut engine, &base_username_proof_add).await;
@@ -2045,18 +2041,15 @@ mod tests {
 
         // We merged an add, a remove and a second remove which should win over the first (later timestamp)
         // In the end, the add and the intermediate remove should not exist
-        assert_eq!(
-            test_helper::key_exists_in_trie(&mut engine, &TrieKey::for_message(cast1)),
-            false
-        );
-        assert_eq!(
-            test_helper::key_exists_in_trie(&mut engine, &TrieKey::for_message(cast2)),
-            false
-        );
-        assert_eq!(
-            test_helper::key_exists_in_trie(&mut engine, &TrieKey::for_message(cast3)),
-            true
-        );
+        assert!(!TrieKey::for_message(&cast1)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
+        assert!(!TrieKey::for_message(&cast2)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
+        assert!(TrieKey::for_message(&cast3)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
 
         let messages = &engine
             .get_stores()
@@ -2769,10 +2762,9 @@ mod tests {
             Some(&signer),
         );
         commit_message(&mut engine1, &fid1_username_msg).await;
-        assert!(key_exists_in_trie(
-            &mut engine1,
-            &TrieKey::for_message(&fid1_username_msg)
-        ));
+        assert!(TrieKey::for_message(&fid1_username_msg)
+            .iter()
+            .all(|key| engine1.trie_key_exists(&trie_ctx(), &key)));
 
         let is_username_present = |engine: &ShardEngine, fid: u64| {
             let result =
@@ -2961,10 +2953,9 @@ mod tests {
             &mut engine,
             &TrieKey::for_fname(FID_FOR_TEST, fname)
         ));
-        assert!(!test_helper::key_exists_in_trie(
-            &mut engine,
-            &TrieKey::for_message(&fid_username_msg)
-        ));
+        assert!(!TrieKey::for_message(&fid_username_msg)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
 
         let original_fid_user_data = engine.get_user_data_by_fid(FID_FOR_TEST).unwrap();
         assert_eq!(original_fid_user_data.messages.len(), 0);
@@ -3441,9 +3432,9 @@ mod tests {
         );
 
         commit_message_at(&mut engine, &long_cast, &FarcasterTime::current()).await;
-        assert!(
-            !engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&long_cast)),
-        );
+        assert!(!TrieKey::for_message(&long_cast)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
 
         commit_event(&mut engine, &pro_event).await;
         assert!(engine.trie_key_exists(
@@ -3452,7 +3443,9 @@ mod tests {
         ));
 
         commit_message_at(&mut engine, &long_cast, &FarcasterTime::current()).await;
-        assert!(engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&long_cast)),);
+        assert!(TrieKey::for_message(&long_cast)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
     }
 
     #[tokio::test]
@@ -3497,9 +3490,9 @@ mod tests {
             None,
         );
         commit_message_at(&mut engine, &four_embeds, &FarcasterTime::current()).await;
-        assert!(
-            !engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&four_embeds)),
-        );
+        assert!(!TrieKey::for_message(&four_embeds)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
 
         commit_event(&mut engine, &pro_event).await;
         assert!(engine.trie_key_exists(
@@ -3508,9 +3501,9 @@ mod tests {
         ));
 
         commit_message_at(&mut engine, &four_embeds, &FarcasterTime::current()).await;
-        assert!(
-            engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&four_embeds)),
-        );
+        assert!(TrieKey::for_message(&four_embeds)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
     }
 
     #[tokio::test]
@@ -3536,7 +3529,9 @@ mod tests {
             Some(time::current_timestamp_with_offset(-1)),
         );
         commit_message_at(&mut engine, &banner, &FarcasterTime::current()).await;
-        assert!(!engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&banner)),);
+        assert!(!TrieKey::for_message(&banner)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
 
         commit_event(&mut engine, &pro_event).await;
         assert!(engine.trie_key_exists(
@@ -3545,7 +3540,9 @@ mod tests {
         ));
 
         commit_message_at(&mut engine, &banner, &FarcasterTime::current()).await;
-        assert!(engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&banner)),);
+        assert!(TrieKey::for_message(&banner)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
     }
 
     #[tokio::test]
@@ -3841,7 +3838,7 @@ mod tests {
             None,
             None,
         );
-        let storage_lend_block_event = create_storage_lend_event(lend_message, 1);
+        let storage_lend_block_event = create_merge_message_event(lend_message, 1);
         commit_block_events(&mut engine, vec![&storage_lend_block_event]).await;
 
         // Verify the borrower now has storage
@@ -3873,7 +3870,7 @@ mod tests {
             None,
             None,
         );
-        let storage_lend_block_event = create_storage_lend_event(lend_message, 2);
+        let storage_lend_block_event = create_merge_message_event(lend_message, 2);
         commit_block_events(&mut engine, vec![&storage_lend_block_event]).await;
 
         // Verify the lender's storage was returned

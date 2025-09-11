@@ -29,10 +29,23 @@ pub struct TrieKey {}
 
 impl TrieKey {
     #[inline]
-    pub fn for_message(msg: &proto::Message) -> Vec<u8> {
+    pub fn for_message(msg: &proto::Message) -> Vec<Vec<u8>> {
+        let mut keys = vec![];
         let mut key = Self::for_message_type(msg.fid(), msg.msg_type().into_u8());
         key.extend_from_slice(&msg.hash);
-        key
+        keys.push(key);
+
+        match &msg.data.as_ref().unwrap().body {
+            Some(proto::message_data::Body::LendStorageBody(lend_storage_body)) => {
+                let mut key =
+                    Self::for_message_type(lend_storage_body.to_fid, msg.msg_type().into_u8());
+                key.extend_from_slice(&msg.hash);
+                keys.push(key);
+            }
+            _ => {}
+        }
+
+        keys
     }
 
     #[inline]
@@ -128,10 +141,10 @@ impl TrieKey {
         match &event.body {
             Some(proto::hub_event::Body::MergeMessageBody(merge)) => {
                 if let Some(msg) = &merge.message {
-                    inserts.push(TrieKey::for_message(&msg));
+                    inserts.extend(TrieKey::for_message(&msg));
                 }
                 for deleted_message in &merge.deleted_messages {
-                    deletes.push(TrieKey::for_message(&deleted_message));
+                    deletes.extend(TrieKey::for_message(&deleted_message));
                 }
             }
             Some(proto::hub_event::Body::MergeOnChainEventBody(merge)) => {
@@ -141,21 +154,21 @@ impl TrieKey {
             }
             Some(proto::hub_event::Body::PruneMessageBody(prune)) => {
                 if let Some(msg) = &prune.message {
-                    deletes.push(TrieKey::for_message(&msg));
+                    deletes.extend(TrieKey::for_message(&msg));
                 }
             }
 
             Some(proto::hub_event::Body::RevokeMessageBody(revoke)) => {
                 if let Some(msg) = &revoke.message {
-                    deletes.push(TrieKey::for_message(&msg));
+                    deletes.extend(TrieKey::for_message(&msg));
                 }
             }
             Some(proto::hub_event::Body::MergeUsernameProofBody(merge)) => {
                 if let Some(msg) = &merge.username_proof_message {
-                    inserts.push(TrieKey::for_message(&msg));
+                    inserts.extend(TrieKey::for_message(&msg));
                 }
                 if let Some(msg) = &merge.deleted_username_proof_message {
-                    deletes.push(TrieKey::for_message(&msg));
+                    deletes.extend(TrieKey::for_message(&msg));
                 }
                 if let Some(proof) = &merge.username_proof {
                     if proof.r#type == proto::UserNameType::UsernameTypeFname as i32

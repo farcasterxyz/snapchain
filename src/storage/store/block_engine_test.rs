@@ -279,7 +279,7 @@ mod tests {
 
         // Should generate one block event for the storage lend
         assert_eq!(block.events.len(), 1);
-        assert_storage_lend_event(&block.events[0], &lend_message);
+        assert_merge_message_event(&block.events[0], &lend_message);
         assert_storage_balance(
             &block_engine,
             FID_FOR_TEST,
@@ -346,8 +346,8 @@ mod tests {
         // The other two should fail during merge due to insufficient storage
         assert_eq!(block.events.len(), 2);
         assert_eq!(block.events[1].seqnum(), block.events[0].seqnum() + 1);
-        assert_storage_lend_event(&block.events[0], &lend_message1);
-        assert_storage_lend_event(&block.events[1], &lend_message2);
+        assert_merge_message_event(&block.events[0], &lend_message1);
+        assert_merge_message_event(&block.events[1], &lend_message2);
         assert_storage_balance(
             &block_engine,
             FID_FOR_TEST,
@@ -406,7 +406,7 @@ mod tests {
             None,
         );
         let block = commit_message(&mut block_engine, &lend_message1, Validity::Valid);
-        assert_storage_lend_event(&block.events[0], &lend_message1);
+        assert_merge_message_event(&block.events[0], &lend_message1);
         assert_storage_balance(
             &block_engine,
             FID_FOR_TEST + 1,
@@ -461,7 +461,7 @@ mod tests {
         );
         let block1 = commit_message(&mut block_engine, &lend_message1, Validity::Valid);
         assert_eq!(block1.events.len(), 1);
-        assert_storage_lend_event(&block1.events[0], &lend_message1);
+        assert_merge_message_event(&block1.events[0], &lend_message1);
 
         // Verify initial balances after lending
         assert_storage_balance(
@@ -487,7 +487,7 @@ mod tests {
             None,
         );
         let block2 = commit_message(&mut block_engine, &lend_message2, Validity::Valid);
-        assert_storage_lend_event(&block2.events[0], &lend_message2);
+        assert_merge_message_event(&block2.events[0], &lend_message2);
 
         // Verify balances after taking back storage
         assert_storage_balance(

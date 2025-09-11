@@ -822,37 +822,54 @@ impl ShardEngine {
 
                     if version.is_enabled(ProtocolFeature::StorageLending) {
                         // Process storage lend messages from block events
-                        if let Some(block_event_data) = &block_event.data {
-                            if let Some(proto::block_event_data::Body::LendStorageEventBody(
-                                lend_storage_event,
-                            )) = &block_event_data.body
-                            {
-                                if let Some(lend_storage_message) =
-                                    &lend_storage_event.lend_storage_message
-                                {
-                                    match self
-                                        .stores
-                                        .storage_lend_store
-                                        .merge(lend_storage_message, txn_batch)
-                                    {
+                        match &block_event.data.as_ref().unwrap().body {
+                            Some(proto::block_event_data::Body::MergeMessageEventBody(
+                                merge_message_event,
+                            )) => {
+                                if let Some(message) = &merge_message_event.message {
+                                    match self.merge_message(&message, txn_batch) {
                                         Ok(hub_event) => {
                                             merged_messages_count += 1;
                                             self.update_trie(trie_ctx, &hub_event, txn_batch)?;
                                             events.push(hub_event);
-                                            message_types.insert(lend_storage_message.msg_type());
+                                            message_types.insert(message.msg_type());
                                         }
                                         Err(err) => {
                                             if source != ProposalSource::Simulate {
                                                 warn!(
-                                                seqnum = block_event.seqnum(),
-                                                "Error merging storage lend from block event: {}",
-                                                err.to_string()
-                                            );
+                                                    seqnum = block_event.seqnum(),
+                                                    "Error merging message from block event: {}",
+                                                    err.to_string()
+                                                );
                                             }
                                         }
                                     }
                                 }
                             }
+                            Some(proto::block_event_data::Body::RevokeMessageEventBody(
+                                revoke_message_event,
+                            )) => {
+                                if let Some(message) = &revoke_message_event.message {
+                                    match self.stores.revoke_message(&message, txn_batch) {
+                                        Ok(hub_event) => {
+                                            revoked_messages_count += 1;
+                                            self.update_trie(trie_ctx, &hub_event, txn_batch)?;
+                                            events.push(hub_event);
+                                            message_types.insert(message.msg_type());
+                                        }
+                                        Err(err) => {
+                                            if source != ProposalSource::Simulate {
+                                                warn!(
+                                                    seqnum = block_event.seqnum(),
+                                                    "Error revoking message from block event: {}",
+                                                    err.to_string()
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
 
                         last_block_event_seqnum += 1;
@@ -1182,8 +1199,12 @@ impl ShardEngine {
                 let result = store.merge(msg, txn_batch);
                 result.map_err(|e| MessageValidationError::StoreError(e))
             }
+            MessageType::LendStorage => {
+                let store = &self.stores.storage_lend_store;
+                let result = store.merge(msg, txn_batch);
+                result.map_err(|e| MessageValidationError::StoreError(e))
+            }
             unhandled_type => {
-                // Return a validation error if a storage lend gets routed to the shard engine directly
                 return Err(MessageValidationError::InvalidMessageType(
                     unhandled_type as i32,
                 ));
