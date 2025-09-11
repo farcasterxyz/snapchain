@@ -29,41 +29,49 @@ pub fn onchain_events_migration_job(
             info!("Starting onchain events migration");
 
             let shard_id = shard_stores.shard_id;
+            let mut batches_finished = 0;
+            loop {
+                let page_token = local_state_store
+                    .get_onchain_events_migration_page_token(shard_id)
+                    .unwrap_or_else(|e| {
+                        error!(
+                            "Error getting migration page token for shard {}: {}",
+                            shard_id, e
+                        );
+                        None
+                    });
 
-            let page_token = local_state_store
-                .get_onchain_events_migration_page_token(shard_id)
-                .unwrap_or_else(|e| {
-                    error!(
-                        "Error getting migration page token for shard {}: {}",
-                        shard_id, e
-                    );
-                    None
-                });
+                info!("Processing onchain events from shard {}", shard_id);
 
-            info!("Processing onchain events from shard {}", shard_id);
+                match migrate_shard_onchain_events_batch(
+                    &shard_stores,
+                    &block_stores,
+                    &mempool_tx,
+                    &local_state_store,
+                    shard_id,
+                    page_token,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        batches_finished += 1;
+                        if batches_finished % 100 == 0 {
+                            info!(
+                                shard_id,
+                                "Finished migrating {} batches of onchain events", batches_finished
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!(shard_id, "Error migrating onchain events: {}", e);
+                        return;
+                    }
+                }
 
-            match migrate_shard_onchain_events(
-                &shard_stores,
-                &block_stores,
-                &mempool_tx,
-                &local_state_store,
-                shard_id,
-                page_token,
-            )
-            .await
-            {
-                Ok(_) => {}
-                Err(e) => {
-                    error!(
-                        "Error migrating onchain events from shard {}: {}",
-                        shard_id, e
-                    );
+                if let Err(err) = wait_for_mempool_to_clear(&mempool_tx).await {
+                    error!("Error polling mempool for size {}", err);
                     return;
                 }
-            }
-
-            if let Err(err) = wait_for_mempool_to_clear(&mempool_tx).await {
-                error!("Error polling mempool for size {}", err)
             }
         })
     })
@@ -88,7 +96,7 @@ async fn wait_for_mempool_to_clear(
     }
 }
 
-async fn migrate_shard_onchain_events(
+async fn migrate_shard_onchain_events_batch(
     source_shard_store: &Stores,
     block_stores: &BlockStores,
     mempool_tx: &mpsc::Sender<MempoolRequest>,
@@ -135,12 +143,6 @@ async fn migrate_shard_onchain_events(
             shard_id = source_shard_store.shard_id,
             "Finished onchain events migration for shard",
         );
-    } else {
-        info!(
-            batch_size = events_page.onchain_events.len(),
-            shard_id = source_shard_store.shard_id,
-            shard_id = "Migrated onchain event batch to shard"
-        )
     }
 
     // Update the page token after processing this batch
