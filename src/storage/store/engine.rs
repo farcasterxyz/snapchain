@@ -570,7 +570,7 @@ impl ShardEngine {
     }
 
     pub(crate) fn replay_replicator_message(
-        &mut self,
+        &self,
         txn_batch: &mut RocksDbTransactionBatch,
         trie_message: &ShardTrieEntryWithMessage,
     ) -> Result<MergedReplicatorMessage, EngineError> {
@@ -636,7 +636,7 @@ impl ShardEngine {
 
     // Reset the event id generator to 0. This is used when doing replication, when we're merging in events from another node
     // and not from blocks (so no blockheight to use)
-    pub(crate) fn reset_event_id(&mut self) {
+    pub(crate) fn reset_event_id(&self) {
         self.stores.event_handler.set_current_height(0);
     }
 
@@ -1102,7 +1102,7 @@ impl ShardEngine {
     }
 
     fn merge_message(
-        &mut self,
+        &self,
         msg: &proto::Message,
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<proto::HubEvent, MessageValidationError> {
