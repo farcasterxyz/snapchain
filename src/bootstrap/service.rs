@@ -7,7 +7,8 @@ use crate::proto::shard_trie_entry_with_message::TrieMessage;
 use crate::proto::{self, ReplicationTriePartStatus, ShardSnapshotMetadata};
 use crate::storage::store::node_local_state::LocalStateStore;
 use crate::storage::{
-    db::{RocksDB, RocksDbTransactionBatch},
+    constants::RootPrefix,
+    db::{PageOptions, RocksDB, RocksDbTransactionBatch},
     store::{
         account::StoreOptions,
         block::BlockStore,
@@ -16,6 +17,7 @@ use crate::storage::{
         stores::StoreLimits,
     },
     trie::merkle_trie::{self, TrieKey},
+    util::increment_vec_u8,
 };
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -359,6 +361,9 @@ impl ReplicatorBootstrap {
                     self.verify_shard_roots(rocksdb_dir, shard_id, metadata)
                         .await?;
 
+                    // Clean up the work unit statuses and the account root hashes that were stored in the DB
+                    self.cleanup_db(rocksdb_dir, shard_id).await?;
+
                     return Ok(result);
                 }
                 WorkUnitResponse::Working | WorkUnitResponse::None => {
@@ -367,6 +372,44 @@ impl ReplicatorBootstrap {
                 }
             }
         }
+    }
+
+    /// Clean up the work unit statuses and account root hashes stored in the DB for a shard
+    async fn cleanup_db(&self, rocksdb_dir: &str, shard_id: u32) -> Result<(), BootstrapError> {
+        info!("Cleaning up bootstrap data for shard {}", shard_id);
+
+        let db = RocksDB::open_bulk_write_shard_db(rocksdb_dir, shard_id);
+
+        // Create the prefix for all bootstrap data for this shard
+        let start_prefix = vec![RootPrefix::ReplicationBootstrapStatus as u8, shard_id as u8];
+        let stop_prefix = increment_vec_u8(&start_prefix);
+
+        // Delete all keys with this prefix
+        let mut deleted_count = 0u64;
+        db.for_each_iterator_by_prefix(
+            Some(start_prefix),
+            Some(stop_prefix),
+            &PageOptions::default(),
+            |key, _value| {
+                db.del(key)?;
+                deleted_count += 1;
+                return Ok(false); // continue
+            },
+        )
+        .map_err(|e| {
+            BootstrapError::DatabaseError(format!(
+                "Failed to clean up bootstrap data for shard {}: {:?}",
+                shard_id, e
+            ))
+        })?;
+
+        db.close();
+
+        info!(
+            "Successfully cleaned up bootstrap data for shard {}, deleting {} keys",
+            shard_id, deleted_count
+        );
+        Ok(())
     }
 
     /// Create a dedicated thread to write transactions into the DB. The RocksDB we use is multi threaded,

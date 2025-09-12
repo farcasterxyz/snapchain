@@ -17,7 +17,7 @@ use tracing::{info, warn};
 #[derive(Debug)]
 struct Peer {
     client: ReplicationServiceClient<Channel>,
-    stats: PeerStats,
+    stats: Mutex<PeerStats>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -30,9 +30,10 @@ struct PeerStats {
 // This manager handles peer selection, connection, and affinity.
 pub(crate) struct PeerManager {
     // We use the address as a key and store the Peer in an Arc for shared ownership.
-    peers: HashMap<String, Arc<Mutex<Peer>>>,
+    peers: HashMap<String, Arc<Peer>>,
     pub peer_addresses: Vec<String>,
-    // Affinity stores the prefered peer to use for each vts.
+    // Affinity stores the prefered peer to use for each vts. We want to request all the pages for a
+    // virtual trie shard (vts) from the same peer to take advantage of server-side caching.
     pub vts_peer_affinity: HashMap<u8, String>,
 }
 
@@ -46,12 +47,12 @@ impl PeerManager {
     }
 
     // This is the single entry point to get a managed peer connection.
-    async fn get_peer_for_vts(&mut self, vts: u8) -> Result<Arc<Mutex<Peer>>, BootstrapError> {
+    async fn get_peer_for_vts(&mut self, vts: u8) -> Result<Arc<Peer>, BootstrapError> {
         // Check if we already have an established affinity for this vts.
         if let Some(peer_address) = self.vts_peer_affinity.get(&vts) {
             // If so, return the existing peer connection.
             if let Some(peer) = self.peers.get(peer_address) {
-                return Ok(Arc::clone(peer));
+                return Ok(peer.clone());
             }
         }
 
@@ -63,18 +64,17 @@ impl PeerManager {
         if let Some(peer) = self.peers.get(&peer_address) {
             // Establish affinity for next time.
             self.vts_peer_affinity.insert(vts, peer_address);
-            return Ok(Arc::clone(peer));
+            return Ok(peer.clone());
         }
 
         //  If it's a new peer, connect and store it
         let client = ReplicationServiceClient::connect(peer_address.clone()).await?;
-        let new_peer = Arc::new(Mutex::new(Peer {
+        let new_peer = Arc::new(Peer {
             client,
-            stats: PeerStats::default(),
-        }));
+            stats: Mutex::new(PeerStats::default()),
+        });
 
-        self.peers
-            .insert(peer_address.clone(), Arc::clone(&new_peer));
+        self.peers.insert(peer_address.clone(), new_peer.clone());
         self.vts_peer_affinity.insert(vts, peer_address);
 
         Ok(new_peer)
@@ -179,7 +179,7 @@ impl RpcClientsManager {
 
     // This function takes a shared reference to the peer and locks it internally.
     async fn call_get_shard_transactions_with_retry(
-        peer: Arc<Mutex<Peer>>,
+        peer: Arc<Peer>,
         request: proto::GetShardTransactionsRequest,
     ) -> Result<GetShardTransactionsResponse, tonic::Status> {
         let start = Instant::now();
@@ -188,24 +188,22 @@ impl RpcClientsManager {
         for _attempt in 1..=3 {
             let req = tonic::Request::new(request.clone());
             // Clone the client from within the peer. This is a cheap operation.
-            let mut client = {
-                let p = peer.lock().await;
-                p.client.clone()
-            };
+            let mut client = peer.client.clone();
 
-            match client.get_shard_transactions(req).await {
+            let response = client.get_shard_transactions(req).await;
+
+            // Lock the peer to update stats.
+            let mut s = peer.stats.lock().await;
+            match response {
                 Ok(response) => {
                     let latency = start.elapsed();
-                    // Lock the peer only to update stats.
-                    let mut p = peer.lock().await;
-                    p.stats.calls += 1;
-                    p.stats.total_latency += latency;
+
+                    s.calls += 1;
+                    s.total_latency += latency;
                     return Ok(response.into_inner());
                 }
                 Err(e) => {
-                    // Lock the peer only to update stats.
-                    let mut p = peer.lock().await;
-                    p.stats.errors += 1;
+                    s.errors += 1;
                     last_error = Some(e);
                     sleep(Duration::from_secs(1)).await;
                 }
@@ -218,13 +216,13 @@ impl RpcClientsManager {
     async fn handle_response_and_spawn_next(
         &self,
         vts: u8,
-        response: GetShardTransactionsResponse,
+        next_page_token: Option<String>,
     ) -> Result<(), BootstrapError> {
-        // treat empty string as "no token"
-        if let Some(next_page_token) = response.next_page_token.filter(|s| !s.is_empty()) {
+        // treat empty string as None (no token)
+        if let Some(next_page_token) = next_page_token.filter(|s| !s.is_empty()) {
             let (sender, receiver) = oneshot::channel();
 
-            // insert the receiver into the cache while holding the lock (fast)
+            // insert the receiver into the cache while holding the lock
             {
                 let mut data = self.inner.lock().await;
                 data.vts_next_page_cache
@@ -232,10 +230,10 @@ impl RpcClientsManager {
             }
 
             // capture what we need for the spawned task
-            let inner = Arc::clone(&self.inner);
+            let inner = self.inner.clone();
             let shard_id = self.shard_id;
             let height = self.height;
-            let token_for_request = next_page_token.clone();
+            let next_page_token = next_page_token.clone();
 
             // spawn the background prefetch — do peer resolution and network calls inside the task
             tokio::spawn(async move {
@@ -253,7 +251,7 @@ impl RpcClientsManager {
                                 shard_id,
                                 height,
                                 trie_virtual_shard: vts as u32,
-                                page_token: Some(token_for_request),
+                                page_token: Some(next_page_token),
                             },
                         )
                         .await;
@@ -270,10 +268,10 @@ impl RpcClientsManager {
     }
 
     async fn get_shard_metadata(
-        peer: String,
+        peer_address: String,
         shard_id: u32,
     ) -> Result<GetShardSnapshotMetadataResponse, BootstrapError> {
-        let mut client = ReplicationServiceClient::connect(peer).await?;
+        let mut client = ReplicationServiceClient::connect(peer_address).await?;
 
         let response = client
             .get_shard_snapshot_metadata(tonic::Request::new(
@@ -294,7 +292,7 @@ impl RpcClientsManager {
             .and_then(|s| if s.is_empty() { None } else { Some(s) });
         let page_key = (vts, normalized_key);
 
-        // --- 1. Check Cache ---
+        //  Check Cache
         let receiver = {
             let mut data = self.inner.lock().await;
             data.vts_next_page_cache.remove(&page_key)
@@ -304,12 +302,12 @@ impl RpcClientsManager {
             // Await the pre-fetched result.
             let response = receiver.await??;
             // Handle spawning the *next* pre-fetch.
-            self.handle_response_and_spawn_next(vts, response.clone())
+            self.handle_response_and_spawn_next(vts, response.next_page_token.clone())
                 .await?;
             return Ok(response);
         }
 
-        // --- 2. Cache Miss: Make a new request ---
+        //  Cache miss, Make a new request
         let peer = {
             let mut data = self.inner.lock().await;
             data.peer_manager.get_peer_for_vts(vts).await?
@@ -325,7 +323,7 @@ impl RpcClientsManager {
         let response = Self::call_get_shard_transactions_with_retry(peer, request).await?;
 
         // Handle spawning the next pre-fetch.
-        self.handle_response_and_spawn_next(vts, response.clone())
+        self.handle_response_and_spawn_next(vts, response.next_page_token.clone())
             .await?;
 
         Ok(response)
