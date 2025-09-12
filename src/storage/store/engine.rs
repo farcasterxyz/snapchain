@@ -819,6 +819,8 @@ impl ShardEngine {
                         );
                     }
 
+                    last_block_event_seqnum += 1;
+
                     if version.is_enabled(ProtocolFeature::StorageLending) {
                         // Process storage lend messages from block events
                         match &block_event.data.as_ref().unwrap().body {
@@ -847,8 +849,6 @@ impl ShardEngine {
                             }
                             _ => {}
                         }
-
-                        last_block_event_seqnum += 1;
                     }
                 }
             }
