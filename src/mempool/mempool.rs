@@ -484,7 +484,7 @@ impl Mempool {
                     match shard_messages.pop_first() {
                         None => break,
                         Some((_, next_message)) => {
-                            let result = self.message_is_valid(&next_message);
+                            let result = self.message_is_valid(request.shard_id, &next_message);
                             if result.is_ok() {
                                 messages.push(next_message);
                             }
@@ -499,7 +499,11 @@ impl Mempool {
         }
     }
 
-    pub fn message_is_valid(&mut self, message: &MempoolMessage) -> Result<(), HubError> {
+    pub fn message_is_valid(
+        &mut self,
+        shard: u32,
+        message: &MempoolMessage,
+    ) -> Result<(), HubError> {
         // Check for block events that have already been merged
         if let MempoolMessage::BlockEvent { message, for_shard } = message {
             let stores = self.read_node_mempool.shard_stores.get(&for_shard).unwrap();
@@ -509,10 +513,6 @@ impl Mempool {
                 }
             }
         }
-        let shard = self
-            .read_node_mempool
-            .message_router
-            .route_fid(message.fid(), self.read_node_mempool.num_shards);
 
         if self.message_already_exists(shard, message) {
             return Err(HubError::duplicate("message has already been merged"));
@@ -608,7 +608,7 @@ impl Mempool {
         }
 
         // TODO(aditi): Maybe we don't need to run validations here?
-        let result = self.message_is_valid(&message);
+        let result = self.message_is_valid(shard_id, &message);
         if result.is_ok() {
             match self.messages.get_mut(&shard_id) {
                 None => {
