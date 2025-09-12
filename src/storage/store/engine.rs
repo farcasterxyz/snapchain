@@ -660,7 +660,7 @@ impl ShardEngine {
         let mut pruned_messages_count = 0;
         let mut revoked_messages_count = 0;
         let mut events = vec![];
-        let mut message_types = HashSet::new();
+        let mut message_types_to_prune = HashSet::new();
         let mut revoked_signers = HashSet::new();
 
         let mut validation_errors = vec![];
@@ -831,7 +831,7 @@ impl ShardEngine {
                                             merged_messages_count += 1;
                                             self.update_trie(trie_ctx, &hub_event, txn_batch)?;
                                             events.push(hub_event);
-                                            message_types.insert(message.msg_type());
+                                            // Don't prune storage lends here. That's handled in shard 0.
                                         }
                                         Err(err) => {
                                             if source != ProposalSource::Simulate {
@@ -927,7 +927,7 @@ impl ShardEngine {
                             self.update_trie(trie_ctx, &event, txn_batch)?;
                             events.push(event.clone());
                             user_messages_count += 1;
-                            message_types.insert(msg.msg_type());
+                            message_types_to_prune.insert(msg.msg_type());
                         }
                         Err(err) => {
                             if source != ProposalSource::Simulate {
@@ -968,7 +968,7 @@ impl ShardEngine {
             }
         }
 
-        for msg_type in message_types {
+        for msg_type in message_types_to_prune {
             let fid = snapchain_txn.fid;
             let result = self.prune_messages(fid, msg_type, txn_batch, &version);
             match result {
