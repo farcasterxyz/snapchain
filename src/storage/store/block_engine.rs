@@ -23,6 +23,7 @@ use crate::version::version::{EngineVersion, ProtocolFeature};
 use itertools::Itertools;
 use prost::Message;
 use std::sync::Arc;
+use std::u32;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{error, warn};
@@ -98,15 +99,19 @@ impl BlockStores {
         &self,
         fid: u64,
         pending_onchain_events: &Vec<OnChainEvent>,
+        count_lent_storage: bool,
         count_borrowed_storage: bool,
     ) -> Option<StorageSlot> {
-        let lent_storage =
-            StorageLendStore::get_lent_storage(&self.storage_lend_store, fid).ok()?;
+        let lent_storage = if count_lent_storage {
+            StorageLendStore::get_lent_storage(&self.storage_lend_store, fid).ok()?
+        } else {
+            StorageSlot::new(0, 0, 0, u32::MAX)
+        };
 
         let borrowed_storage = if count_borrowed_storage {
             StorageLendStore::get_borrowed_storage(&self.storage_lend_store, fid).ok()?
         } else {
-            StorageSlot::new(0, 0, 0, 0)
+            StorageSlot::new(0, 0, 0, u32::MAX)
         };
 
         self.onchain_event_store
@@ -252,8 +257,17 @@ impl BlockEngine {
             .ok_or(MessageValidationError::NoMessageData)?
         {
             crate::proto::message_data::Body::LendStorageBody(lend_storage) => {
+                let total_storage_purchased = self
+                    .stores
+                    .get_storage_slot_for_fid(message_data.fid, &vec![], false, false)
+                    .ok_or(MessageValidationError::InsufficientStorage)?;
+
+                // Restricts who can lend storage to some reasonable set of users
+                if total_storage_purchased.units_for(lend_storage.unit_type()) < 100 {
+                    return Err(MessageValidationError::InsufficientStorage);
+                }
+
                 let num_units_available = storage_slot.units_for(lend_storage.unit_type());
-                // TODO(aditi): Update this check so we also check that the user also has 100+ total storage units purchased before lending
                 if num_units_available < lend_storage.num_units as u32 {
                     return Err(MessageValidationError::InsufficientStorage);
                 }
@@ -331,7 +345,7 @@ impl BlockEngine {
         }
 
         let mut storage_slot = self
-            .storage_slot_for_transaction(snapchain_txn, false)
+            .storage_slot_for_transaction(snapchain_txn, true, false)
             .unwrap();
 
         for message in &snapchain_txn.user_messages {
@@ -480,6 +494,7 @@ impl BlockEngine {
     fn storage_slot_for_transaction(
         &self,
         snapchain_txn: &Transaction,
+        count_lent_storage: bool,
         count_borrowed_storage: bool,
     ) -> Option<StorageSlot> {
         let pending_onchain_events: Vec<OnChainEvent> = snapchain_txn
@@ -491,6 +506,7 @@ impl BlockEngine {
         self.stores.get_storage_slot_for_fid(
             snapchain_txn.fid,
             &pending_onchain_events,
+            count_lent_storage,
             count_borrowed_storage,
         )
     }
@@ -513,7 +529,7 @@ impl BlockEngine {
             .into_iter()
             .filter_map(|mut transaction| {
                 // TODO(aditi): We could share this code with the shard engine but there may be other things we want to add here. For example, it may make sense to exclude validator messages and user messages that aren't intended for shard 0 here so a bug in the mempool won't impact the protocol in a significant way.
-                let storage_slot = self.storage_slot_for_transaction(&transaction, true)?;
+                let storage_slot = self.storage_slot_for_transaction(&transaction, true, true)?;
 
                 // Drop events if storage slot is inactive
                 if !storage_slot.is_active() {

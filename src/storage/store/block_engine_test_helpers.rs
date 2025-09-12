@@ -242,7 +242,7 @@ pub fn assert_storage_balance(
     assert_eq!(
         block_engine
             .stores()
-            .get_storage_slot_for_fid(fid, &vec![], true)
+            .get_storage_slot_for_fid(fid, &vec![], true, true)
             .unwrap()
             .units_for(unit_type),
         num_units

@@ -205,7 +205,7 @@ mod tests {
         );
         let storage_slot = block_engine
             .stores()
-            .get_storage_slot_for_fid(FID_FOR_TEST, &vec![], true)
+            .get_storage_slot_for_fid(FID_FOR_TEST, &vec![], true, true)
             .unwrap();
         assert_eq!(storage_slot.units_for(StorageUnitType::UnitType2025), 1);
     }
@@ -502,5 +502,49 @@ mod tests {
             StorageUnitType::UnitType2025,
             0,
         ); // No more borrowed storage
+    }
+
+    #[tokio::test]
+    async fn test_user_with_low_total_storage_cannot_lend() {
+        let (mut block_engine, _temp_dir) = setup(None);
+
+        // Register user with only 50 units of storage (less than 100 required minimum)
+        register_user(
+            FID_FOR_TEST,
+            default_signer(),
+            default_custody_address(),
+            50, // Only 50 units - below the 100 unit minimum for lending
+            &mut block_engine,
+        );
+
+        // Attempt to create a storage lend message
+        let lend_message = messages_factory::storage_lend::create_storage_lend(
+            FID_FOR_TEST,
+            FID_FOR_TEST + 1,
+            10, // Try to lend 10 units
+            StorageUnitType::UnitType2025,
+            None,
+            None,
+        );
+
+        // The message should be invalid due to insufficient total storage
+        let block = commit_message(&mut block_engine, &lend_message, Validity::Invalid);
+
+        // No block events should be generated for failed storage lend
+        assert_eq!(block.events.len(), 0);
+
+        // Storage balances should remain unchanged
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST,
+            StorageUnitType::UnitType2025,
+            50, // Original amount
+        );
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST + 1,
+            StorageUnitType::UnitType2025,
+            0, // No borrowed storage
+        );
     }
 }
