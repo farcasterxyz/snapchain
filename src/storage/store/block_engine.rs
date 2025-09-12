@@ -237,7 +237,6 @@ impl BlockEngine {
         )?;
 
         // 1. Check that the user has a custody address
-        // If not in the temp cache, fall back to the DB
         self.stores
             .onchain_event_store
             .get_id_register_event_by_fid(message_data.fid, Some(txn_batch))
