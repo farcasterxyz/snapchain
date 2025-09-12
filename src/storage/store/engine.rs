@@ -846,29 +846,6 @@ impl ShardEngine {
                                     }
                                 }
                             }
-                            Some(proto::block_event_data::Body::RevokeMessageEventBody(
-                                revoke_message_event,
-                            )) => {
-                                if let Some(message) = &revoke_message_event.message {
-                                    match self.stores.revoke_message(&message, txn_batch) {
-                                        Ok(hub_event) => {
-                                            revoked_messages_count += 1;
-                                            self.update_trie(trie_ctx, &hub_event, txn_batch)?;
-                                            events.push(hub_event);
-                                            message_types.insert(message.msg_type());
-                                        }
-                                        Err(err) => {
-                                            if source != ProposalSource::Simulate {
-                                                warn!(
-                                                    seqnum = block_event.seqnum(),
-                                                    "Error revoking message from block event: {}",
-                                                    err.to_string()
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
                             _ => {}
                         }
 

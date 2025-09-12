@@ -41,6 +41,13 @@ pub fn setup(network: Option<FarcasterNetwork>) -> (BlockEngine, TempDir) {
     (block_engine, temp_dir)
 }
 
+#[cfg(test)]
+pub fn message_exists_in_trie(engine: &mut BlockEngine, msg: &proto::Message) -> bool {
+    TrieKey::for_message(&msg)
+        .iter()
+        .all(|key| engine.trie_key_exists(&merkle_trie::Context::new(), &key))
+}
+
 pub fn default_block() -> Block {
     Block {
         header: Some(BlockHeader {
@@ -222,7 +229,7 @@ pub fn assert_merge_message_event(block_event: &BlockEvent, message: &proto::Mes
     {
         assert_eq!(merge_message_event.message.as_ref().unwrap(), message);
     } else {
-        panic!("Expected LendStorageEventBody");
+        panic!("Expected MergeMessageEventBody");
     }
 }
 

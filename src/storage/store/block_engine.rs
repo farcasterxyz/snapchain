@@ -332,21 +332,6 @@ impl BlockEngine {
                 {
                     Ok(event) => {
                         hub_events.push(event);
-                        if version.is_enabled(ProtocolFeature::StorageLending) {
-                            if let Some(proto::on_chain_event::Body::SignerEventBody(
-                                signer_event,
-                            )) = &onchain_event.body
-                            {
-                                if signer_event.event_type == proto::SignerEventType::Remove as i32
-                                {
-                                    hub_events.extend(self.stores.revoke_messages(
-                                        onchain_event.fid,
-                                        &signer_event.key,
-                                        txn_batch,
-                                    )?);
-                                }
-                            }
-                        }
                     }
                     Err(err) => {
                         error!("Unable to merge onchain event: {:#?}", err.to_string())
@@ -449,30 +434,6 @@ impl BlockEngine {
                                     body: Some(block_event_data::Body::MergeMessageEventBody(
                                         proto::MergeMessageEventBody {
                                             message: Some(message),
-                                        },
-                                    )),
-                                };
-                                let event = Self::build_block_event(data);
-                                events.push(event);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                proto::hub_event::Body::RevokeMessageBody(revoke_message_body) => {
-                    if let Some(message) = revoke_message_body.message {
-                        match message.msg_type() {
-                            MessageType::LendStorage => {
-                                max_block_event_seqnum += 1;
-                                let data = BlockEventData {
-                                    seqnum: max_block_event_seqnum,
-                                    r#type: BlockEventType::RevokeMessage as i32,
-                                    block_number: height.block_number,
-                                    event_index: events.len() as u64,
-                                    block_timestamp: timestamp.to_u64(),
-                                    body: Some(block_event_data::Body::RevokeMessageEventBody(
-                                        proto::RevokeMessageEventBody {
-                                            message: Some(message.clone()),
                                         },
                                     )),
                                 };
