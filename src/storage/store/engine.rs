@@ -817,6 +817,8 @@ impl ShardEngine {
                             "Error merging block event: {}",
                             err.to_string()
                         );
+                    } else {
+                        last_block_event_seqnum += 1;
                     }
 
                     if version.is_enabled(ProtocolFeature::StorageLending) {
@@ -847,8 +849,6 @@ impl ShardEngine {
                             }
                             _ => {}
                         }
-
-                        last_block_event_seqnum += 1;
                     }
                 }
             }
