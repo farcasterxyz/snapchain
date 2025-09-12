@@ -41,25 +41,40 @@ pub fn onchain_events_migration_job(
                         None
                     });
 
-                info!("Processing onchain events from shard {}", shard_id);
+                info!(shard_id, "Started migrating onchain events");
 
                 match migrate_shard_onchain_events_batch(
                     &shard_stores,
                     &block_stores,
                     &mempool_tx,
-                    &local_state_store,
-                    shard_id,
                     page_token,
                 )
                 .await
                 {
-                    Ok(_) => {
-                        batches_finished += 1;
-                        if batches_finished % 100 == 0 {
-                            info!(
-                                shard_id,
-                                "Finished migrating {} batches of onchain events", batches_finished
+                    Ok(next_page_token) => {
+                        // Update the page token after processing this batch
+                        if let Err(e) = local_state_store.set_onchain_events_migration_page_token(
+                            shard_id,
+                            next_page_token.clone(),
+                        ) {
+                            error!(
+                                "Error updating migration page token for shard {}: {}",
+                                shard_id, e
                             );
+                            return;
+                        }
+                        if next_page_token.is_none() {
+                            info!(shard_id, "Finished migrating all onchain events");
+                            return;
+                        } else {
+                            batches_finished += 1;
+                            if batches_finished % 100 == 0 {
+                                info!(
+                                    shard_id,
+                                    "Finished migrating {} batches of onchain events",
+                                    batches_finished
+                                );
+                            }
                         }
                     }
                     Err(e) => {
@@ -100,10 +115,8 @@ async fn migrate_shard_onchain_events_batch(
     source_shard_store: &Stores,
     block_stores: &BlockStores,
     mempool_tx: &mpsc::Sender<MempoolRequest>,
-    local_state_store: &LocalStateStore,
-    shard_id: u32,
     page_token: Option<Vec<u8>>,
-) -> Result<(), String> {
+) -> Result<Option<Vec<u8>>, String> {
     let page_options = PageOptions {
         page_size: Some(MIGRATION_BATCH_SIZE),
         page_token,
@@ -137,23 +150,5 @@ async fn migrate_shard_onchain_events_batch(
             }
         }
     }
-
-    if events_page.next_page_token.is_none() {
-        info!(
-            shard_id = source_shard_store.shard_id,
-            "Finished onchain events migration for shard",
-        );
-    }
-
-    // Update the page token after processing this batch
-    if let Err(e) = local_state_store
-        .set_onchain_events_migration_page_token(shard_id, events_page.next_page_token)
-    {
-        return Err(format!(
-            "Error updating migration page token for shard {}: {}",
-            shard_id, e
-        ));
-    }
-
-    Ok(())
+    Ok(events_page.next_page_token)
 }
