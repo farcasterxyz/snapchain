@@ -26,10 +26,10 @@ pub fn onchain_events_migration_job(
         let shard_stores = shard_stores.clone();
 
         Box::pin(async move {
-            info!("Starting onchain events migration");
-
             let shard_id = shard_stores.shard_id;
             let mut batches_finished = 0;
+
+            info!(shard_id, "Started migrating onchain events");
             loop {
                 let page_token = local_state_store
                     .get_onchain_events_migration_page_token(shard_id)
@@ -40,8 +40,6 @@ pub fn onchain_events_migration_job(
                         );
                         None
                     });
-
-                info!(shard_id, "Started migrating onchain events");
 
                 match migrate_shard_onchain_events_batch(
                     &shard_stores,
