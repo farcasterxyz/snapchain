@@ -1,4 +1,5 @@
 pub mod error;
+pub mod replication_rpc_client;
 pub mod service;
 
 #[cfg(test)]

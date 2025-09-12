@@ -301,10 +301,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 // info!("Starting node with replication bootstrap");
                 // let replicator = ReplicatorBootstrap::new(&app_config);
 
-                // match replicator
-                //     .bootstrap_using_replication("http://127.0.0.1:3383".to_string())
-                //     .await
-                // {
+                // match replicator.bootstrap_using_replication().await {
                 //     Ok(r) => {
                 //         // Check for the specific success response
                 //         if r == WorkUnitResponse::Finished {

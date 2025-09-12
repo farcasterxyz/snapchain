@@ -54,6 +54,7 @@ pub struct Config {
     pub aws_access_key_id: String,
     pub aws_secret_access_key: String,
     pub bootstrap_method: BootstrapMethod,
+    pub replication_peers: Vec<String>,
 }
 
 impl Default for Config {
@@ -71,6 +72,7 @@ impl Default for Config {
             aws_access_key_id: "".to_string(),
             aws_secret_access_key: "".to_string(),
             bootstrap_method: BootstrapMethod::default(),
+            replication_peers: vec![],
         }
     }
 }
