@@ -376,6 +376,12 @@ impl Replicator {
                 )?
                 .messages
             }
+            proto::MessageType::LendStorage => {
+                stores
+                    .storage_lend_store
+                    .get_adds_by_fid(fid, &page_options, filter)?
+                    .messages
+            }
         };
 
         // Build a hashmap of message_hash -> message and put it in the cache

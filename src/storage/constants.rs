@@ -54,6 +54,8 @@ pub enum RootPrefix {
 
     /* Replication Bootstrap status */
     ReplicationBootstrapStatus = 21,
+
+    LendStorageByRecipient = 22,
 }
 
 /** Copied from the JS code */
@@ -68,6 +70,7 @@ pub enum UserPostfix {
     // SignerMessage = 5,
     UserDataMessage = 6,
     UsernameProofMessage = 7,
+    LendStorageMessage = 8,
 
     // Add new message types here
     // NOTE: If you add a new message type, make sure that it is only used to store Message protobufs.
@@ -104,6 +107,8 @@ pub enum UserPostfix {
 
     /* Link Compact State set */
     LinkCompactStateMessage = 100,
+
+    LendStorages = 101,
 }
 
 impl UserPostfix {

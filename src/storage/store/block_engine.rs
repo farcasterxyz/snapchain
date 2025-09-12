@@ -1,13 +1,17 @@
 use crate::consensus::proposer::ProposalSource;
+use crate::core::error::HubError;
+use crate::core::validations;
 use crate::core::{types::Height, util::FarcasterTime};
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::{
-    block_event_data, Block, BlockEvent, BlockEventData, BlockEventType, FarcasterNetwork,
-    HeartbeatEventBody, OnChainEvent, ShardChunkWitness, Transaction,
+    self, block_event_data, Block, BlockEvent, BlockEventData, BlockEventType, FarcasterNetwork,
+    HeartbeatEventBody, HubEvent, MergeMessageBody, MessageType, OnChainEvent, ShardChunkWitness,
+    Transaction,
 };
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
-    BlockEventStore, OnchainEventStorageError, OnchainEventStore, StoreEventHandler,
+    BlockEventStore, OnchainEventStorageError, OnchainEventStore, StorageLendStore,
+    StorageLendStoreDef, StorageSlot, Store, StoreEventHandler,
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
@@ -19,6 +23,7 @@ use crate::version::version::{EngineVersion, ProtocolFeature};
 use itertools::Itertools;
 use prost::Message;
 use std::sync::Arc;
+use std::u32;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{error, warn};
@@ -39,6 +44,35 @@ pub enum BlockEngineError {
 
     #[error(transparent)]
     OnchainEventError(#[from] OnchainEventStorageError),
+
+    #[error(transparent)]
+    HubError(#[from] HubError),
+}
+#[derive(Error, Debug)]
+pub enum MessageValidationError {
+    #[error("message has no data")]
+    NoMessageData,
+
+    #[error("unknown fid")]
+    MissingFid,
+
+    #[error("invalid signer")]
+    MissingSigner,
+
+    #[error("invalid message type")]
+    InvalidMessageType,
+
+    #[error("insufficient storage")]
+    InsufficientStorage,
+
+    #[error(transparent)]
+    HubError(#[from] HubError),
+
+    #[error(transparent)]
+    MessageValidationError(#[from] validations::error::ValidationError),
+
+    #[error(transparent)]
+    OnchainEventError(#[from] OnchainEventStorageError),
 }
 
 #[derive(Clone)]
@@ -46,6 +80,8 @@ pub struct BlockStores {
     pub block_store: BlockStore,
     pub block_event_store: BlockEventStore,
     pub onchain_event_store: OnchainEventStore,
+    pub storage_lend_store: Store<StorageLendStoreDef>,
+    pub network: FarcasterNetwork,
 }
 
 impl BlockStores {
@@ -57,6 +93,36 @@ impl BlockStores {
         self.block_store
             .get_block_by_height(block_event.block_number())
             .ok()?
+    }
+
+    pub fn get_storage_slot_for_fid(
+        &self,
+        fid: u64,
+        pending_onchain_events: &Vec<OnChainEvent>,
+        count_lent_storage: bool,
+        count_borrowed_storage: bool,
+    ) -> Option<StorageSlot> {
+        let lent_storage = if count_lent_storage {
+            StorageLendStore::get_lent_storage(&self.storage_lend_store, fid).ok()?
+        } else {
+            StorageSlot::new(0, 0, 0, u32::MAX)
+        };
+
+        let borrowed_storage = if count_borrowed_storage {
+            StorageLendStore::get_borrowed_storage(&self.storage_lend_store, fid).ok()?
+        } else {
+            StorageSlot::new(0, 0, 0, u32::MAX)
+        };
+
+        self.onchain_event_store
+            .get_storage_slot_for_fid(
+                fid,
+                self.network,
+                pending_onchain_events.as_slice(),
+                &lent_storage,
+                &borrowed_storage,
+            )
+            .ok()
     }
 }
 
@@ -91,11 +157,21 @@ impl BlockEngine {
         network: FarcasterNetwork,
     ) -> Self {
         trie.initialize(&db).unwrap();
+        let store_event_handler = StoreEventHandler::new();
         BlockEngine {
             stores: BlockStores {
                 block_store,
                 block_event_store: BlockEventStore { db: db.clone() },
-                onchain_event_store: OnchainEventStore::new(db.clone(), StoreEventHandler::new()),
+                onchain_event_store: OnchainEventStore::new(
+                    db.clone(),
+                    store_event_handler.clone(),
+                ),
+                storage_lend_store: StorageLendStore::new(
+                    db.clone(),
+                    store_event_handler.clone(),
+                    100,
+                ),
+                network,
             },
             trie,
             shard_id: 0,
@@ -132,12 +208,124 @@ impl BlockEngine {
             })
     }
 
+    pub fn validate_user_message(
+        &self,
+        message: &proto::Message,
+        storage_slot: &StorageSlot,
+        timestamp: &FarcasterTime,
+        version: EngineVersion,
+        txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Result<(), MessageValidationError> {
+        // Ensure message data is present
+        let message_data = message
+            .data
+            .as_ref()
+            .ok_or(MessageValidationError::NoMessageData)?;
+
+        let is_pro_user = self
+            .stores
+            .onchain_event_store
+            .is_tier_subscription_active_at(proto::TierType::Pro, message.fid(), timestamp)
+            .map_err(|err| HubError::internal_db_error(&err.to_string()))?;
+
+        validations::message::validate_message(
+            message,
+            self.network,
+            is_pro_user,
+            timestamp,
+            version,
+        )?;
+
+        // 1. Check that the user has a custody address
+        self.stores
+            .onchain_event_store
+            .get_id_register_event_by_fid(message_data.fid, Some(txn_batch))
+            .map_err(|_| MessageValidationError::MissingFid)?
+            .ok_or(MessageValidationError::MissingFid)?;
+
+        // 2. Check that the user has a valid signer
+        self.stores
+            .onchain_event_store
+            .get_active_signer(message_data.fid, message.signer.clone(), Some(txn_batch))
+            .map_err(|_| MessageValidationError::MissingSigner)?
+            .ok_or(MessageValidationError::MissingSigner)?;
+
+        match message_data
+            .body
+            .as_ref()
+            .ok_or(MessageValidationError::NoMessageData)?
+        {
+            crate::proto::message_data::Body::LendStorageBody(lend_storage) => {
+                let total_storage_purchased = self
+                    .stores
+                    .get_storage_slot_for_fid(message_data.fid, &vec![], false, false)
+                    .ok_or(MessageValidationError::InsufficientStorage)?;
+
+                // Restricts who can lend storage to some reasonable set of users
+                if total_storage_purchased.units_for(lend_storage.unit_type()) < 100 {
+                    return Err(MessageValidationError::InsufficientStorage);
+                }
+
+                let num_units_available = storage_slot.units_for(lend_storage.unit_type());
+                if num_units_available < lend_storage.num_units as u32 {
+                    return Err(MessageValidationError::InsufficientStorage);
+                }
+            }
+            _ => return Err(MessageValidationError::InvalidMessageType),
+        }
+
+        Ok(())
+    }
+
+    fn merge_message(
+        &self,
+        message: &proto::Message,
+        txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Result<proto::HubEvent, MessageValidationError> {
+        match message.msg_type() {
+            MessageType::LendStorage => {
+                Ok(self.stores.storage_lend_store.merge(message, txn_batch)?)
+            }
+            _ => return Err(MessageValidationError::InvalidMessageType),
+        }
+    }
+
+    fn on_merge_message(storage_slot: &mut StorageSlot, merge_message_body: &MergeMessageBody) {
+        if let Some(added_message) = &merge_message_body.message {
+            match added_message.data.as_ref().unwrap().body.as_ref().unwrap() {
+                proto::message_data::Body::LendStorageBody(lend_storage_body) => {
+                    storage_slot.sub(&StorageSlot::from_storage_lend(&lend_storage_body));
+                }
+                _ => {}
+            }
+        }
+
+        for deleted_message in &merge_message_body.deleted_messages {
+            match deleted_message
+                .data
+                .as_ref()
+                .unwrap()
+                .body
+                .as_ref()
+                .unwrap()
+            {
+                proto::message_data::Body::LendStorageBody(lend_storage_body) => {
+                    storage_slot.merge(&StorageSlot::from_storage_lend(&lend_storage_body));
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub(crate) fn replay_snapchain_txn(
         &mut self,
         trie_ctx: &merkle_trie::Context,
         snapchain_txn: &Transaction,
         txn_batch: &mut RocksDbTransactionBatch,
-    ) -> Result<Vec<u8>, BlockEngineError> {
+        timestamp: &FarcasterTime,
+        version: EngineVersion,
+    ) -> Result<(Vec<u8>, Vec<HubEvent>), BlockEngineError> {
+        let mut hub_events = vec![];
         for message in &snapchain_txn.system_messages {
             if let Some(ref onchain_event) = message.on_chain_event {
                 match self
@@ -145,9 +333,9 @@ impl BlockEngine {
                     .onchain_event_store
                     .merge_onchain_event(onchain_event.clone(), txn_batch)
                 {
-                    Ok(event) => self
-                        .trie
-                        .update_for_event(trie_ctx, &self.db, &event, txn_batch)?,
+                    Ok(event) => {
+                        hub_events.push(event);
+                    }
                     Err(err) => {
                         error!("Unable to merge onchain event: {:#?}", err.to_string())
                     }
@@ -155,11 +343,56 @@ impl BlockEngine {
             }
         }
 
+        let mut storage_slot = self
+            .storage_slot_for_transaction(snapchain_txn, true, false)
+            .unwrap();
+
+        for message in &snapchain_txn.user_messages {
+            match self.validate_user_message(message, &storage_slot, timestamp, version, txn_batch)
+            {
+                Ok(()) => match message.msg_type() {
+                    MessageType::LendStorage => {
+                        if version.is_enabled(ProtocolFeature::StorageLending) {
+                            if let Ok(event) = self.merge_message(message, txn_batch) {
+                                match event.body.as_ref().unwrap() {
+                                    proto::hub_event::Body::MergeMessageBody(
+                                        merge_message_body,
+                                    ) => {
+                                        Self::on_merge_message(
+                                            &mut storage_slot,
+                                            &merge_message_body,
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                                hub_events.push(event);
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                Err(err) => {
+                    warn!(
+                        fid = snapchain_txn.fid,
+                        "Error merging message {}",
+                        err.to_string()
+                    );
+                }
+            }
+        }
+
+        // TODO(aditi): We don't support pruning for any messages processed by shard 0 yet.
+
+        for event in &hub_events {
+            self.trie
+                .update_for_event(trie_ctx, &self.db, &event, txn_batch)?;
+        }
+
         let account_root =
             self.trie
                 .get_hash(&self.db, txn_batch, &TrieKey::for_fid(snapchain_txn.fid))?;
 
-        Ok(account_root)
+        Ok((account_root, hub_events))
     }
 
     fn heartbeat_block_interval(&self) -> u64 {
@@ -169,17 +402,59 @@ impl BlockEngine {
         }
     }
 
+    fn build_block_event(data: BlockEventData) -> BlockEvent {
+        let hash = blake3::hash(data.encode_to_vec().as_slice())
+            .as_bytes()
+            .to_vec();
+        BlockEvent {
+            hash,
+            data: Some(data),
+        }
+    }
+
     fn generate_block_events(
         &self,
         height: Height,
         timestamp: &FarcasterTime,
+        hub_events: Vec<HubEvent>,
         txn: &mut RocksDbTransactionBatch,
     ) -> (Vec<BlockEvent>, Vec<u8>) {
         let mut events = vec![];
+        let mut max_block_event_seqnum = self.stores.block_event_store.max_seqnum().unwrap();
+        for hub_event in hub_events {
+            match hub_event.body.unwrap() {
+                proto::hub_event::Body::MergeMessageBody(merge_message_body) => {
+                    if let Some(message) = merge_message_body.message {
+                        match message.msg_type() {
+                            MessageType::LendStorage => {
+                                max_block_event_seqnum += 1;
+                                let data = BlockEventData {
+                                    seqnum: max_block_event_seqnum,
+                                    r#type: BlockEventType::MergeMessage as i32,
+                                    block_number: height.block_number,
+                                    event_index: events.len() as u64,
+                                    block_timestamp: timestamp.to_u64(),
+                                    body: Some(block_event_data::Body::MergeMessageEventBody(
+                                        proto::MergeMessageEventBody {
+                                            message: Some(message),
+                                        },
+                                    )),
+                                };
+                                let event = Self::build_block_event(data);
+                                events.push(event);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
         if height.block_number % self.heartbeat_block_interval() == 0 {
-            let event_seqnum = self.stores.block_event_store.max_seqnum().unwrap() + 1;
+            max_block_event_seqnum += 1;
             let data = BlockEventData {
-                seqnum: event_seqnum,
+                seqnum: max_block_event_seqnum,
                 r#type: BlockEventType::Heartbeat as i32,
                 block_number: height.block_number,
                 event_index: events.len() as u64,
@@ -188,21 +463,18 @@ impl BlockEngine {
                     HeartbeatEventBody {},
                 )),
             };
-            let hash = blake3::hash(data.encode_to_vec().as_slice())
-                .as_bytes()
-                .to_vec();
-            let event = BlockEvent {
-                hash,
-                data: Some(data),
-            };
+            let event = Self::build_block_event(data);
             // Store these events so
             // (1) It's possible to figuure out the max seqnum easily
             // (2) It's possible to query over them in an rpc and see what has been produced.
+            events.push(event);
+        }
+
+        for event in events.iter() {
             self.stores
                 .block_event_store
                 .put_block_event(&event, txn)
                 .unwrap();
-            events.push(event);
         }
 
         let events_hash = if events.is_empty() {
@@ -218,12 +490,33 @@ impl BlockEngine {
         (events, events_hash)
     }
 
+    fn storage_slot_for_transaction(
+        &self,
+        snapchain_txn: &Transaction,
+        count_lent_storage: bool,
+        count_borrowed_storage: bool,
+    ) -> Option<StorageSlot> {
+        let pending_onchain_events: Vec<OnChainEvent> = snapchain_txn
+            .system_messages
+            .iter()
+            .filter_map(|vm| vm.on_chain_event.clone())
+            .collect();
+
+        self.stores.get_storage_slot_for_fid(
+            snapchain_txn.fid,
+            &pending_onchain_events,
+            count_lent_storage,
+            count_borrowed_storage,
+        )
+    }
+
     fn prepare_proposal(
         &mut self,
         txn_batch: &mut RocksDbTransactionBatch,
         messages: Vec<MempoolMessage>,
         height: Height,
         timestamp: &FarcasterTime,
+        version: EngineVersion,
     ) -> Result<BlockStateChange, BlockEngineError> {
         self.metrics.count(
             "recv_messages",
@@ -235,21 +528,7 @@ impl BlockEngine {
             .into_iter()
             .filter_map(|mut transaction| {
                 // TODO(aditi): We could share this code with the shard engine but there may be other things we want to add here. For example, it may make sense to exclude validator messages and user messages that aren't intended for shard 0 here so a bug in the mempool won't impact the protocol in a significant way.
-                let pending_onchain_events: Vec<OnChainEvent> = transaction
-                    .system_messages
-                    .iter()
-                    .filter_map(|vm| vm.on_chain_event.clone())
-                    .collect();
-
-                let storage_slot = self
-                    .stores
-                    .onchain_event_store
-                    .get_storage_slot_for_fid(
-                        transaction.fid,
-                        self.network,
-                        pending_onchain_events.as_slice(),
-                    )
-                    .ok()?;
+                let storage_slot = self.storage_slot_for_transaction(&transaction, true, true)?;
 
                 // Drop events if storage slot is inactive
                 if !storage_slot.is_active() {
@@ -264,13 +543,21 @@ impl BlockEngine {
             })
             .collect_vec();
 
+        let mut all_hub_events = vec![];
         for snapchain_txn in &mut snapchain_txns {
-            let account_root =
-                self.replay_snapchain_txn(&merkle_trie::Context::new(), &snapchain_txn, txn_batch)?;
+            let (account_root, hub_events) = self.replay_snapchain_txn(
+                &merkle_trie::Context::new(),
+                &snapchain_txn,
+                txn_batch,
+                timestamp,
+                version,
+            )?;
             snapchain_txn.account_root = account_root;
+            all_hub_events.extend_from_slice(&hub_events);
         }
 
-        let (events, events_hash) = self.generate_block_events(height, timestamp, txn_batch);
+        let (events, events_hash) =
+            self.generate_block_events(height, timestamp, all_hub_events, txn_batch);
 
         self.metrics
             .publish_transaction_counts(&snapchain_txns, ProposalSource::Propose);
@@ -300,7 +587,7 @@ impl BlockEngine {
         let version = EngineVersion::version_for(&timestamp, self.network);
         let state_change = if version.is_enabled(ProtocolFeature::WriteDataToShardZero) {
             let result = self
-                .prepare_proposal(&mut txn, messages, height, &timestamp)
+                .prepare_proposal(&mut txn, messages, height, &timestamp, version)
                 .unwrap();
 
             self.trie.reload(&self.db).unwrap();
@@ -332,6 +619,7 @@ impl BlockEngine {
         source: ProposalSource,
         height: Height,
         timestamp: &FarcasterTime,
+        version: EngineVersion,
     ) -> Result<(), BlockEngineError> {
         let now = std::time::Instant::now();
         // TODO(aditi): We probably only want to check this if we're in a test env (maybe only if the network is Devnet)
@@ -361,9 +649,15 @@ impl BlockEngine {
             },
         }
 
+        let mut all_hub_events = vec![];
         for snapchain_txn in transactions {
-            let account_root =
-                self.replay_snapchain_txn(&merkle_trie::Context::new(), snapchain_txn, txn_batch)?;
+            let (account_root, hub_events) = self.replay_snapchain_txn(
+                &merkle_trie::Context::new(),
+                snapchain_txn,
+                txn_batch,
+                timestamp,
+                version,
+            )?;
             // Reject early if account roots fail to match (shard roots will definitely fail)
             if &account_root != &snapchain_txn.account_root {
                 warn!(
@@ -377,10 +671,12 @@ impl BlockEngine {
                 );
                 return Err(BlockEngineError::HashMismatch);
             }
+
+            all_hub_events.extend_from_slice(&hub_events);
         }
 
         let (_block_events, computed_events_hash) =
-            self.generate_block_events(height, timestamp, txn_batch);
+            self.generate_block_events(height, timestamp, all_hub_events, txn_batch);
 
         if computed_events_hash != *events_hash {
             warn!(
@@ -435,6 +731,7 @@ impl BlockEngine {
             ProposalSource::Validate,
             height,
             &shard_state_change.timestamp,
+            version,
         );
 
         if let Err(ref err) = proposal_result {
@@ -486,6 +783,7 @@ impl BlockEngine {
                 ProposalSource::Commit,
                 height,
                 &FarcasterTime::new(block_timestamp),
+                version,
             ) {
                 Err(err) => {
                     error!("State change commit failed: {}", err);

@@ -6,6 +6,7 @@ use crate::proto::{
     IdRegisterEventBody, IdRegisterEventType, MergeOnChainEventBody, OnChainEvent,
     OnChainEventType, SignerEventBody, SignerEventType, TierType,
 };
+use crate::proto::{LendStorageBody, StorageUnitType};
 use crate::storage::constants::{OnChainEventPostfix, RootPrefix, PAGE_SIZE_MAX};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch, RocksdbError};
 use crate::storage::store::account::StoreOptions;
@@ -399,6 +400,23 @@ impl StorageSlot {
         }
     }
 
+    pub fn from_storage_lend(storage_lend: &LendStorageBody) -> StorageSlot {
+        let mut storage_slot = StorageSlot::new(0, 0, 0, u32::MAX);
+        match storage_lend.unit_type() {
+            StorageUnitType::UnitType2024 => {
+                storage_slot.units_2024 = storage_lend.num_units as u32
+            }
+            StorageUnitType::UnitTypeLegacy => {
+                storage_slot.units_legacy = storage_lend.num_units as u32
+            }
+            StorageUnitType::UnitType2025 => {
+                storage_slot.units_2025 = storage_lend.num_units as u32
+            }
+        }
+
+        storage_slot
+    }
+
     pub fn from_event(
         onchain_event: &OnChainEvent,
         network: FarcasterNetwork,
@@ -470,6 +488,14 @@ impl StorageSlot {
         self.units_2025 += other.units_2025;
         self.invalidate_at = std::cmp::min(self.invalidate_at, other.invalidate_at);
         true
+    }
+
+    pub fn sub(&mut self, other: &StorageSlot) {
+        if other.is_active() {
+            self.units_legacy -= other.units_legacy;
+            self.units_2024 -= other.units_2024;
+            self.units_2025 -= other.units_2025;
+        }
     }
 }
 
@@ -695,6 +721,8 @@ impl OnchainEventStore {
         fid: u64,
         network: FarcasterNetwork,
         pending_events: &[OnChainEvent],
+        lent_storage: &StorageSlot,
+        borrowed_storage: &StorageSlot,
     ) -> Result<StorageSlot, OnchainEventStorageError> {
         let rent_events =
             self.get_onchain_events(OnChainEventType::EventTypeStorageRent, Some(fid))?;
@@ -708,6 +736,10 @@ impl OnchainEventStore {
                 storage_slot.merge(&StorageSlot::from_event(event, network)?);
             }
         }
+
+        storage_slot.sub(lent_storage);
+        storage_slot.merge(borrowed_storage);
+
         Ok(storage_slot)
     }
 
