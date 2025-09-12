@@ -483,19 +483,6 @@ impl Stores {
         Ok(response)
     }
 
-    pub fn revoke_message(
-        &mut self,
-        message: &proto::Message,
-        txn: &mut RocksDbTransactionBatch,
-    ) -> Result<HubEvent, HubError> {
-        match message.msg_type() {
-            MessageType::LendStorage => self.storage_lend_store.revoke(message, txn),
-            _ => Err(HubError::invalid_internal_state(
-                "attempting to revoke invalid message",
-            )),
-        }
-    }
-
     pub fn revoke_messages(
         &self,
         fid: u64,

@@ -119,16 +119,6 @@ impl BlockStores {
             )
             .ok()
     }
-
-    pub fn revoke_messages(
-        &self,
-        fid: u64,
-        key: &Vec<u8>,
-        txn_batch: &mut RocksDbTransactionBatch,
-    ) -> Result<Vec<HubEvent>, HubError> {
-        self.storage_lend_store
-            .revoke_messages_by_signer(fid, key, txn_batch)
-    }
 }
 
 pub struct BlockEngine {
