@@ -311,7 +311,7 @@ mod tests {
         let lend_message1 = messages_factory::storage_lend::create_storage_lend(
             FID_FOR_TEST,
             FID_FOR_TEST + 1,
-            100, // This should succeed (250 - 100 = 150 remaining)
+            100, // This should succeed (400 - 100 = 300 remaining)
             StorageUnitType::UnitType2025,
             None,
             None,
@@ -319,7 +319,7 @@ mod tests {
         let lend_message2 = messages_factory::storage_lend::create_storage_lend(
             FID_FOR_TEST,
             FID_FOR_TEST + 2,
-            200, // This should fail (only 150 remaining, need 200)
+            200, // This should succeed (300 - 200 = 100 remaining)
             StorageUnitType::UnitType2025,
             None,
             None,
@@ -327,7 +327,7 @@ mod tests {
         let lend_message3 = messages_factory::storage_lend::create_storage_lend(
             FID_FOR_TEST,
             FID_FOR_TEST + 3,
-            150, // This should also fail (still insufficient storage)
+            150, // This should fail (still insufficient storage)
             StorageUnitType::UnitType2025,
             None,
             None,
