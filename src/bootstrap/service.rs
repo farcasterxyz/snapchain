@@ -23,6 +23,7 @@ use crate::storage::{
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use ed25519_dalek::{Signature, VerifyingKey};
 use prost::Message as _;
+use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 use std::{
     collections::HashMap,
@@ -73,13 +74,18 @@ struct WorkUnit {
 }
 
 // Shared data for all threads working on a shard. The DB and the Trie
-// are shared among all the vts. This struct is placed inside a Mutex
-// so that all threads can share it safely
+// are shared among all the vts.
 struct ShardSharedWorkData {
     shard_id: u32,
-    db: Arc<RocksDB>,
-    trie: MerkleTrie,
-    messages_in_batch: usize,
+    // We'll use this mutex to ensure only one thread writes to the DB at a time
+    db_writer: Mutex<Arc<RocksDB>>,
+    // We'll use this mutex to ensure only one thread updates the trie at a time
+    trie: Mutex<MerkleTrie>,
+    // read-only clone of the DB to be used by the trie
+    trie_db: Arc<RocksDB>,
+    // Keep track of how many messages we've written in this batch
+    messages_in_batch: AtomicUsize,
+    // When did we start this batch, for profiling.
     start_time: Instant,
 }
 
@@ -337,7 +343,7 @@ impl ReplicatorBootstrap {
 
     /// Commit the DB transaction batch to the DB.
     async fn commit_to_db(
-        work_data: &Arc<Mutex<ShardSharedWorkData>>,
+        work_data: &Arc<ShardSharedWorkData>,
         txn_batch: RocksDbTransactionBatch,
         num_messages: usize,
     ) -> Result<DbCommitResponse, BootstrapError> {
@@ -349,29 +355,33 @@ impl ReplicatorBootstrap {
         // so far, saves progress, and creates a proper "checkpoint" for us to resume, in case things go wrong or the user
         // presses CTRL+C etc...
         let max_messages_in_write_session = 5_000_000;
-
-        let mut work_data = work_data.lock().await;
-
         let start_time = Instant::now();
-        work_data.messages_in_batch += num_messages;
 
-        let result = work_data.db.commit(txn_batch);
+        let result = {
+            let db = work_data.db_writer.lock().await;
+            db.commit(txn_batch)
+        };
+
         let elapsed_time = start_time.elapsed();
         let total_elapsed = work_data.start_time.elapsed();
+        work_data
+            .messages_in_batch
+            .fetch_add(num_messages, Ordering::SeqCst);
 
+        let total_messages = work_data.messages_in_batch.load(Ordering::SeqCst);
         info!(
             "DB writer({}) - Commit took {:?}. Writing at {:.1}k msg/sec {:.2}M total messages",
             work_data.shard_id,
             elapsed_time,
-            work_data.messages_in_batch as f64 / 1000.0 / total_elapsed.as_secs_f64(),
-            work_data.messages_in_batch as f64 / 1_000_000.0
+            total_messages as f64 / 1000.0 / total_elapsed.as_secs_f64(),
+            total_messages as f64 / 1_000_000.0
         );
 
         match result {
             Ok(()) => {
                 // If we've exceeded the total number of messages in the write session, stop the writer
                 // and allow the DB to reload
-                if work_data.messages_in_batch > max_messages_in_write_session {
+                if total_messages > max_messages_in_write_session {
                     Ok(DbCommitResponse::Stop)
                 } else {
                     Ok(DbCommitResponse::Continue)
@@ -389,17 +399,14 @@ impl ReplicatorBootstrap {
 
     // Commit all the keys to the Trie and return a DB transaction that has all the DBNode updates
     async fn commit_to_trie(
-        work_data: &Arc<Mutex<ShardSharedWorkData>>,
+        work_data: &Arc<ShardSharedWorkData>,
         trie_keys: Vec<Vec<u8>>,
     ) -> Result<RocksDbTransactionBatch, BootstrapError> {
-        let mut work_data = work_data.lock().await;
-
         let mut txn_batch = RocksDbTransactionBatch::new();
-        let db = work_data.db.clone();
 
-        let result = work_data.trie.insert(
+        let result = work_data.trie.lock().await.insert(
             &merkle_trie::Context::new(), // Not tracking trie perf during replication
-            &db,
+            &work_data.trie_db,
             &mut txn_batch,
             trie_keys
                 .iter()
@@ -497,13 +504,14 @@ impl ReplicatorBootstrap {
         let mut is_errored = None;
 
         // Create the shared work data for this shard
-        let work_data = Arc::new(Mutex::new(ShardSharedWorkData {
+        let work_data = Arc::new(ShardSharedWorkData {
             shard_id,
-            db: db.clone(),
-            trie,
-            messages_in_batch: 0,
+            db_writer: Mutex::new(db.clone()),
+            trie: Mutex::new(trie),
+            trie_db: db.clone(),
+            messages_in_batch: AtomicUsize::new(0),
             start_time: Instant::now(),
-        }));
+        });
 
         loop {
             if shutdown_signal.load(Ordering::SeqCst) {
@@ -563,6 +571,7 @@ impl ReplicatorBootstrap {
 
         // Drop any unfinished work_units and close the DB
         drop(work_units);
+        drop(work_data);
         db.close();
 
         // If there was an error, return that
@@ -591,7 +600,7 @@ impl ReplicatorBootstrap {
     async fn process_vts_work_item(
         &self,
         work_item: WorkUnit,
-        work_data: Arc<Mutex<ShardSharedWorkData>>,
+        work_data: Arc<ShardSharedWorkData>,
     ) -> Result<WorkUnitResponse, BootstrapError> {
         let response;
 
