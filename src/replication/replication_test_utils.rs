@@ -68,7 +68,10 @@ pub mod replication_test_utils {
             state_change.new_state_root,
             chunk.header.as_ref().unwrap().shard_root
         );
-        assert!(engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(message)));
+
+        assert!(TrieKey::for_message(message)
+            .iter()
+            .all(|trie_key| engine.trie_key_exists(test_helper::trie_ctx(), trie_key)));
     }
 
     pub async fn register_fid(engine: &mut ShardEngine, fid: u64) -> ed25519_dalek::SigningKey {
