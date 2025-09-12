@@ -2,8 +2,8 @@ use crate::core::util::FarcasterTime;
 use crate::core::validations::error::ValidationError;
 use crate::core::validations::validate_cast_id;
 use crate::proto::{
-    self, FarcasterNetwork, FrameActionBody, MessageData, MessageType, UserDataBody, UserDataType,
-    UserNameType,
+    self, FarcasterNetwork, FrameActionBody, MessageData, MessageType, StorageUnitType,
+    UserDataBody, UserDataType, UserNameType,
 };
 use crate::storage::util::{blake3_20, bytes_compare};
 
@@ -219,9 +219,8 @@ pub fn validate_message(
 fn validate_lend_storage_body(
     lend_storage_body: &proto::LendStorageBody,
 ) -> Result<(), ValidationError> {
-    if lend_storage_body.unit_type > 2 {
-        return Err(ValidationError::InvalidStorageUnitType);
-    }
+    StorageUnitType::try_from(lend_storage_body.unit_type)
+        .map_err(|_| ValidationError::InvalidStorageUnitType)?;
 
     // This is $1,000 worth of storage units and provides more storage than anybody would currently use.
     if lend_storage_body.num_units > 5000 {
