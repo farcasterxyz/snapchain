@@ -3835,7 +3835,7 @@ mod tests {
             borrower_fid,
             1, // Lend 1 unit
             crate::proto::StorageUnitType::UnitType2025,
-            None,
+            Some(1),
             None,
         );
         let storage_lend_block_event = create_merge_message_event(lend_message, 1);
@@ -3863,11 +3863,11 @@ mod tests {
 
         // Reclaim the lent storage
         let lend_message = messages_factory::storage_lend::create_storage_lend(
-            borrower_fid,
             lender_fid,
-            1, // Lend 1 unit
+            borrower_fid,
+            0, // Set lent storage to 0
             crate::proto::StorageUnitType::UnitType2025,
-            None,
+            Some(2),
             None,
         );
         let storage_lend_block_event = create_merge_message_event(lend_message, 2);
