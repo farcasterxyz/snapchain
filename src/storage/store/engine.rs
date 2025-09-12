@@ -1241,6 +1241,10 @@ impl ShardEngine {
                     Ok(vec![])
                 }
             }
+            MessageType::LendStorage => {
+                // Pruning not supported for storage lend messages
+                Ok(vec![])
+            }
             unhandled_type => {
                 return Err(EngineError::UnsupportedMessageType(unhandled_type));
             }
