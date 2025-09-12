@@ -61,7 +61,7 @@ pub struct ReplicationConfig {
     // Note: you shouldn't set these values in the config file, they are
     // intended to be statically defined across the whole network.
     pub snapshot_interval: u64, // Specified in number of blocks
-    //
+
     #[serde(with = "humantime_serde")]
     pub snapshot_max_age: Duration,
 }
