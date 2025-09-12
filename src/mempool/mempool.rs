@@ -231,7 +231,8 @@ impl MempoolMessage {
     pub fn mempool_key(&self) -> MempoolKey {
         match self {
             MempoolMessage::UserMessage(msg) => msg.mempool_key(),
-            MempoolMessage::OnchainEvent(event) => {
+            MempoolMessage::OnchainEvent(event)
+            | MempoolMessage::OnchainEventForMigration(event) => {
                 let validator_message = proto::ValidatorMessage {
                     on_chain_event: Some(event.clone()),
                     fname_transfer: None,
@@ -335,6 +336,7 @@ impl ReadNodeMempool {
                     }
                 },
                 MempoolMessage::OnchainEvent(_)
+                | MempoolMessage::OnchainEventForMigration(_)
                 | MempoolMessage::FnameTransfer(_)
                 | MempoolMessage::BlockEvent { .. } => {
                     // Don't do duplicate checks for validator messages. They are infrequent, and engine can handle duplicates.
@@ -461,6 +463,7 @@ impl Mempool {
                 }
             }
             MempoolMessage::OnchainEvent(_)
+            | MempoolMessage::OnchainEventForMigration(_)
             | MempoolMessage::FnameTransfer(_)
             | MempoolMessage::BlockEvent { .. } => false,
         }
@@ -481,7 +484,7 @@ impl Mempool {
                     match shard_messages.pop_first() {
                         None => break,
                         Some((_, next_message)) => {
-                            let result = self.message_is_valid(&next_message);
+                            let result = self.message_is_valid(request.shard_id, &next_message);
                             if result.is_ok() {
                                 messages.push(next_message);
                             }
@@ -496,7 +499,11 @@ impl Mempool {
         }
     }
 
-    pub fn message_is_valid(&mut self, message: &MempoolMessage) -> Result<(), HubError> {
+    pub fn message_is_valid(
+        &mut self,
+        shard: u32,
+        message: &MempoolMessage,
+    ) -> Result<(), HubError> {
         // Check for block events that have already been merged
         if let MempoolMessage::BlockEvent { message, for_shard } = message {
             let stores = self.read_node_mempool.shard_stores.get(&for_shard).unwrap();
@@ -506,10 +513,6 @@ impl Mempool {
                 }
             }
         }
-        let shard = self
-            .read_node_mempool
-            .message_router
-            .route_fid(message.fid(), self.read_node_mempool.num_shards);
 
         if self.message_already_exists(shard, message) {
             return Err(HubError::duplicate("message has already been merged"));
@@ -549,6 +552,12 @@ impl Mempool {
             } else {
                 vec![fid_shard]
             }
+        } else if let MempoolMessage::OnchainEventForMigration(_) = &message {
+            // TODO(aditi): Remove this codepath after migrating onchain events to shard 0
+            vec![0]
+        } else if let MempoolMessage::OnchainEvent(_) = &message {
+            // Onchain events need to get to shard 0 so that we can support other messages (lend storage) in shard 0.
+            vec![0, fid_shard]
         } else if let MempoolMessage::BlockEvent {
             for_shard,
             message: _,
@@ -599,7 +608,7 @@ impl Mempool {
         }
 
         // TODO(aditi): Maybe we don't need to run validations here?
-        let result = self.message_is_valid(&message);
+        let result = self.message_is_valid(shard_id, &message);
         if result.is_ok() {
             match self.messages.get_mut(&shard_id) {
                 None => {
