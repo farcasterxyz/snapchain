@@ -6,7 +6,7 @@ use super::super::{
 use super::errors::TrieError;
 use crate::proto::DbTrieNode;
 use prost::Message as _;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic;
 use tracing::error;
 
@@ -255,7 +255,7 @@ impl TrieNode {
         child_hashes: &mut HashMap<u8, Vec<u8>>,
         db: &RocksDB,
         txn: &mut RocksDbTransactionBatch,
-        mut keys: Vec<Vec<u8>>,
+        keys: Vec<Vec<u8>>,
         current_index: usize,
     ) -> Result<Vec<bool>, TrieError> {
         if keys.len() == 0 {
@@ -272,50 +272,53 @@ impl TrieNode {
 
         // Do not compact first few bytes of the trie, since it is used to compare snapshots
         if current_index >= UNCOMPACTED_LENGTH && self.is_leaf() {
-            let mut inserted = false;
-            if self.key.is_none() {
-                let key = keys.pop().unwrap();
-                // Reached a leaf node with no value, insert it
-                if key.is_empty() {
-                    panic!("empty key found on leaf node");
-                }
-                self.key = Some(key);
-                self.items += 1;
-
-                self.update_hash(child_hashes, &prefix)?;
-                self.put_to_txn(txn, &prefix);
-
-                inserted = true;
-
-                results[0] = true; // the first key was inserted successfully
+            // Step 1: Find all unique keys we need to deal with at this node.
+            // This includes the key already in the leaf (if any) and all unique keys from the input.
+            let mut all_unique_keys = HashSet::new();
+            if let Some(existing_key) = &self.key {
+                all_unique_keys.insert(existing_key.clone());
+            }
+            for key in &keys {
+                all_unique_keys.insert(key.clone());
             }
 
-            if keys.is_empty() {
-                return Ok(results);
-            }
+            // Step 2: Decide if we need to split. A split is needed if the total number of unique keys is > 1.
+            if all_unique_keys.len() <= 1 {
+                // --- NO SPLIT ---
+                // This node remains a leaf. We only need to handle the case where the leaf was empty and is now being filled.
+                if self.key.is_none() {
+                    if let Some(key_to_insert) = all_unique_keys.iter().next() {
+                        // The leaf was empty, and we have one unique key to insert.
+                        self.key = Some(key_to_insert.clone());
+                        self.items += 1;
 
-            // See if any of the keys already exists
-            remaining_keys = keys
-                .into_iter()
-                .enumerate()
-                .filter_map(|(i, key)| {
-                    if bytes_compare(self.key.as_ref().unwrap_or(&vec![]), key.as_slice()) == 0 {
-                        // Key already exists, do nothing
-                        results[i] = false;
-                        None
-                    } else {
-                        Some((i + if inserted { 1 } else { 0 }, key)) // If we already pop()ed the first key, the index is i + 1
+                        // Find the first occurrence of this key in the input `keys` to mark it as a success.
+                        let mut first = true;
+                        for (i, key) in keys.iter().enumerate() {
+                            if bytes_compare(key, key_to_insert) == 0 {
+                                if first {
+                                    results[i] = true;
+                                    first = false;
+                                }
+                            }
+                        }
+                        self.update_hash(child_hashes, &prefix)?;
+                        self.put_to_txn(txn, &prefix);
                     }
-                })
-                .collect::<Vec<_>>();
-
-            if remaining_keys.is_empty() {
-                // Nothing new was inserted, return
+                }
+                // If self.key already existed, then all input keys are duplicates.
+                // `results` remains all `false` for them, which is correct.
                 return Ok(results);
+            } else {
+                // --- SPLIT ---
+                // A split is necessary. The existing key in this leaf will be pushed down.
+                // All the new keys will also be pushed down.
+                remaining_keys = keys.into_iter().enumerate().collect::<Vec<_>>();
+                // Only split if we actually have an existing key to split
+                if self.key.is_some() {
+                    self.split_leaf_node(ctx, db, txn, current_index)?;
+                }
             }
-
-            //  If the key is different, and a value exists, then split the node
-            self.split_leaf_node(ctx, db, txn, current_index)?;
         } else {
             // If not a leaf, then we need to add all the keys
             remaining_keys = keys.into_iter().enumerate().collect::<Vec<_>>()
