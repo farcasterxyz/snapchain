@@ -397,26 +397,22 @@ mod tests {
     fn test_bulk_insert_with_duplicates() {
         let ctx = &Context::new();
 
-        let tmp_path1 = tempfile::tempdir().unwrap();
-        let db1 = &RocksDB::new(tmp_path1.path().to_str().unwrap());
-        db1.open().unwrap();
+        // Create 3 temporary databases
+        let tmp_paths: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+        let mut dbs = vec![];
+        for tmp_path in &tmp_paths {
+            let db = RocksDB::new(tmp_path.path().to_str().unwrap());
+            db.open().unwrap();
+            dbs.push(db);
+        }
 
-        let tmp_path2 = tempfile::tempdir().unwrap();
-        let db2 = &RocksDB::new(tmp_path2.path().to_str().unwrap());
-        db2.open().unwrap();
-
-        let tmp_path3 = tempfile::tempdir().unwrap();
-        let db3 = &RocksDB::new(tmp_path3.path().to_str().unwrap());
-        db3.open().unwrap();
-
-        let mut trie1 = MerkleTrie::new().unwrap();
-        trie1.initialize(db1).unwrap();
-
-        let mut trie2 = MerkleTrie::new().unwrap();
-        trie2.initialize(db2).unwrap();
-
-        let mut trie3 = MerkleTrie::new().unwrap();
-        trie3.initialize(db3).unwrap();
+        // Initialize 3 tries
+        let mut tries = vec![];
+        for db in &dbs {
+            let mut trie = MerkleTrie::new().unwrap();
+            trie.initialize(db).unwrap();
+            tries.push(trie);
+        }
 
         // Generate 3 random keys
         let key_vecs: Vec<Vec<u8>> = (0..3)
@@ -432,92 +428,67 @@ mod tests {
             keys.push(key.as_slice());
         }
 
-        // Bulk insert into trie1
+        // Bulk insert into tries[0]
         let mut txn_batch = RocksDbTransactionBatch::new();
-        trie1
-            .insert(ctx, db1, &mut txn_batch, keys.clone())
+        tries[0]
+            .insert(ctx, &dbs[0], &mut txn_batch, keys.clone())
             .unwrap();
-        db1.commit(txn_batch).unwrap();
-        let root_hash1 = trie1.root_hash().unwrap();
+        dbs[0].commit(txn_batch).unwrap();
+        let root_hash0 = tries[0].root_hash().unwrap();
 
-        // Serial insert into trie2
+        // Serial insert into tries[1]
         for key in &keys {
             let mut txn_batch = RocksDbTransactionBatch::new();
-            trie2.insert(ctx, db2, &mut txn_batch, vec![*key]).unwrap();
-            db2.commit(txn_batch).unwrap();
+            tries[1]
+                .insert(ctx, &dbs[1], &mut txn_batch, vec![*key])
+                .unwrap();
+            dbs[1].commit(txn_batch).unwrap();
         }
-        let root_hash2 = trie2.root_hash().unwrap();
-        assert_eq!(root_hash1, root_hash2);
+        let root_hash1 = tries[1].root_hash().unwrap();
+        assert_eq!(root_hash0, root_hash1);
 
-        // Bulk insert unique keys into trie3, then duplicate keys
+        // Bulk insert unique keys into tries[2], then duplicate keys
         let keys_unique: Vec<&[u8]> = key_vecs.iter().map(|v| v.as_slice()).collect();
 
         // First bulk insert with unique keys
         let mut txn_batch = RocksDbTransactionBatch::new();
-        trie3
-            .insert(ctx, db3, &mut txn_batch, keys_unique.clone())
+        tries[2]
+            .insert(ctx, &dbs[2], &mut txn_batch, keys_unique.clone())
             .unwrap();
-        db3.commit(txn_batch).unwrap();
+        dbs[2].commit(txn_batch).unwrap();
 
         // Second bulk insert with the same keys (duplicates)
         let mut txn_batch = RocksDbTransactionBatch::new();
-        trie3
-            .insert(ctx, db3, &mut txn_batch, keys_unique.clone())
+        tries[2]
+            .insert(ctx, &dbs[2], &mut txn_batch, keys_unique.clone())
             .unwrap();
-        db3.commit(txn_batch).unwrap();
+        dbs[2].commit(txn_batch).unwrap();
 
-        let root_hash3 = trie3.root_hash().unwrap();
-        assert_eq!(root_hash1, root_hash3);
-        assert_eq!(root_hash2, root_hash3);
+        let root_hash2 = tries[2].root_hash().unwrap();
+        assert_eq!(root_hash0, root_hash2);
+        assert_eq!(root_hash1, root_hash2);
     }
 
     #[test]
     fn test_bulk_insert_with_partial_duplicates() {
         let ctx = &Context::new();
 
-        // Create 4 temporary databases
-        let tmp_path1 = tempfile::tempdir().unwrap();
-        let db1 = &RocksDB::new(tmp_path1.path().to_str().unwrap());
-        db1.open().unwrap();
+        // Create 6 temporary databases
+        let tmp_paths: Vec<_> = (0..6).map(|_| tempfile::tempdir().unwrap()).collect();
+        let mut dbs = vec![];
+        for tmp_path in &tmp_paths {
+            let db = RocksDB::new(tmp_path.path().to_str().unwrap());
+            db.open().unwrap();
+            dbs.push(db);
+        }
 
-        let tmp_path2 = tempfile::tempdir().unwrap();
-        let db2 = &RocksDB::new(tmp_path2.path().to_str().unwrap());
-        db2.open().unwrap();
-
-        let tmp_path3 = tempfile::tempdir().unwrap();
-        let db3 = &RocksDB::new(tmp_path3.path().to_str().unwrap());
-        db3.open().unwrap();
-
-        let tmp_path4 = tempfile::tempdir().unwrap();
-        let db4 = &RocksDB::new(tmp_path4.path().to_str().unwrap());
-        db4.open().unwrap();
-
-        let tmp_path5 = tempfile::tempdir().unwrap();
-        let db5 = &RocksDB::new(tmp_path5.path().to_str().unwrap());
-        db5.open().unwrap();
-
-        let tmp_path6 = tempfile::tempdir().unwrap();
-        let db6 = &RocksDB::new(tmp_path6.path().to_str().unwrap());
-        db6.open().unwrap();
-
-        // Initialize 4 tries
-        let mut trie1 = MerkleTrie::new().unwrap();
-        trie1.initialize(db1).unwrap();
-
-        let mut trie2 = MerkleTrie::new().unwrap();
-        trie2.initialize(db2).unwrap();
-
-        let mut trie3 = MerkleTrie::new().unwrap();
-        trie3.initialize(db3).unwrap();
-
-        let mut trie4 = MerkleTrie::new().unwrap();
-        trie4.initialize(db4).unwrap();
-
-        let mut trie5 = MerkleTrie::new().unwrap();
-        trie5.initialize(db5).unwrap();
-
-        let mut trie6 = MerkleTrie::new().unwrap();
-        trie6.initialize(db6).unwrap();
+        // Initialize 6 tries
+        let mut tries = vec![];
+        for db in &dbs {
+            let mut trie = MerkleTrie::new().unwrap();
+            trie.initialize(db).unwrap();
+            tries.push(trie);
+        }
 
         // Generate 2000 random keys
         let mut rng = thread_rng();
@@ -535,48 +506,98 @@ mod tests {
         }
         // Now all_keys has 3000 elements: 2000 unique + 1000 duplicates
 
-        // trie1 -> all 3000 in one go
+        // tries[0] -> all 3000 in one go
         let mut txn_batch = RocksDbTransactionBatch::new();
-        let results1 = trie1
-            .insert(ctx, db1, &mut txn_batch, all_keys.clone())
+        let results0 = tries[0]
+            .insert(ctx, &dbs[0], &mut txn_batch, all_keys.clone())
             .unwrap();
-        db1.commit(txn_batch).unwrap();
-        let root_hash1 = trie1.root_hash().unwrap();
+        dbs[0].commit(txn_batch).unwrap();
+        let root_hash0 = tries[0].root_hash().unwrap();
 
         // Assert first 2000 are true (unique keys) and last 1000 are false (duplicates)
-        assert_eq!(results1.len(), 3000);
+        assert_eq!(results0.len(), 3000);
         for i in 0..2000 {
             assert_eq!(
-                results1[i], true,
+                results0[i], true,
                 "Position {} should be true (unique key)",
                 i
             );
         }
         for i in 2000..3000 {
             assert_eq!(
-                results1[i], false,
+                results0[i], false,
                 "Position {} should be false (duplicate key)",
                 i
             );
         }
 
-        // trie2 -> 1500 + 1500
+        // tries[1] -> 1500 + 1500
         let mut txn_batch = RocksDbTransactionBatch::new();
-        let results2a = trie2
-            .insert(ctx, db2, &mut txn_batch, all_keys[0..1500].to_vec())
+        let results1a = tries[1]
+            .insert(ctx, &dbs[1], &mut txn_batch, all_keys[0..1500].to_vec())
             .unwrap();
-        db2.commit(txn_batch).unwrap();
+        dbs[1].commit(txn_batch).unwrap();
 
         let mut txn_batch = RocksDbTransactionBatch::new();
-        let results2b = trie2
-            .insert(ctx, db2, &mut txn_batch, all_keys[1500..3000].to_vec())
+        let results1b = tries[1]
+            .insert(ctx, &dbs[1], &mut txn_batch, all_keys[1500..3000].to_vec())
             .unwrap();
-        db2.commit(txn_batch).unwrap();
-        let root_hash2 = trie2.root_hash().unwrap();
+        dbs[1].commit(txn_batch).unwrap();
+        let root_hash1 = tries[1].root_hash().unwrap();
 
         // Combine results for trie2
+        let mut combined_results1 = results1a;
+        combined_results1.extend(results1b);
+
+        // Assert first 2000 are true (unique keys) and last 1000 are false (duplicates)
+        assert_eq!(combined_results1.len(), 3000);
+        for i in 0..2000 {
+            assert_eq!(
+                combined_results1[i], true,
+                "Position {} should be true (unique key)",
+                i
+            );
+        }
+        for i in 2000..3000 {
+            assert_eq!(
+                combined_results1[i], false,
+                "Position {} should be false (duplicate key)",
+                i
+            );
+        }
+
+        // tries[2] -> 1000 + 1000 + 1000
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        let results2a = tries[2]
+            .insert(ctx, &dbs[2], &mut txn_batch, all_keys[0..1000].to_vec())
+            .unwrap();
+        dbs[2].commit(txn_batch).unwrap();
+        assert_eq!(tries[2].items().unwrap(), 1000);
+        tries[2].reload(&dbs[2]).unwrap();
+        assert_eq!(tries[2].items().unwrap(), 1000);
+
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        let results2b = tries[2]
+            .insert(ctx, &dbs[2], &mut txn_batch, all_keys[1000..2000].to_vec())
+            .unwrap();
+        assert_eq!(tries[2].items().unwrap(), 2000);
+        dbs[2].commit(txn_batch).unwrap();
+        tries[2].reload(&dbs[2]).unwrap();
+        assert_eq!(tries[2].items().unwrap(), 2000);
+
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        let results2c = tries[2]
+            .insert(ctx, &dbs[2], &mut txn_batch, all_keys[2000..3000].to_vec())
+            .unwrap();
+        // this txn_batch should be empty as all are duplicates
+        assert!(txn_batch.batch.is_empty());
+        assert_eq!(tries[2].items().unwrap(), 2000);
+        let root_hash2 = tries[2].root_hash().unwrap();
+
+        // Combine results for trie3
         let mut combined_results2 = results2a;
         combined_results2.extend(results2b);
+        combined_results2.extend(results2c);
 
         // Assert first 2000 are true (unique keys) and last 1000 are false (duplicates)
         assert_eq!(combined_results2.len(), 3000);
@@ -595,128 +616,197 @@ mod tests {
             );
         }
 
-        // trie3 -> 1000 + 1000 + 1000
-        let mut txn_batch = RocksDbTransactionBatch::new();
-        let results3a = trie3
-            .insert(ctx, db3, &mut txn_batch, all_keys[0..1000].to_vec())
-            .unwrap();
-        db3.commit(txn_batch).unwrap();
-        assert_eq!(trie3.items().unwrap(), 1000);
-        trie3.reload(db3).unwrap();
-        assert_eq!(trie3.items().unwrap(), 1000);
-
-        let mut txn_batch = RocksDbTransactionBatch::new();
-        let results3b = trie3
-            .insert(ctx, db3, &mut txn_batch, all_keys[1000..2000].to_vec())
-            .unwrap();
-        assert_eq!(trie3.items().unwrap(), 2000);
-        db3.commit(txn_batch).unwrap();
-        trie3.reload(db3).unwrap();
-        assert_eq!(trie3.items().unwrap(), 2000);
-
-        let mut txn_batch = RocksDbTransactionBatch::new();
-        let results3c = trie3
-            .insert(ctx, db3, &mut txn_batch, all_keys[2000..3000].to_vec())
-            .unwrap();
-        // this txn_batch should be empty as all are duplicates
-        assert!(txn_batch.batch.is_empty());
-        assert_eq!(trie3.items().unwrap(), 2000);
-        let root_hash3 = trie3.root_hash().unwrap();
-
-        // Combine results for trie3
-        let mut combined_results3 = results3a;
-        combined_results3.extend(results3b);
-        combined_results3.extend(results3c);
-
-        // Assert first 2000 are true (unique keys) and last 1000 are false (duplicates)
-        assert_eq!(combined_results3.len(), 3000);
-        for i in 0..2000 {
-            assert_eq!(
-                combined_results3[i], true,
-                "Position {} should be true (unique key)",
-                i
-            );
-        }
-        for i in 2000..3000 {
-            assert_eq!(
-                combined_results3[i], false,
-                "Position {} should be false (duplicate key)",
-                i
-            );
-        }
-
-        // trie4 -> one at a time
-        let mut results4: Vec<bool> = vec![];
+        // tries[3] -> one at a time
+        let mut results3: Vec<bool> = vec![];
         for key in &all_keys {
             let mut txn_batch = RocksDbTransactionBatch::new();
-            let result = trie4.insert(ctx, db4, &mut txn_batch, vec![*key]).unwrap();
-            results4.extend(result);
-            db4.commit(txn_batch).unwrap();
+            let result = tries[3]
+                .insert(ctx, &dbs[3], &mut txn_batch, vec![*key])
+                .unwrap();
+            results3.extend(result);
+            dbs[3].commit(txn_batch).unwrap();
         }
-        let root_hash4 = trie4.root_hash().unwrap();
+        let root_hash3 = tries[3].root_hash().unwrap();
 
         // Assert first 2000 are true (unique keys) and last 1000 are false (duplicates)
-        assert_eq!(results4.len(), 3000);
+        assert_eq!(results3.len(), 3000);
         for i in 0..2000 {
             assert_eq!(
-                results4[i], true,
+                results3[i], true,
                 "Position {} should be true (unique key)",
                 i
             );
         }
         for i in 2000..3000 {
             assert_eq!(
-                results4[i], false,
+                results3[i], false,
                 "Position {} should be false (duplicate key)",
                 i
             );
         }
 
-        // trie5 -> only first 2000 unique keys, one at a time, each should return true
+        // tries[4] -> only first 2000 unique keys, one at a time, each should return true
         for i in 0..2000 {
             let mut txn_batch = RocksDbTransactionBatch::new();
-            let result = trie5
-                .insert(ctx, db5, &mut txn_batch, vec![all_keys[i]])
+            let result = tries[4]
+                .insert(ctx, &dbs[4], &mut txn_batch, vec![all_keys[i]])
                 .unwrap();
             assert_eq!(result, vec![true]);
-            db5.commit(txn_batch).unwrap();
+            dbs[4].commit(txn_batch).unwrap();
         }
-        let root_hash5 = trie5.root_hash().unwrap();
+        let root_hash4 = tries[4].root_hash().unwrap();
 
-        // trie6 -> shuffle the 3000 keys, then bulk add them 100 at a time
+        // tries[5] -> shuffle the 3000 keys, then bulk add them 100 at a time
         let mut shuffled_keys = all_keys.clone();
         shuffled_keys.shuffle(&mut thread_rng());
 
-        let mut results6: Vec<bool> = vec![];
+        let mut results5: Vec<bool> = vec![];
         for chunk in shuffled_keys.chunks(100) {
             let mut txn_batch = RocksDbTransactionBatch::new();
-            let result = trie6
-                .insert(ctx, db6, &mut txn_batch, chunk.to_vec())
+            let result = tries[5]
+                .insert(ctx, &dbs[5], &mut txn_batch, chunk.to_vec())
                 .unwrap();
-            results6.extend(result);
-            db6.commit(txn_batch).unwrap();
-            trie6.reload(db6).unwrap();
+            results5.extend(result);
+            dbs[5].commit(txn_batch).unwrap();
+            tries[5].reload(&dbs[5]).unwrap();
         }
 
-        let root_hash6 = trie6.root_hash().unwrap();
+        let root_hash5 = tries[5].root_hash().unwrap();
 
-        let true_count = results6.iter().filter(|&&x| x).count();
-        let false_count = results6.iter().filter(|&&x| !x).count();
+        let true_count = results5.iter().filter(|&&x| x).count();
+        let false_count = results5.iter().filter(|&&x| !x).count();
         assert_eq!(true_count, 2000);
         assert_eq!(false_count, 1000);
 
         // Verify all 6 have the same hash
+        assert_eq!(root_hash0, root_hash1);
         assert_eq!(root_hash1, root_hash2);
         assert_eq!(root_hash2, root_hash3);
         assert_eq!(root_hash3, root_hash4);
         assert_eq!(root_hash4, root_hash5);
-        assert_eq!(root_hash5, root_hash6);
 
-        assert_eq!(trie1.items().unwrap(), 2000);
-        assert_eq!(trie2.items().unwrap(), 2000);
-        assert_eq!(trie3.items().unwrap(), 2000);
-        assert_eq!(trie4.items().unwrap(), 2000);
-        assert_eq!(trie5.items().unwrap(), 2000);
-        assert_eq!(trie6.items().unwrap(), 2000);
+        for i in 0..6 {
+            assert_eq!(tries[i].items().unwrap(), 2000);
+        }
+    }
+
+    #[test]
+    fn test_exists_and_delete_with_duplicates() {
+        let ctx = &Context::new();
+
+        let tmp_path = tempfile::tempdir().unwrap();
+        let db = &RocksDB::new(tmp_path.path().to_str().unwrap());
+        db.open().unwrap();
+
+        let mut trie = MerkleTrie::new().unwrap();
+        trie.initialize(db).unwrap();
+
+        // Generate 200 random keys of lengths 6-20
+        let mut rng = thread_rng();
+        let key_vecs: Vec<Vec<u8>> = (0..200)
+            .map(|_| {
+                let len = rng.gen_range(6..=20);
+                (0..len).map(|_| rng.gen::<u8>()).collect()
+            })
+            .collect();
+
+        let keys: Vec<&[u8]> = key_vecs.iter().map(|v| v.as_slice()).collect();
+
+        // Bulk insert all 200 keys
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        trie.insert(ctx, db, &mut txn_batch, keys.clone()).unwrap();
+        db.commit(txn_batch).unwrap();
+
+        // Check exists with all 200, all should be true
+        for (i, key) in keys.iter().enumerate() {
+            let exists = trie.exists(ctx, db, key).unwrap();
+            assert!(exists, "Key {} should exist", i);
+        }
+
+        // Now test delete with duplicates
+        // Delete the first 50 keys
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        let delete_results = trie
+            .delete(ctx, db, &mut txn_batch, keys[0..50].to_vec())
+            .unwrap();
+        db.commit(txn_batch).unwrap();
+
+        // All delete results should be true (successfully deleted)
+        for (i, &result) in delete_results.iter().enumerate() {
+            assert!(result, "Delete of key {} should succeed", i);
+        }
+
+        // Verify first 50 no longer exist
+        for i in 0..50 {
+            let exists = trie.exists(ctx, db, keys[i]).unwrap();
+            assert!(!exists, "Key {} should not exist after delete", i);
+        }
+
+        // Verify last 150 still exist
+        for i in 50..200 {
+            let exists = trie.exists(ctx, db, keys[i]).unwrap();
+            assert!(exists, "Key {} should still exist", i);
+        }
+
+        // Delete the remaining 50 with duplicates (50 + 50 again)
+        let mut remaining_keys = keys[50..100].to_vec();
+        remaining_keys.extend(keys[50..100].to_vec());
+
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        let delete_results = trie
+            .delete(ctx, db, &mut txn_batch, remaining_keys)
+            .unwrap();
+        db.commit(txn_batch).unwrap();
+        trie.reload(db).unwrap();
+
+        // First 50 should be true (deleted), last 50 should be false (already deleted)
+        for i in 0..50 {
+            assert!(
+                delete_results[i],
+                "Delete of remaining key {} should succeed",
+                i
+            );
+        }
+        for i in 50..100 {
+            assert!(
+                !delete_results[i],
+                "Delete of duplicate key {} should fail",
+                i
+            );
+        }
+
+        // Verify first 100 keys no longer exist
+        for i in 0..100 {
+            let exists = trie.exists(ctx, db, keys[i]).unwrap();
+            assert!(!exists, "Key {} should not exist after all deletes", i);
+        }
+
+        // Verify last 100 keys still exist
+        for i in 100..200 {
+            let exists = trie.exists(ctx, db, keys[i]).unwrap();
+            assert!(exists, "Key {} should still exist", i);
+        }
+
+        // Create a new trie and add the last 100 elements (keys[100..200]) one by one and make sure
+        // the hash matches the current trie's hash
+        let tmp_path_new = tempfile::tempdir().unwrap();
+        let db2 = &RocksDB::new(tmp_path_new.path().to_str().unwrap());
+        db2.open().unwrap();
+
+        let mut trie2 = MerkleTrie::new().unwrap();
+        trie2.initialize(db2).unwrap();
+
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        for i in 100..200 {
+            trie2
+                .insert(ctx, db2, &mut txn_batch, vec![keys[i]])
+                .unwrap();
+        }
+        db2.commit(txn_batch).unwrap();
+
+        // Check that the root hash matches the current trie's root hash
+        let root_hash_new = trie2.root_hash().unwrap();
+        let root_hash_current = trie.root_hash().unwrap();
+        assert_eq!(root_hash_new, root_hash_current);
     }
 }
