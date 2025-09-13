@@ -5,6 +5,7 @@ mod tests {
             replication_rpc_client::RpcClientsManager,
             replication_test_utils::replication_test_utils::*,
             service::{ReplicatorBootstrap, WorkUnitResponse},
+            BootstrapError,
         },
         cfg::Config,
         proto::{
@@ -24,6 +25,7 @@ mod tests {
         },
         utils::factory::{self, messages_factory},
     };
+    use rand::random;
     use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
@@ -1038,14 +1040,160 @@ mod tests {
         let result = bootstrap.bootstrap_using_replication().await;
 
         // Assert that bootstrap failed with AccountRootMismatch error.
-        match result {
-            Err(crate::bootstrap::error::BootstrapError::AccountRootMismatch(_)) => {
-                // Expected error type
+        assert!(matches!(
+            result.unwrap_err(),
+            BootstrapError::AccountRootMismatch(_)
+        ));
+
+        // Cleanup
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn test_replication_wrong_fid_account_root() {
+        // 1. Create an engine with test data using the existing helper.
+        let (tmp_dir, source_engine, replication_server, _signer, _fid, _fid2) =
+            setup_source_engine_with_test_data().await;
+
+        // 2. Fetch the actual data from the real replication server to populate our mock.
+        let height = source_engine.get_confirmed_height().block_number;
+        let shard_id = source_engine.shard_id();
+        let (vts_data, snapshot_metadata) =
+            fetch_transactions(&replication_server, shard_id, height)
+                .await
+                .unwrap();
+
+        // --- Setup the Mock Server ---
+        let mock_service = MockReplicationService::default();
+
+        // 2a. Mock the metadata response.
+        mock_service
+            .metadata_responses
+            .lock()
+            .unwrap()
+            .insert(shard_id, Ok(snapshot_metadata));
+
+        // 2b. For each vts, change the fid_account_roots to have random 12-byte account_root_hash and set the response
+        for vts in 0..256 {
+            let (trie_messages, mut fid_account_roots) =
+                vts_data.get(&vts).cloned().unwrap_or_default();
+
+            // Modify each fid_account_root to have a random 32-byte account_root_hash
+            for root in &mut fid_account_roots {
+                root.account_root_hash = random::<[u8; 32]>().to_vec();
             }
-            other => {
-                panic!("Expected AccountRootMismatch error, but got: {:?}", other);
-            }
+
+            let response = GetShardTransactionsResponse {
+                trie_messages,
+                fid_account_roots,
+                next_page_token: None, // No pagination, one big response.
+            };
+
+            mock_service
+                .transactions_responses
+                .lock()
+                .unwrap()
+                .insert((shard_id, height, vts, None), Ok(response));
         }
+
+        // --- Start the Mock Server ---
+        let (addr, shutdown_tx) = spawn_mock_server(mock_service).await;
+        let server_addr = format!("http://{}", addr);
+
+        // --- Configure and run the bootstrap client against the mock server ---
+        let dest_rocksdb_dir = format!("{}/dest_wrong_roots", tmp_dir.path().to_str().unwrap());
+
+        let mut config = Config::default();
+        config.rocksdb_dir = dest_rocksdb_dir.clone();
+        config.consensus.shard_ids = vec![shard_id];
+        config.fc_network = source_engine.network.clone();
+        config.snapshot.replication_peers = vec![server_addr];
+
+        let bootstrap = ReplicatorBootstrap::new(&config);
+
+        // 3. Perform the bootstrap. We expect this to fail due to wrong account roots.
+        let result = bootstrap.bootstrap_using_replication().await;
+
+        // Assert that bootstrap failed with AccountRootMismatch error.
+        assert!(matches!(
+            result.unwrap_err(),
+            BootstrapError::AccountRootMismatch(_)
+        ));
+
+        // Cleanup
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn test_replication_wrong_trie_key() {
+        // 1. Create an engine with test data using the existing helper.
+        let (tmp_dir, source_engine, replication_server, _signer, _fid, _fid2) =
+            setup_source_engine_with_test_data().await;
+
+        // 2. Fetch the actual data from the real replication server to populate our mock.
+        let height = source_engine.get_confirmed_height().block_number;
+        let shard_id = source_engine.shard_id();
+        let (vts_data, snapshot_metadata) =
+            fetch_transactions(&replication_server, shard_id, height)
+                .await
+                .unwrap();
+
+        // --- Setup the Mock Server ---
+        let mock_service = MockReplicationService::default();
+
+        // 2a. Mock the metadata response.
+        mock_service
+            .metadata_responses
+            .lock()
+            .unwrap()
+            .insert(shard_id, Ok(snapshot_metadata));
+
+        // 2b. For each vts, change the trie_messages to have random 12-byte trie_key and set the response
+        for vts in 0..256 {
+            let (mut trie_messages, fid_account_roots) =
+                vts_data.get(&vts).cloned().unwrap_or_default();
+
+            // Modify each trie_message to have a random 12-byte trie_key
+            for message in &mut trie_messages {
+                message.trie_key = random::<[u8; 12]>().to_vec();
+            }
+
+            let response = GetShardTransactionsResponse {
+                trie_messages,
+                fid_account_roots,
+                next_page_token: None, // No pagination, one big response.
+            };
+
+            mock_service
+                .transactions_responses
+                .lock()
+                .unwrap()
+                .insert((shard_id, height, vts, None), Ok(response));
+        }
+
+        // --- Start the Mock Server ---
+        let (addr, shutdown_tx) = spawn_mock_server(mock_service).await;
+        let server_addr = format!("http://{}", addr);
+
+        // --- Configure and run the bootstrap client against the mock server ---
+        let dest_rocksdb_dir = format!("{}/dest_wrong_trie_keys", tmp_dir.path().to_str().unwrap());
+
+        let mut config = Config::default();
+        config.rocksdb_dir = dest_rocksdb_dir.clone();
+        config.consensus.shard_ids = vec![shard_id];
+        config.fc_network = source_engine.network.clone();
+        config.snapshot.replication_peers = vec![server_addr];
+
+        let bootstrap = ReplicatorBootstrap::new(&config);
+
+        // 3. Perform the bootstrap. We expect this to fail due to wrong trie keys.
+        let result = bootstrap.bootstrap_using_replication().await;
+
+        // Assert that bootstrap failed with "Generated trie key mismatch".
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("does not match expected trie key"));
 
         // Cleanup
         let _ = shutdown_tx.send(());
