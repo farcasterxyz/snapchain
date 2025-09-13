@@ -23,6 +23,7 @@ use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use ed25519_dalek::{Signature, VerifyingKey};
 use futures::future;
 use prost::Message as _;
+use std::collections::HashSet;
 use std::{
     collections::HashMap,
     net::UdpSocket,
@@ -756,7 +757,7 @@ impl ReplicatorBootstrap {
             // get proper IDs.
             thread_engine.reset_event_id();
 
-            let mut trie_keys = vec![];
+            let mut trie_keys = HashSet::new();
             let num_messages = trie_messages.len();
 
             // Validate all the message signatures
@@ -765,7 +766,7 @@ impl ReplicatorBootstrap {
             // 3. Start going through all onchain_events and messages for fids > work_item.last_fid
             for trie_message_entry in &trie_messages {
                 let trie_key = trie_message_entry.trie_key.clone();
-                trie_keys.push(trie_key.clone());
+                trie_keys.insert(trie_key.clone());
 
                 match thread_engine.replay_replicator_message(&mut txn_batch, trie_message_entry) {
                     Ok(m) => {
@@ -811,7 +812,7 @@ impl ReplicatorBootstrap {
             work_item
                 .trie_insert_tx
                 .send(TrieInsertRequest {
-                    trie_keys,
+                    trie_keys: trie_keys.into_iter().collect::<Vec<_>>(),
                     response_tx,
                 })
                 .await?;
@@ -872,10 +873,20 @@ impl ReplicatorBootstrap {
             }
 
             if next_page_token.is_none() {
-                // All done.
+                // All done. Check the last fid
+                let mut txn_batch = RocksDbTransactionBatch::new();
+                if let Some(last_fid) = last_fid {
+                    Self::check_fid_roots(
+                        &thread_engine,
+                        status.shard_id,
+                        status.virtual_trie_shard as u8,
+                        &db,
+                        &mut txn_batch,
+                        vec![last_fid],
+                    )?;
+                }
                 // Write to the DB that we're all done
                 status.last_response = WorkUnitResponse::Finished as u32;
-                let mut txn_batch = RocksDbTransactionBatch::new();
                 LocalStateStore::write_work_unit(&mut txn_batch, &status);
 
                 // commit via db_commit_tx
@@ -955,8 +966,8 @@ impl ReplicatorBootstrap {
                     shard_id,
                     virtual_trie_shard,
                     fid,
-                    hex::encode(expected_root),
-                    hex::encode(actual_root),
+                    hex::encode(&expected_root),
+                    hex::encode(&actual_root),
                 )));
             } else {
                 debug!(
@@ -964,7 +975,7 @@ impl ReplicatorBootstrap {
                     shard_id,
                     virtual_trie_shard,
                     fid,
-                    hex::encode(actual_root)
+                    hex::encode(&actual_root)
                 );
             }
         }

@@ -637,23 +637,35 @@ mod tests {
         height: u64,
     ) -> Result<
         (
-            Vec<proto::ShardTrieEntryWithMessage>,
-            Vec<proto::FidAccountRootHash>,
+            HashMap<
+                u32,
+                (
+                    Vec<proto::ShardTrieEntryWithMessage>,
+                    Vec<proto::FidAccountRootHash>,
+                ),
+            >,
             proto::GetShardSnapshotMetadataResponse,
         ),
         Box<dyn std::error::Error>,
     > {
-        // Fetch shard snapshot metadata for shard_id: 1
-        let snapshot_request = proto::GetShardSnapshotMetadataRequest { shard_id: 1 };
+        // Fetch shard snapshot metadata for shard_id
+        let snapshot_request = proto::GetShardSnapshotMetadataRequest { shard_id };
         let snapshot_response = replication_server
             .get_shard_snapshot_metadata(tonic::Request::new(snapshot_request))
             .await?
             .into_inner();
 
-        let mut trie_messages = vec![];
-        let mut fid_account_roots = vec![];
+        let mut vts_data: HashMap<
+            u32,
+            (
+                Vec<proto::ShardTrieEntryWithMessage>,
+                Vec<proto::FidAccountRootHash>,
+            ),
+        > = HashMap::new();
 
-        for vts in 0..255 {
+        for vts in 0..256 {
+            let mut trie_messages = vec![];
+            let mut fid_account_roots = vec![];
             let mut next_page_token: Option<String> = None;
 
             loop {
@@ -682,9 +694,11 @@ mod tests {
                     break;
                 }
             }
+
+            vts_data.insert(vts, (trie_messages, fid_account_roots));
         }
 
-        Ok((trie_messages, fid_account_roots, snapshot_response))
+        Ok((vts_data, snapshot_response))
     }
 
     async fn replicate_engine(
@@ -694,10 +708,18 @@ mod tests {
         fids: Vec<u64>,
     ) {
         let height = source_engine.get_confirmed_height().block_number;
-        let (trie_messages, fid_account_roots, snapshot_metadata) =
+        let (vts_data, snapshot_metadata) =
             fetch_transactions(replication_server, source_engine.shard_id(), height)
                 .await
                 .unwrap();
+
+        // Concatenate all trie_messages and fid_account_roots from all vts
+        let mut trie_messages = vec![];
+        let mut fid_account_roots = vec![];
+        for (_vts, (msgs, roots)) in &vts_data {
+            trie_messages.extend(msgs.clone());
+            fid_account_roots.extend(roots.clone());
+        }
 
         // There are 14 messages inserted, and all of them should be returned
         assert_eq!(trie_messages.len(), 14);
@@ -864,5 +886,168 @@ mod tests {
         let dest_root = dest_trie.root_hash().unwrap();
 
         assert_eq!(source_root, dest_root);
+    }
+
+    #[tokio::test]
+    async fn test_replication_duplicate_messages() {
+        // 1. Create an engine with test data using the existing helper.
+        let (tmp_dir, source_engine, replication_server, _signer, _fid, _fid2) =
+            setup_source_engine_with_test_data().await;
+
+        // 2. Fetch the actual data from the real replication server to populate our mock.
+        let height = source_engine.get_confirmed_height().block_number;
+        let shard_id = source_engine.shard_id();
+        let (vts_data, snapshot_metadata) =
+            fetch_transactions(&replication_server, shard_id, height)
+                .await
+                .unwrap();
+
+        // --- Setup the Mock Server ---
+        let mock_service = MockReplicationService::default();
+
+        // 2a. Mock the metadata response.
+        mock_service
+            .metadata_responses
+            .lock()
+            .unwrap()
+            .insert(shard_id, Ok(snapshot_metadata));
+
+        // 2c. For each vts, create duplicated trie_messages and set the response
+        for vts in 0..256 {
+            let (trie_messages, fid_account_roots) =
+                vts_data.get(&vts).cloned().unwrap_or_default();
+
+            let duplicated_trie_messages = [trie_messages.clone(), trie_messages.clone()].concat();
+
+            let response = GetShardTransactionsResponse {
+                trie_messages: duplicated_trie_messages,
+                fid_account_roots,
+                next_page_token: None, // No pagination, one big response.
+            };
+
+            mock_service
+                .transactions_responses
+                .lock()
+                .unwrap()
+                .insert((shard_id, height, vts, None), Ok(response));
+        }
+
+        // --- Start the Mock Server ---
+        let (addr, shutdown_tx) = spawn_mock_server(mock_service).await;
+        let server_addr = format!("http://{}", addr);
+
+        // --- Configure and run the bootstrap client against the mock server ---
+        let dest_rocksdb_dir = format!("{}/dest_duplicates", tmp_dir.path().to_str().unwrap());
+
+        let mut config = Config::default();
+        config.rocksdb_dir = dest_rocksdb_dir.clone();
+        config.consensus.shard_ids = vec![shard_id];
+        config.fc_network = source_engine.network.clone();
+        config.snapshot.replication_peers = vec![server_addr];
+
+        let bootstrap = ReplicatorBootstrap::new(&config);
+
+        // 3. Perform the bootstrap. We expect this to succeed despite the duplicate messages.
+        let result = bootstrap.bootstrap_using_replication().await;
+
+        // Assert that bootstrap succeeded.
+        match &result {
+            Ok(WorkUnitResponse::Finished) => {}
+            _ => panic!("Bootstrap failed with result: {:?}", result),
+        }
+
+        // 3. Verify that the roots match. This proves the duplicates were handled idempotently.
+        let source_root = source_engine.get_stores().trie.root_hash().unwrap();
+
+        // Open the destination DB and check its root hash.
+        let dest_db = RocksDB::open_shard_db(&dest_rocksdb_dir, shard_id);
+        let mut dest_trie = MerkleTrie::new().unwrap();
+        dest_trie.initialize(&dest_db).unwrap();
+        let dest_root = dest_trie.root_hash().unwrap();
+
+        assert!(!source_root.is_empty(), "Source root should not be empty");
+        assert_eq!(
+            source_root, dest_root,
+            "Source and destination trie roots must match"
+        );
+
+        // Cleanup
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn test_replication_missing_messages() {
+        // 1. Create an engine with test data using the existing helper.
+        let (tmp_dir, source_engine, replication_server, _signer, _fid, _fid2) =
+            setup_source_engine_with_test_data().await;
+
+        // 2. Fetch the actual data from the real replication server to populate our mock.
+        let height = source_engine.get_confirmed_height().block_number;
+        let shard_id = source_engine.shard_id();
+        let (vts_data, snapshot_metadata) =
+            fetch_transactions(&replication_server, shard_id, height)
+                .await
+                .unwrap();
+
+        // --- Setup the Mock Server ---
+        let mock_service = MockReplicationService::default();
+
+        // 2a. Mock the metadata response.
+        mock_service
+            .metadata_responses
+            .lock()
+            .unwrap()
+            .insert(shard_id, Ok(snapshot_metadata));
+
+        // 2b. For each vts, withhold the last message from trie_messages if size > 0 and set the response
+        for vts in 0..256 {
+            let (mut trie_messages, fid_account_roots) =
+                vts_data.get(&vts).cloned().unwrap_or_default();
+
+            trie_messages.pop(); // Remove the last message
+
+            let response = GetShardTransactionsResponse {
+                trie_messages,
+                fid_account_roots,
+                next_page_token: None, // No pagination, one big response.
+            };
+
+            mock_service
+                .transactions_responses
+                .lock()
+                .unwrap()
+                .insert((shard_id, height, vts, None), Ok(response));
+        }
+
+        // --- Start the Mock Server ---
+        let (addr, shutdown_tx) = spawn_mock_server(mock_service).await;
+        let server_addr = format!("http://{}", addr);
+
+        // --- Configure and run the bootstrap client against the mock server ---
+        let dest_rocksdb_dir = format!("{}/dest_missing", tmp_dir.path().to_str().unwrap());
+
+        let mut config = Config::default();
+        config.rocksdb_dir = dest_rocksdb_dir.clone();
+        config.consensus.shard_ids = vec![shard_id];
+        config.fc_network = source_engine.network.clone();
+        config.snapshot.replication_peers = vec![server_addr];
+
+        let bootstrap = ReplicatorBootstrap::new(&config);
+
+        // 3. Perform the bootstrap. We expect this to fail due to missing messages.
+        let result = bootstrap.bootstrap_using_replication().await;
+
+        // Assert that bootstrap failed with AccountRootMismatch error.
+        match result {
+            Err(crate::bootstrap::error::BootstrapError::AccountRootMismatch(_)) => {
+                // Expected error type
+            }
+            other => {
+                panic!("Expected AccountRootMismatch error, but got: {:?}", other);
+            }
+        }
+
+        // Cleanup
+        let _ = shutdown_tx.send(());
     }
 }
