@@ -18,6 +18,7 @@ mod tests {
         storage::{
             db::{RocksDB, RocksDbTransactionBatch},
             store::{
+                block_engine_test_helpers,
                 engine::{PostCommitMessage, ShardEngine},
                 test_helper::{self},
             },
@@ -504,7 +505,10 @@ mod tests {
         let (signer, mut source_engine) =
             new_engine_with_fname_signer(&tmp_dir, Some(post_commit_tx)).await; // source engine
 
-        let (replicator, replication_server) = setup_replicator(&mut source_engine);
+        let (mut block_engine, _) = block_engine_test_helpers::setup(None);
+
+        let (replicator, replication_server) =
+            setup_replicator(&mut source_engine, &mut block_engine);
         let spawned_replicator = replicator.clone();
         tokio::spawn(async move {
             replicator::run(spawned_replicator, post_commit_rx).await;
