@@ -1,5 +1,5 @@
-use crate::bootstrap::error::BootstrapError;
-use crate::bootstrap::replication_rpc_client::RpcClientsManager;
+use crate::bootstrap::replication::error::BootstrapError;
+use crate::bootstrap::replication::rpc_client::RpcClientsManager;
 use crate::cfg::Config;
 use crate::core::validations;
 use crate::core::validations::message::validate_message_hash;

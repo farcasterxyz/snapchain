@@ -1,20 +1,20 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        bootstrap::{
-            replication_rpc_client::RpcClientsManager,
-            replication_test_utils::replication_test_utils::*,
+        bootstrap::replication::{
+            error::BootstrapError,
+            rpc_client::RpcClientsManager,
             service::{ReplicatorBootstrap, WorkUnitResponse},
-            BootstrapError,
+            test_utils::replication_test_utils::*,
         },
         cfg::Config,
+        network::replication::{replicator, ReplicationServer},
         proto::{
             self,
             replication_service_server::{ReplicationService, ReplicationServiceServer},
             GetShardSnapshotMetadataResponse, GetShardTransactionsResponse, ShardSnapshotMetadata,
             ShardTrieEntryWithMessage,
         },
-        replication::{replicator, ReplicationServer},
         storage::{
             db::{RocksDB, RocksDbTransactionBatch},
             store::{

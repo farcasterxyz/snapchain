@@ -11,13 +11,13 @@ use snapchain::mempool::routing;
 use snapchain::network::admin_server::MyAdminService;
 use snapchain::network::gossip::{GossipEvent, SnapchainGossip};
 use snapchain::network::http_server::HubHttpServiceImpl;
+use snapchain::network::replication::{self, ReplicationServer};
 use snapchain::network::server::MyHubService;
 use snapchain::node::snapchain_node::SnapchainNode;
 use snapchain::node::snapchain_read_node::SnapchainReadNode;
 use snapchain::proto::admin_service_server::AdminServiceServer;
 use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::proto::replication_service_server::ReplicationServiceServer;
-use snapchain::replication::{self, ReplicationServer};
 use snapchain::storage::db::snapshot::{download_snapshots, BootstrapMethod};
 use snapchain::storage::db::RocksDB;
 use snapchain::storage::store::engine::{PostCommitMessage, Senders};
@@ -319,7 +319,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 //         process::exit(1);
                 //     }
                 // }
-                error!("Not yet active");
+                error!("Bootstraup via Replication is not yet active");
                 process::exit(1);
             }
             BootstrapMethod::Snapshot => {

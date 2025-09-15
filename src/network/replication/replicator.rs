@@ -1,10 +1,10 @@
 use crate::{
     core::util,
+    network::replication::{error::ReplicationError, replication_stores::ReplicationStores},
     proto::{
         self, shard_trie_entry_with_message::TrieMessage, GetShardTransactionsResponse,
         MessageType, OnChainEventType,
     },
-    replication::{error::ReplicationError, replication_stores::ReplicationStores},
     storage::{
         db::{PageOptions, RocksDbTransactionBatch},
         store::{
