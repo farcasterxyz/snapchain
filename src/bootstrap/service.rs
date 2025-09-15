@@ -1,16 +1,15 @@
 use crate::bootstrap::error::BootstrapError;
+use crate::bootstrap::replication_rpc_client::RpcClientsManager;
 use crate::cfg::Config;
 use crate::core::validations;
 use crate::core::validations::message::validate_message_hash;
 use crate::proto::shard_trie_entry_with_message::TrieMessage;
-use crate::proto::{
-    self, replication_service_client::ReplicationServiceClient, GetShardSnapshotMetadataRequest,
-    GetShardTransactionsRequest, ReplicationTriePartStatus, ShardSnapshotMetadata,
-};
+use crate::proto::{self, ReplicationTriePartStatus, ShardSnapshotMetadata};
 use crate::storage::store::node_local_state::LocalStateStore;
 use crate::storage::trie::merkle_trie::MerkleTrie;
 use crate::storage::{
-    db::{RocksDB, RocksDbTransactionBatch},
+    constants::RootPrefix,
+    db::{PageOptions, RocksDB, RocksDbTransactionBatch},
     store::{
         account::StoreOptions,
         block::BlockStore,
@@ -19,10 +18,13 @@ use crate::storage::{
         stores::StoreLimits,
     },
     trie::merkle_trie::{self, TrieKey},
+    util::increment_vec_u8,
 };
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use ed25519_dalek::{Signature, VerifyingKey};
+use futures::future;
 use prost::Message as _;
+use std::collections::HashSet;
 use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 use std::{
@@ -34,13 +36,9 @@ use std::{
     },
     u64,
 };
-use tokio::{
-    signal::ctrl_c,
-    sync::{mpsc, Mutex},
-    task::JoinSet,
-    time,
-};
-use tonic::transport::Channel;
+use tokio::signal::ctrl_c;
+use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 use tracing::{error, info};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -68,7 +66,7 @@ enum DbCommitResponse {
 #[derive(Clone)]
 struct WorkUnit {
     current_status: proto::ReplicationTriePartStatus,
-    peer_address: String,
+    rpc_client_manager: Arc<RpcClientsManager>,
     shutdown_signal: Arc<AtomicBool>,
     thread_engine: Arc<ShardEngine>,
 }
@@ -96,6 +94,7 @@ pub struct ReplicatorBootstrap {
     statsd_client: StatsdClientWrapper,
     shard_ids: Vec<u32>,
     rocksdb_dir: String,
+    initial_peer_list: Vec<String>,
 }
 
 impl ReplicatorBootstrap {
@@ -118,12 +117,16 @@ impl ReplicatorBootstrap {
         let statsd_client =
             StatsdClientWrapper::new(statsd_client_inner, app_config.statsd.use_tags);
 
+        // Get the list of peers from the config
+        let initial_peer_list = app_config.snapshot.replication_peers.clone();
+
         Self {
             shutdown: Arc::new(AtomicBool::new(false)),
             network: app_config.fc_network,
             statsd_client,
             shard_ids: app_config.consensus.shard_ids.clone(),
             rocksdb_dir: app_config.rocksdb_dir.clone(),
+            initial_peer_list,
         }
     }
 
@@ -154,36 +157,55 @@ impl ReplicatorBootstrap {
     }
 
     /// Bootstrap a node from replication instead of snapshot download
-    pub async fn bootstrap_using_replication(
-        &self,
-        peer_address: String, // TODO: Implement multi-peer syncing
-    ) -> Result<WorkUnitResponse, BootstrapError> {
+    pub async fn bootstrap_using_replication(&self) -> Result<WorkUnitResponse, BootstrapError> {
         info!("Starting replication-based bootstrap");
 
-        // Fetch metadata and determine target height
-        let shard_metadata = {
-            let mut client = ReplicationServiceClient::connect(peer_address.clone()).await?;
-
-            self.get_shard_snapshots(&mut client, self.shard_ids.clone())
-                .await?
-        };
+        let peer_addresses = self.initial_peer_list.clone();
+        // If no peers are configured, we can't proceed, so error out
+        if peer_addresses.is_empty() {
+            return Err(BootstrapError::GenericError(
+                "No replication peers configured".into(),
+            ));
+        }
 
         // Initialize databases and replay transactions for each shard
         // Note: We're not replicating shard 0 (block shard) for now.
         let shard_ids = self.shard_ids.clone();
 
+        // For each shard, create a new RPC Client object, seeded by the the first peer
+        let rpc_client_managers = future::join_all(
+            shard_ids
+                .iter()
+                .map(|shard_id| RpcClientsManager::new(peer_addresses[0].clone(), *shard_id)),
+        )
+        .await
+        .into_iter()
+        .zip(shard_ids.iter())
+        .map(|(res, shard_id)| res.map(|mgr| (*shard_id, Arc::new(mgr))))
+        .collect::<Result<HashMap<_, _>, BootstrapError>>()?;
+
+        // Add the rest of the peers into all the rpc client managers
+        for (_, rpc_client_manager) in rpc_client_managers.iter() {
+            for peer in peer_addresses.iter().skip(1) {
+                rpc_client_manager.add_new_peer(peer.clone());
+            }
+        }
+
         // Create tasks for each shard to run in parallel
         let mut shard_tasks = JoinSet::new();
 
         for shard_id in shard_ids {
-            let metadata = shard_metadata.get(&shard_id).ok_or_else(|| {
-                BootstrapError::MetadataFetchError(format!(
-                    "No metadata found for shard {}",
-                    shard_id
-                ))
-            })?;
-
-            let target_height = metadata.height;
+            let rpc_client_manager = match rpc_client_managers.get(&shard_id) {
+                None => {
+                    return Err(BootstrapError::MetadataFetchError(format!(
+                        "No RPC client found for shard {}, couldn't fetch metadata",
+                        shard_id
+                    )))
+                }
+                Some(mgr) => mgr.clone(),
+            };
+            let shard_metadata = rpc_client_manager.get_metadata();
+            let target_height = shard_metadata.height;
 
             if target_height == 0 {
                 return Err(BootstrapError::GenericError(format!(
@@ -192,10 +214,7 @@ impl ReplicatorBootstrap {
                 )));
             }
 
-            // Clone necessary data for the spawned task
-            let peer_address_clone = peer_address.clone();
             let rocksdb_dir = self.get_snapshot_rocksdb_dir();
-
             info!(
                 "Bootstrapping shard {} at height {}",
                 shard_id, target_height
@@ -203,14 +222,14 @@ impl ReplicatorBootstrap {
 
             // Spawn a task for this shard
             let shutdown_signal = self.shutdown.clone();
-            let metadata = metadata.clone();
+            let metadata = shard_metadata.clone();
 
             let self_clone = self.clone();
             shard_tasks.spawn(async move {
                 // Replay transactions for this shard
                 self_clone
                     .start_shard_replication_main(
-                        &peer_address_clone,
+                        rpc_client_manager,
                         shard_id,
                         &rocksdb_dir,
                         metadata,
@@ -233,6 +252,10 @@ impl ReplicatorBootstrap {
                     // Ignore results since we're shutting down
                     let _ = res;
                 }
+
+                for (_, rpc_client_manager) in rpc_client_managers.iter() {
+                    rpc_client_manager.close().await;
+                }
                 info!("All shard tasks have been shut down.");
             };
 
@@ -240,8 +263,11 @@ impl ReplicatorBootstrap {
             if shard_tasks.is_empty() {
                 // All tasks completed successfully
                 // Write the final metadata from the server into the new DB.
-                self.write_final_metadata_to_db(&shard_metadata, &self.get_snapshot_rocksdb_dir())
-                    .await?;
+                self.write_final_metadata_to_db(
+                    &rpc_client_managers,
+                    &self.get_snapshot_rocksdb_dir(),
+                )
+                .await?;
 
                 info!("Replication bootstrap finished. Promoting snapshot to main DB.");
 
@@ -290,7 +316,7 @@ impl ReplicatorBootstrap {
 
     async fn start_shard_replication_main(
         &self,
-        peer_address: &str,
+        rpc_client_manager: Arc<RpcClientsManager>,
         shard_id: u32,
         rocksdb_dir: &str,
         metadata: ShardSnapshotMetadata,
@@ -304,7 +330,7 @@ impl ReplicatorBootstrap {
 
             let result = self
                 .start_shard_replication_batch(
-                    peer_address,
+                    rpc_client_manager.clone(),
                     shard_id,
                     rocksdb_dir,
                     metadata.clone(),
@@ -331,6 +357,9 @@ impl ReplicatorBootstrap {
                     self.verify_shard_roots(rocksdb_dir, shard_id, metadata)
                         .await?;
 
+                    // Clean up the work unit statuses and the account root hashes that were stored in the DB
+                    self.cleanup_db(rocksdb_dir, shard_id).await?;
+
                     return Ok(result);
                 }
                 WorkUnitResponse::Working | WorkUnitResponse::None => {
@@ -339,6 +368,44 @@ impl ReplicatorBootstrap {
                 }
             }
         }
+    }
+
+    /// Clean up the work unit statuses and account root hashes stored in the DB for a shard
+    async fn cleanup_db(&self, rocksdb_dir: &str, shard_id: u32) -> Result<(), BootstrapError> {
+        info!("Cleaning up bootstrap data for shard {}", shard_id);
+
+        let db = RocksDB::open_bulk_write_shard_db(rocksdb_dir, shard_id);
+
+        // Create the prefix for all bootstrap data for this shard
+        let start_prefix = vec![RootPrefix::ReplicationBootstrapStatus as u8, shard_id as u8];
+        let stop_prefix = increment_vec_u8(&start_prefix);
+
+        // Delete all keys with this prefix
+        let mut deleted_count = 0u64;
+        db.for_each_iterator_by_prefix(
+            Some(start_prefix),
+            Some(stop_prefix),
+            &PageOptions::default(),
+            |key, _value| {
+                db.del(key)?;
+                deleted_count += 1;
+                return Ok(false); // continue
+            },
+        )
+        .map_err(|e| {
+            BootstrapError::DatabaseError(format!(
+                "Failed to clean up bootstrap data for shard {}: {:?}",
+                shard_id, e
+            ))
+        })?;
+
+        db.close();
+
+        info!(
+            "Successfully cleaned up bootstrap data for shard {}, deleting {} keys",
+            shard_id, deleted_count
+        );
+        Ok(())
     }
 
     /// Commit the DB transaction batch to the DB.
@@ -427,7 +494,7 @@ impl ReplicatorBootstrap {
     /// It will also save progress and return if the main loop instructs it to via `shutdown_signal` if for eg. CTRL+C is pressed
     async fn start_shard_replication_batch(
         &self,
-        peer_address: &str,
+        rpc_client_manager: Arc<RpcClientsManager>,
         shard_id: u32,
         rocksdb_dir: &str,
         metadata: ShardSnapshotMetadata,
@@ -479,13 +546,13 @@ impl ReplicatorBootstrap {
                 continue;
             }
 
-            // 2. Create a work item for this VSI
-            let peer_address = peer_address.to_string();
+            // 2. Create a work item for this vts
+            let rpc_client_manager = rpc_client_manager.clone();
             let shutdown_signal = shutdown_signal.clone();
 
             let work_item = WorkUnit {
                 current_status,
-                peer_address,
+                rpc_client_manager,
                 thread_engine: thread_engine.clone(),
                 shutdown_signal,
             };
@@ -613,105 +680,23 @@ impl ReplicatorBootstrap {
         // 1. Create the engine and trie objects
         let mut status = work_item.current_status;
 
-        // Buffer size is 2, so it will prefetch the next page without waiting
-        let (messages_page_tx, mut messages_page_rx) = mpsc::channel(2);
-
-        let rpc_shutdown_signal = Arc::new(AtomicBool::new(false));
-        let rpc_shutdown_signal_clone = rpc_shutdown_signal.clone();
-        let rpc_client_handle = tokio::spawn(async move {
-            let mut thread_client =
-                match ReplicationServiceClient::connect(work_item.peer_address.clone()).await {
-                    Ok(client) => client,
-                    Err(e) => {
-                        error!(
-                            "Failed to connect to RPC server({}) for shard {} vts {}: {}",
-                            work_item.peer_address, status.shard_id, status.virtual_trie_shard, e
-                        );
-                        return;
-                    }
-                };
-
-            let mut request = GetShardTransactionsRequest {
-                shard_id: status.shard_id,
-                height: status.height,
-                trie_virtual_shard: status.virtual_trie_shard,
-                page_token: status.next_page_token,
-            };
-
-            // Keep track of number of attempts
-            let mut attempts = 0;
-
-            // Keep getting messages_page from the peer_address until we get a shutdown signal
-            loop {
-                // Get a messages page. Up to 3 tries, will respond with an error and exit the thread if >3 errors occur
-                const MAX_ATTEMPTS: usize = 3;
-                let messages_page =
-                    match thread_client.get_shard_transactions(request.clone()).await {
-                        Ok(m) => m.into_inner(),
-                        Err(e) => {
-                            attempts += 1;
-
-                            if attempts >= MAX_ATTEMPTS {
-                                error!("Max attempts reached, breaking out of loop");
-                                messages_page_tx.send(Err(e)).await.unwrap();
-                                return;
-                            } else {
-                                // Add a small delay before retrying
-                                time::sleep(time::Duration::from_secs(1)).await;
-                            }
-
-                            info!(
-                                "RPC Error while connecting to {}. Will retry ({}): {:?}",
-                                work_item.peer_address, attempts, e
-                            );
-                            continue; // try again
-                        }
-                    };
-
-                if rpc_shutdown_signal.load(Ordering::Relaxed) {
-                    return;
-                }
-
-                let next_page_token = messages_page.next_page_token.clone();
-
-                // Send the RPC response
-                messages_page_tx.send(Ok(messages_page)).await.unwrap();
-
-                // If all pages are done, exit
-                if next_page_token.is_none() || next_page_token.as_ref().unwrap().is_empty() {
-                    return;
-                }
-                request.page_token = next_page_token;
-            }
-        });
-
         loop {
             let mut last_fid = status.last_fid;
             let mut fids_to_check = vec![];
 
-            // 1. Use the RPC to fetch the page of messages from the server
-            let messages_page = match messages_page_rx.recv().await {
-                None => {
-                    // No more messages pages, some error occurred
-                    response = Err(BootstrapError::GenericError(
-                        "Unexpectedly No more messages_pages".into(),
-                    ));
-                    break;
-                }
-                Some(Ok(page)) => page,
-                Some(Err(e)) => {
-                    response = Err(BootstrapError::GenericError(format!(
-                        "Failed to receive messages_page on shard {} vts {}: {:?}",
-                        status.shard_id, status.virtual_trie_shard, e
-                    )));
-                    break; // Explicit error, just bail
-                }
-            };
+            // 2. Use the next_page_token to fetch the page of messages from the server
+            let messages_page = work_item
+                .rpc_client_manager
+                .get_shard_transactions(
+                    status.virtual_trie_shard as u8,
+                    status.next_page_token.clone(),
+                )
+                .await?;
 
             let trie_messages = messages_page.trie_messages;
             let mut txn_batch = RocksDbTransactionBatch::new();
 
-            // 2. Write the account roots to the DB, so we may check them later
+            // 3. Write the account roots to the DB, so we may check them later
             for fid_root in &messages_page.fid_account_roots {
                 LocalStateStore::write_account_root(
                     &mut txn_batch,
@@ -724,20 +709,20 @@ impl ReplicatorBootstrap {
 
             let next_page_token = messages_page.next_page_token;
 
-            // 3. Set the block height to 0 (by resetting the event id) for bootstrap. This makes the hub events
+            // 4. Set the block height to 0 (by resetting the event id) for bootstrap. This makes the hub events
             // get proper IDs.
             work_item.thread_engine.reset_event_id();
 
-            let mut trie_keys = vec![];
+            let mut trie_keys = HashSet::new();
             let num_messages = trie_messages.len();
 
-            // 4. Validate all the message signatures and hashes.
+            // 5. Validate all the message signatures and hashes.
             Self::validate_messages_signatures(&trie_messages)?;
 
-            // 5. Start going through all onchain_events and messages that were returned from the RPC
+            // 6. Start going through all onchain_events and messages that were returned from the RPC
             for trie_message_entry in &trie_messages {
                 let trie_key = trie_message_entry.trie_key.clone();
-                trie_keys.push(trie_key.clone());
+                trie_keys.insert(trie_key.clone());
 
                 match work_item
                     .thread_engine
@@ -781,11 +766,12 @@ impl ReplicatorBootstrap {
                 };
             }
 
-            // 6. Insert all the trie keys into the trie
-            let trie_txn_batch = Self::commit_to_trie(&work_data, trie_keys).await?;
+            // 7. Insert all the trie keys into the trie
+            let trie_txn_batch =
+                Self::commit_to_trie(&work_data, trie_keys.into_iter().collect()).await?;
             txn_batch.merge(trie_txn_batch);
 
-            // 7. Verify account root for fid, update last_fid in the DB
+            // 8. Verify account root for fid, update last_fid in the DB
             Self::check_fid_roots(
                 &work_item.thread_engine,
                 status.shard_id,
@@ -794,14 +780,14 @@ impl ReplicatorBootstrap {
                 fids_to_check,
             )?;
 
-            // 8. Now that the account roots match, commit to DB
+            // 9. Now that the account roots match, commit to DB
             // First, add the work status to the txn_batch so it gets commited atomically with the work done
             status.last_fid = last_fid;
             status.next_page_token = next_page_token.clone();
             status.last_response = WorkUnitResponse::Working as u32;
             LocalStateStore::write_work_unit(&mut txn_batch, &status);
 
-            // 8. Commit to DB. This will commit all the messages and the trie nodes atomically
+            // 10. Commit to DB. This will commit all the messages and the trie nodes atomically
             let db_response = Self::commit_to_db(&work_data, txn_batch, num_messages).await?;
 
             // Reload the trie after commit, so we get the correct numbers from the DB. Note that the ShardSharedWorkData has it's own copy of the
@@ -830,10 +816,19 @@ impl ReplicatorBootstrap {
             }
 
             if next_page_token.is_none() {
-                // All done.
+                // All done. Check the last fid
+                let mut txn_batch = RocksDbTransactionBatch::new();
+                if let Some(last_fid) = last_fid {
+                    Self::check_fid_roots(
+                        &work_item.thread_engine,
+                        status.shard_id,
+                        status.virtual_trie_shard as u8,
+                        &mut txn_batch,
+                        vec![last_fid],
+                    )?;
+                }
                 // Write to the DB that we're all done
                 status.last_response = WorkUnitResponse::Finished as u32;
-                let mut txn_batch = RocksDbTransactionBatch::new();
                 LocalStateStore::write_work_unit(&mut txn_batch, &status);
 
                 // commit to DB, we're exiting anyway, so we don't care about the response
@@ -843,11 +838,6 @@ impl ReplicatorBootstrap {
                 break;
             }
         } // loop to next page from the server
-
-        // Drain all the pending message_pages so the messages thread can exit
-        rpc_shutdown_signal_clone.store(true, Ordering::Relaxed);
-        while let Some(_) = messages_page_rx.recv().await {}
-        rpc_client_handle.await?;
 
         return response;
     }
@@ -917,8 +907,8 @@ impl ReplicatorBootstrap {
                     shard_id,
                     virtual_trie_shard,
                     fid,
-                    hex::encode(expected_root),
-                    hex::encode(actual_root),
+                    hex::encode(&expected_root),
+                    hex::encode(&actual_root),
                 )));
             }
         }
@@ -964,56 +954,6 @@ impl ReplicatorBootstrap {
                 actual,
             });
         }
-    }
-
-    /// Determine the highest block for each shard.
-    async fn get_shard_snapshots(
-        &self,
-        client: &mut ReplicationServiceClient<Channel>,
-        shards: Vec<u32>,
-    ) -> Result<HashMap<u32, ShardSnapshotMetadata>, BootstrapError> {
-        let mut shard_metadata = HashMap::new();
-
-        // Add shard-0 to the list of shards to fetch the metadata for.
-        let mut all_shards = vec![0];
-        all_shards.extend(shards);
-
-        for shard_id in all_shards {
-            let request = GetShardSnapshotMetadataRequest { shard_id };
-
-            match client.get_shard_snapshot_metadata(request).await {
-                Ok(response) => {
-                    let metadata_response = response.into_inner();
-
-                    if metadata_response.snapshots.is_empty() {
-                        error!("No snapshots found for shard {}", shard_id);
-                        return Err(BootstrapError::MetadataFetchError(
-                            "No snapshots found".into(),
-                        ));
-                    }
-
-                    // Find the largest height in the response, and use that
-                    let mut latest_snapshot = metadata_response.snapshots[0].clone();
-                    for snapshot in metadata_response.snapshots {
-                        if snapshot.height > latest_snapshot.height {
-                            latest_snapshot = snapshot;
-                        }
-                    }
-
-                    info!(
-                        "Added metadata for shard {} at height {}",
-                        shard_id, latest_snapshot.height
-                    );
-                    shard_metadata.insert(shard_id, latest_snapshot);
-                }
-                Err(e) => {
-                    error!("Failed to get metadata for shard {}: {}", shard_id, e);
-                    return Err(BootstrapError::MetadataFetchError(e.to_string()));
-                }
-            }
-        }
-
-        Ok(shard_metadata)
     }
 
     // Bulk validate all the signatures. We use the dalek library for batch verification. This is substantially faster than validating
@@ -1082,12 +1022,13 @@ impl ReplicatorBootstrap {
     // which includes the highest ShardChunks for shard-1 and shard-2 and the highest block for shard-0
     async fn write_final_metadata_to_db(
         &self,
-        shard_metadata: &std::collections::HashMap<u32, crate::proto::ShardSnapshotMetadata>,
+        rpc_client_managers: &HashMap<u32, Arc<RpcClientsManager>>,
         rocksdb_dir: &str,
     ) -> Result<(), BootstrapError> {
         info!("Writing final block and shard chunks to database...");
 
-        for (shard_id, metadata) in shard_metadata {
+        for (shard_id, rpc_client_manager) in rpc_client_managers {
+            let metadata = rpc_client_manager.get_metadata();
             if *shard_id == 0 {
                 // Handle Block for Shard 0
                 if let Some(block) = &metadata.block {

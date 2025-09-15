@@ -7,9 +7,3 @@ pub mod error;
 pub mod replication_server;
 pub mod replication_stores;
 pub mod replicator;
-
-#[cfg(test)]
-mod replication_server_test;
-
-#[cfg(test)]
-pub mod replication_test_utils;

@@ -237,7 +237,7 @@ impl LocalStateStore {
         shard_id: u32,
         virtual_trie_shard: u8,
         fid: u64,
-        txn_batch: &mut RocksDbTransactionBatch,
+        txn_batch: &RocksDbTransactionBatch,
     ) -> Option<FidAccountRootHash> {
         let key = Self::make_account_root_key(shard_id, virtual_trie_shard, fid);
         if let Some(Some(bytes)) = txn_batch.batch.get(&key) {
