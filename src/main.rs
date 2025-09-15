@@ -181,7 +181,6 @@ async fn schedule_background_jobs(
     sync_complete_rx: watch::Receiver<bool>,
     statsd_client: StatsdClientWrapper,
     mempool_tx: mpsc::Sender<MempoolRequest>,
-    block_stores: BlockStores,
     local_state_store: LocalStateStore,
 ) {
     let sched = JobScheduler::new().await.unwrap();
@@ -214,8 +213,8 @@ async fn schedule_background_jobs(
             "0 0 5 * * *", // 5 AM UTC every day
             app_config.snapshot.clone(),
             app_config.fc_network,
-            block_stores,
-            shard_stores,
+            block_stores.clone(),
+            shard_stores.clone(),
             statsd_client,
         )
         .unwrap();
@@ -516,7 +515,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             sync_complete_rx,
             statsd_client.clone(),
             mempool_tx.clone(),
-            node.block_stores.clone(),
             local_state_store.clone(),
         )
         .await;
@@ -667,7 +665,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             sync_complete_rx,
             statsd_client.clone(),
             mempool_tx.clone(),
-            node.block_stores.clone(),
             local_state_store.clone(),
         )
         .await;
