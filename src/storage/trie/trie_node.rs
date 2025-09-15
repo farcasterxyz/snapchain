@@ -274,32 +274,35 @@ impl TrieNode {
         if current_index >= UNCOMPACTED_LENGTH && self.is_leaf() {
             // Step 1: Find all unique keys we need to deal with at this node.
             // This includes the key already in the leaf (if any) and all unique keys from the input.
-            let mut all_unique_keys = HashSet::new();
-            if let Some(existing_key) = &self.key {
-                all_unique_keys.insert(existing_key.clone());
-            }
-            for key in &keys {
-                all_unique_keys.insert(key.clone());
-            }
+            let (num_unique_keys, maybe_first_key) = {
+                let mut all_unique_keys = HashSet::new();
+                if let Some(existing_key) = &self.key {
+                    all_unique_keys.insert(existing_key);
+                }
+                for key in &keys {
+                    all_unique_keys.insert(key);
+                }
 
+                (
+                    all_unique_keys.len(),
+                    all_unique_keys.into_iter().next().map(|k| k.clone()),
+                )
+            };
             // Step 2: Decide if we need to split. A split is needed if the total number of unique keys is > 1.
-            if all_unique_keys.len() <= 1 {
+            if num_unique_keys <= 1 {
                 // --- NO SPLIT ---
                 // This node remains a leaf. We only need to handle the case where the leaf was empty and is now being filled.
                 if self.key.is_none() {
-                    if let Some(key_to_insert) = all_unique_keys.iter().next() {
+                    if let Some(key_to_insert) = maybe_first_key {
                         // The leaf was empty, and we have one unique key to insert.
                         self.key = Some(key_to_insert.clone());
                         self.items += 1;
 
                         // Find the first occurrence of this key in the input `keys` to mark it as a success.
-                        let mut first = true;
                         for (i, key) in keys.iter().enumerate() {
-                            if bytes_compare(key, key_to_insert) == 0 {
-                                if first {
-                                    results[i] = true;
-                                    first = false;
-                                }
+                            if bytes_compare(key, &key_to_insert) == 0 {
+                                results[i] = true;
+                                break;
                             }
                         }
                         self.update_hash(child_hashes, &prefix)?;
