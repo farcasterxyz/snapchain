@@ -53,8 +53,8 @@ pub mod events_factory {
     use super::*;
     use crate::{
         proto::{
-            self, BlockEvent, BlockEventData, BlockEventType, HeartbeatEventBody, StorageUnitType,
-            TierPurchaseBody, TierType,
+            self, BlockEvent, BlockEventData, BlockEventType, HeartbeatEventBody,
+            MergeMessageEventBody, StorageUnitType, TierPurchaseBody, TierType,
         },
         storage::store::account::{StorageSlot, UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP},
     };
@@ -68,6 +68,28 @@ pub mod events_factory {
             block_timestamp: 0,
             body: Some(message::block_event_data::Body::HeartbeatEventBody(
                 HeartbeatEventBody {},
+            )),
+        };
+        let hash = blake3::hash(data.encode_to_vec().as_slice())
+            .as_bytes()
+            .to_vec();
+        BlockEvent {
+            hash,
+            data: Some(data),
+        }
+    }
+
+    pub fn create_merge_message_event(message: proto::Message, seqnum: u64) -> BlockEvent {
+        let data = BlockEventData {
+            seqnum,
+            r#type: BlockEventType::MergeMessage as i32,
+            block_number: 0,
+            event_index: 0,
+            block_timestamp: 0,
+            body: Some(message::block_event_data::Body::MergeMessageEventBody(
+                MergeMessageEventBody {
+                    message: Some(message),
+                },
             )),
         };
         let hash = blake3::hash(data.encode_to_vec().as_slice())
@@ -540,6 +562,34 @@ pub mod messages_factory {
                 fid,
                 MessageType::UserDataAdd,
                 message::message_data::Body::UserDataBody(user_data_body),
+                timestamp,
+                private_key,
+            )
+        }
+    }
+
+    pub mod storage_lend {
+        use message::LendStorageBody;
+
+        use super::*;
+
+        pub fn create_storage_lend(
+            from_fid: u64,
+            to_fid: u64,
+            units: u64,
+            unit_type: message::StorageUnitType,
+            timestamp: Option<u32>,
+            private_key: Option<&SigningKey>,
+        ) -> message::Message {
+            let lend_storage_body = LendStorageBody {
+                to_fid,
+                num_units: units,
+                unit_type: unit_type as i32,
+            };
+            create_message_with_data(
+                from_fid,
+                MessageType::LendStorage,
+                message::message_data::Body::LendStorageBody(lend_storage_body),
                 timestamp,
                 private_key,
             )

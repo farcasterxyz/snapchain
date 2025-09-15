@@ -313,8 +313,7 @@ impl ShardEngine {
 
                 let storage_slot = self
                     .stores
-                    .onchain_event_store
-                    .get_storage_slot_for_fid(transaction.fid, self.network, maybe_onchainevents)
+                    .get_storage_slot_for_fid(transaction.fid, maybe_onchainevents)
                     .ok()?;
 
                 // Drop events if storage slot is inactive
@@ -661,7 +660,7 @@ impl ShardEngine {
         let mut pruned_messages_count = 0;
         let mut revoked_messages_count = 0;
         let mut events = vec![];
-        let mut message_types = HashSet::new();
+        let mut message_types_to_prune = HashSet::new();
         let mut revoked_signers = HashSet::new();
 
         let mut validation_errors = vec![];
@@ -818,8 +817,39 @@ impl ShardEngine {
                             "Error merging block event: {}",
                             err.to_string()
                         );
+                    } else {
+                        last_block_event_seqnum += 1;
                     }
-                    last_block_event_seqnum += 1;
+
+                    if version.is_enabled(ProtocolFeature::StorageLending) {
+                        // Process storage lend messages from block events
+                        match &block_event.data.as_ref().unwrap().body {
+                            Some(proto::block_event_data::Body::MergeMessageEventBody(
+                                merge_message_event,
+                            )) => {
+                                if let Some(message) = &merge_message_event.message {
+                                    match self.merge_message(&message, txn_batch) {
+                                        Ok(hub_event) => {
+                                            merged_messages_count += 1;
+                                            self.update_trie(trie_ctx, &hub_event, txn_batch)?;
+                                            events.push(hub_event);
+                                            // Don't prune storage lends here. That's handled in shard 0.
+                                        }
+                                        Err(err) => {
+                                            if source != ProposalSource::Simulate {
+                                                warn!(
+                                                    seqnum = block_event.seqnum(),
+                                                    "Error merging message from block event: {}",
+                                                    err.to_string()
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
         }
@@ -897,7 +927,7 @@ impl ShardEngine {
                             self.update_trie(trie_ctx, &event, txn_batch)?;
                             events.push(event.clone());
                             user_messages_count += 1;
-                            message_types.insert(msg.msg_type());
+                            message_types_to_prune.insert(msg.msg_type());
                         }
                         Err(err) => {
                             if source != ProposalSource::Simulate {
@@ -938,7 +968,7 @@ impl ShardEngine {
             }
         }
 
-        for msg_type in message_types {
+        for msg_type in message_types_to_prune {
             let fid = snapchain_txn.fid;
             let result = self.prune_messages(fid, msg_type, txn_batch, &version);
             match result {
@@ -1145,6 +1175,11 @@ impl ShardEngine {
                 let result = store.merge(msg, txn_batch);
                 result.map_err(|e| MessageValidationError::StoreError(e))
             }
+            MessageType::LendStorage => {
+                let store = &self.stores.storage_lend_store;
+                let result = store.merge(msg, txn_batch);
+                result.map_err(|e| MessageValidationError::StoreError(e))
+            }
             unhandled_type => {
                 return Err(MessageValidationError::InvalidMessageType(
                     unhandled_type as i32,
@@ -1205,6 +1240,10 @@ impl ShardEngine {
                 } else {
                     Ok(vec![])
                 }
+            }
+            MessageType::LendStorage => {
+                // Pruning not supported for storage lend messages
+                Ok(vec![])
             }
             unhandled_type => {
                 return Err(EngineError::UnsupportedMessageType(unhandled_type));
@@ -1287,6 +1326,13 @@ impl ShardEngine {
             .get_active_signer(message_data.fid, message.signer.clone(), Some(txn_batch))
             .map_err(|_| MessageValidationError::MissingSigner)?
             .ok_or(MessageValidationError::MissingSigner)?;
+
+        // Don't allow storage lends to be merged directly without going through shard 0
+        if message_data.r#type() == MessageType::LendStorage {
+            return Err(MessageValidationError::InvalidMessageType(
+                message_data.r#type,
+            ));
+        }
 
         // State-dependent verifications:
         match &message_data.body {

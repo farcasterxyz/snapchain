@@ -174,12 +174,7 @@ enum StoreType {
   STORE_TYPE_USER_DATA = 4;
   STORE_TYPE_VERIFICATIONS = 5;
   STORE_TYPE_USERNAME_PROOFS = 6;
-}
-
-enum StorageUnitType {
-  UNIT_TYPE_LEGACY = 0;
-  UNIT_TYPE_2024 = 1;
-  UNIT_TYPE_2025 = 2;
+  STORE_TYPE_STORAGE_LENDS = 7;
 }
 
 message StorageUnitDetails {

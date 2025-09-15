@@ -1124,7 +1124,7 @@ async fn test_decoupling_shard_0_from_other_shards() {
                 &merkle_trie::Context::new(),
                 &stores.db,
                 &mut txn,
-                vec![&TrieKey::for_message(&message)],
+                vec![&TrieKey::for_message(&message)[0]],
             )
             .unwrap();
         stores.db.commit(txn).unwrap();

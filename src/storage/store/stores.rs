@@ -6,16 +6,16 @@ use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
 use crate::network::http_server::TierType;
 use crate::proto::{
-    self, HubEvent, StorageLimit, StorageLimitsResponse, StorageUnitDetails, StorageUnitType,
-    StoreType,
+    self, HubEvent, OnChainEvent, StorageLimit, StorageLimitsResponse, StorageUnitDetails,
+    StorageUnitType, StoreType,
 };
 use crate::proto::{MessageType, TierDetails};
 use crate::storage::constants::{RootPrefix, PAGE_SIZE_MAX};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch, RocksdbError};
 use crate::storage::store::account::{
     BlockEventStore, CastStore, CastStoreDef, IntoU8, LinkStore, OnchainEventStorageError,
-    OnchainEventStore, Store, StoreEventHandler, StoreOptions, UsernameProofStore,
-    UsernameProofStoreDef,
+    OnchainEventStore, StorageLendStore, StorageLendStoreDef, Store, StoreEventHandler,
+    StoreOptions, UsernameProofStore, UsernameProofStoreDef,
 };
 use crate::storage::store::shard::ShardStore;
 use crate::storage::trie::merkle_trie;
@@ -53,6 +53,7 @@ pub struct Stores {
     pub verification_store: Store<VerificationStoreDef>,
     pub onchain_event_store: OnchainEventStore,
     pub username_proof_store: Store<UsernameProofStoreDef>,
+    pub storage_lend_store: Store<StorageLendStoreDef>,
     pub db: Arc<RocksDB>,
     pub trie: merkle_trie::MerkleTrie,
     pub store_limits: StoreLimits,
@@ -135,6 +136,7 @@ impl Limits {
             MessageType::UserDataAdd => StoreType::UserData,
             MessageType::UsernameProof => StoreType::UsernameProofs,
             MessageType::FrameAction => StoreType::None,
+            MessageType::LendStorage => StoreType::StorageLends,
             MessageType::None => StoreType::None,
         }
     }
@@ -154,6 +156,7 @@ impl Limits {
                 MessageType::VerificationRemove,
             ],
             StoreType::UsernameProofs => vec![MessageType::UsernameProof],
+            StoreType::StorageLends => vec![MessageType::LendStorage],
             StoreType::None => vec![],
         }
     }
@@ -166,6 +169,7 @@ impl Limits {
             StoreType::UserData => self.user_data,
             StoreType::Verifications => self.verifications,
             StoreType::UsernameProofs => self.user_name_proofs,
+            StoreType::StorageLends => u32::MAX, // There's no explicit limit for storage lends
             StoreType::None => 0,
         }
     }
@@ -284,6 +288,13 @@ impl Stores {
         let onchain_event_store =
             OnchainEventStore::new_with_opts(db.clone(), event_handler.clone(), store_opts.clone());
 
+        let storage_lend_store = StorageLendStore::new_with_opts(
+            db.clone(),
+            event_handler.clone(),
+            100,
+            store_opts.clone(),
+        );
+
         Stores {
             shard_id,
             trie,
@@ -295,6 +306,7 @@ impl Stores {
             verification_store,
             onchain_event_store,
             username_proof_store,
+            storage_lend_store,
             db: db.clone(),
             store_limits,
             event_handler,
@@ -321,6 +333,37 @@ impl Stores {
             .put(&Self::make_schema_version_key(), &version.to_be_bytes())
     }
 
+    pub fn get_storage_slot_for_fid(
+        &self,
+        fid: u64,
+        pending_events: &[OnChainEvent],
+    ) -> Result<StorageSlot, StoresError> {
+        let lent_storage = StorageLendStore::get_lent_storage(&self.storage_lend_store, fid)
+            .map_err(|err| StoresError::StoreError {
+                inner: err,
+                hash: vec![],
+            })?;
+        let borrowed_storage =
+            StorageLendStore::get_borrowed_storage(&self.storage_lend_store, fid).map_err(
+                |err| StoresError::StoreError {
+                    inner: err,
+                    hash: vec![],
+                },
+            )?;
+        let slot = self
+            .onchain_event_store
+            .get_storage_slot_for_fid(
+                fid,
+                self.network,
+                pending_events,
+                &lent_storage,
+                &borrowed_storage,
+            )
+            .map_err(|e| StoresError::OnchainEventError(e))?;
+
+        Ok(slot)
+    }
+
     pub fn get_usage(
         &self,
         fid: u64,
@@ -329,10 +372,7 @@ impl Stores {
     ) -> Result<(u32, u32), StoresError> {
         let store_type = Limits::message_type_to_store_type(message_type);
         let message_count = self.get_usage_by_store_type(fid, store_type, txn_batch)?;
-        let slot = self
-            .onchain_event_store
-            .get_storage_slot_for_fid(fid, self.network, &[])
-            .map_err(|e| StoresError::OnchainEventError(e))?;
+        let slot = self.get_storage_slot_for_fid(fid, &[])?;
         let max_messages = self.store_limits.max_messages(&slot, store_type);
 
         Ok((message_count, max_messages))
@@ -376,13 +416,11 @@ impl Stores {
     }
 
     pub fn get_storage_limits(&self, fid: u64) -> Result<StorageLimitsResponse, StoresError> {
-        let slot = self
-            .onchain_event_store
-            .get_storage_slot_for_fid(fid, self.network, &[])
-            .map_err(|e| StoresError::OnchainEventError(e))?;
+        let slot = self.get_storage_slot_for_fid(fid, &[])?;
 
         let txn_batch = &mut RocksDbTransactionBatch::new();
         let mut limits = vec![];
+        // Don't count storage lend message limits here. The limit is artificially set to u32::MAX.
         for store_type in vec![
             StoreType::Casts,
             StoreType::Links,
@@ -401,6 +439,7 @@ impl Stores {
                 StoreType::UserData => "USER_DATA",
                 StoreType::Verifications => "VERIFICATIONS",
                 StoreType::UsernameProofs => "USERNAME_PROOFS",
+                StoreType::StorageLends => "STORAGE_LENDS",
             };
             let limit = StorageLimit {
                 store_type: store_type.try_into().unwrap(),
