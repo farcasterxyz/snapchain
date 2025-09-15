@@ -1,12 +1,12 @@
 #[cfg(test)]
 pub mod replication_test_utils {
     use crate::{
-        proto,
-        replication::{
+        network::replication::{
             replication_stores::ReplicationStores,
             replicator::{Replicator, ReplicatorSnapshotOptions},
             ReplicationServer,
         },
+        proto,
         storage::{
             db::{RocksDB, RocksdbError},
             store::{

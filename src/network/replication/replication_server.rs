@@ -1,5 +1,5 @@
+use crate::network::replication::replicator::Replicator;
 use crate::proto;
-use crate::replication::replicator::Replicator;
 use crate::storage::store::BlockStore;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};

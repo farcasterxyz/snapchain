@@ -1,6 +1,6 @@
 use crate::{
+    network::replication::error::ReplicationError,
     proto,
-    replication::error::ReplicationError,
     storage::{
         db::RocksDB,
         store::stores::{StoreLimits, Stores},

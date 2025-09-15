@@ -1,9 +1,7 @@
-use crate::{
-    bootstrap::BootstrapError,
-    proto::{
-        self, replication_service_client::ReplicationServiceClient,
-        GetShardSnapshotMetadataResponse, GetShardTransactionsResponse, ShardSnapshotMetadata,
-    },
+use crate::bootstrap::replication::error::BootstrapError;
+use crate::proto::{
+    self, replication_service_client::ReplicationServiceClient, GetShardSnapshotMetadataResponse,
+    GetShardTransactionsResponse, ShardSnapshotMetadata,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
