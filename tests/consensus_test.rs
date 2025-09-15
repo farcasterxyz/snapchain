@@ -24,7 +24,6 @@ use snapchain::storage::store::block_engine::BlockStores;
 use snapchain::storage::store::mempool_poller::MempoolMessage;
 use snapchain::storage::store::node_local_state::LocalStateStore;
 use snapchain::storage::store::stores::Stores;
-use snapchain::storage::store::BlockStore;
 use snapchain::storage::trie::merkle_trie::{self, TrieKey};
 use snapchain::utils::factory::{self, messages_factory};
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
@@ -255,7 +254,6 @@ impl ReadNodeForTest {
         let data_dir = &make_tmp_path();
         let db = Arc::new(RocksDB::new(data_dir));
         db.open().unwrap();
-        let block_store = BlockStore::new(db.clone());
         let (_, messages_request_rx) = mpsc::channel(100);
         let node = SnapchainReadNode::create(
             keypair.clone(),
@@ -263,7 +261,6 @@ impl ReadNodeForTest {
             peer_id,
             gossip_tx.clone(),
             system_tx.clone(),
-            block_store.clone(),
             make_tmp_path(),
             statsd_client.clone(),
             fc_network,
@@ -355,7 +352,6 @@ impl NodeForTest {
         let data_dir = &make_tmp_path();
         let db = Arc::new(RocksDB::new(data_dir));
         db.open().unwrap();
-        let block_store = BlockStore::new(db.clone());
         let global_db = RocksDB::open_global_db(&data_dir);
         let node_local_store = LocalStateStore::new(global_db);
         let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
@@ -368,7 +364,6 @@ impl NodeForTest {
             shard_decision_tx,
             Some(block_tx.clone()),
             messages_request_tx,
-            block_store.clone(),
             node_local_store,
             make_tmp_path(),
             statsd_client.clone(),
@@ -424,6 +419,7 @@ impl NodeForTest {
             messages_request_rx,
             num_shards,
             node.shard_stores.clone(),
+            node.block_stores.clone(),
             gossip_tx.clone(),
             shard_decision_rx,
             statsd_client.clone(),
@@ -433,7 +429,7 @@ impl NodeForTest {
 
         let service = MyHubService::new(
             "".to_string(),
-            block_store.clone(),
+            node.block_stores.clone(),
             node.shard_stores.clone(),
             node.shard_senders.clone(),
             statsd_client.clone(),

@@ -119,6 +119,33 @@ mod tests {
         )
     }
 
+    async fn pull_message(
+        messages_request_tx: &mpsc::Sender<MempoolMessagesRequest>,
+        shard_id: u32,
+        expected_message: Option<MempoolMessage>,
+    ) {
+        // Setup channel to retrieve messages
+        let (mempool_retrieval_tx, mempool_retrieval_rx) = oneshot::channel();
+
+        // Query mempool for the messages
+        messages_request_tx
+            .send(MempoolMessagesRequest {
+                shard_id,
+                max_messages_per_block: 1,
+                message_tx: mempool_retrieval_tx,
+            })
+            .await
+            .unwrap();
+
+        let result = mempool_retrieval_rx.await.unwrap();
+        if let Some(expected_message) = expected_message {
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0], expected_message)
+        } else {
+            assert_eq!(result.len(), 0)
+        }
+    }
+
     #[tokio::test]
     async fn test_duplicate_user_message_is_invalid() {
         let (mut engines, _, _, mut mempool, _, _, _, _) = setup(None, false, 1).await;
@@ -377,7 +404,7 @@ mod tests {
 
         mempool_tx
             .send(MempoolRequest::AddMessage(
-                MempoolMessage::OnchainEvent(onchain_event),
+                MempoolMessage::OnchainEvent(onchain_event.clone()),
                 MempoolSource::Local,
                 None,
             ))
@@ -387,43 +414,18 @@ mod tests {
         // Wait for processing
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        let pull_message = async || {
-            // Setup channel to retrieve messages
-            let (mempool_retrieval_tx, mempool_retrieval_rx) = oneshot::channel();
-
-            // Query mempool for the messages
-            messages_request_tx
-                .send(MempoolMessagesRequest {
-                    shard_id: 1,
-                    max_messages_per_block: 1,
-                    message_tx: mempool_retrieval_tx,
-                })
-                .await
-                .unwrap();
-
-            let result = mempool_retrieval_rx.await.unwrap();
-            return result[0].clone();
-        };
-
-        match pull_message().await {
-            MempoolMessage::UserMessage(_) => {
-                panic!("Expected validator message, got user message")
-            }
-            MempoolMessage::OnchainEvent(_)
-            | MempoolMessage::OnchainEventForMigration(_)
-            | MempoolMessage::FnameTransfer(_)
-            | MempoolMessage::BlockEvent { .. } => {}
-        }
-
-        match pull_message().await {
-            MempoolMessage::UserMessage(_) => {}
-            MempoolMessage::OnchainEvent(_)
-            | MempoolMessage::OnchainEventForMigration(_)
-            | MempoolMessage::FnameTransfer(_)
-            | MempoolMessage::BlockEvent { .. } => {
-                panic!("Expected user message, got validator message")
-            }
-        }
+        pull_message(
+            &messages_request_tx,
+            1,
+            Some(MempoolMessage::OnchainEvent(onchain_event)),
+        )
+        .await;
+        pull_message(
+            &messages_request_tx,
+            1,
+            Some(MempoolMessage::UserMessage(cast.clone())),
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -671,5 +673,104 @@ mod tests {
 
         let error = result.unwrap_err();
         assert_eq!(error.code, "bad_request.duplicate");
+    }
+
+    #[tokio::test]
+    async fn test_onchain_events_routing() {
+        // Setup with 2 shards
+        let (_, _, _, mut mempool, mempool_tx, messages_request_tx, _decision_tx, _) =
+            setup(None, false, 2).await;
+
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let fid = 1234;
+        // Ensure this FID routes to shard 2
+        let router = ShardRouter {};
+        assert_eq!(router.route_fid(fid, 2), 1);
+
+        let onchain_event = events_factory::create_rent_event(
+            fid,
+            10,
+            proto::StorageUnitType::UnitType2025,
+            false,
+            proto::FarcasterNetwork::Devnet,
+        );
+
+        // Add onchain event to mempool
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::OnchainEvent(onchain_event.clone()),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        // Wait for processing
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        pull_message(
+            &messages_request_tx,
+            0,
+            Some(MempoolMessage::OnchainEvent(onchain_event.clone())),
+        )
+        .await;
+        pull_message(
+            &messages_request_tx,
+            1,
+            Some(MempoolMessage::OnchainEvent(onchain_event.clone())),
+        )
+        .await;
+
+        // Test that duplicates are allowed by adding the same onchain event again
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::OnchainEvent(onchain_event.clone()),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        // Wait for processing
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Should be able to pull the duplicate from both shards
+        pull_message(
+            &messages_request_tx,
+            0,
+            Some(MempoolMessage::OnchainEvent(onchain_event.clone())),
+        )
+        .await;
+        pull_message(
+            &messages_request_tx,
+            1,
+            Some(MempoolMessage::OnchainEvent(onchain_event.clone())),
+        )
+        .await;
+
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::OnchainEventForMigration(onchain_event.clone()),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        // Wait for processing
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        pull_message(
+            &messages_request_tx,
+            0,
+            Some(MempoolMessage::OnchainEventForMigration(
+                onchain_event.clone(),
+            )),
+        )
+        .await;
+        pull_message(&messages_request_tx, 1, None).await;
     }
 }

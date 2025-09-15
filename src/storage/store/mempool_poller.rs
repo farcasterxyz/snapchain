@@ -27,7 +27,7 @@ pub struct MempoolPoller {
     pub statsd_client: StatsdClientWrapper,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum MempoolMessage {
     UserMessage(proto::Message),
     OnchainEvent(proto::OnChainEvent),
