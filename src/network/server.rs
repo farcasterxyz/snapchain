@@ -35,10 +35,10 @@ use crate::storage::store::account::{
     CastStore, LinkStore, ReactionStore, UserDataStore, VerificationStore,
 };
 use crate::storage::store::account::{EventsPage, HubEventIdGenerator};
+use crate::storage::store::block_engine::BlockStores;
 use crate::storage::store::engine::{MessageValidationError, Senders, ShardEngine};
 use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::stores::Stores;
-use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::{EngineVersion, ProtocolFeature};
 use hex::ToHex;
@@ -59,7 +59,7 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
 
 pub struct MyHubService {
     allowed_users: HashMap<String, String>,
-    block_store: BlockStore,
+    block_stores: BlockStores,
     shard_stores: HashMap<u32, Stores>,
     shard_senders: HashMap<u32, Senders>,
     num_shards: u32,
@@ -77,7 +77,7 @@ pub struct MyHubService {
 impl MyHubService {
     pub fn new(
         rpc_auth: String,
-        block_store: BlockStore,
+        block_stores: BlockStores,
         shard_stores: HashMap<u32, Stores>,
         shard_senders: HashMap<u32, Senders>,
         statsd_client: StatsdClientWrapper,
@@ -112,7 +112,7 @@ impl MyHubService {
         let service = Self {
             allowed_users,
             network,
-            block_store,
+            block_stores,
             shard_senders,
             shard_stores,
             statsd_client,
@@ -717,7 +717,7 @@ impl HubService for MyHubService {
 
         info!( {start_block_number, stop_block_number}, "Received call to [get_blocks] RPC");
 
-        let block_store = self.block_store.clone();
+        let block_store = self.block_stores.block_store.clone();
 
         tokio::spawn(async move {
             let mut next_page_token = None;
@@ -811,11 +811,20 @@ impl HubService for MyHubService {
         let current_time = get_farcaster_time().unwrap_or(0);
         let block_info = proto::ShardInfo {
             shard_id: 0,
-            max_height: self.block_store.max_block_number().unwrap_or(0),
+            max_height: self
+                .block_stores
+                .block_store
+                .max_block_number()
+                .unwrap_or(0),
             num_messages: 0,
             num_fid_registrations: 0,
-            approx_size: self.block_store.db.approximate_size(),
-            block_delay: current_time - self.block_store.max_block_timestamp().unwrap_or(0),
+            approx_size: self.block_stores.block_store.db.approximate_size(),
+            block_delay: current_time
+                - self
+                    .block_stores
+                    .block_store
+                    .max_block_timestamp()
+                    .unwrap_or(0),
             mempool_size: 0,
         };
         shard_infos.push(block_info);

@@ -13,6 +13,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
 use crate::proto::{FarcasterNetwork, OnChainEventType};
+use crate::storage::store::block_engine::BlockStores;
 use crate::{
     core::types::SnapchainValidatorContext,
     network::gossip::GossipEvent,
@@ -271,6 +272,7 @@ pub struct MempoolMessagesRequest {
 
 pub struct ReadNodeMempool {
     shard_stores: HashMap<u32, Stores>,
+    block_stores: BlockStores,
     message_router: Box<dyn MessageRouter>,
     num_shards: u32,
     mempool_rx: mpsc::Receiver<MempoolRequest>,
@@ -283,11 +285,13 @@ impl ReadNodeMempool {
         mempool_rx: mpsc::Receiver<MempoolRequest>,
         num_shards: u32,
         shard_stores: HashMap<u32, Stores>,
+        block_stores: BlockStores,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         statsd_client: StatsdClientWrapper,
     ) -> Self {
         ReadNodeMempool {
             shard_stores,
+            block_stores,
             num_shards,
             mempool_rx,
             message_router: Box::new(ShardRouter {}),
@@ -299,14 +303,19 @@ impl ReadNodeMempool {
     fn message_already_exists(&self, shard: u32, message: &MempoolMessage) -> bool {
         let fid = message.fid();
 
-        let stores = self.shard_stores.get(&shard);
+        let db = if shard == 0 {
+            Some(&self.block_stores.db)
+        } else {
+            self.shard_stores.get(&shard).map(|stores| &stores.db)
+        };
+
         // Default to false in the error paths
-        match stores {
+        match db {
             None => {
                 error!("Error finding store for shard: {}", shard);
                 false
             }
-            Some(stores) => match message {
+            Some(db) => match message {
                 MempoolMessage::UserMessage(message) => match &message.data {
                     None => false,
                     Some(message_data) => {
@@ -323,7 +332,7 @@ impl ReadNodeMempool {
                                     Some(&ts_hash),
                                 );
                                 let existing_message = get_message_by_key(
-                                    &stores.db,
+                                    db,
                                     &mut RocksDbTransactionBatch::new(),
                                     &primary_key,
                                 );
@@ -423,6 +432,7 @@ impl Mempool {
         messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
         num_shards: u32,
         shard_stores: HashMap<u32, Stores>,
+        block_stores: BlockStores,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         shard_decision_rx: broadcast::Receiver<ShardChunk>,
         statsd_client: StatsdClientWrapper,
@@ -445,6 +455,7 @@ impl Mempool {
                 mempool_rx,
                 num_shards,
                 shard_stores,
+                block_stores,
                 gossip_tx,
                 statsd_client.clone(),
             ),
@@ -506,6 +517,11 @@ impl Mempool {
     ) -> Result<(), HubError> {
         // Check for block events that have already been merged
         if let MempoolMessage::BlockEvent { message, for_shard } = message {
+            if *for_shard == 0 {
+                return Err(HubError::invalid_internal_state(
+                    "block event cannot be submitted to shard 0",
+                ));
+            }
             let stores = self.read_node_mempool.shard_stores.get(&for_shard).unwrap();
             if let Ok(max_seqnum) = stores.block_event_store.max_seqnum() {
                 if message.seqnum() <= max_seqnum {

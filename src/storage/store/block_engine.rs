@@ -82,9 +82,21 @@ pub struct BlockStores {
     pub onchain_event_store: OnchainEventStore,
     pub storage_lend_store: Store<StorageLendStoreDef>,
     pub network: FarcasterNetwork,
+    pub db: Arc<RocksDB>,
 }
 
 impl BlockStores {
+    pub fn new(db: Arc<RocksDB>, network: FarcasterNetwork) -> Self {
+        let store_event_handler = StoreEventHandler::new();
+        BlockStores {
+            block_store: BlockStore::new(db.clone()),
+            block_event_store: BlockEventStore { db: db.clone() },
+            onchain_event_store: OnchainEventStore::new(db.clone(), store_event_handler.clone()),
+            storage_lend_store: StorageLendStore::new(db.clone(), store_event_handler.clone(), 100),
+            network,
+            db: db.clone(),
+        }
+    }
     pub fn get_block_by_event_seqnum(&self, seqnum: u64) -> Option<Block> {
         let block_event = self
             .block_event_store
@@ -148,7 +160,6 @@ pub struct BlockStateChange {
 
 impl BlockEngine {
     pub fn new(
-        block_store: BlockStore,
         mut trie: MerkleTrie,
         statsd_client: StatsdClientWrapper,
         db: Arc<RocksDB>,
@@ -157,22 +168,8 @@ impl BlockEngine {
         network: FarcasterNetwork,
     ) -> Self {
         trie.initialize(&db).unwrap();
-        let store_event_handler = StoreEventHandler::new();
         BlockEngine {
-            stores: BlockStores {
-                block_store,
-                block_event_store: BlockEventStore { db: db.clone() },
-                onchain_event_store: OnchainEventStore::new(
-                    db.clone(),
-                    store_event_handler.clone(),
-                ),
-                storage_lend_store: StorageLendStore::new(
-                    db.clone(),
-                    store_event_handler.clone(),
-                    100,
-                ),
-                network,
-            },
+            stores: BlockStores::new(db.clone(), network),
             trie,
             shard_id: 0,
             mempool_poller: MempoolPoller {

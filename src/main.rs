@@ -24,7 +24,6 @@ use snapchain::storage::store::block_engine::BlockStores;
 use snapchain::storage::store::engine::{PostCommitMessage, Senders};
 use snapchain::storage::store::node_local_state::{self, LocalStateStore};
 use snapchain::storage::store::stores::Stores;
-use snapchain::storage::store::BlockStore;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -53,7 +52,7 @@ async fn start_servers(
     statsd_client: StatsdClientWrapper,
     shard_stores: HashMap<u32, Stores>,
     shard_senders: HashMap<u32, Senders>,
-    block_store: BlockStore,
+    block_stores: BlockStores,
     chain_clients: ChainClients,
     replicator: Option<Arc<replication::replicator::Replicator>>,
 ) {
@@ -66,7 +65,7 @@ async fn start_servers(
         onchain_events_request_tx,
         fname_request_tx,
         shard_stores.clone(),
-        block_store.clone(),
+        block_stores.clone(),
         app_config.snapshot.clone(),
         app_config.fc_network,
         statsd_client.clone(),
@@ -74,7 +73,7 @@ async fn start_servers(
 
     let service = Arc::new(MyHubService::new(
         app_config.rpc_auth.clone(),
-        block_store.clone(),
+        block_stores.clone(),
         shard_stores.clone(),
         shard_senders,
         statsd_client.clone(),
@@ -90,7 +89,7 @@ async fn start_servers(
 
     let replication_service = if let Some(replicator) = replicator {
         let service =
-            ReplicationServiceServer::new(ReplicationServer::new(replicator, block_store.clone()));
+            ReplicationServiceServer::new(ReplicationServer::new(replicator, block_stores.clone()));
         Some(service)
     } else {
         None
@@ -174,12 +173,11 @@ async fn start_servers(
 
 async fn schedule_background_jobs(
     app_config: &snapchain::cfg::Config,
-    block_store: BlockStore,
     shard_stores: HashMap<u32, Stores>,
+    block_stores: BlockStores,
     sync_complete_rx: watch::Receiver<bool>,
     statsd_client: StatsdClientWrapper,
     mempool_tx: mpsc::Sender<MempoolRequest>,
-    block_stores: BlockStores,
     local_state_store: LocalStateStore,
 ) {
     let sched = JobScheduler::new().await.unwrap();
@@ -190,7 +188,7 @@ async fn schedule_background_jobs(
             let job = snapchain::jobs::block_pruning::block_pruning_job(
                 schedule,
                 block_retention,
-                block_store.clone(),
+                block_stores.clone(),
                 shard_stores.clone(),
                 sync_complete_rx,
             )
@@ -212,7 +210,7 @@ async fn schedule_background_jobs(
             "0 0 5 * * *", // 5 AM UTC every day
             app_config.snapshot.clone(),
             app_config.fc_network,
-            block_store,
+            block_stores.clone(),
             shard_stores.clone(),
             statsd_client,
         )
@@ -403,13 +401,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         cadence::StatsdClient::builder(app_config.statsd.prefix.as_str(), sink).build();
     let statsd_client = StatsdClientWrapper::new(statsd_client, app_config.statsd.use_tags);
 
-    let block_db = RocksDB::open_shard_db(app_config.rocksdb_dir.as_str(), 0);
-    let block_store = BlockStore::new(block_db);
-    info!(
-        "Block db height {}",
-        block_store.max_block_number().unwrap()
-    );
-
     let keypair = app_config.consensus.keypair().clone();
 
     let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(1000);
@@ -479,7 +470,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             local_peer_id,
             gossip_tx.clone(),
             system_tx.clone(),
-            block_store.clone(),
             app_config.rocksdb_dir.clone(),
             statsd_client.clone(),
             app_config.fc_network,
@@ -490,12 +480,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         schedule_background_jobs(
             &app_config,
-            block_store.clone(),
             node.shard_stores.clone(),
+            node.block_stores.clone(),
             sync_complete_rx,
             statsd_client.clone(),
             mempool_tx.clone(),
-            node.block_stores.clone(),
             local_state_store.clone(),
         )
         .await;
@@ -504,6 +493,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             mempool_rx,
             app_config.consensus.num_shards,
             node.shard_stores.clone(),
+            node.block_stores.clone(),
             gossip_tx.clone(),
             statsd_client.clone(),
         );
@@ -538,7 +528,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             statsd_client,
             node.shard_stores.clone(),
             node.shard_senders.clone(),
-            block_store.clone(),
+            node.block_stores.clone(),
             chains_clients,
             replicator,
         )
@@ -618,7 +608,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             shard_decision_tx,
             Some(block_tx.clone()),
             messages_request_tx,
-            block_store.clone(),
             local_state_store.clone(),
             app_config.rocksdb_dir.clone(),
             statsd_client.clone(),
@@ -630,12 +619,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         schedule_background_jobs(
             &app_config,
-            block_store.clone(),
             node.shard_stores.clone(),
+            node.block_stores.clone(),
             sync_complete_rx,
             statsd_client.clone(),
             mempool_tx.clone(),
-            node.block_stores.clone(),
             local_state_store.clone(),
         )
         .await;
@@ -647,6 +635,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             messages_request_rx,
             app_config.consensus.num_shards,
             node.shard_stores.clone(),
+            node.block_stores.clone(),
             gossip_tx.clone(),
             shard_decision_rx,
             statsd_client.clone(),
@@ -755,7 +744,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             statsd_client,
             node.shard_stores.clone(),
             node.shard_senders.clone(),
-            block_store.clone(),
+            node.block_stores.clone(),
             chains_clients,
             replicator,
         )
@@ -764,9 +753,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // TODO(aditi): We may want to reconsider this code when we upload snapshots on a schedule.
         if app_config.snapshot.backup_on_startup {
             let shard_ids = app_config.consensus.shard_ids.clone();
-            let block_db = block_store.db.clone();
+            let block_stores = node.block_stores.clone();
             let mut dbs = HashMap::new();
-            dbs.insert(0, block_db.clone());
+            dbs.insert(0, block_stores.db.clone());
             node.shard_stores
                 .iter()
                 .for_each(|(shard_id, shard_store)| {

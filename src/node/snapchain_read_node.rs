@@ -9,7 +9,6 @@ use crate::storage::db::RocksDB;
 use crate::storage::store::block_engine::{BlockEngine, BlockStores};
 use crate::storage::store::engine::{PostCommitMessage, Senders, ShardEngine};
 use crate::storage::store::stores::{StoreLimits, Stores};
-use crate::storage::store::BlockStore;
 use crate::storage::trie::merkle_trie::{self, MerkleTrie};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_metrics::SharedRegistry;
@@ -17,7 +16,7 @@ use libp2p::identity::ed25519::Keypair;
 use libp2p::PeerId;
 use std::collections::{BTreeMap, HashMap};
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{info, warn};
 
 const MAX_SHARDS: u32 = 64;
 
@@ -37,7 +36,6 @@ impl SnapchainReadNode {
         local_peer_id: PeerId,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         system_tx: mpsc::Sender<SystemMessage>,
-        block_store: BlockStore,
         rocksdb_dir: String,
         statsd_client: StatsdClientWrapper,
         farcaster_network: proto::FarcasterNetwork,
@@ -114,16 +112,20 @@ impl SnapchainReadNode {
 
         // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
         let trie = MerkleTrie::new().unwrap();
+        let block_db = RocksDB::open_shard_db(rocksdb_dir.as_str(), 0);
         let engine = BlockEngine::new(
-            block_store.clone(),
             trie,
             statsd_client.clone(),
-            block_store.db,
+            block_db,
             config.max_messages_per_block,
             None,
             farcaster_network,
         );
         let block_stores = engine.stores();
+        info!(
+            "Block db height {}",
+            block_stores.block_store.max_block_number().unwrap()
+        );
         let ctx = SnapchainValidatorContext::new(keypair.clone());
         let block_actor = MalachiteReadNodeActors::create_and_start(
             ctx,

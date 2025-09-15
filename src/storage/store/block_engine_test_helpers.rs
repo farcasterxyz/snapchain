@@ -8,7 +8,6 @@ use crate::storage::db::RocksDB;
 use crate::storage::store::block_engine::{BlockEngine, BlockStateChange};
 use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::test_helper::statsd_client;
-use crate::storage::store::BlockStore;
 use crate::storage::trie::merkle_trie::{self, MerkleTrie, TrieKey};
 use crate::utils::factory::events_factory;
 use ed25519_dalek::SigningKey;
@@ -22,14 +21,11 @@ pub fn setup(network: Option<FarcasterNetwork>) -> (BlockEngine, TempDir) {
     let db = RocksDB::new(db_path.to_str().unwrap());
     db.open().unwrap();
     let db = Arc::new(db);
-
-    let block_store = BlockStore::new(db.clone());
     let trie = MerkleTrie::new().unwrap();
     let statsd_client = statsd_client();
     let (tx, _rx) = mpsc::channel(100);
 
     let block_engine = BlockEngine::new(
-        block_store,
         trie,
         statsd_client,
         db,
