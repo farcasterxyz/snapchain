@@ -8,6 +8,7 @@ use crate::proto::{
     GetShardTransactionsRequest, ReplicationTriePartStatus, ShardSnapshotMetadata,
 };
 use crate::storage::store::node_local_state::LocalStateStore;
+use crate::storage::trie::merkle_trie::MerkleTrie;
 use crate::storage::{
     db::{RocksDB, RocksDbTransactionBatch},
     store::{
@@ -22,6 +23,8 @@ use crate::storage::{
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use ed25519_dalek::{Signature, VerifyingKey};
 use prost::Message as _;
+use std::sync::atomic::AtomicUsize;
+use std::time::Instant;
 use std::{
     collections::HashMap,
     net::UdpSocket,
@@ -31,13 +34,14 @@ use std::{
     },
     u64,
 };
-use tokio::signal::ctrl_c;
-use tokio::sync::mpsc;
-use tokio::sync::oneshot;
-use tokio::task::JoinSet;
-use tokio::time;
+use tokio::{
+    signal::ctrl_c,
+    sync::{mpsc, Mutex},
+    task::JoinSet,
+    time,
+};
 use tonic::transport::Channel;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum WorkUnitResponse {
@@ -54,21 +58,11 @@ pub enum WorkUnitResponse {
     Finished = 5,
 }
 
-/// Request to commit a transaction batch to the database
+/// Response after a DB commit in a batch. If the DB is "full",
+/// we ask the threads to stop/start again
 enum DbCommitResponse {
     Continue,
     Stop,
-}
-
-struct DbCommitRequest {
-    txn_batch: RocksDbTransactionBatch,
-    num_messages: usize,
-    response_tx: oneshot::Sender<Result<DbCommitResponse, BootstrapError>>,
-}
-
-struct TrieInsertRequest {
-    trie_keys: Vec<Vec<u8>>,
-    response_tx: oneshot::Sender<Result<RocksDbTransactionBatch, BootstrapError>>,
 }
 
 #[derive(Clone)]
@@ -76,8 +70,23 @@ struct WorkUnit {
     current_status: proto::ReplicationTriePartStatus,
     peer_address: String,
     shutdown_signal: Arc<AtomicBool>,
-    db_commit_tx: mpsc::Sender<DbCommitRequest>,
-    trie_insert_tx: mpsc::Sender<TrieInsertRequest>,
+    thread_engine: Arc<ShardEngine>,
+}
+
+// Shared data for all threads working on a shard. The DB and the Trie
+// are shared among all the vts.
+struct ShardSharedWorkData {
+    shard_id: u32,
+    // We'll use this mutex to ensure only one thread writes to the DB at a time
+    db_writer: Mutex<Arc<RocksDB>>,
+    // We'll use this mutex to ensure only one thread updates the trie at a time
+    trie: Mutex<MerkleTrie>,
+    // read-only clone of the DB to be used by the trie
+    trie_db: Arc<RocksDB>,
+    // Keep track of how many messages we've written in this batch
+    messages_in_batch: AtomicUsize,
+    // When did we start this batch, for profiling.
+    start_time: Instant,
 }
 
 #[derive(Clone)]
@@ -134,26 +143,14 @@ impl ReplicatorBootstrap {
             })?;
 
         // If there's no status for this shard/vts, create an empty Status
-        match status {
-            Some(status) => {
-                debug!("Read existing status {:?}", status);
-                Ok(status)
-            }
-            None => {
-                debug!(
-                    "Creating new status for {} height {} vts {}",
-                    shard_id, metadata.height, virtual_trie_shard
-                );
-                Ok(ReplicationTriePartStatus {
-                    shard_id,
-                    height: metadata.height,
-                    virtual_trie_shard,
-                    last_response: 0,
-                    last_fid: None,
-                    next_page_token: None,
-                })
-            }
-        }
+        Ok(status.unwrap_or(ReplicationTriePartStatus {
+            shard_id,
+            height: metadata.height,
+            virtual_trie_shard,
+            last_response: 0,
+            last_fid: None,
+            next_page_token: None,
+        }))
     }
 
     /// Bootstrap a node from replication instead of snapshot download
@@ -172,7 +169,7 @@ impl ReplicatorBootstrap {
         };
 
         // Initialize databases and replay transactions for each shard
-        // Note: We're not replicating shard 0 (block shard) for now as requested
+        // Note: We're not replicating shard 0 (block shard) for now.
         let shard_ids = self.shard_ids.clone();
 
         // Create tasks for each shard to run in parallel
@@ -344,16 +341,12 @@ impl ReplicatorBootstrap {
         }
     }
 
-    /// Create a dedicated thread to write transactions into the DB. The RocksDB we use is multi threaded,
-    /// but writing to the DB directly from multiple threads creates a lot of lock contention, and we don't want to
-    /// write a lot of retry logic. Plus, by keeping the DB writer on one thread, we can create "backpressure" to all
-    /// the other threads, slowing down them as needed without overwhelming RocksDB
-    fn create_db_writer_task(
-        &self,
-        db: Arc<RocksDB>,
-        shard_id: u32,
-        mut db_commit_rx: mpsc::Receiver<DbCommitRequest>,
-    ) -> tokio::task::JoinHandle<()> {
+    /// Commit the DB transaction batch to the DB.
+    async fn commit_to_db(
+        work_data: &Arc<ShardSharedWorkData>,
+        txn_batch: RocksDbTransactionBatch,
+        num_messages: usize,
+    ) -> Result<DbCommitResponse, BootstrapError> {
         // Important Note: We will write these many messages to the DB in a single "batch" (See start_shard_replication_batch)
         // The DB type we use is optimized for bulk writing, but unfortunately doesn't allow us to compact or flush the keys.
         // They are flushed and the DB compacted only when it is closed.
@@ -362,103 +355,74 @@ impl ReplicatorBootstrap {
         // so far, saves progress, and creates a proper "checkpoint" for us to resume, in case things go wrong or the user
         // presses CTRL+C etc...
         let max_messages_in_write_session = 5_000_000;
+        let start_time = Instant::now();
 
-        tokio::spawn(async move {
-            info!("DB writer thread started for shard {}", shard_id);
-            let mut total_messages = 0;
-            let total_start_time = std::time::Instant::now();
+        let result = {
+            let db = work_data.db_writer.lock().await;
+            db.commit(txn_batch)
+        };
 
-            while let Some(commit_request) = db_commit_rx.recv().await {
-                let start_time = std::time::Instant::now();
-                total_messages += commit_request.num_messages;
+        let elapsed_time = start_time.elapsed();
+        let total_elapsed = work_data.start_time.elapsed();
+        work_data
+            .messages_in_batch
+            .fetch_add(num_messages, Ordering::SeqCst);
 
-                let result = db.commit(commit_request.txn_batch);
-                let elapsed_time = start_time.elapsed();
-                let total_elapsed = total_start_time.elapsed();
-                info!(
-                    "DB writer({}) - Commit took {:?}. Writing at {:.1}k msg/sec {:.2}M total messages",
-                    shard_id,
-                    elapsed_time,
-                    total_messages as f64 / 1000.0 / total_elapsed.as_secs_f64(),
-                    total_messages as f64 / 1_000_000.0
-                );
+        let total_messages = work_data.messages_in_batch.load(Ordering::SeqCst);
+        info!(
+            "DB writer({}) - Commit took {:?}. Writing at {:.1}k msg/sec {:.2}M total messages",
+            work_data.shard_id,
+            elapsed_time,
+            total_messages as f64 / 1000.0 / total_elapsed.as_secs_f64(),
+            total_messages as f64 / 1_000_000.0
+        );
 
-                let response = match result {
-                    Ok(()) => {
-                        // If we've exceeded the total number of messages in the write session, stop the writer
-                        // and allow the DB to reload
-                        if total_messages > max_messages_in_write_session {
-                            Ok(DbCommitResponse::Stop)
-                        } else {
-                            Ok(DbCommitResponse::Continue)
-                        }
-                    }
-                    Err(e) => {
-                        error!("DB writer - Failed to commit transaction: {}", e);
-                        Err(BootstrapError::DatabaseError(format!(
-                            "Failed to commit transaction: {}",
-                            e
-                        )))
-                    }
-                };
-
-                // Send the result back to the requesting thread
-                if let Err(_) = commit_request.response_tx.send(response) {
-                    error!("Failed to send DB commit response from DB Writer thread");
-                    break;
+        match result {
+            Ok(()) => {
+                // If we've exceeded the total number of messages in the write session, stop the writer
+                // and allow the DB to reload
+                if total_messages > max_messages_in_write_session {
+                    Ok(DbCommitResponse::Stop)
+                } else {
+                    Ok(DbCommitResponse::Continue)
                 }
             }
-
-            info!("DB writer thread finished for shard {}", shard_id);
-        })
-    }
-
-    /// Create a dedicated thread (per shard) to write to the Trie. This way, we can keep all the trie nodes
-    /// in memory (upto the max limit, see the DB_writer thread), which allows us to save ~12 db reads per insert
-    /// speeding up the insertion of trie keys. Additionally, we'll always keep the trie hashes correct, since the writes
-    /// from multiple parts of the trie are serialized.
-    fn create_trie_merges_task(
-        &self,
-        trie_db: Arc<RocksDB>,
-        shard_id: u32,
-        mut trie_insert_rx: mpsc::Receiver<TrieInsertRequest>,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            debug!("Trie merges thread started for shard {}", shard_id);
-            let mut trie = merkle_trie::MerkleTrie::new().unwrap();
-            trie.initialize(&trie_db).unwrap();
-
-            while let Some(insert_request) = trie_insert_rx.recv().await {
-                let mut txn_batch = RocksDbTransactionBatch::new();
-                let trie_keys = insert_request.trie_keys;
-
-                let result = trie.insert(
-                    &merkle_trie::Context::new(), // Not tracking trie perf during replication
-                    &trie_db,
-                    &mut txn_batch,
-                    trie_keys
-                        .iter()
-                        .map(|v| v.as_slice())
-                        .collect::<Vec<&[u8]>>(),
-                );
-
-                let response = match result {
-                    Ok(_) => Ok(txn_batch),
-                    Err(e) => Err(BootstrapError::TrieError(e)),
-                };
-
-                if insert_request.response_tx.send(response).is_err() {
-                    error!("Failed to send response for trie insert request");
-                    break;
-                }
+            Err(e) => {
+                error!("DB writer - Failed to commit transaction: {}", e);
+                Err(BootstrapError::DatabaseError(format!(
+                    "Failed to commit transaction: {}",
+                    e
+                )))
             }
-            debug!("Trie merges thread finished for shard {}", shard_id);
-        })
+        }
     }
 
-    /// Replicate one "batch" of the shard's tries. This method will spawn upto 4 threads, each working on an independent part of the
-    /// trie (by virtual trie shard or "vts"). It will pick up from where it left off, and fetch the next set of pages for each vts
-    /// and attempt to merge them. If there's an error, it will stop immediately and return
+    // Commit all the keys to the Trie and return a DB transaction that has all the DBNode updates
+    async fn commit_to_trie(
+        work_data: &Arc<ShardSharedWorkData>,
+        trie_keys: Vec<Vec<u8>>,
+    ) -> Result<RocksDbTransactionBatch, BootstrapError> {
+        let mut txn_batch = RocksDbTransactionBatch::new();
+
+        let result = work_data.trie.lock().await.insert(
+            &merkle_trie::Context::new(), // Not tracking trie perf during replication
+            &work_data.trie_db,
+            &mut txn_batch,
+            trie_keys
+                .iter()
+                .map(|v| v.as_slice())
+                .collect::<Vec<&[u8]>>(),
+        );
+
+        match result {
+            Ok(_) => Ok(txn_batch),
+            Err(e) => Err(BootstrapError::TrieError(e)),
+        }
+    }
+
+    /// Replicate one "batch" of the shard's tries. This method will spawn upto `max_num_parallel_vts` threads, each working on an independent
+    /// part of the trie (by virtual trie shard or "vts"). It will pick up from where it left off, and fetch the next set of pages for each vts
+    /// and attempt to merge them. If there's an error, it will stop immediately and return.
     /// When the DB writer task instructs to exit, it saves its progress and closes all the threads and returns.
     /// It will also save progress and return if the main loop instructs it to via `shutdown_signal` if for eg. CTRL+C is pressed
     async fn start_shard_replication_batch(
@@ -476,18 +440,34 @@ impl ReplicatorBootstrap {
 
         let db = RocksDB::open_bulk_write_shard_db(&rocksdb_dir, shard_id);
 
-        // Create a channel for DB commit requests
-        let (db_commit_tx, db_commit_rx) = mpsc::channel::<DbCommitRequest>(max_num_parallel_vts);
+        let store_opts = StoreOptions {
+            conflict_free: true, // All messages will be free of conflicts, since these are from a already-merged snapshot
+            save_hub_events: false, // No need for HubEvents, which are emitted only from "live" nodes
+        };
 
-        // Spawn the DB writer thread
-        let db_writer_task = self.create_db_writer_task(db.clone(), shard_id, db_commit_rx);
+        // Initialize the shared engine and trie that will be used by all the vts tasks working on this shard
+        let thread_engine = Arc::new(
+            ShardEngine::new_with_opts(
+                db.clone(),
+                self.network,
+                MerkleTrie::new()?,
+                shard_id,
+                StoreLimits::default(),
+                self.statsd_client.clone(),
+                256,
+                None,
+                None,
+                None,
+                store_opts,
+            )
+            .await
+            .map_err(|e| BootstrapError::DatabaseError(e.to_string()))?,
+        );
 
-        // Spawn a thread to handle trie merges
-        let (trie_insert_tx, trie_insert_rx) =
-            mpsc::channel::<TrieInsertRequest>(max_num_parallel_vts);
-        let trie_merges_task = self.create_trie_merges_task(db.clone(), shard_id, trie_insert_rx);
+        let mut trie = MerkleTrie::new()?;
+        trie.initialize(&db)?;
 
-        // Go over each Trie's Virtual Trie Shard (vts) and sync for it.
+        // Go over each Trie's Virtual Trie Shard (vts) and see what their status is. Create the work units for each vts
         let mut vts_results = vec![WorkUnitResponse::None; merkle_trie::TRIE_SHARD_SIZE as usize];
         let mut work_units: Vec<(u32, WorkUnit)> = vec![];
 
@@ -495,7 +475,6 @@ impl ReplicatorBootstrap {
             // 1. Read the progress for this from the DB
             let current_status = Self::get_or_gen_vts_status(&db, shard_id, vts, &metadata)?;
             if current_status.last_response == WorkUnitResponse::Finished as u32 {
-                debug!("Shard {} vts {} already finished, skipping", shard_id, vts);
                 vts_results[vts as usize] = WorkUnitResponse::Finished;
                 continue;
             }
@@ -503,21 +482,18 @@ impl ReplicatorBootstrap {
             // 2. Create a work item for this VSI
             let peer_address = peer_address.to_string();
             let shutdown_signal = shutdown_signal.clone();
-            let db_commit_tx = db_commit_tx.clone();
-            let trie_insert_tx = trie_insert_tx.clone();
 
             let work_item = WorkUnit {
                 current_status,
                 peer_address,
+                thread_engine: thread_engine.clone(),
                 shutdown_signal,
-                db_commit_tx,
-                trie_insert_tx,
             };
 
             work_units.push((vts, work_item));
         }
 
-        // Now process the collected work units, up to 2 at a time
+        // Now process the collected work units in parallel
         let mut join_set: JoinSet<Result<(u32, WorkUnitResponse), BootstrapError>> = JoinSet::new();
         let mut work_index = 0;
 
@@ -525,26 +501,36 @@ impl ReplicatorBootstrap {
         let mut stop_more_work = false;
 
         // Track if there were any errors on any of the threads
-        let mut errored = None;
+        let mut is_errored = None;
+
+        // Create the shared work data for this shard
+        let work_data = Arc::new(ShardSharedWorkData {
+            shard_id,
+            db_writer: Mutex::new(db.clone()),
+            trie: Mutex::new(trie),
+            trie_db: db.clone(),
+            messages_in_batch: AtomicUsize::new(0),
+            start_time: Instant::now(),
+        });
 
         loop {
             if shutdown_signal.load(Ordering::SeqCst) {
                 stop_more_work = true;
             }
 
-            // Spawn up to 2 tasks if not stopped
+            // Spawn up to `max_num_parallel_vts` tasks (if we're not stopped)
             while !stop_more_work
                 && join_set.len() < max_num_parallel_vts
                 && work_index < work_units.len()
             {
                 let (vts, work_item) = work_units[work_index].clone();
 
-                let db_clone = db.clone();
-
+                let work_data = work_data.clone();
                 let self_clone = self.clone();
+
                 join_set.spawn(async move {
                     self_clone
-                        .process_vts_work_item(work_item, db_clone)
+                        .process_vts_work_item(work_item, work_data)
                         .await
                         .map(|res| (vts, res))
                 });
@@ -568,7 +554,7 @@ impl ReplicatorBootstrap {
                     }
                     Ok(Err(e)) => {
                         // Propagate errors and stop all work
-                        errored = Some(e);
+                        is_errored = Some(e);
                         stop_more_work = true;
                     }
                     Err(e) => {
@@ -583,20 +569,14 @@ impl ReplicatorBootstrap {
             }
         }
 
-        // Drop the original sender and any unfinished work_units so the DB/trie writer threads can exit
-        drop(db_commit_tx);
-        drop(trie_insert_tx);
+        // Drop any unfinished work_units and close the DB
         drop(work_units);
-
-        // Wait for both the DB writer and trie merges tasks to finish and propagate any errors
-        db_writer_task.await?;
-        trie_merges_task.await?;
-
+        drop(work_data);
         db.close();
 
         // If there was an error, return that
-        if errored.is_some() {
-            return Err(errored.unwrap());
+        if is_errored.is_some() {
+            return Err(is_errored.unwrap());
         }
 
         // If any of the vts_results is "DbStopped", then return stopped
@@ -620,7 +600,7 @@ impl ReplicatorBootstrap {
     async fn process_vts_work_item(
         &self,
         work_item: WorkUnit,
-        db: Arc<RocksDB>,
+        work_data: Arc<ShardSharedWorkData>,
     ) -> Result<WorkUnitResponse, BootstrapError> {
         let response;
 
@@ -633,30 +613,8 @@ impl ReplicatorBootstrap {
         // 1. Create the engine and trie objects
         let mut status = work_item.current_status;
 
-        let store_opts = StoreOptions {
-            conflict_free: true, // All messages will be free of conflicts, since these are from a already-merged snapshot
-            save_hub_events: false, // No need for HubEvents, which are emitted only from "live" nodes
-        };
-
-        let trie = merkle_trie::MerkleTrie::new().unwrap();
-        let mut thread_engine = ShardEngine::new_with_opts(
-            db.clone(),
-            self.network,
-            trie,
-            shard_id,
-            StoreLimits::default(),
-            self.statsd_client.clone(),
-            256,
-            None,
-            None,
-            None,
-            store_opts.clone(),
-        )
-        .await
-        .map_err(|e| BootstrapError::DatabaseError(e.to_string()))?;
-
         // Buffer size is 2, so it will prefetch the next page without waiting
-        let (messages_page_tx, mut messages_page_rx) = tokio::sync::mpsc::channel(2);
+        let (messages_page_tx, mut messages_page_rx) = mpsc::channel(2);
 
         let rpc_shutdown_signal = Arc::new(AtomicBool::new(false));
         let rpc_shutdown_signal_clone = rpc_shutdown_signal.clone();
@@ -731,7 +689,7 @@ impl ReplicatorBootstrap {
             let mut last_fid = status.last_fid;
             let mut fids_to_check = vec![];
 
-            // 2. Use the next_page_token to fetch the page of messages from the server
+            // 1. Use the RPC to fetch the page of messages from the server
             let messages_page = match messages_page_rx.recv().await {
                 None => {
                     // No more messages pages, some error occurred
@@ -751,10 +709,9 @@ impl ReplicatorBootstrap {
             };
 
             let trie_messages = messages_page.trie_messages;
-
             let mut txn_batch = RocksDbTransactionBatch::new();
 
-            // Write the account roots to the DB, so we may check them later
+            // 2. Write the account roots to the DB, so we may check them later
             for fid_root in &messages_page.fid_account_roots {
                 LocalStateStore::write_account_root(
                     &mut txn_batch,
@@ -767,22 +724,25 @@ impl ReplicatorBootstrap {
 
             let next_page_token = messages_page.next_page_token;
 
-            // Set the block height to 0 (by resetting the event id) for bootstrap. This makes the hub events
+            // 3. Set the block height to 0 (by resetting the event id) for bootstrap. This makes the hub events
             // get proper IDs.
-            thread_engine.reset_event_id();
+            work_item.thread_engine.reset_event_id();
 
             let mut trie_keys = vec![];
             let num_messages = trie_messages.len();
 
-            // Validate all the message signatures
+            // 4. Validate all the message signatures and hashes.
             Self::validate_messages_signatures(&trie_messages)?;
 
-            // 3. Start going through all onchain_events and messages for fids > work_item.last_fid
+            // 5. Start going through all onchain_events and messages that were returned from the RPC
             for trie_message_entry in &trie_messages {
                 let trie_key = trie_message_entry.trie_key.clone();
                 trie_keys.push(trie_key.clone());
 
-                match thread_engine.replay_replicator_message(&mut txn_batch, trie_message_entry) {
+                match work_item
+                    .thread_engine
+                    .replay_replicator_message(&mut txn_batch, trie_message_entry)
+                {
                     Ok(m) => {
                         let generated_trie_key = m.trie_key;
                         let fid = m.fid;
@@ -821,54 +781,37 @@ impl ReplicatorBootstrap {
                 };
             }
 
-            // Insert all the trie keys into the trie
-            let (response_tx, response_rx) = oneshot::channel();
-            work_item
-                .trie_insert_tx
-                .send(TrieInsertRequest {
-                    trie_keys,
-                    response_tx,
-                })
-                .await?;
-            let trie_txn_batch = response_rx.await??;
-
+            // 6. Insert all the trie keys into the trie
+            let trie_txn_batch = Self::commit_to_trie(&work_data, trie_keys).await?;
             txn_batch.merge(trie_txn_batch);
 
-            // Verify account root for fid, update last_fid in the DB
+            // 7. Verify account root for fid, update last_fid in the DB
             Self::check_fid_roots(
-                &thread_engine,
+                &work_item.thread_engine,
                 status.shard_id,
                 status.virtual_trie_shard as u8,
-                &db,
                 &mut txn_batch,
                 fids_to_check,
             )?;
 
-            // 5. Now that the account roots match, commit to DB via db_commit_tx
-
+            // 8. Now that the account roots match, commit to DB
             // First, add the work status to the txn_batch so it gets commited atomically with the work done
             status.last_fid = last_fid;
             status.next_page_token = next_page_token.clone();
             status.last_response = WorkUnitResponse::Working as u32;
             LocalStateStore::write_work_unit(&mut txn_batch, &status);
 
-            // commit via db_commit_tx
-            let (response_tx, response_rx) = oneshot::channel();
+            // 8. Commit to DB. This will commit all the messages and the trie nodes atomically
+            let db_response = Self::commit_to_db(&work_data, txn_batch, num_messages).await?;
+
+            // Reload the trie after commit, so we get the correct numbers from the DB. Note that the ShardSharedWorkData has it's own copy of the
+            // in memory trie, so we need to reload from the DB here to get the correct numbers. We do this instead of just using the trie from ShardSharedWorkData
+            // for safety. We want to check that what's in the DB is exactly what we expect.
             work_item
-                .db_commit_tx
-                .send(DbCommitRequest {
-                    txn_batch,
-                    num_messages,
-                    response_tx,
-                })
-                .await?;
-
-            // Wait for the commit to complete. The double ?? are to handle both the channel cancelled and the DB writer errors
-            let db_response = response_rx.await??;
-
-            // Reload the trie after commit, so we get the correct numbers from the DB. Note that the trie thread has it's own copy of the
-            // in memory trie, so we need to reload from the DB here to get the correct numbers
-            thread_engine.get_stores().trie.reload(&db)?;
+                .thread_engine
+                .get_stores()
+                .trie
+                .reload(&work_item.thread_engine.db)?;
 
             // Check if shutdown signal is set, if it is, break out
             if work_item.shutdown_signal.load(Ordering::Relaxed) {
@@ -893,19 +836,8 @@ impl ReplicatorBootstrap {
                 let mut txn_batch = RocksDbTransactionBatch::new();
                 LocalStateStore::write_work_unit(&mut txn_batch, &status);
 
-                // commit via db_commit_tx
-                let (response_tx, response_rx) = oneshot::channel();
-                work_item
-                    .db_commit_tx
-                    .send(DbCommitRequest {
-                        txn_batch,
-                        num_messages: 0,
-                        response_tx,
-                    })
-                    .await?;
-
-                // Wait for the commit to complete. The double ?? are to handle both the channel cancelled and the DB writer errors
-                response_rx.await??;
+                // commit to DB, we're exiting anyway, so we don't care about the response
+                let _ = Self::commit_to_db(&work_data, txn_batch, num_messages).await?;
 
                 response = Ok(WorkUnitResponse::Finished);
                 break;
@@ -920,17 +852,27 @@ impl ReplicatorBootstrap {
         return response;
     }
 
+    // Go over all the FIDs that were just processed, and check that the roots match
     fn check_fid_roots(
-        thread_engine: &ShardEngine,
+        thread_engine: &Arc<ShardEngine>,
         shard_id: u32,
         virtual_trie_shard: u8,
-        db: &RocksDB,
         txn_batch: &mut RocksDbTransactionBatch,
         fids_to_check: Vec<u64>,
     ) -> Result<(), BootstrapError> {
+        let db = thread_engine.get_stores().db.clone();
+
         for fid in &fids_to_check {
+            let actual_vts = TrieKey::fid_shard(*fid);
+            if actual_vts != virtual_trie_shard {
+                return Err(BootstrapError::GenericError(format!(
+                    "Fid {} was found in vts {} but belongs to vts {}",
+                    fid, virtual_trie_shard, actual_vts
+                )));
+            }
+
             let expected_account = LocalStateStore::read_account_root(
-                db,
+                &db,
                 shard_id,
                 virtual_trie_shard,
                 *fid,
@@ -978,21 +920,13 @@ impl ReplicatorBootstrap {
                     hex::encode(expected_root),
                     hex::encode(actual_root),
                 )));
-            } else {
-                debug!(
-                    "Account root matched for fid {}/{}/{}: {}",
-                    shard_id,
-                    virtual_trie_shard,
-                    fid,
-                    hex::encode(actual_root)
-                );
             }
         }
 
         Ok(())
     }
 
-    // Check that the shard roots match
+    // Check that the shard roots match. This is called after all FIDs have been processed and the trie is fully built
     async fn verify_shard_roots(
         &self,
         rocksdb_dir: &str,
@@ -1082,7 +1016,8 @@ impl ReplicatorBootstrap {
         Ok(shard_metadata)
     }
 
-    // Bulk validate all the signatures. We use the dalek library for batch verification
+    // Bulk validate all the signatures. We use the dalek library for batch verification. This is substantially faster than validating
+    // each signature individually.
     fn validate_messages_signatures(
         trie_messages: &Vec<proto::ShardTrieEntryWithMessage>,
     ) -> Result<(), BootstrapError> {
