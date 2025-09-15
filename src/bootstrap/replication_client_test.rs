@@ -832,7 +832,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_replication_client_bootstrap() {
+    async fn test_replication_client_bootstrap_single_peer() {
         let (tmp_dir, source_engine, replication_server, _signer, _fid, _fid2) =
             setup_source_engine_with_test_data().await;
 
@@ -888,6 +888,122 @@ mod tests {
         let dest_root = dest_trie.root_hash().unwrap();
 
         assert_eq!(source_root, dest_root);
+    }
+
+    #[tokio::test]
+    async fn test_replication_client_bootstrap_multi_peer() {
+        let (tmp_dir, source_engine, replication_server, _signer, _fid, _fid2) =
+            setup_source_engine_with_test_data().await;
+
+        // 2. Fetch the actual data from the real replication server to populate our mocks.
+        let height = source_engine.get_confirmed_height().block_number;
+        let shard_id = source_engine.shard_id();
+        let (vts_data, snapshot_metadata) =
+            fetch_transactions(&replication_server, shard_id, height)
+                .await
+                .unwrap();
+
+        // Start three mock replication servers on free ports, all with the same data
+        let mut server_addrs = vec![];
+        let mut shutdown_txs = vec![];
+        let mut request_counts_vec = vec![];
+
+        for _ in 0..3 {
+            // --- Setup the Mock Server ---
+            let mock_service = MockReplicationService::default();
+
+            // 2a. Mock the metadata response.
+            mock_service
+                .metadata_responses
+                .lock()
+                .unwrap()
+                .insert(shard_id, Ok(snapshot_metadata.clone()));
+
+            // 2b. For each vts, set the response with normal data (no duplicates)
+            for vts in 0..256 {
+                let (trie_messages, fid_account_roots) =
+                    vts_data.get(&vts).cloned().unwrap_or_default();
+
+                let response = GetShardTransactionsResponse {
+                    trie_messages,
+                    fid_account_roots,
+                    next_page_token: None, // No pagination, one big response.
+                };
+
+                mock_service
+                    .transactions_responses
+                    .lock()
+                    .unwrap()
+                    .insert((shard_id, height, vts, None), Ok(response));
+            }
+
+            // Clone the request_counts to check later
+            let request_counts = Arc::clone(&mock_service.request_counts);
+            request_counts_vec.push(request_counts);
+
+            // --- Start the Mock Server ---
+            let (addr, shutdown_tx) = spawn_mock_server(mock_service).await;
+            let server_addr = format!("http://{}", addr);
+            server_addrs.push(server_addr);
+            shutdown_txs.push(shutdown_tx);
+        }
+
+        // Wait a bit for servers to start
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Set up destination engine
+        let dest_rocksdb_dir = format!("{}/dest_multi", tmp_dir.path().to_str().unwrap());
+
+        // Create a config for the bootstrap
+        let mut config = Config::default();
+        config.rocksdb_dir = dest_rocksdb_dir.clone();
+        config.consensus.shard_ids = vec![1]; // Only shard 1 for this test
+        config.fc_network = source_engine.network.clone();
+        config.statsd.addr = "127.0.0.1:8125".to_string();
+        config.statsd.prefix = "test".to_string();
+        config.statsd.use_tags = true;
+        config.snapshot.replication_peers = server_addrs;
+
+        let bootstrap = ReplicatorBootstrap::new(&config);
+
+        // Perform the bootstrap
+        let result = bootstrap.bootstrap_using_replication().await;
+
+        // Assert that bootstrap succeeded
+        match &result {
+            Ok(WorkUnitResponse::Finished) => {}
+            _ => panic!("Bootstrap failed with result: {:?}", result),
+        }
+
+        // Now, check that the shard roots match
+        let source_root = source_engine.get_stores().trie.root_hash().unwrap();
+
+        // Open the destination DB and check the root
+        let dest_db = RocksDB::open_shard_db(&dest_rocksdb_dir, 1);
+        let mut dest_trie = MerkleTrie::new().unwrap();
+        dest_trie.initialize(&dest_db).unwrap();
+        let dest_root = dest_trie.root_hash().unwrap();
+
+        assert_eq!(source_root, dest_root);
+
+        // Assert that the request_counts for both methods are 3 each for each of the 3 mock servers
+        for request_counts in request_counts_vec {
+            let counts = request_counts.lock().unwrap();
+            assert_eq!(
+                *counts.get("get_shard_snapshot_metadata").unwrap_or(&0),
+                1,
+                "get_shard_snapshot_metadata should be called once for each peer"
+            );
+            assert!(
+                *counts.get("get_shard_transactions").unwrap_or(&0) > 10,
+                "get_shard_transactions should be called multiple times for each peer"
+            );
+        }
+
+        // Cleanup
+        for shutdown_tx in shutdown_txs {
+            let _ = shutdown_tx.send(());
+        }
     }
 
     #[tokio::test]

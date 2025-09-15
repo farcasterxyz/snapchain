@@ -4,6 +4,7 @@ use crate::storage::store::BlockStore;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
+#[derive(Clone)]
 pub struct ReplicationServer {
     replicator: Arc<Replicator>,
     block_store: BlockStore,
