@@ -13,7 +13,6 @@ use crate::storage::store::engine::{PostCommitMessage, Senders, ShardEngine};
 use crate::storage::store::node_local_state::LocalStateStore;
 use crate::storage::store::stores::StoreLimits;
 use crate::storage::store::stores::Stores;
-use crate::storage::store::BlockStore;
 use crate::storage::trie::merkle_trie::{self, MerkleTrie};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_metrics::SharedRegistry;
@@ -43,7 +42,6 @@ impl SnapchainNode {
         shard_decision_tx: broadcast::Sender<ShardChunk>,
         block_tx: Option<broadcast::Sender<Block>>,
         messages_request_tx: mpsc::Sender<MempoolMessagesRequest>,
-        block_store: BlockStore,
         local_state_store: LocalStateStore,
         rocksdb_dir: String,
         statsd_client: StatsdClientWrapper,
@@ -139,11 +137,11 @@ impl SnapchainNode {
 
         // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
         let trie = MerkleTrie::new().unwrap();
+        let block_db = RocksDB::open_shard_db(rocksdb_dir.as_str(), 0);
         let engine = BlockEngine::new(
-            block_store.clone(),
             trie,
             statsd_client.clone(),
-            block_store.db,
+            block_db,
             config.max_messages_per_block,
             Some(messages_request_tx.clone()),
             network,

@@ -11,10 +11,10 @@ pub mod replication_test_utils {
             db::{RocksDB, RocksdbError},
             store::{
                 account::UserDataStore,
+                block_engine::BlockEngine,
                 engine::{PostCommitMessage, ShardEngine},
                 mempool_poller::MempoolMessage,
                 test_helper::{self, EngineOptions},
-                BlockStore,
             },
             trie::merkle_trie::TrieKey,
         },
@@ -240,7 +240,10 @@ pub mod replication_test_utils {
         link
     }
 
-    pub fn setup_replicator(engine: &mut ShardEngine) -> (Arc<Replicator>, ReplicationServer) {
+    pub fn setup_replicator(
+        engine: &mut ShardEngine,
+        block_engine: &mut BlockEngine,
+    ) -> (Arc<Replicator>, ReplicationServer) {
         use crate::storage::store::block_engine_test_helpers::default_block;
 
         let statsd_client = crate::utils::statsd_wrapper::StatsdClientWrapper::new(
@@ -266,12 +269,12 @@ pub mod replication_test_utils {
             },
         ));
 
-        let block_store = BlockStore::new(engine.db.clone());
+        let block_stores = block_engine.stores();
         let block = default_block();
-        block_store.put_block(&block).unwrap();
+        block_stores.block_store.put_block(&block).unwrap();
 
         // Set up the replication server with the given replicator
-        let replication_server = ReplicationServer::new(replicator.clone(), block_store);
+        let replication_server = ReplicationServer::new(replicator.clone(), block_stores);
 
         (replicator, replication_server)
     }
