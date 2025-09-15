@@ -863,6 +863,14 @@ impl ReplicatorBootstrap {
         let db = thread_engine.get_stores().db.clone();
 
         for fid in &fids_to_check {
+            let actual_vts = TrieKey::fid_shard(*fid);
+            if actual_vts != virtual_trie_shard {
+                return Err(BootstrapError::GenericError(format!(
+                    "Fid {} was found in vts {} but belongs to vts {}",
+                    fid, virtual_trie_shard, actual_vts
+                )));
+            }
+
             let expected_account = LocalStateStore::read_account_root(
                 &db,
                 shard_id,
