@@ -327,6 +327,7 @@ impl TrieNode {
         {
             return Err(TrieError::KeyLengthExceeded);
         }
+
         // For the remaining keys, group them by the key[current_index] and insert them in bulk
         // at the next level
         let mut grouped_keys = HashMap::new();
