@@ -4,7 +4,7 @@ mod tests {
         bootstrap::replication::{
             error::BootstrapError,
             rpc_client::RpcClientsManager,
-            service::{ReplicatorBootstrap, WorkUnitResponse},
+            service::{ReplicatorBootstrap, ReplicatorBootstrapConfig, WorkUnitResponse},
             test_utils::replication_test_utils::*,
         },
         cfg::Config,
@@ -19,7 +19,7 @@ mod tests {
             db::{RocksDB, RocksDbTransactionBatch},
             store::{
                 engine::{PostCommitMessage, ShardEngine},
-                test_helper::{self},
+                test_helper::{self, statsd_client},
             },
             trie::merkle_trie::{Context, MerkleTrie},
         },
@@ -54,6 +54,8 @@ mod tests {
         >,
         // Counter for calls
         request_counts: Arc<Mutex<HashMap<String, u32>>>,
+        // Error rate for simulating failures (0.0 to 1.0)
+        error_rate: f64,
     }
 
     #[tonic::async_trait]
@@ -62,6 +64,10 @@ mod tests {
             &self,
             request: Request<proto::GetShardSnapshotMetadataRequest>,
         ) -> Result<Response<GetShardSnapshotMetadataResponse>, Status> {
+            if self.error_rate > 0.0 && rand::random::<f64>() < self.error_rate {
+                return Err(Status::internal("Simulated error"));
+            }
+
             let mut counts = self.request_counts.lock().unwrap();
             *counts
                 .entry("get_shard_snapshot_metadata".to_string())
@@ -83,6 +89,10 @@ mod tests {
             &self,
             request: Request<proto::GetShardTransactionsRequest>,
         ) -> Result<Response<GetShardTransactionsResponse>, Status> {
+            if self.error_rate > 0.0 && rand::random::<f64>() < self.error_rate {
+                return Err(Status::internal("Simulated error"));
+            }
+
             let mut counts = self.request_counts.lock().unwrap();
             *counts
                 .entry("get_shard_transactions".to_string())
@@ -179,9 +189,13 @@ mod tests {
         let peer_addr = format!("http://{}", addr);
 
         // --- Test ---
-        let manager = RpcClientsManager::new(peer_addr.clone(), shard_id)
-            .await
-            .unwrap();
+        let manager = RpcClientsManager::new(
+            peer_addr.clone(),
+            shard_id,
+            ReplicatorBootstrapConfig::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(manager.get_metadata().height, height);
 
         let vts = 0;
@@ -248,7 +262,10 @@ mod tests {
         let peer_addr = format!("http://{}", addr);
 
         // --- Test ---
-        let manager = RpcClientsManager::new(peer_addr, shard_id).await.unwrap();
+        let manager =
+            RpcClientsManager::new(peer_addr, shard_id, ReplicatorBootstrapConfig::default())
+                .await
+                .unwrap();
 
         // Request page 1
         let resp1 = manager.get_shard_transactions(vts, None).await.unwrap();
@@ -294,9 +311,13 @@ mod tests {
         let (addr1, shutdown1) = spawn_mock_server(mock_service_1).await;
 
         // --- Test ---
-        let manager = RpcClientsManager::new(format!("http://{}", addr1), shard_id)
-            .await
-            .unwrap();
+        let manager = RpcClientsManager::new(
+            format!("http://{}", addr1),
+            shard_id,
+            ReplicatorBootstrapConfig::default(),
+        )
+        .await
+        .unwrap();
 
         // Peer 2 has the wrong height
         let mock_service_2 = MockReplicationService::default();
@@ -379,9 +400,13 @@ mod tests {
         let (addr, shutdown_tx) = spawn_mock_server(mock_service).await;
 
         // --- Test ---
-        let manager = RpcClientsManager::new(format!("http://{}", addr), shard_id)
-            .await
-            .unwrap();
+        let manager = RpcClientsManager::new(
+            format!("http://{}", addr),
+            shard_id,
+            ReplicatorBootstrapConfig::default(),
+        )
+        .await
+        .unwrap();
         let response = manager.get_shard_transactions(vts, None).await;
 
         // It should succeed after retries
@@ -441,9 +466,13 @@ mod tests {
         let peer_addr_2 = format!("http://{}", addr2);
 
         // --- Test ---
-        let manager = RpcClientsManager::new(peer_addr_1.clone(), shard_id)
-            .await
-            .unwrap();
+        let manager = RpcClientsManager::new(
+            peer_addr_1.clone(),
+            shard_id,
+            ReplicatorBootstrapConfig::default(),
+        )
+        .await
+        .unwrap();
         let handle = manager.add_new_peer(peer_addr_2.clone());
         sleep(Duration::from_millis(100)).await; // allow add_peer to complete
 
@@ -862,12 +891,9 @@ mod tests {
         config.rocksdb_dir = dest_rocksdb_dir.clone();
         config.consensus.shard_ids = vec![1]; // Only shard 1 for this test
         config.fc_network = source_engine.network.clone();
-        config.statsd.addr = "127.0.0.1:8125".to_string();
-        config.statsd.prefix = "test".to_string();
-        config.statsd.use_tags = true;
         config.snapshot.replication_peers = vec![server_addr];
 
-        let bootstrap = ReplicatorBootstrap::new(&config);
+        let bootstrap = ReplicatorBootstrap::new(statsd_client(), &config);
 
         // Perform the bootstrap
         let result = bootstrap.bootstrap_using_replication().await;
@@ -959,12 +985,9 @@ mod tests {
         config.rocksdb_dir = dest_rocksdb_dir.clone();
         config.consensus.shard_ids = vec![1]; // Only shard 1 for this test
         config.fc_network = source_engine.network.clone();
-        config.statsd.addr = "127.0.0.1:8125".to_string();
-        config.statsd.prefix = "test".to_string();
-        config.statsd.use_tags = true;
         config.snapshot.replication_peers = server_addrs;
 
-        let bootstrap = ReplicatorBootstrap::new(&config);
+        let bootstrap = ReplicatorBootstrap::new(statsd_client(), &config);
 
         // Perform the bootstrap
         let result = bootstrap.bootstrap_using_replication().await;
@@ -1004,6 +1027,167 @@ mod tests {
         for shutdown_tx in shutdown_txs {
             let _ = shutdown_tx.send(());
         }
+    }
+
+    #[tokio::test]
+    async fn test_replication_client_bootstrap_multi_page() {
+        // let _ = tracing_subscriber::fmt()
+        //     .with_max_level(tracing::Level::INFO)
+        //     .try_init();
+
+        let (tmp_dir, source_engine, replication_server, _signer, _fid, _fid2) =
+            setup_source_engine_with_test_data().await;
+
+        // Now, start the replication server on a free port
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_addr = format!("http://{}", addr);
+
+        let replication_service = ReplicationServiceServer::new(replication_server);
+
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(replication_service)
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+
+        // Wait a bit for server to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Set up destination engine
+        let dest_rocksdb_dir = format!("{}/dest", tmp_dir.path().to_str().unwrap());
+
+        // Create a config for the bootstrap
+        let mut config = Config::default();
+        config.rocksdb_dir = dest_rocksdb_dir.clone();
+        config.consensus.shard_ids = vec![1]; // Only shard 1 for this test
+        config.fc_network = source_engine.network.clone();
+        config.snapshot.replication_peers = vec![server_addr];
+
+        let bootstrap = ReplicatorBootstrap::new_with_config(
+            statsd_client(),
+            &config,
+            ReplicatorBootstrapConfig {
+                // Set to commit every message individually, which will cause many pages
+                max_messages_in_write_session: 1,
+                ..Default::default()
+            },
+        );
+
+        // Perform the bootstrap
+        let result = bootstrap.bootstrap_using_replication().await;
+
+        // Assert that bootstrap succeeded
+        match &result {
+            Ok(WorkUnitResponse::Finished) => {}
+            _ => panic!("Bootstrap failed with result: {:?}", result),
+        }
+
+        // Now, check that the shard roots match
+        let source_root = source_engine.get_stores().trie.root_hash().unwrap();
+
+        // Open the destination DB and check the root
+        let dest_db = RocksDB::open_shard_db(&dest_rocksdb_dir, 1);
+        let mut dest_trie = MerkleTrie::new().unwrap();
+        dest_trie.initialize(&dest_db).unwrap();
+        let dest_root = dest_trie.root_hash().unwrap();
+
+        assert_eq!(source_root, dest_root);
+    }
+
+    #[tokio::test]
+    async fn test_replication_client_handles_rpc_errors() {
+        let (tmp_dir, source_engine, replication_server, _signer, _fid, _fid2) =
+            setup_source_engine_with_test_data().await;
+
+        // Fetch the actual data from the real replication server to populate our mock.
+        let height = source_engine.get_confirmed_height().block_number;
+        let shard_id = source_engine.shard_id();
+        let (vts_data, snapshot_metadata) =
+            fetch_transactions(&replication_server, shard_id, height)
+                .await
+                .unwrap();
+
+        // --- Setup the Mock Server ---
+        let mut mock_service = MockReplicationService::default();
+        mock_service.error_rate = 0.1; // 10% of the vts will return an error
+
+        // Mock the metadata response.
+        mock_service
+            .metadata_responses
+            .lock()
+            .unwrap()
+            .insert(shard_id, Ok(snapshot_metadata));
+
+        // For each vts, set the response with normal data (no pagination)
+        for vts in 0..256 {
+            let (trie_messages, fid_account_roots) =
+                vts_data.get(&vts).cloned().unwrap_or_default();
+
+            let response = GetShardTransactionsResponse {
+                trie_messages,
+                fid_account_roots,
+                next_page_token: None, // No pagination, one big response.
+            };
+
+            mock_service
+                .transactions_responses
+                .lock()
+                .unwrap()
+                .insert((shard_id, height, vts, None), Ok(response));
+        }
+
+        // --- Start the Mock Server ---
+        let (addr, shutdown_tx) = spawn_mock_server(mock_service).await;
+        let server_addr = format!("http://{}", addr);
+
+        // Wait a bit for server to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Set up destination engine
+        let dest_rocksdb_dir = format!("{}/dest_errors", tmp_dir.path().to_str().unwrap());
+
+        // Create a config for the bootstrap
+        let mut config = Config::default();
+        config.rocksdb_dir = dest_rocksdb_dir.clone();
+        config.consensus.shard_ids = vec![shard_id];
+        config.fc_network = source_engine.network.clone();
+        config.snapshot.replication_peers = vec![server_addr];
+
+        let bootstrap = ReplicatorBootstrap::new_with_config(
+            statsd_client(),
+            &config,
+            ReplicatorBootstrapConfig {
+                max_rpc_retries: 100, // Allow many retries to overcome errors
+                rpc_retry_delay: Duration::from_secs(0),
+                ..Default::default()
+            },
+        );
+
+        // Perform the bootstrap
+        let result = bootstrap.bootstrap_using_replication().await;
+
+        // Assert that bootstrap succeeded despite RPC errors
+        match &result {
+            Ok(WorkUnitResponse::Finished) => {}
+            _ => panic!("Bootstrap failed with result: {:?}", result),
+        }
+
+        // Now, check that the shard roots match
+        let source_root = source_engine.get_stores().trie.root_hash().unwrap();
+
+        // Open the destination DB and check the root
+        let dest_db = RocksDB::open_shard_db(&dest_rocksdb_dir, shard_id);
+        let mut dest_trie = MerkleTrie::new().unwrap();
+        dest_trie.initialize(&dest_db).unwrap();
+        let dest_root = dest_trie.root_hash().unwrap();
+
+        assert_eq!(source_root, dest_root);
+
+        // Cleanup
+        let _ = shutdown_tx.send(());
     }
 
     #[tokio::test]
@@ -1063,7 +1247,7 @@ mod tests {
         config.fc_network = source_engine.network.clone();
         config.snapshot.replication_peers = vec![server_addr];
 
-        let bootstrap = ReplicatorBootstrap::new(&config);
+        let bootstrap = ReplicatorBootstrap::new(statsd_client(), &config);
 
         // 3. Perform the bootstrap. We expect this to succeed despite the duplicate messages.
         let result = bootstrap.bootstrap_using_replication().await;
@@ -1150,7 +1334,7 @@ mod tests {
         config.fc_network = source_engine.network.clone();
         config.snapshot.replication_peers = vec![server_addr];
 
-        let bootstrap = ReplicatorBootstrap::new(&config);
+        let bootstrap = ReplicatorBootstrap::new(statsd_client(), &config);
 
         // 3. Perform the bootstrap. We expect this to fail due to missing messages.
         let result = bootstrap.bootstrap_using_replication().await;
@@ -1225,7 +1409,7 @@ mod tests {
         config.fc_network = source_engine.network.clone();
         config.snapshot.replication_peers = vec![server_addr];
 
-        let bootstrap = ReplicatorBootstrap::new(&config);
+        let bootstrap = ReplicatorBootstrap::new(statsd_client(), &config);
 
         // 3. Perform the bootstrap. We expect this to fail due to wrong account roots.
         let result = bootstrap.bootstrap_using_replication().await;
@@ -1300,7 +1484,7 @@ mod tests {
         config.fc_network = source_engine.network.clone();
         config.snapshot.replication_peers = vec![server_addr];
 
-        let bootstrap = ReplicatorBootstrap::new(&config);
+        let bootstrap = ReplicatorBootstrap::new(statsd_client(), &config);
 
         // 3. Perform the bootstrap. We expect this to fail due to wrong trie keys.
         let result = bootstrap.bootstrap_using_replication().await;

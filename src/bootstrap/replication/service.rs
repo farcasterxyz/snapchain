@@ -26,10 +26,9 @@ use futures::future;
 use prost::Message as _;
 use std::collections::HashSet;
 use std::sync::atomic::AtomicUsize;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::{
     collections::HashMap,
-    net::UdpSocket,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -88,6 +87,40 @@ struct ShardSharedWorkData {
 }
 
 #[derive(Clone)]
+pub struct ReplicatorBootstrapConfig {
+    pub max_messages_in_write_session: usize,
+    pub num_parallel_vts: usize,
+    pub rpc_retry_delay: Duration,
+    pub max_rpc_retries: u32,
+}
+
+impl Default for ReplicatorBootstrapConfig {
+    fn default() -> Self {
+        Self {
+            // We will write these many messages to the DB in a single "batch" (See start_shard_replication_batch)
+            // The DB type we use is optimized for bulk writing, but unfortunately doesn't allow us to compact or flush the keys.
+            // They are flushed and the DB compacted only when it is closed.
+            // If we do nothing and write continuously, the writes slow down A LOT, bringing the replication to a crawl.
+            // So, as a work around, every 5M messages, we close and reopen the DB. This flushes and finializes all the keys written
+            // so far, saves progress, and creates a proper "checkpoint" for us to resume, in case things go wrong or the user
+            // presses CTRL+C etc...
+            max_messages_in_write_session: 5_000_000,
+
+            // Fetch upto these many virtual trie shards in parallel. Note that this can't be too big, as we are
+            // primarily bottlenecked by DB writing. Increasing this wont help performance much because of the backpressure
+            // from the DB writer.
+            num_parallel_vts: 4,
+
+            // Wait this much time between retries for RPC calls
+            rpc_retry_delay: Duration::from_secs(1),
+
+            // Max number of retries for the RPC before giving up
+            max_rpc_retries: 3,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct ReplicatorBootstrap {
     shutdown: Arc<AtomicBool>,
     network: crate::proto::FarcasterNetwork,
@@ -95,38 +128,37 @@ pub struct ReplicatorBootstrap {
     shard_ids: Vec<u32>,
     rocksdb_dir: String,
     initial_peer_list: Vec<String>,
+    config: ReplicatorBootstrapConfig,
 }
 
 impl ReplicatorBootstrap {
-    pub fn new(app_config: &Config) -> Self {
-        let (statsd_host, statsd_port) = match app_config.statsd.addr.split_once(':') {
-            Some((host, port)) => {
-                if host.is_empty() || port.is_empty() {
-                    panic!("statsd address must be in the format host:port");
-                }
-                (host.to_string(), port.parse::<u16>().unwrap())
-            }
-            None => panic!("invalid statsd address: {}", app_config.statsd.addr),
-        };
-
-        let host = (statsd_host, statsd_port);
-        let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
-        let sink = cadence::UdpMetricSink::from(host, socket).unwrap();
-        let statsd_client_inner =
-            cadence::StatsdClient::builder(app_config.statsd.prefix.as_str(), sink).build();
-        let statsd_client =
-            StatsdClientWrapper::new(statsd_client_inner, app_config.statsd.use_tags);
-
-        // Get the list of peers from the config
-        let initial_peer_list = app_config.snapshot.replication_peers.clone();
-
+    pub fn new(statsd_client: StatsdClientWrapper, app_config: &Config) -> Self {
         Self {
             shutdown: Arc::new(AtomicBool::new(false)),
             network: app_config.fc_network,
             statsd_client,
             shard_ids: app_config.consensus.shard_ids.clone(),
             rocksdb_dir: app_config.rocksdb_dir.clone(),
-            initial_peer_list,
+            initial_peer_list: app_config.snapshot.replication_peers.clone(),
+            config: ReplicatorBootstrapConfig::default(),
+        }
+    }
+
+    // For tests, we allow constructing a replicator with custom options to test various scenarios
+    #[cfg(test)]
+    pub fn new_with_config(
+        statsd_client: StatsdClientWrapper,
+        app_config: &Config,
+        config: ReplicatorBootstrapConfig,
+    ) -> Self {
+        Self {
+            shutdown: Arc::new(AtomicBool::new(false)),
+            network: app_config.fc_network,
+            statsd_client,
+            shard_ids: app_config.consensus.shard_ids.clone(),
+            rocksdb_dir: app_config.rocksdb_dir.clone(),
+            initial_peer_list: app_config.snapshot.replication_peers.clone(),
+            config,
         }
     }
 
@@ -173,11 +205,9 @@ impl ReplicatorBootstrap {
         let shard_ids = self.shard_ids.clone();
 
         // For each shard, create a new RPC Client object, seeded by the the first peer
-        let rpc_client_managers = future::join_all(
-            shard_ids
-                .iter()
-                .map(|shard_id| RpcClientsManager::new(peer_addresses[0].clone(), *shard_id)),
-        )
+        let rpc_client_managers = future::join_all(shard_ids.iter().map(|shard_id| {
+            RpcClientsManager::new(peer_addresses[0].clone(), *shard_id, self.config.clone())
+        }))
         .await
         .into_iter()
         .zip(shard_ids.iter())
@@ -410,19 +440,12 @@ impl ReplicatorBootstrap {
 
     /// Commit the DB transaction batch to the DB.
     async fn commit_to_db(
+        &self,
         work_data: &Arc<ShardSharedWorkData>,
         txn_batch: RocksDbTransactionBatch,
         num_messages: usize,
     ) -> Result<DbCommitResponse, BootstrapError> {
-        // Important Note: We will write these many messages to the DB in a single "batch" (See start_shard_replication_batch)
-        // The DB type we use is optimized for bulk writing, but unfortunately doesn't allow us to compact or flush the keys.
-        // They are flushed and the DB compacted only when it is closed.
-        // If we do nothing and write continuously, the writes slow down A LOT, bringing the replication to a crawl.
-        // So, as a work around, every 5M messages, we close and reopen the DB. This flushes and finializes all the keys written
-        // so far, saves progress, and creates a proper "checkpoint" for us to resume, in case things go wrong or the user
-        // presses CTRL+C etc...
-        let max_messages_in_write_session = 5_000_000;
-        let start_time = Instant::now();
+        let start_time: Instant = Instant::now();
 
         let result = {
             let db = work_data.db_writer.lock().await;
@@ -448,7 +471,7 @@ impl ReplicatorBootstrap {
             Ok(()) => {
                 // If we've exceeded the total number of messages in the write session, stop the writer
                 // and allow the DB to reload
-                if total_messages > max_messages_in_write_session {
+                if total_messages > self.config.max_messages_in_write_session {
                     Ok(DbCommitResponse::Stop)
                 } else {
                     Ok(DbCommitResponse::Continue)
@@ -487,7 +510,7 @@ impl ReplicatorBootstrap {
         }
     }
 
-    /// Replicate one "batch" of the shard's tries. This method will spawn upto `max_num_parallel_vts` threads, each working on an independent
+    /// Replicate one "batch" of the shard's tries. This method will spawn upto `num_parallel_vts` threads, each working on an independent
     /// part of the trie (by virtual trie shard or "vts"). It will pick up from where it left off, and fetch the next set of pages for each vts
     /// and attempt to merge them. If there's an error, it will stop immediately and return.
     /// When the DB writer task instructs to exit, it saves its progress and closes all the threads and returns.
@@ -500,11 +523,6 @@ impl ReplicatorBootstrap {
         metadata: ShardSnapshotMetadata,
         shutdown_signal: Arc<AtomicBool>,
     ) -> Result<WorkUnitResponse, BootstrapError> {
-        // Fetch upto these many virtual trie shards in parallel. Note that this can't be too big, as we are
-        // primarily bottlenecked by DB writing. Increasing this wont help performance much because of the backpressure
-        // from the DB writer thread.
-        let max_num_parallel_vts = 4;
-
         let db = RocksDB::open_bulk_write_shard_db(&rocksdb_dir, shard_id);
 
         let store_opts = StoreOptions {
@@ -585,9 +603,9 @@ impl ReplicatorBootstrap {
                 stop_more_work = true;
             }
 
-            // Spawn up to `max_num_parallel_vts` tasks (if we're not stopped)
+            // Spawn up to `num_parallel_vts` tasks (if we're not stopped)
             while !stop_more_work
-                && join_set.len() < max_num_parallel_vts
+                && join_set.len() < self.config.num_parallel_vts
                 && work_index < work_units.len()
             {
                 let (vts, work_item) = work_units[work_index].clone();
@@ -788,7 +806,9 @@ impl ReplicatorBootstrap {
             LocalStateStore::write_work_unit(&mut txn_batch, &status);
 
             // 10. Commit to DB. This will commit all the messages and the trie nodes atomically
-            let db_response = Self::commit_to_db(&work_data, txn_batch, num_messages).await?;
+            let db_response = self
+                .commit_to_db(&work_data, txn_batch, num_messages)
+                .await?;
 
             // Reload the trie after commit, so we get the correct numbers from the DB. Note that the ShardSharedWorkData has it's own copy of the
             // in memory trie, so we need to reload from the DB here to get the correct numbers. We do this instead of just using the trie from ShardSharedWorkData
@@ -798,22 +818,6 @@ impl ReplicatorBootstrap {
                 .get_stores()
                 .trie
                 .reload(&work_item.thread_engine.db)?;
-
-            // Check if shutdown signal is set, if it is, break out
-            if work_item.shutdown_signal.load(Ordering::Relaxed) {
-                info!(
-                    "Shutdown signal received, stopping replication for shard {}, vts {}",
-                    shard_id, status.virtual_trie_shard
-                );
-
-                response = Ok(WorkUnitResponse::Stopped);
-                break;
-            }
-
-            if let DbCommitResponse::Stop = db_response {
-                response = Ok(WorkUnitResponse::DbStopped);
-                break;
-            }
 
             if next_page_token.is_none() {
                 // All done. Check the last fid
@@ -831,10 +835,29 @@ impl ReplicatorBootstrap {
                 status.last_response = WorkUnitResponse::Finished as u32;
                 LocalStateStore::write_work_unit(&mut txn_batch, &status);
 
-                // commit to DB, we're exiting anyway, so we don't care about the response
-                let _ = Self::commit_to_db(&work_data, txn_batch, num_messages).await?;
+                // commit to DB, we're exiting anyway, so we don't care about the `db write session is full` response
+                let _ = self
+                    .commit_to_db(&work_data, txn_batch, num_messages)
+                    .await?;
 
                 response = Ok(WorkUnitResponse::Finished);
+                break;
+            }
+
+            // Check if shutdown signal is set, if it is, break out
+            if work_item.shutdown_signal.load(Ordering::Relaxed) {
+                info!(
+                    "Shutdown signal received, stopping replication for shard {}, vts {}",
+                    shard_id, status.virtual_trie_shard
+                );
+
+                response = Ok(WorkUnitResponse::Stopped);
+                break;
+            }
+
+            // If the DB says the write session is full, we need to exit
+            if let DbCommitResponse::Stop = db_response {
+                response = Ok(WorkUnitResponse::DbStopped);
                 break;
             }
         } // loop to next page from the server

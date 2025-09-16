@@ -290,6 +290,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    if app_config.statsd.prefix == "" {
+        // TODO: consider removing this check
+        return Err("statsd prefix must be specified in config".into());
+    }
+
+    let (statsd_host, statsd_port) = match app_config.statsd.addr.split_once(':') {
+        Some((host, port)) => {
+            if host.is_empty() || port.is_empty() {
+                return Err("statsd address must be in the format host:port".into());
+            }
+            Ok((host.to_string(), port.parse::<u16>()?))
+        }
+        None => Err(format!(
+            "invalid statsd address: {}",
+            app_config.statsd.addr
+        )),
+    }?;
+
+    let host = (statsd_host, statsd_port);
+    let socket = net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    let sink = cadence::UdpMetricSink::from(host, socket)?;
+    let statsd_client =
+        cadence::StatsdClient::builder(app_config.statsd.prefix.as_str(), sink).build();
+    let statsd_client = StatsdClientWrapper::new(statsd_client, app_config.statsd.use_tags);
+
     // We only use snapshots if the db directory doesn't exist or is empty.
     // If the user sets [force_load_db_from_snapshot], load the snapshot without checking directory contents.
     let db_is_empty = !fs::exists(app_config.rocksdb_dir.clone()).unwrap()
@@ -298,27 +323,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if db_is_empty {
         match app_config.snapshot.bootstrap_method {
             BootstrapMethod::Replicate => {
-                // info!("Starting node with replication bootstrap");
-                // let replicator = ReplicatorBootstrap::new(&app_config);
+                //     info!("Starting node with replication bootstrap");
+                //     let replicator = ReplicatorBootstrap::new(statsd_client.clone(), &app_config);
 
-                // match replicator.bootstrap_using_replication().await {
-                //     Ok(r) => {
-                //         // Check for the specific success response
-                //         if r == WorkUnitResponse::Finished {
-                //             info!("Replication bootstrap successful. Continuing with startup.");
-                //         } else {
-                //             error!(
-                //                 "Replication bootstrap stopped with status: {:?}. Exiting.",
-                //                 r
-                //             );
+                //     match replicator.bootstrap_using_replication().await {
+                //         Ok(r) => {
+                //             // Check for the specific success response
+                //             if r == WorkUnitResponse::Finished {
+                //                 info!("Replication bootstrap successful. Continuing with startup.");
+                //             } else {
+                //                 error!(
+                //                     "Replication bootstrap stopped with status: {:?}. Exiting.",
+                //                     r
+                //                 );
+                //                 process::exit(1);
+                //             }
+                //         }
+                //         Err(e) => {
+                //             error!("Replication bootstrap failed:\n{}\nPlease clear the database directory and try again.", e);
                 //             process::exit(1);
                 //         }
                 //     }
-                //     Err(e) => {
-                //         error!("Replication bootstrap failed:\n{}\nPlease clear the database directory and try again.", e);
-                //         process::exit(1);
-                //     }
-                // }
                 error!("Bootstraup via Replication is not yet active");
                 process::exit(1);
             }
@@ -355,31 +380,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await
         .unwrap();
     };
-
-    if app_config.statsd.prefix == "" {
-        // TODO: consider removing this check
-        return Err("statsd prefix must be specified in config".into());
-    }
-
-    let (statsd_host, statsd_port) = match app_config.statsd.addr.split_once(':') {
-        Some((host, port)) => {
-            if host.is_empty() || port.is_empty() {
-                return Err("statsd address must be in the format host:port".into());
-            }
-            Ok((host.to_string(), port.parse::<u16>()?))
-        }
-        None => Err(format!(
-            "invalid statsd address: {}",
-            app_config.statsd.addr
-        )),
-    }?;
-
-    let host = (statsd_host, statsd_port);
-    let socket = net::UdpSocket::bind("0.0.0.0:0").unwrap();
-    let sink = cadence::UdpMetricSink::from(host, socket)?;
-    let statsd_client =
-        cadence::StatsdClient::builder(app_config.statsd.prefix.as_str(), sink).build();
-    let statsd_client = StatsdClientWrapper::new(statsd_client, app_config.statsd.use_tags);
 
     let block_db = RocksDB::open_shard_db(app_config.rocksdb_dir.as_str(), 0);
     let block_store = BlockStore::new(block_db);
