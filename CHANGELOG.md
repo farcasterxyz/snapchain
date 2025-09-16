@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.0] - 2025-09-16
+
+### 🚀 Features
+
+- Add trie paged iteration + remove attach_to_root (#660)
+- Add trie-based replication server (#663)
+- Add profile token user data type (#666)
+- Add the ability to start a node via replication (#667)
+- Support storage lending in the shard and block engines (#665)
+- Add client manager + tests for replication rpc requests (#672)
+
+### 🐛 Bug Fixes
+
+- Hardcode the trie_branching_factor to 16 (#668)
+- Update block event seqnum correctly if there are multiple block events in a single transaction (#673)
+- Simplify the replication by removing trie/DB threads (#671)
+- Rename replication rs files (#675)
+
+### ⚙️ Miscellaneous Tasks
+
+- Add chain tag to some onchain event metrics (#664)
+
 ## [0.7.0] - 2025-09-03
 
 ### 🚀 Features
