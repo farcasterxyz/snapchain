@@ -1191,6 +1191,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_replication_client_rpc_error_propogates() {
+        let (tmp_dir, source_engine, _, _signer, _fid, _fid2) =
+            setup_source_engine_with_test_data().await;
+
+        let shard_id = source_engine.shard_id();
+
+        // --- Setup the Mock Server ---
+        let mut mock_service = MockReplicationService::default();
+        mock_service.error_rate = 1.0; // only return errors
+
+        // --- Start the Mock Server ---
+        let (addr, shutdown_tx) = spawn_mock_server(mock_service).await;
+        let server_addr = format!("http://{}", addr);
+
+        // Wait a bit for server to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Set up destination engine
+        let dest_rocksdb_dir = format!("{}/dest_errors", tmp_dir.path().to_str().unwrap());
+
+        // Create a config for the bootstrap
+        let mut config = Config::default();
+        config.rocksdb_dir = dest_rocksdb_dir.clone();
+        config.consensus.shard_ids = vec![shard_id];
+        config.fc_network = source_engine.network.clone();
+        config.snapshot.replication_peers = vec![server_addr];
+
+        let bootstrap = ReplicatorBootstrap::new(statsd_client(), &config);
+
+        // Perform the bootstrap
+        let result = bootstrap.bootstrap_using_replication().await;
+        assert!(matches!(result, Err(BootstrapError::RpcError(_))));
+        assert!(result.unwrap_err().to_string().contains("Simulated error"));
+
+        // Cleanup
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
     async fn test_replication_duplicate_messages() {
         // 1. Create an engine with test data using the existing helper.
         let (tmp_dir, source_engine, replication_server, _signer, _fid, _fid2) =
