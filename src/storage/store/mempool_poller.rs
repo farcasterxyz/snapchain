@@ -27,10 +27,11 @@ pub struct MempoolPoller {
     pub statsd_client: StatsdClientWrapper,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum MempoolMessage {
     UserMessage(proto::Message),
     OnchainEvent(proto::OnChainEvent),
+    OnchainEventForMigration(proto::OnChainEvent),
     FnameTransfer(proto::FnameTransfer),
     BlockEvent {
         for_shard: u32,
@@ -42,7 +43,8 @@ impl MempoolMessage {
     pub fn fid(&self) -> u64 {
         match self {
             MempoolMessage::UserMessage(msg) => msg.fid(),
-            MempoolMessage::OnchainEvent(event) => event.fid,
+            MempoolMessage::OnchainEvent(event)
+            | MempoolMessage::OnchainEventForMigration(event) => event.fid,
             MempoolMessage::FnameTransfer(transfer) => transfer.proof.as_ref().unwrap().fid,
             MempoolMessage::BlockEvent {
                 for_shard: _,
@@ -153,7 +155,8 @@ impl MempoolPoller {
                             block_event: None,
                         })
                     }
-                    MempoolMessage::OnchainEvent(onchain_event) => {
+                    MempoolMessage::OnchainEvent(onchain_event)
+                    | MempoolMessage::OnchainEventForMigration(onchain_event) => {
                         transaction.system_messages.push(ValidatorMessage {
                             on_chain_event: Some(onchain_event.clone()),
                             fname_transfer: None,
