@@ -70,7 +70,7 @@ impl Default for ReplicationConfig {
     fn default() -> Self {
         Self {
             enable: false,
-            snapshot_interval: (60 * 60 * 2), // every ~2 hours (in number of blocks)
+            snapshot_interval: (60 * 60 * 8), // every ~8 hours (in number of blocks)
             snapshot_max_age: Duration::from_secs(60 * 60 * 24), // keep snapshots for 24 hours
         }
     }
