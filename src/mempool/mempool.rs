@@ -572,8 +572,8 @@ impl Mempool {
             // TODO(aditi): Remove this codepath after migrating onchain events to shard 0
             vec![0]
         } else if let MempoolMessage::OnchainEvent(_) = &message {
-            // Onchain events need to get to shard 0 so that we can support other messages (lend storage) in shard 0.
-            vec![0, fid_shard]
+            // TODO(aditi): Onchain events need to get to shard 0 so that we can support other messages (lend storage) in shard 0.
+            vec![fid_shard]
         } else if let MempoolMessage::BlockEvent {
             for_shard,
             message: _,

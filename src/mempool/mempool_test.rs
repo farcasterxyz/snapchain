@@ -676,7 +676,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_onchain_events_routing() {
+    async fn test_onchain_event_for_migration_routing() {
         // Setup with 2 shards
         let (_, _, _, mut mempool, mempool_tx, messages_request_tx, _decision_tx, _) =
             setup(None, false, 2).await;
@@ -697,59 +697,6 @@ mod tests {
             false,
             proto::FarcasterNetwork::Devnet,
         );
-
-        // Add onchain event to mempool
-        mempool_tx
-            .send(MempoolRequest::AddMessage(
-                MempoolMessage::OnchainEvent(onchain_event.clone()),
-                MempoolSource::Local,
-                None,
-            ))
-            .await
-            .unwrap();
-
-        // Wait for processing
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        pull_message(
-            &messages_request_tx,
-            0,
-            Some(MempoolMessage::OnchainEvent(onchain_event.clone())),
-        )
-        .await;
-        pull_message(
-            &messages_request_tx,
-            1,
-            Some(MempoolMessage::OnchainEvent(onchain_event.clone())),
-        )
-        .await;
-
-        // Test that duplicates are allowed by adding the same onchain event again
-        mempool_tx
-            .send(MempoolRequest::AddMessage(
-                MempoolMessage::OnchainEvent(onchain_event.clone()),
-                MempoolSource::Local,
-                None,
-            ))
-            .await
-            .unwrap();
-
-        // Wait for processing
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Should be able to pull the duplicate from both shards
-        pull_message(
-            &messages_request_tx,
-            0,
-            Some(MempoolMessage::OnchainEvent(onchain_event.clone())),
-        )
-        .await;
-        pull_message(
-            &messages_request_tx,
-            1,
-            Some(MempoolMessage::OnchainEvent(onchain_event.clone())),
-        )
-        .await;
 
         mempool_tx
             .send(MempoolRequest::AddMessage(
