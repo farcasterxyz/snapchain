@@ -7,9 +7,12 @@ use libp2p::identity::ed25519::Keypair;
 use libp2p::swarm::SwarmEvent;
 use libp2p::PeerId;
 use prost::Message as _;
+use serde_json;
 use tracing::{info, warn};
 
+use crate::bootstrap::replication::error::BootstrapError;
 use crate::bootstrap::replication::rpc_client::RpcClientsManager;
+use crate::cfg::DEFAULT_RPC_PORT;
 use crate::network::gossip::{Config as GossipConfig, SnapchainGossip};
 use crate::proto::{self, ContactInfoBody};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
@@ -35,7 +38,7 @@ impl PeerDiscoverer {
         fc_network: crate::proto::FarcasterNetwork,
         statsd_client: StatsdClientWrapper,
         shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, BootstrapError> {
         // Ephemeral keypair for discovery session
         let keypair = Keypair::generate();
         let gossip = SnapchainGossip::create(
@@ -46,7 +49,10 @@ impl PeerDiscoverer {
             fc_network,
             statsd_client,
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            BootstrapError::GossipInitError(format!("Failed to initialize gossip: {}", e))
+        })?;
 
         Ok(Self {
             gossip,
@@ -89,7 +95,8 @@ impl PeerDiscoverer {
         let parts: Vec<&str> = gossip_addr.split('/').collect();
         if parts.len() >= 3 && parts[1] == "ip4" {
             let ip = parts[2];
-            Some(format!("https://{}:3383", ip))
+            // When we have just the IP address, we'll assume HTTP and the default port
+            Some(format!("http://{}:{}", ip, DEFAULT_RPC_PORT))
         } else {
             None
         }
@@ -104,12 +111,27 @@ impl PeerDiscoverer {
             }
         };
 
-        let http_addr = match self.gossip_addr_to_http_addr(&contact_info.gossip_address) {
-            Some(addr) => addr,
-            None => {
-                warn!("Invalid gossip address format");
-                return;
+        let http_addr = if !contact_info.announce_rpc_address.is_empty() {
+            // This peer is announcing an RPC address, use that one
+            contact_info.announce_rpc_address
+        } else if !contact_info.gossip_address.is_empty() {
+            // Fallback to deriving from gossip address
+            match self.gossip_addr_to_http_addr(&contact_info.gossip_address) {
+                Some(addr) => addr,
+                None => {
+                    warn!(
+                        contact_info = %serde_json::to_string(&contact_info).unwrap_or_else(|_| "failed to serialize".to_string()),
+                        "Invalid gossip address format, not adding peer",
+                    );
+                    return;
+                }
             }
+        } else {
+            warn!(
+                contact_info = %serde_json::to_string(&contact_info).unwrap_or_else(|_| "failed to serialize".to_string()),
+                "No RPC or gossip address provided in contact info, not adding peer"
+            );
+            return;
         };
 
         // Cooldown check
@@ -117,11 +139,6 @@ impl PeerDiscoverer {
             if ts.elapsed() < INCOMPATIBLE_PEER_COOLDOWN {
                 return;
             }
-        }
-
-        // Already known
-        if self.rpc_manager.knows_peer(&http_addr) {
-            return;
         }
 
         // Spawn validation (metadata height match) via RpcClientsManager::add_new_peer

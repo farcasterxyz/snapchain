@@ -12,6 +12,9 @@ use tokio::time::{sleep, Instant};
 use tonic::transport::Channel;
 use tracing::{info, warn};
 
+// Comma-separated list of initial peers to bootstrap from if none are configured.
+pub const REPLICATION_INITIAL_PEERS: &str = "https://rho.farcaster.xyz:3381";
+
 // A peer owns its own client and its stats, guarded by a Mutex for concurrent updates.
 #[derive(Debug)]
 struct Peer {
@@ -102,16 +105,6 @@ impl RpcClientsManager {
         self.shard_id
     }
 
-    // Fast check to see if we already know about a peer address. Uses a blocking lock since this
-    // is only called in lightweight, non-async contexts (e.g., peer discovery event loop) and the
-    // critical section is tiny.
-    pub fn knows_peer(&self, peer_address: &str) -> bool {
-        let data = self.inner.blocking_lock();
-        data.peer_manager
-            .peer_addresses
-            .iter()
-            .any(|addr| addr == peer_address)
-    }
     pub async fn new(
         peer_addr: String,
         shard_id: u32,
@@ -159,10 +152,22 @@ impl RpcClientsManager {
         let height = self.height;
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
+            let mut data = inner.lock().await;
+
+            // Check if we already know this peer
+            if data
+                .peer_manager
+                .peer_addresses
+                .iter()
+                .any(|addr| *addr == peer_address)
+            {
+                // Already known
+                return Ok(true);
+            }
+
             match Self::get_shard_metadata(peer_address.clone(), shard_id).await {
                 Ok(snapshots) => {
                     if snapshots.snapshots.iter().any(|s| s.height == height) {
-                        let mut data = inner.lock().await;
                         data.peer_manager.peer_addresses.push(peer_address);
                         Ok(true)
                     } else {

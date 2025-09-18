@@ -130,6 +130,13 @@ impl Config {
         }
     }
 
+    pub fn with_announce_rpc_address(self, announce_rpc_address: String) -> Self {
+        Config {
+            announce_rpc_address,
+            ..self
+        }
+    }
+
     pub fn bootstrap_addrs(&self) -> Vec<String> {
         self.bootstrap_peers
             .split(',')

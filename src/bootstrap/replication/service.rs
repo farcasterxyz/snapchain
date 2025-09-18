@@ -1,6 +1,6 @@
 use crate::bootstrap::replication::error::BootstrapError;
 use crate::bootstrap::replication::peer_discovery::PeerDiscoverer;
-use crate::bootstrap::replication::rpc_client::RpcClientsManager;
+use crate::bootstrap::replication::rpc_client::{RpcClientsManager, REPLICATION_INITIAL_PEERS};
 use crate::cfg::Config;
 use crate::core::validations;
 use crate::core::validations::message::validate_message_hash;
@@ -128,11 +128,10 @@ pub struct ReplicatorBootstrap {
     shutdown: Arc<AtomicBool>,
     network: crate::proto::FarcasterNetwork,
     statsd_client: StatsdClientWrapper,
-    gossip_address: String,
+    gossip_config: gossip::Config,
     shard_ids: Vec<u32>,
     rocksdb_dir: String,
     replication_peer_list: Vec<String>,
-    gossip_bootstrap_peers: String,
     config: ReplicatorBootstrapConfig,
 }
 
@@ -142,8 +141,7 @@ impl ReplicatorBootstrap {
             shutdown: Arc::new(AtomicBool::new(false)),
             network: app_config.fc_network,
             statsd_client,
-            gossip_address: app_config.gossip.address.clone(),
-            gossip_bootstrap_peers: app_config.gossip.bootstrap_peers.clone(),
+            gossip_config: app_config.gossip.clone(),
             shard_ids: app_config.consensus.shard_ids.clone(),
             rocksdb_dir: app_config.rocksdb_dir.clone(),
             replication_peer_list: app_config.snapshot.replication_peers.clone(),
@@ -163,8 +161,7 @@ impl ReplicatorBootstrap {
             shutdown: Arc::new(AtomicBool::new(false)),
             network: app_config.fc_network,
             statsd_client,
-            gossip_address: app_config.gossip.address.clone(),
-            gossip_bootstrap_peers: app_config.gossip.bootstrap_peers.clone(),
+            gossip_config: app_config.gossip.clone(),
             shard_ids: app_config.consensus.shard_ids.clone(),
             rocksdb_dir: app_config.rocksdb_dir.clone(),
             replication_peer_list: app_config.snapshot.replication_peers.clone(),
@@ -200,15 +197,20 @@ impl ReplicatorBootstrap {
 
     /// Bootstrap a node from replication instead of snapshot download
     pub async fn bootstrap_using_replication(&self) -> Result<WorkUnitResponse, BootstrapError> {
-        info!("Starting replication-based bootstrap with dynamic peer discovery");
+        let peer_addresses = if self.replication_peer_list.is_empty() {
+            // If no peers are configured, use the built-in default list
+            REPLICATION_INITIAL_PEERS
+                .split(',')
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        } else {
+            self.replication_peer_list.clone()
+        };
 
-        let peer_addresses = self.replication_peer_list.clone();
-        // If no peers are configured, we can't proceed, so error out
-        if peer_addresses.is_empty() {
-            return Err(BootstrapError::GenericError(
-                "No replication peers configured".into(),
-            ));
-        }
+        info!(
+            "Starting replication-based bootstrap with dynamic peer discovery. Initial Peers: {:?}",
+            peer_addresses
+        );
 
         // Initialize databases and replay transactions for each shard
         // Note: We're not replicating shard 0 (block shard) for now.
@@ -238,41 +240,32 @@ impl ReplicatorBootstrap {
             .ok_or_else(|| BootstrapError::GenericError("No RPC managers initialized".into()))?;
         let target_height = first_manager.get_metadata().height;
 
-        // Spin up peer discovery service
-        let bootstrap_peers = if self.replication_peer_list.is_empty() {
-            self.gossip_bootstrap_peers.clone()
-        } else {
-            self.replication_peer_list.join(",")
-        };
+        let (mut disc_shutdown_tx_opt, mut discovery_thread_handle_opt) = {
+            let (disc_shutdown_tx, disc_shutdown_rx) = oneshot::channel();
 
-        let (disc_shutdown_tx, disc_shutdown_rx) = oneshot::channel();
-        let mut gossip_config = gossip::Config {
-            // build minimal config using existing peers as bootstrap list
-            bootstrap_peers,
-            address: self.gossip_address.clone(),
-            ..Default::default()
-        };
+            // Clone/move all inputs needed inside the new thread. We construct PeerDiscoverer
+            // inside the thread so we don't have to move a !Send swarm across threads.
+            let gossip_config = self.gossip_config.clone();
+            let rpc_mgr = first_manager.clone();
+            let statsd = self.statsd_client.clone();
+            let network = self.network;
+            let handle = tokio::spawn(async move {
+                match PeerDiscoverer::new(
+                    &gossip_config,
+                    rpc_mgr,
+                    target_height,
+                    network,
+                    statsd,
+                    disc_shutdown_rx,
+                )
+                .await
+                {
+                    Ok(peer_discoverer) => peer_discoverer.run().await,
+                    Err(e) => warn!("Peer discovery disabled (failed to start): {}", e),
+                }
+            });
 
-        // ensure we do not attempt autodiscovery in discovery gossip itself
-        gossip_config.enable_autodiscovery = false;
-        let (mut discovery_handle, mut disc_shutdown_tx) = match PeerDiscoverer::new(
-            &gossip_config,
-            first_manager.clone(),
-            target_height,
-            self.network,
-            self.statsd_client.clone(),
-            disc_shutdown_rx,
-        )
-        .await
-        {
-            Ok(peer_discoverer) => {
-                let handle = tokio::spawn(peer_discoverer.run());
-                (Some(handle), Some(disc_shutdown_tx))
-            }
-            Err(e) => {
-                warn!("Peer discovery disabled (failed to start): {}", e);
-                (None, None)
-            }
+            (Some(disc_shutdown_tx), Some(handle))
         };
 
         // Create tasks for each shard to run in parallel
@@ -336,20 +329,23 @@ impl ReplicatorBootstrap {
                     // Ignore results since we're shutting down
                     let _ = res;
                 }
+                info!("Shard tasks have been shut down, attempting to close RPC clients...");
 
                 for (_, rpc_client_manager) in rpc_client_managers.iter() {
                     rpc_client_manager.close().await;
                 }
+
                 info!("All shard tasks have been shut down.");
             };
 
         let shutdown_gossip_discovery_fn =
             async |disc_shutdown_tx: &mut Option<oneshot::Sender<()>>,
-                   discovery_handle: &mut Option<tokio::task::JoinHandle<()>>| {
-                if let (Some(tx), Some(handle)) = (disc_shutdown_tx.take(), discovery_handle.take())
+                   discovery_thread_handle: &mut Option<tokio::task::JoinHandle<()>>| {
+                if let (Some(tx), Some(handle)) =
+                    (disc_shutdown_tx.take(), discovery_thread_handle.take())
                 {
                     let _ = tx.send(());
-                    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+                    let _ = handle.await;
                 }
             };
 
@@ -373,7 +369,11 @@ impl ReplicatorBootstrap {
                 }
 
                 // Shut down discovery task
-                shutdown_gossip_discovery_fn(&mut disc_shutdown_tx, &mut discovery_handle).await;
+                shutdown_gossip_discovery_fn(
+                    &mut disc_shutdown_tx_opt,
+                    &mut discovery_thread_handle_opt,
+                )
+                .await;
                 return Ok(WorkUnitResponse::Finished);
             }
 
@@ -388,13 +388,13 @@ impl ReplicatorBootstrap {
                             error!("Shard task failed: {}", e);
                             // Shutdown all remaining tasks as well
                             shutdown_and_drain_tasks_fn(&mut shard_tasks).await;
-                            shutdown_gossip_discovery_fn(&mut disc_shutdown_tx, &mut discovery_handle).await;
+                            shutdown_gossip_discovery_fn(&mut disc_shutdown_tx_opt, &mut discovery_thread_handle_opt).await;
 
                             return Err(e);
                         }
                         Err(e) => {
                             error!("Shard task join error: {}", e);
-                            shutdown_gossip_discovery_fn(&mut disc_shutdown_tx, &mut discovery_handle).await;
+                            shutdown_gossip_discovery_fn(&mut disc_shutdown_tx_opt, &mut discovery_thread_handle_opt).await;
                             return Err(BootstrapError::TransactionReplayError(format!(
                                 "Shard task join error: {}",
                                 e
@@ -405,7 +405,7 @@ impl ReplicatorBootstrap {
                 _ = ctrl_c() => {
                     info!("Shutdown signal received, stopping all shard replication tasks");
                     shutdown_and_drain_tasks_fn(&mut shard_tasks).await;
-                    shutdown_gossip_discovery_fn(&mut disc_shutdown_tx, &mut discovery_handle).await;
+                    shutdown_gossip_discovery_fn(&mut disc_shutdown_tx_opt, &mut discovery_thread_handle_opt).await;
 
                     return Ok(WorkUnitResponse::Stopped);
                 }
