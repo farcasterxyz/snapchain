@@ -301,7 +301,6 @@ impl TrieNode {
                 .filter_map(|(i, key)| {
                     if bytes_compare(self.key.as_ref().unwrap_or(&vec![]), key.as_slice()) == 0 {
                         // Key already exists, do nothing
-                        results[i] = false;
                         None
                     } else {
                         Some((i + if inserted { 1 } else { 0 }, key)) // If we already pop()ed the first key, the index is i + 1

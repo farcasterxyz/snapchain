@@ -2,8 +2,8 @@ use crate::proto::FarcasterNetwork;
 use crate::storage;
 use crate::storage::db::snapshot::{clear_old_snapshots, SnapshotError};
 use crate::storage::db::RocksDB;
+use crate::storage::store::block_engine::BlockStores;
 use crate::storage::store::stores::Stores;
-use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -36,7 +36,7 @@ async fn backup_and_upload(
 pub async fn upload_snapshot(
     snapshot_config: storage::db::snapshot::Config,
     fc_network: FarcasterNetwork,
-    block_store: BlockStore,
+    block_stores: BlockStores,
     shard_stores: HashMap<u32, Stores>,
     statsd_client: StatsdClientWrapper,
     only_for_shard_ids: Option<HashSet<u32>>,
@@ -58,7 +58,7 @@ pub async fn upload_snapshot(
             fc_network,
             snapshot_config.clone(),
             0,
-            block_store.db.clone(),
+            block_stores.db.clone(),
             now as i64,
             statsd_client.clone(),
         )
@@ -107,20 +107,20 @@ pub fn snapshot_upload_job(
     schedule: &str,
     snapshot_config: storage::db::snapshot::Config,
     fc_network: FarcasterNetwork,
-    block_store: BlockStore,
+    block_stores: BlockStores,
     shard_stores: HashMap<u32, Stores>,
     statsd_client: StatsdClientWrapper,
 ) -> Result<Job, JobSchedulerError> {
     Job::new_async(schedule, move |_, _| {
         let snapshot_config = snapshot_config.clone();
-        let block_store = block_store.clone();
+        let block_stores = block_stores.clone();
         let shard_stores = shard_stores.clone();
         let statsd_client = statsd_client.clone();
         Box::pin(async move {
             if let Err(err) = upload_snapshot(
                 snapshot_config,
                 fc_network,
-                block_store,
+                block_stores,
                 shard_stores,
                 statsd_client,
                 None,

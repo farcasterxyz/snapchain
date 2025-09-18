@@ -1206,6 +1206,7 @@ impl IdRegistryEventByAddressRequest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ContactInfoBody {
     gossip_address: String,
+    announce_rpc_address: String,
     peer_id: String,
     snapchain_version: String,
     network: FarcasterNetwork,
@@ -1218,6 +1219,7 @@ impl TryFrom<proto::ContactInfoBody> for ContactInfoBody {
     fn try_from(value: proto::ContactInfoBody) -> Result<Self, Self::Error> {
         Ok(ContactInfoBody {
             gossip_address: value.gossip_address.clone(),
+            announce_rpc_address: value.announce_rpc_address.clone(),
             peer_id: PeerId::from_bytes(&value.peer_id)
                 .map_err(|err| ErrorResponse {
                     error: "Invalid peer id".to_string(),
