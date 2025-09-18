@@ -16,6 +16,10 @@ use std::error::Error;
 use std::path::Path;
 use std::time::Duration;
 
+pub const DEFAULT_GOSSIP_PORT: u16 = 3382;
+pub const DEFAULT_RPC_PORT: u16 = 3383;
+pub const DEFAULT_HTTP_PORT: u16 = 3381;
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct StatsdConfig {
     pub prefix: String,
@@ -114,8 +118,8 @@ impl Default for Config {
             mempool: mempool::mempool::Config::default(),
             rpc_auth: "".to_string(),
             admin_rpc_auth: "".to_string(),
-            rpc_address: "0.0.0.0:3383".to_string(),
-            http_address: "0.0.0.0:3381".to_string(),
+            rpc_address: format!("0.0.0.0:{}", DEFAULT_RPC_PORT),
+            http_address: format!("0.0.0.0:{}", DEFAULT_HTTP_PORT),
             rocksdb_dir: ".rocks".to_string(),
             clear_db: false,
             statsd: StatsdConfig::default(),

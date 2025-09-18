@@ -370,6 +370,7 @@ mod tests {
         mock_hub_service.current_peers = Some(GetConnectedPeersResponse {
             contacts: vec![ContactInfoBody {
                 gossip_address: "127.0.0.1:3382".to_string(),
+                announce_rpc_address: "http://127.0.0.1:3381".to_string(),
                 network: FarcasterNetwork::Mainnet as i32,
                 peer_id: vec![
                     0, 36, 8, 1, 18, 32, 113, 33, 69, 101, 159, 234, 6, 137, 235, 52, 28, 108, 100,
@@ -393,6 +394,7 @@ mod tests {
           "contacts": [
             {
               "gossip_address": "127.0.0.1:3382",
+              "announce_rpc_address": "http://127.0.0.1:3381",
               "peer_id": "12D3KooWHRyfTBKcjkqjNk5UZarJhzT7rXZYfr4DmaCWJgen62Xk",
               "snapchain_version": "0.2.1",
               "network": "Mainnet",

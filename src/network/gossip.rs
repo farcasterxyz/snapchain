@@ -1,3 +1,4 @@
+use crate::cfg::{DEFAULT_GOSSIP_PORT, DEFAULT_RPC_PORT};
 use crate::consensus::consensus::{MalachiteEventShard, SystemMessage};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
@@ -37,7 +38,6 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
-const DEFAULT_GOSSIP_PORT: u16 = 3382;
 const DEFAULT_GOSSIP_HOST: &str = "127.0.0.1";
 const MAX_GOSSIP_MESSAGE_SIZE: usize = 1024 * 1024 * 10; // 10 mb
 
@@ -51,6 +51,7 @@ const CONTACT_INFO: &str = "contact-info";
 pub struct Config {
     pub address: String,
     pub announce_address: String,
+    pub announce_rpc_address: String,
     pub bootstrap_peers: String,
     pub contact_info_interval: Duration,
     pub bootstrap_reconnect_interval: Duration,
@@ -67,6 +68,7 @@ impl Default for Config {
         Config {
             address: address.clone(),
             announce_address: "".to_string(),
+            announce_rpc_address: "".to_string(),
             bootstrap_peers: "".to_string(),
             contact_info_interval: Duration::from_secs(300),
             bootstrap_reconnect_interval: Duration::from_secs(30),
@@ -174,6 +176,7 @@ pub struct SnapchainGossip {
     bootstrap_addrs: HashSet<String>,
     connected_bootstrap_addrs: HashSet<String>,
     announce_address: String,
+    announce_rpc_address: String,
     fc_network: FarcasterNetwork,
     contact_info_interval: Duration,
     bootstrap_reconnect_interval: Duration,
@@ -307,9 +310,17 @@ impl SnapchainGossip {
         // Listen on all assigned port for this id
         swarm.listen_on(config.address.parse()?)?;
 
-        let announce_address = Self::get_announce_address(config).await;
+        let announce_address = Self::get_announce_address(fc_network, config).await;
+        let announce_rpc_address = match Self::get_announce_rpc_address(fc_network, config).await {
+            Ok(addr) => addr,
+            Err(e) => {
+                warn!("Failed to get announce RPC address: {}", e);
+                "".to_string()
+            }
+        };
 
-        info!("Using {} as announce address", announce_address);
+        info!("Using \"{}\" as announce address", announce_address);
+        info!("Using \"{}\" as announce RPC address", announce_rpc_address);
 
         // ~5 seconds of buffer (assuming 1K msgs/pec)
         let (tx, rx) = mpsc::channel(5000);
@@ -322,6 +333,7 @@ impl SnapchainGossip {
             read_node,
             bootstrap_addrs: config.bootstrap_addrs().into_iter().collect(),
             announce_address,
+            announce_rpc_address,
             fc_network,
             contact_info_interval: config.contact_info_interval,
             bootstrap_reconnect_interval: config.bootstrap_reconnect_interval,
@@ -332,9 +344,35 @@ impl SnapchainGossip {
         })
     }
 
-    async fn get_announce_address(config: &Config) -> String {
+    async fn get_announce_rpc_address(
+        fc_network: FarcasterNetwork,
+        config: &Config,
+    ) -> Result<String, reqwest::Error> {
+        if config.announce_rpc_address.len() > 0 {
+            return Ok(config.announce_rpc_address.clone());
+        }
+
+        if fc_network == FarcasterNetwork::Devnet {
+            // Don't try to fetch public IP for devnet/during tests
+            return Ok("".to_string());
+        }
+
+        // If no config-defined announce RPC IP exists, detect the public IP.
+        Self::get_public_ip()
+            .await
+            // Use http if using IP address (assumeno SSL)
+            .map(|ip| format!("http://{}:{}", ip, DEFAULT_RPC_PORT))
+    }
+
+    async fn get_announce_address(fc_network: FarcasterNetwork, config: &Config) -> String {
         if config.announce_address.len() > 0 {
             return config.announce_address.clone();
+        }
+
+        if fc_network == FarcasterNetwork::Devnet {
+            // Don't try to fetch public IP for devnet/during tests
+            // Fallback to address.
+            return config.address.clone();
         }
 
         // If no config-defined announce IP exists, detect the public IP.
@@ -399,6 +437,7 @@ impl SnapchainGossip {
             body: Some(ContactInfoBody {
                 peer_id: self.swarm.local_peer_id().to_bytes(),
                 gossip_address: self.announce_address.clone(),
+                announce_rpc_address: self.announce_rpc_address.clone(),
                 network: self.fc_network as i32,
                 snapchain_version: current_version.to_string(),
                 timestamp: std::time::SystemTime::now()
