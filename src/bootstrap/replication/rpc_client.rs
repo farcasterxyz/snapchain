@@ -1,4 +1,5 @@
 use crate::bootstrap::replication::error::BootstrapError;
+use crate::bootstrap::replication::service::ReplicatorBootstrapConfig;
 use crate::proto::{
     self, replication_service_client::ReplicationServiceClient, GetShardSnapshotMetadataResponse,
     GetShardTransactionsResponse, ShardSnapshotMetadata,
@@ -92,6 +93,7 @@ pub struct RpcClientsManager {
     shard_id: u32,
     height: u64,
     metadata: ShardSnapshotMetadata,
+    config: ReplicatorBootstrapConfig,
     inner: Arc<Mutex<ReplicationServiceRpcData>>,
 }
 
@@ -99,6 +101,7 @@ impl RpcClientsManager {
     pub async fn new(
         peer_addr: String,
         shard_id: u32,
+        config: ReplicatorBootstrapConfig,
     ) -> Result<RpcClientsManager, BootstrapError> {
         // We'll create a new RPC client, seeded by the metadata in the peer.
 
@@ -126,6 +129,7 @@ impl RpcClientsManager {
             shard_id,
             height,
             metadata: highest_snapshot.clone(),
+            config,
             inner: Arc::new(Mutex::new(ReplicationServiceRpcData {
                 peer_manager,
                 vts_next_page_cache: HashMap::new(),
@@ -179,11 +183,12 @@ impl RpcClientsManager {
     async fn call_get_shard_transactions_with_retry(
         peer: Arc<Peer>,
         request: proto::GetShardTransactionsRequest,
+        config: &ReplicatorBootstrapConfig,
     ) -> Result<GetShardTransactionsResponse, tonic::Status> {
         let start = Instant::now();
         let mut last_error = None;
 
-        for _attempt in 1..=3 {
+        for _attempt in 1..=config.max_rpc_retries {
             let req = tonic::Request::new(request.clone());
             // Clone the client from within the peer. This is a cheap operation.
             let mut client = peer.client.clone();
@@ -203,7 +208,7 @@ impl RpcClientsManager {
                 Err(e) => {
                     s.errors += 1;
                     last_error = Some(e);
-                    sleep(Duration::from_secs(1)).await;
+                    sleep(config.rpc_retry_delay).await;
                 }
             }
         }
@@ -232,6 +237,7 @@ impl RpcClientsManager {
             let shard_id = self.shard_id;
             let height = self.height;
             let next_page_token = next_page_token.clone();
+            let config = self.config.clone();
 
             // spawn the background prefetch — do peer resolution and network calls inside the task
             tokio::spawn(async move {
@@ -251,6 +257,7 @@ impl RpcClientsManager {
                                 trie_virtual_shard: vts as u32,
                                 page_token: Some(next_page_token),
                             },
+                            &config,
                         )
                         .await;
                         let _ = sender.send(response.map_err(BootstrapError::from));
@@ -318,7 +325,8 @@ impl RpcClientsManager {
             page_token,
         };
 
-        let response = Self::call_get_shard_transactions_with_retry(peer, request).await?;
+        let response =
+            Self::call_get_shard_transactions_with_retry(peer, request, &self.config).await?;
 
         // Handle spawning the next pre-fetch.
         self.handle_response_and_spawn_next(vts, response.next_page_token.clone())
