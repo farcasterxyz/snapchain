@@ -239,7 +239,7 @@ impl ReadNodeForTest {
         let mut gossip = SnapchainGossip::create(
             keypair.clone(),
             &config,
-            system_tx.clone(),
+            Some(system_tx.clone()),
             false,
             fc_network,
             statsd_client.clone(),
@@ -336,7 +336,7 @@ impl NodeForTest {
         let mut gossip = SnapchainGossip::create(
             keypair.clone(),
             &config,
-            system_tx.clone(),
+            Some(system_tx.clone()),
             false,
             fc_network,
             statsd_client.clone(),

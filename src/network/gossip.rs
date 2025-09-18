@@ -182,7 +182,7 @@ pub struct SnapchainGossip {
     pub swarm: Swarm<SnapchainBehavior>,
     pub tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     rx: mpsc::Receiver<GossipEvent<SnapchainValidatorContext>>,
-    system_tx: Sender<SystemMessage>,
+    system_tx: Option<Sender<SystemMessage>>,
     sync_channels: HashMap<InboundRequestId, sync::ResponseChannel>,
     read_node: bool,
     enable_autodiscovery: bool,
@@ -201,7 +201,7 @@ impl SnapchainGossip {
     pub async fn create(
         keypair: Keypair,
         config: &Config,
-        system_tx: Sender<SystemMessage>,
+        system_tx: Option<Sender<SystemMessage>>,
         read_node: bool,
         fc_network: FarcasterNetwork,
         statsd_client: StatsdClientWrapper,
@@ -491,11 +491,12 @@ impl SnapchainGossip {
                     match gossip_event {
                         SwarmEvent::ConnectionEstablished {peer_id, endpoint, ..} => {
                             info!(total_peers = self.swarm.connected_peers().count(), "Connection established with peer: {peer_id}");
-                            let event = MalachiteNetworkEvent::PeerConnected(MalachitePeerId::from_libp2p(&peer_id));
-                            let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await;
-                            if let Err(e) = res {
-                                warn!("Failed to send connection established message: {}", e);
-                            };
+                            if let Some(system_tx) = &self.system_tx {
+                                let event = MalachiteNetworkEvent::PeerConnected(MalachitePeerId::from_libp2p(&peer_id));
+                                if let Err(e) = system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await {
+                                    warn!("Failed to send connection established message: {}", e);
+                                }
+                            }
                             match endpoint {
                                 libp2p::core::ConnectedPoint::Dialer { address, ..} => {
                                     if self.bootstrap_addrs.contains(&address.to_string()) {
@@ -508,10 +509,11 @@ impl SnapchainGossip {
                         },
                         SwarmEvent::ConnectionClosed {peer_id, cause, endpoint, ..} => {
                             info!("Connection closed with peer: {:?} due to: {:?}", peer_id, cause);
-                            let event = MalachiteNetworkEvent::PeerDisconnected(MalachitePeerId::from_libp2p(&peer_id));
-                            let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await;
-                            if let Err(e) = res {
-                                warn!("Failed to send connection closed message: {}", e);
+                            if let Some(system_tx) = &self.system_tx {
+                                let event = MalachiteNetworkEvent::PeerDisconnected(MalachitePeerId::from_libp2p(&peer_id));
+                                if let Err(e) = system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, event)).await {
+                                    warn!("Failed to send connection closed message: {}", e);
+                                }
                             }
                             match endpoint {
                                 libp2p::core::ConnectedPoint::Dialer { address, ..} => {
@@ -526,9 +528,10 @@ impl SnapchainGossip {
                             info!("Peer: {peer_id} unsubscribed to topic: {topic}"),
                         SwarmEvent::NewListenAddr { address, .. } => {
                             info!(address = address.to_string(), "Local node is listening");
-                            let res = self.system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, MalachiteNetworkEvent::Listening(address))).await;
-                            if let Err(e) = res {
-                                warn!("Failed to send Listening message: {}", e);
+                            if let Some(system_tx) = &self.system_tx {
+                                if let Err(e) = system_tx.send(SystemMessage::MalachiteNetwork(MalachiteEventShard::None, MalachiteNetworkEvent::Listening(address))).await {
+                                    warn!("Failed to send Listening message: {}", e);
+                                }
                             }
                         },
                         SwarmEvent::OutgoingConnectionError {connection_id: _, peer_id, error} => {
@@ -539,10 +542,14 @@ impl SnapchainGossip {
                             message_id: _id,
                             message,
                         })) => {
-                            if let Some(system_message) = self.map_gossip_bytes_to_system_message(peer_id, message.data) {
-                                let res = self.system_tx.send(system_message).await;
-                                if let Err(e) = res {
-                                    warn!("Failed to send system block message: {}", e);
+                            // Take an owned sender if present to avoid holding an immutable borrow during mutable self call
+                            let maybe_sender = self.system_tx.as_ref().cloned();
+                            if let Some(system_tx) = maybe_sender {
+                                let data = message.data.clone();
+                                if let Some(system_message) = self.map_gossip_bytes_to_system_message(peer_id, data) {
+                                    if let Err(e) = system_tx.send(system_message).await {
+                                        warn!("Failed to send system block message: {}", e);
+                                    }
                                 }
                             }
                         },
@@ -561,11 +568,12 @@ impl SnapchainGossip {
                                                 peer: MalachitePeerId::from_libp2p(&peer),
                                                 body: request.0,
                                             };
-                                            let event = Self::map_sync_message_to_system_message(request);
-                                            if let Some(event) = event {
-                                                let res = self.system_tx.send(event).await;
-                                                if let Err(e) = res {
-                                                    warn!("Failed to send RPC request message: {}", e);
+                                            if let Some(system_tx) = &self.system_tx {
+                                                let event = Self::map_sync_message_to_system_message(request);
+                                                if let Some(event) = event {
+                                                    if let Err(e) = system_tx.send(event).await {
+                                                        warn!("Failed to send RPC request message: {}", e);
+                                                    }
                                                 }
                                             }
                                         },
@@ -578,11 +586,12 @@ impl SnapchainGossip {
                                                 peer: MalachitePeerId::from_libp2p(&peer),
                                                 body: response.0,
                                             };
-                                            let event = Self::map_sync_message_to_system_message(event);
-                                            if let Some(event) = event {
-                                                let res = self.system_tx.send(event).await;
-                                                if let Err(e) = res {
-                                                    warn!("Failed to send RPC request message: {}", e);
+                                            if let Some(system_tx) = &self.system_tx {
+                                                let event = Self::map_sync_message_to_system_message(event);
+                                                if let Some(event) = event {
+                                                    if let Err(e) = system_tx.send(event).await {
+                                                        warn!("Failed to send RPC request message: {}", e);
+                                                    }
                                                 }
                                             }
                                         },

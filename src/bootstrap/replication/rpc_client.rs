@@ -98,6 +98,20 @@ pub struct RpcClientsManager {
 }
 
 impl RpcClientsManager {
+    pub fn shard_id(&self) -> u32 {
+        self.shard_id
+    }
+
+    // Fast check to see if we already know about a peer address. Uses a blocking lock since this
+    // is only called in lightweight, non-async contexts (e.g., peer discovery event loop) and the
+    // critical section is tiny.
+    pub fn knows_peer(&self, peer_address: &str) -> bool {
+        let data = self.inner.blocking_lock();
+        data.peer_manager
+            .peer_addresses
+            .iter()
+            .any(|addr| addr == peer_address)
+    }
     pub async fn new(
         peer_addr: String,
         shard_id: u32,

@@ -65,10 +65,6 @@ mod tests {
             &self,
             request: Request<proto::GetShardSnapshotMetadataRequest>,
         ) -> Result<Response<GetShardSnapshotMetadataResponse>, Status> {
-            if self.error_rate > 0.0 && rand::random::<f64>() < self.error_rate {
-                return Err(Status::internal("Simulated error"));
-            }
-
             let mut counts = self.request_counts.lock().unwrap();
             *counts
                 .entry("get_shard_snapshot_metadata".to_string())
@@ -1196,14 +1192,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_replication_client_rpc_error_propogates() {
-        let (tmp_dir, source_engine, _, _signer, _fid, _fid2) =
+        let (tmp_dir, source_engine, replication_server, _signer, _fid, _fid2) =
             setup_source_engine_with_test_data().await;
 
+        // Fetch the actual data from the real replication server to populate our mock.
+        let height = source_engine.get_confirmed_height().block_number;
         let shard_id = source_engine.shard_id();
+        let (_, snapshot_metadata) = fetch_transactions(&replication_server, shard_id, height)
+            .await
+            .unwrap();
 
         // --- Setup the Mock Server ---
         let mut mock_service = MockReplicationService::default();
         mock_service.error_rate = 1.0; // only return errors
+
+        // Mock the metadata response.
+        mock_service
+            .metadata_responses
+            .lock()
+            .unwrap()
+            .insert(shard_id, Ok(snapshot_metadata));
 
         // --- Start the Mock Server ---
         let (addr, shutdown_tx) = spawn_mock_server(mock_service).await;

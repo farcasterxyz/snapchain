@@ -2,6 +2,8 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
+use rustls::crypto::{self, ring};
+use snapchain::bootstrap::replication::service::{ReplicatorBootstrap, WorkUnitResponse};
 use snapchain::connectors::fname::FnameRequest;
 use snapchain::connectors::onchain_events::{ChainClients, OnchainEventsRequest};
 use snapchain::consensus::consensus::SystemMessage;
@@ -252,6 +254,9 @@ fn create_replicator(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    crypto::CryptoProvider::install_default(ring::default_provider())
+        .expect("Failed to install rustls crypto provider");
+
     let args: Vec<String> = std::env::args().collect();
 
     let app_config = match snapchain::cfg::load_and_merge_config(args) {
@@ -324,29 +329,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if db_is_empty {
         match app_config.snapshot.bootstrap_method {
             BootstrapMethod::Replicate => {
-                // info!("Starting node with replication bootstrap");
-                // let replicator = ReplicatorBootstrap::new(statsd_client.clone(), &app_config);
+                info!("Starting node with replication bootstrap");
+                let replicator = ReplicatorBootstrap::new(statsd_client.clone(), &app_config);
 
-                // match replicator.bootstrap_using_replication().await {
-                //     Ok(r) => {
-                //         // Check for the specific success response
-                //         if r == WorkUnitResponse::Finished {
-                //             info!("Replication bootstrap successful. Continuing with startup.");
-                //         } else {
-                //             error!(
-                //                 "Replication bootstrap stopped with status: {:?}. Exiting.",
-                //                 r
-                //             );
-                //             process::exit(1);
-                //         }
-                //     }
-                //     Err(e) => {
-                //         error!("Replication bootstrap failed:\n{}\nPlease clear the database directory and try again.", e);
-                //         process::exit(1);
-                //     }
-                // }
-                error!("Bootstraup via Replication is not yet active");
-                process::exit(1);
+                match replicator.bootstrap_using_replication().await {
+                    Ok(r) => {
+                        // Check for the specific success response
+                        if r == WorkUnitResponse::Finished {
+                            info!("Replication bootstrap successful. Continuing with startup.");
+                        } else {
+                            error!(
+                                "Replication bootstrap stopped with status: {:?}. Exiting.",
+                                r
+                            );
+                            process::exit(1);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Replication bootstrap failed:\n{}\nPlease clear the database directory and try again.", e);
+                        process::exit(1);
+                    }
+                }
+                // error!("Bootstraup via Replication is not yet active");
+                // process::exit(1);
             }
             BootstrapMethod::Snapshot => {
                 if app_config.snapshot.force_load_db_from_snapshot
@@ -397,7 +402,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let gossip_result = SnapchainGossip::create(
         keypair.clone(),
         &app_config.gossip,
-        system_tx.clone(),
+        Some(system_tx.clone()),
         app_config.read_node,
         app_config.fc_network,
         statsd_client.clone(),
