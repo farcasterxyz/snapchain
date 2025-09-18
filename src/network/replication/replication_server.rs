@@ -1,20 +1,20 @@
 use crate::network::replication::replicator::Replicator;
 use crate::proto;
-use crate::storage::store::BlockStore;
+use crate::storage::store::block_engine::BlockStores;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 #[derive(Clone)]
 pub struct ReplicationServer {
     replicator: Arc<Replicator>,
-    block_store: BlockStore,
+    block_stores: BlockStores,
 }
 
 impl ReplicationServer {
-    pub fn new(replicator: Arc<Replicator>, block_store: BlockStore) -> Self {
+    pub fn new(replicator: Arc<Replicator>, block_stores: BlockStores) -> Self {
         ReplicationServer {
             replicator,
-            block_store,
+            block_stores,
         }
     }
 }
@@ -31,6 +31,7 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
         // because for shard-0, we just need the highest block number, so get it from the block_store instead
         let snapshots = if request.shard_id == 0 {
             let block = self
+                .block_stores
                 .block_store
                 .get_last_block()
                 .map_err(|e| Status::internal(format!("Failed to get block by height: {}", e)))?

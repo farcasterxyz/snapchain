@@ -4,7 +4,7 @@ use crate::mempool::mempool::{self, Mempool, MempoolRequest, MempoolSource};
 use crate::proto::{FarcasterNetwork, Height, ShardChunk, ShardHeader};
 use crate::storage::store::engine::ShardStateChange;
 use crate::storage::store::mempool_poller::MempoolMessage;
-use crate::storage::store::test_helper;
+use crate::storage::store::{block_engine_test_helpers, test_helper};
 use crate::utils::cli::compose_message;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::HashMap;
@@ -45,6 +45,8 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     })
     .await;
 
+    let (block_engine, _) = block_engine_test_helpers::setup(None);
+
     let statsd_client = StatsdClientWrapper::new(
         cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
         true,
@@ -59,6 +61,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         messages_request_rx,
         1,
         shard_stores,
+        block_engine.stores(),
         gossip_tx,
         shard_decision_rx,
         statsd_client,

@@ -10,9 +10,9 @@ use crate::proto::{
     RetryOnchainEventsRequest, UploadSnapshotRequest, UserNameProof,
 };
 use crate::storage;
+use crate::storage::store::block_engine::BlockStores;
 use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::stores::Stores;
-use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use rocksdb;
 use std::collections::HashMap;
@@ -30,7 +30,7 @@ pub struct MyAdminService {
     fname_request_tx: broadcast::Sender<FnameRequest>,
     snapshot_config: storage::db::snapshot::Config,
     shard_stores: HashMap<u32, Stores>,
-    block_store: BlockStore,
+    block_stores: BlockStores,
     fc_network: FarcasterNetwork,
     statsd_client: StatsdClientWrapper,
 }
@@ -51,7 +51,7 @@ impl MyAdminService {
         onchain_events_request_tx: broadcast::Sender<OnchainEventsRequest>,
         fname_request_tx: broadcast::Sender<FnameRequest>,
         shard_stores: HashMap<u32, Stores>,
-        block_store: BlockStore,
+        block_stores: BlockStores,
         snapshot_config: storage::db::snapshot::Config,
         fc_network: FarcasterNetwork,
         statsd_client: StatsdClientWrapper,
@@ -70,7 +70,7 @@ impl MyAdminService {
             onchain_events_request_tx,
             fname_request_tx,
             shard_stores,
-            block_store,
+            block_stores,
             snapshot_config,
             fc_network,
             statsd_client,
@@ -267,7 +267,7 @@ impl AdminService for MyAdminService {
         let fc_network = self.fc_network.clone();
         let snapshot_config = self.snapshot_config.clone();
         let shard_stores = self.shard_stores.clone();
-        let block_store = self.block_store.clone();
+        let block_stores = self.block_stores.clone();
         let statsd_client = self.statsd_client.clone();
         let shard_ids = if request.get_ref().shard_indexes.is_empty() {
             None
@@ -279,7 +279,7 @@ impl AdminService for MyAdminService {
             if let Err(err) = upload_snapshot(
                 snapshot_config,
                 fc_network,
-                block_store,
+                block_stores,
                 shard_stores,
                 statsd_client,
                 shard_ids,

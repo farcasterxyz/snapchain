@@ -1,8 +1,7 @@
-use crate::core::util;
 use crate::storage::constants::PAGE_SIZE_MAX;
 use crate::storage::db::PageOptions;
 use crate::storage::store::stores::Stores;
-use crate::storage::store::BlockStore;
+use crate::{core::util, storage::store::block_engine::BlockStores};
 use std::collections::HashMap;
 use tokio::sync::watch;
 use tokio::time::Duration;
@@ -14,14 +13,14 @@ const THROTTLE: Duration = Duration::from_millis(100);
 pub fn block_pruning_job(
     schedule: &str,
     block_retention: Duration,
-    block_store: BlockStore,
+    block_stores: BlockStores,
     shard_stores: HashMap<u32, Stores>,
     sync_complete_rx: watch::Receiver<bool>,
 ) -> Result<Job, JobSchedulerError> {
     Job::new_async(schedule, move |_, _| {
         // TODO: Can these clones be avoided?
         let sync_complete_rx = sync_complete_rx.clone();
-        let block_store = block_store.clone();
+        let block_stores = block_stores.clone();
         let shard_stores = shard_stores.clone();
         Box::pin(async move {
             // Wait for sync to complete before pruning
@@ -33,7 +32,8 @@ pub fn block_pruning_job(
 
             let cutoff_timestamp =
                 util::get_farcaster_time().unwrap() - (block_retention.as_secs() as u64);
-            let stop_height = block_store
+            let stop_height = block_stores
+                .block_store
                 .get_next_height_by_timestamp(cutoff_timestamp)
                 .unwrap_or_else(|e| {
                     error!("Error getting next height by timestamp: {}", e);
@@ -49,7 +49,8 @@ pub fn block_pruning_job(
                     "Pruning blocks older than timestamp: {}, height: {}",
                     cutoff_timestamp, stop_height
                 );
-                let count = block_store
+                let count = block_stores
+                    .block_store
                     .prune_until(stop_height, &page_options, THROTTLE)
                     .await
                     .unwrap_or_else(|e| {
