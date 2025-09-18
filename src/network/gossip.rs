@@ -49,13 +49,26 @@ const CONTACT_INFO: &str = "contact-info";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    // The address to listen on. (eg address="/ip4/0.0.0.0/udp/3382/quic-v1")
     pub address: String,
+    // What address to announce to peers. Useful if behind NAT or public IP is different.
+    // eg announce_address="/ip4/56.23.122.23/udp/3382/quic-v1"
+    // If empty, will try to detect public IP and fall back to `address` if detection fails.
     pub announce_address: String,
+    // What RPC address to announce to peers. Useful if behind NAT or public IP is different.
+    // eg announce_rpc_address="http://56.23.122.23:3381"
+    // or announce_rpc_address="https://mydomain.com:3381" if using a domain with SSL termination
     pub announce_rpc_address: String,
+    // List of bootstrap peers to connect to on startup, comma-separated.
+    // eg bootstrap_peers = "/ip4/54.236.164.51/udp/3382/quic-v1, /ip4/54.87.204.167/udp/3382/quic-v1, ..."
     pub bootstrap_peers: String,
+    // Interval at which to publish our contact info to the network.
     pub contact_info_interval: Duration,
+    // Interval at which to attempt to reconnect to bootstrap peers if disconnected.
     pub bootstrap_reconnect_interval: Duration,
+    // Whether to enable auto-discovery of peers via contact info messages.
     pub enable_autodiscovery: bool,
+    // Comma-separated list of peer IDs to always connect to directly.
     pub direct_peers: String,
 }
 
@@ -175,7 +188,7 @@ pub struct SnapchainGossip {
     enable_autodiscovery: bool,
     bootstrap_addrs: HashSet<String>,
     connected_bootstrap_addrs: HashSet<String>,
-    announce_address: String,
+    announce_gossip_address: String,
     announce_rpc_address: String,
     fc_network: FarcasterNetwork,
     contact_info_interval: Duration,
@@ -310,7 +323,7 @@ impl SnapchainGossip {
         // Listen on all assigned port for this id
         swarm.listen_on(config.address.parse()?)?;
 
-        let announce_address = Self::get_announce_address(fc_network, config).await;
+        let announce_gossip_address = Self::get_announce_gossip_address(fc_network, config).await;
         let announce_rpc_address = match Self::get_announce_rpc_address(fc_network, config).await {
             Ok(addr) => addr,
             Err(e) => {
@@ -319,8 +332,10 @@ impl SnapchainGossip {
             }
         };
 
-        info!("Using \"{}\" as announce address", announce_address);
-        info!("Using \"{}\" as announce RPC address", announce_rpc_address);
+        info!(
+            announce_gossip_address,
+            announce_rpc_address, "Configured announce addresses",
+        );
 
         // ~5 seconds of buffer (assuming 1K msgs/pec)
         let (tx, rx) = mpsc::channel(5000);
@@ -332,7 +347,7 @@ impl SnapchainGossip {
             sync_channels: HashMap::new(),
             read_node,
             bootstrap_addrs: config.bootstrap_addrs().into_iter().collect(),
-            announce_address,
+            announce_gossip_address,
             announce_rpc_address,
             fc_network,
             contact_info_interval: config.contact_info_interval,
@@ -364,7 +379,7 @@ impl SnapchainGossip {
             .map(|ip| format!("http://{}:{}", ip, DEFAULT_RPC_PORT))
     }
 
-    async fn get_announce_address(fc_network: FarcasterNetwork, config: &Config) -> String {
+    async fn get_announce_gossip_address(fc_network: FarcasterNetwork, config: &Config) -> String {
         if config.announce_address.len() > 0 {
             return config.announce_address.clone();
         }
@@ -436,7 +451,7 @@ impl SnapchainGossip {
         let contact_info = ContactInfo {
             body: Some(ContactInfoBody {
                 peer_id: self.swarm.local_peer_id().to_bytes(),
-                gossip_address: self.announce_address.clone(),
+                gossip_address: self.announce_gossip_address.clone(),
                 announce_rpc_address: self.announce_rpc_address.clone(),
                 network: self.fc_network as i32,
                 snapchain_version: current_version.to_string(),
