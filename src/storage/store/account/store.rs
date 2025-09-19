@@ -6,8 +6,7 @@ use super::{
 };
 use crate::core::error::HubError;
 use crate::proto::{
-    hub_event, message_data, HubEvent, HubEventType, MergeMessageBody, PruneMessageBody,
-    RevokeMessageBody,
+    hub_event, HubEvent, HubEventType, MergeMessageBody, PruneMessageBody, RevokeMessageBody,
 };
 use crate::storage::db::PageOptions;
 use crate::storage::util::increment_vec_u8;
@@ -869,18 +868,6 @@ impl<T: StoreDef + Clone> Store<T> {
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<Option<HubEvent>, HubError> {
-        if let Some(message_data) = &message.data {
-            match &message_data.body {
-                Some(message_data::Body::LendStorageBody(lend_storage_body)) => {
-                    if lend_storage_body.num_units != 0 {
-                        // Don't prune any active storage lends. We check for storage availability before allocating these and the lender is responsible for removing or re-allocating.
-                        return Ok(None);
-                    }
-                }
-                _ => {}
-            }
-        }
-
         // Note that compact state messages are not pruned
         if self.store_def.compact_state_type_supported()
             && self.store_def.is_compact_state_type(&message)

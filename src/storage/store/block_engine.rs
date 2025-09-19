@@ -15,7 +15,6 @@ use crate::storage::store::account::{
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
-use crate::storage::store::stores::{Limits, StoreLimits};
 use crate::storage::store::BlockStore;
 use crate::storage::trie::merkle_trie::{self, MerkleTrie, TrieKey};
 use crate::storage::trie::{self};
@@ -27,9 +26,7 @@ use std::sync::Arc;
 use std::u32;
 use thiserror::Error;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
-
-const MAX_PRUNED_MESSAGES_PER_BLOCK: u32 = 100;
+use tracing::{error, warn};
 
 #[derive(Error, Debug)]
 pub enum BlockEngineError {
@@ -50,12 +47,6 @@ pub enum BlockEngineError {
 
     #[error(transparent)]
     HubError(#[from] HubError),
-
-    #[error("Unable to get usage count")]
-    UsageCountError,
-
-    #[error("unsupported message type")]
-    UnsupportedMessageType(MessageType),
 }
 #[derive(Error, Debug)]
 pub enum MessageValidationError {
@@ -92,14 +83,11 @@ pub struct BlockStores {
     pub storage_lend_store: Store<StorageLendStoreDef>,
     pub network: FarcasterNetwork,
     pub db: Arc<RocksDB>,
-    pub trie: MerkleTrie,
-    pub store_limits: StoreLimits,
 }
 
 impl BlockStores {
-    pub fn new(db: Arc<RocksDB>, trie: MerkleTrie, network: FarcasterNetwork) -> Self {
+    pub fn new(db: Arc<RocksDB>, network: FarcasterNetwork) -> Self {
         let store_event_handler = StoreEventHandler::new();
-        let store_limits = StoreLimits::default();
         BlockStores {
             block_store: BlockStore::new(db.clone()),
             block_event_store: BlockEventStore { db: db.clone() },
@@ -107,8 +95,6 @@ impl BlockStores {
             storage_lend_store: StorageLendStore::new(db.clone(), store_event_handler.clone(), 100),
             network,
             db: db.clone(),
-            trie,
-            store_limits,
         }
     }
     pub fn get_block_by_event_seqnum(&self, seqnum: u64) -> Option<Block> {
@@ -127,95 +113,34 @@ impl BlockStores {
         pending_onchain_events: &Vec<OnChainEvent>,
         count_lent_storage: bool,
         count_borrowed_storage: bool,
-    ) -> Result<StorageSlot, BlockEngineError> {
+    ) -> Option<StorageSlot> {
         let lent_storage = if count_lent_storage {
-            StorageLendStore::get_lent_storage(&self.storage_lend_store, fid)?
+            StorageLendStore::get_lent_storage(&self.storage_lend_store, fid).ok()?
         } else {
             StorageSlot::new(0, 0, 0, u32::MAX)
         };
 
         let borrowed_storage = if count_borrowed_storage {
-            StorageLendStore::get_borrowed_storage(&self.storage_lend_store, fid)?
+            StorageLendStore::get_borrowed_storage(&self.storage_lend_store, fid).ok()?
         } else {
             StorageSlot::new(0, 0, 0, u32::MAX)
         };
 
-        Ok(self.onchain_event_store.get_storage_slot_for_fid(
-            fid,
-            self.network,
-            pending_onchain_events.as_slice(),
-            &lent_storage,
-            &borrowed_storage,
-        )?)
-    }
-
-    pub fn get_usage(
-        &self,
-        fid: u64,
-        message_type: MessageType,
-        pending_onchain_events: Vec<OnChainEvent>,
-        txn_batch: &mut RocksDbTransactionBatch,
-    ) -> Result<(u32, u32), BlockEngineError> {
-        let store_type = Limits::message_type_to_store_type(message_type);
-        let message_count = self
-            .trie
-            .get_usage_by_store_type(&self.db, fid, store_type, txn_batch)?;
-        let count_borrowed_storage = match message_type {
-            MessageType::LendStorage => false,
-            _ => true,
-        };
-        let slot = self.get_storage_slot_for_fid(
-            fid,
-            &pending_onchain_events,
-            true,
-            count_borrowed_storage,
-        )?;
-        let max_messages = self.store_limits.max_messages(&slot, store_type);
-
-        Ok((message_count, max_messages))
-    }
-
-    fn prune_messages(
-        &mut self,
-        fid: u64,
-        msg_type: MessageType,
-        pending_onchain_events: Vec<OnChainEvent>,
-        txn_batch: &mut RocksDbTransactionBatch,
-    ) -> Result<Vec<HubEvent>, BlockEngineError> {
-        let (current_count, mut max_count) =
-            self.get_usage(fid, msg_type, pending_onchain_events, txn_batch)?;
-
-        // Limit the number of prunes per block so we don't overflow the block with prune events
-        if let Some(num_messages_to_prune) = current_count.checked_sub(max_count) {
-            if num_messages_to_prune > MAX_PRUNED_MESSAGES_PER_BLOCK {
-                max_count = current_count - MAX_PRUNED_MESSAGES_PER_BLOCK
-            }
-        }
-
-        let events = match msg_type {
-            MessageType::LendStorage => {
-                self.storage_lend_store
-                    .prune_messages(fid, current_count, max_count, txn_batch)?
-            }
-            unhandled_type => {
-                return Err(BlockEngineError::UnsupportedMessageType(unhandled_type));
-            }
-        };
-
-        if !events.is_empty() {
-            info!(
-                fid = fid,
-                msg_type = msg_type as u8,
-                count = events.len(),
-                "Pruned messages"
-            );
-        }
-        Ok(events)
+        self.onchain_event_store
+            .get_storage_slot_for_fid(
+                fid,
+                self.network,
+                pending_onchain_events.as_slice(),
+                &lent_storage,
+                &borrowed_storage,
+            )
+            .ok()
     }
 }
 
 pub struct BlockEngine {
     stores: BlockStores,
+    trie: MerkleTrie,
     network: FarcasterNetwork,
     pub mempool_poller: MempoolPoller,
     shard_id: u64,
@@ -244,7 +169,8 @@ impl BlockEngine {
     ) -> Self {
         trie.initialize(&db).unwrap();
         BlockEngine {
-            stores: BlockStores::new(db.clone(), trie, network),
+            stores: BlockStores::new(db.clone(), network),
+            trie,
             shard_id: 0,
             mempool_poller: MempoolPoller {
                 max_messages_per_block,
@@ -267,12 +193,11 @@ impl BlockEngine {
     }
 
     pub fn trie_root_hash(&self) -> Vec<u8> {
-        self.stores.trie.root_hash().unwrap()
+        self.trie.root_hash().unwrap()
     }
 
     pub fn trie_key_exists(&mut self, ctx: &merkle_trie::Context, sync_id: &Vec<u8>) -> bool {
-        self.stores
-            .trie
+        self.trie
             .exists(ctx, &self.db, sync_id.as_ref())
             .unwrap_or_else(|err| {
                 error!("Error checking if sync id exists: {:?}", err);
@@ -331,7 +256,7 @@ impl BlockEngine {
                 let total_storage_purchased = self
                     .stores
                     .get_storage_slot_for_fid(message_data.fid, &vec![], false, false)
-                    .map_err(|err| HubError::internal_db_error(err.to_string().as_str()))?;
+                    .ok_or(MessageValidationError::InsufficientStorage)?;
 
                 // Restricts who can lend storage to some reasonable set of users
                 if total_storage_purchased.units_for(lend_storage.unit_type()) < 100 {
@@ -362,11 +287,27 @@ impl BlockEngine {
         }
     }
 
-    fn on_merge_message(storage_slot: &mut StorageSlot, merge_message_body: &MergeMessageBody) {
+    fn on_merge_message(
+        &mut self,
+        storage_slot: &mut StorageSlot,
+        merge_message_body: &MergeMessageBody,
+        txn: &mut RocksDbTransactionBatch,
+    ) -> Result<Vec<HubEvent>, BlockEngineError> {
+        let mut events = vec![];
         if let Some(added_message) = &merge_message_body.message {
             match added_message.data.as_ref().unwrap().body.as_ref().unwrap() {
                 proto::message_data::Body::LendStorageBody(lend_storage_body) => {
                     storage_slot.sub(&StorageSlot::from_storage_lend(&lend_storage_body));
+                    // Prune out the lend messages where storage is revoked so they don't consume storage.
+                    if lend_storage_body.num_units == 0 {
+                        if let Some(event) = self
+                            .stores
+                            .storage_lend_store
+                            .prune_message(&added_message, txn)?
+                        {
+                            events.push(event)
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -387,6 +328,8 @@ impl BlockEngine {
                 _ => {}
             }
         }
+
+        Ok(events)
     }
 
     pub(crate) fn replay_snapchain_txn(
@@ -415,18 +358,9 @@ impl BlockEngine {
             }
         }
 
-        let pending_onchain_events: Vec<OnChainEvent> = snapchain_txn
-            .system_messages
-            .iter()
-            .filter_map(|vm| vm.on_chain_event.clone())
-            .collect();
-
-        let mut storage_slot = self.stores.get_storage_slot_for_fid(
-            snapchain_txn.fid,
-            &pending_onchain_events,
-            true,
-            false,
-        )?;
+        let mut storage_slot = self
+            .storage_slot_for_transaction(snapchain_txn, true, false)
+            .unwrap();
 
         for message in &snapchain_txn.user_messages {
             match self.validate_user_message(message, &storage_slot, timestamp, version, txn_batch)
@@ -435,18 +369,21 @@ impl BlockEngine {
                     MessageType::LendStorage => {
                         if version.is_enabled(ProtocolFeature::StorageLending) {
                             if let Ok(event) = self.merge_message(message, txn_batch) {
+                                hub_events.push(event.clone());
                                 match event.body.as_ref().unwrap() {
                                     proto::hub_event::Body::MergeMessageBody(
                                         merge_message_body,
                                     ) => {
-                                        Self::on_merge_message(
+                                        if let Ok(events) = self.on_merge_message(
                                             &mut storage_slot,
                                             &merge_message_body,
-                                        );
+                                            txn_batch,
+                                        ) {
+                                            hub_events.extend(events);
+                                        }
                                     }
                                     _ => {}
                                 }
-                                hub_events.push(event);
                             }
                         }
                     }
@@ -462,26 +399,15 @@ impl BlockEngine {
             }
         }
 
-        if !snapchain_txn.user_messages.is_empty() {
-            hub_events.extend(self.stores.prune_messages(
-                snapchain_txn.fid,
-                MessageType::LendStorage,
-                pending_onchain_events,
-                txn_batch,
-            )?)
-        }
-
         // TODO(aditi): We don't support pruning for any messages processed by shard 0 yet.
 
         for event in &hub_events {
-            self.stores
-                .trie
+            self.trie
                 .update_for_event(trie_ctx, &self.db, &event, txn_batch)?;
         }
 
         let account_root =
-            self.stores
-                .trie
+            self.trie
                 .get_hash(&self.db, txn_batch, &TrieKey::for_fid(snapchain_txn.fid))?;
 
         Ok((account_root, hub_events))
@@ -539,30 +465,6 @@ impl BlockEngine {
                         }
                     }
                 }
-                proto::hub_event::Body::PruneMessageBody(prune_message_body) => {
-                    if let Some(message) = prune_message_body.message {
-                        match message.msg_type() {
-                            MessageType::LendStorage => {
-                                max_block_event_seqnum += 1;
-                                let data = BlockEventData {
-                                    seqnum: max_block_event_seqnum,
-                                    r#type: BlockEventType::PruneMessage as i32,
-                                    block_number: height.block_number,
-                                    event_index: events.len() as u64,
-                                    block_timestamp: timestamp.to_u64(),
-                                    body: Some(block_event_data::Body::PruneMessageEventBody(
-                                        proto::PruneMessageEventBody {
-                                            message: Some(message),
-                                        },
-                                    )),
-                                };
-                                let event = Self::build_block_event(data);
-                                events.push(event);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
                 _ => {}
             }
         }
@@ -606,6 +508,26 @@ impl BlockEngine {
         (events, events_hash)
     }
 
+    fn storage_slot_for_transaction(
+        &self,
+        snapchain_txn: &Transaction,
+        count_lent_storage: bool,
+        count_borrowed_storage: bool,
+    ) -> Option<StorageSlot> {
+        let pending_onchain_events: Vec<OnChainEvent> = snapchain_txn
+            .system_messages
+            .iter()
+            .filter_map(|vm| vm.on_chain_event.clone())
+            .collect();
+
+        self.stores.get_storage_slot_for_fid(
+            snapchain_txn.fid,
+            &pending_onchain_events,
+            count_lent_storage,
+            count_borrowed_storage,
+        )
+    }
+
     fn prepare_proposal(
         &mut self,
         txn_batch: &mut RocksDbTransactionBatch,
@@ -624,16 +546,7 @@ impl BlockEngine {
             .into_iter()
             .filter_map(|mut transaction| {
                 // TODO(aditi): We could share this code with the shard engine but there may be other things we want to add here. For example, it may make sense to exclude validator messages and user messages that aren't intended for shard 0 here so a bug in the mempool won't impact the protocol in a significant way.
-                let pending_onchain_events: Vec<OnChainEvent> = transaction
-                    .system_messages
-                    .iter()
-                    .filter_map(|vm| vm.on_chain_event.clone())
-                    .collect();
-
-                let storage_slot = self
-                    .stores
-                    .get_storage_slot_for_fid(transaction.fid, &pending_onchain_events, true, true)
-                    .ok()?;
+                let storage_slot = self.storage_slot_for_transaction(&transaction, true, true)?;
 
                 // Drop events if storage slot is inactive
                 if !storage_slot.is_active() {
@@ -667,7 +580,7 @@ impl BlockEngine {
         self.metrics
             .publish_transaction_counts(&snapchain_txns, ProposalSource::Propose);
 
-        let new_root_hash = self.stores.trie.root_hash()?;
+        let new_root_hash = self.trie.root_hash()?;
 
         let result = BlockStateChange {
             timestamp: timestamp.clone(),
@@ -695,7 +608,7 @@ impl BlockEngine {
                 .prepare_proposal(&mut txn, messages, height, &timestamp, version)
                 .unwrap();
 
-            self.stores.trie.reload(&self.db).unwrap();
+            self.trie.reload(&self.db).unwrap();
             result
         } else {
             BlockStateChange {
@@ -732,7 +645,7 @@ impl BlockEngine {
         match self.get_last_block() {
             None => { // There are places where it's hard to provide a parent hash-- e.g. tests so make this an option and skip validation if not present
             }
-            Some(block) => match self.stores.trie.root_hash() {
+            Some(block) => match self.trie.root_hash() {
                 Err(err) => {
                     warn!(
                         source = source.to_string(),
@@ -793,7 +706,7 @@ impl BlockEngine {
             return Err(BlockEngineError::EventsHashMismatch);
         }
 
-        let root1 = self.stores.trie.root_hash()?;
+        let root1 = self.trie.root_hash()?;
         if &root1 != shard_root {
             warn!(
                 shard_id = self.shard_id,
@@ -843,7 +756,7 @@ impl BlockEngine {
             error!("State change validation failed: {}", err);
         }
 
-        self.stores.trie.reload(&self.db).unwrap();
+        self.trie.reload(&self.db).unwrap();
         let elapsed = now.elapsed();
         self.metrics
             .time_with_shard("validate_time", elapsed.as_millis() as u64);
@@ -900,7 +813,7 @@ impl BlockEngine {
                     if result.is_err() {
                         error!("Failed to store block: {:?}", result.err());
                     }
-                    self.stores.trie.reload(&self.db).unwrap();
+                    self.trie.reload(&self.db).unwrap();
                     self.metrics
                         .publish_transaction_counts(&block.transactions, ProposalSource::Commit);
                     self.metrics.count(
