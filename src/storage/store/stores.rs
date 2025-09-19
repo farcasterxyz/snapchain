@@ -345,14 +345,14 @@ impl Stores {
                 hash: vec![],
             })?;
         let borrowed_storage = if count_borrowed_storage {
-            StorageSlot::new(0, 0, 0, u32::MAX)
-        } else {
             StorageLendStore::get_borrowed_storage(&self.storage_lend_store, fid).map_err(
                 |err| StoresError::StoreError {
                     inner: err,
                     hash: vec![],
                 },
             )?
+        } else {
+            StorageSlot::new(0, 0, 0, u32::MAX)
         };
         let slot = self
             .onchain_event_store
