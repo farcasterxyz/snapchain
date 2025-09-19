@@ -3846,7 +3846,7 @@ mod tests {
         // Verify the borrower now has storage
         let borrower_storage = engine
             .get_stores()
-            .get_storage_slot_for_fid(borrower_fid, &vec![])
+            .get_storage_slot_for_fid(borrower_fid, true, &vec![])
             .unwrap();
         assert_eq!(
             borrower_storage.units_for(crate::proto::StorageUnitType::UnitType2025),
@@ -3855,7 +3855,7 @@ mod tests {
         // Verify the lender's storage was reduced
         let lender_storage = engine
             .get_stores()
-            .get_storage_slot_for_fid(lender_fid, &vec![])
+            .get_storage_slot_for_fid(lender_fid, true, &vec![])
             .unwrap();
         // Lender should have default storage minus 1 unit lent
         assert_eq!(
@@ -3881,7 +3881,7 @@ mod tests {
         // Verify the lender's storage was returned
         let borrower_storage = engine
             .get_stores()
-            .get_storage_slot_for_fid(borrower_fid, &vec![])
+            .get_storage_slot_for_fid(borrower_fid, true, &vec![])
             .unwrap();
         assert_eq!(
             borrower_storage.units_for(crate::proto::StorageUnitType::UnitType2025),
@@ -3889,7 +3889,7 @@ mod tests {
         );
         let lender_storage = engine
             .get_stores()
-            .get_storage_slot_for_fid(lender_fid, &vec![])
+            .get_storage_slot_for_fid(lender_fid, true, &vec![])
             .unwrap();
         assert_eq!(
             lender_storage.units_for(crate::proto::StorageUnitType::UnitType2025),

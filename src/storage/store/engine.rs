@@ -319,7 +319,7 @@ impl ShardEngine {
 
                 let storage_slot = self
                     .stores
-                    .get_storage_slot_for_fid(transaction.fid, maybe_onchainevents)
+                    .get_storage_slot_for_fid(transaction.fid, true, maybe_onchainevents)
                     .ok()?;
 
                 // Drop events if storage slot is inactive

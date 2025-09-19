@@ -169,7 +169,7 @@ impl Limits {
             StoreType::UserData => self.user_data,
             StoreType::Verifications => self.verifications,
             StoreType::UsernameProofs => self.user_name_proofs,
-            StoreType::StorageLends => u32::MAX, // There's no explicit limit for storage lends
+            StoreType::StorageLends => 1, // For storage lends only non-borrowed storage counts
             StoreType::None => 0,
         }
     }
@@ -336,6 +336,7 @@ impl Stores {
     pub fn get_storage_slot_for_fid(
         &self,
         fid: u64,
+        count_borrowed_storage: bool,
         pending_events: &[OnChainEvent],
     ) -> Result<StorageSlot, StoresError> {
         let lent_storage = StorageLendStore::get_lent_storage(&self.storage_lend_store, fid)
@@ -343,13 +344,16 @@ impl Stores {
                 inner: err,
                 hash: vec![],
             })?;
-        let borrowed_storage =
+        let borrowed_storage = if count_borrowed_storage {
+            StorageSlot::new(0, 0, 0, u32::MAX)
+        } else {
             StorageLendStore::get_borrowed_storage(&self.storage_lend_store, fid).map_err(
                 |err| StoresError::StoreError {
                     inner: err,
                     hash: vec![],
                 },
-            )?;
+            )?
+        };
         let slot = self
             .onchain_event_store
             .get_storage_slot_for_fid(
@@ -372,7 +376,8 @@ impl Stores {
     ) -> Result<(u32, u32), StoresError> {
         let store_type = Limits::message_type_to_store_type(message_type);
         let message_count = self.get_usage_by_store_type(fid, store_type, txn_batch)?;
-        let slot = self.get_storage_slot_for_fid(fid, &[])?;
+        let count_borrowed_storage = store_type != StoreType::StorageLends;
+        let slot = self.get_storage_slot_for_fid(fid, count_borrowed_storage, &[])?;
         let max_messages = self.store_limits.max_messages(&slot, store_type);
 
         Ok((message_count, max_messages))
@@ -416,8 +421,6 @@ impl Stores {
     }
 
     pub fn get_storage_limits(&self, fid: u64) -> Result<StorageLimitsResponse, StoresError> {
-        let slot = self.get_storage_slot_for_fid(fid, &[])?;
-
         let txn_batch = &mut RocksDbTransactionBatch::new();
         let mut limits = vec![];
         // Don't count storage lend message limits here. The limit is artificially set to u32::MAX.
@@ -428,7 +431,10 @@ impl Stores {
             StoreType::UserData,
             StoreType::Verifications,
             StoreType::UsernameProofs,
+            StoreType::StorageLends,
         ] {
+            let slot =
+                self.get_storage_slot_for_fid(fid, store_type != StoreType::StorageLends, &[])?;
             let used = self.get_usage_by_store_type(fid, store_type, txn_batch)?;
             let max_messages = self.store_limits.max_messages(&slot, store_type);
             let name = match store_type {
@@ -452,6 +458,8 @@ impl Stores {
             limits.push(limit);
         }
 
+        // We want to get the storage slot that includes borrowed storage.
+        let slot = self.get_storage_slot_for_fid(fid, true, &[])?;
         let response = StorageLimitsResponse {
             limits,
             units: slot.units_for(StorageUnitType::UnitTypeLegacy)
