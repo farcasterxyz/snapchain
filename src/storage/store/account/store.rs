@@ -6,7 +6,8 @@ use super::{
 };
 use crate::core::error::HubError;
 use crate::proto::{
-    hub_event, HubEvent, HubEventType, MergeMessageBody, PruneMessageBody, RevokeMessageBody,
+    hub_event, message_data, HubEvent, HubEventType, MergeMessageBody, PruneMessageBody,
+    RevokeMessageBody,
 };
 use crate::storage::db::PageOptions;
 use crate::storage::util::increment_vec_u8;
