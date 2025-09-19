@@ -144,40 +144,35 @@ impl RpcClientsManager {
         })
     }
 
-    pub fn add_new_peer(
-        &self,
-        peer_address: String,
-    ) -> tokio::task::JoinHandle<Result<bool, BootstrapError>> {
+    pub async fn add_new_peer(&self, peer_address: String) -> Result<bool, BootstrapError> {
         let shard_id = self.shard_id;
         let height = self.height;
-        let inner = Arc::clone(&self.inner);
-        tokio::spawn(async move {
-            let mut data = inner.lock().await;
 
-            // Check if we already know this peer
-            if data
-                .peer_manager
-                .peer_addresses
-                .iter()
-                .any(|addr| *addr == peer_address)
-            {
-                // Already known
-                return Ok(true);
-            }
+        let mut data = self.inner.lock().await;
 
-            match Self::get_shard_metadata(peer_address.clone(), shard_id).await {
-                Ok(snapshots) => {
-                    if snapshots.snapshots.iter().any(|s| s.height == height) {
-                        data.peer_manager.peer_addresses.push(peer_address);
-                        Ok(true)
-                    } else {
-                        warn!("peer {} doesn't have the required metadata", peer_address);
-                        Ok(false)
-                    }
+        // Check if we already know this peer
+        if data
+            .peer_manager
+            .peer_addresses
+            .iter()
+            .any(|addr| *addr == peer_address)
+        {
+            // Already known
+            return Ok(true);
+        }
+
+        match Self::get_shard_metadata(peer_address.clone(), shard_id).await {
+            Ok(snapshots) => {
+                if snapshots.snapshots.iter().any(|s| s.height == height) {
+                    data.peer_manager.peer_addresses.push(peer_address);
+                    Ok(true)
+                } else {
+                    warn!("peer {} doesn't have the required metadata", peer_address);
+                    Ok(false)
                 }
-                Err(e) => Err(e),
             }
-        })
+            Err(e) => Err(e),
+        }
     }
 
     pub fn get_metadata(&self) -> ShardSnapshotMetadata {

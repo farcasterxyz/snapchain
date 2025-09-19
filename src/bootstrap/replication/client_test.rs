@@ -34,7 +34,6 @@ mod tests {
     use tempfile::TempDir;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
-    use tokio::time::sleep;
     use tonic::transport::Server;
     use tonic::{Request, Response, Status};
 
@@ -333,10 +332,8 @@ mod tests {
             .insert(shard_id, Ok(metadata2));
         let (addr2, shutdown2) = spawn_mock_server(mock_service_2).await;
 
-        // Try to add the new peer
-        let handle = manager.add_new_peer(format!("http://{}", addr2));
-
-        let result = handle.await.unwrap();
+        // Try to add the new peer with wrong height, should not be added
+        let result = manager.add_new_peer(format!("http://{}", addr2)).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), false);
 
@@ -470,10 +467,8 @@ mod tests {
         )
         .await
         .unwrap();
-        let handle = manager.add_new_peer(peer_addr_2.clone());
-        sleep(Duration::from_millis(100)).await; // allow add_peer to complete
 
-        let result = handle.await.unwrap();
+        let result = manager.add_new_peer(peer_addr_2.clone()).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), true);
 
@@ -753,7 +748,8 @@ mod tests {
         }
 
         // There are 14 messages inserted, and all of them should be returned
-        assert_eq!(trie_messages.len(), 14);
+        let expected_num_messages = 14;
+        assert_eq!(trie_messages.len(), expected_num_messages);
         // 2 FIDs were used, and both should be returned
         assert_eq!(fid_account_roots.len(), 2);
         // Multiple snapshots are present
@@ -779,6 +775,7 @@ mod tests {
 
         assert_eq!(snapshot.shard_id, 1);
         assert_eq!(shard_chunk_header.height.as_ref().unwrap().shard_index, 1);
+        assert_eq!(snapshot.num_items, expected_num_messages as u64);
 
         // The trie root should match this
         let metadata_shard_root = shard_chunk_header.shard_root.clone();

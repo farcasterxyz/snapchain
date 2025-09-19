@@ -229,7 +229,7 @@ impl ReplicatorBootstrap {
         // Add the rest of the peers into all the rpc client managers
         for (_, rpc_client_manager) in rpc_client_managers.iter() {
             for peer in peer_addresses.iter().skip(1) {
-                rpc_client_manager.add_new_peer(peer.clone());
+                rpc_client_manager.add_new_peer(peer.clone()).await?;
             }
         }
 

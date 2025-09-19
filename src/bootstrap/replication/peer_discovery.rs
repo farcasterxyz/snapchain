@@ -146,9 +146,8 @@ impl PeerDiscoverer {
         let incompatible = self.incompatible_peers.clone();
         info!(peer = %peer_id, addr = %http_addr, "Discovered potential replication peer");
         tokio::spawn(async move {
-            let handle = rpc_manager.add_new_peer(http_addr.clone());
-            match handle.await {
-                Ok(Ok(true)) => {
+            match rpc_manager.add_new_peer(http_addr.clone()).await {
+                Ok(true) => {
                     info!(peer = %peer_id, addr = %http_addr, "Added new replication peer")
                 }
                 _ => {

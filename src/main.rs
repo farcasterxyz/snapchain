@@ -90,8 +90,11 @@ async fn start_servers(
     ));
 
     let replication_service = if let Some(replicator) = replicator {
-        let service =
-            ReplicationServiceServer::new(ReplicationServer::new(replicator, block_stores.clone()));
+        let service = ReplicationServiceServer::new(ReplicationServer::new(
+            replicator,
+            block_stores.clone(),
+            statsd_client.clone(),
+        ));
         Some(service)
     } else {
         None
@@ -250,7 +253,6 @@ fn create_replicator(
     );
     Arc::new(replicator)
 }
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     crypto::CryptoProvider::install_default(ring::default_provider())
