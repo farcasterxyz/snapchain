@@ -2,9 +2,8 @@ use super::super::db::{RocksDB, RocksDbTransactionBatch};
 use super::errors::TrieError;
 use super::trie_node::{TrieNode, UNCOMPACTED_LENGTH};
 use crate::mempool::routing::{MessageRouter, ShardRouter};
-use crate::proto::{self, StoreType};
+use crate::proto;
 use crate::storage::store::account::{make_fid_key, read_fid_key, IntoU8, FID_BYTES};
-use crate::storage::store::stores::Limits;
 use crate::storage::trie::util::{combine_nibbles, expand_nibbles};
 use crate::storage::trie::{trie_node, util};
 use std::collections::HashMap;
@@ -238,26 +237,6 @@ impl MerkleTrie {
         }
 
         Ok(())
-    }
-
-    // Usage is defined at the store level, but the trie accounts for message by type, this function maps between the two
-    pub fn get_usage_by_store_type(
-        &self,
-        db: &RocksDB,
-        fid: u64,
-        store_type: StoreType,
-        txn_batch: &mut RocksDbTransactionBatch,
-    ) -> Result<u32, TrieError> {
-        let mut total_count = 0;
-        for each_message_type in Limits::store_type_to_message_types(store_type) {
-            let count = self.get_count(
-                &db,
-                txn_batch,
-                &TrieKey::for_message_type(fid, each_message_type.into_u8()),
-            )? as u32;
-            total_count += count;
-        }
-        Ok(total_count)
     }
 
     fn create_empty_root(&mut self, txn_batch: &mut RocksDbTransactionBatch) {
