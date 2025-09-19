@@ -260,6 +260,20 @@ pub fn assert_merge_message_event(block_event: &BlockEvent, message: &proto::Mes
     }
 }
 
+pub fn assert_prune_message_event(block_event: &BlockEvent, message: &proto::Message) {
+    assert_eq!(
+        block_event.data.as_ref().unwrap().r#type,
+        crate::proto::BlockEventType::PruneMessage as i32
+    );
+    if let Some(crate::proto::block_event_data::Body::PruneMessageEventBody(prune_message_event)) =
+        &block_event.data.as_ref().unwrap().body
+    {
+        assert_eq!(prune_message_event.message.as_ref().unwrap(), message);
+    } else {
+        panic!("Expected PruneMessageEventBody");
+    }
+}
+
 pub fn assert_storage_balance(
     block_engine: &BlockEngine,
     fid: u64,
