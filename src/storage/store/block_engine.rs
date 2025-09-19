@@ -465,6 +465,30 @@ impl BlockEngine {
                         }
                     }
                 }
+                proto::hub_event::Body::PruneMessageBody(prune_message_body) => {
+                    if let Some(message) = prune_message_body.message {
+                        match message.msg_type() {
+                            MessageType::LendStorage => {
+                                max_block_event_seqnum += 1;
+                                let data = BlockEventData {
+                                    seqnum: max_block_event_seqnum,
+                                    r#type: BlockEventType::PruneMessage as i32,
+                                    block_number: height.block_number,
+                                    event_index: events.len() as u64,
+                                    block_timestamp: timestamp.to_u64(),
+                                    body: Some(block_event_data::Body::PruneMessageEventBody(
+                                        proto::PruneMessageEventBody {
+                                            message: Some(message),
+                                        },
+                                    )),
+                                };
+                                let event = Self::build_block_event(data);
+                                events.push(event);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 _ => {}
             }
         }
