@@ -13,13 +13,13 @@ use crate::proto::{MessageType, TierDetails};
 use crate::storage::constants::{RootPrefix, PAGE_SIZE_MAX};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch, RocksdbError};
 use crate::storage::store::account::{
-    BlockEventStore, CastStore, CastStoreDef, IntoU8, LinkStore, OnchainEventStorageError,
+    BlockEventStore, CastStore, CastStoreDef, LinkStore, OnchainEventStorageError,
     OnchainEventStore, StorageLendStore, StorageLendStoreDef, Store, StoreEventHandler,
     StoreOptions, UsernameProofStore, UsernameProofStoreDef,
 };
 use crate::storage::store::shard::ShardStore;
+use crate::storage::trie::errors::TrieError;
 use crate::storage::trie::merkle_trie;
-use crate::storage::trie::merkle_trie::TrieKey;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +34,9 @@ pub enum StoresError {
 
     #[error("unsupported message type")]
     UnsupportedMessageType(MessageType),
+
+    #[error(transparent)]
+    TrieError(#[from] TrieError),
 
     #[error("store error")]
     StoreError {
@@ -122,7 +125,7 @@ impl Limits {
         self.for_store_type(Limits::message_type_to_store_type(message_type))
     }
 
-    fn message_type_to_store_type(message_type: MessageType) -> StoreType {
+    pub fn message_type_to_store_type(message_type: MessageType) -> StoreType {
         match message_type {
             MessageType::CastAdd => StoreType::Casts,
             MessageType::CastRemove => StoreType::Casts,
@@ -141,7 +144,7 @@ impl Limits {
         }
     }
 
-    fn store_type_to_message_types(store_type: StoreType) -> Vec<MessageType> {
+    pub fn store_type_to_message_types(store_type: StoreType) -> Vec<MessageType> {
         match store_type {
             StoreType::Casts => vec![MessageType::CastAdd, MessageType::CastRemove],
             StoreType::Links => vec![
@@ -169,7 +172,7 @@ impl Limits {
             StoreType::UserData => self.user_data,
             StoreType::Verifications => self.verifications,
             StoreType::UsernameProofs => self.user_name_proofs,
-            StoreType::StorageLends => u32::MAX, // There's no explicit limit for storage lends
+            StoreType::StorageLends => 1,
             StoreType::None => 0,
         }
     }
@@ -211,9 +214,7 @@ impl StoreLimits {
             StorageUnitType::UnitType2025 => &self.limits_2025,
         }
     }
-}
 
-impl StoreLimits {
     pub fn default() -> StoreLimits {
         StoreLimits {
             limits_legacy: Limits::of_type(StorageUnitType::UnitTypeLegacy),
@@ -371,36 +372,13 @@ impl Stores {
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<(u32, u32), StoresError> {
         let store_type = Limits::message_type_to_store_type(message_type);
-        let message_count = self.get_usage_by_store_type(fid, store_type, txn_batch)?;
+        let message_count = self
+            .trie
+            .get_usage_by_store_type(&self.db, fid, store_type, txn_batch)?;
         let slot = self.get_storage_slot_for_fid(fid, &[])?;
         let max_messages = self.store_limits.max_messages(&slot, store_type);
 
         Ok((message_count, max_messages))
-    }
-
-    // Usage is defined at the store level, but the trie accounts for message by type, this function maps between the two
-    fn get_usage_by_store_type(
-        &self,
-        fid: u64,
-        store_type: StoreType,
-        txn_batch: &mut RocksDbTransactionBatch,
-    ) -> Result<u32, StoresError> {
-        let mut total_count = 0;
-        for each_message_type in Limits::store_type_to_message_types(store_type) {
-            let count = self
-                .trie
-                .get_count(
-                    &self.db,
-                    txn_batch,
-                    &TrieKey::for_message_type(fid, each_message_type.into_u8()),
-                )
-                .map_err(|e| StoresError::StoreError {
-                    inner: HubError::internal_db_error(&format!("Trie error: {}", e)),
-                    hash: TrieKey::for_message_type(fid, each_message_type.into_u8()).to_vec(),
-                })? as u32;
-            total_count += count;
-        }
-        Ok(total_count)
     }
 
     pub fn is_pro_user(
@@ -429,7 +407,9 @@ impl Stores {
             StoreType::Verifications,
             StoreType::UsernameProofs,
         ] {
-            let used = self.get_usage_by_store_type(fid, store_type, txn_batch)?;
+            let used = self
+                .trie
+                .get_usage_by_store_type(&self.db, fid, store_type, txn_batch)?;
             let max_messages = self.store_limits.max_messages(&slot, store_type);
             let name = match store_type {
                 StoreType::None => "NONE",

@@ -105,6 +105,12 @@ pub enum MessageValidationError {
 
     #[error("invalid seqnum for block event")]
     InvalidSeqnumForBlockEvent,
+
+    #[error("block event missing body")]
+    BlockEventMissingBody,
+
+    #[error("block event did not prune")]
+    BlockEventResultedInNoPrunes,
 }
 
 pub struct MergedReplicatorMessage {
@@ -639,6 +645,45 @@ impl ShardEngine {
         self.stores.event_handler.set_current_height(0);
     }
 
+    fn handle_block_event(
+        &mut self,
+        trie_ctx: &merkle_trie::Context,
+        block_event: &proto::BlockEvent,
+        txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Result<Vec<HubEvent>, EngineError> {
+        let body = block_event
+            .data
+            .as_ref()
+            .ok_or(MessageValidationError::NoMessageData)?
+            .body
+            .as_ref()
+            .ok_or(MessageValidationError::BlockEventMissingBody)?;
+        match body {
+            proto::block_event_data::Body::MergeMessageEventBody(merge_message_event) => {
+                let message = &merge_message_event
+                    .message
+                    .as_ref()
+                    .ok_or(MessageValidationError::BlockEventMissingBody)?;
+                let hub_event = self.merge_message(&message, txn_batch)?;
+                self.update_trie(trie_ctx, &hub_event, txn_batch)?;
+                Ok(vec![hub_event])
+            }
+            proto::block_event_data::Body::PruneMessageEventBody(prune_message_event) => {
+                let message = &prune_message_event
+                    .message
+                    .as_ref()
+                    .ok_or(MessageValidationError::BlockEventMissingBody)?;
+                // TODO(aditi): Validate that the behavior is reasonable if the message doesn't exist.
+                let hub_event = self
+                    .prune_message(&message, txn_batch)?
+                    .ok_or(MessageValidationError::BlockEventResultedInNoPrunes)?;
+                self.update_trie(trie_ctx, &hub_event, txn_batch)?;
+                Ok(vec![hub_event])
+            }
+            proto::block_event_data::Body::HeartbeatEventBody(_) => Ok(vec![]),
+        }
+    }
+
     pub(crate) fn replay_snapchain_txn(
         &mut self,
         trie_ctx: &merkle_trie::Context,
@@ -814,7 +859,7 @@ impl ShardEngine {
                     {
                         error!(
                             seqnum = block_event.seqnum().to_string(),
-                            "Error merging block event: {}",
+                            "error merging block event: {}",
                             err.to_string()
                         );
                     } else {
@@ -822,32 +867,16 @@ impl ShardEngine {
                     }
 
                     if version.is_enabled(ProtocolFeature::StorageLending) {
-                        // Process storage lend messages from block events
-                        match &block_event.data.as_ref().unwrap().body {
-                            Some(proto::block_event_data::Body::MergeMessageEventBody(
-                                merge_message_event,
-                            )) => {
-                                if let Some(message) = &merge_message_event.message {
-                                    match self.merge_message(&message, txn_batch) {
-                                        Ok(hub_event) => {
-                                            merged_messages_count += 1;
-                                            self.update_trie(trie_ctx, &hub_event, txn_batch)?;
-                                            events.push(hub_event);
-                                            // Don't prune storage lends here. That's handled in shard 0.
-                                        }
-                                        Err(err) => {
-                                            if source != ProposalSource::Simulate {
-                                                warn!(
-                                                    seqnum = block_event.seqnum(),
-                                                    "Error merging message from block event: {}",
-                                                    err.to_string()
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
+                        // process storage lend messages from block events
+                        match self.handle_block_event(trie_ctx, block_event, txn_batch) {
+                            Ok(hub_events) => events.extend(hub_events),
+                            Err(err) => {
+                                warn!(
+                                    fid = snapchain_txn.fid,
+                                    "Error merging block event {}",
+                                    err.to_string()
+                                );
                             }
-                            _ => {}
                         }
                     }
                 }
@@ -1259,6 +1288,31 @@ impl ShardEngine {
             );
         }
         Ok(events)
+    }
+
+    fn prune_message(
+        &mut self,
+        message: &proto::Message,
+        txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Result<Option<HubEvent>, EngineError> {
+        let event = match message.msg_type() {
+            MessageType::LendStorage => self
+                .stores
+                .storage_lend_store
+                .prune_message(message, txn_batch)
+                .map_err(|e| EngineError::StoreError(e)),
+            unhandled_type => {
+                return Err(EngineError::UnsupportedMessageType(unhandled_type));
+            }
+        }?;
+
+        info!(
+            fid = message.data.as_ref().unwrap().fid,
+            hash = hex::encode(&message.hash),
+            "Pruned message"
+        );
+
+        Ok(event)
     }
 
     fn update_trie(

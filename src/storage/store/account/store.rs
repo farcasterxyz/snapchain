@@ -6,7 +6,8 @@ use super::{
 };
 use crate::core::error::HubError;
 use crate::proto::{
-    hub_event, HubEvent, HubEventType, MergeMessageBody, PruneMessageBody, RevokeMessageBody,
+    hub_event, message_data, HubEvent, HubEventType, MergeMessageBody, PruneMessageBody,
+    RevokeMessageBody,
 };
 use crate::storage::db::PageOptions;
 use crate::storage::util::increment_vec_u8;
@@ -863,6 +864,46 @@ impl<T: StoreDef + Clone> Store<T> {
         Ok(hub_event)
     }
 
+    pub fn prune_message(
+        &self,
+        message: &Message,
+        txn: &mut RocksDbTransactionBatch,
+    ) -> Result<Option<HubEvent>, HubError> {
+        if let Some(message_data) = &message.data {
+            match &message_data.body {
+                Some(message_data::Body::LendStorageBody(lend_storage_body)) => {
+                    if lend_storage_body.num_units != 0 {
+                        // Don't prune any active storage lends. We check for storage availability before allocating these and the lender is responsible for removing or re-allocating.
+                        return Ok(None);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Note that compact state messages are not pruned
+        if self.store_def.compact_state_type_supported()
+            && self.store_def.is_compact_state_type(&message)
+        {
+            return Ok(None); // Continue the iteration
+        } else if self.store_def.is_add_type(&message) {
+            let ts_hash = make_ts_hash(message.data.as_ref().unwrap().timestamp, &message.hash)?;
+            self.delete_add_transaction(txn, &ts_hash, &message)?;
+        } else if self.store_def.remove_type_supported() && self.store_def.is_remove_type(&message)
+        {
+            self.delete_remove_transaction(txn, &message)?;
+        }
+
+        // Event Handler
+        let mut hub_event = self.store_def.prune_event_args(&message);
+        let id = self
+            .store_event_handler
+            .commit_transaction(txn, &mut hub_event)?;
+
+        hub_event.id = id;
+        Ok(Some(hub_event))
+    }
+
     pub fn prune_messages(
         &self,
         fid: u64,
@@ -890,32 +931,13 @@ impl<T: StoreDef + Clone> Store<T> {
 
                 // Value is a message, so try to decode it
                 let message = message_decode(value)?;
-
-                // Note that compact state messages are not pruned
-                if self.store_def.compact_state_type_supported()
-                    && self.store_def.is_compact_state_type(&message)
-                {
-                    return Ok(false); // Continue the iteration
-                } else if self.store_def.is_add_type(&message) {
-                    let ts_hash =
-                        make_ts_hash(message.data.as_ref().unwrap().timestamp, &message.hash)?;
-                    self.delete_add_transaction(txn, &ts_hash, &message)?;
-                } else if self.store_def.remove_type_supported()
-                    && self.store_def.is_remove_type(&message)
-                {
-                    self.delete_remove_transaction(txn, &message)?;
+                match self.prune_message(&message, txn)? {
+                    Some(hub_event) => {
+                        count -= 1;
+                        pruned_events.push(hub_event);
+                    }
+                    None => {}
                 }
-
-                // Event Handler
-                let mut hub_event = self.store_def.prune_event_args(&message);
-                let id = self
-                    .store_event_handler
-                    .commit_transaction(txn, &mut hub_event)?;
-
-                count -= 1;
-
-                hub_event.id = id;
-                pruned_events.push(hub_event);
 
                 Ok(false) // Continue the iteration
             },
