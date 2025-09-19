@@ -287,11 +287,27 @@ impl BlockEngine {
         }
     }
 
-    fn on_merge_message(storage_slot: &mut StorageSlot, merge_message_body: &MergeMessageBody) {
+    fn on_merge_message(
+        &mut self,
+        storage_slot: &mut StorageSlot,
+        merge_message_body: &MergeMessageBody,
+        txn: &mut RocksDbTransactionBatch,
+    ) -> Result<Vec<HubEvent>, BlockEngineError> {
+        let mut events = vec![];
         if let Some(added_message) = &merge_message_body.message {
             match added_message.data.as_ref().unwrap().body.as_ref().unwrap() {
                 proto::message_data::Body::LendStorageBody(lend_storage_body) => {
                     storage_slot.sub(&StorageSlot::from_storage_lend(&lend_storage_body));
+                    // Prune out the lend messages where storage is revoked so they don't consume storage.
+                    if lend_storage_body.num_units == 0 {
+                        if let Some(event) = self
+                            .stores
+                            .storage_lend_store
+                            .prune_message(&added_message, txn)?
+                        {
+                            events.push(event)
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -312,6 +328,8 @@ impl BlockEngine {
                 _ => {}
             }
         }
+
+        Ok(events)
     }
 
     pub(crate) fn replay_snapchain_txn(
@@ -351,18 +369,21 @@ impl BlockEngine {
                     MessageType::LendStorage => {
                         if version.is_enabled(ProtocolFeature::StorageLending) {
                             if let Ok(event) = self.merge_message(message, txn_batch) {
+                                hub_events.push(event.clone());
                                 match event.body.as_ref().unwrap() {
                                     proto::hub_event::Body::MergeMessageBody(
                                         merge_message_body,
                                     ) => {
-                                        Self::on_merge_message(
+                                        if let Ok(events) = self.on_merge_message(
                                             &mut storage_slot,
                                             &merge_message_body,
-                                        );
+                                            txn_batch,
+                                        ) {
+                                            hub_events.extend(events);
+                                        }
                                     }
                                     _ => {}
                                 }
-                                hub_events.push(event);
                             }
                         }
                     }
@@ -433,6 +454,30 @@ impl BlockEngine {
                                     block_timestamp: timestamp.to_u64(),
                                     body: Some(block_event_data::Body::MergeMessageEventBody(
                                         proto::MergeMessageEventBody {
+                                            message: Some(message),
+                                        },
+                                    )),
+                                };
+                                let event = Self::build_block_event(data);
+                                events.push(event);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                proto::hub_event::Body::PruneMessageBody(prune_message_body) => {
+                    if let Some(message) = prune_message_body.message {
+                        match message.msg_type() {
+                            MessageType::LendStorage => {
+                                max_block_event_seqnum += 1;
+                                let data = BlockEventData {
+                                    seqnum: max_block_event_seqnum,
+                                    r#type: BlockEventType::PruneMessage as i32,
+                                    block_number: height.block_number,
+                                    event_index: events.len() as u64,
+                                    block_timestamp: timestamp.to_u64(),
+                                    body: Some(block_event_data::Body::PruneMessageEventBody(
+                                        proto::PruneMessageEventBody {
                                             message: Some(message),
                                         },
                                     )),

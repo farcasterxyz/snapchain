@@ -486,8 +486,9 @@ mod tests {
             Some(lend_message1.data.as_ref().unwrap().timestamp + 1),
             None,
         );
-        let block2 = commit_message(&mut block_engine, &lend_message2, Validity::Valid);
+        let block2 = commit_message(&mut block_engine, &lend_message2, Validity::Invalid); // Mark as invalid because we don't expect this message to be in the trie
         assert_merge_message_event(&block2.events[0], &lend_message2);
+        assert_prune_message_event(&block2.events[1], &lend_message2);
 
         // Verify balances after taking back storage
         assert_storage_balance(
