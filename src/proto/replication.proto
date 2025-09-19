@@ -20,6 +20,7 @@ message ShardSnapshotMetadata {
   uint64 timestamp = 3;
   optional ShardChunk shard_chunk = 5;
   optional Block block = 6;
+  uint64 num_items = 7;
 }
 
 message GetShardSnapshotMetadataResponse {

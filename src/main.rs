@@ -2,6 +2,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
+use rustls::crypto::{self, ring};
 use snapchain::connectors::fname::FnameRequest;
 use snapchain::connectors::onchain_events::{ChainClients, OnchainEventsRequest};
 use snapchain::consensus::consensus::SystemMessage;
@@ -89,8 +90,11 @@ async fn start_servers(
     ));
 
     let replication_service = if let Some(replicator) = replicator {
-        let service =
-            ReplicationServiceServer::new(ReplicationServer::new(replicator, block_stores.clone()));
+        let service = ReplicationServiceServer::new(ReplicationServer::new(
+            replicator,
+            block_stores.clone(),
+            statsd_client.clone(),
+        ));
         Some(service)
     } else {
         None
@@ -249,7 +253,6 @@ fn create_replicator(
     );
     Arc::new(replicator)
 }
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -324,6 +327,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if db_is_empty {
         match app_config.snapshot.bootstrap_method {
             BootstrapMethod::Replicate => {
+                // Initialize SSL for rustls
+                crypto::CryptoProvider::install_default(ring::default_provider())
+                    .expect("Failed to install rustls crypto provider");
+
                 // info!("Starting node with replication bootstrap");
                 // let replicator = ReplicatorBootstrap::new(statsd_client.clone(), &app_config);
 
@@ -397,7 +404,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let gossip_result = SnapchainGossip::create(
         keypair.clone(),
         &app_config.gossip,
-        system_tx.clone(),
+        Some(system_tx.clone()),
         app_config.read_node,
         app_config.fc_network,
         statsd_client.clone(),
