@@ -7752,6 +7752,7 @@ dependencies = [
  "informalsystems-malachitebft-wal",
  "insta",
  "itertools 0.13.0",
+ "libc",
  "libp2p",
  "libp2p-connection-limits",
  "moka",

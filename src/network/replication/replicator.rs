@@ -205,6 +205,10 @@ pub struct Replicator {
 impl Replicator {
     const MESSAGE_LIMIT: usize = 1_000; // Maximum number of messages to fetch per page
 
+    // min and recommended FD limit
+    pub const ULIMIT_MIN: u64 = 1024;
+    pub const ULIMIT_RECOMMENDED: u64 = u16::MAX as u64; // 65535
+
     pub fn new(stores: Arc<ReplicationStores>, statsd_client: StatsdClientWrapper) -> Self {
         Self::new_with_options(stores, statsd_client, ReplicatorSnapshotOptions::default())
     }
@@ -222,6 +226,55 @@ impl Replicator {
             stores,
             snapshot_options,
             message_hash_cache: RwLock::new(MessageHashCache::new(statsd_client)),
+        }
+    }
+
+    /// Ensure the process ulimit (RLIMIT_NOFILE) soft limit is enough.
+    /// If the current soft limit is below 65k and the hard limit allows, attempt to raise it.
+    /// Returns the resulting soft limit.
+    pub fn ensure_ulimit() -> u64 {
+        #[cfg(unix)]
+        {
+            use libc::{getrlimit, rlimit, setrlimit, RLIMIT_NOFILE};
+
+            unsafe {
+                let mut lim: rlimit = rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if getrlimit(RLIMIT_NOFILE, &mut lim as *mut rlimit) != 0 {
+                    // On error, just return a conservative default
+                    return 0;
+                }
+
+                let mut cur = lim.rlim_cur as u64;
+                let max = lim.rlim_max as u64; // Hard limit that we can't change
+
+                // If we are below the recommended limit, try to raise it if possible
+                if cur < Self::ULIMIT_RECOMMENDED && Self::ULIMIT_RECOMMENDED <= max {
+                    let new_lim = rlimit {
+                        rlim_cur: Self::ULIMIT_RECOMMENDED as libc::rlim_t,
+                        rlim_max: lim.rlim_max,
+                    };
+                    // Try to raise the soft limit up to desired (bounded by hard)
+                    let _ = setrlimit(RLIMIT_NOFILE, &new_lim as *const rlimit);
+                    // Re-read to report the effective value
+                    let mut check: rlimit = rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
+                    };
+                    if getrlimit(RLIMIT_NOFILE, &mut check as *mut rlimit) == 0 {
+                        cur = check.rlim_cur as u64;
+                    }
+                }
+
+                cur
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Non-Unix platforms: nothing to do; return 0 to indicate unknown/not set
+            u64::MAX
         }
     }
 
