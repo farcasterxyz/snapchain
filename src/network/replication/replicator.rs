@@ -230,50 +230,45 @@ impl Replicator {
     }
 
     /// Ensure the process ulimit (RLIMIT_NOFILE) soft limit is enough.
-    /// If the current soft limit is below 65k and the hard limit allows, attempt to raise it.
+    /// If the current soft limit is below the recommended value, attempt to raise it
+    /// up to the highest possible value, i.e. min(recommended, hard limit).
     /// Returns the resulting soft limit.
     pub fn ensure_ulimit() -> u64 {
         #[cfg(unix)]
         {
-            use libc::{getrlimit, rlimit, setrlimit, RLIMIT_NOFILE};
+            use nix::sys::resource::{getrlimit, setrlimit, Resource, RLIM_INFINITY};
 
-            unsafe {
-                let mut lim: rlimit = rlimit {
-                    rlim_cur: 0,
-                    rlim_max: 0,
-                };
-                if getrlimit(RLIMIT_NOFILE, &mut lim as *mut rlimit) != 0 {
-                    // On error, just return a conservative default
-                    return 0;
-                }
-
-                let mut cur = lim.rlim_cur as u64;
-                let max = lim.rlim_max as u64; // Hard limit that we can't change
-
-                // If we are below the recommended limit, try to raise it if possible
-                if cur < Self::ULIMIT_RECOMMENDED && Self::ULIMIT_RECOMMENDED <= max {
-                    let new_lim = rlimit {
-                        rlim_cur: Self::ULIMIT_RECOMMENDED as libc::rlim_t,
-                        rlim_max: lim.rlim_max,
+            match getrlimit(Resource::RLIMIT_NOFILE) {
+                Ok((cur, hard)) => {
+                    let mut cur_u = cur as u64;
+                    // Interpret infinity as "no bound" for our comparison purposes
+                    let hard_u = if hard == RLIM_INFINITY {
+                        u64::MAX
+                    } else {
+                        hard as u64
                     };
-                    // Try to raise the soft limit up to desired (bounded by hard)
-                    let _ = setrlimit(RLIMIT_NOFILE, &new_lim as *const rlimit);
-                    // Re-read to report the effective value
-                    let mut check: rlimit = rlimit {
-                        rlim_cur: 0,
-                        rlim_max: 0,
-                    };
-                    if getrlimit(RLIMIT_NOFILE, &mut check as *mut rlimit) == 0 {
-                        cur = check.rlim_cur as u64;
+                    // Desired is min of (recommended, hard limit)
+                    let desired = Self::ULIMIT_RECOMMENDED.min(hard_u);
+
+                    if cur_u < desired {
+                        // Attempt to raise the soft limit as high as allowed (<= hard)
+                        let new_soft = desired as nix::sys::resource::rlim_t;
+                        // Keep hard limit unchanged
+                        let _ = setrlimit(Resource::RLIMIT_NOFILE, new_soft, hard);
+                        // Re-read to report the effective value
+                        if let Ok((new_cur, _)) = getrlimit(Resource::RLIMIT_NOFILE) {
+                            cur_u = new_cur as u64;
+                        }
                     }
-                }
 
-                cur
+                    cur_u
+                }
+                Err(_) => u64::MAX, // On error, return "no bound"
             }
         }
         #[cfg(not(unix))]
         {
-            // Non-Unix platforms: nothing to do; return 0 to indicate unknown/not set
+            // Non-Unix platforms: nothing to do
             u64::MAX
         }
     }
