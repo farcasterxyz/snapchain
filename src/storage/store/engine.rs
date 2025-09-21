@@ -109,9 +109,6 @@ pub enum MessageValidationError {
 
     #[error("block event missing body")]
     BlockEventMissingBody,
-
-    #[error("block event did not prune")]
-    BlockEventResultedInNoPrunes,
 }
 
 pub struct MergedReplicatorMessage {

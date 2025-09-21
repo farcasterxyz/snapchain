@@ -57,7 +57,7 @@ mod tests {
             statsd_client(),
         );
 
-        for _ in 0..6000 {
+        for _ in 0..7000 {
             assert!(rate_limits.consume_for_fid(engine.shard_id(), FID_FOR_TEST))
         }
 
@@ -98,7 +98,7 @@ mod tests {
             statsd_client(),
         );
 
-        for _ in 0..600 {
+        for _ in 0..700 {
             assert!(rate_limits.consume_for_fid(engine.shard_id(), FID_FOR_TEST))
         }
 
@@ -143,7 +143,7 @@ mod tests {
         );
 
         for fid in FID_FOR_TEST..FID_FOR_TEST + 11 {
-            for _ in 0..600 {
+            for _ in 0..700 {
                 assert!(rate_limits.consume_for_fid(engine.shard_id(), fid))
             }
         }
