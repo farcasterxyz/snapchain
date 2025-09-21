@@ -22,9 +22,7 @@ mod tests {
         commit_message, message_exists_in_trie, register_user, FID2_FOR_TEST, FID_FOR_TEST,
     };
     use crate::storage::trie::merkle_trie::TrieKey;
-    use crate::utils::factory::events_factory::{
-        create_merge_message_event, create_prune_message_event,
-    };
+    use crate::utils::factory::events_factory::create_merge_message_event;
     use crate::utils::factory::signers::generate_signer;
     use crate::utils::factory::{self, events_factory, messages_factory, time, username_factory};
     use crate::version::version::{EngineVersion, ProtocolFeature};

@@ -1290,31 +1290,6 @@ impl ShardEngine {
         Ok(events)
     }
 
-    fn prune_message(
-        &mut self,
-        message: &proto::Message,
-        txn_batch: &mut RocksDbTransactionBatch,
-    ) -> Result<Option<HubEvent>, EngineError> {
-        let event = match message.msg_type() {
-            MessageType::LendStorage => self
-                .stores
-                .storage_lend_store
-                .prune_message(message, txn_batch)
-                .map_err(|e| EngineError::StoreError(e)),
-            unhandled_type => {
-                return Err(EngineError::UnsupportedMessageType(unhandled_type));
-            }
-        }?;
-
-        info!(
-            fid = message.data.as_ref().unwrap().fid,
-            hash = hex::encode(&message.hash),
-            "Pruned message"
-        );
-
-        Ok(event)
-    }
-
     fn update_trie(
         &mut self,
         ctx: &merkle_trie::Context,
