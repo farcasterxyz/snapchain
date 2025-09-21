@@ -14,7 +14,8 @@ use crate::proto::{
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
-    BlockEventStorageError, CastStore, MessagesPage, StoreOptions, VerificationStore,
+    BlockEventStorageError, CastStore, MessagesPage, StorageLendStore, StoreOptions,
+    VerificationStore,
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
@@ -581,8 +582,15 @@ impl ShardEngine {
     ) -> Result<MergedReplicatorMessage, EngineError> {
         let (hub_event, fid) = match &trie_message.trie_message {
             Some(TrieMessage::UserMessage(m)) => {
-                let event = self.merge_message(m, txn_batch)?;
-                (event, m.fid())
+                let events = self.merge_message(m, txn_batch)?;
+                // This is only expected for deleted
+                if events.len() != 1 {
+                    return Err(EngineError::ReplicatorError(format!(
+                        "Message generated incorrect number of hub events. Message:{:?}\nHubEvents {:?}",
+                        trie_message, events
+                    )));
+                }
+                (events[0].clone(), m.fid())
             }
             Some(TrieMessage::OnChainEvent(oe)) => {
                 let event = self
@@ -664,21 +672,11 @@ impl ShardEngine {
                     .message
                     .as_ref()
                     .ok_or(MessageValidationError::BlockEventMissingBody)?;
-                let hub_event = self.merge_message(&message, txn_batch)?;
-                self.update_trie(trie_ctx, &hub_event, txn_batch)?;
-                Ok(vec![hub_event])
-            }
-            proto::block_event_data::Body::PruneMessageEventBody(prune_message_event) => {
-                let message = &prune_message_event
-                    .message
-                    .as_ref()
-                    .ok_or(MessageValidationError::BlockEventMissingBody)?;
-                // TODO(aditi): Validate that the behavior is reasonable if the message doesn't exist.
-                let hub_event = self
-                    .prune_message(&message, txn_batch)?
-                    .ok_or(MessageValidationError::BlockEventResultedInNoPrunes)?;
-                self.update_trie(trie_ctx, &hub_event, txn_batch)?;
-                Ok(vec![hub_event])
+                let hub_events = self.merge_message(&message, txn_batch)?;
+                for event in &hub_events {
+                    self.update_trie(trie_ctx, event, txn_batch)?;
+                }
+                Ok(hub_events)
             }
             proto::block_event_data::Body::HeartbeatEventBody(_) => Ok(vec![]),
         }
@@ -951,11 +949,13 @@ impl ShardEngine {
                 Ok(()) => {
                     let result = self.merge_message(msg, txn_batch);
                     match result {
-                        Ok(event) => {
-                            merged_messages_count += 1;
-                            self.update_trie(trie_ctx, &event, txn_batch)?;
-                            events.push(event.clone());
-                            user_messages_count += 1;
+                        Ok(merge_events) => {
+                            for event in &merge_events {
+                                merged_messages_count += 1;
+                                self.update_trie(trie_ctx, &event, txn_batch)?;
+                                user_messages_count += 1;
+                            }
+                            events.extend(merge_events.clone());
                             message_types_to_prune.insert(msg.msg_type());
                         }
                         Err(err) => {
@@ -1164,7 +1164,7 @@ impl ShardEngine {
         &self,
         msg: &proto::Message,
         txn_batch: &mut RocksDbTransactionBatch,
-    ) -> Result<proto::HubEvent, MessageValidationError> {
+    ) -> Result<Vec<proto::HubEvent>, MessageValidationError> {
         let now = std::time::Instant::now();
         let data = msg
             .data
@@ -1174,47 +1174,50 @@ impl ShardEngine {
             .or(Err(MessageValidationError::InvalidMessageType(data.r#type)))?;
 
         let event = match mt {
-            MessageType::CastAdd | MessageType::CastRemove => self
+            MessageType::CastAdd | MessageType::CastRemove => vec![self
                 .stores
                 .cast_store
                 .merge(msg, txn_batch)
-                .map_err(|e| MessageValidationError::StoreError(e)),
-            MessageType::LinkAdd | MessageType::LinkRemove | MessageType::LinkCompactState => self
-                .stores
-                .link_store
-                .merge(msg, txn_batch)
-                .map_err(|e| MessageValidationError::StoreError(e)),
-            MessageType::ReactionAdd | MessageType::ReactionRemove => self
+                .map_err(|e| MessageValidationError::StoreError(e))?],
+            MessageType::LinkAdd | MessageType::LinkRemove | MessageType::LinkCompactState => {
+                vec![self
+                    .stores
+                    .link_store
+                    .merge(msg, txn_batch)
+                    .map_err(|e| MessageValidationError::StoreError(e))?]
+            }
+            MessageType::ReactionAdd | MessageType::ReactionRemove => vec![self
                 .stores
                 .reaction_store
                 .merge(msg, txn_batch)
-                .map_err(|e| MessageValidationError::StoreError(e)),
-            MessageType::UserDataAdd => self
+                .map_err(|e| MessageValidationError::StoreError(e))?],
+            MessageType::UserDataAdd => vec![self
                 .stores
                 .user_data_store
                 .merge(msg, txn_batch)
-                .map_err(|e| MessageValidationError::StoreError(e)),
-            MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => self
+                .map_err(|e| MessageValidationError::StoreError(e))?],
+            MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => vec![self
                 .stores
                 .verification_store
                 .merge(msg, txn_batch)
-                .map_err(|e| MessageValidationError::StoreError(e)),
+                .map_err(|e| MessageValidationError::StoreError(e))?],
             MessageType::UsernameProof => {
                 let store = &self.stores.username_proof_store;
-                let result = store.merge(msg, txn_batch);
-                result.map_err(|e| MessageValidationError::StoreError(e))
+                vec![store
+                    .merge(msg, txn_batch)
+                    .map_err(|e| MessageValidationError::StoreError(e))?]
             }
             MessageType::LendStorage => {
                 let store = &self.stores.storage_lend_store;
-                let result = store.merge(msg, txn_batch);
-                result.map_err(|e| MessageValidationError::StoreError(e))
+                StorageLendStore::merge(store, msg, txn_batch)
+                    .map_err(|e| MessageValidationError::StoreError(e))?
             }
             unhandled_type => {
                 return Err(MessageValidationError::InvalidMessageType(
                     unhandled_type as i32,
                 ));
             }
-        }?;
+        };
         let elapsed = now.elapsed();
         self.metrics
             .time_with_shard("merge_message_time_us", elapsed.as_micros() as u64);
@@ -1288,31 +1291,6 @@ impl ShardEngine {
             );
         }
         Ok(events)
-    }
-
-    fn prune_message(
-        &mut self,
-        message: &proto::Message,
-        txn_batch: &mut RocksDbTransactionBatch,
-    ) -> Result<Option<HubEvent>, EngineError> {
-        let event = match message.msg_type() {
-            MessageType::LendStorage => self
-                .stores
-                .storage_lend_store
-                .prune_message(message, txn_batch)
-                .map_err(|e| EngineError::StoreError(e)),
-            unhandled_type => {
-                return Err(EngineError::UnsupportedMessageType(unhandled_type));
-            }
-        }?;
-
-        info!(
-            fid = message.data.as_ref().unwrap().fid,
-            hash = hex::encode(&message.hash),
-            "Pruned message"
-        );
-
-        Ok(event)
     }
 
     fn update_trie(

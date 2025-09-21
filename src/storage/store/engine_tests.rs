@@ -22,9 +22,7 @@ mod tests {
         commit_message, message_exists_in_trie, register_user, FID2_FOR_TEST, FID_FOR_TEST,
     };
     use crate::storage::trie::merkle_trie::TrieKey;
-    use crate::utils::factory::events_factory::{
-        create_merge_message_event, create_prune_message_event,
-    };
+    use crate::utils::factory::events_factory::create_merge_message_event;
     use crate::utils::factory::signers::generate_signer;
     use crate::utils::factory::{self, events_factory, messages_factory, time, username_factory};
     use crate::version::version::{EngineVersion, ProtocolFeature};
@@ -3877,7 +3875,7 @@ mod tests {
             vec![&create_merge_message_event(lend_message.clone(), 2)],
         )
         .await;
-        assert!(message_exists_in_trie(&mut engine, &lend_message));
+
         // Verify the lender's storage was returned
         let borrower_storage = engine
             .get_stores()
@@ -3895,12 +3893,6 @@ mod tests {
             lender_storage.units_for(crate::proto::StorageUnitType::UnitType2025),
             1
         );
-
-        commit_block_events(
-            &mut engine,
-            vec![&create_prune_message_event(lend_message.clone(), 3)],
-        )
-        .await;
         assert!(!message_exists_in_trie(&mut engine, &lend_message))
     }
 }

@@ -36,6 +36,7 @@ mod tests {
             user_data: 10000,
             user_name_proofs: 10000,
             verifications: 10000,
+            storage_lends: 10000,
         })
         .await;
 
@@ -76,6 +77,7 @@ mod tests {
             user_data: 1000,
             user_name_proofs: 1000,
             verifications: 1000,
+            storage_lends: 1000,
         })
         .await;
 
@@ -117,6 +119,7 @@ mod tests {
             user_data: 1000,
             user_name_proofs: 1000,
             verifications: 1000,
+            storage_lends: 1000,
         })
         .await;
 
@@ -161,6 +164,7 @@ mod tests {
             user_data: 1,
             user_name_proofs: 1,
             verifications: 1,
+            storage_lends: 1,
         })
         .await;
 

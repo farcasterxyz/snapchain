@@ -3,7 +3,6 @@ use super::{
     store::{Store, StoreDef},
     StoreEventHandler,
 };
-use crate::storage::{constants::UserPostfix, db::PageOptions, store::account::StorageSlot};
 use crate::{
     core::error::HubError,
     proto::SignatureScheme,
@@ -13,6 +12,10 @@ use crate::{
     },
 };
 use crate::{proto::message_data::Body, storage::util::increment_vec_u8};
+use crate::{
+    proto::HubEvent,
+    storage::{constants::UserPostfix, db::PageOptions, store::account::StorageSlot},
+};
 use crate::{
     proto::MessageType,
     storage::db::{RocksDB, RocksDbTransactionBatch},
@@ -302,6 +305,27 @@ impl StorageLendStore {
         )?;
 
         Ok(storage_slot)
+    }
+
+    pub fn merge(
+        store: &Store<StorageLendStoreDef>,
+        message: &proto::Message,
+        txn: &mut RocksDbTransactionBatch,
+    ) -> Result<Vec<HubEvent>, HubError> {
+        let mut events = vec![];
+        events.push(store.merge(message, txn)?);
+        match message.data.as_ref().unwrap().body.as_ref().unwrap() {
+            proto::message_data::Body::LendStorageBody(lend_storage_body) => {
+                // Prune out the lend messages where storage is revoked so they don't consume storage.
+                if lend_storage_body.num_units == 0 {
+                    if let Some(event) = store.prune_message(&message, txn)? {
+                        events.push(event);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(events)
     }
 }
 

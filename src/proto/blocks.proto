@@ -103,17 +103,12 @@ message ConsensusMessage {
 enum BlockEventType {
   BLOCK_EVENT_TYPE_HEARTBEAT = 0;
   BLOCK_EVENT_TYPE_MERGE_MESSAGE = 1;
-  BLOCK_EVENT_TYPE_PRUNE_MESSAGE = 2;
 }
 
 message HeartbeatEventBody {
 }
 
 message MergeMessageEventBody {
-  Message message = 1;
-} 
-
-message PruneMessageEventBody {
   Message message = 1;
 } 
 
@@ -126,7 +121,6 @@ message BlockEventData {
   oneof body {
     HeartbeatEventBody heartbeat_event_body = 6;
     MergeMessageEventBody merge_message_event_body = 7;
-    PruneMessageEventBody prune_message_event_body = 8;
   };
 }
 

@@ -72,6 +72,7 @@ pub struct Limits {
     pub user_data: u32,
     pub user_name_proofs: u32,
     pub verifications: u32,
+    pub storage_lends: u32,
 }
 
 impl Limits {
@@ -89,6 +90,7 @@ impl Limits {
                 user_data: 50,
                 user_name_proofs: 5,
                 verifications: 25,
+                storage_lends: 1,
             },
             // Extended Storage limits https://github.com/farcasterxyz/protocol/discussions/191
             // Units rented after Aug 24, 2024
@@ -99,6 +101,7 @@ impl Limits {
                 user_data: 50,
                 user_name_proofs: 5,
                 verifications: 25,
+                storage_lends: 1,
             },
             // Storage Redenomination FIP: https://github.com/farcasterxyz/protocol/discussions/229
             // Units rented after Jul 16, 2025
@@ -109,6 +112,7 @@ impl Limits {
                 user_data: 25,
                 user_name_proofs: 2,
                 verifications: 5,
+                storage_lends: 1,
             },
         }
     }
@@ -169,7 +173,7 @@ impl Limits {
             StoreType::UserData => self.user_data,
             StoreType::Verifications => self.verifications,
             StoreType::UsernameProofs => self.user_name_proofs,
-            StoreType::StorageLends => 1, // For storage lends only non-borrowed storage counts
+            StoreType::StorageLends => self.storage_lends,
             StoreType::None => 0,
         }
     }
