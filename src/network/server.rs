@@ -35,7 +35,7 @@ use crate::storage::store::account::{
     CastStore, LinkStore, ReactionStore, UserDataStore, VerificationStore,
 };
 use crate::storage::store::account::{EventsPage, HubEventIdGenerator};
-use crate::storage::store::block_engine::{self, BlockStores};
+use crate::storage::store::block_engine::BlockStores;
 use crate::storage::store::engine::{self, Senders, ShardEngine};
 use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::stores::Stores;
@@ -320,24 +320,12 @@ impl MyHubService {
         shard_id: u32,
     ) -> Vec<Result<(), HubError>> {
         if shard_id == 0 {
-            // Handle shard 0 (block engine) specially using bulk simulation
-            let mut block_engine = crate::storage::store::block_engine::BlockEngine::new(
-                self.block_stores.trie.clone(),
-                self.statsd_client.clone(),
-                self.block_stores.db.clone(),
-                100,
-                None,
-                self.network,
-            );
-
-            block_engine
-                .simulate_bulk_messages(messages)
-                .into_iter()
-                .map(|result| {
-                    result.map_err(|e| match e {
-                        block_engine::MessageValidationError::HubError(hub_error) => hub_error,
-                        _ => HubError::validation_failure(&e.to_string()),
-                    })
+            messages
+                .iter()
+                .map(|_| {
+                    Err(HubError::validation_failure(
+                        "submit bulk messages not supported for shard 0",
+                    ))
                 })
                 .collect()
         } else {
