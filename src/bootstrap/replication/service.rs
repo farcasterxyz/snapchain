@@ -38,10 +38,9 @@ use std::{
     u64,
 };
 use tokio::signal::ctrl_c;
-use tokio::sync::oneshot;
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::task::JoinSet;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum WorkUnitResponse {
@@ -85,8 +84,6 @@ struct ShardSharedWorkData {
     trie_db: Arc<RocksDB>,
     // Keep track of how many messages we've written in this batch
     messages_in_batch: AtomicUsize,
-    // When did we start this batch, for profiling.
-    start_time: Instant,
 }
 
 #[derive(Clone)]
@@ -124,12 +121,32 @@ impl Default for ReplicatorBootstrapConfig {
 }
 
 #[derive(Clone)]
+struct ShardProgress {
+    metadata: ShardSnapshotMetadata,
+    messages_merged: usize,
+    start_time: Instant,
+    last_updated_printed: Instant,
+}
+
+impl ShardProgress {
+    pub fn from_metadata(metadata: ShardSnapshotMetadata) -> Self {
+        Self {
+            metadata,
+            messages_merged: 0,
+            start_time: Instant::now(),
+            last_updated_printed: Instant::now(),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct ReplicatorBootstrap {
     shutdown: Arc<AtomicBool>,
     network: crate::proto::FarcasterNetwork,
     statsd_client: StatsdClientWrapper,
     gossip_config: gossip::Config,
-    shard_ids: Vec<u32>,
+    data_shard_ids: Vec<u32>,
+    shard_metadatas: Arc<RwLock<HashMap<u32, ShardProgress>>>,
     rocksdb_dir: String,
     replication_peer_list: Vec<String>,
     config: ReplicatorBootstrapConfig,
@@ -142,7 +159,8 @@ impl ReplicatorBootstrap {
             network: app_config.fc_network,
             statsd_client,
             gossip_config: app_config.gossip.clone(),
-            shard_ids: app_config.consensus.shard_ids.clone(),
+            data_shard_ids: app_config.consensus.shard_ids.clone(),
+            shard_metadatas: Arc::new(RwLock::new(HashMap::new())),
             rocksdb_dir: app_config.rocksdb_dir.clone(),
             replication_peer_list: app_config.snapshot.replication_peers.clone(),
 
@@ -162,7 +180,8 @@ impl ReplicatorBootstrap {
             network: app_config.fc_network,
             statsd_client,
             gossip_config: app_config.gossip.clone(),
-            shard_ids: app_config.consensus.shard_ids.clone(),
+            data_shard_ids: app_config.consensus.shard_ids.clone(),
+            shard_metadatas: Arc::new(RwLock::new(HashMap::new())),
             rocksdb_dir: app_config.rocksdb_dir.clone(),
             replication_peer_list: app_config.snapshot.replication_peers.clone(),
             config,
@@ -212,17 +231,16 @@ impl ReplicatorBootstrap {
             peer_addresses
         );
 
-        // Initialize databases and replay transactions for each shard
-        // Note: We're not replicating shard 0 (block shard) for now.
-        let shard_ids = self.shard_ids.clone();
+        // Initialize databases and replay transactions for each data shard
+        let data_shard_ids = self.data_shard_ids.clone();
 
         // For each shard, create a new RPC Client object, seeded by the the first peer
-        let rpc_client_managers = future::join_all(shard_ids.iter().map(|shard_id| {
+        let rpc_client_managers = future::join_all(data_shard_ids.iter().map(|shard_id| {
             RpcClientsManager::new(peer_addresses[0].clone(), *shard_id, self.config.clone())
         }))
         .await
         .into_iter()
-        .zip(shard_ids.iter())
+        .zip(data_shard_ids.iter())
         .map(|(res, shard_id)| res.map(|mgr| (*shard_id, Arc::new(mgr))))
         .collect::<Result<HashMap<_, _>, BootstrapError>>()?;
 
@@ -271,30 +289,46 @@ impl ReplicatorBootstrap {
         // Create tasks for each shard to run in parallel
         let mut shard_tasks = JoinSet::new();
 
-        for shard_id in shard_ids {
-            let rpc_client_manager = match rpc_client_managers.get(&shard_id) {
+        // For shard-0, we'll fetch the latest metadata from the peer. Since we don't need to sync shard-0, we'll just store the metadata
+        {
+            let shard_0_rpc =
+                RpcClientsManager::new(peer_addresses[0].clone(), 0, self.config.clone()).await?;
+            let shard_0_metadata = shard_0_rpc.get_metadata();
+            self.shard_metadatas
+                .write()
+                .await
+                .insert(0, ShardProgress::from_metadata(shard_0_metadata.clone()));
+        }
+
+        for data_shard_id in data_shard_ids {
+            let rpc_client_manager = match rpc_client_managers.get(&data_shard_id) {
                 None => {
                     return Err(BootstrapError::MetadataFetchError(format!(
                         "No RPC client found for shard {}, couldn't fetch metadata",
-                        shard_id
+                        data_shard_id
                     )))
                 }
                 Some(mgr) => mgr.clone(),
             };
             let shard_metadata = rpc_client_manager.get_metadata();
+            self.shard_metadatas.write().await.insert(
+                data_shard_id,
+                ShardProgress::from_metadata(shard_metadata.clone()),
+            );
+
             let target_height = shard_metadata.height;
 
             if target_height == 0 {
                 return Err(BootstrapError::GenericError(format!(
                     "No valid snapshot found for shard {}. Skipping bootstrap.",
-                    shard_id
+                    data_shard_id
                 )));
             }
 
             let rocksdb_dir = self.get_snapshot_rocksdb_dir();
-            info!(
+            debug!(
                 "Bootstrapping shard {} at height {}",
-                shard_id, target_height
+                data_shard_id, target_height
             );
 
             // Spawn a task for this shard
@@ -307,7 +341,7 @@ impl ReplicatorBootstrap {
                 self_clone
                     .start_shard_replication_main(
                         rpc_client_manager,
-                        shard_id,
+                        data_shard_id,
                         &rocksdb_dir,
                         metadata,
                         shutdown_signal,
@@ -317,7 +351,7 @@ impl ReplicatorBootstrap {
         }
 
         // Wait for either all shard tasks to complete or a shutdown signal
-        info!("Waiting for shutdown signal or shard tasks to complete");
+        debug!("Waiting for shutdown signal or shard tasks to complete");
 
         let mut results = Vec::new();
 
@@ -329,7 +363,7 @@ impl ReplicatorBootstrap {
                     // Ignore results since we're shutting down
                     let _ = res;
                 }
-                info!("Shard tasks have been shut down, attempting to close RPC clients...");
+                debug!("Shard tasks have been shut down, attempting to close RPC clients...");
 
                 for (_, rpc_client_manager) in rpc_client_managers.iter() {
                     rpc_client_manager.close().await;
@@ -382,7 +416,7 @@ impl ReplicatorBootstrap {
                     match res {
                         Ok(Ok(work_response)) => {
                             results.push(work_response);
-                            info!("Shard task completed successfully");
+                            debug!("Shard task completed successfully");
                         }
                         Ok(Err(e)) => {
                             error!("Shard task failed: {}", e);
@@ -439,14 +473,14 @@ impl ReplicatorBootstrap {
 
             match result {
                 WorkUnitResponse::DbStopped => {
-                    info!(
+                    debug!(
                         "DB session expired, restarting shard replication for shard {}",
                         shard_id
                     );
                     continue;
                 }
                 WorkUnitResponse::Stopped => {
-                    info!("Shard replication stopped for shard {}", shard_id);
+                    debug!("Shard replication stopped for shard {}", shard_id);
                     return Ok(WorkUnitResponse::Stopped);
                 }
                 WorkUnitResponse::PartiallyComplete | WorkUnitResponse::Finished => {
@@ -471,7 +505,7 @@ impl ReplicatorBootstrap {
 
     /// Clean up the work unit statuses and account root hashes stored in the DB for a shard
     async fn cleanup_db(&self, rocksdb_dir: &str, shard_id: u32) -> Result<(), BootstrapError> {
-        info!("Cleaning up bootstrap data for shard {}", shard_id);
+        debug!("Cleaning up bootstrap data for shard {}", shard_id);
 
         let db = RocksDB::open_bulk_write_shard_db(rocksdb_dir, shard_id);
 
@@ -514,33 +548,78 @@ impl ReplicatorBootstrap {
         txn_batch: RocksDbTransactionBatch,
         num_messages: usize,
     ) -> Result<DbCommitResponse, BootstrapError> {
-        let start_time: Instant = Instant::now();
-
         let result = {
             let db = work_data.db_writer.lock().await;
             db.commit(txn_batch)
         };
 
-        let elapsed_time = start_time.elapsed();
-        let total_elapsed = work_data.start_time.elapsed();
-        work_data
+        let progress = {
+            let mut guard = self.shard_metadatas.write().await;
+            let progress = guard.get_mut(&work_data.shard_id);
+
+            progress
+                .map(|p| {
+                    p.messages_merged += num_messages;
+                    p
+                })
+                .cloned()
+        };
+
+        // Print Updates
+        if progress.is_none() {
+            // Just return without printing anything
+            warn!("No progress found for shard {}", work_data.shard_id);
+        } else {
+            let progress = progress.unwrap();
+            if progress.last_updated_printed.elapsed() > Duration::from_secs(5) {
+                let total_elapsed = progress.start_time.elapsed();
+
+                // Calculate the ETAs
+                let messages_merged = progress.messages_merged;
+                let total_messages_expected = progress.metadata.num_items as usize;
+
+                let msgs_per_sec = messages_merged as f64 / total_elapsed.as_secs_f64();
+                let remaining_msgs = total_messages_expected - messages_merged;
+                let eta = Duration::from_secs_f64(remaining_msgs as f64 / msgs_per_sec);
+                let eta_str = {
+                    let total_secs = eta.as_secs();
+                    if total_secs < 60 {
+                        format!("{:.1}s", eta.as_secs_f64())
+                    } else if total_secs < 3600 {
+                        let mins = total_secs / 60;
+                        let secs = total_secs % 60;
+                        format!("{}m {:02}s", mins, secs)
+                    } else {
+                        let hours = total_secs / 3600;
+                        let mins = (total_secs % 3600) / 60;
+                        format!("{}h {:02}m", hours, mins)
+                    }
+                };
+                info!(
+                    "Shard {} merged {:.1}M of {:.1}M messages @{:.1}k msg/sec. ETA {}",
+                    work_data.shard_id,
+                    messages_merged as f64 / 1_000_000.0,
+                    total_messages_expected as f64 / 1_000_000.0,
+                    msgs_per_sec / 1000.0,
+                    eta_str
+                );
+
+                self.shard_metadatas
+                    .write()
+                    .await
+                    .get_mut(&work_data.shard_id)
+                    .map(|p| p.last_updated_printed = Instant::now());
+            };
+        }
+
+        let messages_in_batch = work_data
             .messages_in_batch
             .fetch_add(num_messages, Ordering::SeqCst);
-
-        let total_messages = work_data.messages_in_batch.load(Ordering::SeqCst);
-        info!(
-            "DB writer({}) - Commit took {:?}. Writing at {:.1}k msg/sec {:.2}M total messages",
-            work_data.shard_id,
-            elapsed_time,
-            total_messages as f64 / 1000.0 / total_elapsed.as_secs_f64(),
-            total_messages as f64 / 1_000_000.0
-        );
-
         match result {
             Ok(()) => {
                 // If we've exceeded the total number of messages in the write session, stop the writer
                 // and allow the DB to reload
-                if total_messages > self.config.max_messages_in_write_session {
+                if messages_in_batch > self.config.max_messages_in_write_session {
                     Ok(DbCommitResponse::Stop)
                 } else {
                     Ok(DbCommitResponse::Continue)
@@ -664,7 +743,6 @@ impl ReplicatorBootstrap {
             trie: Mutex::new(trie),
             trie_db: db.clone(),
             messages_in_batch: AtomicUsize::new(0),
-            start_time: Instant::now(),
         });
 
         loop {
@@ -759,7 +837,7 @@ impl ReplicatorBootstrap {
         let response;
 
         let shard_id = work_item.current_status.shard_id;
-        info!(
+        debug!(
             "Processing Shard:{} vts: {}",
             shard_id, work_item.current_status.virtual_trie_shard
         );
@@ -1119,64 +1197,75 @@ impl ReplicatorBootstrap {
     ) -> Result<(), BootstrapError> {
         info!("Writing final block and shard chunks to database...");
 
+        // Write shard-0 block
+        let shard0_metadata = {
+            self.shard_metadatas
+                .read()
+                .await
+                .get(&0)
+                .cloned()
+                .ok_or_else(|| {
+                    BootstrapError::MetadataFetchError("No metadata found for shard 0".to_string())
+                })?
+                .metadata
+        };
+
+        if let Some(block) = &shard0_metadata.block {
+            let header = block.header.as_ref().ok_or_else(|| {
+                BootstrapError::MetadataFetchError("Block header is missing".to_string())
+            })?;
+            let height = header.height.as_ref().ok_or_else(|| {
+                BootstrapError::MetadataFetchError("Block height is missing".to_string())
+            })?;
+            info!(
+                "Writing block for shard 0 at height {}",
+                height.block_number
+            );
+            let block_db = RocksDB::open_shard_db(rocksdb_dir, 0);
+            let block_store = BlockStore::new(block_db.clone());
+            block_store
+                .put_block(block)
+                .map_err(|e| BootstrapError::DatabaseError(e.to_string()))?;
+            block_db.close();
+        } else {
+            // If there's no block, its OK, we'll have to sync from genesis. But log a warning
+            warn!(
+                "No block found for shard 0. Metadata = {:?}",
+                shard0_metadata
+            );
+        }
+
+        // Write the data shard's ShardChunks
         for (shard_id, rpc_client_manager) in rpc_client_managers {
             let metadata = rpc_client_manager.get_metadata();
-            if *shard_id == 0 {
-                // Handle Block for Shard 0
-                if let Some(block) = &metadata.block {
-                    let header = block.header.as_ref().ok_or_else(|| {
-                        BootstrapError::MetadataFetchError("Block header is missing".to_string())
-                    })?;
-                    let height = header.height.as_ref().ok_or_else(|| {
-                        BootstrapError::MetadataFetchError("Block height is missing".to_string())
-                    })?;
-                    info!(
-                        "Writing block for shard 0 at height {}",
-                        height.block_number
-                    );
-                    let block_db = RocksDB::open_shard_db(rocksdb_dir, 0);
-                    let block_store = BlockStore::new(block_db.clone());
-                    block_store
-                        .put_block(block)
-                        .map_err(|e| BootstrapError::DatabaseError(e.to_string()))?;
-                    block_db.close();
-                } else {
-                    return Err(BootstrapError::MetadataFetchError(format!(
-                        "No block found for shard 0. Metadata = {:?}",
-                        metadata
-                    )));
-                }
+            if let Some(shard_chunk) = &metadata.shard_chunk {
+                let header = shard_chunk.header.as_ref().ok_or_else(|| {
+                    BootstrapError::MetadataFetchError(format!(
+                        "ShardChunk header is missing for shard {}",
+                        shard_id
+                    ))
+                })?;
+                let height = header.height.as_ref().ok_or_else(|| {
+                    BootstrapError::MetadataFetchError(format!(
+                        "ShardChunk height is missing for shard {}",
+                        shard_id
+                    ))
+                })?;
+                info!(
+                    "Writing ShardChunk for shard {} at height {}",
+                    shard_id, height.block_number
+                );
+                let shard_db = RocksDB::open_shard_db(rocksdb_dir, *shard_id);
+                let shard_store = ShardStore::new(shard_db.clone(), *shard_id);
+                shard_store
+                    .put_shard_chunk(shard_chunk)
+                    .map_err(|e| BootstrapError::DatabaseError(e.to_string()))?;
+                shard_db.close();
             } else {
-                // Handle ShardChunk for Data Shards
-                if let Some(shard_chunk) = &metadata.shard_chunk {
-                    let header = shard_chunk.header.as_ref().ok_or_else(|| {
-                        BootstrapError::MetadataFetchError(format!(
-                            "ShardChunk header is missing for shard {}",
-                            shard_id
-                        ))
-                    })?;
-                    let height = header.height.as_ref().ok_or_else(|| {
-                        BootstrapError::MetadataFetchError(format!(
-                            "ShardChunk height is missing for shard {}",
-                            shard_id
-                        ))
-                    })?;
-                    info!(
-                        "Writing ShardChunk for shard {} at height {}",
-                        shard_id, height.block_number
-                    );
-                    let shard_db = RocksDB::open_shard_db(rocksdb_dir, *shard_id);
-                    let shard_store = ShardStore::new(shard_db.clone(), *shard_id);
-                    shard_store
-                        .put_shard_chunk(shard_chunk)
-                        .map_err(|e| BootstrapError::DatabaseError(e.to_string()))?;
-                    shard_db.close();
-                } else {
-                    return Err(BootstrapError::MetadataFetchError(format!(
-                        "No ShardChunk found for shard {}. Metadata = {:?}",
-                        shard_id, metadata
-                    )));
-                }
+                return Err(BootstrapError::MetadataFetchError(format!(
+                    "No ShardChunk found for shard {}. Metadata = {:?}",
+                    shard_id, metadata
+                )));
             }
         }
 

@@ -77,7 +77,17 @@ mod tests {
                     Err(status) => Err(status.clone()),
                 }
             } else {
-                Err(Status::not_found("No metadata for this shard_id"))
+                // return empty for shard-0
+                if shard_id == 0 {
+                    return Ok(Response::new(GetShardSnapshotMetadataResponse {
+                        snapshots: vec![ShardSnapshotMetadata::default()],
+                    }));
+                }
+
+                Err(Status::not_found(format!(
+                    "No metadata for shard_id {}",
+                    shard_id
+                )))
             }
         }
 
@@ -1009,10 +1019,9 @@ mod tests {
         // Assert that the request_counts for both methods are 3 each for each of the 3 mock servers
         for request_counts in request_counts_vec {
             let counts = request_counts.lock().unwrap();
-            assert_eq!(
-                *counts.get("get_shard_snapshot_metadata").unwrap_or(&0),
-                1,
-                "get_shard_snapshot_metadata should be called once for each peer"
+            assert!(
+                *counts.get("get_shard_snapshot_metadata").unwrap_or(&0) >= 1,
+                "get_shard_snapshot_metadata should be called at least once for each peer"
             );
             assert!(
                 *counts.get("get_shard_transactions").unwrap_or(&0) > 10,

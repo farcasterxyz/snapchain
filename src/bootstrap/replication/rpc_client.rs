@@ -148,23 +148,28 @@ impl RpcClientsManager {
         let shard_id = self.shard_id;
         let height = self.height;
 
-        let mut data = self.inner.lock().await;
-
-        // Check if we already know this peer
-        if data
-            .peer_manager
-            .peer_addresses
-            .iter()
-            .any(|addr| *addr == peer_address)
         {
-            // Already known
-            return Ok(true);
+            // Lock the inner to see if we already know this peer
+            let data = self.inner.lock().await;
+
+            // Check if we already know this peer
+            if data
+                .peer_manager
+                .peer_addresses
+                .iter()
+                .any(|addr| *addr == peer_address)
+            {
+                // Already known
+                return Ok(true);
+            }
         }
 
         match Self::get_shard_metadata(peer_address.clone(), shard_id).await {
             Ok(snapshots) => {
                 if snapshots.snapshots.iter().any(|s| s.height == height) {
+                    let mut data = self.inner.lock().await;
                     data.peer_manager.peer_addresses.push(peer_address);
+
                     Ok(true)
                 } else {
                     warn!("peer {} doesn't have the required metadata", peer_address);
@@ -203,27 +208,33 @@ impl RpcClientsManager {
         let mut last_error = None;
 
         for _attempt in 1..=config.max_rpc_retries {
-            let req = tonic::Request::new(request.clone());
+            let mut req = tonic::Request::new(request.clone());
+            req.set_timeout(Duration::from_secs(15));
             // Clone the client from within the peer. This is a cheap operation.
             let mut client = peer.client.clone();
 
             let response = client.get_shard_transactions(req).await;
 
             // Lock the peer to update stats.
-            let mut s = peer.stats.lock().await;
-            match response {
-                Ok(response) => {
-                    let latency = start.elapsed();
+            {
+                let mut s = peer.stats.lock().await;
+                match response {
+                    Ok(response) => {
+                        let latency = start.elapsed();
 
-                    s.calls += 1;
-                    s.total_latency += latency;
-                    return Ok(response.into_inner());
+                        s.calls += 1;
+                        s.total_latency += latency;
+                        return Ok(response.into_inner());
+                    }
+                    Err(e) => {
+                        s.errors += 1;
+                        last_error = Some(e);
+                    }
                 }
-                Err(e) => {
-                    s.errors += 1;
-                    last_error = Some(e);
-                    sleep(config.rpc_retry_delay).await;
-                }
+            }
+
+            if last_error.is_some() {
+                sleep(config.rpc_retry_delay).await;
             }
         }
         Err(last_error.unwrap())
@@ -292,11 +303,9 @@ impl RpcClientsManager {
     ) -> Result<GetShardSnapshotMetadataResponse, BootstrapError> {
         let mut client = ReplicationServiceClient::connect(peer_address).await?;
 
-        let response = client
-            .get_shard_snapshot_metadata(tonic::Request::new(
-                proto::GetShardSnapshotMetadataRequest { shard_id },
-            ))
-            .await?;
+        let mut req = tonic::Request::new(proto::GetShardSnapshotMetadataRequest { shard_id });
+        req.set_timeout(Duration::from_secs(15));
+        let response = client.get_shard_snapshot_metadata(req).await?;
 
         Ok(response.into_inner())
     }
