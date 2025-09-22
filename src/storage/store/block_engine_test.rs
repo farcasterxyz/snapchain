@@ -505,7 +505,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_user_with_low_total_storage_cannot_lend() {
-        let (mut block_engine, _temp_dir) = setup();
+        let (mut block_engine, _temp_dir) = setup_with_options(BlockEngineOptions {
+            network: FarcasterNetwork::Mainnet,
+            ..Default::default()
+        });
 
         // Register user with only 50 units of storage (less than 100 required minimum)
         register_user(
@@ -516,18 +519,38 @@ mod tests {
             &mut block_engine,
         );
 
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST,
+            StorageUnitType::UnitType2025,
+            50, // Original amount
+        );
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST + 1,
+            StorageUnitType::UnitType2025,
+            0, // No borrowed storage
+        );
+
+        let future_time = FarcasterTime::from_unix_seconds(1761019200);
+
         // Attempt to create a storage lend message
         let lend_message = messages_factory::storage_lend::create_storage_lend(
             FID_FOR_TEST,
             FID_FOR_TEST + 1,
             10, // Try to lend 10 units
             StorageUnitType::UnitType2025,
-            None,
+            Some(future_time.to_u64() as u32 - 1),
             None,
         );
 
         // The message should be invalid due to insufficient total storage
-        let block = commit_message(&mut block_engine, &lend_message, Validity::Invalid);
+        let block = commit_message_at(
+            &mut block_engine,
+            &lend_message,
+            future_time,
+            Validity::Invalid,
+        );
 
         // No block events should be generated for failed storage lend
         assert_eq!(block.events.len(), 0);

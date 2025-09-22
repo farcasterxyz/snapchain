@@ -139,7 +139,7 @@ impl BlockStores {
 
 pub struct BlockEngine {
     stores: BlockStores,
-    network: FarcasterNetwork,
+    pub network: FarcasterNetwork,
     pub mempool_poller: MempoolPoller,
     shard_id: u64,
     db: Arc<RocksDB>,

@@ -186,14 +186,18 @@ pub fn commit_message_at(
         panic!("Failed to propose message");
     }
     let block = validate_and_commit_state_change(engine, &state_change);
+
     let in_trie = TrieKey::for_message(&msg)
         .iter()
         .all(|key| engine.trie_key_exists(&merkle_trie::Context::new(), &key));
+
     let should_be_in_trie = match validity {
         Validity::Valid => true,
         Validity::Invalid => false,
     };
+
     assert_eq!(in_trie, should_be_in_trie);
+
     block
 }
 
@@ -252,7 +256,7 @@ pub fn register_user(
         storage_units,
         StorageUnitType::UnitType2025,
         false,
-        FarcasterNetwork::Devnet,
+        engine.network,
     );
     commit_event(engine, &storage_event);
 

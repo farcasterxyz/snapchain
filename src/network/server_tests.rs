@@ -1962,8 +1962,11 @@ mod tests {
             .await
             .unwrap();
 
-        let state_change = block_engine
-            .propose_state_change(messages, block_engine.get_confirmed_height().increment());
+        let state_change = block_engine.propose_state_change(
+            messages,
+            block_engine.get_confirmed_height().increment(),
+            None,
+        );
 
         assert_eq!(
             state_change.transactions[0].user_messages[0],
