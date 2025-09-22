@@ -12,7 +12,7 @@ use snapchain::mempool::routing;
 use snapchain::network::admin_server::MyAdminService;
 use snapchain::network::gossip::{GossipEvent, SnapchainGossip};
 use snapchain::network::http_server::HubHttpServiceImpl;
-use snapchain::network::replication::{self, ReplicationServer};
+use snapchain::network::replication::{self, ReplicationServer, Replicator};
 use snapchain::network::server::MyHubService;
 use snapchain::node::snapchain_node::SnapchainNode;
 use snapchain::node::snapchain_read_node::SnapchainReadNode;
@@ -237,7 +237,22 @@ fn create_replicator(
     app_config: &snapchain::cfg::Config,
     shard_stores: HashMap<u32, Stores>,
     statsd_client: StatsdClientWrapper,
-) -> Arc<replication::Replicator> {
+) -> Result<Arc<replication::Replicator>, Box<dyn Error>> {
+    let soft_limit = Replicator::ensure_ulimit();
+    if soft_limit < Replicator::ULIMIT_MIN {
+        error!("The current file descriptor limit ({}) is too low to start the replicator. Replicator will be disabled", soft_limit);
+        return Err(format!("File descriptor limit too low: {}", soft_limit).into());
+    }
+
+    if soft_limit < Replicator::ULIMIT_RECOMMENDED {
+        warn!("The current file descriptor limit ({}) is too low. Please set it to at > {} to ensure stable operation of the replicator", soft_limit, Replicator::ULIMIT_RECOMMENDED);
+    }
+
+    info!(
+        "Starting replicator with file descriptor limit: {}",
+        soft_limit
+    );
+
     let replication_stores = Arc::new(replication::ReplicationStores::new(
         shard_stores,
         statsd_client.clone(),
@@ -251,7 +266,8 @@ fn create_replicator(
             max_age: app_config.replication.snapshot_max_age,
         },
     );
-    Arc::new(replicator)
+
+    Ok(Arc::new(replicator))
 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -497,13 +513,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 statsd_client.clone(),
             );
 
-            let spawned_replicator = replicator.clone();
-            tokio::spawn(async move {
-                replication::replicator::run(spawned_replicator, engine_post_commit_rx.unwrap())
-                    .await;
-            });
-
-            Some(replicator.clone())
+            match replicator {
+                Ok(replicator) => {
+                    let spawned_replicator = replicator.clone();
+                    tokio::spawn(async move {
+                        replication::replicator::run(
+                            spawned_replicator,
+                            engine_post_commit_rx.unwrap(),
+                        )
+                        .await;
+                    });
+                    Some(replicator)
+                }
+                Err(e) => {
+                    error!("Could not create replicator: {}", e);
+                    None
+                }
+            }
         } else {
             None
         };
@@ -697,13 +723,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 statsd_client.clone(),
             );
 
-            let spawned_replicator = replicator.clone();
-            tokio::spawn(async move {
-                replication::replicator::run(spawned_replicator, engine_post_commit_rx.unwrap())
-                    .await;
-            });
-
-            Some(replicator.clone())
+            match replicator {
+                Ok(replicator) => {
+                    let spawned_replicator = replicator.clone();
+                    tokio::spawn(async move {
+                        replication::replicator::run(
+                            spawned_replicator,
+                            engine_post_commit_rx.unwrap(),
+                        )
+                        .await;
+                    });
+                    Some(replicator)
+                }
+                Err(e) => {
+                    error!("Could not create replicator: {}", e);
+                    None
+                }
+            }
         } else {
             None
         };

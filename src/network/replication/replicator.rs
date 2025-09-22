@@ -212,6 +212,10 @@ pub struct Replicator {
 impl Replicator {
     const MESSAGE_LIMIT: usize = 1_000; // Maximum number of messages to fetch per page
 
+    // min and recommended FD limit
+    pub const ULIMIT_MIN: u64 = 1024;
+    pub const ULIMIT_RECOMMENDED: u64 = u16::MAX as u64; // 65535
+
     pub fn new(stores: Arc<ReplicationStores>, statsd_client: StatsdClientWrapper) -> Self {
         Self::new_with_options(stores, statsd_client, ReplicatorSnapshotOptions::default())
     }
@@ -229,6 +233,50 @@ impl Replicator {
             stores,
             snapshot_options,
             message_hash_cache: RwLock::new(MessageHashCache::new(statsd_client)),
+        }
+    }
+
+    /// Ensure the process ulimit (RLIMIT_NOFILE) soft limit is enough.
+    /// If the current soft limit is below the recommended value, attempt to raise it
+    /// up to the highest possible value, i.e. min(recommended, hard limit).
+    /// Returns the resulting soft limit.
+    pub fn ensure_ulimit() -> u64 {
+        #[cfg(unix)]
+        {
+            use nix::sys::resource::{getrlimit, setrlimit, Resource, RLIM_INFINITY};
+
+            match getrlimit(Resource::RLIMIT_NOFILE) {
+                Ok((cur, hard)) => {
+                    let mut cur_u = cur as u64;
+                    // Interpret infinity as "no bound" for our comparison purposes
+                    let hard_u = if hard == RLIM_INFINITY {
+                        u64::MAX
+                    } else {
+                        hard as u64
+                    };
+                    // Desired is min of (recommended, hard limit)
+                    let desired = Self::ULIMIT_RECOMMENDED.min(hard_u);
+
+                    if cur_u < desired {
+                        // Attempt to raise the soft limit as high as allowed (<= hard)
+                        let new_soft = desired as nix::sys::resource::rlim_t;
+                        // Keep hard limit unchanged
+                        let _ = setrlimit(Resource::RLIMIT_NOFILE, new_soft, hard);
+                        // Re-read to report the effective value
+                        if let Ok((new_cur, _)) = getrlimit(Resource::RLIMIT_NOFILE) {
+                            cur_u = new_cur as u64;
+                        }
+                    }
+
+                    cur_u
+                }
+                Err(_) => u64::MAX, // On error, return "no bound"
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Non-Unix platforms: nothing to do
+            u64::MAX
         }
     }
 
