@@ -93,7 +93,7 @@ async fn test_gossip_communication() {
     let mut gossip1 = SnapchainGossip::create(
         keypair1.clone(),
         &config1,
-        system_tx1,
+        Some(system_tx1),
         true,
         FarcasterNetwork::Devnet,
         statsd_client(),
@@ -103,7 +103,7 @@ async fn test_gossip_communication() {
     let mut gossip2 = SnapchainGossip::create(
         keypair2.clone(),
         &config2,
-        system_tx2,
+        Some(system_tx2),
         false,
         FarcasterNetwork::Devnet,
         statsd_client(),
@@ -114,7 +114,7 @@ async fn test_gossip_communication() {
     let mut gossip3 = SnapchainGossip::create(
         keypair3.clone(),
         &config3,
-        system_tx3,
+        Some(system_tx3),
         false,
         FarcasterNetwork::Devnet,
         statsd_client(),
@@ -192,7 +192,7 @@ async fn test_bootstrap_peer_reconnection() {
     let mut gossip2 = SnapchainGossip::create(
         keypair2.clone(),
         &config2,
-        system_tx2,
+        Some(system_tx2),
         false,
         FarcasterNetwork::Devnet,
         statsd_client(),
@@ -208,7 +208,7 @@ async fn test_bootstrap_peer_reconnection() {
     let mut gossip1 = SnapchainGossip::create(
         keypair1.clone(),
         &config1,
-        system_tx1,
+        Some(system_tx1),
         false,
         FarcasterNetwork::Devnet,
         statsd_client(),
@@ -235,7 +235,7 @@ async fn test_bootstrap_peer_reconnection() {
     let mut gossip2 = SnapchainGossip::create(
         keypair2.clone(),
         &Config::new(node2_addr.clone(), node1_addr.clone()),
-        system_tx2,
+        Some(system_tx2),
         false,
         FarcasterNetwork::Devnet,
         statsd_client(),

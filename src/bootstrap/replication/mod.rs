@@ -1,4 +1,5 @@
 pub mod error;
+pub mod peer_discovery;
 pub mod rpc_client;
 pub mod service;
 

@@ -77,7 +77,7 @@ mod tests {
                 SnapchainGossip::create(
                     keypair.clone(),
                     &config,
-                    system_tx,
+                    Some(system_tx),
                     false,
                     proto::FarcasterNetwork::Devnet,
                     statsd_client.clone(),
