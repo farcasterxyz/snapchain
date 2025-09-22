@@ -904,30 +904,26 @@ impl BlockEngine {
             user_messages: vec![message.clone()],
         };
         let version = EngineVersion::current(self.network);
-        let result = self.replay_snapchain_txn(
-            &merkle_trie::Context::new(),
-            &snapchain_txn,
-            &mut txn,
-            &FarcasterTime::current(),
-            version,
-        );
+        let (_, _, errors) = self
+            .replay_snapchain_txn(
+                &merkle_trie::Context::new(),
+                &snapchain_txn,
+                &mut txn,
+                &FarcasterTime::current(),
+                version,
+            )
+            .map_err(|err| {
+                MessageValidationError::HubError(HubError::invalid_internal_state(&err.to_string()))
+            })?;
 
-        match result {
-            Ok((_, _, errors)) => {
-                self.stores.trie.reload(&self.db).map_err(|e| {
-                    MessageValidationError::HubError(HubError::invalid_internal_state(
-                        &e.to_string(),
-                    ))
-                })?;
-                if !errors.is_empty() {
-                    return Err(errors[0].clone());
-                } else {
-                    Ok(())
-                }
-            }
-            Err(err) => Err(MessageValidationError::HubError(
-                HubError::invalid_internal_state(&err.to_string()),
-            )),
+        self.stores.trie.reload(&self.db).map_err(|e| {
+            MessageValidationError::HubError(HubError::invalid_internal_state(&e.to_string()))
+        })?;
+
+        if !errors.is_empty() {
+            return Err(errors[0].clone());
+        } else {
+            Ok(())
         }
     }
 }
