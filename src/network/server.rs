@@ -35,7 +35,7 @@ use crate::storage::store::account::{
     CastStore, LinkStore, ReactionStore, UserDataStore, VerificationStore,
 };
 use crate::storage::store::account::{EventsPage, HubEventIdGenerator};
-use crate::storage::store::block_engine::BlockStores;
+use crate::storage::store::block_engine::{self, BlockStores};
 use crate::storage::store::engine::{self, Senders, ShardEngine};
 use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::stores::Stores;
@@ -263,9 +263,8 @@ impl MyHubService {
     ) -> Result<(), HubError> {
         if shard_id == 0 {
             // Handle shard 0 (block engine) specially
-            let mut block_engine = crate::storage::store::block_engine::BlockEngine::new(
-                crate::storage::trie::merkle_trie::MerkleTrie::new()
-                    .map_err(|e| HubError::invalid_internal_state(&e.to_string()))?,
+            let mut block_engine = block_engine::BlockEngine::new(
+                self.block_stores.trie.clone(),
                 self.statsd_client.clone(),
                 self.block_stores.db.clone(),
                 100,
@@ -274,9 +273,7 @@ impl MyHubService {
             );
 
             block_engine.simulate_message(message).map_err(|e| match e {
-                crate::storage::store::block_engine::MessageValidationError::HubError(
-                    hub_error,
-                ) => hub_error,
+                block_engine::MessageValidationError::HubError(hub_error) => hub_error,
                 _ => HubError::validation_failure(&e.to_string()),
             })
         } else {
@@ -303,9 +300,7 @@ impl MyHubService {
             readonly_engine
                 .simulate_message(message)
                 .map_err(|err| match err {
-                    crate::storage::store::engine::MessageValidationError::StoreError(
-                        hub_error,
-                    ) => {
+                    engine::MessageValidationError::StoreError(hub_error) => {
                         // Forward hub errors as is, otherwise we end up wrapping them
                         hub_error
                     }
