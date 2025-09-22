@@ -262,7 +262,7 @@ pub mod replication_test_utils {
 
         let replicator = Arc::new(Replicator::new_with_options(
             replication_stores.clone(),
-            statsd_client,
+            statsd_client.clone(),
             ReplicatorSnapshotOptions {
                 interval: 1,
                 max_age: Duration::from_secs(10),
@@ -274,7 +274,8 @@ pub mod replication_test_utils {
         block_stores.block_store.put_block(&block).unwrap();
 
         // Set up the replication server with the given replicator
-        let replication_server = ReplicationServer::new(replicator.clone(), block_stores);
+        let replication_server =
+            ReplicationServer::new(replicator.clone(), block_stores, statsd_client);
 
         (replicator, replication_server)
     }

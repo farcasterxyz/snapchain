@@ -196,6 +196,13 @@ impl Default for ReplicatorSnapshotOptions {
     }
 }
 
+pub struct ShardMetadata {
+    pub shard_id: u32,
+    pub height: u64,
+    pub timestamp: u64,
+    pub num_items: usize,
+}
+
 pub struct Replicator {
     stores: Arc<ReplicationStores>,
     snapshot_options: ReplicatorSnapshotOptions,
@@ -659,7 +666,10 @@ impl Replicator {
         Ok(response)
     }
 
-    pub fn get_snapshot_metadata(&self, shard: u32) -> Result<Vec<(u64, u64)>, ReplicationError> {
+    pub fn get_snapshot_metadata(
+        &self,
+        shard: u32,
+    ) -> Result<Vec<ShardMetadata>, ReplicationError> {
         self.stores.get_metadata(shard)
     }
 

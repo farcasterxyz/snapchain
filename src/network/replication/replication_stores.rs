@@ -1,5 +1,5 @@
 use crate::{
-    network::replication::error::ReplicationError,
+    network::replication::{error::ReplicationError, replicator::ShardMetadata},
     proto,
     storage::{
         db::RocksDB,
@@ -54,12 +54,17 @@ impl ReplicationStores {
     }
 
     // Returns a list of (height, farcaster timestamp) pairs for the given shard.
-    pub fn get_metadata(&self, shard: u32) -> Result<Vec<(u64, u64)>, ReplicationError> {
+    pub fn get_metadata(&self, shard: u32) -> Result<Vec<ShardMetadata>, ReplicationError> {
         let results = match self.read_only_stores.read() {
             Ok(stores) => stores.get(&shard).map(|snapshots| {
                 snapshots
                     .iter()
-                    .map(|(&height, (timestamp, _))| (height, *timestamp))
+                    .map(|(&height, (timestamp, stores))| ShardMetadata {
+                        shard_id: shard,
+                        height,
+                        timestamp: *timestamp,
+                        num_items: stores.trie.items().unwrap_or(0),
+                    })
                     .collect()
             }),
             Err(_) => {
