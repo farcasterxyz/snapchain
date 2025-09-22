@@ -8,26 +8,10 @@ mod tests {
     use crate::storage::store::test_helper::{trie_ctx, FID_FOR_TEST};
     use crate::storage::trie::merkle_trie::TrieKey;
     use crate::utils::factory::{events_factory, messages_factory};
-    use ed25519_dalek::{SecretKey, SigningKey};
-    use hex::FromHex;
-    use prost::Message;
-
-    pub fn default_custody_address() -> Vec<u8> {
-        "000000000000000000".to_string().encode_to_vec()
-    }
-
-    pub fn default_signer() -> SigningKey {
-        SigningKey::from_bytes(
-            &SecretKey::from_hex(
-                "1000000000000000000000000000000000000000000000000000000000000000",
-            )
-            .unwrap(),
-        )
-    }
 
     #[tokio::test]
     async fn test_trie_updated_only_on_commit() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
         let onchain_event = events_factory::create_rent_event(
             FID_FOR_TEST,
             1,
@@ -53,7 +37,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_block() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
         let height = block_engine.get_confirmed_height().increment();
         let state_change = block_engine.propose_state_change(vec![], height, None);
 
@@ -69,7 +53,10 @@ mod tests {
     #[tokio::test]
     async fn test_mainnet_propose_validate_commit() {
         // Test that the pipeline works while new features are not active on mainnet
-        let (mut block_engine, _temp_dir) = setup(Some(FarcasterNetwork::Mainnet));
+        let (mut block_engine, _temp_dir) = setup_with_options(BlockEngineOptions {
+            network: FarcasterNetwork::Mainnet,
+            ..BlockEngineOptions::default()
+        });
         let height = block_engine.get_confirmed_height().increment();
         let state_change = block_engine.propose_state_change(vec![], height, None);
 
@@ -85,7 +72,10 @@ mod tests {
     #[tokio::test]
     async fn test_validate_and_commit_old_blocks() {
         // Test that validate and commit will work for old blocks even after features are active
-        let (mut block_engine, _temp_dir) = setup(Some(FarcasterNetwork::Mainnet));
+        let (mut block_engine, _temp_dir) = setup_with_options(BlockEngineOptions {
+            network: FarcasterNetwork::Mainnet,
+            ..BlockEngineOptions::default()
+        });
 
         let height = block_engine.get_confirmed_height().increment();
         validate_and_commit_state_change(
@@ -103,7 +93,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_user_messages_dropped_if_no_storage() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
         let height = block_engine.get_confirmed_height().increment();
         // These messages are included in the transaction list but not included in the state root.
         let messages = vec![MempoolMessage::UserMessage(
@@ -121,7 +111,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_user_messages_put_in_block_if_storage_purchased() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
         let onchain_event = events_factory::create_rent_event(
             FID_FOR_TEST,
             1,
@@ -149,7 +139,7 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "State change commit failed: merkle trie root hash mismatch")]
     async fn test_invalid_state_root() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
         let height = block_engine.get_confirmed_height().increment();
         let invalid_hash = hex::decode("ffffffffffffffffffffffffffffffffffffffff").unwrap();
 
@@ -168,7 +158,7 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "State change commit failed: events hash mismatch")]
     async fn test_invalid_events_hash() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
         let height = block_engine.get_confirmed_height().increment();
         let invalid_hash = hex::decode("ffffffffffffffffffffffffffffffffffffffff").unwrap();
 
@@ -186,7 +176,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_onchain_event() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
         let onchain_event = events_factory::create_rent_event(
             FID_FOR_TEST,
             1,
@@ -213,7 +203,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_heartbeat_generated_on_interval() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
         // The heartbeat interval is 5 blocks, generate the first 4 where there will be no events
         for _ in 0..4 {
             let height = block_engine.get_confirmed_height().increment();
@@ -256,7 +246,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_storage_lend_message_merged() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
 
         // Register user with storage
         register_user(
@@ -297,7 +287,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_storage_lends_in_same_transaction() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
 
         // Register user with only 250 units of storage - not enough for all lends
         register_user(
@@ -377,7 +367,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_borrowed_storage_cannot_be_lent() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
 
         // Register FID_FOR_TEST + 1 with some storage to lend to FID_FOR_TEST + 2
         register_user(
@@ -440,7 +430,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lender_can_take_back_storage_by_setting_to_zero() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
 
         // Register lender with storage
         register_user(
@@ -515,7 +505,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_user_with_low_total_storage_cannot_lend() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
 
         // Register user with only 50 units of storage (less than 100 required minimum)
         register_user(

@@ -41,7 +41,7 @@ mod tests {
         let db = Arc::new(db);
 
         // Create block engine
-        let (block_engine, _temp_dir_block) = block_engine_test_helpers::setup(None);
+        let (block_engine, _temp_dir_block) = block_engine_test_helpers::setup();
 
         // Create shard engine
         let (shard_engine, _temp_dir2) = new_engine_with_options(EngineOptions {

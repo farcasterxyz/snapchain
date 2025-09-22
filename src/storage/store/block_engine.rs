@@ -256,8 +256,10 @@ impl BlockEngine {
                     .get_storage_slot_for_fid(message_data.fid, &vec![], false, false)
                     .ok_or(MessageValidationError::InsufficientStorage)?;
 
-                // Restricts who can lend storage to some reasonable set of users
-                if total_storage_purchased.units_for(lend_storage.unit_type()) < 100 {
+                // Restricts who can lend storage to some reasonable set of users. Don't enforce this limit in devnet and testnet so we can test with fewer storage units.
+                if self.network == FarcasterNetwork::Mainnet
+                    && total_storage_purchased.units_for(lend_storage.unit_type()) < 100
+                {
                     return Err(MessageValidationError::InsufficientStorage);
                 }
 

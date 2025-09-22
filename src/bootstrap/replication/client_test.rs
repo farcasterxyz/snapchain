@@ -535,7 +535,7 @@ mod tests {
         let (signer, mut source_engine) =
             new_engine_with_fname_signer(&tmp_dir, Some(post_commit_tx)).await; // source engine
 
-        let (mut block_engine, _) = block_engine_test_helpers::setup(None);
+        let (mut block_engine, _) = block_engine_test_helpers::setup();
 
         let (replicator, replication_server) =
             setup_replicator(&mut source_engine, &mut block_engine);

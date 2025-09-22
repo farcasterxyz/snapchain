@@ -76,7 +76,7 @@ impl MempoolPoller {
             .time_with_shard(self.shard_id, key.as_str(), value);
     }
 
-    pub(crate) async fn pull_messages(
+    pub async fn pull_messages(
         &mut self,
         max_wait: Duration,
     ) -> Result<Vec<MempoolMessage>, MempoolPollerError> {

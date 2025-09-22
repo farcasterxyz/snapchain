@@ -1,5 +1,6 @@
 use crate::core::types::Height;
 use crate::core::util::FarcasterTime;
+use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::{
     self, Block, BlockEvent, BlockHeader, FarcasterNetwork, OnChainEvent, ShardWitness,
     StorageUnitType,
@@ -10,12 +11,38 @@ use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::test_helper::statsd_client;
 use crate::storage::trie::merkle_trie::{self, MerkleTrie, TrieKey};
 use crate::utils::factory::events_factory;
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{SecretKey, SigningKey};
+use hex::FromHex;
+use prost::Message;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
-pub fn setup(network: Option<FarcasterNetwork>) -> (BlockEngine, TempDir) {
+pub fn default_custody_address() -> Vec<u8> {
+    "000000000000000000".to_string().encode_to_vec()
+}
+
+pub fn default_signer() -> SigningKey {
+    SigningKey::from_bytes(
+        &SecretKey::from_hex("1000000000000000000000000000000000000000000000000000000000000000")
+            .unwrap(),
+    )
+}
+pub struct BlockEngineOptions {
+    pub network: FarcasterNetwork,
+    pub messages_request_tx: Option<mpsc::Sender<MempoolMessagesRequest>>,
+}
+
+impl Default for BlockEngineOptions {
+    fn default() -> Self {
+        BlockEngineOptions {
+            network: FarcasterNetwork::Devnet,
+            messages_request_tx: None,
+        }
+    }
+}
+
+pub fn setup_with_options(engine_options: BlockEngineOptions) -> (BlockEngine, TempDir) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");
     let db = RocksDB::new(db_path.to_str().unwrap());
@@ -23,18 +50,21 @@ pub fn setup(network: Option<FarcasterNetwork>) -> (BlockEngine, TempDir) {
     let db = Arc::new(db);
     let trie = MerkleTrie::new().unwrap();
     let statsd_client = statsd_client();
-    let (tx, _rx) = mpsc::channel(100);
 
     let block_engine = BlockEngine::new(
         trie,
         statsd_client,
         db,
         100,
-        Some(tx),
-        network.unwrap_or(FarcasterNetwork::Devnet),
+        engine_options.messages_request_tx,
+        engine_options.network,
     );
 
     (block_engine, temp_dir)
+}
+
+pub fn setup() -> (BlockEngine, TempDir) {
+    setup_with_options(BlockEngineOptions::default())
 }
 
 #[cfg(test)]
