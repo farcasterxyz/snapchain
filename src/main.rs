@@ -25,7 +25,6 @@ use snapchain::storage::store::block_engine::BlockStores;
 use snapchain::storage::store::engine::{PostCommitMessage, Senders};
 use snapchain::storage::store::node_local_state::{self, LocalStateStore};
 use snapchain::storage::store::stores::Stores;
-use snapchain::storage::store::BlockStore;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -404,13 +403,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await
         .unwrap();
     };
-
-    let block_db = RocksDB::open_shard_db(app_config.rocksdb_dir.as_str(), 0);
-    let block_store = BlockStore::new(block_db);
-    info!(
-        "Block db height {}",
-        block_store.max_block_number().unwrap()
-    );
 
     let keypair = app_config.consensus.keypair().clone();
 
