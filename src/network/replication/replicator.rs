@@ -280,6 +280,10 @@ impl Replicator {
         }
     }
 
+    pub fn network(&self) -> proto::FarcasterNetwork {
+        self.stores.network()
+    }
+
     fn build_fid_onchain_message_type_cache(
         &self,
         stores: &Stores,

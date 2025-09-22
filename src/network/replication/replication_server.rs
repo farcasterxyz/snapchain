@@ -25,6 +25,17 @@ impl ReplicationServer {
             statsd_client,
         }
     }
+
+    /// For shard 0, we return a fixed block number as the "latest" block and ask the client to sync (over p2p)
+    /// from that height. We do this because there will be onchain events, storage lending events etc... in shard-0
+    /// after this block, and we need the client to get them and merge them properly
+    fn get_shard0_block_height(&self) -> u64 {
+        match self.replicator.network() {
+            proto::FarcasterNetwork::Mainnet => 15124000, // ~Sep 21, 2025
+            proto::FarcasterNetwork::Testnet => 15030000, // ~Sep 21, 2025
+            _ => 0, // For devnet, we can just return 0 and let the client sync from genesis
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -44,7 +55,7 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
             let block = self
                 .block_stores
                 .block_store
-                .get_last_block()
+                .get_block_by_height(self.get_shard0_block_height())
                 .map_err(|e| Status::internal(format!("Failed to get block by height: {}", e)))?
                 .ok_or(Status::not_found("No blocks found in block store"))?;
 
