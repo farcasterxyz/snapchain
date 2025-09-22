@@ -147,6 +147,9 @@ impl PeerDiscoverer {
         debug!(peer = %peer_id, addr = %http_addr, "Discovered potential replication peer");
         tokio::spawn(async move {
             match rpc_manager.add_new_peer(http_addr.clone()).await {
+                Ok(false) => {
+                    debug!(peer = %peer_id, addr = %http_addr, "Peer already known");
+                }
                 Ok(true) => {
                     info!(peer = %peer_id, addr = %http_addr, "Added new replication peer")
                 }

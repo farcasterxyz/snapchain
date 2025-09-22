@@ -1236,7 +1236,14 @@ mod tests {
         config.fc_network = source_engine.network.clone();
         config.snapshot.replication_peers = vec![server_addr];
 
-        let bootstrap = ReplicatorBootstrap::new(statsd_client(), &config);
+        let bootstrap = ReplicatorBootstrap::new_with_config(
+            statsd_client(),
+            &config,
+            ReplicatorBootstrapConfig {
+                rpc_retry_delay: Duration::from_secs(0),
+                ..Default::default()
+            },
+        );
 
         // Perform the bootstrap
         let result = bootstrap.bootstrap_using_replication().await;

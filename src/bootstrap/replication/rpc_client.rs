@@ -12,9 +12,6 @@ use tokio::time::{sleep, Instant};
 use tonic::transport::Channel;
 use tracing::{info, warn};
 
-// Comma-separated list of initial peers to bootstrap from if none are configured.
-pub const REPLICATION_INITIAL_PEERS: &str = "https://rho.farcaster.xyz:3381";
-
 // A peer owns its own client and its stats, guarded by a Mutex for concurrent updates.
 #[derive(Debug)]
 struct Peer {
@@ -105,6 +102,18 @@ impl RpcClientsManager {
         self.shard_id
     }
 
+    pub fn get_initial_peers(network: crate::proto::FarcasterNetwork) -> Vec<String> {
+        match network {
+            crate::proto::FarcasterNetwork::Mainnet => {
+                vec!["https://rho.farcaster.xyz:3381".to_string()]
+            }
+            crate::proto::FarcasterNetwork::Testnet => {
+                vec!["https://tau.farcaster.xyz:3381".to_string()]
+            }
+            _ => vec![],
+        }
+    }
+
     pub async fn new(
         peer_addr: String,
         shard_id: u32,
@@ -160,7 +169,7 @@ impl RpcClientsManager {
                 .any(|addr| *addr == peer_address)
             {
                 // Already known
-                return Ok(true);
+                return Ok(false);
             }
         }
 

@@ -1,6 +1,6 @@
 use crate::bootstrap::replication::error::BootstrapError;
 use crate::bootstrap::replication::peer_discovery::PeerDiscoverer;
-use crate::bootstrap::replication::rpc_client::{RpcClientsManager, REPLICATION_INITIAL_PEERS};
+use crate::bootstrap::replication::rpc_client::RpcClientsManager;
 use crate::cfg::Config;
 use crate::core::validations;
 use crate::core::validations::message::validate_message_hash;
@@ -84,6 +84,8 @@ struct ShardSharedWorkData {
     trie_db: Arc<RocksDB>,
     // Keep track of how many messages we've written in this batch
     messages_in_batch: AtomicUsize,
+    // Progress
+    progress: Arc<RwLock<ShardProgress>>,
 }
 
 #[derive(Clone)]
@@ -109,10 +111,10 @@ impl Default for ReplicatorBootstrapConfig {
             // Fetch upto these many virtual trie shards in parallel. Note that this can't be too big, as we are
             // primarily bottlenecked by DB writing. Increasing this wont help performance much because of the backpressure
             // from the DB writer.
-            num_parallel_vts: 8,
+            num_parallel_vts: 4,
 
             // Wait this much time between retries for RPC calls
-            rpc_retry_delay: Duration::from_secs(1),
+            rpc_retry_delay: Duration::from_secs(10),
 
             // Max number of retries for the RPC before giving up
             max_rpc_retries: 3,
@@ -124,15 +126,17 @@ impl Default for ReplicatorBootstrapConfig {
 struct ShardProgress {
     metadata: ShardSnapshotMetadata,
     messages_merged: usize,
+    previously_merged: usize,
     start_time: Instant,
     last_updated_printed: Instant,
 }
 
 impl ShardProgress {
-    pub fn from_metadata(metadata: ShardSnapshotMetadata) -> Self {
+    pub fn from_metadata(metadata: ShardSnapshotMetadata, previously_merged: usize) -> Self {
         Self {
             metadata,
             messages_merged: 0,
+            previously_merged,
             start_time: Instant::now(),
             last_updated_printed: Instant::now(),
         }
@@ -146,7 +150,7 @@ pub struct ReplicatorBootstrap {
     statsd_client: StatsdClientWrapper,
     gossip_config: gossip::Config,
     data_shard_ids: Vec<u32>,
-    shard_metadatas: Arc<RwLock<HashMap<u32, ShardProgress>>>,
+    shard0_metadata: Arc<Mutex<ShardSnapshotMetadata>>,
     rocksdb_dir: String,
     replication_peer_list: Vec<String>,
     config: ReplicatorBootstrapConfig,
@@ -160,10 +164,9 @@ impl ReplicatorBootstrap {
             statsd_client,
             gossip_config: app_config.gossip.clone(),
             data_shard_ids: app_config.consensus.shard_ids.clone(),
-            shard_metadatas: Arc::new(RwLock::new(HashMap::new())),
+            shard0_metadata: Arc::new(Mutex::new(ShardSnapshotMetadata::default())),
             rocksdb_dir: app_config.rocksdb_dir.clone(),
             replication_peer_list: app_config.snapshot.replication_peers.clone(),
-
             config: ReplicatorBootstrapConfig::default(),
         }
     }
@@ -181,7 +184,7 @@ impl ReplicatorBootstrap {
             statsd_client,
             gossip_config: app_config.gossip.clone(),
             data_shard_ids: app_config.consensus.shard_ids.clone(),
-            shard_metadatas: Arc::new(RwLock::new(HashMap::new())),
+            shard0_metadata: Arc::new(Mutex::new(ShardSnapshotMetadata::default())),
             rocksdb_dir: app_config.rocksdb_dir.clone(),
             replication_peer_list: app_config.snapshot.replication_peers.clone(),
             config,
@@ -218,10 +221,7 @@ impl ReplicatorBootstrap {
     pub async fn bootstrap_using_replication(&self) -> Result<WorkUnitResponse, BootstrapError> {
         let peer_addresses = if self.replication_peer_list.is_empty() {
             // If no peers are configured, use the built-in default list
-            REPLICATION_INITIAL_PEERS
-                .split(',')
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
+            RpcClientsManager::get_initial_peers(self.network)
         } else {
             self.replication_peer_list.clone()
         };
@@ -294,10 +294,10 @@ impl ReplicatorBootstrap {
             let shard_0_rpc =
                 RpcClientsManager::new(peer_addresses[0].clone(), 0, self.config.clone()).await?;
             let shard_0_metadata = shard_0_rpc.get_metadata();
-            self.shard_metadatas
-                .write()
+            self.shard0_metadata
+                .lock()
                 .await
-                .insert(0, ShardProgress::from_metadata(shard_0_metadata.clone()));
+                .clone_from(&shard_0_metadata);
         }
 
         for data_shard_id in data_shard_ids {
@@ -310,12 +310,8 @@ impl ReplicatorBootstrap {
                 }
                 Some(mgr) => mgr.clone(),
             };
-            let shard_metadata = rpc_client_manager.get_metadata();
-            self.shard_metadatas.write().await.insert(
-                data_shard_id,
-                ShardProgress::from_metadata(shard_metadata.clone()),
-            );
 
+            let shard_metadata = rpc_client_manager.get_metadata();
             let target_height = shard_metadata.height;
 
             if target_height == 0 {
@@ -554,63 +550,50 @@ impl ReplicatorBootstrap {
         };
 
         let progress = {
-            let mut guard = self.shard_metadatas.write().await;
-            let progress = guard.get_mut(&work_data.shard_id);
+            let mut progress = work_data.progress.write().await;
+            progress.messages_merged += num_messages;
 
-            progress
-                .map(|p| {
-                    p.messages_merged += num_messages;
-                    p
-                })
-                .cloned()
+            progress.clone()
         };
 
         // Print Updates
-        if progress.is_none() {
-            // Just return without printing anything
-            warn!("No progress found for shard {}", work_data.shard_id);
-        } else {
-            let progress = progress.unwrap();
-            if progress.last_updated_printed.elapsed() > Duration::from_secs(5) {
-                let total_elapsed = progress.start_time.elapsed();
+        if progress.last_updated_printed.elapsed() > Duration::from_secs(5) {
+            let total_elapsed = progress.start_time.elapsed();
 
-                // Calculate the ETAs
-                let messages_merged = progress.messages_merged;
-                let total_messages_expected = progress.metadata.num_items as usize;
+            // Calculate the ETAs
+            let messages_merged_this_run = progress.messages_merged;
+            let messages_merged_previous = progress.previously_merged;
+            let total_messages_expected = progress.metadata.num_items as usize;
 
-                let msgs_per_sec = messages_merged as f64 / total_elapsed.as_secs_f64();
-                let remaining_msgs = total_messages_expected - messages_merged;
-                let eta = Duration::from_secs_f64(remaining_msgs as f64 / msgs_per_sec);
-                let eta_str = {
-                    let total_secs = eta.as_secs();
-                    if total_secs < 60 {
-                        format!("{:.1}s", eta.as_secs_f64())
-                    } else if total_secs < 3600 {
-                        let mins = total_secs / 60;
-                        let secs = total_secs % 60;
-                        format!("{}m {:02}s", mins, secs)
-                    } else {
-                        let hours = total_secs / 3600;
-                        let mins = (total_secs % 3600) / 60;
-                        format!("{}h {:02}m", hours, mins)
-                    }
-                };
-                info!(
-                    "Shard {} merged {:.1}M of {:.1}M messages @{:.1}k msg/sec. ETA {}",
-                    work_data.shard_id,
-                    messages_merged as f64 / 1_000_000.0,
-                    total_messages_expected as f64 / 1_000_000.0,
-                    msgs_per_sec / 1000.0,
-                    eta_str
-                );
-
-                self.shard_metadatas
-                    .write()
-                    .await
-                    .get_mut(&work_data.shard_id)
-                    .map(|p| p.last_updated_printed = Instant::now());
+            let msgs_per_sec = messages_merged_this_run as f64 / total_elapsed.as_secs_f64();
+            let remaining_msgs =
+                total_messages_expected - messages_merged_this_run - messages_merged_previous;
+            let eta = Duration::from_secs_f64(remaining_msgs as f64 / msgs_per_sec);
+            let eta_str = {
+                let total_secs = eta.as_secs();
+                if total_secs < 60 {
+                    format!("{:.1}s", eta.as_secs_f64())
+                } else if total_secs < 3600 {
+                    let mins = total_secs / 60;
+                    let secs = total_secs % 60;
+                    format!("{}m {:02}s", mins, secs)
+                } else {
+                    let hours = total_secs / 3600;
+                    let mins = (total_secs % 3600) / 60;
+                    format!("{}h {:02}m", hours, mins)
+                }
             };
-        }
+            info!(
+                "Shard {} merged {:.1}M of {:.1}M messages @{:.1}k msg/sec. ETA {}",
+                work_data.shard_id,
+                (messages_merged_this_run + messages_merged_previous) as f64 / 1_000_000.0,
+                total_messages_expected as f64 / 1_000_000.0,
+                msgs_per_sec / 1000.0,
+                eta_str
+            );
+
+            work_data.progress.write().await.last_updated_printed = Instant::now();
+        };
 
         let messages_in_batch = work_data
             .messages_in_batch
@@ -737,12 +720,17 @@ impl ReplicatorBootstrap {
         let mut is_errored = None;
 
         // Create the shared work data for this shard
+        let previously_merged = trie.items().unwrap_or(0);
         let work_data = Arc::new(ShardSharedWorkData {
             shard_id,
             db_writer: Mutex::new(db.clone()),
             trie: Mutex::new(trie),
             trie_db: db.clone(),
             messages_in_batch: AtomicUsize::new(0),
+            progress: Arc::new(RwLock::new(ShardProgress::from_metadata(
+                metadata.clone(),
+                previously_merged,
+            ))),
         });
 
         loop {
@@ -1198,18 +1186,7 @@ impl ReplicatorBootstrap {
         info!("Writing final block and shard chunks to database...");
 
         // Write shard-0 block
-        let shard0_metadata = {
-            self.shard_metadatas
-                .read()
-                .await
-                .get(&0)
-                .cloned()
-                .ok_or_else(|| {
-                    BootstrapError::MetadataFetchError("No metadata found for shard 0".to_string())
-                })?
-                .metadata
-        };
-
+        let shard0_metadata = self.shard0_metadata.lock().await.clone();
         if let Some(block) = &shard0_metadata.block {
             let header = block.header.as_ref().ok_or_else(|| {
                 BootstrapError::MetadataFetchError("Block header is missing".to_string())
