@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.1] - 2025-09-23
+
+### 🚀 Features
+
+- Enable sending onchain events to shard 0 (#676)
+- Configure or get (from public IP) announce_rpc_address (#681)
+- Discover nodes to sync with using gossip p2p (#682)
+- Ensure we have at least 65k FD limit to start replicator (#685)
+- Pick shard-0 blocks for replicator (#687)
+- Add progress for replication and other nice to haves (#689)
+
+### 🐛 Bug Fixes
+
+- Generate replicator snapshots every 8 hours (#680)
+- Handle duplicates while inserting in the trie (#679)
+- Dont create block_store in main() (#686)
+
+### 🧪 Testing
+
+- Add multi-page/rpc errors tests (#677)
+
+### ⚙️ Miscellaneous Tasks
+
+- Push protocol release out by 2 weeks (#690)
+
 ## [0.8.0] - 2025-09-16
 
 ### 🚀 Features
