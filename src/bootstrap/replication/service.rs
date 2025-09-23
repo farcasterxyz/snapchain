@@ -382,6 +382,13 @@ impl ReplicatorBootstrap {
         loop {
             if shard_tasks.is_empty() {
                 // All tasks completed successfully
+                // Shut down discovery task
+                shutdown_gossip_discovery_fn(
+                    &mut disc_shutdown_tx_opt,
+                    &mut discovery_thread_handle_opt,
+                )
+                .await;
+
                 // Write the final metadata from the server into the new DB.
                 self.write_final_metadata_to_db(
                     &rpc_client_managers,
@@ -398,12 +405,6 @@ impl ReplicatorBootstrap {
                     return Ok(WorkUnitResponse::PartiallyComplete);
                 }
 
-                // Shut down discovery task
-                shutdown_gossip_discovery_fn(
-                    &mut disc_shutdown_tx_opt,
-                    &mut discovery_thread_handle_opt,
-                )
-                .await;
                 return Ok(WorkUnitResponse::Finished);
             }
 

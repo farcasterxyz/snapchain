@@ -218,7 +218,7 @@ impl RpcClientsManager {
 
         for _attempt in 1..=config.max_rpc_retries {
             let mut req = tonic::Request::new(request.clone());
-            req.set_timeout(Duration::from_secs(15));
+            req.set_timeout(Duration::from_secs(60));
             // Clone the client from within the peer. This is a cheap operation.
             let mut client = peer.client.clone();
 
@@ -313,7 +313,7 @@ impl RpcClientsManager {
         let mut client = ReplicationServiceClient::connect(peer_address).await?;
 
         let mut req = tonic::Request::new(proto::GetShardSnapshotMetadataRequest { shard_id });
-        req.set_timeout(Duration::from_secs(15));
+        req.set_timeout(Duration::from_secs(60));
         let response = client.get_shard_snapshot_metadata(req).await?;
 
         Ok(response.into_inner())
