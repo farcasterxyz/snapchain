@@ -12,9 +12,6 @@ use tokio::time::{sleep, Instant};
 use tonic::transport::Channel;
 use tracing::{info, warn};
 
-// Comma-separated list of initial peers to bootstrap from if none are configured.
-pub const REPLICATION_INITIAL_PEERS: &str = "https://rho.farcaster.xyz:3381";
-
 // A peer owns its own client and its stats, guarded by a Mutex for concurrent updates.
 #[derive(Debug)]
 struct Peer {
@@ -47,40 +44,6 @@ impl PeerManager {
             vts_peer_affinity: HashMap::new(),
         }
     }
-
-    // This is the single entry point to get a managed peer connection.
-    async fn get_peer_for_vts(&mut self, vts: u8) -> Result<Arc<Peer>, BootstrapError> {
-        // Check if we already have an established affinity for this vts.
-        if let Some(peer_address) = self.vts_peer_affinity.get(&vts) {
-            // If so, return the existing peer connection.
-            if let Some(peer) = self.peers.get(peer_address) {
-                return Ok(peer.clone());
-            }
-        }
-
-        // If no affinity or peer doesn't exist, select and connect
-        // Simple round-robin selection logic.
-        let peer_address = self.peer_addresses[(vts as usize) % self.peer_addresses.len()].clone();
-
-        // If we've already connected to this peer, return it.
-        if let Some(peer) = self.peers.get(&peer_address) {
-            // Establish affinity for next time.
-            self.vts_peer_affinity.insert(vts, peer_address);
-            return Ok(peer.clone());
-        }
-
-        //  If it's a new peer, connect and store it
-        let client = ReplicationServiceClient::connect(peer_address.clone()).await?;
-        let new_peer = Arc::new(Peer {
-            client,
-            stats: Mutex::new(PeerStats::default()),
-        });
-
-        self.peers.insert(peer_address.clone(), new_peer.clone());
-        self.vts_peer_affinity.insert(vts, peer_address);
-
-        Ok(new_peer)
-    }
 }
 
 pub(crate) struct ReplicationServiceRpcData {
@@ -103,6 +66,63 @@ pub struct RpcClientsManager {
 impl RpcClientsManager {
     pub fn shard_id(&self) -> u32 {
         self.shard_id
+    }
+
+    pub fn get_initial_peers(network: crate::proto::FarcasterNetwork) -> Vec<String> {
+        match network {
+            crate::proto::FarcasterNetwork::Mainnet => {
+                vec!["https://rho.farcaster.xyz:3381".to_string()]
+            }
+            crate::proto::FarcasterNetwork::Testnet => {
+                vec!["https://tau.farcaster.xyz:3381".to_string()]
+            }
+            _ => vec![],
+        }
+    }
+
+    async fn get_peer_for_vts(
+        inner: Arc<Mutex<ReplicationServiceRpcData>>,
+        vts: u8,
+    ) -> Result<Arc<Peer>, BootstrapError> {
+        // First, see if we have the peer already for this vts
+        let mut data = inner.lock().await;
+        let peer_manager = &mut data.peer_manager;
+        if let Some(peer_address) = peer_manager.vts_peer_affinity.get(&vts) {
+            // If so, return the existing peer connection.
+            if let Some(peer) = peer_manager.peers.get(peer_address) {
+                return Ok(peer.clone());
+            }
+        }
+
+        // If no affinity or peer doesn't exist, select and connect
+        // Simple round-robin selection logic.
+        let peer_address =
+            peer_manager.peer_addresses[(vts as usize) % peer_manager.peer_addresses.len()].clone();
+
+        // If we've already connected to this peer, return it.
+        if let Some(peer) = peer_manager.peers.get(&peer_address) {
+            // Establish affinity for next time.
+            peer_manager.vts_peer_affinity.insert(vts, peer_address);
+            return Ok(peer.clone());
+        }
+
+        drop(data); // Release the lock before connecting
+
+        //  If it's a new peer, connect and store it
+        let client = ReplicationServiceClient::connect(peer_address.clone()).await?;
+        let new_peer = Arc::new(Peer {
+            client,
+            stats: Mutex::new(PeerStats::default()),
+        });
+
+        let mut data = inner.lock().await;
+        let peer_manager = &mut data.peer_manager;
+        peer_manager
+            .peers
+            .insert(peer_address.clone(), new_peer.clone());
+        peer_manager.vts_peer_affinity.insert(vts, peer_address);
+
+        Ok(new_peer)
     }
 
     pub async fn new(
@@ -148,23 +168,28 @@ impl RpcClientsManager {
         let shard_id = self.shard_id;
         let height = self.height;
 
-        let mut data = self.inner.lock().await;
-
-        // Check if we already know this peer
-        if data
-            .peer_manager
-            .peer_addresses
-            .iter()
-            .any(|addr| *addr == peer_address)
         {
-            // Already known
-            return Ok(true);
+            // Lock the inner to see if we already know this peer
+            let data = self.inner.lock().await;
+
+            // Check if we already know this peer
+            if data
+                .peer_manager
+                .peer_addresses
+                .iter()
+                .any(|addr| *addr == peer_address)
+            {
+                // Already known
+                return Ok(false);
+            }
         }
 
         match Self::get_shard_metadata(peer_address.clone(), shard_id).await {
             Ok(snapshots) => {
                 if snapshots.snapshots.iter().any(|s| s.height == height) {
+                    let mut data = self.inner.lock().await;
                     data.peer_manager.peer_addresses.push(peer_address);
+
                     Ok(true)
                 } else {
                     warn!("peer {} doesn't have the required metadata", peer_address);
@@ -203,27 +228,33 @@ impl RpcClientsManager {
         let mut last_error = None;
 
         for _attempt in 1..=config.max_rpc_retries {
-            let req = tonic::Request::new(request.clone());
+            let mut req = tonic::Request::new(request.clone());
+            req.set_timeout(Duration::from_secs(60));
             // Clone the client from within the peer. This is a cheap operation.
             let mut client = peer.client.clone();
 
             let response = client.get_shard_transactions(req).await;
 
             // Lock the peer to update stats.
-            let mut s = peer.stats.lock().await;
-            match response {
-                Ok(response) => {
-                    let latency = start.elapsed();
+            {
+                let mut s = peer.stats.lock().await;
+                match response {
+                    Ok(response) => {
+                        let latency = start.elapsed();
 
-                    s.calls += 1;
-                    s.total_latency += latency;
-                    return Ok(response.into_inner());
+                        s.calls += 1;
+                        s.total_latency += latency;
+                        return Ok(response.into_inner());
+                    }
+                    Err(e) => {
+                        s.errors += 1;
+                        last_error = Some(e);
+                    }
                 }
-                Err(e) => {
-                    s.errors += 1;
-                    last_error = Some(e);
-                    sleep(config.rpc_retry_delay).await;
-                }
+            }
+
+            if last_error.is_some() {
+                sleep(config.rpc_retry_delay).await;
             }
         }
         Err(last_error.unwrap())
@@ -256,12 +287,7 @@ impl RpcClientsManager {
             // spawn the background prefetch — do peer resolution and network calls inside the task
             tokio::spawn(async move {
                 // obtain a peer while inside the spawned task (locks inner only inside this task)
-                let peer_res = {
-                    let mut data = inner.lock().await;
-                    data.peer_manager.get_peer_for_vts(vts).await
-                };
-
-                match peer_res {
+                match Self::get_peer_for_vts(inner, vts).await {
                     Ok(peer) => {
                         let response = Self::call_get_shard_transactions_with_retry(
                             peer,
@@ -292,11 +318,9 @@ impl RpcClientsManager {
     ) -> Result<GetShardSnapshotMetadataResponse, BootstrapError> {
         let mut client = ReplicationServiceClient::connect(peer_address).await?;
 
-        let response = client
-            .get_shard_snapshot_metadata(tonic::Request::new(
-                proto::GetShardSnapshotMetadataRequest { shard_id },
-            ))
-            .await?;
+        let mut req = tonic::Request::new(proto::GetShardSnapshotMetadataRequest { shard_id });
+        req.set_timeout(Duration::from_secs(60));
+        let response = client.get_shard_snapshot_metadata(req).await?;
 
         Ok(response.into_inner())
     }
@@ -327,10 +351,7 @@ impl RpcClientsManager {
         }
 
         //  Cache miss, Make a new request
-        let peer = {
-            let mut data = self.inner.lock().await;
-            data.peer_manager.get_peer_for_vts(vts).await?
-        }; // Lock is released here.
+        let peer = Self::get_peer_for_vts(self.inner.clone(), vts).await?;
 
         let request = proto::GetShardTransactionsRequest {
             shard_id: self.shard_id,

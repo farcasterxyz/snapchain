@@ -2,7 +2,6 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
-use rustls::crypto::{self, ring};
 use snapchain::connectors::fname::FnameRequest;
 use snapchain::connectors::onchain_events::{ChainClients, OnchainEventsRequest};
 use snapchain::consensus::consensus::SystemMessage;
@@ -342,9 +341,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if db_is_empty {
         match app_config.snapshot.bootstrap_method {
             BootstrapMethod::Replicate => {
-                // Initialize SSL for rustls
-                crypto::CryptoProvider::install_default(ring::default_provider())
-                    .expect("Failed to install rustls crypto provider");
+                // use snapchain::bootstrap::replication::service::{
+                //     ReplicatorBootstrap, WorkUnitResponse,
+                // };
+                // use tokio::time::{sleep, Duration};
+                // use rustls::crypto::{self, ring};
+
+                // // Initialize SSL for rustls
+                // crypto::CryptoProvider::install_default(ring::default_provider())
+                //     .expect("Failed to install rustls crypto provider");
 
                 // info!("Starting node with replication bootstrap");
                 // let replicator = ReplicatorBootstrap::new(statsd_client.clone(), &app_config);
@@ -353,7 +358,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 //     Ok(r) => {
                 //         // Check for the specific success response
                 //         if r == WorkUnitResponse::Finished {
-                //             info!("Replication bootstrap successful. Continuing with startup.");
+                //             info!("Bootstrap using replication was successful. Will start snapchain now...");
+                //             // Sleep for 5 seconds to allow any pending logs to be flushed and the gossip to shutdown and free the port
+                //             sleep(Duration::from_secs(5)).await;
                 //         } else {
                 //             error!(
                 //                 "Replication bootstrap stopped with status: {:?}. Exiting.",
@@ -363,7 +370,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 //         }
                 //     }
                 //     Err(e) => {
-                //         error!("Replication bootstrap failed:\n{}\nPlease clear the database directory and try again.", e);
+                //         error!("Replication bootstrap failed:\n{}\nPlease check your network connection and restart to resume.", e);
                 //         process::exit(1);
                 //     }
                 // }

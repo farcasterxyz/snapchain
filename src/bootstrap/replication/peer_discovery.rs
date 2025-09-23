@@ -8,7 +8,7 @@ use libp2p::swarm::SwarmEvent;
 use libp2p::PeerId;
 use prost::Message as _;
 use serde_json;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::bootstrap::replication::error::BootstrapError;
 use crate::bootstrap::replication::rpc_client::RpcClientsManager;
@@ -144,9 +144,12 @@ impl PeerDiscoverer {
         // Spawn validation (metadata height match) via RpcClientsManager::add_new_peer
         let rpc_manager = self.rpc_manager.clone();
         let incompatible = self.incompatible_peers.clone();
-        info!(peer = %peer_id, addr = %http_addr, "Discovered potential replication peer");
+        debug!(peer = %peer_id, addr = %http_addr, "Discovered potential replication peer");
         tokio::spawn(async move {
             match rpc_manager.add_new_peer(http_addr.clone()).await {
+                Ok(false) => {
+                    debug!(peer = %peer_id, addr = %http_addr, "Peer already known");
+                }
                 Ok(true) => {
                     info!(peer = %peer_id, addr = %http_addr, "Added new replication peer")
                 }
