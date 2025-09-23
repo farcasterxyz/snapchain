@@ -73,23 +73,23 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
         version: EngineVersion::V6,
     },
     VersionSchedule {
-        active_at: 1756141200, // 2026-08-25 5PM UTC
+        active_at: 1756141200, // 2025-08-25 5PM UTC
         version: EngineVersion::V7,
     },
     VersionSchedule {
-        active_at: 1756918800, // 2026-09-03 5PM UTC
+        active_at: 1756918800, // 2025-09-03 5PM UTC
         version: EngineVersion::V8,
     },
     VersionSchedule {
-        active_at: 1757523600, // 2026-09-10 5PM UTC
+        active_at: 1757523600, // 2025-09-10 5PM UTC
         version: EngineVersion::V9,
     },
     VersionSchedule {
-        active_at: 1758733200, // 2026-09-24 5PM UTC
+        active_at: 1758733200, // 2025-09-24 5PM UTC
         version: EngineVersion::V10,
     },
     VersionSchedule {
-        active_at: 1759338000, // 2026-10-01 5PM UTC
+        active_at: 1760547600, // 2025-10-15 5PM UTC
         version: EngineVersion::V11,
     },
 ]
@@ -109,23 +109,23 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
         version: EngineVersion::V6,
     },
     VersionSchedule {
-        active_at: 1755291600, // 2026-08-15 9PM UTC
+        active_at: 1755291600, // 2025-08-15 9PM UTC
         version: EngineVersion::V7,
     },
     VersionSchedule {
-        active_at: 1755709200, // 2026-08-20 5PM UTC
+        active_at: 1755709200, // 2025-08-20 5PM UTC
         version: EngineVersion::V8,
     },
     VersionSchedule {
-        active_at: 1756918800, // 2026-09-03 5PM UTC
+        active_at: 1756918800, // 2025-09-03 5PM UTC
         version: EngineVersion::V9,
     },
     VersionSchedule {
-        active_at: 1757523600, // 2026-09-10 5PM UTC
+        active_at: 1757523600, // 2025-09-10 5PM UTC
         version: EngineVersion::V10,
     },
     VersionSchedule {
-        active_at: 1758733200, // 2026-09-24 5PM UTC
+        active_at: 1758733200, // 2025-09-24 5PM UTC
         version: EngineVersion::V11,
     },
 ]
@@ -392,7 +392,7 @@ mod version_test {
             Some(1747352400)
         );
 
-        let time = FarcasterTime::from_unix_seconds(1759338000);
+        let time = FarcasterTime::from_unix_seconds(1760547600);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
             None

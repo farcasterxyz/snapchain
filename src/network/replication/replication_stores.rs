@@ -40,6 +40,10 @@ impl ReplicationStores {
         }
     }
 
+    pub fn network(&self) -> proto::FarcasterNetwork {
+        self.network.clone()
+    }
+
     pub fn get(&self, shard: u32, height: u64) -> Option<Stores> {
         match self.read_only_stores.read() {
             Ok(stores) => match stores.get(&shard) {
