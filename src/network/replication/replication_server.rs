@@ -50,29 +50,28 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
         let request = request.into_inner();
 
         // We store the snapshots by the data shards, so there's no snapshot for shard-0. That's OK,
-        // because for shard-0, we just need the highest block number, so get it from the block_store instead
+        // because for shard-0, we just need the block number to start syncing from, so get it from the block_store.
         let snapshots = if request.shard_id == 0 {
             let block = self
                 .block_stores
                 .block_store
                 .get_block_by_height(self.get_shard0_block_height())
-                .map_err(|e| Status::internal(format!("Failed to get block by height: {}", e)))?
-                .ok_or(Status::not_found("No blocks found in block store"))?;
+                .map_err(|e| Status::internal(format!("Failed to get block by height: {}", e)))?;
 
-            let block_clone = block.clone();
-
-            let block_header = block
-                .header
-                .ok_or(Status::not_found("No block header found"))?;
-            let block_height = block_header
-                .height
-                .ok_or(Status::not_found("No block height found"))?;
+            let block_header = block.as_ref().map(|b| b.header.clone()).flatten();
+            let height = block_header
+                .as_ref()
+                .map(|h| h.height)
+                .flatten()
+                .map(|h| h.block_number)
+                .unwrap_or(0); // Return 0 if no height, so client will sync from genesis (eg. devnet)
+            let timestamp = block_header.map(|h| h.timestamp).unwrap_or(0);
 
             vec![proto::ShardSnapshotMetadata {
                 shard_id: request.shard_id,
-                height: block_height.block_number,
-                timestamp: block_header.timestamp,
-                block: Some(block_clone),
+                height,
+                timestamp,
+                block,
                 shard_chunk: None,
                 num_items: 0, // We don't track number of items for shard-0
             }]
