@@ -986,13 +986,8 @@ mod tests {
         test_helper::commit_message(&mut engine1, &proof_message).await;
 
         // Now the user data add should succeed
-        let result = submit_message(&service, user_data_add).await;
-
-        let error = result.unwrap_err();
-        // Ensure that it's not a validation error, if it got as far as adding to the mempool, validation passed
-        // TODO: We should fix the test setup so adding to mempool does not fail
-        assert_eq!(error.code(), tonic::Code::Unavailable);
-        assert_eq!(error.message(), "unavailable/Error adding to mempool");
+        let result = submit_message(&service, user_data_add.clone()).await;
+        assert_eq!(result.unwrap().into_inner(), user_data_add);
     }
 
     #[tokio::test]
