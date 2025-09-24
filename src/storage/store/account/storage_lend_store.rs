@@ -1,3 +1,5 @@
+use tracing::warn;
+
 use super::{
     make_user_key,
     store::{Store, StoreDef},
@@ -318,8 +320,14 @@ impl StorageLendStore {
             proto::message_data::Body::LendStorageBody(lend_storage_body) => {
                 // Prune out the lend messages where storage is revoked so they don't consume storage.
                 if lend_storage_body.num_units == 0 {
-                    if let Some(event) = store.prune_message(&message, txn)? {
-                        events.push(event);
+                    match store.prune_message(&message, txn) {
+                        Ok(Some(event)) => {
+                            events.push(event);
+                        }
+                        Err(err) => {
+                            warn!("Error pruning storage lend {}", err.to_string())
+                        }
+                        Ok(None) => {}
                     }
                 }
             }
