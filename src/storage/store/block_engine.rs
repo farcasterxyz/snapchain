@@ -582,11 +582,12 @@ impl BlockEngine {
         &mut self,
         messages: Vec<MempoolMessage>,
         height: Height,
+        timestamp: Option<FarcasterTime>,
     ) -> BlockStateChange {
         let now = std::time::Instant::now();
         let mut txn = RocksDbTransactionBatch::new();
 
-        let timestamp = FarcasterTime::current();
+        let timestamp = timestamp.unwrap_or(FarcasterTime::current());
         let version = EngineVersion::version_for(&timestamp, self.network);
         let state_change = if version.is_enabled(ProtocolFeature::WriteDataToShardZero) {
             let result = self
@@ -759,9 +760,10 @@ impl BlockEngine {
         let height = block.header.as_ref().unwrap().height.unwrap();
         self.metrics.gauge("block_height", height.block_number);
         let block_timestamp = block.header.as_ref().unwrap().timestamp;
+        // If block timestamp is ahead of current (only in tests), don't overflow
         self.metrics.gauge(
             "block_delay_seconds",
-            FarcasterTime::current().to_u64() - block_timestamp,
+            FarcasterTime::current().to_u64().max(block_timestamp) - block_timestamp,
         );
         self.metrics.count(
             "block_shards",
