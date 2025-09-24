@@ -315,7 +315,7 @@ impl AdminService for MyAdminService {
         let local_state_store = self.local_state_store.clone();
 
         tokio::spawn(async move {
-            migrate_onchain_events(shard_stores, block_stores, mempool_tx, local_state_store)
+            migrate_onchain_events(shard_stores, block_stores, mempool_tx, local_state_store).await;
         });
 
         Ok(Response::new(Empty {}))
