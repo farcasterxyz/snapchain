@@ -854,7 +854,7 @@ impl ShardEngine {
                     {
                         error!(
                             seqnum = block_event.seqnum().to_string(),
-                            "error merging block event: {}",
+                            "Error merging block event: {}",
                             err.to_string()
                         );
                     } else {
