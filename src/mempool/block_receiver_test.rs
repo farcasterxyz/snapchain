@@ -140,7 +140,7 @@ mod tests {
         let mut blocks = vec![];
         for _ in 0..(num_heartbeats * 5) {
             let height = block_engine.get_confirmed_height().increment();
-            let state_change = block_engine.propose_state_change(vec![], height);
+            let state_change = block_engine.propose_state_change(vec![], height, None);
             let mut block = block_engine_test_helpers::validate_and_commit_state_change(
                 block_engine,
                 &state_change,

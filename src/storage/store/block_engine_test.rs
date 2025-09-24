@@ -39,6 +39,7 @@ mod tests {
         let state_change = block_engine.propose_state_change(
             vec![MempoolMessage::OnchainEvent(onchain_event.clone())],
             height,
+            None,
         );
         assert!(!state_change.new_state_root.is_empty());
         assert!(block_engine.trie_root_hash().is_empty());
@@ -54,7 +55,7 @@ mod tests {
     async fn test_empty_block() {
         let (mut block_engine, _temp_dir) = setup(None);
         let height = block_engine.get_confirmed_height().increment();
-        let state_change = block_engine.propose_state_change(vec![], height);
+        let state_change = block_engine.propose_state_change(vec![], height, None);
 
         assert_eq!(state_change.transactions.len(), 0);
         assert!(state_change.events.is_empty());
@@ -70,7 +71,7 @@ mod tests {
         // Test that the pipeline works while new features are not active on mainnet
         let (mut block_engine, _temp_dir) = setup(Some(FarcasterNetwork::Mainnet));
         let height = block_engine.get_confirmed_height().increment();
-        let state_change = block_engine.propose_state_change(vec![], height);
+        let state_change = block_engine.propose_state_change(vec![], height, None);
 
         assert_eq!(state_change.transactions.len(), 0);
         assert!(state_change.events.is_empty());
@@ -108,7 +109,7 @@ mod tests {
         let messages = vec![MempoolMessage::UserMessage(
             messages_factory::casts::create_cast_add(FID_FOR_TEST, "hi", None, None),
         )];
-        let state_change = block_engine.propose_state_change(messages, height);
+        let state_change = block_engine.propose_state_change(messages, height, None);
         assert_eq!(state_change.transactions.len(), 0);
         assert!(state_change.events.is_empty());
         assert!(state_change.new_state_root.is_empty());
@@ -137,7 +138,7 @@ mod tests {
         )];
 
         // The message is included in the block but doesn't impact trie state.
-        let state_change = block_engine.propose_state_change(messages, height);
+        let state_change = block_engine.propose_state_change(messages, height, None);
         assert_eq!(state_change.transactions.len(), 1);
         assert_eq!(state_change.new_state_root, initial_state_root);
 
@@ -152,7 +153,7 @@ mod tests {
         let height = block_engine.get_confirmed_height().increment();
         let invalid_hash = hex::decode("ffffffffffffffffffffffffffffffffffffffff").unwrap();
 
-        let mut state_change = block_engine.propose_state_change(vec![], height);
+        let mut state_change = block_engine.propose_state_change(vec![], height, None);
 
         let valid = block_engine.validate_state_change(&state_change, height);
         assert!(valid);
@@ -171,7 +172,7 @@ mod tests {
         let height = block_engine.get_confirmed_height().increment();
         let invalid_hash = hex::decode("ffffffffffffffffffffffffffffffffffffffff").unwrap();
 
-        let mut state_change = block_engine.propose_state_change(vec![], height);
+        let mut state_change = block_engine.propose_state_change(vec![], height, None);
 
         let valid = block_engine.validate_state_change(&state_change, height);
         assert!(valid);
@@ -216,13 +217,13 @@ mod tests {
         // The heartbeat interval is 5 blocks, generate the first 4 where there will be no events
         for _ in 0..4 {
             let height = block_engine.get_confirmed_height().increment();
-            let state_change = block_engine.propose_state_change(vec![], height);
+            let state_change = block_engine.propose_state_change(vec![], height, None);
             assert!(state_change.events.is_empty());
             validate_and_commit_state_change(&mut block_engine, &state_change);
         }
 
         let height = block_engine.get_confirmed_height().increment();
-        let state_change = block_engine.propose_state_change(vec![], height);
+        let state_change = block_engine.propose_state_change(vec![], height, None);
         assert_eq!(state_change.events.len(), 1);
         assert_eq!(state_change.events[0].data.as_ref().unwrap().seqnum, 1);
         assert_eq!(
@@ -235,14 +236,14 @@ mod tests {
         // The heartbeat interval is 5 blocks, generate the next 4 where there will be no events
         for _ in 0..4 {
             let height = block_engine.get_confirmed_height().increment();
-            let state_change = block_engine.propose_state_change(vec![], height);
+            let state_change = block_engine.propose_state_change(vec![], height, None);
             assert!(state_change.events.is_empty());
             validate_and_commit_state_change(&mut block_engine, &state_change);
         }
 
         // Check that seqnum is incremented properly
         let height = block_engine.get_confirmed_height().increment();
-        let state_change = block_engine.propose_state_change(vec![], height);
+        let state_change = block_engine.propose_state_change(vec![], height, None);
         assert_eq!(state_change.events.len(), 1);
         assert_eq!(state_change.events[0].data.as_ref().unwrap().seqnum, 2);
         assert_eq!(
@@ -486,7 +487,7 @@ mod tests {
             Some(lend_message1.data.as_ref().unwrap().timestamp + 1),
             None,
         );
-        let block2 = commit_message(&mut block_engine, &lend_message2, Validity::Valid);
+        let block2 = commit_message(&mut block_engine, &lend_message2, Validity::Invalid); // Mark as invalid because we don't expect this message to be in the trie
         assert_merge_message_event(&block2.events[0], &lend_message2);
 
         // Verify balances after taking back storage
@@ -502,6 +503,14 @@ mod tests {
             StorageUnitType::UnitType2025,
             0,
         ); // No more borrowed storage
+
+        // The old message shouldn't get merged again if it's far enough in the past
+        commit_message_at(
+            &mut block_engine,
+            &lend_message1,
+            FarcasterTime::new(lend_message1.data.as_ref().unwrap().timestamp as u64 + (60 * 11)),
+            Validity::Invalid,
+        );
     }
 
     #[tokio::test]

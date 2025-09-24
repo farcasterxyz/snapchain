@@ -676,4 +676,20 @@ mod tests {
         );
         assert_validation_error(&msg, ValidationError::ExceededMaxStorageUnits);
     }
+
+    #[test]
+    fn test_storage_lend_timestamp_too_far_in_past() {
+        let current_time = FarcasterTime::current();
+
+        let msg = create_storage_lend(
+            1234, // from_fid
+            5678, // to_fid
+            100,  // units
+            proto::StorageUnitType::UnitTypeLegacy,
+            Some((current_time.decr_by(60 * 20).to_u64()) as u32), // Set timestamp to 20 minutes ago (7200 seconds = 2 * 60 * 60)
+            None,
+        );
+
+        assert_validation_error(&msg, ValidationError::TimestampTooFarInThePast);
+    }
 }

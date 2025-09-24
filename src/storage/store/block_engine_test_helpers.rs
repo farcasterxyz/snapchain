@@ -98,8 +98,11 @@ pub fn validate_and_commit_state_change(
 
 pub fn commit_event(engine: &mut BlockEngine, event: &OnChainEvent) -> Block {
     let height = engine.get_confirmed_height().increment();
-    let state_change =
-        engine.propose_state_change(vec![MempoolMessage::OnchainEvent(event.clone())], height);
+    let state_change = engine.propose_state_change(
+        vec![MempoolMessage::OnchainEvent(event.clone())],
+        height,
+        None,
+    );
 
     validate_and_commit_state_change(engine, &state_change)
 }
@@ -117,7 +120,7 @@ pub fn commit_message(
 ) -> Block {
     let height = engine.get_confirmed_height().increment();
     let state_change =
-        engine.propose_state_change(vec![MempoolMessage::UserMessage(msg.clone())], height);
+        engine.propose_state_change(vec![MempoolMessage::UserMessage(msg.clone())], height, None);
     if state_change.transactions.is_empty() {
         panic!("Failed to propose message");
     }
@@ -137,6 +140,33 @@ pub fn commit_message(
     block
 }
 
+pub fn commit_message_at(
+    engine: &mut BlockEngine,
+    msg: &crate::proto::Message,
+    timestamp: FarcasterTime,
+    validity: Validity,
+) -> Block {
+    let height = engine.get_confirmed_height().increment();
+    let state_change = engine.propose_state_change(
+        vec![MempoolMessage::UserMessage(msg.clone())],
+        height,
+        Some(timestamp),
+    );
+    if state_change.transactions.is_empty() {
+        panic!("Failed to propose message");
+    }
+    let block = validate_and_commit_state_change(engine, &state_change);
+    let in_trie = TrieKey::for_message(&msg)
+        .iter()
+        .all(|key| engine.trie_key_exists(&merkle_trie::Context::new(), &key));
+    let should_be_in_trie = match validity {
+        Validity::Valid => true,
+        Validity::Invalid => false,
+    };
+    assert_eq!(in_trie, should_be_in_trie);
+    block
+}
+
 pub fn commit_messages(
     engine: &mut BlockEngine,
     msgs: Vec<(&crate::proto::Message, Validity)>,
@@ -150,6 +180,7 @@ pub fn commit_messages(
             .map(|(msg, _)| MempoolMessage::UserMessage(msg.clone()))
             .collect_vec(),
         height,
+        None,
     );
 
     if state_change.transactions.is_empty() {

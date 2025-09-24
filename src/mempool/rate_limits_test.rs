@@ -36,6 +36,7 @@ mod tests {
             user_data: 10000,
             user_name_proofs: 10000,
             verifications: 10000,
+            storage_lends: 10000,
         })
         .await;
 
@@ -56,7 +57,7 @@ mod tests {
             statsd_client(),
         );
 
-        for _ in 0..6000 {
+        for _ in 0..7000 {
             assert!(rate_limits.consume_for_fid(engine.shard_id(), FID_FOR_TEST))
         }
 
@@ -76,6 +77,7 @@ mod tests {
             user_data: 1000,
             user_name_proofs: 1000,
             verifications: 1000,
+            storage_lends: 1000,
         })
         .await;
 
@@ -96,7 +98,7 @@ mod tests {
             statsd_client(),
         );
 
-        for _ in 0..600 {
+        for _ in 0..700 {
             assert!(rate_limits.consume_for_fid(engine.shard_id(), FID_FOR_TEST))
         }
 
@@ -117,6 +119,7 @@ mod tests {
             user_data: 1000,
             user_name_proofs: 1000,
             verifications: 1000,
+            storage_lends: 1000,
         })
         .await;
 
@@ -140,7 +143,7 @@ mod tests {
         );
 
         for fid in FID_FOR_TEST..FID_FOR_TEST + 11 {
-            for _ in 0..600 {
+            for _ in 0..700 {
                 assert!(rate_limits.consume_for_fid(engine.shard_id(), fid))
             }
         }
@@ -161,6 +164,7 @@ mod tests {
             user_data: 1,
             user_name_proofs: 1,
             verifications: 1,
+            storage_lends: 1,
         })
         .await;
 

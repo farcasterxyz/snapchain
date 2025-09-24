@@ -208,6 +208,10 @@ pub fn validate_message(
             validate_frame_action_body(&frame_action_body)?;
         }
         Some(proto::message_data::Body::LendStorageBody(lend_storage_body)) => {
+            // We have this backdating check for storage lends because we prune out removes eagerly and don't want people to reconcile old storage lends successfully.
+            if message_data.timestamp < block_timestamp.decr_by(60 * 10).to_u64() as u32 {
+                return Err(ValidationError::TimestampTooFarInThePast);
+            }
             validate_lend_storage_body(&lend_storage_body)?;
         }
         None => {}

@@ -278,16 +278,22 @@ impl BlockEngine {
         &self,
         message: &proto::Message,
         txn_batch: &mut RocksDbTransactionBatch,
-    ) -> Result<proto::HubEvent, MessageValidationError> {
+    ) -> Result<Vec<proto::HubEvent>, MessageValidationError> {
         match message.msg_type() {
-            MessageType::LendStorage => {
-                Ok(self.stores.storage_lend_store.merge(message, txn_batch)?)
-            }
+            MessageType::LendStorage => Ok(StorageLendStore::merge(
+                &self.stores.storage_lend_store,
+                message,
+                txn_batch,
+            )?),
             _ => return Err(MessageValidationError::InvalidMessageType),
         }
     }
 
-    fn on_merge_message(storage_slot: &mut StorageSlot, merge_message_body: &MergeMessageBody) {
+    fn on_merge_message(
+        &mut self,
+        storage_slot: &mut StorageSlot,
+        merge_message_body: &MergeMessageBody,
+    ) -> Result<(), BlockEngineError> {
         if let Some(added_message) = &merge_message_body.message {
             match added_message.data.as_ref().unwrap().body.as_ref().unwrap() {
                 proto::message_data::Body::LendStorageBody(lend_storage_body) => {
@@ -312,6 +318,8 @@ impl BlockEngine {
                 _ => {}
             }
         }
+
+        Ok(())
     }
 
     pub(crate) fn replay_snapchain_txn(
@@ -350,19 +358,19 @@ impl BlockEngine {
                 Ok(()) => match message.msg_type() {
                     MessageType::LendStorage => {
                         if version.is_enabled(ProtocolFeature::StorageLending) {
-                            if let Ok(event) = self.merge_message(message, txn_batch) {
-                                match event.body.as_ref().unwrap() {
-                                    proto::hub_event::Body::MergeMessageBody(
-                                        merge_message_body,
-                                    ) => {
-                                        Self::on_merge_message(
+                            if let Ok(events) = self.merge_message(message, txn_batch) {
+                                for event in &events {
+                                    match event.body.as_ref().unwrap() {
+                                        proto::hub_event::Body::MergeMessageBody(
+                                            merge_message_body,
+                                        ) => self.on_merge_message(
                                             &mut storage_slot,
                                             &merge_message_body,
-                                        );
+                                        )?,
+                                        _ => {}
                                     }
-                                    _ => {}
                                 }
-                                hub_events.push(event);
+                                hub_events.extend(events);
                             }
                         }
                     }
@@ -377,8 +385,6 @@ impl BlockEngine {
                 }
             }
         }
-
-        // TODO(aditi): We don't support pruning for any messages processed by shard 0 yet.
 
         for event in &hub_events {
             self.trie
@@ -576,11 +582,12 @@ impl BlockEngine {
         &mut self,
         messages: Vec<MempoolMessage>,
         height: Height,
+        timestamp: Option<FarcasterTime>,
     ) -> BlockStateChange {
         let now = std::time::Instant::now();
         let mut txn = RocksDbTransactionBatch::new();
 
-        let timestamp = FarcasterTime::current();
+        let timestamp = timestamp.unwrap_or(FarcasterTime::current());
         let version = EngineVersion::version_for(&timestamp, self.network);
         let state_change = if version.is_enabled(ProtocolFeature::WriteDataToShardZero) {
             let result = self
@@ -753,9 +760,10 @@ impl BlockEngine {
         let height = block.header.as_ref().unwrap().height.unwrap();
         self.metrics.gauge("block_height", height.block_number);
         let block_timestamp = block.header.as_ref().unwrap().timestamp;
+        // If block timestamp is ahead of current (only in tests), don't overflow
         self.metrics.gauge(
             "block_delay_seconds",
-            FarcasterTime::current().to_u64() - block_timestamp,
+            FarcasterTime::current().to_u64().max(block_timestamp) - block_timestamp,
         );
         self.metrics.count(
             "block_shards",

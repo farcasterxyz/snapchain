@@ -58,6 +58,7 @@ pub mod limits {
             user_data: 0,
             user_name_proofs: 0,
             verifications: 0,
+            storage_lends: 0,
         }
     }
 
@@ -69,6 +70,7 @@ pub mod limits {
             user_data: 1,
             user_name_proofs: 1,
             verifications: 1,
+            storage_lends: 1,
         }
     }
 
@@ -80,6 +82,7 @@ pub mod limits {
             user_data: 4,
             user_name_proofs: 2,
             verifications: 2,
+            storage_lends: 1,
         }
     }
 
@@ -93,6 +96,7 @@ pub mod limits {
             user_data: 5,
             user_name_proofs: 5,
             verifications: 5,
+            storage_lends: 1,
         }
     }
 
@@ -104,6 +108,7 @@ pub mod limits {
             user_data: u32::MAX,
             user_name_proofs: u32::MAX,
             verifications: u32::MAX,
+            storage_lends: u32::MAX,
         }
     }
 

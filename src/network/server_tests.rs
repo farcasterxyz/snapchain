@@ -1325,7 +1325,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.get_ref().units, 0);
-        assert_eq!(response.get_ref().limits.len(), 6);
+        assert_eq!(response.get_ref().limits.len(), 7);
         for limit in response.get_ref().limits.iter() {
             assert_eq!(limit.limit, 0);
             assert_eq!(limit.used, 0);
@@ -1437,6 +1437,15 @@ mod tests {
             .filter(|limit| limit.store_type() == proto::StoreType::Links)
             .collect::<Vec<_>>()[0];
         assert_eq!(links_limit.used, 1);
+
+        let storage_lends_limit = response
+            .get_ref()
+            .limits
+            .iter()
+            .filter(|limit| limit.store_type() == proto::StoreType::StorageLends)
+            .collect::<Vec<_>>()[0];
+        assert_eq!(storage_lends_limit.limit, 3);
+        assert_eq!(storage_lends_limit.used, 0);
     }
 
     #[tokio::test]
