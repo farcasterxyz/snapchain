@@ -48,7 +48,7 @@ pub enum BlockEngineError {
     #[error(transparent)]
     HubError(#[from] HubError),
 }
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum MessageValidationError {
     #[error("message has no data")]
     NoMessageData,
@@ -70,9 +70,6 @@ pub enum MessageValidationError {
 
     #[error(transparent)]
     MessageValidationError(#[from] validations::error::ValidationError),
-
-    #[error(transparent)]
-    OnchainEventError(#[from] OnchainEventStorageError),
 }
 
 #[derive(Clone)]
@@ -83,10 +80,11 @@ pub struct BlockStores {
     pub storage_lend_store: Store<StorageLendStoreDef>,
     pub network: FarcasterNetwork,
     pub db: Arc<RocksDB>,
+    pub trie: MerkleTrie,
 }
 
 impl BlockStores {
-    pub fn new(db: Arc<RocksDB>, network: FarcasterNetwork) -> Self {
+    pub fn new(db: Arc<RocksDB>, trie: MerkleTrie, network: FarcasterNetwork) -> Self {
         let store_event_handler = StoreEventHandler::new();
         BlockStores {
             block_store: BlockStore::new(db.clone()),
@@ -95,6 +93,7 @@ impl BlockStores {
             storage_lend_store: StorageLendStore::new(db.clone(), store_event_handler.clone(), 100),
             network,
             db: db.clone(),
+            trie,
         }
     }
     pub fn get_block_by_event_seqnum(&self, seqnum: u64) -> Option<Block> {
@@ -140,8 +139,7 @@ impl BlockStores {
 
 pub struct BlockEngine {
     stores: BlockStores,
-    trie: MerkleTrie,
-    network: FarcasterNetwork,
+    pub network: FarcasterNetwork,
     pub mempool_poller: MempoolPoller,
     shard_id: u64,
     db: Arc<RocksDB>,
@@ -169,8 +167,7 @@ impl BlockEngine {
     ) -> Self {
         trie.initialize(&db).unwrap();
         BlockEngine {
-            stores: BlockStores::new(db.clone(), network),
-            trie,
+            stores: BlockStores::new(db.clone(), trie, network),
             shard_id: 0,
             mempool_poller: MempoolPoller {
                 max_messages_per_block,
@@ -193,11 +190,12 @@ impl BlockEngine {
     }
 
     pub fn trie_root_hash(&self) -> Vec<u8> {
-        self.trie.root_hash().unwrap()
+        self.stores.trie.root_hash().unwrap()
     }
 
     pub fn trie_key_exists(&mut self, ctx: &merkle_trie::Context, sync_id: &Vec<u8>) -> bool {
-        self.trie
+        self.stores
+            .trie
             .exists(ctx, &self.db, sync_id.as_ref())
             .unwrap_or_else(|err| {
                 error!("Error checking if sync id exists: {:?}", err);
@@ -258,8 +256,10 @@ impl BlockEngine {
                     .get_storage_slot_for_fid(message_data.fid, &vec![], false, false)
                     .ok_or(MessageValidationError::InsufficientStorage)?;
 
-                // Restricts who can lend storage to some reasonable set of users
-                if total_storage_purchased.units_for(lend_storage.unit_type()) < 100 {
+                // Restricts who can lend storage to some reasonable set of users. Don't enforce this limit in devnet and testnet so we can test with fewer storage units.
+                if self.network == FarcasterNetwork::Mainnet
+                    && total_storage_purchased.units_for(lend_storage.unit_type()) < 100
+                {
                     return Err(MessageValidationError::InsufficientStorage);
                 }
 
@@ -329,8 +329,9 @@ impl BlockEngine {
         txn_batch: &mut RocksDbTransactionBatch,
         timestamp: &FarcasterTime,
         version: EngineVersion,
-    ) -> Result<(Vec<u8>, Vec<HubEvent>), BlockEngineError> {
+    ) -> Result<(Vec<u8>, Vec<HubEvent>, Vec<MessageValidationError>), BlockEngineError> {
         let mut hub_events = vec![];
+        let mut validation_errors = vec![];
         for message in &snapchain_txn.system_messages {
             if let Some(ref onchain_event) = message.on_chain_event {
                 match self
@@ -382,20 +383,23 @@ impl BlockEngine {
                         "Error merging message {}",
                         err.to_string()
                     );
+                    validation_errors.push(err);
                 }
             }
         }
 
         for event in &hub_events {
-            self.trie
+            self.stores
+                .trie
                 .update_for_event(trie_ctx, &self.db, &event, txn_batch)?;
         }
 
         let account_root =
-            self.trie
+            self.stores
+                .trie
                 .get_hash(&self.db, txn_batch, &TrieKey::for_fid(snapchain_txn.fid))?;
 
-        Ok((account_root, hub_events))
+        Ok((account_root, hub_events, validation_errors))
     }
 
     fn heartbeat_block_interval(&self) -> u64 {
@@ -548,7 +552,7 @@ impl BlockEngine {
 
         let mut all_hub_events = vec![];
         for snapchain_txn in &mut snapchain_txns {
-            let (account_root, hub_events) = self.replay_snapchain_txn(
+            let (account_root, hub_events, _) = self.replay_snapchain_txn(
                 &merkle_trie::Context::new(),
                 &snapchain_txn,
                 txn_batch,
@@ -565,7 +569,7 @@ impl BlockEngine {
         self.metrics
             .publish_transaction_counts(&snapchain_txns, ProposalSource::Propose);
 
-        let new_root_hash = self.trie.root_hash()?;
+        let new_root_hash = self.stores.trie.root_hash()?;
 
         let result = BlockStateChange {
             timestamp: timestamp.clone(),
@@ -594,7 +598,7 @@ impl BlockEngine {
                 .prepare_proposal(&mut txn, messages, height, &timestamp, version)
                 .unwrap();
 
-            self.trie.reload(&self.db).unwrap();
+            self.stores.trie.reload(&self.db).unwrap();
             result
         } else {
             BlockStateChange {
@@ -631,7 +635,7 @@ impl BlockEngine {
         match self.get_last_block() {
             None => { // There are places where it's hard to provide a parent hash-- e.g. tests so make this an option and skip validation if not present
             }
-            Some(block) => match self.trie.root_hash() {
+            Some(block) => match self.stores.trie.root_hash() {
                 Err(err) => {
                     warn!(
                         source = source.to_string(),
@@ -655,7 +659,7 @@ impl BlockEngine {
 
         let mut all_hub_events = vec![];
         for snapchain_txn in transactions {
-            let (account_root, hub_events) = self.replay_snapchain_txn(
+            let (account_root, hub_events, _) = self.replay_snapchain_txn(
                 &merkle_trie::Context::new(),
                 snapchain_txn,
                 txn_batch,
@@ -692,7 +696,7 @@ impl BlockEngine {
             return Err(BlockEngineError::EventsHashMismatch);
         }
 
-        let root1 = self.trie.root_hash()?;
+        let root1 = self.stores.trie.root_hash()?;
         if &root1 != shard_root {
             warn!(
                 shard_id = self.shard_id,
@@ -742,7 +746,7 @@ impl BlockEngine {
             error!("State change validation failed: {}", err);
         }
 
-        self.trie.reload(&self.db).unwrap();
+        self.stores.trie.reload(&self.db).unwrap();
         let elapsed = now.elapsed();
         self.metrics
             .time_with_shard("validate_time", elapsed.as_millis() as u64);
@@ -800,7 +804,7 @@ impl BlockEngine {
                     if result.is_err() {
                         error!("Failed to store block: {:?}", result.err());
                     }
-                    self.trie.reload(&self.db).unwrap();
+                    self.stores.trie.reload(&self.db).unwrap();
                     self.metrics
                         .publish_transaction_counts(&block.transactions, ProposalSource::Commit);
                     self.metrics.count(
@@ -886,5 +890,40 @@ impl BlockEngine {
             .iter()
             .find(|witness| witness.height.unwrap().shard_index == shard_id)
             .cloned()
+    }
+
+    pub fn simulate_message(
+        &mut self,
+        message: &proto::Message,
+    ) -> Result<(), MessageValidationError> {
+        let mut txn = RocksDbTransactionBatch::new();
+        let snapchain_txn = Transaction {
+            fid: message.fid() as u64,
+            account_root: vec![],
+            system_messages: vec![],
+            user_messages: vec![message.clone()],
+        };
+        let version = EngineVersion::current(self.network);
+        let (_, _, errors) = self
+            .replay_snapchain_txn(
+                &merkle_trie::Context::new(),
+                &snapchain_txn,
+                &mut txn,
+                &FarcasterTime::current(),
+                version,
+            )
+            .map_err(|err| {
+                MessageValidationError::HubError(HubError::invalid_internal_state(&err.to_string()))
+            })?;
+
+        self.stores.trie.reload(&self.db).map_err(|e| {
+            MessageValidationError::HubError(HubError::invalid_internal_state(&e.to_string()))
+        })?;
+
+        if !errors.is_empty() {
+            return Err(errors[0].clone());
+        } else {
+            Ok(())
+        }
     }
 }

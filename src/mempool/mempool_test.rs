@@ -70,7 +70,7 @@ mod tests {
             engines.insert(i, engine);
         }
 
-        let (block_engine, _) = block_engine_test_helpers::setup(None);
+        let (block_engine, _) = block_engine_test_helpers::setup();
 
         let gossip = match config {
             Some(config) => Some(

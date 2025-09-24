@@ -40,12 +40,17 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     let (mut engine, _tmpdir) = test_helper::new_engine_with_options(test_helper::EngineOptions {
         limits: Some(test_helper::limits::unlimited_store_limits()),
-        messages_request_tx: Some(messages_request_tx),
+        messages_request_tx: Some(messages_request_tx.clone()),
         ..Default::default()
     })
     .await;
 
-    let (block_engine, _) = block_engine_test_helpers::setup(None);
+    let (block_engine, _) = block_engine_test_helpers::setup_with_options(
+        block_engine_test_helpers::BlockEngineOptions {
+            messages_request_tx: Some(messages_request_tx.clone()),
+            ..Default::default()
+        },
+    );
 
     let statsd_client = StatsdClientWrapper::new(
         cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),

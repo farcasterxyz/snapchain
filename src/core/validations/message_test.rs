@@ -686,7 +686,7 @@ mod tests {
             5678, // to_fid
             100,  // units
             proto::StorageUnitType::UnitTypeLegacy,
-            Some((current_time.decr_by(60 * 20).to_u64()) as u32), // Set timestamp to 20 minutes ago (7200 seconds = 2 * 60 * 60)
+            Some((current_time.decr_by(60 * 20).to_u64()) as u32), // Set timestamp to 20 minutes ago
             None,
         );
 

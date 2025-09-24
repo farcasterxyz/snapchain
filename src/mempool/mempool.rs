@@ -12,6 +12,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
+use crate::mempool::routing;
 use crate::proto::{FarcasterNetwork, OnChainEventType};
 use crate::storage::store::block_engine::BlockStores;
 use crate::{
@@ -278,6 +279,7 @@ pub struct ReadNodeMempool {
     mempool_rx: mpsc::Receiver<MempoolRequest>,
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     statsd_client: StatsdClientWrapper,
+    network: FarcasterNetwork,
 }
 
 impl ReadNodeMempool {
@@ -288,6 +290,7 @@ impl ReadNodeMempool {
         block_stores: BlockStores,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         statsd_client: StatsdClientWrapper,
+        network: FarcasterNetwork,
     ) -> Self {
         ReadNodeMempool {
             shard_stores,
@@ -297,6 +300,7 @@ impl ReadNodeMempool {
             message_router: Box::new(ShardRouter {}),
             gossip_tx,
             statsd_client,
+            network,
         }
     }
 
@@ -374,9 +378,50 @@ impl ReadNodeMempool {
         }
     }
 
-    fn message_is_valid(&mut self, message: &MempoolMessage) -> Result<(), HubError> {
-        let fid = message.fid();
-        let shard = self.message_router.route_fid(fid, self.num_shards);
+    fn route_mempool_message(&self, message: &MempoolMessage) -> Vec<u32> {
+        let fid_shard = self
+            .message_router
+            .route_fid(message.fid(), self.num_shards);
+
+        // Fname transfers are mirrored to both the sender and receiver shard.
+        match message {
+            MempoolMessage::FnameTransfer(_fname_transfer) => {
+                let version = EngineVersion::current(self.network);
+                // Send the username transfer to all other shards, transfers from a->b->c are
+                // correctly tracked. Due to current limitations of the engine, if we transfer from
+                // shard 1 to shard 2, and then transfer within shard 2, we will keep the transfer
+                // around forever on shard 1. See test_fname_transfer for an example.
+                if version.is_enabled(ProtocolFeature::UsernameShardRoutingFix) {
+                    (1..self.num_shards + 1).collect()
+                } else {
+                    vec![fid_shard]
+                }
+            }
+            MempoolMessage::OnchainEventForMigration(_) => {
+                // TODO(aditi): Remove this codepath after migrating onchain events to shard 0
+                vec![0]
+            }
+            MempoolMessage::OnchainEvent(_) => {
+                // TODO(aditi): Onchain events need to get to shard 0 so that we can support other messages (lend storage) in shard 0.
+                vec![fid_shard]
+            }
+            MempoolMessage::BlockEvent {
+                for_shard,
+                message: _,
+            } => {
+                vec![*for_shard]
+            }
+            MempoolMessage::UserMessage(message) => {
+                vec![routing::route_message(
+                    &self.message_router,
+                    message,
+                    self.num_shards,
+                )]
+            }
+        }
+    }
+
+    fn message_is_valid(&mut self, shard: u32, message: &MempoolMessage) -> Result<(), HubError> {
         if self.message_already_exists(shard, message) {
             return Err(HubError::duplicate("message has already been merged"));
         }
@@ -389,7 +434,17 @@ impl ReadNodeMempool {
                 MempoolRequest::AddMessage(message, source, reply_to) => {
                     self.statsd_client
                         .count("read_mempool.messages_received", 1);
-                    let result = self.message_is_valid(&message);
+                    let results: Vec<Result<(), HubError>> = self
+                        .route_mempool_message(&message)
+                        .iter()
+                        .map(|shard| self.message_is_valid(*shard, &message))
+                        .collect();
+                    // If the message is valid on any shard then keep it. Else all shards return errors and just take the first error.
+                    let result = if results.iter().any(|res| res.is_ok()) {
+                        Ok(())
+                    } else {
+                        results[0].clone()
+                    };
                     if result.is_ok() {
                         self.gossip_message(message, source).await;
                         self.statsd_client
@@ -421,7 +476,6 @@ pub struct Mempool {
     statsd_client: StatsdClientWrapper,
     read_node_mempool: ReadNodeMempool,
     rate_limits: Option<RateLimits>,
-    network: FarcasterNetwork,
 }
 
 impl Mempool {
@@ -458,9 +512,9 @@ impl Mempool {
                 block_stores,
                 gossip_tx,
                 statsd_client.clone(),
+                network,
             ),
             statsd_client,
-            network,
         }
     }
 
@@ -549,40 +603,7 @@ impl Mempool {
         message: MempoolMessage,
         source: MempoolSource,
     ) -> Result<(), HubError> {
-        let fid = message.fid();
-
-        let fid_shard = self
-            .read_node_mempool
-            .message_router
-            .route_fid(fid, self.read_node_mempool.num_shards);
-
-        // Fname transfers are mirrored to both the sender and receiver shard.
-        let shard_ids = if let MempoolMessage::FnameTransfer(_fname_transfer) = &message {
-            let version = EngineVersion::current(self.network);
-            // Send the username transfer to all other shards, transfers from a->b->c are
-            // correctly tracked. Due to current limitations of the engine, if we transfer from
-            // shard 1 to shard 2, and then transfer within shard 2, we will keep the transfer
-            // around forever on shard 1. See test_fname_transfer for an example.
-            if version.is_enabled(ProtocolFeature::UsernameShardRoutingFix) {
-                (1..self.read_node_mempool.num_shards + 1).collect()
-            } else {
-                vec![fid_shard]
-            }
-        } else if let MempoolMessage::OnchainEventForMigration(_) = &message {
-            // TODO(aditi): Remove this codepath after migrating onchain events to shard 0
-            vec![0]
-        } else if let MempoolMessage::OnchainEvent(_) = &message {
-            // TODO(aditi): Onchain events need to get to shard 0 so that we can support other messages (lend storage) in shard 0.
-            vec![fid_shard]
-        } else if let MempoolMessage::BlockEvent {
-            for_shard,
-            message: _,
-        } = &message
-        {
-            vec![*for_shard]
-        } else {
-            vec![fid_shard]
-        };
+        let shard_ids = self.read_node_mempool.route_mempool_message(&message);
 
         let mut errors = vec![];
         for shard_id in shard_ids {

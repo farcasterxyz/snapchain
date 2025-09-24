@@ -1,4 +1,5 @@
 use crate::core::types::FidOnDisk;
+use crate::proto::{self, MessageType};
 use sha2::{Digest, Sha256};
 
 pub trait MessageRouter: Send + Sync {
@@ -31,5 +32,17 @@ impl MessageRouter for EvenOddRouterForTest {
         } else {
             1
         }
+    }
+}
+
+pub fn route_message(
+    router: &Box<dyn MessageRouter>,
+    message: &proto::Message,
+    num_shards: u32,
+) -> u32 {
+    if message.msg_type() == MessageType::LendStorage {
+        0
+    } else {
+        router.route_fid(message.fid(), num_shards)
     }
 }

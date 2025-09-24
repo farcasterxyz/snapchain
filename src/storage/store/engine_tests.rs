@@ -3875,7 +3875,6 @@ mod tests {
             vec![&create_merge_message_event(lend_message.clone(), 2)],
         )
         .await;
-
         // Verify the lender's storage was returned
         let borrower_storage = engine
             .get_stores()
