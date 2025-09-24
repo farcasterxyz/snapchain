@@ -146,7 +146,7 @@ pub enum ValidationError {
     MissingEmbed,
     #[error("timestamp more than 10 mins in the future")]
     TimestampTooFarInFuture,
-    #[error("timestamp more than 1 hour in the past")]
+    #[error("timestamp more than 10 mins in the past")]
     TimestampTooFarInThePast,
     #[error(transparent)]
     HubError(#[from] HubError),
