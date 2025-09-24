@@ -31,8 +31,8 @@ impl ReplicationServer {
     /// after this block, and we need the client to get them and merge them properly
     fn get_shard0_block_height(&self) -> u64 {
         match self.replicator.network() {
-            proto::FarcasterNetwork::Mainnet => 15124000, // ~Sep 21, 2025
-            proto::FarcasterNetwork::Testnet => 15030000, // ~Sep 21, 2025
+            proto::FarcasterNetwork::Mainnet => 13396000, // ~Sep 03, 2025
+            proto::FarcasterNetwork::Testnet => 13302000, // ~Sep 03, 2025
             _ => 0, // For devnet, we can just return 0 and let the client sync from genesis
         }
     }
