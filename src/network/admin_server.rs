@@ -1,5 +1,6 @@
 use crate::connectors::fname::FnameRequest;
 use crate::connectors::onchain_events::OnchainEventsRequest;
+use crate::jobs::migrate_onchain_events::migrate_onchain_events;
 use crate::jobs::snapshot_upload::upload_snapshot;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::network::rpc_extensions::authenticate_request;
@@ -7,11 +8,13 @@ use crate::network::server::MEMPOOL_ADD_REQUEST_TIMEOUT;
 use crate::proto::admin_service_server::AdminService;
 use crate::proto::{
     self, Empty, FarcasterNetwork, FnameTransfer, OnChainEvent, RetryFnameRequest,
-    RetryOnchainEventsRequest, UploadSnapshotRequest, UserNameProof,
+    RetryOnchainEventsRequest, RunOnchainEventsMigrationRequest, UploadSnapshotRequest,
+    UserNameProof,
 };
 use crate::storage;
 use crate::storage::store::block_engine::BlockStores;
 use crate::storage::store::mempool_poller::MempoolMessage;
+use crate::storage::store::node_local_state::LocalStateStore;
 use crate::storage::store::stores::Stores;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use rocksdb;
@@ -33,6 +36,7 @@ pub struct MyAdminService {
     block_stores: BlockStores,
     fc_network: FarcasterNetwork,
     statsd_client: StatsdClientWrapper,
+    local_state_store: LocalStateStore,
 }
 
 #[derive(Debug, Error)]
@@ -55,6 +59,7 @@ impl MyAdminService {
         snapshot_config: storage::db::snapshot::Config,
         fc_network: FarcasterNetwork,
         statsd_client: StatsdClientWrapper,
+        local_state_store: LocalStateStore,
     ) -> Self {
         let mut allowed_users = HashMap::new();
         for auth in rpc_auth.split(",") {
@@ -74,6 +79,7 @@ impl MyAdminService {
             snapshot_config,
             fc_network,
             statsd_client,
+            local_state_store,
         }
     }
 
@@ -288,6 +294,28 @@ impl AdminService for MyAdminService {
             {
                 error!("Error uploading snapshot {}", err.to_string());
             }
+        });
+
+        Ok(Response::new(Empty {}))
+    }
+
+    async fn run_onchain_events_migration(
+        &self,
+        request: Request<RunOnchainEventsMigrationRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        authenticate_request(&request, &self.allowed_users)?;
+
+        let shard_stores = self
+            .shard_stores
+            .get(&(request.into_inner().shard_id as u32))
+            .ok_or(Status::invalid_argument("invalid shard id"))?
+            .clone();
+        let block_stores = self.block_stores.clone();
+        let mempool_tx = self.mempool_tx.clone();
+        let local_state_store = self.local_state_store.clone();
+
+        tokio::spawn(async move {
+            migrate_onchain_events(shard_stores, block_stores, mempool_tx, local_state_store)
         });
 
         Ok(Response::new(Empty {}))

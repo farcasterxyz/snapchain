@@ -55,6 +55,7 @@ async fn start_servers(
     block_stores: BlockStores,
     chain_clients: ChainClients,
     replicator: Option<Arc<replication::replicator::Replicator>>,
+    local_state_store: LocalStateStore,
 ) {
     let grpc_addr = app_config.rpc_address.clone();
     let grpc_socket_addr: SocketAddr = grpc_addr.parse().unwrap();
@@ -69,6 +70,7 @@ async fn start_servers(
         app_config.snapshot.clone(),
         app_config.fc_network,
         statsd_client.clone(),
+        local_state_store,
     );
 
     let service = Arc::new(MyHubService::new(
@@ -180,8 +182,6 @@ async fn schedule_background_jobs(
     block_stores: BlockStores,
     sync_complete_rx: watch::Receiver<bool>,
     statsd_client: StatsdClientWrapper,
-    mempool_tx: mpsc::Sender<MempoolRequest>,
-    local_state_store: LocalStateStore,
 ) {
     let sched = JobScheduler::new().await.unwrap();
     let mut jobs = vec![];
@@ -219,24 +219,6 @@ async fn schedule_background_jobs(
         )
         .unwrap();
         jobs.push(snapshot_upload_job);
-    }
-
-    // Add onchain events migration jobs if enabled
-    if app_config.onchain_events_migration_enabled && !app_config.read_node {
-        // Create one migration job per shard
-        for shard_store in shard_stores.values() {
-            // Only migrate from non-zero shards to shard 0
-            let migration_job =
-                snapchain::jobs::migrate_onchain_events::onchain_events_migration_job(
-                    "0 0 7 * * *", // Every 5 minutes
-                    shard_store.clone(),
-                    block_stores.clone(),
-                    mempool_tx.clone(),
-                    local_state_store.clone(),
-                )
-                .unwrap();
-            jobs.push(migration_job);
-        }
     }
 
     for job in jobs {
@@ -514,8 +496,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.block_stores.clone(),
             sync_complete_rx,
             statsd_client.clone(),
-            mempool_tx.clone(),
-            local_state_store.clone(),
         )
         .await;
 
@@ -572,6 +552,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.block_stores.clone(),
             chains_clients,
             replicator,
+            local_state_store.clone(),
         )
         .await;
 
@@ -664,8 +645,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.block_stores.clone(),
             sync_complete_rx,
             statsd_client.clone(),
-            mempool_tx.clone(),
-            local_state_store.clone(),
         )
         .await;
 
@@ -725,7 +704,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     node_local_state::Chain::Base,
                     mempool_tx.clone(),
                     statsd_client.clone(),
-                    local_state_store,
+                    local_state_store.clone(),
                     onchain_events_request_tx.subscribe(),
                 )?;
             tokio::spawn(async move {
@@ -798,6 +777,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.block_stores.clone(),
             chains_clients,
             replicator,
+            local_state_store.clone(),
         )
         .await;
 

@@ -45,6 +45,7 @@ message ShardInfo {
   uint64 approx_size = 5;
   uint64 block_delay = 6;
   uint64 mempool_size = 7;
+  uint64 num_onchain_events = 8;
 }
 
 message GetInfoRequest {
