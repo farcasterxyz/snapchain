@@ -3844,7 +3844,7 @@ mod tests {
         // Verify the borrower now has storage
         let borrower_storage = engine
             .get_stores()
-            .get_storage_slot_for_fid(borrower_fid, &vec![])
+            .get_storage_slot_for_fid(borrower_fid, true, &vec![])
             .unwrap();
         assert_eq!(
             borrower_storage.units_for(crate::proto::StorageUnitType::UnitType2025),
@@ -3853,7 +3853,7 @@ mod tests {
         // Verify the lender's storage was reduced
         let lender_storage = engine
             .get_stores()
-            .get_storage_slot_for_fid(lender_fid, &vec![])
+            .get_storage_slot_for_fid(lender_fid, true, &vec![])
             .unwrap();
         // Lender should have default storage minus 1 unit lent
         assert_eq!(
@@ -3870,13 +3870,15 @@ mod tests {
             Some(2),
             None,
         );
-        let storage_lend_block_event = create_merge_message_event(lend_message, 2);
-        commit_block_events(&mut engine, vec![&storage_lend_block_event]).await;
-
+        commit_block_events(
+            &mut engine,
+            vec![&create_merge_message_event(lend_message.clone(), 2)],
+        )
+        .await;
         // Verify the lender's storage was returned
         let borrower_storage = engine
             .get_stores()
-            .get_storage_slot_for_fid(borrower_fid, &vec![])
+            .get_storage_slot_for_fid(borrower_fid, true, &vec![])
             .unwrap();
         assert_eq!(
             borrower_storage.units_for(crate::proto::StorageUnitType::UnitType2025),
@@ -3884,11 +3886,12 @@ mod tests {
         );
         let lender_storage = engine
             .get_stores()
-            .get_storage_slot_for_fid(lender_fid, &vec![])
+            .get_storage_slot_for_fid(lender_fid, true, &vec![])
             .unwrap();
         assert_eq!(
             lender_storage.units_for(crate::proto::StorageUnitType::UnitType2025),
             1
         );
+        assert!(!message_exists_in_trie(&mut engine, &lend_message))
     }
 }

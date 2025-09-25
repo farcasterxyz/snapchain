@@ -8,26 +8,10 @@ mod tests {
     use crate::storage::store::test_helper::{trie_ctx, FID_FOR_TEST};
     use crate::storage::trie::merkle_trie::TrieKey;
     use crate::utils::factory::{events_factory, messages_factory};
-    use ed25519_dalek::{SecretKey, SigningKey};
-    use hex::FromHex;
-    use prost::Message;
-
-    pub fn default_custody_address() -> Vec<u8> {
-        "000000000000000000".to_string().encode_to_vec()
-    }
-
-    pub fn default_signer() -> SigningKey {
-        SigningKey::from_bytes(
-            &SecretKey::from_hex(
-                "1000000000000000000000000000000000000000000000000000000000000000",
-            )
-            .unwrap(),
-        )
-    }
 
     #[tokio::test]
     async fn test_trie_updated_only_on_commit() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
         let onchain_event = events_factory::create_rent_event(
             FID_FOR_TEST,
             1,
@@ -39,6 +23,7 @@ mod tests {
         let state_change = block_engine.propose_state_change(
             vec![MempoolMessage::OnchainEvent(onchain_event.clone())],
             height,
+            None,
         );
         assert!(!state_change.new_state_root.is_empty());
         assert!(block_engine.trie_root_hash().is_empty());
@@ -52,9 +37,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_block() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
         let height = block_engine.get_confirmed_height().increment();
-        let state_change = block_engine.propose_state_change(vec![], height);
+        let state_change = block_engine.propose_state_change(vec![], height, None);
 
         assert_eq!(state_change.transactions.len(), 0);
         assert!(state_change.events.is_empty());
@@ -68,9 +53,12 @@ mod tests {
     #[tokio::test]
     async fn test_mainnet_propose_validate_commit() {
         // Test that the pipeline works while new features are not active on mainnet
-        let (mut block_engine, _temp_dir) = setup(Some(FarcasterNetwork::Mainnet));
+        let (mut block_engine, _temp_dir) = setup_with_options(BlockEngineOptions {
+            network: FarcasterNetwork::Mainnet,
+            ..BlockEngineOptions::default()
+        });
         let height = block_engine.get_confirmed_height().increment();
-        let state_change = block_engine.propose_state_change(vec![], height);
+        let state_change = block_engine.propose_state_change(vec![], height, None);
 
         assert_eq!(state_change.transactions.len(), 0);
         assert!(state_change.events.is_empty());
@@ -84,7 +72,10 @@ mod tests {
     #[tokio::test]
     async fn test_validate_and_commit_old_blocks() {
         // Test that validate and commit will work for old blocks even after features are active
-        let (mut block_engine, _temp_dir) = setup(Some(FarcasterNetwork::Mainnet));
+        let (mut block_engine, _temp_dir) = setup_with_options(BlockEngineOptions {
+            network: FarcasterNetwork::Mainnet,
+            ..BlockEngineOptions::default()
+        });
 
         let height = block_engine.get_confirmed_height().increment();
         validate_and_commit_state_change(
@@ -102,13 +93,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_user_messages_dropped_if_no_storage() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
         let height = block_engine.get_confirmed_height().increment();
         // These messages are included in the transaction list but not included in the state root.
         let messages = vec![MempoolMessage::UserMessage(
             messages_factory::casts::create_cast_add(FID_FOR_TEST, "hi", None, None),
         )];
-        let state_change = block_engine.propose_state_change(messages, height);
+        let state_change = block_engine.propose_state_change(messages, height, None);
         assert_eq!(state_change.transactions.len(), 0);
         assert!(state_change.events.is_empty());
         assert!(state_change.new_state_root.is_empty());
@@ -120,7 +111,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_user_messages_put_in_block_if_storage_purchased() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
         let onchain_event = events_factory::create_rent_event(
             FID_FOR_TEST,
             1,
@@ -137,7 +128,7 @@ mod tests {
         )];
 
         // The message is included in the block but doesn't impact trie state.
-        let state_change = block_engine.propose_state_change(messages, height);
+        let state_change = block_engine.propose_state_change(messages, height, None);
         assert_eq!(state_change.transactions.len(), 1);
         assert_eq!(state_change.new_state_root, initial_state_root);
 
@@ -148,11 +139,11 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "State change commit failed: merkle trie root hash mismatch")]
     async fn test_invalid_state_root() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
         let height = block_engine.get_confirmed_height().increment();
         let invalid_hash = hex::decode("ffffffffffffffffffffffffffffffffffffffff").unwrap();
 
-        let mut state_change = block_engine.propose_state_change(vec![], height);
+        let mut state_change = block_engine.propose_state_change(vec![], height, None);
 
         let valid = block_engine.validate_state_change(&state_change, height);
         assert!(valid);
@@ -167,11 +158,11 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "State change commit failed: events hash mismatch")]
     async fn test_invalid_events_hash() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
         let height = block_engine.get_confirmed_height().increment();
         let invalid_hash = hex::decode("ffffffffffffffffffffffffffffffffffffffff").unwrap();
 
-        let mut state_change = block_engine.propose_state_change(vec![], height);
+        let mut state_change = block_engine.propose_state_change(vec![], height, None);
 
         let valid = block_engine.validate_state_change(&state_change, height);
         assert!(valid);
@@ -185,7 +176,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_onchain_event() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
         let onchain_event = events_factory::create_rent_event(
             FID_FOR_TEST,
             1,
@@ -212,17 +203,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_heartbeat_generated_on_interval() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
         // The heartbeat interval is 5 blocks, generate the first 4 where there will be no events
         for _ in 0..4 {
             let height = block_engine.get_confirmed_height().increment();
-            let state_change = block_engine.propose_state_change(vec![], height);
+            let state_change = block_engine.propose_state_change(vec![], height, None);
             assert!(state_change.events.is_empty());
             validate_and_commit_state_change(&mut block_engine, &state_change);
         }
 
         let height = block_engine.get_confirmed_height().increment();
-        let state_change = block_engine.propose_state_change(vec![], height);
+        let state_change = block_engine.propose_state_change(vec![], height, None);
         assert_eq!(state_change.events.len(), 1);
         assert_eq!(state_change.events[0].data.as_ref().unwrap().seqnum, 1);
         assert_eq!(
@@ -235,14 +226,14 @@ mod tests {
         // The heartbeat interval is 5 blocks, generate the next 4 where there will be no events
         for _ in 0..4 {
             let height = block_engine.get_confirmed_height().increment();
-            let state_change = block_engine.propose_state_change(vec![], height);
+            let state_change = block_engine.propose_state_change(vec![], height, None);
             assert!(state_change.events.is_empty());
             validate_and_commit_state_change(&mut block_engine, &state_change);
         }
 
         // Check that seqnum is incremented properly
         let height = block_engine.get_confirmed_height().increment();
-        let state_change = block_engine.propose_state_change(vec![], height);
+        let state_change = block_engine.propose_state_change(vec![], height, None);
         assert_eq!(state_change.events.len(), 1);
         assert_eq!(state_change.events[0].data.as_ref().unwrap().seqnum, 2);
         assert_eq!(
@@ -255,7 +246,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_storage_lend_message_merged() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
 
         // Register user with storage
         register_user(
@@ -296,7 +287,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_storage_lends_in_same_transaction() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
 
         // Register user with only 250 units of storage - not enough for all lends
         register_user(
@@ -376,7 +367,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_borrowed_storage_cannot_be_lent() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
 
         // Register FID_FOR_TEST + 1 with some storage to lend to FID_FOR_TEST + 2
         register_user(
@@ -439,7 +430,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lender_can_take_back_storage_by_setting_to_zero() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup();
 
         // Register lender with storage
         register_user(
@@ -486,7 +477,7 @@ mod tests {
             Some(lend_message1.data.as_ref().unwrap().timestamp + 1),
             None,
         );
-        let block2 = commit_message(&mut block_engine, &lend_message2, Validity::Valid);
+        let block2 = commit_message(&mut block_engine, &lend_message2, Validity::Invalid); // Mark as invalid because we don't expect this message to be in the trie
         assert_merge_message_event(&block2.events[0], &lend_message2);
 
         // Verify balances after taking back storage
@@ -502,11 +493,22 @@ mod tests {
             StorageUnitType::UnitType2025,
             0,
         ); // No more borrowed storage
+
+        // The old message shouldn't get merged again if it's far enough in the past
+        commit_message_at(
+            &mut block_engine,
+            &lend_message1,
+            FarcasterTime::new(lend_message1.data.as_ref().unwrap().timestamp as u64 + (60 * 11)),
+            Validity::Invalid,
+        );
     }
 
     #[tokio::test]
     async fn test_user_with_low_total_storage_cannot_lend() {
-        let (mut block_engine, _temp_dir) = setup(None);
+        let (mut block_engine, _temp_dir) = setup_with_options(BlockEngineOptions {
+            network: FarcasterNetwork::Mainnet,
+            ..Default::default()
+        });
 
         // Register user with only 50 units of storage (less than 100 required minimum)
         register_user(
@@ -517,18 +519,38 @@ mod tests {
             &mut block_engine,
         );
 
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST,
+            StorageUnitType::UnitType2025,
+            50, // Original amount
+        );
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST + 1,
+            StorageUnitType::UnitType2025,
+            0, // No borrowed storage
+        );
+
+        let future_time = FarcasterTime::from_unix_seconds(1761019200);
+
         // Attempt to create a storage lend message
         let lend_message = messages_factory::storage_lend::create_storage_lend(
             FID_FOR_TEST,
             FID_FOR_TEST + 1,
             10, // Try to lend 10 units
             StorageUnitType::UnitType2025,
-            None,
+            Some(future_time.to_u64() as u32 - 1),
             None,
         );
 
         // The message should be invalid due to insufficient total storage
-        let block = commit_message(&mut block_engine, &lend_message, Validity::Invalid);
+        let block = commit_message_at(
+            &mut block_engine,
+            &lend_message,
+            future_time,
+            Validity::Invalid,
+        );
 
         // No block events should be generated for failed storage lend
         assert_eq!(block.events.len(), 0);

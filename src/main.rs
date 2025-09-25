@@ -501,6 +501,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.block_stores.clone(),
             gossip_tx.clone(),
             statsd_client.clone(),
+            app_config.fc_network,
         );
         tokio::spawn(async move { mempool.run().await });
 

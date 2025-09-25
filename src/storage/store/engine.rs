@@ -14,7 +14,8 @@ use crate::proto::{
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
-    BlockEventStorageError, CastStore, MessagesPage, StoreOptions, VerificationStore,
+    BlockEventStorageError, CastStore, MessagesPage, StorageLendStore, StoreOptions,
+    VerificationStore,
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
@@ -105,6 +106,9 @@ pub enum MessageValidationError {
 
     #[error("invalid seqnum for block event")]
     InvalidSeqnumForBlockEvent,
+
+    #[error("block event missing body")]
+    BlockEventMissingBody,
 }
 
 pub struct MergedReplicatorMessage {
@@ -313,7 +317,7 @@ impl ShardEngine {
 
                 let storage_slot = self
                     .stores
-                    .get_storage_slot_for_fid(transaction.fid, maybe_onchainevents)
+                    .get_storage_slot_for_fid(transaction.fid, true, maybe_onchainevents)
                     .ok()?;
 
                 // Drop events if storage slot is inactive
@@ -575,8 +579,15 @@ impl ShardEngine {
     ) -> Result<MergedReplicatorMessage, EngineError> {
         let (hub_event, fid) = match &trie_message.trie_message {
             Some(TrieMessage::UserMessage(m)) => {
-                let event = self.merge_message(m, txn_batch)?;
-                (event, m.fid())
+                let events = self.merge_message(m, txn_batch)?;
+                // This is only expected for deleted
+                if events.len() != 1 {
+                    return Err(EngineError::ReplicatorError(format!(
+                        "Message generated incorrect number of hub events. Message:{:?}\nHubEvents {:?}",
+                        trie_message, events
+                    )));
+                }
+                (events[0].clone(), m.fid())
             }
             Some(TrieMessage::OnChainEvent(oe)) => {
                 let event = self
@@ -637,6 +648,35 @@ impl ShardEngine {
     // and not from blocks (so no blockheight to use)
     pub(crate) fn reset_event_id(&self) {
         self.stores.event_handler.set_current_height(0);
+    }
+
+    fn handle_block_event(
+        &mut self,
+        trie_ctx: &merkle_trie::Context,
+        block_event: &proto::BlockEvent,
+        txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Result<Vec<HubEvent>, EngineError> {
+        let body = block_event
+            .data
+            .as_ref()
+            .ok_or(MessageValidationError::NoMessageData)?
+            .body
+            .as_ref()
+            .ok_or(MessageValidationError::BlockEventMissingBody)?;
+        match body {
+            proto::block_event_data::Body::MergeMessageEventBody(merge_message_event) => {
+                let message = &merge_message_event
+                    .message
+                    .as_ref()
+                    .ok_or(MessageValidationError::BlockEventMissingBody)?;
+                let hub_events = self.merge_message(&message, txn_batch)?;
+                for event in &hub_events {
+                    self.update_trie(trie_ctx, event, txn_batch)?;
+                }
+                Ok(hub_events)
+            }
+            proto::block_event_data::Body::HeartbeatEventBody(_) => Ok(vec![]),
+        }
     }
 
     pub(crate) fn replay_snapchain_txn(
@@ -814,7 +854,7 @@ impl ShardEngine {
                     {
                         error!(
                             seqnum = block_event.seqnum().to_string(),
-                            "Error merging block event: {}",
+                            "error merging block event: {}",
                             err.to_string()
                         );
                     } else {
@@ -822,32 +862,16 @@ impl ShardEngine {
                     }
 
                     if version.is_enabled(ProtocolFeature::StorageLending) {
-                        // Process storage lend messages from block events
-                        match &block_event.data.as_ref().unwrap().body {
-                            Some(proto::block_event_data::Body::MergeMessageEventBody(
-                                merge_message_event,
-                            )) => {
-                                if let Some(message) = &merge_message_event.message {
-                                    match self.merge_message(&message, txn_batch) {
-                                        Ok(hub_event) => {
-                                            merged_messages_count += 1;
-                                            self.update_trie(trie_ctx, &hub_event, txn_batch)?;
-                                            events.push(hub_event);
-                                            // Don't prune storage lends here. That's handled in shard 0.
-                                        }
-                                        Err(err) => {
-                                            if source != ProposalSource::Simulate {
-                                                warn!(
-                                                    seqnum = block_event.seqnum(),
-                                                    "Error merging message from block event: {}",
-                                                    err.to_string()
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
+                        // process storage lend messages from block events
+                        match self.handle_block_event(trie_ctx, block_event, txn_batch) {
+                            Ok(hub_events) => events.extend(hub_events),
+                            Err(err) => {
+                                warn!(
+                                    fid = snapchain_txn.fid,
+                                    "Error merging block event {}",
+                                    err.to_string()
+                                );
                             }
-                            _ => {}
                         }
                     }
                 }
@@ -922,11 +946,13 @@ impl ShardEngine {
                 Ok(()) => {
                     let result = self.merge_message(msg, txn_batch);
                     match result {
-                        Ok(event) => {
-                            merged_messages_count += 1;
-                            self.update_trie(trie_ctx, &event, txn_batch)?;
-                            events.push(event.clone());
-                            user_messages_count += 1;
+                        Ok(merge_events) => {
+                            for event in &merge_events {
+                                merged_messages_count += 1;
+                                self.update_trie(trie_ctx, &event, txn_batch)?;
+                                user_messages_count += 1;
+                            }
+                            events.extend(merge_events.clone());
                             message_types_to_prune.insert(msg.msg_type());
                         }
                         Err(err) => {
@@ -1135,7 +1161,7 @@ impl ShardEngine {
         &self,
         msg: &proto::Message,
         txn_batch: &mut RocksDbTransactionBatch,
-    ) -> Result<proto::HubEvent, MessageValidationError> {
+    ) -> Result<Vec<proto::HubEvent>, MessageValidationError> {
         let now = std::time::Instant::now();
         let data = msg
             .data
@@ -1145,47 +1171,50 @@ impl ShardEngine {
             .or(Err(MessageValidationError::InvalidMessageType(data.r#type)))?;
 
         let event = match mt {
-            MessageType::CastAdd | MessageType::CastRemove => self
+            MessageType::CastAdd | MessageType::CastRemove => vec![self
                 .stores
                 .cast_store
                 .merge(msg, txn_batch)
-                .map_err(|e| MessageValidationError::StoreError(e)),
-            MessageType::LinkAdd | MessageType::LinkRemove | MessageType::LinkCompactState => self
-                .stores
-                .link_store
-                .merge(msg, txn_batch)
-                .map_err(|e| MessageValidationError::StoreError(e)),
-            MessageType::ReactionAdd | MessageType::ReactionRemove => self
+                .map_err(|e| MessageValidationError::StoreError(e))?],
+            MessageType::LinkAdd | MessageType::LinkRemove | MessageType::LinkCompactState => {
+                vec![self
+                    .stores
+                    .link_store
+                    .merge(msg, txn_batch)
+                    .map_err(|e| MessageValidationError::StoreError(e))?]
+            }
+            MessageType::ReactionAdd | MessageType::ReactionRemove => vec![self
                 .stores
                 .reaction_store
                 .merge(msg, txn_batch)
-                .map_err(|e| MessageValidationError::StoreError(e)),
-            MessageType::UserDataAdd => self
+                .map_err(|e| MessageValidationError::StoreError(e))?],
+            MessageType::UserDataAdd => vec![self
                 .stores
                 .user_data_store
                 .merge(msg, txn_batch)
-                .map_err(|e| MessageValidationError::StoreError(e)),
-            MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => self
+                .map_err(|e| MessageValidationError::StoreError(e))?],
+            MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => vec![self
                 .stores
                 .verification_store
                 .merge(msg, txn_batch)
-                .map_err(|e| MessageValidationError::StoreError(e)),
+                .map_err(|e| MessageValidationError::StoreError(e))?],
             MessageType::UsernameProof => {
                 let store = &self.stores.username_proof_store;
-                let result = store.merge(msg, txn_batch);
-                result.map_err(|e| MessageValidationError::StoreError(e))
+                vec![store
+                    .merge(msg, txn_batch)
+                    .map_err(|e| MessageValidationError::StoreError(e))?]
             }
             MessageType::LendStorage => {
                 let store = &self.stores.storage_lend_store;
-                let result = store.merge(msg, txn_batch);
-                result.map_err(|e| MessageValidationError::StoreError(e))
+                StorageLendStore::merge(store, msg, txn_batch)
+                    .map_err(|e| MessageValidationError::StoreError(e))?
             }
             unhandled_type => {
                 return Err(MessageValidationError::InvalidMessageType(
                     unhandled_type as i32,
                 ));
             }
-        }?;
+        };
         let elapsed = now.elapsed();
         self.metrics
             .time_with_shard("merge_message_time_us", elapsed.as_micros() as u64);

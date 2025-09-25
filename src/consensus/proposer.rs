@@ -500,7 +500,7 @@ impl Proposer for BlockProposer {
             .await
             .unwrap();
 
-        let proposal = self.engine.propose_state_change(messages, height);
+        let proposal = self.engine.propose_state_change(messages, height, None);
         let version = EngineVersion::version_for(&proposal.timestamp, self.network);
 
         let shard_witnesses = self
