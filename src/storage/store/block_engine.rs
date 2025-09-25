@@ -274,7 +274,6 @@ impl BlockEngine {
                 }
 
                 let num_units_available = storage_slot.units_for(lend_storage.unit_type());
-                // TODO(aditi): Update this check so we also check that the user also has 100+ total storage units purchased before lending
                 if num_units_available < lend_storage.num_units as u32 {
                     return Err(MessageValidationError::InsufficientStorage);
                 }

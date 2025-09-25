@@ -1210,7 +1210,6 @@ impl ShardEngine {
                     .map_err(|e| MessageValidationError::StoreError(e))?
             }
             unhandled_type => {
-                // Return a validation error if a storage lend gets routed to the shard engine directly
                 return Err(MessageValidationError::InvalidMessageType(
                     unhandled_type as i32,
                 ));
