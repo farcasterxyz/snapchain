@@ -96,7 +96,7 @@ async fn wait_for_mempool_to_clear(
             return Err(format!("Error sending message to mempool: {}", e));
         }
         if let Ok(sizes) = rx.await {
-            let size = sizes.get(&0).unwrap_or(0);
+            let size = sizes.get(&0).unwrap_or(&0);
             if *size < MAX_MEMPOOL_SIZE {
                 return Ok(());
             }
