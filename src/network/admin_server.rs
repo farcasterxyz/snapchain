@@ -313,9 +313,17 @@ impl AdminService for MyAdminService {
         let block_stores = self.block_stores.clone();
         let mempool_tx = self.mempool_tx.clone();
         let local_state_store = self.local_state_store.clone();
+        let statsd_client = self.statsd_client.clone();
 
         tokio::spawn(async move {
-            migrate_onchain_events(shard_stores, block_stores, mempool_tx, local_state_store).await;
+            migrate_onchain_events(
+                shard_stores,
+                block_stores.db,
+                mempool_tx,
+                local_state_store,
+                statsd_client,
+            )
+            .await;
         });
 
         Ok(Response::new(Empty {}))

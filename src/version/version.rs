@@ -19,6 +19,7 @@ pub enum EngineVersion {
     V9 = 9,
     V10 = 10,
     V11 = 11,
+    V12 = 12,
 }
 
 pub enum ProtocolFeature {
@@ -36,6 +37,7 @@ pub enum ProtocolFeature {
     ReadDataFromShardZero,
     UserProfileToken,
     StorageLending,
+    EventIdBugFix,
 }
 
 pub struct VersionSchedule {
@@ -92,6 +94,10 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
         active_at: 1760547600, // 2025-10-15 5PM UTC
         version: EngineVersion::V11,
     },
+    VersionSchedule {
+        active_at: 1760547600, // 2025-10-15 5PM UTC
+        version: EngineVersion::V12,
+    },
 ]
 .as_slice();
 
@@ -128,12 +134,16 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
         active_at: 1758733200, // 2025-09-24 5PM UTC
         version: EngineVersion::V11,
     },
+    VersionSchedule {
+        active_at: 1758763200, // 2025-09-25 1:20AM UTC
+        version: EngineVersion::V12,
+    },
 ]
 .as_slice();
 
 const ENGINE_VERSION_SCHEDULE_DEVNET: &[VersionSchedule] = [VersionSchedule {
     active_at: 0,
-    version: EngineVersion::V11,
+    version: EngineVersion::V12,
 }]
 .as_slice();
 
@@ -181,6 +191,7 @@ impl EngineVersion {
                 self >= &EngineVersion::V10
             }
             ProtocolFeature::StorageLending => self >= &EngineVersion::V11,
+            ProtocolFeature::EventIdBugFix => self >= &EngineVersion::V12,
         }
     }
 
@@ -197,7 +208,7 @@ impl EngineVersion {
             EngineVersion::V8 => 5,
             EngineVersion::V9 => 6,
             EngineVersion::V10 => 7,
-            EngineVersion::V11 => LATEST_PROTOCOL_VERSION,
+            EngineVersion::V11 | EngineVersion::V12 => LATEST_PROTOCOL_VERSION,
         }
     }
 
@@ -262,7 +273,7 @@ mod version_test {
                 previous_version.version
             );
             assert!(
-                current_version.active_at > previous_version.active_at,
+                current_version.active_at >= previous_version.active_at,
                 "Active time {:?} should be greater than {:?}",
                 current_version.active_at,
                 previous_version.active_at
@@ -367,7 +378,7 @@ mod version_test {
 
     #[test]
     fn test_latest() {
-        assert_eq!(EngineVersion::latest(), EngineVersion::V11);
+        assert_eq!(EngineVersion::latest(), EngineVersion::V12);
         assert_eq!(
             EngineVersion::version_for(&FarcasterTime::current(), FarcasterNetwork::Devnet),
             EngineVersion::latest()

@@ -496,7 +496,7 @@ impl StorageSlot {
 #[derive(Clone)]
 pub struct OnchainEventStore {
     pub(crate) db: Arc<RocksDB>,
-    store_event_handler: Arc<StoreEventHandler>,
+    pub store_event_handler: Arc<StoreEventHandler>,
     store_opts: StoreOptions,
 }
 

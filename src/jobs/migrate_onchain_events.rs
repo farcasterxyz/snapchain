@@ -1,11 +1,16 @@
+use std::sync::Arc;
+use std::time::Duration;
+
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
-use crate::storage::db::{PageOptions, RocksDbTransactionBatch};
-use crate::storage::store::block_engine::BlockStores;
+use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
+use crate::storage::store::account::{
+    OnchainEventStorageError, OnchainEventStore, StoreEventHandler,
+};
 use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::node_local_state::LocalStateStore;
 use crate::storage::store::stores::Stores;
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::Duration;
 use tracing::{error, info};
 
 // TODO(aditi): This is not a job right now. It's an rpc because that gives us more control over when it runs. Shift it to a job if needed once stable.
@@ -15,12 +20,14 @@ const MAX_MEMPOOL_SIZE: u64 = 1_000;
 
 pub async fn migrate_onchain_events(
     shard_stores: Stores,
-    block_stores: BlockStores,
+    block_db: Arc<RocksDB>,
     mempool_tx: mpsc::Sender<MempoolRequest>,
     local_state_store: LocalStateStore,
+    statsd_client: StatsdClientWrapper,
 ) {
     let shard_id = shard_stores.shard_id;
     let mut batches_finished = 0;
+    let onchain_event_store = OnchainEventStore::new(block_db, StoreEventHandler::new());
 
     info!(shard_id, "Started migrating onchain events");
     loop {
@@ -36,9 +43,10 @@ pub async fn migrate_onchain_events(
 
         match migrate_shard_onchain_events_batch(
             &shard_stores,
-            &block_stores,
+            &onchain_event_store,
             &mempool_tx,
             page_token,
+            &statsd_client,
         )
         .await
         {
@@ -100,9 +108,10 @@ async fn wait_for_mempool_to_clear(
 
 async fn migrate_shard_onchain_events_batch(
     source_shard_store: &Stores,
-    block_stores: &BlockStores,
+    block_onchain_event_store: &OnchainEventStore,
     mempool_tx: &mpsc::Sender<MempoolRequest>,
     page_token: Option<Vec<u8>>,
+    statsd_client: &StatsdClientWrapper,
 ) -> Result<Option<Vec<u8>>, String> {
     let page_options = PageOptions {
         page_size: Some(MIGRATION_BATCH_SIZE),
@@ -118,23 +127,57 @@ async fn migrate_shard_onchain_events_batch(
 
     for event in &events_page.onchain_events {
         // Check if event already exists in shard 0 by merging and seeing that the result isn't an error (duplicate error)
-        if let Ok(_) = block_stores
-            .onchain_event_store
+        block_onchain_event_store
+            .store_event_handler
+            .set_current_height(0);
+        match block_onchain_event_store
             .merge_onchain_event(event.clone(), &mut &mut RocksDbTransactionBatch::new())
         {
-            // Submit OnchainEventForMigration to mempool
-            let mempool_message = MempoolMessage::OnchainEventForMigration(event.clone());
+            Ok(_) => {
+                // Submit OnchainEventForMigration to mempool
+                let mempool_message = MempoolMessage::OnchainEventForMigration(event.clone());
 
-            if let Err(e) = mempool_tx
-                .send(MempoolRequest::AddMessage(
-                    mempool_message,
-                    MempoolSource::Local,
-                    None,
-                ))
-                .await
-            {
-                return Err(format!("Error sending message to mempool: {}", e));
+                if let Err(e) = mempool_tx
+                    .send(MempoolRequest::AddMessage(
+                        mempool_message,
+                        MempoolSource::Local,
+                        None,
+                    ))
+                    .await
+                {
+                    return Err(format!("Error sending message to mempool: {}", e));
+                }
+                statsd_client.count_with_shard(
+                    source_shard_store.shard_id,
+                    "onchain_events.migration.success",
+                    1,
+                    vec![],
+                );
             }
+            Err(err) => match err {
+                OnchainEventStorageError::DuplicateOnchainEvent => {
+                    statsd_client.count_with_shard(
+                        source_shard_store.shard_id,
+                        "onchain_events.migration.duplicate",
+                        1,
+                        vec![],
+                    );
+                }
+                _ => {
+                    error!(
+                        fid = event.fid,
+                        event_type = event.r#type,
+                        "Skipping onchain event due to unexpected error {}",
+                        err.to_string()
+                    );
+                    statsd_client.count_with_shard(
+                        source_shard_store.shard_id,
+                        "onchain_events.migration.error",
+                        1,
+                        vec![],
+                    );
+                }
+            },
         }
     }
     Ok(events_page.next_page_token)

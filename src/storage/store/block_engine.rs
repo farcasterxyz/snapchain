@@ -81,6 +81,7 @@ pub struct BlockStores {
     pub network: FarcasterNetwork,
     pub db: Arc<RocksDB>,
     pub trie: MerkleTrie,
+    pub event_handler: Arc<StoreEventHandler>,
 }
 
 impl BlockStores {
@@ -94,6 +95,7 @@ impl BlockStores {
             network,
             db: db.clone(),
             trie,
+            event_handler: store_event_handler,
         }
     }
     pub fn get_block_by_event_seqnum(&self, seqnum: u64) -> Option<Block> {
@@ -201,6 +203,14 @@ impl BlockEngine {
                 error!("Error checking if sync id exists: {:?}", err);
                 false
             })
+    }
+
+    fn set_height(&self, version: &EngineVersion, height: Height) {
+        if version.is_enabled(ProtocolFeature::EventIdBugFix) {
+            self.stores
+                .event_handler
+                .set_current_height(height.block_number);
+        }
     }
 
     pub fn validate_user_message(
@@ -551,6 +561,8 @@ impl BlockEngine {
             })
             .collect_vec();
 
+        self.set_height(&version, height);
+
         let mut all_hub_events = vec![];
         for snapchain_txn in &mut snapchain_txns {
             let (account_root, hub_events, _) = self.replay_snapchain_txn(
@@ -657,6 +669,8 @@ impl BlockEngine {
                 }
             },
         }
+
+        self.set_height(&version, height);
 
         let mut all_hub_events = vec![];
         for snapchain_txn in transactions {
