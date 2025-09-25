@@ -1231,6 +1231,17 @@ impl ReplicatorBootstrap {
                 let peer_address = self.replication_peer_list[0].clone();
                 match RpcClientsManager::get_shard0_blocks(peer_address, start_height, |block| {
                     block_engine.commit_block(&block);
+                    let height = block
+                        .header
+                        .as_ref()
+                        .map(|h| h.height.as_ref().map(|h| h.block_number))
+                        .flatten()
+                        .unwrap_or(0);
+                    // Print updates every 100k blocks
+                    if height % 100_001 == 0 {
+                        info!("Merged shard 0 block {}", height);
+                    }
+
                     Ok(())
                 })
                 .await

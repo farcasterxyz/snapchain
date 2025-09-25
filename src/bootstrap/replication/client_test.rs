@@ -8,12 +8,15 @@ mod tests {
             test_utils::replication_test_utils::*,
         },
         cfg::Config,
-        network::replication::{replicator, ReplicationServer},
+        network::{
+            http_server_test::tests::MockHubService,
+            replication::{replicator, ReplicationServer},
+        },
         proto::{
             self,
+            hub_service_server::HubServiceServer,
             replication_service_server::{ReplicationService, ReplicationServiceServer},
-            GetShardSnapshotMetadataResponse, GetShardTransactionsResponse, ShardSnapshotMetadata,
-            ShardTrieEntryWithMessage,
+            *,
         },
         storage::{
             db::{RocksDB, RocksDbTransactionBatch},
@@ -141,18 +144,28 @@ mod tests {
     async fn spawn_mock_server(
         mock_service: MockReplicationService,
     ) -> (SocketAddr, oneshot::Sender<()>) {
+        spawn_mock_server_with_hub_service(mock_service, None).await
+    }
+
+    async fn spawn_mock_server_with_hub_service(
+        mock_service: MockReplicationService,
+        mock_hub_service: Option<MockHubService>,
+    ) -> (SocketAddr, oneshot::Sender<()>) {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let server_future = Server::builder()
-            .add_service(ReplicationServiceServer::new(mock_service))
-            .serve_with_incoming_shutdown(
-                tokio_stream::wrappers::TcpListenerStream::new(listener),
-                async {
-                    shutdown_rx.await.ok();
-                },
-            );
+        let mut builder =
+            Server::builder().add_service(ReplicationServiceServer::new(mock_service));
+        if let Some(hub) = mock_hub_service {
+            builder = builder.add_service(HubServiceServer::new(hub));
+        }
+        let server_future = builder.serve_with_incoming_shutdown(
+            tokio_stream::wrappers::TcpListenerStream::new(listener),
+            async {
+                shutdown_rx.await.ok();
+            },
+        );
 
         tokio::spawn(server_future);
 
@@ -1033,6 +1046,121 @@ mod tests {
         for shutdown_tx in shutdown_txs {
             let _ = shutdown_tx.send(());
         }
+    }
+
+    #[tokio::test]
+    async fn test_replication_shard0_catchup() {
+        let (tmp_dir, source_engine, replication_server, _signer, _fid, _fid2) =
+            setup_source_engine_with_test_data().await;
+
+        let mock_hub = MockHubService::new();
+        let call_counts = Arc::clone(&mock_hub.call_counts);
+        let mock_hub_service = Some(mock_hub);
+
+        // Fetch the actual data from the real replication server to populate our mock.
+        let height = source_engine.get_confirmed_height().block_number;
+        let shard_id = source_engine.shard_id();
+        let (vts_data, snapshot_metadata) =
+            fetch_transactions(&replication_server, shard_id, height)
+                .await
+                .unwrap();
+
+        // --- Setup the Mock Server ---
+        let mock_service = MockReplicationService::default();
+
+        // Insert shard-0 metadata
+        let shard0_snapshot = ShardSnapshotMetadata {
+            shard_id: 0,
+            block: Some(Block {
+                header: Some(BlockHeader {
+                    height: Some(Height {
+                        block_number: 0,
+                        shard_index: 0,
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        mock_service.metadata_responses.lock().unwrap().insert(
+            0,
+            Ok(GetShardSnapshotMetadataResponse {
+                snapshots: vec![shard0_snapshot],
+            }),
+        );
+
+        // Mock the metadata response.
+        mock_service
+            .metadata_responses
+            .lock()
+            .unwrap()
+            .insert(shard_id, Ok(snapshot_metadata));
+
+        // For each vts, set the response with normal data (no pagination)
+        for vts in 0..256 {
+            let (trie_messages, fid_account_roots) =
+                vts_data.get(&vts).cloned().unwrap_or_default();
+
+            let response = GetShardTransactionsResponse {
+                trie_messages,
+                fid_account_roots,
+                next_page_token: None, // No pagination, one big response.
+            };
+
+            mock_service
+                .transactions_responses
+                .lock()
+                .unwrap()
+                .insert((shard_id, height, vts, None), Ok(response));
+        }
+
+        // --- Start the Mock Server ---
+        let (addr, shutdown_tx) =
+            spawn_mock_server_with_hub_service(mock_service, mock_hub_service).await;
+        let server_addr = format!("http://{}", addr);
+        // Wait a bit for server to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Set up destination engine
+        let dest_rocksdb_dir = format!("{}/dest", tmp_dir.path().to_str().unwrap());
+
+        // Create a config for the bootstrap
+        let mut config = Config::default();
+        config.rocksdb_dir = dest_rocksdb_dir.clone();
+        config.consensus.shard_ids = vec![1]; // Only shard 1 for this test
+        config.fc_network = source_engine.network.clone();
+        config.snapshot.replication_peers = vec![server_addr];
+
+        let bootstrap = ReplicatorBootstrap::new(statsd_client(), &config);
+
+        // Perform the bootstrap
+        let result = bootstrap.bootstrap_using_replication().await;
+        // assert that the get_blocks got called
+        assert!(
+            *call_counts.lock().await.get("get_blocks").unwrap_or(&0) > 0,
+            "get_blocks should be called at least once"
+        );
+
+        // Assert that bootstrap succeeded despite RPC errors
+        match &result {
+            Ok(WorkUnitResponse::Finished) => {}
+            _ => panic!("Bootstrap failed with result: {:?}", result),
+        }
+
+        // Now, check that the shard roots match
+        let source_root = source_engine.get_stores().trie.root_hash().unwrap();
+
+        // Open the destination DB and check the root
+        let dest_db = RocksDB::open_shard_db(&dest_rocksdb_dir, shard_id);
+        let mut dest_trie = MerkleTrie::new().unwrap();
+        dest_trie.initialize(&dest_db).unwrap();
+        let dest_root = dest_trie.root_hash().unwrap();
+
+        assert_eq!(source_root, dest_root);
+
+        // Cleanup
+        let _ = shutdown_tx.send(());
     }
 
     #[tokio::test]

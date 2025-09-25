@@ -1,7 +1,8 @@
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use async_trait::async_trait;
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
+    use tokio::sync::Mutex;
     use tokio_stream::wrappers::ReceiverStream;
     use tonic::{Request, Response, Status};
 
@@ -11,14 +12,17 @@ mod tests {
         proto::{hub_service_server::HubService, *},
     };
 
+    #[derive(Clone)]
     pub struct MockHubService {
         current_peers: Option<GetConnectedPeersResponse>,
+        pub call_counts: Arc<Mutex<HashMap<String, usize>>>,
     }
 
     impl MockHubService {
         pub fn new() -> Self {
             Self {
                 current_peers: None,
+                call_counts: Arc::new(Mutex::new(HashMap::new())),
             }
         }
     }
@@ -55,6 +59,12 @@ mod tests {
             _request: Request<BlocksRequest>,
         ) -> Result<Response<Self::GetBlocksStream>, Status> {
             let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            self.call_counts
+                .lock()
+                .await
+                .entry("get_blocks".to_string())
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
             Ok(Response::new(ReceiverStream::new(rx)))
         }
 
