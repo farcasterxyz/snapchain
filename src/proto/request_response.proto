@@ -5,7 +5,6 @@ import "blocks.proto";
 import "hub_event.proto";
 import "username_proof.proto";
 import "onchain_event.proto";
-import "gossip.proto";
 
 
 message BlocksRequest {
@@ -302,9 +301,19 @@ message FidAddressTypeResponse {
   bool is_verified = 3;
 }
 
+message ContactInfoBody {
+  string gossip_address = 1;
+  bytes peer_id = 2;
+  string snapchain_version = 3;
+  FarcasterNetwork network = 4;
+  uint64 timestamp = 5;
+  string announce_rpc_address = 6;
+}
+
 message GetConnectedPeersRequest {
 }
 
 message GetConnectedPeersResponse {
   repeated ContactInfoBody contacts = 1;
 }
+

@@ -2,15 +2,7 @@ syntax = "proto3";
 
 import "message.proto";
 import "blocks.proto";
-
-message ContactInfoBody {
-  string gossip_address = 1;
-  bytes peer_id = 2;
-  string snapchain_version = 3;
-  FarcasterNetwork network = 4;
-  uint64 timestamp = 5;
-  string announce_rpc_address = 6;
-}
+import "request_response.proto";
 
 message ContactInfo {
   ContactInfoBody body = 1;
