@@ -584,7 +584,7 @@ impl ReplicatorBootstrap {
                     let mins = total_secs / 60;
                     let secs = total_secs % 60;
                     format!("{}m {:02}s", mins, secs)
-                } else if total_secs < 8 * 3600 {
+                } else if total_secs < 24 * 3600 {
                     let hours = total_secs / 3600;
                     let mins = (total_secs % 3600) / 60;
                     format!("{}h {:02}m", hours, mins)
