@@ -11,4 +11,4 @@ mod gossip_test;
 mod server_tests;
 
 #[cfg(test)]
-mod http_server_test;
+pub mod http_server_test;

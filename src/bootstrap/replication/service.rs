@@ -7,6 +7,7 @@ use crate::core::validations::message::validate_message_hash;
 use crate::network::gossip;
 use crate::proto::shard_trie_entry_with_message::TrieMessage;
 use crate::proto::{self, ReplicationTriePartStatus, ShardSnapshotMetadata};
+use crate::storage::store::block_engine::BlockEngine;
 use crate::storage::store::node_local_state::LocalStateStore;
 use crate::storage::trie::merkle_trie::MerkleTrie;
 use crate::storage::{
@@ -14,7 +15,6 @@ use crate::storage::{
     db::{PageOptions, RocksDB, RocksDbTransactionBatch},
     store::{
         account::StoreOptions,
-        block::BlockStore,
         engine::{EngineError, ShardEngine},
         shard::ShardStore,
         stores::StoreLimits,
@@ -146,12 +146,13 @@ impl ShardProgress {
 #[derive(Clone)]
 pub struct ReplicatorBootstrap {
     shutdown: Arc<AtomicBool>,
-    network: crate::proto::FarcasterNetwork,
+    fc_network: crate::proto::FarcasterNetwork,
     statsd_client: StatsdClientWrapper,
     gossip_config: gossip::Config,
     data_shard_ids: Vec<u32>,
     shard0_metadata: Arc<Mutex<ShardSnapshotMetadata>>,
     rocksdb_dir: String,
+    max_messages_per_block: u32,
     replication_peer_list: Vec<String>,
     config: ReplicatorBootstrapConfig,
 }
@@ -160,13 +161,14 @@ impl ReplicatorBootstrap {
     pub fn new(statsd_client: StatsdClientWrapper, app_config: &Config) -> Self {
         Self {
             shutdown: Arc::new(AtomicBool::new(false)),
-            network: app_config.fc_network,
+            fc_network: app_config.fc_network,
             statsd_client,
             gossip_config: app_config.gossip.clone(),
             data_shard_ids: app_config.consensus.shard_ids.clone(),
             shard0_metadata: Arc::new(Mutex::new(ShardSnapshotMetadata::default())),
             rocksdb_dir: app_config.rocksdb_dir.clone(),
             replication_peer_list: app_config.snapshot.replication_peers.clone(),
+            max_messages_per_block: app_config.consensus.max_messages_per_block,
             config: ReplicatorBootstrapConfig::default(),
         }
     }
@@ -180,13 +182,14 @@ impl ReplicatorBootstrap {
     ) -> Self {
         Self {
             shutdown: Arc::new(AtomicBool::new(false)),
-            network: app_config.fc_network,
+            fc_network: app_config.fc_network,
             statsd_client,
             gossip_config: app_config.gossip.clone(),
             data_shard_ids: app_config.consensus.shard_ids.clone(),
             shard0_metadata: Arc::new(Mutex::new(ShardSnapshotMetadata::default())),
             rocksdb_dir: app_config.rocksdb_dir.clone(),
             replication_peer_list: app_config.snapshot.replication_peers.clone(),
+            max_messages_per_block: app_config.consensus.max_messages_per_block,
             config,
         }
     }
@@ -221,7 +224,7 @@ impl ReplicatorBootstrap {
     pub async fn bootstrap_using_replication(&self) -> Result<WorkUnitResponse, BootstrapError> {
         let peer_addresses = if self.replication_peer_list.is_empty() {
             // If no peers are configured, use the built-in default list
-            RpcClientsManager::get_initial_peers(self.network)
+            RpcClientsManager::get_initial_peers(self.fc_network)
         } else {
             self.replication_peer_list.clone()
         };
@@ -266,7 +269,7 @@ impl ReplicatorBootstrap {
             let gossip_config = self.gossip_config.clone();
             let rpc_mgr = first_manager.clone();
             let statsd = self.statsd_client.clone();
-            let network = self.network;
+            let network = self.fc_network;
             let handle = tokio::spawn(async move {
                 match PeerDiscoverer::new(
                     &gossip_config,
@@ -322,7 +325,7 @@ impl ReplicatorBootstrap {
             }
 
             let rocksdb_dir = self.get_snapshot_rocksdb_dir();
-            debug!(
+            info!(
                 "Bootstrapping shard {} at height {}",
                 data_shard_id, target_height
             );
@@ -395,6 +398,12 @@ impl ReplicatorBootstrap {
                     &self.get_snapshot_rocksdb_dir(),
                 )
                 .await?;
+
+                // Cleanup the DB for all the shards
+                for data_shard_id in self.data_shard_ids.iter() {
+                    self.cleanup_db(&self.get_snapshot_rocksdb_dir(), *data_shard_id)
+                        .await?;
+                }
 
                 info!("Replication bootstrap finished. Promoting snapshot to main DB.");
 
@@ -487,9 +496,6 @@ impl ReplicatorBootstrap {
                     self.verify_shard_roots(rocksdb_dir, shard_id, metadata)
                         .await?;
 
-                    // Clean up the work unit statuses and the account root hashes that were stored in the DB
-                    self.cleanup_db(rocksdb_dir, shard_id).await?;
-
                     return Ok(result);
                 }
                 WorkUnitResponse::Working | WorkUnitResponse::None => {
@@ -578,10 +584,12 @@ impl ReplicatorBootstrap {
                     let mins = total_secs / 60;
                     let secs = total_secs % 60;
                     format!("{}m {:02}s", mins, secs)
-                } else {
+                } else if total_secs < 8 * 3600 {
                     let hours = total_secs / 3600;
                     let mins = (total_secs % 3600) / 60;
                     format!("{}h {:02}m", hours, mins)
+                } else {
+                    format!("----")
                 }
             };
             info!(
@@ -666,7 +674,7 @@ impl ReplicatorBootstrap {
         let thread_engine = Arc::new(
             ShardEngine::new_with_opts(
                 db.clone(),
-                self.network,
+                self.fc_network,
                 MerkleTrie::new()?,
                 shard_id,
                 StoreLimits::default(),
@@ -1200,10 +1208,53 @@ impl ReplicatorBootstrap {
                 height.block_number
             );
             let block_db = RocksDB::open_shard_db(rocksdb_dir, 0);
-            let block_store = BlockStore::new(block_db.clone());
-            block_store
+            let trie = MerkleTrie::new().unwrap();
+            let mut block_engine = BlockEngine::new(
+                trie,
+                self.statsd_client.clone(),
+                block_db.clone(),
+                self.max_messages_per_block,
+                None,
+                self.fc_network,
+            );
+
+            block_engine
+                .stores()
+                .block_store
                 .put_block(block)
                 .map_err(|e| BootstrapError::DatabaseError(e.to_string()))?;
+
+            if !self.replication_peer_list.is_empty() {
+                let start_height = height.block_number + 1;
+                info!("Catching up on shard 0 blocks from {}", start_height);
+
+                let peer_address = self.replication_peer_list[0].clone();
+                match RpcClientsManager::get_shard0_blocks(peer_address, start_height, |block| {
+                    block_engine.commit_block(&block);
+                    let height = block
+                        .header
+                        .as_ref()
+                        .map(|h| h.height.as_ref().map(|h| h.block_number))
+                        .flatten()
+                        .unwrap_or(0);
+                    // Print updates every 100k blocks
+                    if height % 100_001 == 0 {
+                        info!("Merged shard 0 block {}", height);
+                    }
+
+                    Ok(())
+                })
+                .await
+                {
+                    Ok(()) => {
+                        info!("Successfully caught up on shard 0 blocks");
+                    }
+                    Err(e) => {
+                        warn!("Failed to catch up on shard 0 blocks from height {}, will use regular sync for node. Error: {}", start_height, e);
+                    }
+                }
+            }
+
             block_db.close();
         } else {
             // If there's no block, its OK, we'll have to sync from genesis. But log a warning

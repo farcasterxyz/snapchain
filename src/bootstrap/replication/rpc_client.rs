@@ -1,7 +1,8 @@
 use crate::bootstrap::replication::error::BootstrapError;
 use crate::bootstrap::replication::service::ReplicatorBootstrapConfig;
 use crate::proto::{
-    self, replication_service_client::ReplicationServiceClient, GetShardSnapshotMetadataResponse,
+    self, hub_service_client::HubServiceClient,
+    replication_service_client::ReplicationServiceClient, Block, GetShardSnapshotMetadataResponse,
     GetShardTransactionsResponse, ShardSnapshotMetadata,
 };
 use std::collections::HashMap;
@@ -368,5 +369,30 @@ impl RpcClientsManager {
             .await?;
 
         Ok(response)
+    }
+
+    pub async fn get_shard0_blocks<F>(
+        peer_address: String,
+        start_height: u64,
+        mut callback: F,
+    ) -> Result<(), BootstrapError>
+    where
+        F: FnMut(Block) -> Result<(), BootstrapError>,
+    {
+        let mut client = HubServiceClient::connect(peer_address).await?;
+
+        let request = proto::BlocksRequest {
+            shard_id: 0,
+            start_block_number: start_height,
+            stop_block_number: None, // all blocks up to the latest
+        };
+
+        let mut stream = client.get_blocks(request).await?.into_inner();
+
+        while let Some(block) = stream.message().await? {
+            callback(block)?;
+        }
+
+        Ok(())
     }
 }
