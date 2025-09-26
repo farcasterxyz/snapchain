@@ -17,7 +17,7 @@ mod tests {
     use crate::network::server::MyHubService;
     use crate::proto::hub_service_server::HubService;
     use crate::proto::{
-        self, EventRequest, EventsRequest, FarcasterNetwork, HubEvent, HubEventType,
+        self, Block, EventRequest, EventsRequest, FarcasterNetwork, HubEvent, HubEventType,
         OnChainEventType, ShardChunk, StorageUnitType, SubmitBulkMessagesRequest,
         SubmitBulkMessagesResponse, UserDataType, UserNameProof, UserNameType,
         UsernameProofRequest, VerificationAddAddressBody,
@@ -191,6 +191,7 @@ mod tests {
         BlockEngine,
         MyHubService,
         broadcast::Sender<ShardChunk>,
+        broadcast::Sender<Block>,
     ) {
         let (msgs_request_tx, msgs_request_rx) = mpsc::channel(100);
 
@@ -247,6 +248,7 @@ mod tests {
         let (mempool_tx, mempool_rx) = mpsc::channel(1000);
         let (gossip_tx, _gossip_rx) = mpsc::channel(1000);
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(1000);
+        let (block_decision_tx, block_decision_rx) = broadcast::channel(1000);
         let (block_engine, _) = block_engine_test_helpers::setup_with_options(BlockEngineOptions {
             messages_request_tx: Some(msgs_request_tx),
             ..BlockEngineOptions::default()
@@ -263,6 +265,7 @@ mod tests {
             block_stores.clone(),
             gossip_tx.clone(),
             shard_decision_rx,
+            block_decision_rx,
             statsd_client.clone(),
         );
         tokio::spawn(async move { mempool.run().await });
@@ -299,13 +302,21 @@ mod tests {
                 "asddef".to_string(),
             ),
             shard_decision_tx,
+            block_decision_tx,
         )
     }
 
     #[tokio::test]
     async fn test_subscribe_rpc() {
-        let (stores, senders, _engines, _block_engine, service, _shard_decision_tx) =
-            make_server(None).await;
+        let (
+            stores,
+            senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
 
         let num_shard1_pre_existing_events = 10;
         let num_shard2_pre_existing_events = 20;
@@ -360,8 +371,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscribe_with_filter_rpc() {
-        let (stores, senders, _engines, _block_engine, service, _shard_decision_tx) =
-            make_server(None).await;
+        let (
+            stores,
+            senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
 
         let num_shard1_pre_existing_events = 10;
         let num_shard2_pre_existing_events = 20;
@@ -411,8 +429,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_event_success() {
-        let (stores, _senders, _engines, _block_engine, service, _shard_decision_tx) =
-            make_server(None).await;
+        let (
+            stores,
+            _senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
         let event_id = 12345;
         let hub_event = HubEvent {
             r#type: HubEventType::MergeMessage as i32,
@@ -443,8 +468,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_event_not_found() {
-        let (stores, _senders, _engines, _block_engine, service, _shard_decision_tx) =
-            make_server(None).await;
+        let (
+            stores,
+            _senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
 
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 1).await;
 
@@ -462,8 +494,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_event_invalid_shard() {
-        let (stores, _senders, _engines, _block_engine, service, _shard_decision_tx) =
-            make_server(None).await;
+        let (
+            stores,
+            _senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
 
         let event_id = 12345;
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 1).await;
@@ -483,8 +522,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_event_missing_shard_index() {
-        let (stores, _senders, _engines, _block_engine, service, _shard_decision_tx) =
-            make_server(None).await;
+        let (
+            stores,
+            _senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
 
         let event_id = 12345;
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 1).await;
@@ -503,8 +549,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_events() {
-        let (stores, _senders, _engines, _block_engine, service, _shard_decision_tx) =
-            make_server(None).await;
+        let (
+            stores,
+            _senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
 
         // Write some test events to the DB
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 10).await;
@@ -575,6 +628,7 @@ mod tests {
             _block_engine,
             service,
             _shard_decision_tx,
+            _block_decision_tx,
         ) = make_server(None).await;
 
         // Message with no fid registration
@@ -628,8 +682,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_authentication() {
-        let (_stores, _senders, _engines, _block_engine, service, _shard_decision_tx) =
-            make_server(Some("user1:pass1,user2:pass2".to_string())).await;
+        let (
+            _stores,
+            _senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(Some("user1:pass1,user2:pass2".to_string())).await;
         let message = messages_factory::casts::create_cast_add(123, "test", None, None);
 
         let no_auth_request = Request::new(message.clone());
@@ -665,8 +726,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_submit_bulk_messages_empty() {
-        let (_stores, _senders, _engines, _block_engine, service, _shard_decision_tx) =
-            make_server(None).await;
+        let (
+            _stores,
+            _senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
 
         // Test submitting 0 messages
         let response = submit_bulk_messages(&service, vec![]).await.unwrap();
@@ -683,6 +751,7 @@ mod tests {
             _block_engine,
             service,
             _shard_decision_tx,
+            _block_decision_tx,
         ) = make_server(None).await;
 
         // Register a user
@@ -735,6 +804,7 @@ mod tests {
             _block_engine,
             service,
             _shard_decision_tx,
+            _block_decision_tx,
         ) = make_server(None).await;
 
         // Register a user for the valid message
@@ -794,6 +864,7 @@ mod tests {
             _block_engine,
             service,
             _shard_decision_tx,
+            _block_decision_tx,
         ) = make_server(None).await;
 
         test_helper::register_user(
@@ -915,6 +986,7 @@ mod tests {
             _block_engine,
             service,
             _shard_decision_tx,
+            _block_decision_tx,
         ) = make_server(None).await;
         let signer = test_helper::default_signer();
         let owner = hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap();
@@ -947,6 +1019,7 @@ mod tests {
             _block_engine,
             service,
             _shard_decision_tx,
+            _block_decision_tx,
         ) = make_server(None).await;
         let signer = test_helper::default_signer();
         let owner = hex::decode("849151d7D0bF1F34b70d5caD5149D28CC2308bf1").unwrap();
@@ -999,6 +1072,7 @@ mod tests {
             _block_engine,
             service,
             _shard_decision_tx,
+            _block_decision_tx,
         ) = make_server(None).await;
         let signer = test_helper::default_signer();
         let owner = test_helper::default_custody_address();
@@ -1031,6 +1105,7 @@ mod tests {
             _block_engine,
             service,
             _shard_decision_tx,
+            _block_decision_tx,
         ) = make_server(None).await;
         let signer = test_helper::default_signer();
         let owner = test_helper::default_custody_address();
@@ -1069,6 +1144,7 @@ mod tests {
             _block_engine,
             service,
             _shard_decision_tx,
+            _block_decision_tx,
         ) = make_server(None).await;
         let signer = test_helper::default_signer();
         let fid = 2;
@@ -1114,6 +1190,7 @@ mod tests {
             _block_engine,
             service,
             _shard_decision_tx,
+            _block_decision_tx,
         ) = make_server(None).await;
         let engine1 = &mut engine1;
         let engine2 = &mut engine2;
@@ -1277,6 +1354,7 @@ mod tests {
             _block_engine,
             service,
             _shard_decision_tx,
+            _block_decision_tx,
         ) = make_server(None).await;
         let engine1 = &mut engine1;
         let engine2 = &mut engine2;
@@ -1413,6 +1491,7 @@ mod tests {
             _block_engine,
             service,
             _shard_decision_tx,
+            _block_decision_tx,
         ) = make_server(None).await;
 
         let response = service
@@ -1552,6 +1631,7 @@ mod tests {
             _block_engine,
             service,
             _shard_decision_tx,
+            _block_decision_tx,
         ) = make_server(None).await;
 
         test_helper::register_user(
@@ -1620,6 +1700,7 @@ mod tests {
             _block_engine,
             service,
             _shard_decision_tx,
+            _block_decision_tx,
         ) = make_server(None).await;
         let fid = SHARD1_FID;
         let signer = test_helper::default_signer();
@@ -1672,6 +1753,7 @@ mod tests {
             _block_engine,
             service,
             _shard_decision_tx,
+            _block_decision_tx,
         ) = make_server(None).await;
 
         test_helper::register_user(
@@ -1744,6 +1826,7 @@ mod tests {
             _block_engine,
             service,
             _shard_decision_tx,
+            _block_decision_tx,
         ) = make_server(None).await;
         let owner = test_helper::default_custody_address();
         let fid = SHARD1_FID;
@@ -1780,6 +1863,7 @@ mod tests {
             _block_engine,
             service,
             _shard_decision_tx,
+            _block_decision_tx,
         ) = make_server(None).await;
         let fid = SHARD1_FID;
         let signer = test_helper::default_signer();
@@ -1845,6 +1929,7 @@ mod tests {
             _block_engine,
             service,
             _shard_decision_tx,
+            _block_decision_tx,
         ) = make_server(None).await;
         let fid = SHARD1_FID;
         let signer = test_helper::default_signer();
@@ -1926,14 +2011,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_submit_storage_lending_message() {
-        let (_stores, _senders, _engines, mut block_engine, service, _shard_decision_tx) =
-            make_server(None).await;
+        let (
+            _stores,
+            _senders,
+            _engines,
+            mut block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
 
         block_engine_test_helpers::register_user(
             SHARD1_FID,
             block_engine_test_helpers::default_signer(),
             block_engine_test_helpers::default_custody_address(),
-            1,
+            2,
             &mut block_engine,
         );
 

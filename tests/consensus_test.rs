@@ -422,6 +422,7 @@ impl NodeForTest {
             node.block_stores.clone(),
             gossip_tx.clone(),
             shard_decision_rx,
+            block_tx.subscribe(),
             statsd_client.clone(),
         );
         let handle = tokio::spawn(async move { mempool.run().await });

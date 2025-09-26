@@ -37,6 +37,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
     let (gossip_tx, _gossip_rx) = mpsc::channel(100);
     let (_shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
+    let (_block_decision_tx, block_decision_rx) = broadcast::channel(100);
 
     let (mut engine, _tmpdir) = test_helper::new_engine_with_options(test_helper::EngineOptions {
         limits: Some(test_helper::limits::unlimited_store_limits()),
@@ -69,6 +70,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         block_engine.stores(),
         gossip_tx,
         shard_decision_rx,
+        block_decision_rx,
         statsd_client,
     );
 

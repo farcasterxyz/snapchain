@@ -81,6 +81,7 @@ pub struct BlockStores {
     pub network: FarcasterNetwork,
     pub db: Arc<RocksDB>,
     pub trie: MerkleTrie,
+    pub event_handler: Arc<StoreEventHandler>,
 }
 
 impl BlockStores {
@@ -94,6 +95,7 @@ impl BlockStores {
             network,
             db: db.clone(),
             trie,
+            event_handler: store_event_handler,
         }
     }
     pub fn get_block_by_event_seqnum(&self, seqnum: u64) -> Option<Block> {
@@ -203,6 +205,14 @@ impl BlockEngine {
             })
     }
 
+    fn set_height(&self, version: &EngineVersion, height: Height) {
+        if version.is_enabled(ProtocolFeature::EventIdBugFix) {
+            self.stores
+                .event_handler
+                .set_current_height(height.block_number);
+        }
+    }
+
     pub fn validate_user_message(
         &self,
         message: &proto::Message,
@@ -264,7 +274,14 @@ impl BlockEngine {
                 }
 
                 let num_units_available = storage_slot.units_for(lend_storage.unit_type());
-                if num_units_available < lend_storage.num_units as u32 {
+                let num_units_required =
+                    if version.is_enabled(ProtocolFeature::StorageLendingLimitFix) {
+                        // Retain 1 unit for the lender so the lender is able to revoke lent storage. There are a couple places that fail if the user has no active storage. Maintaining 1 storage unit is easier and safer than bypassing these validations for storage lends.
+                        lend_storage.num_units + 1
+                    } else {
+                        lend_storage.num_units
+                    };
+                if num_units_available < num_units_required as u32 {
                     return Err(MessageValidationError::InsufficientStorage);
                 }
             }
@@ -550,6 +567,8 @@ impl BlockEngine {
             })
             .collect_vec();
 
+        self.set_height(&version, height);
+
         let mut all_hub_events = vec![];
         for snapchain_txn in &mut snapchain_txns {
             let (account_root, hub_events, _) = self.replay_snapchain_txn(
@@ -656,6 +675,8 @@ impl BlockEngine {
                 }
             },
         }
+
+        self.set_height(&version, height);
 
         let mut all_hub_events = vec![];
         for snapchain_txn in transactions {

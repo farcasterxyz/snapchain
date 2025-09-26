@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::core::util::FarcasterTime;
-    use crate::proto::{FarcasterNetwork, StorageUnitType};
+    use crate::proto::{BlockEventType, FarcasterNetwork, StorageUnitType};
     use crate::storage::store::block_engine::BlockStateChange;
     use crate::storage::store::block_engine_test_helpers::*;
     use crate::storage::store::mempool_poller::MempoolMessage;
@@ -441,17 +441,35 @@ mod tests {
             &mut block_engine,
         );
 
+        // Make sure to retain 1 unit for the lender so the lender can revoke.
+        let invalid_lend_message = messages_factory::storage_lend::create_storage_lend(
+            FID_FOR_TEST,
+            FID_FOR_TEST + 1,
+            500,
+            StorageUnitType::UnitType2025,
+            None,
+            None,
+        );
+        commit_message(&mut block_engine, &invalid_lend_message, Validity::Invalid);
+
         // Lender lends 300 units to borrower
         let lend_message1 = messages_factory::storage_lend::create_storage_lend(
             FID_FOR_TEST,
             FID_FOR_TEST + 1,
-            300,
+            499,
             StorageUnitType::UnitType2025,
             None,
             None,
         );
         let block1 = commit_message(&mut block_engine, &lend_message1, Validity::Valid);
-        assert_eq!(block1.events.len(), 1);
+        assert_eq!(
+            block1
+                .events
+                .iter()
+                .filter(|event| event.data.as_ref().unwrap().r#type() != BlockEventType::Heartbeat)
+                .count(),
+            1
+        );
         assert_merge_message_event(&block1.events[0], &lend_message1);
 
         // Verify initial balances after lending
@@ -459,13 +477,13 @@ mod tests {
             &block_engine,
             FID_FOR_TEST,
             StorageUnitType::UnitType2025,
-            200,
-        ); // 500 - 300
+            1,
+        ); // 500 - 499
         assert_storage_balance(
             &block_engine,
             FID_FOR_TEST + 1,
             StorageUnitType::UnitType2025,
-            300,
+            499,
         ); // borrowed
 
         // Lender takes back storage by setting lend to 0

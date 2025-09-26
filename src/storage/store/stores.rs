@@ -440,6 +440,7 @@ impl Stores {
             let slot =
                 self.get_storage_slot_for_fid(fid, store_type != StoreType::StorageLends, &[])?;
             let used = self.get_usage_by_store_type(fid, store_type, txn_batch)?;
+            // TODO(aditi): Should subtract 1 here for storage lends because we require keeping 1 storage unit available for revoking lent storage
             let max_messages = self.store_limits.max_messages(&slot, store_type);
             let name = match store_type {
                 StoreType::None => "NONE",

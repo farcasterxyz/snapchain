@@ -55,17 +55,18 @@ mod tests {
                 max_capacity: 10,
             },
             statsd_client(),
+            1,
         );
 
         for _ in 0..7000 {
-            assert!(rate_limits.consume_for_fid(engine.shard_id(), FID_FOR_TEST))
+            assert!(rate_limits.consume_for_fid(FID_FOR_TEST))
         }
 
-        assert!(!rate_limits.consume_for_fid(engine.shard_id(), FID_FOR_TEST));
+        assert!(!rate_limits.consume_for_fid(FID_FOR_TEST));
 
         sleep(Duration::from_millis(1500)).await;
 
-        assert!(rate_limits.consume_for_fid(engine.shard_id(), FID_FOR_TEST));
+        assert!(rate_limits.consume_for_fid(FID_FOR_TEST));
     }
 
     #[tokio::test]
@@ -96,18 +97,19 @@ mod tests {
                 max_capacity: 10,
             },
             statsd_client(),
+            1,
         );
 
         for _ in 0..700 {
-            assert!(rate_limits.consume_for_fid(engine.shard_id(), FID_FOR_TEST))
+            assert!(rate_limits.consume_for_fid(FID_FOR_TEST))
         }
 
-        assert!(!rate_limits.consume_for_fid(engine.shard_id(), FID_FOR_TEST));
+        assert!(!rate_limits.consume_for_fid(FID_FOR_TEST));
 
         sleep(Duration::from_millis(20)).await;
 
         // The rate limiter for this fid is evicted because the tti is 10ms and the rate limits are freed up again.
-        assert!(rate_limits.consume_for_fid(engine.shard_id(), FID_FOR_TEST));
+        assert!(rate_limits.consume_for_fid(FID_FOR_TEST));
     }
 
     #[tokio::test]
@@ -140,18 +142,19 @@ mod tests {
                 max_capacity: 10,
             },
             statsd_client(),
+            1,
         );
 
         for fid in FID_FOR_TEST..FID_FOR_TEST + 11 {
             for _ in 0..700 {
-                assert!(rate_limits.consume_for_fid(engine.shard_id(), fid))
+                assert!(rate_limits.consume_for_fid(fid))
             }
         }
 
         // FID_FOR_TEST was LRU so it should be removed
-        assert!(rate_limits.consume_for_fid(engine.shard_id(), FID_FOR_TEST));
+        assert!(rate_limits.consume_for_fid(FID_FOR_TEST));
         for fid in FID_FOR_TEST + 1..FID_FOR_TEST + 11 {
-            assert!(!rate_limits.consume_for_fid(engine.shard_id(), fid));
+            assert!(!rate_limits.consume_for_fid(fid));
         }
     }
 
@@ -183,11 +186,12 @@ mod tests {
                 max_capacity: 10,
             },
             statsd_client(),
+            1,
         );
 
         // Min allowance is 100
         for _ in 0..100 {
-            assert!(rate_limits.consume_for_fid(engine.shard_id(), FID_FOR_TEST))
+            assert!(rate_limits.consume_for_fid(FID_FOR_TEST))
         }
     }
 
@@ -210,9 +214,10 @@ mod tests {
                 max_capacity: 10,
             },
             statsd_client(),
+            1,
         );
 
         // If allowance is 0, don't allow any messages. This more realistically happens when the user has no storage.
-        assert!(!rate_limits.consume_for_fid(engine.shard_id(), FID_FOR_TEST))
+        assert!(!rate_limits.consume_for_fid(FID_FOR_TEST))
     }
 }
