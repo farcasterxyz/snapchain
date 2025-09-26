@@ -1,5 +1,5 @@
 use crate::mempool::mempool::MempoolMessagesRequest;
-use crate::proto::{self, FarcasterNetwork, Transaction, ValidatorMessage};
+use crate::proto::{self, block_event_data, FarcasterNetwork, Transaction, ValidatorMessage};
 use crate::storage::store::account::OnchainEventStorageError;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use itertools::Itertools;
@@ -48,8 +48,17 @@ impl MempoolMessage {
             MempoolMessage::FnameTransfer(transfer) => transfer.proof.as_ref().unwrap().fid,
             MempoolMessage::BlockEvent {
                 for_shard: _,
-                message: _,
-            } => 0,
+                message,
+            } => match &message.data {
+                Some(data) => match &data.body {
+                    Some(block_event_data::Body::MergeMessageEventBody(body)) => {
+                        body.message.as_ref().unwrap().fid()
+                    }
+                    Some(block_event_data::Body::HeartbeatEventBody(_)) => 0,
+                    None => 0,
+                },
+                None => 0,
+            },
         }
     }
 
