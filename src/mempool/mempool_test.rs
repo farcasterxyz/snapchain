@@ -9,7 +9,10 @@ mod tests {
         core::util::to_farcaster_time,
         mempool::mempool::{self, Mempool, MempoolMessagesRequest},
         network::gossip::{Config, SnapchainGossip},
-        proto::{self, Block, FarcasterNetwork, Height, ShardChunk, ShardHeader, Transaction},
+        proto::{
+            self, Block, BlockHeader, FarcasterNetwork, Height, ShardChunk, ShardHeader,
+            StorageUnitType, Transaction,
+        },
         storage::store::{
             block_engine::BlockEngine,
             block_engine_test_helpers,
@@ -18,7 +21,10 @@ mod tests {
             test_helper::{self, commit_event, default_storage_event, FID_FOR_TEST},
         },
         utils::{
-            factory::{events_factory, messages_factory},
+            factory::{
+                events_factory,
+                messages_factory::{self, storage_lend::create_storage_lend},
+            },
             statsd_wrapper::StatsdClientWrapper,
         },
     };
@@ -556,6 +562,115 @@ mod tests {
         // We expect one of the added casts to have been evicted
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].fid(), fid);
+    }
+    #[tokio::test]
+    async fn test_mempool_eviction_shard0() {
+        let (
+            _engines,
+            mut block_engine,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            _shard_decision_tx,
+            block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
+        block_engine_test_helpers::register_user(
+            1234,
+            default_signer(),
+            default_custody_address(),
+            5,
+            &mut block_engine,
+        );
+
+        // Spawn mempool task
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let fid = 1234;
+
+        let storage_lend1 = create_storage_lend(
+            fid,
+            fid + 1,
+            1,
+            StorageUnitType::UnitType2025,
+            Some(1),
+            None,
+        );
+
+        let storage_lend2 = create_storage_lend(
+            fid,
+            fid + 1,
+            1,
+            StorageUnitType::UnitType2025,
+            Some(2),
+            None,
+        );
+
+        let _ = mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(storage_lend1.clone()),
+                MempoolSource::Local,
+                None,
+            ))
+            .await;
+
+        let _ = mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(storage_lend2.clone()),
+                MempoolSource::Local,
+                None,
+            ))
+            .await;
+
+        // Wait for cast processing
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let transaction = Transaction {
+            fid,
+            user_messages: vec![storage_lend1],
+            system_messages: vec![],
+            account_root: vec![],
+        };
+
+        let header = BlockHeader {
+            height: Some(Height {
+                shard_index: 0,
+                block_number: 1,
+            }),
+            ..Default::default()
+        };
+
+        // Create fake chunk with cast1
+        let block = Block {
+            header: Some(header),
+            transactions: vec![transaction],
+            ..Default::default()
+        };
+
+        let _ = block_decision_tx.send(block);
+
+        // Wait for chunk processing
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Setup channel to retrieve messages
+        let (mempool_retrieval_tx, mempool_retrieval_rx) = oneshot::channel();
+
+        // Query mempool for the messages
+        messages_request_tx
+            .send(MempoolMessagesRequest {
+                shard_id: 0,
+                max_messages_per_block: 2,
+                message_tx: mempool_retrieval_tx,
+            })
+            .await
+            .unwrap();
+
+        let result = mempool_retrieval_rx.await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].mempool_key().identity(), storage_lend2.hex_hash())
     }
 
     #[tokio::test]
