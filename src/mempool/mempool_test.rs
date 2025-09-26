@@ -625,7 +625,7 @@ mod tests {
             ))
             .await;
 
-        // Wait for cast processing
+        // Wait for processing
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         let transaction = Transaction {
@@ -643,7 +643,7 @@ mod tests {
             ..Default::default()
         };
 
-        // Create fake chunk with cast1
+        // Create fake block
         let block = Block {
             header: Some(header),
             transactions: vec![transaction],
@@ -652,7 +652,7 @@ mod tests {
 
         let _ = block_decision_tx.send(block);
 
-        // Wait for chunk processing
+        // Wait for block processing
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         // Setup channel to retrieve messages
