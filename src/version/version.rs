@@ -20,6 +20,7 @@ pub enum EngineVersion {
     V10 = 10,
     V11 = 11,
     V12 = 12,
+    V13 = 13,
 }
 
 pub enum ProtocolFeature {
@@ -38,6 +39,7 @@ pub enum ProtocolFeature {
     UserProfileToken,
     StorageLending,
     EventIdBugFix,
+    StorageLendingLimitFix,
 }
 
 pub struct VersionSchedule {
@@ -95,8 +97,12 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
         version: EngineVersion::V11,
     },
     VersionSchedule {
-        active_at: 1760547600, // 2025-10-15 5PM UTC
+        active_at: 1760547600, // 2025-10-15 5PM UTC, fixes testnet issue
         version: EngineVersion::V12,
+    },
+    VersionSchedule {
+        active_at: 1760547600, // 2025-10-15 5PM UTC, fixes testnet issue
+        version: EngineVersion::V13,
     },
 ]
 .as_slice();
@@ -135,15 +141,19 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
         version: EngineVersion::V11,
     },
     VersionSchedule {
-        active_at: 1758763200, // 2025-09-25 1:20AM UTC
+        active_at: 1758763200, // 2025-09-25 1:20AM UTC, block engine event id fix
         version: EngineVersion::V12,
+    },
+    VersionSchedule {
+        active_at: 1758906000, // 2025-09-26 5PM UTC, storage lending allowance limit fix
+        version: EngineVersion::V13,
     },
 ]
 .as_slice();
 
 const ENGINE_VERSION_SCHEDULE_DEVNET: &[VersionSchedule] = [VersionSchedule {
     active_at: 0,
-    version: EngineVersion::V12,
+    version: EngineVersion::V13,
 }]
 .as_slice();
 
@@ -192,6 +202,7 @@ impl EngineVersion {
             }
             ProtocolFeature::StorageLending => self >= &EngineVersion::V11,
             ProtocolFeature::EventIdBugFix => self >= &EngineVersion::V12,
+            ProtocolFeature::StorageLendingLimitFix => self >= &EngineVersion::V13,
         }
     }
 
@@ -208,7 +219,7 @@ impl EngineVersion {
             EngineVersion::V8 => 5,
             EngineVersion::V9 => 6,
             EngineVersion::V10 => 7,
-            EngineVersion::V11 | EngineVersion::V12 => LATEST_PROTOCOL_VERSION,
+            EngineVersion::V11 | EngineVersion::V12 | EngineVersion::V13 => LATEST_PROTOCOL_VERSION,
         }
     }
 
@@ -378,7 +389,7 @@ mod version_test {
 
     #[test]
     fn test_latest() {
-        assert_eq!(EngineVersion::latest(), EngineVersion::V12);
+        assert_eq!(EngineVersion::latest(), EngineVersion::V13);
         assert_eq!(
             EngineVersion::version_for(&FarcasterTime::current(), FarcasterNetwork::Devnet),
             EngineVersion::latest()

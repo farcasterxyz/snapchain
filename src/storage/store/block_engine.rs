@@ -274,7 +274,14 @@ impl BlockEngine {
                 }
 
                 let num_units_available = storage_slot.units_for(lend_storage.unit_type());
-                if num_units_available < lend_storage.num_units as u32 {
+                let num_units_required =
+                    if version.is_enabled(ProtocolFeature::StorageLendingLimitFix) {
+                        // Retain 1 unit for the lender so the lender is able to revoke lent storage. There are a couple places that fail if the user has no active storage. Maintaining 1 storage unit is easier and safer than bypassing these validations for storage lends.
+                        lend_storage.num_units + 1
+                    } else {
+                        lend_storage.num_units
+                    };
+                if num_units_available < num_units_required as u32 {
                     return Err(MessageValidationError::InsufficientStorage);
                 }
             }
