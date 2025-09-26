@@ -9,7 +9,7 @@ mod tests {
         core::util::to_farcaster_time,
         mempool::mempool::{self, Mempool, MempoolMessagesRequest},
         network::gossip::{Config, SnapchainGossip},
-        proto::{self, FarcasterNetwork, Height, ShardChunk, ShardHeader, Transaction},
+        proto::{self, Block, FarcasterNetwork, Height, ShardChunk, ShardHeader, Transaction},
         storage::store::{
             block_engine::BlockEngine,
             block_engine_test_helpers,
@@ -48,6 +48,7 @@ mod tests {
         mpsc::Sender<MempoolRequest>,
         mpsc::Sender<MempoolMessagesRequest>,
         broadcast::Sender<ShardChunk>,
+        broadcast::Sender<Block>,
         mpsc::Receiver<SystemMessage>,
     ) {
         let keypair = Keypair::generate();
@@ -60,6 +61,7 @@ mod tests {
         let (mempool_tx, mempool_rx) = mpsc::channel(100);
         let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
+        let (block_decision_tx, block_decision_rx) = broadcast::channel(100);
         let mut shard_senders = HashMap::new();
         let mut shard_stores = HashMap::new();
         let mut engines = HashMap::new();
@@ -104,6 +106,7 @@ mod tests {
             block_engine.stores(),
             gossip_tx,
             shard_decision_rx,
+            block_decision_rx,
             statsd_client,
         );
 
@@ -115,6 +118,7 @@ mod tests {
             mempool_tx,
             messages_request_tx,
             shard_decision_tx,
+            block_decision_tx,
             system_rx,
         )
     }
@@ -148,7 +152,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_user_message_is_invalid() {
-        let (mut engines, _, _, mut mempool, _, _, _, _) = setup(None, false, 1).await;
+        let (mut engines, _, _, mut mempool, _, _, _, _, _) = setup(None, false, 1).await;
         let mut engine = engines.get_mut(&1).unwrap();
         test_helper::register_user(
             1234,
@@ -167,7 +171,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_block_event_is_invalid() {
-        let (mut engines, _, _, mut mempool, _, _, _, _) = setup(None, false, 1).await;
+        let (mut engines, _, _, mut mempool, _, _, _, _, _) = setup(None, false, 1).await;
         let mut engine = engines.get_mut(&1).unwrap();
         let block_event = events_factory::create_heartbeat_event(1);
         let valid = mempool.message_is_valid(
@@ -192,7 +196,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_onchain_event_is_valid() {
-        let (mut engines, _, _, mut mempool, _, _, _, _) = setup(None, false, 1).await;
+        let (mut engines, _, _, mut mempool, _, _, _, _, _) = setup(None, false, 1).await;
         let mut engine = engines.get_mut(&1).unwrap();
         let onchain_event = events_factory::create_rent_event(
             1234,
@@ -213,7 +217,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_fname_transfer_is_valid() {
-        let (mut engines, _, _, mut mempool, _, _, _, _) = setup(None, false, 1).await;
+        let (mut engines, _, _, mut mempool, _, _, _, _, _) = setup(None, false, 1).await;
         let mut engine = engines.get_mut(&1).unwrap();
         test_helper::register_user(
             1,
@@ -239,7 +243,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limits_applied() {
-        let (mut engines, _, _, mut mempool, _, _, _, _) = setup(None, true, 1).await;
+        let (mut engines, _, _, mut mempool, _, _, _, _, _) = setup(None, true, 1).await;
         let mut engine = engines.get_mut(&1).unwrap();
 
         let id_register_event = events_factory::create_id_register_event(
@@ -271,8 +275,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_copying_fname_transfer() {
-        let (_, _, _, mut mempool, mempool_tx, _request_tx, _decision_tx, _) =
-            setup(None, false, 2).await;
+        let (
+            _,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 2).await;
         tokio::spawn(async move {
             mempool.run().await;
         });
@@ -331,8 +344,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_mempool_size() {
-        let (_, _, _, mut mempool, mempool_tx, _request_tx, _decision_tx, _) =
-            setup(None, false, 1).await;
+        let (
+            _,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
         tokio::spawn(async move {
             mempool.run().await;
         });
@@ -368,8 +390,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_mempool_prioritization() {
-        let (_, _, _, mut mempool, mempool_tx, messages_request_tx, _shard_decision_tx, _) =
-            setup(None, false, 1).await;
+        let (
+            _,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
 
         // Spawn mempool task
         tokio::spawn(async move {
@@ -430,8 +461,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_mempool_eviction() {
-        let (mut engines, _, _, mut mempool, mempool_tx, messages_request_tx, shard_decision_tx, _) =
-            setup(None, false, 1).await;
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
         let mut engine = engines.get_mut(&1).unwrap();
         test_helper::register_user(
             1234,
@@ -535,6 +575,7 @@ mod tests {
             mempool_tx1,
             _mempool_requests_tx1,
             _shard_decision_tx1,
+            _block_decision_tx1,
             _,
         ) = setup(Some(config1), false, 1).await;
         let (
@@ -545,6 +586,7 @@ mod tests {
             mempool_tx2,
             mempool_requests_tx2,
             _shard_decision_tx1,
+            _block_decision_tx1,
             mut system_rx2,
         ) = setup(Some(config2), false, 1).await;
 
@@ -638,8 +680,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_mempool_error() {
-        let (mut engines, _, _, mut mempool, mempool_tx, _request_tx, _decision_tx, _) =
-            setup(None, false, 1).await;
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
         let mut engine = engines.get_mut(&1).unwrap();
 
         test_helper::register_user(
@@ -678,8 +729,17 @@ mod tests {
     #[tokio::test]
     async fn test_onchain_event_for_migration_routing() {
         // Setup with 2 shards
-        let (_, _, _, mut mempool, mempool_tx, messages_request_tx, _decision_tx, _) =
-            setup(None, false, 2).await;
+        let (
+            _,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 2).await;
 
         tokio::spawn(async move {
             mempool.run().await;

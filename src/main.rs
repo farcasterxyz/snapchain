@@ -611,7 +611,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } else {
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
 
-        let (block_tx, _block_rx) = broadcast::channel(1000);
+        let (block_tx, block_rx) = broadcast::channel(1000);
 
         // Setup post-commit channel if replication is enabled
         let (engine_post_commit_tx, engine_post_commit_rx) = if app_config.replication.enable {
@@ -658,6 +658,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.block_stores.clone(),
             gossip_tx.clone(),
             shard_decision_rx,
+            block_rx,
             statsd_client.clone(),
         );
         tokio::spawn(async move { mempool.run().await });
