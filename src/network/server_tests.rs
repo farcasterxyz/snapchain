@@ -2025,7 +2025,7 @@ mod tests {
             SHARD1_FID,
             block_engine_test_helpers::default_signer(),
             block_engine_test_helpers::default_custody_address(),
-            1,
+            2,
             &mut block_engine,
         );
 
