@@ -60,6 +60,8 @@ pub struct RateLimits {
     shard_stores: HashMap<u32, Stores>,
     rate_limits_by_fid: Cache<u64, Arc<DirectRateLimiter>>,
     statsd_client: StatsdClientWrapper,
+    message_router: Box<dyn MessageRouter>,
+    num_shards: u32,
 }
 
 impl RateLimits {
@@ -67,6 +69,7 @@ impl RateLimits {
         shard_stores: HashMap<u32, Stores>,
         config: RateLimitsConfig,
         statsd_client: StatsdClientWrapper,
+        num_shards: u32,
     ) -> Self {
         RateLimits {
             shard_stores,
@@ -75,6 +78,8 @@ impl RateLimits {
                 .time_to_idle(config.time_to_idle)
                 .eviction_policy(EvictionPolicy::lru())
                 .build(),
+            message_router: Box::new(ShardRouter {}),
+            num_shards,
         }
     }
 
@@ -82,12 +87,9 @@ impl RateLimits {
         self.rate_limits_by_fid.invalidate(&fid);
     }
 
-    fn get_rate_limiter_for_fid(
-        &mut self,
-        shard_id: u32,
-        fid: u64,
-    ) -> Option<Arc<DirectRateLimiter>> {
+    fn get_rate_limiter_for_fid(&mut self, fid: u64) -> Option<Arc<DirectRateLimiter>> {
         self.rate_limits_by_fid.optionally_get_with(fid, || {
+            let shard_id = self.message_router.route_fid(fid, self.num_shards);
             let stores = self.shard_stores.get(&shard_id).unwrap();
             let storage_limits = stores.get_storage_limits(fid).unwrap();
             let storage_allowance: u32 = storage_limits
@@ -106,8 +108,8 @@ impl RateLimits {
         })
     }
 
-    pub fn consume_for_fid(&mut self, shard_id: u32, fid: u64) -> bool {
-        let rate_limiter = self.get_rate_limiter_for_fid(shard_id, fid);
+    pub fn consume_for_fid(&mut self, fid: u64) -> bool {
+        let rate_limiter = self.get_rate_limiter_for_fid(fid);
         self.statsd_client.gauge(
             "mempool.rate_limiter_entries",
             self.rate_limits_by_fid.entry_count(),
@@ -500,6 +502,7 @@ impl Mempool {
                     shard_stores.clone(),
                     RateLimitsConfig::default(),
                     statsd_client.clone(),
+                    num_shards,
                 ))
             } else {
                 None
@@ -518,11 +521,11 @@ impl Mempool {
         }
     }
 
-    fn message_exceeds_rate_limits(&mut self, shard_id: u32, message: &MempoolMessage) -> bool {
+    fn message_exceeds_rate_limits(&mut self, message: &MempoolMessage) -> bool {
         match message {
             MempoolMessage::UserMessage(message) => {
                 if let Some(rate_limits) = &mut self.rate_limits {
-                    !rate_limits.consume_for_fid(shard_id, message.fid())
+                    !rate_limits.consume_for_fid(message.fid())
                 } else {
                     false
                 }
@@ -587,7 +590,7 @@ impl Mempool {
         if self.message_already_exists(shard, message) {
             return Err(HubError::duplicate("message has already been merged"));
         }
-        if self.message_exceeds_rate_limits(shard, message) {
+        if self.message_exceeds_rate_limits(message) {
             self.statsd_client
                 .count_with_shard(shard, "mempool.rate_limit_hit", 1, vec![]);
             return Err(HubError::rate_limited(&format!(
