@@ -315,7 +315,7 @@ where
             Verification::Valid => Ok(()),
             Verification::Invalid => Err(ValidationError::InvalidClaimSignature),
         },
-        Err(_) => Err(ValidationError::InvalidClaimSignature),
+        Err(e) => Err(ValidationError::ClaimSignatureVerificationError(e.to_string())),
     }
 }
 
@@ -456,7 +456,7 @@ fn validate_verification_add_sol_address_signature(
 
     match public_key.unwrap().verify_strict(&full_message, &signature) {
         Ok(_) => Ok(()),
-        Err(_) => Err(ValidationError::InvalidSignature),
+        Err(e) => Err(ValidationError::SignatureVerificationError(e.to_string())),
     }
 }
 
