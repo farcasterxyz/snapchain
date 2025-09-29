@@ -31,7 +31,7 @@ pub fn validate_cast_add_body(
         Ok(CastType::TenKCast) if text_bytes.len() <= 1024 => {
             return Err(ValidationError::TextTooLongFor10kCast);
         }
-        Err(_) => {
+        Err(e) => {
             return Err(ValidationError::InvalidCastType);
         }
         _ => {}
