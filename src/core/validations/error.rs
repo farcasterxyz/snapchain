@@ -154,4 +154,10 @@ pub enum ValidationError {
     InvalidStorageUnitType,
     #[error("num storage units too large")]
     ExceededMaxStorageUnits,
+    #[error("Failed to decode protobuf data: {0}")]
+    DecodeError(String),
+    #[error("Failed to verify signature: {0}")]
+    SignatureVerificationError(String),
+    #[error("Failed to verify claim signature: {0}")]
+    ClaimSignatureVerificationError(String),
 }
