@@ -735,10 +735,10 @@ impl Mempool {
 
                         }
                         Err(broadcast::error::RecvError::Closed) => {
-                            panic!("Shard decision tx is closed.");
+                            panic!("Block decision tx is closed.");
                         },
                         Err(broadcast::error::RecvError::Lagged(count)) => {
-                            error!(lag = count, "Shard decision rx is lagged");
+                            error!(lag = count, "Block decision rx is lagged");
                         }
                     }
                 }
@@ -750,10 +750,10 @@ impl Mempool {
                             self.remove_committed_txns(height, &chunk.transactions)
                         },
                         Err(broadcast::error::RecvError::Closed) => {
-                            panic!("Block decision tx is closed.");
+                            panic!("Shard decision tx is closed.");
                         },
                         Err(broadcast::error::RecvError::Lagged(count)) => {
-                            error!(lag = count, "Block decision rx is lagged");
+                            error!(lag = count, "Shard decision rx is lagged");
                         }
                     }
                 }
