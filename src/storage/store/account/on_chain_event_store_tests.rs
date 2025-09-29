@@ -1,11 +1,16 @@
 #[cfg(test)]
 mod tests {
     use crate::core::util::FarcasterTime;
-    use crate::proto::{FarcasterNetwork, StorageUnitType, TierType};
+    use crate::proto::{
+        FarcasterNetwork, IdRegisterEventType, SignerEventType, StorageUnitType, TierType,
+    };
     use crate::storage::db;
     use crate::storage::db::RocksDbTransactionBatch;
-    use crate::storage::store::account::{OnchainEventStore, StorageSlot, StoreEventHandler};
-    use crate::utils::factory::{self};
+    use crate::storage::store::account::{
+        block_event_store, OnchainEventStore, StorageSlot, StoreEventHandler,
+    };
+    use crate::storage::store::test_helper::default_custody_address;
+    use crate::utils::factory::{self, events_factory, signers};
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -373,5 +378,127 @@ mod tests {
                     .incr_by(day_in_secs + 1)
             )
             .unwrap());
+    }
+
+    #[test]
+    fn test_get_all_onchain_events() {
+        use crate::storage::db::PageOptions;
+
+        let (store, _dir) = store();
+
+        // Create different types of onchain events
+        let id_register_event1 = factory::events_factory::create_id_register_event(
+            1,
+            IdRegisterEventType::Register,
+            default_custody_address(),
+            None,
+        );
+        let id_register_event2 = factory::events_factory::create_id_register_event(
+            2,
+            IdRegisterEventType::Register,
+            default_custody_address(),
+            None,
+        );
+        let signer_event1 = factory::events_factory::create_signer_event(
+            1,
+            signers::generate_signer(),
+            SignerEventType::Add,
+            None,
+            None,
+        );
+        let signer_event2 = factory::events_factory::create_signer_event(
+            3,
+            signers::generate_signer(),
+            SignerEventType::Add,
+            None,
+            None,
+        );
+        let rent_event1 = factory::events_factory::create_rent_event(
+            1,
+            5,
+            StorageUnitType::UnitTypeLegacy,
+            false,
+            FarcasterNetwork::Mainnet,
+        );
+        let rent_event2 = factory::events_factory::create_rent_event(
+            2,
+            10,
+            StorageUnitType::UnitType2024,
+            false,
+            FarcasterNetwork::Mainnet,
+        );
+
+        // Merge all events into the store
+        let mut txn = RocksDbTransactionBatch::new();
+        let events = vec![
+            id_register_event1.clone(),
+            id_register_event2.clone(),
+            signer_event1.clone(),
+            signer_event2.clone(),
+            rent_event1.clone(),
+            rent_event2.clone(),
+        ];
+        for event in &events {
+            store.merge_onchain_event(event.clone(), &mut txn).unwrap();
+        }
+        // Put in some data with a prefix higher than the onchain event store prefix and make sure it's not included.
+        block_event_store::put_block_event(&events_factory::create_heartbeat_event(1), &mut txn)
+            .unwrap();
+        store.db.commit(txn).unwrap();
+
+        // Test pagination with page size limit
+        let page_options = PageOptions {
+            page_size: Some(3),
+            page_token: None,
+            reverse: false,
+        };
+        let page = store.get_all_onchain_events(&page_options).unwrap();
+        assert!(page.next_page_token.is_some());
+        assert_eq!(
+            page.onchain_events,
+            vec![
+                signer_event1.clone(),
+                signer_event2.clone(),
+                id_register_event1.clone(),
+            ]
+        );
+
+        // Get second page
+        let page_options = PageOptions {
+            page_size: Some(4),
+            page_token: page.next_page_token,
+            reverse: false,
+        };
+        let page = store.get_all_onchain_events(&page_options).unwrap();
+        assert!(page.next_page_token.is_none());
+        assert_eq!(
+            page.onchain_events,
+            vec![
+                id_register_event2.clone(),
+                rent_event1.clone(),
+                rent_event2.clone()
+            ]
+        );
+
+        // With exactly 6 events and page size 3, we should have exactly 2 pages
+        // Test without page size limit (get all events)
+        let page_options = PageOptions {
+            page_size: None,
+            page_token: None,
+            reverse: false,
+        };
+        let page = store.get_all_onchain_events(&page_options).unwrap();
+        assert!(page.next_page_token.is_none());
+        assert_eq!(
+            page.onchain_events,
+            vec![
+                signer_event1.clone(),
+                signer_event2.clone(),
+                id_register_event1.clone(),
+                id_register_event2.clone(),
+                rent_event1.clone(),
+                rent_event2.clone(),
+            ]
+        );
     }
 }

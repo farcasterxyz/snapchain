@@ -170,6 +170,10 @@ fn build_secondary_indices_for_signer(
 
     if signer_event_body.event_type() == SignerEventType::AdminReset {
         let mut next_page_token = None;
+        let mut start_prefix = make_onchain_event_type_prefix(OnChainEventType::EventTypeSigner);
+        start_prefix.extend(make_fid_key(onchain_event.fid));
+        let stop_prefix = increment_vec_u8(&start_prefix);
+
         loop {
             let events_page = get_onchain_events(
                 db,
@@ -178,8 +182,8 @@ fn build_secondary_indices_for_signer(
                     page_token: next_page_token,
                     reverse: false,
                 },
-                OnChainEventType::EventTypeSigner,
-                Some(onchain_event.fid),
+                start_prefix.clone(),
+                stop_prefix.clone(),
             )?;
 
             let onchain_event = events_page.onchain_events.into_iter().find(|event| {
@@ -268,17 +272,9 @@ fn get_event_by_secondary_key(
 pub fn get_onchain_events(
     db: &RocksDB,
     page_options: &PageOptions,
-    event_type: OnChainEventType,
-    fid: Option<u64>,
+    start_prefix: Vec<u8>,
+    stop_prefix: Vec<u8>,
 ) -> Result<OnchainEventsPage, OnchainEventStorageError> {
-    let mut start_prefix = make_onchain_event_type_prefix(event_type);
-
-    if let Some(fid) = &fid {
-        start_prefix.extend(make_fid_key(*fid));
-    }
-
-    let stop_prefix = increment_vec_u8(&start_prefix);
-
     let mut onchain_events = vec![];
     let mut last_key = vec![];
     db.for_each_iterator_by_prefix_paged(
@@ -321,11 +317,9 @@ where
     F: Fn(&OnChainEvent) -> bool,
 {
     let mut start_prefix = make_onchain_event_type_prefix(event_type);
-
     if let Some(fid) = &fid {
         start_prefix.extend(make_fid_key(*fid));
     }
-
     let stop_prefix = increment_vec_u8(&start_prefix);
 
     let mut onchain_events = vec![];
@@ -502,7 +496,7 @@ impl StorageSlot {
 #[derive(Clone)]
 pub struct OnchainEventStore {
     pub(crate) db: Arc<RocksDB>,
-    store_event_handler: Arc<StoreEventHandler>,
+    pub store_event_handler: Arc<StoreEventHandler>,
     store_opts: StoreOptions,
 }
 
@@ -546,6 +540,22 @@ impl OnchainEventStore {
         Ok(hub_event.clone())
     }
 
+    pub fn get_all_onchain_events(
+        &self,
+        page_options: &PageOptions,
+    ) -> Result<OnchainEventsPage, OnchainEventStorageError> {
+        let start_prefix = vec![
+            RootPrefix::OnChainEvent as u8,
+            OnChainEventPostfix::OnChainEvents as u8,
+        ];
+        get_onchain_events(
+            &self.db,
+            page_options,
+            start_prefix.clone(),
+            increment_vec_u8(&start_prefix),
+        )
+    }
+
     pub fn get_onchain_events(
         &self,
         event_type: OnChainEventType,
@@ -553,6 +563,12 @@ impl OnchainEventStore {
     ) -> Result<Vec<OnChainEvent>, OnchainEventStorageError> {
         let mut onchain_events = vec![];
         let mut next_page_token = None;
+        let mut start_prefix = make_onchain_event_type_prefix(event_type);
+        if let Some(fid) = &fid {
+            start_prefix.extend(make_fid_key(*fid));
+        }
+        let stop_prefix = increment_vec_u8(&start_prefix);
+
         loop {
             let onchain_events_page = get_onchain_events(
                 &self.db,
@@ -561,8 +577,8 @@ impl OnchainEventStore {
                     page_token: next_page_token,
                     reverse: false,
                 },
-                event_type,
-                fid,
+                start_prefix.clone(),
+                stop_prefix.clone(),
             )?;
             onchain_events.extend(onchain_events_page.onchain_events);
             if onchain_events_page.next_page_token.is_none() {
@@ -609,11 +625,12 @@ impl OnchainEventStore {
         &self,
         page_options: &PageOptions,
     ) -> Result<(Vec<u64>, Option<Vec<u8>>), OnchainEventStorageError> {
+        let start_prefix = make_onchain_event_type_prefix(OnChainEventType::EventTypeIdRegister);
         let onchain_events_page = get_onchain_events(
             &self.db,
             page_options,
-            OnChainEventType::EventTypeIdRegister,
-            None,
+            start_prefix.clone(),
+            increment_vec_u8(&start_prefix),
         )?;
 
         let fids = onchain_events_page

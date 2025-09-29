@@ -55,6 +55,7 @@ async fn start_servers(
     block_stores: BlockStores,
     chain_clients: ChainClients,
     replicator: Option<Arc<replication::replicator::Replicator>>,
+    local_state_store: LocalStateStore,
 ) {
     let grpc_addr = app_config.rpc_address.clone();
     let grpc_socket_addr: SocketAddr = grpc_addr.parse().unwrap();
@@ -69,6 +70,7 @@ async fn start_servers(
         app_config.snapshot.clone(),
         app_config.fc_network,
         statsd_client.clone(),
+        local_state_store,
     );
 
     let service = Arc::new(MyHubService::new(
@@ -211,8 +213,8 @@ async fn schedule_background_jobs(
             "0 0 5 * * *", // 5 AM UTC every day
             app_config.snapshot.clone(),
             app_config.fc_network,
-            block_stores,
-            shard_stores,
+            block_stores.clone(),
+            shard_stores.clone(),
             statsd_client,
         )
         .unwrap();
@@ -461,6 +463,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (onchain_events_request_tx, onchain_events_request_rx) = broadcast::channel(100);
     let (fname_request_tx, fname_request_rx) = broadcast::channel(100);
 
+    let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
+    let local_state_store = LocalStateStore::new(global_db);
+
     if app_config.read_node {
         // Setup post-commit channel if replication is enabled
         let (engine_post_commit_tx, engine_post_commit_rx) = if app_config.replication.enable {
@@ -547,6 +552,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.block_stores.clone(),
             chains_clients,
             replicator,
+            local_state_store.clone(),
         )
         .await;
 
@@ -605,7 +611,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } else {
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
 
-        let (block_tx, _block_rx) = broadcast::channel(1000);
+        let (block_tx, block_rx) = broadcast::channel(1000);
 
         // Setup post-commit channel if replication is enabled
         let (engine_post_commit_tx, engine_post_commit_rx) = if app_config.replication.enable {
@@ -615,9 +621,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         } else {
             (None, None)
         };
-
-        let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
-        let local_state_store = LocalStateStore::new(global_db);
 
         let node = SnapchainNode::create(
             keypair.clone(),
@@ -655,6 +658,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.block_stores.clone(),
             gossip_tx.clone(),
             shard_decision_rx,
+            block_rx,
             statsd_client.clone(),
         );
         tokio::spawn(async move { mempool.run().await });
@@ -701,7 +705,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     node_local_state::Chain::Base,
                     mempool_tx.clone(),
                     statsd_client.clone(),
-                    local_state_store,
+                    local_state_store.clone(),
                     onchain_events_request_tx.subscribe(),
                 )?;
             tokio::spawn(async move {
@@ -774,6 +778,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node.block_stores.clone(),
             chains_clients,
             replicator,
+            local_state_store.clone(),
         )
         .await;
 

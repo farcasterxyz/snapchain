@@ -28,10 +28,15 @@ message UploadSnapshotRequest {
   repeated uint32 shard_indexes = 1;
 }
 
+message RunOnchainEventsMigrationRequest {
+  uint64 shard_id = 1;
+}
+
 service AdminService {
   rpc SubmitOnChainEvent(OnChainEvent) returns (OnChainEvent);
   rpc SubmitUserNameProof(UserNameProof) returns (UserNameProof);
   rpc UploadSnapshot(UploadSnapshotRequest) returns (Empty);
   rpc RetryOnchainEvents(RetryOnchainEventsRequest) returns (Empty);
   rpc RetryFnameEvents(RetryFnameRequest) returns (Empty);
+  rpc RunOnchainEventsMigration(RunOnchainEventsMigrationRequest) returns (Empty);
 }

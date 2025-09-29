@@ -13,7 +13,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
 use crate::mempool::routing;
-use crate::proto::{FarcasterNetwork, OnChainEventType};
+use crate::proto::{Block, FarcasterNetwork, Height, OnChainEventType, Transaction};
 use crate::storage::store::block_engine::BlockStores;
 use crate::{
     core::types::SnapchainValidatorContext,
@@ -60,6 +60,8 @@ pub struct RateLimits {
     shard_stores: HashMap<u32, Stores>,
     rate_limits_by_fid: Cache<u64, Arc<DirectRateLimiter>>,
     statsd_client: StatsdClientWrapper,
+    message_router: Box<dyn MessageRouter>,
+    num_shards: u32,
 }
 
 impl RateLimits {
@@ -67,6 +69,7 @@ impl RateLimits {
         shard_stores: HashMap<u32, Stores>,
         config: RateLimitsConfig,
         statsd_client: StatsdClientWrapper,
+        num_shards: u32,
     ) -> Self {
         RateLimits {
             shard_stores,
@@ -75,6 +78,8 @@ impl RateLimits {
                 .time_to_idle(config.time_to_idle)
                 .eviction_policy(EvictionPolicy::lru())
                 .build(),
+            message_router: Box::new(ShardRouter {}),
+            num_shards,
         }
     }
 
@@ -82,12 +87,9 @@ impl RateLimits {
         self.rate_limits_by_fid.invalidate(&fid);
     }
 
-    fn get_rate_limiter_for_fid(
-        &mut self,
-        shard_id: u32,
-        fid: u64,
-    ) -> Option<Arc<DirectRateLimiter>> {
+    fn get_rate_limiter_for_fid(&mut self, fid: u64) -> Option<Arc<DirectRateLimiter>> {
         self.rate_limits_by_fid.optionally_get_with(fid, || {
+            let shard_id = self.message_router.route_fid(fid, self.num_shards);
             let stores = self.shard_stores.get(&shard_id).unwrap();
             let storage_limits = stores.get_storage_limits(fid).unwrap();
             let storage_allowance: u32 = storage_limits
@@ -106,8 +108,8 @@ impl RateLimits {
         })
     }
 
-    pub fn consume_for_fid(&mut self, shard_id: u32, fid: u64) -> bool {
-        let rate_limiter = self.get_rate_limiter_for_fid(shard_id, fid);
+    pub fn consume_for_fid(&mut self, fid: u64) -> bool {
+        let rate_limiter = self.get_rate_limiter_for_fid(fid);
         self.statsd_client.gauge(
             "mempool.rate_limiter_entries",
             self.rate_limits_by_fid.entry_count(),
@@ -473,6 +475,7 @@ pub struct Mempool {
     messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
     messages: HashMap<u32, BTreeMap<MempoolKey, MempoolMessage>>,
     shard_decision_rx: broadcast::Receiver<ShardChunk>,
+    block_decision_rx: broadcast::Receiver<Block>,
     statsd_client: StatsdClientWrapper,
     read_node_mempool: ReadNodeMempool,
     rate_limits: Option<RateLimits>,
@@ -489,17 +492,20 @@ impl Mempool {
         block_stores: BlockStores,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         shard_decision_rx: broadcast::Receiver<ShardChunk>,
+        block_decision_rx: broadcast::Receiver<Block>,
         statsd_client: StatsdClientWrapper,
     ) -> Self {
         Mempool {
             messages: HashMap::new(),
             messages_request_rx,
             shard_decision_rx,
+            block_decision_rx,
             rate_limits: if config.enable_rate_limits {
                 Some(RateLimits::new(
                     shard_stores.clone(),
                     RateLimitsConfig::default(),
                     statsd_client.clone(),
+                    num_shards,
                 ))
             } else {
                 None
@@ -518,11 +524,11 @@ impl Mempool {
         }
     }
 
-    fn message_exceeds_rate_limits(&mut self, shard_id: u32, message: &MempoolMessage) -> bool {
+    fn message_exceeds_rate_limits(&mut self, message: &MempoolMessage) -> bool {
         match message {
             MempoolMessage::UserMessage(message) => {
                 if let Some(rate_limits) = &mut self.rate_limits {
-                    !rate_limits.consume_for_fid(shard_id, message.fid())
+                    !rate_limits.consume_for_fid(message.fid())
                 } else {
                     false
                 }
@@ -587,7 +593,7 @@ impl Mempool {
         if self.message_already_exists(shard, message) {
             return Err(HubError::duplicate("message has already been merged"));
         }
-        if self.message_exceeds_rate_limits(shard, message) {
+        if self.message_exceeds_rate_limits(message) {
             self.statsd_client
                 .count_with_shard(shard, "mempool.rate_limit_hit", 1, vec![]);
             return Err(HubError::rate_limited(&format!(
@@ -676,6 +682,39 @@ impl Mempool {
         result
     }
 
+    fn remove_committed_txns(&mut self, height: Height, transactions: &Vec<Transaction>) {
+        if let Some(mempool) = self.messages.get_mut(&height.shard_index) {
+            for transaction in transactions {
+                for user_message in &transaction.user_messages {
+                    mempool.remove(&user_message.mempool_key());
+                    self.statsd_client.count_with_shard(
+                        height.shard_index,
+                        "mempool.remove.success",
+                        1,
+                        vec![],
+                    );
+                }
+                for system_message in &transaction.system_messages {
+                    mempool.remove(&system_message.mempool_key());
+                    if let Some(onchain_event) = &system_message.on_chain_event {
+                        if onchain_event.r#type() == OnChainEventType::EventTypeStorageRent {
+                            // If the user buys more storage, we should bump their rate limit
+                            if let Some(rate_limits) = &mut self.rate_limits {
+                                rate_limits.invalidate_rate_limiter_for_fid(onchain_event.fid);
+                            }
+                        }
+                    }
+                    self.statsd_client.count_with_shard(
+                        height.shard_index,
+                        "mempool.remove.success",
+                        1,
+                        vec![],
+                    );
+                }
+            }
+        }
+    }
+
     pub async fn run(&mut self) {
         let mut poll_interval = tokio::time::interval(self.config.rx_poll_interval);
         loop {
@@ -687,33 +726,28 @@ impl Mempool {
                         self.pull_messages(messages_request).await
                     }
                 }
+                block = self.block_decision_rx.recv() => {
+                    match block  {
+                        Ok(block) => {
+                            let header = block.header.expect("Expects block to have a header");
+                            let height = header.height.expect("Expects header to have a height");
+                            self.remove_committed_txns(height, &block.transactions)
+
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            panic!("Block decision tx is closed.");
+                        },
+                        Err(broadcast::error::RecvError::Lagged(count)) => {
+                            error!(lag = count, "Block decision rx is lagged");
+                        }
+                    }
+                }
                 chunk = self.shard_decision_rx.recv() => {
                     match chunk {
                         Ok(chunk) => {
                             let header = chunk.header.expect("Expects chunk to have a header");
                             let height = header.height.expect("Expects header to have a height");
-                            if let Some(mempool) = self.messages.get_mut(&height.shard_index) {
-                                for transaction in chunk.transactions {
-                                    for user_message in transaction.user_messages {
-                                        mempool.remove(&user_message.mempool_key());
-                                        self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1, vec![]);
-                                    }
-                                    for system_message in transaction.system_messages {
-                                        mempool.remove(&system_message.mempool_key());
-                                        if let Some(onchain_event) = system_message.on_chain_event
-                                        {
-                                            if onchain_event.r#type() == OnChainEventType::EventTypeStorageRent{
-                                                // If the user buys more storage, we should bump their rate limit
-                                                if let Some(rate_limits) = &mut self.rate_limits {
-                                                    rate_limits.invalidate_rate_limiter_for_fid(onchain_event.fid);
-                                                }
-
-                                            }
-                                        }
-                                       self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1, vec![]);
-                                    }
-                                }
-                            }
+                            self.remove_committed_txns(height, &chunk.transactions)
                         },
                         Err(broadcast::error::RecvError::Closed) => {
                             panic!("Shard decision tx is closed.");
