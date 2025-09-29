@@ -101,8 +101,8 @@ pub fn validate_message(
             Ok(data) => {
                 message_data = data.clone();
             }
-            Err(_) => {
-                return Err(ValidationError::InvalidData);
+            Err(e) => {
+                return Err(ValidationError::DecodeError(e.to_string()));
             }
         }
     } else {
