@@ -528,12 +528,11 @@ mod tests {
             ..Default::default()
         });
 
-        // Register user with only 50 units of storage (less than 100 required minimum)
         register_user(
             FID_FOR_TEST,
             default_signer(),
             default_custody_address(),
-            50, // Only 50 units - below the 100 unit minimum for lending
+            500, // Only 500 units - below the 1000 unit minimum for lending
             &mut block_engine,
         );
 
@@ -541,7 +540,7 @@ mod tests {
             &block_engine,
             FID_FOR_TEST,
             StorageUnitType::UnitType2025,
-            50, // Original amount
+            500, // Original amount
         );
         assert_storage_balance(
             &block_engine,
@@ -566,7 +565,7 @@ mod tests {
         let block = commit_message_at(
             &mut block_engine,
             &lend_message,
-            future_time,
+            future_time.clone(),
             Validity::Invalid,
         );
 
@@ -578,13 +577,51 @@ mod tests {
             &block_engine,
             FID_FOR_TEST,
             StorageUnitType::UnitType2025,
-            50, // Original amount
+            500, // Original amount
         );
         assert_storage_balance(
             &block_engine,
             FID_FOR_TEST + 1,
             StorageUnitType::UnitType2025,
             0, // No borrowed storage
+        );
+
+        register_user(
+            FID_FOR_TEST,
+            default_signer(),
+            default_custody_address(),
+            500,
+            &mut block_engine,
+        );
+
+        // Goes through if the user gets 1000 units
+        let lend_message = messages_factory::storage_lend::create_storage_lend(
+            FID_FOR_TEST,
+            FID_FOR_TEST + 1,
+            10, // Try to lend 10 units
+            StorageUnitType::UnitType2025,
+            Some(future_time.to_u64() as u32 - 1),
+            None,
+        );
+
+        commit_message_at(
+            &mut block_engine,
+            &lend_message,
+            future_time,
+            Validity::Valid,
+        );
+
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST,
+            StorageUnitType::UnitType2025,
+            990,
+        );
+        assert_storage_balance(
+            &block_engine,
+            FID_FOR_TEST + 1,
+            StorageUnitType::UnitType2025,
+            10,
         );
     }
 }
