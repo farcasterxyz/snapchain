@@ -268,7 +268,7 @@ impl BlockEngine {
 
                 // Restricts who can lend storage to some reasonable set of users. Don't enforce this limit in devnet and testnet so we can test with fewer storage units.
                 if self.network == FarcasterNetwork::Mainnet
-                    && total_storage_purchased.units_for(lend_storage.unit_type()) < 100
+                    && total_storage_purchased.units_for(lend_storage.unit_type()) < 1000
                 {
                     return Err(MessageValidationError::InsufficientStorage);
                 }
