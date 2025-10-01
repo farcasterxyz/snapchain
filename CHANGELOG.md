@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.0] - 2025-10-01
+
+### 🚀 Features
+
+- Implement pruning for storage lends (#683)
+- Enable submitting storage lends via rpc (#688)
+- Do a "fast" catchup on shard-0 by streaming blocks during replication (#693)
+- Enable migrating onchain events to shard 0 and fix bugs with storage lending (#669)
+
+### 🐛 Bug Fixes
+
+- Make shard-0 block to Sep 3 2025 (#692)
+- Update ETA constant for replication (#694)
+
+### ⚙️ Miscellaneous Tasks
+
+- Separate out ContactInfo and GossipMessage protos (#695)
+- Increase minimum storage requirement for storage lending (#698)
+- Set protocol release date to 10/8 (#699)
+
 ## [0.8.1] - 2025-09-23
 
 ### 🚀 Features
