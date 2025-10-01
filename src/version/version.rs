@@ -93,15 +93,15 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
         version: EngineVersion::V10,
     },
     VersionSchedule {
-        active_at: 1760547600, // 2025-10-15 5PM UTC
+        active_at: 1759942800, // 2025-10-08 5PM UTC
         version: EngineVersion::V11,
     },
     VersionSchedule {
-        active_at: 1760547600, // 2025-10-15 5PM UTC, fixes testnet issue
+        active_at: 1759942800, // 2025-10-08 5PM UTC, fixes testnet issue
         version: EngineVersion::V12,
     },
     VersionSchedule {
-        active_at: 1760547600, // 2025-10-15 5PM UTC, fixes testnet issue
+        active_at: 1759942800, // 2025-10-08 5PM UTC, fixes testnet issue
         version: EngineVersion::V13,
     },
 ]
