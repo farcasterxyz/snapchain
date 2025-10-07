@@ -1477,6 +1477,7 @@ impl HubService for MyHubService {
     ) -> Result<Response<MessagesResponse>, Status> {
         let request = request.into_inner();
         let (start_ts, stop_ts) = request.timestamps();
+        // These messages are stored on all shards. Query them from the block shard because this is the source of truth.
         self.block_stores
             .storage_lend_store
             .get_all_messages_by_fid(request.fid, start_ts, stop_ts, &request.page_options())
