@@ -26,7 +26,7 @@ mod tests {
     use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{HubEventIdGenerator, SEQUENCE_BITS};
     use crate::storage::store::block_engine::BlockEngine;
-    use crate::storage::store::block_engine_test_helpers::BlockEngineOptions;
+    use crate::storage::store::block_engine_test_helpers::{BlockEngineOptions, Validity};
     use crate::storage::store::engine::{Senders, ShardEngine};
     use crate::storage::store::stores::Stores;
     use crate::storage::store::test_helper::{commit_event, register_user};
@@ -2059,5 +2059,88 @@ mod tests {
             state_change.transactions[0].user_messages[0],
             storage_lend_message
         )
+    }
+
+    #[tokio::test]
+    async fn test_get_all_lend_storage_messages_by_fid() {
+        let (
+            _stores,
+            _senders,
+            [_engine1, _engine2],
+            mut block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        block_engine_test_helpers::register_user(
+            SHARD1_FID,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            5,
+            &mut block_engine,
+        );
+
+        // Create storage lend messages
+        let lend1 = messages_factory::storage_lend::create_storage_lend(
+            SHARD1_FID,
+            SHARD1_FID + 1,
+            1,
+            proto::StorageUnitType::UnitType2025,
+            None,
+            None,
+        );
+        let lend2 = messages_factory::storage_lend::create_storage_lend(
+            SHARD1_FID,
+            SHARD2_FID + 2,
+            2,
+            proto::StorageUnitType::UnitType2025,
+            Some(lend1.data.as_ref().unwrap().timestamp + 10),
+            None,
+        );
+
+        block_engine_test_helpers::commit_message(&mut block_engine, &lend1, Validity::Valid);
+        block_engine_test_helpers::commit_message(&mut block_engine, &lend2, Validity::Valid);
+
+        // Test pagination
+        let request = proto::FidTimestampRequest {
+            fid: SHARD1_FID,
+            page_size: Some(1),
+            page_token: None,
+            reverse: None,
+            start_timestamp: None,
+            stop_timestamp: None,
+        };
+        let response = service
+            .get_all_lend_storage_messages_by_fid(Request::new(request))
+            .await;
+        test_helper::assert_contains_all_messages(&response, &[&lend1]);
+
+        // Test getting all messages
+        let request = proto::FidTimestampRequest {
+            fid: SHARD1_FID,
+            page_size: None,
+            page_token: None,
+            reverse: None,
+            start_timestamp: None,
+            stop_timestamp: None,
+        };
+        let response = service
+            .get_all_lend_storage_messages_by_fid(Request::new(request))
+            .await;
+        test_helper::assert_contains_all_messages(&response, &[&lend1, &lend2]);
+
+        // Test reverse order
+        let request = proto::FidTimestampRequest {
+            fid: SHARD1_FID,
+            page_size: Some(1),
+            page_token: None,
+            reverse: Some(true),
+            start_timestamp: None,
+            stop_timestamp: None,
+        };
+        let response = service
+            .get_all_lend_storage_messages_by_fid(Request::new(request))
+            .await;
+        test_helper::assert_contains_all_messages(&response, &[&lend2]);
     }
 }
