@@ -74,6 +74,7 @@ service HubService {
   rpc GetAllVerificationMessagesByFid(FidTimestampRequest) returns (MessagesResponse);
   rpc GetAllUserDataMessagesByFid(FidTimestampRequest) returns (MessagesResponse);
   rpc GetAllLinkMessagesByFid(FidTimestampRequest) returns (MessagesResponse);
+  rpc GetAllLendStorageMessagesByFid(FidTimestampRequest) returns (MessagesResponse);
 
   rpc GetTrieMetadataByPrefix(TrieNodeMetadataRequest) returns (TrieNodeMetadataResponse);
 };

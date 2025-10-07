@@ -365,6 +365,14 @@ pub mod tests {
             Ok(Response::new(response))
         }
 
+        async fn get_all_lend_storage_messages_by_fid(
+            &self,
+            _request: Request<FidTimestampRequest>,
+        ) -> Result<Response<MessagesResponse>, Status> {
+            let response = MessagesResponse::default();
+            Ok(Response::new(response))
+        }
+
         async fn get_trie_metadata_by_prefix(
             &self,
             _request: Request<TrieNodeMetadataRequest>,

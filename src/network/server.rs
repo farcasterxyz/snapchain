@@ -1471,6 +1471,18 @@ impl HubService for MyHubService {
             .as_response()
     }
 
+    async fn get_all_lend_storage_messages_by_fid(
+        &self,
+        request: Request<FidTimestampRequest>,
+    ) -> Result<Response<MessagesResponse>, Status> {
+        let request = request.into_inner();
+        let (start_ts, stop_ts) = request.timestamps();
+        self.block_stores
+            .storage_lend_store
+            .get_all_messages_by_fid(request.fid, start_ts, stop_ts, &request.page_options())
+            .as_response()
+    }
+
     async fn get_link_compact_state_message_by_fid(
         &self,
         request: Request<FidRequest>,
