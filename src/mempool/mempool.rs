@@ -404,8 +404,8 @@ impl ReadNodeMempool {
                 vec![0]
             }
             MempoolMessage::OnchainEvent(_) => {
-                // TODO(aditi): Onchain events need to get to shard 0 so that we can support other messages (lend storage) in shard 0.
-                vec![fid_shard]
+                // Onchain events need to get to shard 0 so that we can support other messages (lend storage) in shard 0.
+                vec![0, fid_shard]
             }
             MempoolMessage::BlockEvent {
                 for_shard,
