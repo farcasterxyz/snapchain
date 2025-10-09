@@ -875,15 +875,17 @@ impl HubService for MyHubService {
                     &[],
                 )
                 .map_err(|err| Status::internal(err.to_string()))?,
-            num_onchain_events: self
-                .block_stores
-                .db
-                .count_keys_at_prefix(vec![
-                    RootPrefix::OnChainEvent as u8,
-                    OnChainEventPostfix::OnChainEvents as u8,
-                ])
-                .map_err(|err| Status::from_error(Box::new(err)))?
-                as u64,
+            num_onchain_events: 0,
+            // TODO(aditi): [num_onchain_events] is making the endpoint really slow, enable once there's a faster implementation
+            // num_onchain_events: self
+            //     .block_stores
+            //     .db
+            //     .count_keys_at_prefix(vec![
+            //         RootPrefix::OnChainEvent as u8,
+            //         OnChainEventPostfix::OnChainEvents as u8,
+            //     ])
+            //     .map_err(|err| Status::from_error(Box::new(err)))?
+            //     as u64,
             num_fid_registrations: 0,
             approx_size: self.block_stores.block_store.db.approximate_size(),
             block_delay: current_time
@@ -926,22 +928,13 @@ impl HubService for MyHubService {
                 .map_err(|err| Status::from_error(Box::new(err)))?
                 as u64;
 
-            let shard_onchain_events = shard_store
-                .db
-                .count_keys_at_prefix(vec![
-                    RootPrefix::OnChainEvent as u8,
-                    OnChainEventPostfix::OnChainEvents as u8,
-                ])
-                .map_err(|err| Status::from_error(Box::new(err)))?
-                as u64;
-
             let max_block_time = shard_store.shard_store.max_block_timestamp().unwrap_or(0);
 
             let info = proto::ShardInfo {
                 shard_id: *shard_index,
                 max_height: shard_store.shard_store.max_block_number().unwrap_or(0),
                 num_messages: shard_num_messages,
-                num_onchain_events: shard_onchain_events,
+                num_onchain_events: 0, // TODO(aditi): Populating this is making the endpoint slow, enable once there's a faster implementation
                 num_fid_registrations: shard_fid_registrations,
                 approx_size: shard_approx_size,
                 block_delay: current_time.saturating_sub(max_block_time),
