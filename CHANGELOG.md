@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.1] - 2025-10-09
+
+### ⚙️ Miscellaneous Tasks
+
+- Add bulk rpc for querying `LendStorage` messages (#702)
+- Enable replication server by default (#703)
+- Stop populating num_onchain_events in the GetInfo endpoint (#706)
+
 ## [0.9.0] - 2025-10-01
 
 ### 🚀 Features
