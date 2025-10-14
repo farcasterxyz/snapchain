@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.2] - 2025-10-14
+
+### 🐛 Bug Fixes
+
+- Add http server support for storage lend messages (#709)
+
+### ⚙️ Miscellaneous Tasks
+
+- Send onchain events to shard 0 (#705)
+- Downgrade failed onchain event merge log to warn (#710)
+
 ## [0.9.1] - 2025-10-09
 
 ### ⚙️ Miscellaneous Tasks
