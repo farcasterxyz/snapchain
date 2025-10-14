@@ -360,7 +360,8 @@ impl BlockEngine {
                         hub_events.push(event);
                     }
                     Err(err) => {
-                        error!("Unable to merge onchain event: {:#?}", err.to_string())
+                        // Duplicate error is expected
+                        warn!("Unable to merge onchain event: {:#?}", err.to_string())
                     }
                 }
             }
