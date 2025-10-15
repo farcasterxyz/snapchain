@@ -385,7 +385,7 @@ pub async fn validate_and_commit_state_change(
     let height = engine.get_confirmed_height();
     engine.start_round(height.increment(), Round::Nil); // So event id is reset
 
-    let valid = engine.validate_state_change(state_change);
+    let valid = engine.validate_state_change(state_change, height.increment());
     assert!(valid);
 
     let chunk = state_change_to_shard_chunk(1, height.block_number + 1, state_change);

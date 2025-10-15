@@ -1506,7 +1506,11 @@ impl ShardEngine {
         Ok(())
     }
 
-    pub fn validate_state_change(&mut self, shard_state_change: &ShardStateChange) -> bool {
+    pub fn validate_state_change(
+        &mut self,
+        shard_state_change: &ShardStateChange,
+        height: Height,
+    ) -> bool {
         let mut txn = RocksDbTransactionBatch::new();
 
         let now = std::time::Instant::now();
@@ -1523,6 +1527,10 @@ impl ShardEngine {
             count_fn("trie.mem_get_count.total", read_count.1, vec![]);
             count_fn("trie.mem_get_count.for_validate", read_count.1, vec![]);
         };
+
+        self.stores
+            .event_handler
+            .set_current_height(height.block_number);
 
         let proposal_result = self.replay_proposal(
             &merkle_trie::Context::with_callback(count_callback),
