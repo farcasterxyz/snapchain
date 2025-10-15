@@ -2115,7 +2115,9 @@ impl ShardEngine {
 
     fn should_revoke_signer(signer_event: &proto::SignerEventBody, version: EngineVersion) -> bool {
         // When this bug was active, we did not revoke any signers, so, always return false
-        if version.is_enabled(ProtocolFeature::SignerRevokeBug) {
+        if version.is_enabled(ProtocolFeature::SignerRevokeBug)
+            || version.is_enabled(ProtocolFeature::StopRevokingExistingMessages)
+        {
             return false;
         }
         signer_event.event_type == proto::SignerEventType::Remove as i32

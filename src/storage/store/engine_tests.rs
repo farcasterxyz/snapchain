@@ -102,18 +102,6 @@ mod tests {
         assert_event_id(event, None, event_seq);
     }
 
-    fn assert_revoke_event(event: &HubEvent, revoked_message: &proto::Message, event_seq: u64) {
-        let generated_event = match &event.body {
-            Some(proto::hub_event::Body::RevokeMessageBody(msg)) => msg,
-            _ => panic!("Unexpected event type: {:?}", event.body),
-        };
-        assert_eq!(
-            to_hex(&revoked_message.hash),
-            to_hex(&generated_event.message.as_ref().unwrap().hash)
-        );
-        assert_event_id(event, None, event_seq);
-    }
-
     fn assert_onchain_hub_event(event: &HubEvent, onchain_event: &OnChainEvent, event_seq: u64) {
         let generated_event = match &event.body {
             Some(proto::hub_event::Body::MergeOnChainEventBody(onchain)) => onchain,
@@ -2455,7 +2443,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_revoking_a_signer_deletes_all_messages_from_that_signer() {
+    async fn test_revoking_a_signer_does_not_delete_all_messages_from_that_signer() {
         let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let signer = generate_signer();
         let another_signer = generate_signer();
@@ -2535,16 +2523,16 @@ mod tests {
         test_helper::commit_event(&mut engine, &revoke_event).await;
         // First receive BLOCK_CONFIRMED event
         let _ = &event_rx.try_recv().unwrap();
-        // Then receive the revoke events with updated sequence numbers
+        // Then receive the onchain event
         assert_onchain_hub_event(&event_rx.try_recv().unwrap(), &revoke_event, 1);
-        assert_revoke_event(&event_rx.try_recv().unwrap(), &msg1, 2);
-        assert_revoke_event(&event_rx.try_recv().unwrap(), &msg2, 3);
+        assert_eq!(
+            event_rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        );
 
         assert_eq!(event_rx.try_recv().is_err(), true); // No more events
-
-        // Only the messages from the revoked signer are deleted
         let messages = engine.get_casts_by_fid(FID_FOR_TEST).unwrap();
-        assert_eq!(1, messages.messages.len());
+        assert_eq!(3, messages.messages.len());
 
         // Different Fid with the same signer is unaffected
         let messages = engine.get_casts_by_fid(FID_FOR_TEST + 1).unwrap();
