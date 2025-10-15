@@ -243,7 +243,7 @@ impl Proposer for ShardProposer {
                 events: vec![],
                 max_block_event_seqnum: 0,
             };
-            return if self.engine.validate_state_change(&state) {
+            return if self.engine.validate_state_change(&state, height) {
                 Validity::Valid
             } else {
                 error!(

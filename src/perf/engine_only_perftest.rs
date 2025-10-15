@@ -113,11 +113,16 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
             .await?;
         let state_change = engine.propose_state_change(1, messages, None);
 
-        let valid = engine.validate_state_change(&state_change);
+        let valid =
+            engine.validate_state_change(&state_change, engine.get_confirmed_height().increment());
         assert!(valid);
 
         // TODO: need block height below
-        let chunk = state_change_to_shard_chunk(1, 1, &state_change);
+        let chunk = state_change_to_shard_chunk(
+            1,
+            engine.get_confirmed_height().increment().block_number,
+            &state_change,
+        );
         engine.commit_shard_chunk(&chunk).await;
 
         println!("{}", engine.trie_num_items());
