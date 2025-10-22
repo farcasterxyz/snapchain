@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.0] - 2025-10-22
+
+### 🚀 Features
+
+- Stop revoking all  messages signed by revoked signers (#714)
+
+### 🐛 Bug Fixes
+
+- Reset events sequence number on validate (#713)
+
 ## [0.9.2] - 2025-10-14
 
 ### 🐛 Bug Fixes
