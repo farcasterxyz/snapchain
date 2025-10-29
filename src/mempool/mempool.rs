@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::time::Instant;
 
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
@@ -717,6 +718,7 @@ impl Mempool {
 
     pub async fn run(&mut self) {
         let mut poll_interval = tokio::time::interval(self.config.rx_poll_interval);
+        let mut last_inbound_message_poll_time = Instant::now();
         loop {
             tokio::select! {
                 biased;
@@ -758,6 +760,10 @@ impl Mempool {
                     }
                 }
                 _ = poll_interval.tick() => {
+                    let now = Instant::now();
+                    self.statsd_client.gauge("mempool.queue_size", self.read_node_mempool.mempool_rx.len() as u64, vec![]);
+                    self.statsd_client.time("mempool.inbound_message_poll_interval_ms", now.duration_since(last_inbound_message_poll_time).as_millis() as u64);
+                    last_inbound_message_poll_time = now;
                     // We want to pull in multiple messages per poll so that throughput is not blocked on the polling frequency. The number of messages we pull should be fixed and relatively small so that the mempool isn't always stuck here.
                     for _ in 0..256 {
                         if self.config.allow_unlimited_mempool_size || (self.messages.len() as u64) < self.config.capacity_per_shard {

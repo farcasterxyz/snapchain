@@ -224,6 +224,7 @@ impl MyHubService {
         let result = match timeout(MEMPOOL_ADD_REQUEST_TIMEOUT, rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(err)) => {
+                self.statsd_client.count("rpc.mempool_submit_error", 1);
                 error!(
                     "Error receiving message from mempool channel: {:?}",
                     err.to_string()
@@ -231,6 +232,7 @@ impl MyHubService {
                 return Err(HubError::unavailable("Error adding to mempool"));
             }
             Err(_) => {
+                self.statsd_client.count("rpc.mempool_submit_timeout", 1);
                 error!("Timeout receiving message from mempool channel",);
                 return Err(HubError::unavailable("Error adding to mempool"));
             }

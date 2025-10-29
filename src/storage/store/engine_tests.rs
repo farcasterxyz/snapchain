@@ -3351,12 +3351,9 @@ mod tests {
 
         test_helper::commit_event_at(&mut engine, &good_signer_revoke_event, &current_time).await;
 
-        // The bad signer cast should still exist, but the good signer cast should be revoked
+        // As of the latest changes, both will still exist. We will only reject new messages with the signer.
         assert_eq!(message_exists_in_trie(&mut engine, &bad_signer_cast), true); // Still exists due to bug
-        assert_eq!(
-            message_exists_in_trie(&mut engine, &good_signer_cast),
-            false
-        ); // Revoked
+        assert_eq!(message_exists_in_trie(&mut engine, &good_signer_cast), true);
     }
 
     #[tokio::test]
