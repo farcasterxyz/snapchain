@@ -180,6 +180,9 @@ enum StoreType {
 message StorageUnitDetails {
   StorageUnitType unit_type = 1;
   uint32 unit_size = 2;
+  uint32 purchased_unit_size = 3;
+  uint32 lent_unit_size = 4;
+  uint32 borrowed_unit_size = 5;
 }
 
 message StorageLimit {

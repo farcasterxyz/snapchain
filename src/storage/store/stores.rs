@@ -427,7 +427,32 @@ impl Stores {
     pub fn get_storage_limits(&self, fid: u64) -> Result<StorageLimitsResponse, StoresError> {
         let txn_batch = &mut RocksDbTransactionBatch::new();
         let mut limits = vec![];
-        // Don't count storage lend message limits here. The limit is artificially set to u32::MAX.
+        let purchased_slot = self
+            .onchain_event_store
+            .get_storage_slot_for_fid(
+                fid,
+                self.network,
+                &[],
+                &StorageSlot::new(0, 0, 0, u32::MAX),
+                &StorageSlot::new(0, 0, 0, u32::MAX),
+            )
+            .map_err(|e| StoresError::OnchainEventError(e))?;
+        let borrowed_slot = StorageLendStore::get_borrowed_storage(&self.storage_lend_store, fid)
+            .map_err(|err| StoresError::StoreError {
+            inner: err,
+            hash: vec![],
+        })?;
+        let lent_slot =
+            StorageLendStore::get_lent_storage(&self.storage_lend_store, fid).map_err(|err| {
+                StoresError::StoreError {
+                    inner: err,
+                    hash: vec![],
+                }
+            })?;
+        let net_slot = self
+            .onchain_event_store
+            .get_storage_slot_for_fid(fid, self.network, &[], &lent_slot, &borrowed_slot)
+            .map_err(|e| StoresError::OnchainEventError(e))?;
         for store_type in vec![
             StoreType::Casts,
             StoreType::Links,
@@ -437,8 +462,12 @@ impl Stores {
             StoreType::UsernameProofs,
             StoreType::StorageLends,
         ] {
-            let slot =
-                self.get_storage_slot_for_fid(fid, store_type != StoreType::StorageLends, &[])?;
+            // You can't lend out borrowed storage. The limit is the number of units you've purchased.
+            let slot = if store_type == StoreType::StorageLends {
+                purchased_slot.clone()
+            } else {
+                net_slot.clone()
+            };
             let used = self.get_usage_by_store_type(fid, store_type, txn_batch)?;
             // TODO(aditi): Should subtract 1 here for storage lends because we require keeping 1 storage unit available for revoking lent storage
             let max_messages = self.store_limits.max_messages(&slot, store_type);
@@ -463,25 +492,32 @@ impl Stores {
             limits.push(limit);
         }
 
-        // We want to get the storage slot that includes borrowed storage.
-        let slot = self.get_storage_slot_for_fid(fid, true, &[])?;
         let response = StorageLimitsResponse {
             limits,
-            units: slot.units_for(StorageUnitType::UnitTypeLegacy)
-                + slot.units_for(StorageUnitType::UnitType2024)
-                + slot.units_for(StorageUnitType::UnitType2025),
+            units: net_slot.units_for(StorageUnitType::UnitTypeLegacy)
+                + net_slot.units_for(StorageUnitType::UnitType2024)
+                + net_slot.units_for(StorageUnitType::UnitType2025),
             unit_details: vec![
                 StorageUnitDetails {
                     unit_type: StorageUnitType::UnitTypeLegacy as i32,
-                    unit_size: slot.units_for(StorageUnitType::UnitTypeLegacy),
+                    unit_size: net_slot.units_for(StorageUnitType::UnitTypeLegacy),
+                    purchased_unit_size: purchased_slot.units_for(StorageUnitType::UnitTypeLegacy),
+                    borrowed_unit_size: borrowed_slot.units_for(StorageUnitType::UnitTypeLegacy),
+                    lent_unit_size: lent_slot.units_for(StorageUnitType::UnitTypeLegacy),
                 },
                 StorageUnitDetails {
                     unit_type: StorageUnitType::UnitType2024 as i32,
-                    unit_size: slot.units_for(StorageUnitType::UnitType2024),
+                    unit_size: net_slot.units_for(StorageUnitType::UnitType2024),
+                    purchased_unit_size: purchased_slot.units_for(StorageUnitType::UnitType2024),
+                    borrowed_unit_size: borrowed_slot.units_for(StorageUnitType::UnitType2024),
+                    lent_unit_size: lent_slot.units_for(StorageUnitType::UnitType2024),
                 },
                 StorageUnitDetails {
                     unit_type: StorageUnitType::UnitType2025 as i32,
-                    unit_size: slot.units_for(StorageUnitType::UnitType2025),
+                    unit_size: net_slot.units_for(StorageUnitType::UnitType2025),
+                    purchased_unit_size: purchased_slot.units_for(StorageUnitType::UnitType2025),
+                    borrowed_unit_size: borrowed_slot.units_for(StorageUnitType::UnitType2025),
+                    lent_unit_size: lent_slot.units_for(StorageUnitType::UnitType2025),
                 },
             ],
             tier_subscriptions: vec![TierDetails {
