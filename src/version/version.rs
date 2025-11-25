@@ -3,7 +3,7 @@ use crate::proto::FarcasterNetwork;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
-const LATEST_PROTOCOL_VERSION: u32 = 9;
+const LATEST_PROTOCOL_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, EnumIter)]
 pub enum EngineVersion {
@@ -22,6 +22,7 @@ pub enum EngineVersion {
     V12 = 12,
     V13 = 13,
     V14 = 14,
+    V15 = 15,
 }
 
 pub enum ProtocolFeature {
@@ -42,6 +43,7 @@ pub enum ProtocolFeature {
     EventIdBugFix,
     StorageLendingLimitFix,
     StopRevokingExistingMessages,
+    IncreaseUsernameProofSizeLimit,
 }
 
 pub struct VersionSchedule {
@@ -110,6 +112,10 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
         active_at: 1761757200, // 2025-10-29 5PM UTC
         version: EngineVersion::V14,
     },
+    VersionSchedule {
+        active_at: 1765386000, // 2025-12-10 5PM UTC
+        version: EngineVersion::V15,
+    },
 ]
 .as_slice();
 
@@ -158,12 +164,16 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
         active_at: 1761152400, // 2025-10-22 5PM UTC
         version: EngineVersion::V14,
     },
+    VersionSchedule {
+        active_at: 1764781200, // 2025-12-03 5PM UTC
+        version: EngineVersion::V15,
+    },
 ]
 .as_slice();
 
 const ENGINE_VERSION_SCHEDULE_DEVNET: &[VersionSchedule] = [VersionSchedule {
     active_at: 0,
-    version: EngineVersion::V14,
+    version: EngineVersion::V15,
 }]
 .as_slice();
 
@@ -214,6 +224,7 @@ impl EngineVersion {
             ProtocolFeature::EventIdBugFix => self >= &EngineVersion::V12,
             ProtocolFeature::StorageLendingLimitFix => self >= &EngineVersion::V13,
             ProtocolFeature::StopRevokingExistingMessages => self >= &EngineVersion::V14,
+            ProtocolFeature::IncreaseUsernameProofSizeLimit => self >= &EngineVersion::V15,
         }
     }
 
@@ -231,7 +242,8 @@ impl EngineVersion {
             EngineVersion::V9 => 6,
             EngineVersion::V10 => 7,
             EngineVersion::V11 | EngineVersion::V12 | EngineVersion::V13 => 8,
-            EngineVersion::V14 => LATEST_PROTOCOL_VERSION,
+            EngineVersion::V14 => 9,
+            EngineVersion::V15 => LATEST_PROTOCOL_VERSION,
         }
     }
 
@@ -401,7 +413,7 @@ mod version_test {
 
     #[test]
     fn test_latest() {
-        assert_eq!(EngineVersion::latest(), EngineVersion::V14);
+        assert_eq!(EngineVersion::latest(), EngineVersion::V15);
         assert_eq!(
             EngineVersion::version_for(&FarcasterTime::current(), FarcasterNetwork::Devnet),
             EngineVersion::latest()
@@ -426,7 +438,7 @@ mod version_test {
             Some(1747352400)
         );
 
-        let time = FarcasterTime::from_unix_seconds(1761757200);
+        let time = FarcasterTime::from_unix_seconds(1765386000);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
             None

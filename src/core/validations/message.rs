@@ -18,6 +18,7 @@ use prost::Message;
 const MAX_DATA_BYTES: usize = 2048;
 const MAX_DATA_BYTES_FOR_10K_CAST: usize = 16_384;
 const MAX_DATA_BYTES_FOR_LINK_COMPACT: usize = 65536;
+const MAX_DATA_BYTES_FOR_USERNAME_PROOF: usize = 16_384;
 const EMBEDS_V1_CUTOFF: u32 = 73612800;
 const TWITTER_USERNAME_REGEX: &str = "^[a-z0-9_]{0,15}$";
 const FNAME_REGEX: &str = "^[a-z0-9][a-z0-9-]{0,15}$";
@@ -119,6 +120,10 @@ pub fn validate_message(
                 MAX_DATA_BYTES_FOR_LINK_COMPACT
             } else if is_pro_user && message_data.r#type() == MessageType::CastAdd {
                 MAX_DATA_BYTES_FOR_10K_CAST
+            } else if message_data.r#type() == MessageType::UsernameProof
+                && version.is_enabled(ProtocolFeature::IncreaseUsernameProofSizeLimit)
+            {
+                MAX_DATA_BYTES_FOR_USERNAME_PROOF
             } else {
                 MAX_DATA_BYTES
             }
