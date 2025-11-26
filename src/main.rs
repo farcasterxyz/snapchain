@@ -343,41 +343,39 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if db_is_empty {
         match app_config.snapshot.bootstrap_method {
             BootstrapMethod::Replicate => {
-                // use snapchain::bootstrap::replication::service::{
-                //     ReplicatorBootstrap, WorkUnitResponse,
-                // };
-                // use tokio::time::{sleep, Duration};
-                // use rustls::crypto::{self, ring};
+                use rustls::crypto::{self, ring};
+                use snapchain::bootstrap::replication::service::{
+                    ReplicatorBootstrap, WorkUnitResponse,
+                };
+                use tokio::time::{sleep, Duration};
 
-                // // Initialize SSL for rustls
-                // crypto::CryptoProvider::install_default(ring::default_provider())
-                //     .expect("Failed to install rustls crypto provider");
+                // Initialize SSL for rustls
+                crypto::CryptoProvider::install_default(ring::default_provider())
+                    .expect("Failed to install rustls crypto provider");
 
-                // info!("Starting node with replication bootstrap");
-                // let replicator = ReplicatorBootstrap::new(statsd_client.clone(), &app_config);
+                info!("Starting node with replication bootstrap");
+                let replicator = ReplicatorBootstrap::new(statsd_client.clone(), &app_config);
 
-                // match replicator.bootstrap_using_replication().await {
-                //     Ok(r) => {
-                //         // Check for the specific success response
-                //         if r == WorkUnitResponse::Finished {
-                //             info!("Bootstrap using replication was successful. Will start snapchain now...");
-                //             // Sleep for 5 seconds to allow any pending logs to be flushed and the gossip to shutdown and free the port
-                //             sleep(Duration::from_secs(5)).await;
-                //         } else {
-                //             error!(
-                //                 "Replication bootstrap stopped with status: {:?}. Exiting.",
-                //                 r
-                //             );
-                //             process::exit(1);
-                //         }
-                //     }
-                //     Err(e) => {
-                //         error!("Replication bootstrap failed:\n{}\nPlease check your network connection and restart to resume.", e);
-                //         process::exit(1);
-                //     }
-                // }
-                error!("Bootstraup via Replication is not yet active");
-                process::exit(1);
+                match replicator.bootstrap_using_replication().await {
+                    Ok(r) => {
+                        // Check for the specific success response
+                        if r == WorkUnitResponse::Finished {
+                            info!("Bootstrap using replication was successful. Will start snapchain now...");
+                            // Sleep for 5 seconds to allow any pending logs to be flushed and the gossip to shutdown and free the port
+                            sleep(Duration::from_secs(5)).await;
+                        } else {
+                            error!(
+                                "Replication bootstrap stopped with status: {:?}. Exiting.",
+                                r
+                            );
+                            process::exit(1);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Replication bootstrap failed:\n{}\nPlease check your network connection and restart to resume.", e);
+                        process::exit(1);
+                    }
+                }
             }
             BootstrapMethod::Snapshot => {
                 if app_config.snapshot.force_load_db_from_snapshot
