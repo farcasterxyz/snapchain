@@ -1,4 +1,9 @@
+use glob;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Ensure build.rs reruns when proto files change
+    println!("cargo:rerun-if-changed=src/proto");
+
     let mut builder = tonic_build::configure();
 
     // Custom type attributes required for malachite
@@ -8,22 +13,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // TODO: this generates a lot of code, perhaps choose specific structures
         .type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]");
 
-    // TODO: auto-discover proto files
+    // Dynamically discover proto files
+    let mut proto_files: Vec<_> = glob::glob("src/proto/*.proto")?
+        .filter_map(Result::ok)
+        .collect();
+
+    proto_files.sort(); // stable deterministic order
+
+    if proto_files.is_empty() {
+        return Err("No .proto files found under src/proto; check your layout/checkout".into());
+    }
+
+    // This helps catch accidental additions in CI logs.
+    for path in &proto_files {
+        println!("cargo:warning=Compiling proto: {}", path.display());
+    }
+
     builder.compile(
-        &[
-            "src/proto/admin_rpc.proto",
-            "src/proto/blocks.proto",
-            "src/proto/rpc.proto",
-            "src/proto/message.proto",
-            "src/proto/onchain_event.proto",
-            "src/proto/hub_event.proto",
-            "src/proto/username_proof.proto",
-            "src/proto/sync_trie.proto",
-            "src/proto/node_state.proto",
-            "src/proto/gossip.proto",
-            "src/proto/request_response.proto",
-            "src/proto/replication.proto",
-        ],
+        &proto_files.iter().map(|p| p.as_path()).collect::<Vec<_>>(),
         &["src/proto"],
     )?;
 
