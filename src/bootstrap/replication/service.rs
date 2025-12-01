@@ -6,7 +6,7 @@ use crate::core::validations;
 use crate::core::validations::message::validate_message_hash;
 use crate::network::gossip;
 use crate::proto::shard_trie_entry_with_message::TrieMessage;
-use crate::proto::{self, ReplicationTriePartStatus, ShardSnapshotMetadata};
+use crate::proto::{self, MessageType, ReplicationTriePartStatus, ShardSnapshotMetadata};
 use crate::storage::store::block_engine::BlockEngine;
 use crate::storage::store::node_local_state::LocalStateStore;
 use crate::storage::trie::merkle_trie::MerkleTrie;
@@ -885,19 +885,21 @@ impl ReplicatorBootstrap {
             for trie_message_entry in &trie_messages {
                 let trie_key = trie_message_entry.trie_key.clone();
                 trie_keys.insert(trie_key.clone());
+                let decoded_trie_key = TrieKey::decode(&trie_key)?;
 
                 match work_item
                     .thread_engine
                     .replay_replicator_message(&mut txn_batch, trie_message_entry)
                 {
                     Ok(m) => {
-                        let generated_trie_key = m.trie_key;
+                        // For storage lend messages, we insert 2 keys per message
+                        let generated_trie_keys = m.trie_keys;
                         let fid = m.fid;
 
-                        if generated_trie_key != trie_key {
+                        if !generated_trie_keys.contains(&trie_key) {
                             return Err(BootstrapError::GenericError(format!(
-                                "Generated trie key {:?} does not match expected trie key {:?} for {:?}",
-                                generated_trie_key, trie_key, trie_message_entry
+                                "Generated trie keys {:?} does not contain expected trie key {:?} for {:?}",
+                                generated_trie_keys, trie_key, trie_message_entry
                             )));
                         }
 
@@ -905,7 +907,17 @@ impl ReplicatorBootstrap {
                             last_fid = Some(fid);
                         }
 
-                        if fid > last_fid.unwrap() {
+                        // Check that the fid on the message belongs to the correct vts. For storage lends, there are 2 impacted fids.
+                        let actual_vts = TrieKey::fid_shard(fid);
+                        if status.virtual_trie_shard != actual_vts as u32
+                            && decoded_trie_key.message_type != Some(MessageType::LendStorage as u8)
+                        {
+                            return Err(BootstrapError::GenericError(format!("Message belongs to incorrect vts. actual {}, expected {}, trie key {:#?}", actual_vts, status.virtual_trie_shard, trie_key)));
+                        }
+
+                        // Don't check fids if theyr'e not in this vts because we wouldn't have pulled in all the messages.
+                        if fid > last_fid.unwrap() && status.virtual_trie_shard == actual_vts as u32
+                        {
                             fids_to_check.push(last_fid.unwrap());
                             last_fid = Some(fid);
                         }
