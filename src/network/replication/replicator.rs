@@ -516,6 +516,7 @@ impl Replicator {
                 )));
             }
 
+            // TODO(aditi): We put messages into the trie for both fids on storage lends, but it's only stored under 1 fid in the so
             let fid = decoded_key.fid;
             let onchain_message_type = decoded_key.onchain_message_type;
             let message_type = decoded_key.message_type;
