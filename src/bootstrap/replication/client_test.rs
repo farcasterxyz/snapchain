@@ -1685,7 +1685,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("does not match expected trie key"));
+            .contains("does not contain expected trie key"));
 
         // Cleanup
         let _ = shutdown_tx.send(());
