@@ -2,8 +2,8 @@ use crate::{
     core::util,
     network::replication::{error::ReplicationError, replication_stores::ReplicationStores},
     proto::{
-        self, shard_trie_entry_with_message::TrieMessage, GetShardTransactionsResponse,
-        MessageType, OnChainEventType,
+        self, shard_trie_entry_with_message::TrieMessage, FarcasterNetwork,
+        GetShardTransactionsResponse, MessageType, OnChainEventType,
     },
     storage::{
         db::{PageOptions, RocksDbTransactionBatch},
@@ -744,8 +744,15 @@ impl Replicator {
         self.stores
             .close_aged_snapshots(msg.shard_id, oldest_valid_timestamp);
 
+        // Take a snapshot for testnet nodes if none exist because there aren't many read nodes running and we may have to wait a long time for the scheduled snapshot after restart.
+        let take_first_snapshot = self.stores.network() == FarcasterNetwork::Testnet
+            && self.stores.max_height_for_shard(msg.shard_id).is_none();
+
         // Check if we can take a snapshot of this block
-        if block_number > 0 && block_number % self.snapshot_options.interval != 0 {
+        if block_number > 0
+            && block_number % self.snapshot_options.interval != 0
+            && !take_first_snapshot
+        {
             return Ok(());
         }
 
