@@ -309,6 +309,57 @@ impl StorageLendStore {
         Ok(storage_slot)
     }
 
+    pub fn get_messages_by_borrower_fid(
+        store: &Store<StorageLendStoreDef>,
+        borrower_fid: u64,
+    ) -> Result<Vec<proto::Message>, HubError> {
+        let mut messages = vec![];
+
+        // Create the prefix for the secondary index (RootPrefix::LendStorageByRecipient + to_fid)
+        let mut prefix = vec![];
+        prefix.push(RootPrefix::LendStorageByRecipient as u8);
+        prefix.extend_from_slice(&make_fid_key(borrower_fid));
+
+        let page_options = PageOptions {
+            page_size: None,
+            page_token: None,
+            reverse: false,
+        };
+
+        store.db().for_each_iterator_by_prefix(
+            Some(prefix.clone()),
+            Some(increment_vec_u8(&prefix)),
+            &page_options,
+            |secondary_key, _| {
+                // Extract lender and borrower FIDs from the secondary index key
+                let lender_fid = StorageLendStoreDef::read_lender_from_secondary_key(secondary_key);
+                let borrower_fid =
+                    StorageLendStoreDef::read_borrower_from_secondary_key(secondary_key);
+
+                // Create partial message to use with get_add
+                let partial_message = proto::Message {
+                    data: Some(proto::MessageData {
+                        fid: lender_fid,
+                        body: Some(Body::LendStorageBody(proto::LendStorageBody {
+                            to_fid: borrower_fid,
+                            ..Default::default()
+                        })),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+
+                if let Ok(Some(message)) = store.get_add(&partial_message, None) {
+                    messages.push(message);
+                }
+
+                Ok(false)
+            },
+        )?;
+
+        Ok(messages)
+    }
+
     pub fn merge(
         store: &Store<StorageLendStoreDef>,
         message: &proto::Message,
