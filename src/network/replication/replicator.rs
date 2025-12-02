@@ -475,6 +475,7 @@ impl Replicator {
         shard_id: u32,
         height: u64,
         trie_virtual_shard: u8,
+        fid: Option<u64>,
         page_token: Option<String>,
     ) -> Result<GetShardTransactionsResponse, ReplicationError> {
         // Get the stores for this shard_id and height
@@ -494,10 +495,16 @@ impl Replicator {
         // First, collect MAX_SIZE trie elements starting at the given page_token and prefix
         let mut trie_keys = vec![];
 
+        let prefix = if let Some(fid) = fid {
+            TrieKey::for_fid(fid)
+        } else {
+            vec![trie_virtual_shard]
+        };
+
         let next_page_token = trie.get_paged_values_of_subtree(
             &merkle_trie::Context::new(),
             &stores.db,
-            &[trie_virtual_shard],
+            &prefix,
             &mut trie_keys,
             Self::MESSAGE_LIMIT,
             page_token,
