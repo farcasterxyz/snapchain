@@ -1082,7 +1082,7 @@ impl ReplicatorBootstrap {
             .map(|key| TrieKey::decode(key).unwrap())
             .collect();
 
-        println!("Differing trie keys: {:#?}", differing_trie_keys);
+        info!("Differing trie keys: {:#?}", differing_trie_keys);
 
         Ok(())
     }
