@@ -1083,7 +1083,7 @@ impl ReplicatorBootstrap {
             .collect();
 
         for trie_key in unique_to_us {
-            info!("Trie key missing on server {:#?}", trie_key)
+            info!(fid, "Trie key missing on server {:#?}", trie_key)
         }
 
         let unique_to_server: Vec<DecodedTrieKey> = server_trie_keys_set
@@ -1092,7 +1092,7 @@ impl ReplicatorBootstrap {
             .collect();
 
         for trie_key in unique_to_server {
-            info!("Trie key missing locally {:#?}", trie_key);
+            info!(fid, "Trie key missing locally {:#?}", trie_key);
         }
 
         Ok(())
