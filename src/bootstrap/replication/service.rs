@@ -1077,12 +1077,23 @@ impl ReplicatorBootstrap {
 
         let server_trie_keys_set: HashSet<Vec<u8>> = server_trie_keys.into_iter().collect();
 
-        let differing_trie_keys: Vec<DecodedTrieKey> = our_trie_keys_set
-            .symmetric_difference(&server_trie_keys_set)
+        let unique_to_us: Vec<DecodedTrieKey> = our_trie_keys_set
+            .difference(&server_trie_keys_set)
             .map(|key| TrieKey::decode(key).unwrap())
             .collect();
 
-        info!("Differing trie keys: {:#?}", differing_trie_keys);
+        for trie_key in unique_to_us {
+            info!("Trie key missing on server {:#?}", trie_key)
+        }
+
+        let unique_to_server: Vec<DecodedTrieKey> = server_trie_keys_set
+            .difference(&our_trie_keys_set)
+            .map(|key| TrieKey::decode(key).unwrap())
+            .collect();
+
+        for trie_key in unique_to_server {
+            info!("Trie key missing locally {:#?}", trie_key);
+        }
 
         Ok(())
     }
