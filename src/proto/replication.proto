@@ -38,6 +38,7 @@ message GetShardTransactionsRequest {
 
   // If NONE, then start from the left-most leaf node under the prefix
   optional string page_token = 4;
+  optional uint64 fid = 5;
 }
 
 message GetShardTransactionsResponse {
