@@ -1045,7 +1045,7 @@ impl ReplicatorBootstrap {
 
         let mut page_token = None;
         let mut client =
-            ReplicationServiceClient::connect("tau.farcaster.xyz:3383".to_string()).await?;
+            ReplicationServiceClient::connect("https://tau.farcaster.xyz:3383".to_string()).await?;
 
         loop {
             let request = proto::GetShardTransactionsRequest {
