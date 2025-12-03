@@ -165,7 +165,7 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
         version: EngineVersion::V14,
     },
     VersionSchedule {
-        active_at: 1764781200, // 2025-12-03 5PM UTC
+        active_at: 1764783794, // 2025-12-03 5:43PM UTC -- need to forward date because the change wasn't rolled to testnet when it went active.
         version: EngineVersion::V15,
     },
 ]
