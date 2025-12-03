@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.0] - 2025-12-03
+
+### 🚀 Features
+
+- Increase message size limit for username proofs (#722)
+
+### 🐛 Bug Fixes
+
+- Set correct ports for replication peer addresses (#724)
+
+### ⚙️ Miscellaneous Tasks
+
+- Add more information about lent and borrowed units to rpc (#717)
+- Add more metrics to mempool (#718)
+- Activate decentralized sync entrypoint (#723)
+
 ## [0.10.0] - 2025-10-22
 
 ### 🚀 Features
