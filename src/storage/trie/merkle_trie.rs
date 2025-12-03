@@ -17,6 +17,7 @@ pub const FNAME_MESSAGE_TYPE: u8 = 7;
 
 pub const TRIE_SHARD_SIZE: u32 = 256; // So it fits into 1 byte
 
+#[derive(Debug)]
 pub struct DecodedTrieKey {
     pub virtual_shard: u8,
     pub fid: u64,

@@ -141,6 +141,7 @@ impl proto::replication_service_server::ReplicationService for ReplicationServer
             request.shard_id,
             request.height,
             request.trie_virtual_shard as u8,
+            request.fid,
             request.page_token.clone(),
         );
 
