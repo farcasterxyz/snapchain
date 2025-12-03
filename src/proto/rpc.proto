@@ -52,6 +52,7 @@ service HubService {
   // Verifications
   rpc GetVerification(VerificationRequest) returns (Message);
   rpc GetVerificationsByFid(FidRequest) returns (MessagesResponse);
+  rpc GetFidByVerification(VerificationFidRequest) returns (VerificationFidResponse);
 
   // OnChain Events
   rpc GetOnChainSigner(SignerRequest) returns (OnChainEvent);
