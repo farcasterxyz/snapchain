@@ -1,0 +1,17 @@
+[package]
+name = "snapchain-proto"
+version = "0.11.0"
+edition = "2021"
+description = "Protocol buffer definitions for Snapchain"
+license = "GPL-3.0"
+
+[dependencies]
+prost = "0.13.3"
+tonic = { version = "0.12.3", features = ["tls", "tls-native-roots"] }
+serde = { version = "1.0", features = ["derive"] }
+futures-core = "0.3.31"
+hex = "0.4.3"
+informalsystems-malachitebft-core-types = { path = "../../malachite/code/crates/core-types" }
+
+[build-dependencies]
+tonic-build = "0.9.2"

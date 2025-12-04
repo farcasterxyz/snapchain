@@ -15,8 +15,7 @@ use tracing::{error, warn};
 
 pub use crate::proto; // TODO: reconsider how this is imported
 
-use crate::proto::full_proposal::ProposedValue;
-use crate::proto::{Block, Commits, FullProposal, ShardChunk};
+use crate::proto::{Commits, FullProposal};
 pub use proto::Height;
 pub use proto::ShardHash;
 
@@ -276,150 +275,17 @@ impl Display for Hash {
     }
 }
 
-impl Height {
-    pub const fn new(shard_index: u32, block_number: u64) -> Self {
-        Self {
-            shard_index,
-            block_number,
-        }
-    }
+// Malachite Height and Value trait impls are now in snapchain-proto crate
+// Most FullProposal methods are now in snapchain-proto crate
 
-    pub const fn as_u64(&self) -> u64 {
-        self.block_number
-    }
-
-    pub const fn increment(&self) -> Self {
-        self.increment_by(1)
-    }
-
-    pub const fn increment_by(&self, n: u64) -> Self {
-        Self {
-            shard_index: self.shard_index,
-            block_number: self.block_number + n,
-        }
-    }
-
-    pub fn decrement(&self) -> Option<Self> {
-        self.block_number.checked_sub(1).map(|block_number| Self {
-            shard_index: self.shard_index,
-            block_number,
-        })
-    }
-
-    pub fn decrement_by(&self, n: u64) -> Option<Self> {
-        self.block_number.checked_sub(n).map(|block_number| Self {
-            shard_index: self.shard_index,
-            block_number,
-        })
-    }
+// Extension trait for FullProposal that depends on main crate types (Address)
+pub trait FullProposalExt {
+    fn proposer_address(&self) -> Address;
 }
 
-impl fmt::Display for Height {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}] {}", self.shard_index, self.block_number)
-    }
-}
-
-impl informalsystems_malachitebft_core_types::Height for Height {
-    const ZERO: Self = Self::new(0, 0);
-    const INITIAL: Self = Self::new(0, 1);
-
-    fn increment(&self) -> Self {
-        self.increment()
-    }
-
-    fn as_u64(&self) -> u64 {
-        self.block_number
-    }
-
-    fn increment_by(&self, n: u64) -> Self {
-        self.increment_by(n)
-    }
-
-    fn decrement_by(&self, n: u64) -> Option<Self> {
-        self.decrement_by(n)
-    }
-}
-
-// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-// pub struct ShardHash {
-//     shard_index: u8,
-//     hash: Hash,
-// }
-
-impl fmt::Display for ShardHash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}] {:?}", self.shard_index, hex::encode(&self.hash))
-    }
-}
-
-// impl ShardHash {
-//     pub fn new(shard_id: u8, hash: Hash) -> Self {
-//         Self { shard_id, hash }
-//     }
-// }
-
-impl informalsystems_malachitebft_core_types::Value for ShardHash {
-    type Id = ShardHash;
-
-    fn id(&self) -> Self::Id {
-        self.clone()
-    }
-}
-
-impl FullProposal {
-    pub fn shard_hash(&self) -> ShardHash {
-        match &self.proposed_value {
-            Some(ProposedValue::Block(block)) => ShardHash {
-                shard_index: self.height().shard_index as u32,
-                hash: block.hash.clone(),
-            },
-            Some(ProposedValue::Shard(shard_chunk)) => ShardHash {
-                shard_index: self.height().shard_index as u32,
-                hash: shard_chunk.hash.clone(),
-            },
-            _ => {
-                panic!("Invalid proposal type");
-            }
-        }
-    }
-
-    pub fn block(&self, commits: Commits) -> Option<Block> {
-        match &self.proposed_value {
-            Some(ProposedValue::Block(block)) => {
-                let mut block = block.clone();
-                block.commits = Some(commits);
-                Some(block)
-            }
-            _ => None,
-        }
-    }
-
-    pub fn shard_chunk(&self, commits: Commits) -> Option<ShardChunk> {
-        match &self.proposed_value {
-            Some(ProposedValue::Shard(chunk)) => {
-                let mut chunk = chunk.clone();
-                chunk.commits = Some(commits);
-                Some(chunk)
-            }
-            _ => None,
-        }
-    }
-
-    pub fn proposer_address(&self) -> Address {
+impl FullProposalExt for FullProposal {
+    fn proposer_address(&self) -> Address {
         Address::from_vec(self.proposer.clone())
-    }
-
-    pub fn height(&self) -> Height {
-        self.height.clone().unwrap()
-    }
-
-    pub fn round(&self) -> Round {
-        Round::new(self.round.try_into().unwrap())
-    }
-
-    pub fn to_sign_bytes(&self) -> Vec<u8> {
-        self.encode_to_vec()
     }
 }
 
@@ -721,8 +587,7 @@ impl informalsystems_malachitebft_core_types::ProposalPart<SnapchainValidatorCon
     }
 }
 
-// Make malachite happy. Prost already implements PartialEq, should be safe to mark as Eq?
-impl Eq for FullProposal {}
+// impl Eq for FullProposal is now in the snapchain-proto crate
 
 impl informalsystems_malachitebft_core_types::Proposal<SnapchainValidatorContext> for Proposal {
     fn height(&self) -> Height {
@@ -828,26 +693,20 @@ impl informalsystems_malachitebft_core_types::Validator<SnapchainValidatorContex
     }
 }
 
-impl proto::BlockEvent {
-    pub fn seqnum(&self) -> u64 {
-        self.data.as_ref().unwrap().seqnum
-    }
-
-    pub fn block_number(&self) -> u64 {
-        self.data.as_ref().unwrap().block_number
-    }
-
-    pub fn block_timestamp(&self) -> u64 {
-        self.data.as_ref().unwrap().block_timestamp
-    }
-
-    pub fn event_index(&self) -> u64 {
-        self.data.as_ref().unwrap().event_index
-    }
+// Extension trait for Commits that depends on main crate types
+pub trait CommitsExt {
+    fn to_commit_certificate(
+        &self,
+    ) -> informalsystems_malachitebft_core_types::CommitCertificate<SnapchainValidatorContext>;
+    fn from_commit_certificate(
+        certificate: &informalsystems_malachitebft_core_types::CommitCertificate<
+            SnapchainValidatorContext,
+        >,
+    ) -> Commits;
 }
 
-impl proto::Commits {
-    pub fn to_commit_certificate(
+impl CommitsExt for Commits {
+    fn to_commit_certificate(
         &self,
     ) -> informalsystems_malachitebft_core_types::CommitCertificate<SnapchainValidatorContext> {
         let height = self.height.unwrap();
@@ -871,11 +730,11 @@ impl proto::Commits {
         }
     }
 
-    pub fn from_commit_certificate(
+    fn from_commit_certificate(
         certificate: &informalsystems_malachitebft_core_types::CommitCertificate<
             SnapchainValidatorContext,
         >,
-    ) -> Self {
+    ) -> Commits {
         let height = Some(certificate.height.clone());
         let round = certificate.round.as_i64();
         let value = Some(certificate.value_id.clone());

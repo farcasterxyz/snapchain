@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use super::validator::StoredValidatorSets;
 use crate::consensus::consensus::SystemMessage;
-use crate::core::types::SnapchainValidatorContext;
+use crate::core::types::{CommitsExt, SnapchainValidatorContext};
 use crate::core::util::{verify_signatures, FarcasterTime};
 use crate::proto::{self, DecidedValue, FarcasterNetwork, Height};
 use crate::storage::store::block_engine::BlockEngine;

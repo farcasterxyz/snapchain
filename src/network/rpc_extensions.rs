@@ -77,18 +77,28 @@ fn page_options(
     }
 }
 
-impl FidRequest {
-    pub fn page_options(&self) -> PageOptions {
+// Extension traits for RPC request types
+pub trait FidRequestExt {
+    fn page_options(&self) -> PageOptions;
+}
+
+impl FidRequestExt for FidRequest {
+    fn page_options(&self) -> PageOptions {
         page_options(self.page_size, self.page_token.clone(), self.reverse)
     }
 }
 
-impl FidTimestampRequest {
-    pub fn page_options(&self) -> PageOptions {
+pub trait FidTimestampRequestExt {
+    fn page_options(&self) -> PageOptions;
+    fn timestamps(&self) -> (Option<u32>, Option<u32>);
+}
+
+impl FidTimestampRequestExt for FidTimestampRequest {
+    fn page_options(&self) -> PageOptions {
         page_options(self.page_size, self.page_token.clone(), self.reverse)
     }
 
-    pub fn timestamps(&self) -> (Option<u32>, Option<u32>) {
+    fn timestamps(&self) -> (Option<u32>, Option<u32>) {
         let start_timestamp = match self.start_timestamp {
             Some(ts) => Some(ts as u32),
             None => None,
@@ -101,20 +111,32 @@ impl FidTimestampRequest {
     }
 }
 
-impl CastsByParentRequest {
-    pub fn page_options(&self) -> PageOptions {
+pub trait CastsByParentRequestExt {
+    fn page_options(&self) -> PageOptions;
+}
+
+impl CastsByParentRequestExt for CastsByParentRequest {
+    fn page_options(&self) -> PageOptions {
         page_options(self.page_size, self.page_token.clone(), self.reverse)
     }
 }
 
-impl ReactionsByFidRequest {
-    pub fn page_options(&self) -> PageOptions {
+pub trait ReactionsByFidRequestExt {
+    fn page_options(&self) -> PageOptions;
+}
+
+impl ReactionsByFidRequestExt for ReactionsByFidRequest {
+    fn page_options(&self) -> PageOptions {
         page_options(self.page_size, self.page_token.clone(), self.reverse)
     }
 }
 
-impl LinksByFidRequest {
-    pub fn page_options(&self) -> PageOptions {
+pub trait LinksByFidRequestExt {
+    fn page_options(&self) -> PageOptions;
+}
+
+impl LinksByFidRequestExt for LinksByFidRequest {
+    fn page_options(&self) -> PageOptions {
         page_options(self.page_size, self.page_token.clone(), self.reverse)
     }
 }

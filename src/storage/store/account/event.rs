@@ -124,21 +124,42 @@ impl StoreEventHandler {
     }
 }
 
-impl HubEvent {
-    fn make_event_key(event_id: u64) -> Vec<u8> {
-        let mut key = Vec::with_capacity(1 + 8);
+// Extension trait for HubEvent storage operations
+pub trait HubEventStorageExt {
+    fn put_event_transaction(
+        txn: &mut RocksDbTransactionBatch,
+        event: &HubEvent,
+    ) -> Result<(), HubError>;
+    fn get_events(
+        db: Arc<RocksDB>,
+        start_id: u64,
+        stop_id: Option<u64>,
+        page_options: Option<PageOptions>,
+    ) -> Result<EventsPage, HubError>;
+    fn get_event(db: Arc<RocksDB>, event_id: u64) -> Result<HubEvent, HubError>;
+    fn prune_events_util(
+        db: Arc<RocksDB>,
+        stop_height: u64,
+        page_options: &PageOptions,
+        throttle: Duration,
+    ) -> impl std::future::Future<Output = Result<u32, HubError>> + Send;
+}
 
-        key.push(RootPrefix::HubEvents as u8); // HubEvents prefix, 1 byte
-        key.extend_from_slice(&event_id.to_be_bytes());
+fn make_event_key(event_id: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(1 + 8);
 
-        key
-    }
+    key.push(RootPrefix::HubEvents as u8); // HubEvents prefix, 1 byte
+    key.extend_from_slice(&event_id.to_be_bytes());
 
-    pub fn put_event_transaction(
+    key
+}
+
+impl HubEventStorageExt for HubEvent {
+    fn put_event_transaction(
         txn: &mut RocksDbTransactionBatch,
         event: &HubEvent,
     ) -> Result<(), HubError> {
-        let key = Self::make_event_key(event.id);
+        let key = make_event_key(event.id);
         let value = event.encode_to_vec();
 
         txn.put(key, value);
@@ -146,16 +167,16 @@ impl HubEvent {
         Ok(())
     }
 
-    pub fn get_events(
+    fn get_events(
         db: Arc<RocksDB>,
         start_id: u64,
         stop_id: Option<u64>,
         page_options: Option<PageOptions>,
     ) -> Result<EventsPage, HubError> {
-        let start_prefix = Self::make_event_key(start_id);
+        let start_prefix = make_event_key(start_id);
         let stop_prefix = match stop_id {
-            Some(id) => Self::make_event_key(id),
-            None => increment_vec_u8(&Self::make_event_key(std::u64::MAX)),
+            Some(id) => make_event_key(id),
+            None => increment_vec_u8(&make_event_key(std::u64::MAX)),
         };
 
         let mut events = Vec::new();
@@ -187,8 +208,8 @@ impl HubEvent {
         })
     }
 
-    pub fn get_event(db: Arc<RocksDB>, event_id: u64) -> Result<HubEvent, HubError> {
-        let key = Self::make_event_key(event_id);
+    fn get_event(db: Arc<RocksDB>, event_id: u64) -> Result<HubEvent, HubError> {
+        let key = make_event_key(event_id);
         let buf = db.get(&key)?;
         if buf.is_none() {
             return Err(HubError::not_found("Event not found"));
@@ -203,15 +224,15 @@ impl HubEvent {
         }
     }
 
-    pub async fn prune_events_util(
+    async fn prune_events_util(
         db: Arc<RocksDB>,
         stop_height: u64,
         page_options: &PageOptions,
         throttle: Duration,
     ) -> Result<u32, HubError> {
         let stop_event_id = HubEventIdGenerator::make_event_id_for_block_number(stop_height);
-        let start_event_key = Self::make_event_key(0);
-        let stop_event_key = Self::make_event_key(stop_event_id);
+        let start_event_key = make_event_key(0);
+        let stop_event_key = make_event_key(stop_event_id);
         let total_pruned = db
             .delete_paginated(
                 Some(start_event_key),

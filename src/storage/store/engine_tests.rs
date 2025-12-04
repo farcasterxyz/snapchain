@@ -9,7 +9,7 @@ mod tests {
     use crate::proto::{FnameTransfer, ShardChunk, UserNameProof};
     use crate::proto::{OnChainEvent, OnChainEventType};
     use crate::storage::db::{PageOptions, RocksDbTransactionBatch};
-    use crate::storage::store::account::{HubEventIdGenerator, UserDataStore};
+    use crate::storage::store::account::{HubEventIdGenerator, HubEventStorageExt, UserDataStore};
     use crate::storage::store::engine::{MessageValidationError, ShardEngine};
     use crate::storage::store::mempool_poller::MempoolMessage;
     use crate::storage::store::stores::StoreLimits;
