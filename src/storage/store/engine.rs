@@ -1,7 +1,8 @@
 use super::account::{IntoU8, OnchainEventStorageError, UserDataStore, UsernameProofStore};
 use crate::consensus::proposer::ProposalSource;
 use crate::core::{
-    error::HubError, types::Height, util::FarcasterTime, validations, validations::verification,
+    error::HubError, message::HubEventExt, types::Height, util::FarcasterTime, validations,
+    validations::verification,
 };
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::message_data::Body;
@@ -1592,7 +1593,7 @@ impl ShardEngine {
         let height = header.height.as_ref().unwrap();
         let mut event_counts_by_type = Self::compute_event_counts_by_type(&events);
         event_counts_by_type.insert(HubEventType::BlockConfirmed as i32, 1);
-        let mut block_confirmed = HubEvent::from(
+        let mut block_confirmed = HubEvent::new_event(
             proto::HubEventType::BlockConfirmed,
             proto::hub_event::Body::BlockConfirmedBody(proto::BlockConfirmedBody {
                 block_number: height.block_number,

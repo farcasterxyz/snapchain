@@ -14,6 +14,4 @@ pub mod version;
 
 mod tests;
 
-pub mod proto {
-    tonic::include_proto!("_");
-}
+pub use snapchain_proto::proto;

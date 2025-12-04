@@ -5,6 +5,7 @@ use super::{
     message_encode, put_message_transaction, MessagesPage, StoreEventHandler, TS_HASH_LENGTH,
 };
 use crate::core::error::HubError;
+use crate::core::message::HubEventExt;
 use crate::proto::{
     hub_event, HubEvent, HubEventType, MergeMessageBody, PruneMessageBody, RevokeMessageBody,
 };
@@ -211,7 +212,7 @@ pub trait StoreDef: Send + Sync {
 
     #[inline]
     fn revoke_event_args(&self, message: &Message) -> HubEvent {
-        HubEvent::from(
+        HubEvent::new_event(
             HubEventType::RevokeMessage,
             hub_event::Body::RevokeMessageBody(RevokeMessageBody {
                 message: Some(message.clone()),
@@ -221,7 +222,7 @@ pub trait StoreDef: Send + Sync {
 
     #[inline]
     fn merge_event_args(&self, message: &Message, merge_conflicts: Vec<Message>) -> HubEvent {
-        HubEvent::from(
+        HubEvent::new_event(
             HubEventType::MergeMessage,
             hub_event::Body::MergeMessageBody(MergeMessageBody {
                 message: Some(message.clone()),
@@ -232,7 +233,7 @@ pub trait StoreDef: Send + Sync {
 
     #[inline]
     fn prune_event_args(&self, message: &Message) -> HubEvent {
-        HubEvent::from(
+        HubEvent::new_event(
             HubEventType::PruneMessage,
             hub_event::Body::PruneMessageBody(PruneMessageBody {
                 message: Some(message.clone()),

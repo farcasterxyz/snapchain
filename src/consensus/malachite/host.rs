@@ -1,7 +1,7 @@
 //! Implementation of a host actor for bridiging consensus and the application via a set of channels.
 
 use crate::consensus::validator::{ProposalSource, ShardValidator};
-use crate::core::types::SnapchainValidatorContext;
+use crate::core::types::{CommitsExt, FullProposalExt, SnapchainValidatorContext};
 use crate::network::gossip::GossipEvent;
 use crate::proto::{self, decided_value, full_proposal, Block, Commits, FullProposal, ShardChunk};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;

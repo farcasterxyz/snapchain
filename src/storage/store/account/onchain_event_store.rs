@@ -1,5 +1,6 @@
 use super::{get_from_db_or_txn, make_fid_key, StoreEventHandler};
 use crate::core::error::HubError;
+use crate::core::message::HubEventExt;
 use crate::core::util::FarcasterTime;
 use crate::proto::{
     self, on_chain_event, on_chain_event::Body, FarcasterNetwork, HubEvent, HubEventType,
@@ -527,7 +528,7 @@ impl OnchainEventStore {
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<HubEvent, OnchainEventStorageError> {
         merge_onchain_event(&self.db, txn, onchain_event.clone(), &self.store_opts)?;
-        let hub_event = &mut HubEvent::from(
+        let hub_event = &mut HubEvent::new_event(
             HubEventType::MergeOnChainEvent,
             proto::hub_event::Body::MergeOnChainEventBody(MergeOnChainEventBody {
                 on_chain_event: Some(onchain_event.clone()),

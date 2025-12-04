@@ -1,6 +1,6 @@
 use super::account::{
-    EventsPage, ReactionStore, ReactionStoreDef, StorageSlot, UserDataStore, UserDataStoreDef,
-    VerificationStore, VerificationStoreDef,
+    EventsPage, HubEventStorageExt, ReactionStore, ReactionStoreDef, StorageSlot, UserDataStore,
+    UserDataStoreDef, VerificationStore, VerificationStoreDef,
 };
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;

@@ -3,6 +3,7 @@ use super::{
     store::{Store, StoreDef},
     IntoU8, MessagesPage, StoreEventHandler, TS_HASH_LENGTH,
 };
+use crate::core::message::HubEventExt;
 use crate::proto::message_data::Body;
 use crate::proto::{self, HubEvent, HubEventType, MergeUserNameProofBody, Message, MessageType};
 use crate::storage::constants::{RootPrefix, UserPostfix};
@@ -280,7 +281,7 @@ impl StoreDef for UsernameProofStoreDef {
             _ => None,
         };
 
-        HubEvent::from(
+        HubEvent::new_event(
             HubEventType::MergeUsernameProof,
             proto::hub_event::Body::MergeUsernameProofBody(MergeUserNameProofBody {
                 username_proof: None,
@@ -317,7 +318,7 @@ impl StoreDef for UsernameProofStoreDef {
             (None, None)
         };
 
-        HubEvent::from(
+        HubEvent::new_event(
             HubEventType::MergeUsernameProof,
             proto::hub_event::Body::MergeUsernameProofBody(MergeUserNameProofBody {
                 username_proof: username_proof_body,

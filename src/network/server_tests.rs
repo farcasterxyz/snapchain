@@ -24,7 +24,7 @@ mod tests {
     };
     use crate::proto::{FidRequest, SubscribeRequest};
     use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
-    use crate::storage::store::account::{HubEventIdGenerator, SEQUENCE_BITS};
+    use crate::storage::store::account::{HubEventIdGenerator, HubEventStorageExt, SEQUENCE_BITS};
     use crate::storage::store::block_engine::BlockEngine;
     use crate::storage::store::block_engine_test_helpers::{BlockEngineOptions, Validity};
     use crate::storage::store::engine::{Senders, ShardEngine};
@@ -46,15 +46,13 @@ mod tests {
     const USER_NAME: &str = "user";
     const PASSWORD: &str = "password";
 
-    impl FidRequest {
-        fn for_fid(fid: u64) -> Request<Self> {
-            Request::new(FidRequest {
-                fid,
-                page_size: None,
-                page_token: None,
-                reverse: None,
-            })
-        }
+    fn fid_request(fid: u64) -> Request<FidRequest> {
+        Request::new(FidRequest {
+            fid,
+            page_size: None,
+            page_token: None,
+            reverse: None,
+        })
     }
 
     struct MockL1Client {}
@@ -1495,7 +1493,7 @@ mod tests {
         ) = make_server(None).await;
 
         let response = service
-            .get_current_storage_limits_by_fid(FidRequest::for_fid(SHARD1_FID))
+            .get_current_storage_limits_by_fid(fid_request(SHARD1_FID))
             .await
             .unwrap();
         assert_eq!(response.get_ref().units, 0);
@@ -1563,7 +1561,7 @@ mod tests {
         .await;
 
         let response = service
-            .get_current_storage_limits_by_fid(FidRequest::for_fid(SHARD1_FID))
+            .get_current_storage_limits_by_fid(fid_request(SHARD1_FID))
             .await
             .unwrap();
         assert_eq!(response.get_ref().units, 3);

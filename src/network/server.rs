@@ -1,4 +1,7 @@
-use super::rpc_extensions::{authenticate_request, AsMessagesResponse, AsSingleMessageResponse};
+use super::rpc_extensions::{
+    authenticate_request, AsMessagesResponse, AsSingleMessageResponse, FidRequestExt,
+    FidTimestampRequestExt, LinksByFidRequestExt, ReactionsByFidRequestExt,
+};
 use crate::connectors::onchain_events::{Chain, ChainClients};
 use crate::core::error::HubError;
 use crate::core::types::SnapchainValidatorContext;

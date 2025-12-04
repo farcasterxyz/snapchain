@@ -30,7 +30,8 @@ EOF
 # since the Cargo configuration references files in src.
 # This means we'll re-fetch all crates every time the source code changes,
 # which isn't ideal.
-COPY Cargo.lock Cargo.toml build.rs ./
+COPY Cargo.lock Cargo.toml ./
+COPY proto ./proto
 COPY src ./src
 
 ENV RUST_BACKTRACE=full
@@ -59,7 +60,7 @@ RUN <<EOF
 EOF
 
 WORKDIR /app
-COPY --from=builder /usr/src/app/src/proto /app/proto
+COPY --from=builder /usr/src/app/proto/definitions /app/proto
 COPY --from=builder /usr/src/app/nodes /app/nodes
 COPY --from=builder \
   /usr/src/app/target/release/snapchain \

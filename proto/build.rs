@@ -11,20 +11,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // TODO: auto-discover proto files
     builder.compile(
         &[
-            "src/proto/admin_rpc.proto",
-            "src/proto/blocks.proto",
-            "src/proto/rpc.proto",
-            "src/proto/message.proto",
-            "src/proto/onchain_event.proto",
-            "src/proto/hub_event.proto",
-            "src/proto/username_proof.proto",
-            "src/proto/sync_trie.proto",
-            "src/proto/node_state.proto",
-            "src/proto/gossip.proto",
-            "src/proto/request_response.proto",
-            "src/proto/replication.proto",
+            "definitions/admin_rpc.proto",
+            "definitions/blocks.proto",
+            "definitions/rpc.proto",
+            "definitions/message.proto",
+            "definitions/onchain_event.proto",
+            "definitions/hub_event.proto",
+            "definitions/username_proof.proto",
+            "definitions/sync_trie.proto",
+            "definitions/node_state.proto",
+            "definitions/gossip.proto",
+            "definitions/request_response.proto",
+            "definitions/replication.proto",
         ],
-        &["src/proto"],
+        &["definitions"],
     )?;
 
     Ok(())

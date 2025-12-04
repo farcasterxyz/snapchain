@@ -3,7 +3,7 @@ use libp2p::identity::ed25519::PublicKey;
 
 use crate::consensus::validator::StoredValidatorSets;
 use crate::core::error::HubError;
-use crate::core::types::{Vote, FARCASTER_EPOCH};
+use crate::core::types::{CommitsExt, Vote, FARCASTER_EPOCH};
 use crate::proto::{self};
 use itertools::Itertools;
 use tracing::error;
