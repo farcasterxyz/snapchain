@@ -306,6 +306,7 @@ mod tests {
             "valid-basename.base.eth",
             "valid-user123",
             "validusername123",
+            "validsol.sol",
         ];
 
         let invalid_names = vec![
@@ -323,6 +324,10 @@ mod tests {
                 "invalid_username!",
                 ValidationError::FnameExceedsLength("invalid_username!".to_string()),
             ), // Contains special character
+            (
+                "too_long_for_a_sol_name.sol",
+                ValidationError::SolNameExceedsLength("too_long_for_a_sol_name.sol".to_string()),
+            ),
         ];
         for name in valid_names {
             let msg = create_user_data_add(

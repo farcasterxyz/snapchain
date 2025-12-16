@@ -9,7 +9,9 @@ mod tests {
     use std::time::{Duration, Instant};
     use tokio::time::{sleep, timeout};
 
-    use crate::connectors::onchain_events::{Chain, ChainAPI, ChainClients};
+    use crate::connectors::onchain_events::{
+        Chain, ChainAPI, ChainClients, SolanaNameResolver, SolanaNameServiceError,
+    };
     use crate::core::validations::{self, verification::VerificationAddressClaim};
     use crate::mempool::mempool::{self, Mempool};
     use crate::mempool::routing;
@@ -80,6 +82,21 @@ mod tests {
             _body: &VerificationAddAddressBody,
         ) -> Result<(), validations::error::ValidationError> {
             future::ready(Ok(())).await
+        }
+    }
+
+    struct MockSolanaResolver {
+        resolved: Vec<u8>,
+    }
+
+    #[async_trait]
+    impl SolanaNameResolver for MockSolanaResolver {
+        async fn resolve(&self, name: String) -> Result<Vec<u8>, SolanaNameServiceError> {
+            if name == "username.sol" {
+                Ok(self.resolved.clone())
+            } else {
+                Err(SolanaNameServiceError::InvalidSuffix)
+            }
         }
     }
 
@@ -193,6 +210,21 @@ mod tests {
         broadcast::Sender<ShardChunk>,
         broadcast::Sender<Block>,
     ) {
+        make_server_with_resolver(rpc_auth, None).await
+    }
+
+    async fn make_server_with_resolver(
+        rpc_auth: Option<String>,
+        solana_resolver: Option<Box<dyn SolanaNameResolver>>,
+    ) -> (
+        HashMap<u32, Stores>,
+        HashMap<u32, Senders>,
+        [ShardEngine; 2],
+        BlockEngine,
+        MyHubService,
+        broadcast::Sender<ShardChunk>,
+        broadcast::Sender<Block>,
+    ) {
         let (msgs_request_tx, msgs_request_rx) = mpsc::channel(100);
 
         let statsd_client = StatsdClientWrapper::new(
@@ -272,6 +304,7 @@ mod tests {
 
         let mut chain_clients = ChainClients {
             chain_api_map: HashMap::new(),
+            solana_name_service: solana_resolver,
         };
         chain_clients.chain_api_map.insert(
             Chain::EthMainnet,
@@ -1004,7 +1037,7 @@ mod tests {
         };
 
         let result = service
-            .validate_ens_username_proof(fid, &username_proof)
+            .validate_external_username_proof(fid, &username_proof)
             .await;
 
         assert!(result.is_ok());
@@ -1037,7 +1070,7 @@ mod tests {
         };
 
         let result = service
-            .validate_ens_username_proof(fid, &username_proof)
+            .validate_external_username_proof(fid, &username_proof)
             .await;
         assert!(result.is_ok());
 
@@ -1061,6 +1094,45 @@ mod tests {
         // Now the user data add should succeed
         let result = submit_message(&service, user_data_add.clone()).await;
         assert_eq!(result.unwrap().into_inner(), user_data_add);
+    }
+
+    #[tokio::test]
+    async fn test_solana_proof() {
+        let owner = hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap();
+        let (
+            _stores,
+            _senders,
+            [mut engine1, mut _engine2],
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server_with_resolver(
+            None,
+            Some(Box::new(MockSolanaResolver {
+                resolved: owner.clone(),
+            })),
+        )
+        .await;
+        let signer = test_helper::default_signer();
+        let fid = SHARD1_FID;
+
+        test_helper::register_user(fid, signer.clone(), owner.clone(), &mut engine1).await;
+
+        let username_proof = UserNameProof {
+            timestamp: messages_factory::farcaster_time() as u64,
+            name: b"username.sol".to_vec(),
+            owner,
+            signature: "signature".to_string().encode_to_vec(),
+            fid,
+            r#type: UserNameType::UsernameTypeSolana as i32,
+        };
+
+        let result = service
+            .validate_external_username_proof(fid, &username_proof)
+            .await;
+
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -1091,7 +1163,7 @@ mod tests {
 
         // Proof owner does not match owner of ens name
         let result = service
-            .validate_ens_username_proof(fid, &username_proof)
+            .validate_external_username_proof(fid, &username_proof)
             .await;
         assert!(result.is_err());
     }
@@ -1129,7 +1201,7 @@ mod tests {
         };
 
         let result = service
-            .validate_ens_username_proof(fid, &username_proof)
+            .validate_external_username_proof(fid, &username_proof)
             .await;
 
         assert!(result.is_err());
@@ -1175,7 +1247,7 @@ mod tests {
         };
 
         let result = service
-            .validate_ens_username_proof(fid, &username_proof)
+            .validate_external_username_proof(fid, &username_proof)
             .await;
 
         assert!(result.is_ok());

@@ -8,16 +8,23 @@ use alloy_rpc_types::{Filter, Log};
 use alloy_sol_types::{sol, SolEvent};
 use alloy_transport_http::{Client, Http};
 use async_trait::async_trait;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use foundry_common::ens::EnsResolver::EnsResolverInstance;
 use foundry_common::ens::{namehash, EnsError, EnsRegistry};
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
-use tokio::sync::{broadcast, mpsc};
-use tracing::{error, info, warn};
+use tokio::{
+    sync::{broadcast, mpsc},
+    task::spawn_blocking,
+};
+use tracing::{debug, error, info, warn};
 
 use crate::core::error::HubError;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
@@ -78,6 +85,132 @@ const RENT_EXPIRY_IN_SECONDS: u64 = 365 * 24 * 60 * 60; // One year
 const RETRY_TIMEOUT_SECONDS: u64 = 10;
 
 const BASE_BLOCK_PAGE_SIZE: u64 = 8000; // Alchemy max is 10K
+const NAME_SERVICE_PROGRAM_ID: &str = "namesLPneVptA9Z5rqUDD9tMTWEJwofgaYwp8cawRkX";
+const SOL_TLD_LABEL: &str = "sol";
+
+// Solana Name Service derivation constants
+const HASH_PREFIX: &str = "SPL Name Service";
+const ROOT_DOMAIN_ACCOUNT: &str = "58PwtjSDuFHuUkYjH9BYnnQKHfwo9reZhC2zMJv9JPkx";
+
+mod derivation {
+    use super::*;
+    use ed25519_dalek::VerifyingKey;
+
+    /// Derive the domain key for a Solana Name Service domain.
+    /// This is a minimal implementation based on the Bonfida SNS SDK and SPL Name Service.
+    pub fn get_domain_key(domain: &str) -> Result<[u8; 32], String> {
+        // Hash the domain name with the SNS prefix
+        let hashed_name = hash_domain_name(domain);
+
+        // Decode the root domain account
+        let root_domain = bs58::decode(ROOT_DOMAIN_ACCOUNT)
+            .into_vec()
+            .map_err(|e| format!("Failed to decode root domain: {}", e))?;
+
+        if root_domain.len() != 32 {
+            return Err("Invalid root domain length".to_string());
+        }
+        let mut root_array = [0u8; 32];
+        root_array.copy_from_slice(&root_domain);
+
+        // Decode the name service program ID
+        let program_id = bs58::decode(NAME_SERVICE_PROGRAM_ID)
+            .into_vec()
+            .map_err(|e| format!("Failed to decode program ID: {}", e))?;
+
+        if program_id.len() != 32 {
+            return Err("Invalid program ID length".to_string());
+        }
+        let mut program_array = [0u8; 32];
+        program_array.copy_from_slice(&program_id);
+
+        // Derive the PDA (Program Derived Address) using the SPL Name Service algorithm
+        find_program_address(&program_array, &hashed_name, None, Some(&root_array))
+    }
+
+    fn hash_domain_name(domain: &str) -> Vec<u8> {
+        let prefixed = format!("{}{}", HASH_PREFIX, domain);
+        Sha256::digest(prefixed.as_bytes()).to_vec()
+    }
+
+    /// Find a program-derived address for the given seeds and program ID.
+    /// Based on Solana's find_program_address implementation.
+    fn find_program_address(
+        program_id: &[u8; 32],
+        hashed_name: &[u8],
+        name_class: Option<&[u8; 32]>,
+        parent: Option<&[u8; 32]>,
+    ) -> Result<[u8; 32], String> {
+        // Build the seeds vector according to SPL Name Service algorithm
+        let mut seeds_vec = Vec::new();
+        seeds_vec.extend_from_slice(hashed_name);
+
+        // Add name_class (or zeros if None)
+        if let Some(class) = name_class {
+            seeds_vec.extend_from_slice(class);
+        } else {
+            seeds_vec.extend_from_slice(&[0u8; 32]);
+        }
+
+        // Add parent (or zeros if None)
+        if let Some(parent_addr) = parent {
+            seeds_vec.extend_from_slice(parent_addr);
+        } else {
+            seeds_vec.extend_from_slice(&[0u8; 32]);
+        }
+
+        // Split into 32-byte chunks as required by Solana PDA derivation
+        let seed_chunks: Vec<&[u8]> = seeds_vec.chunks(32).collect();
+
+        // Try bumps from 255 down to 0
+        for bump in (0..=255u8).rev() {
+            if let Ok(pda) = create_program_address(&seed_chunks, bump, program_id) {
+                return Ok(pda);
+            }
+        }
+
+        Err("Could not find valid PDA".to_string())
+    }
+
+    /// Create a program address from seeds and program ID.
+    /// Based on Solana's create_program_address implementation.
+    fn create_program_address(
+        seeds: &[&[u8]],
+        bump: u8,
+        program_id: &[u8; 32],
+    ) -> Result<[u8; 32], String> {
+        // Hash: seeds || [bump] || program_id || "ProgramDerivedAddress"
+        let mut hasher = Sha256::new();
+        for seed in seeds {
+            hasher.update(seed);
+        }
+        hasher.update(&[bump]);
+        hasher.update(program_id);
+        hasher.update(b"ProgramDerivedAddress");
+        let hash = hasher.finalize();
+
+        // Check if the resulting address is NOT on the Ed25519 curve
+        if is_on_curve(&hash) {
+            return Err("Address is on curve".to_string());
+        }
+
+        let mut result = [0u8; 32];
+        result.copy_from_slice(&hash);
+        Ok(result)
+    }
+
+    fn is_on_curve(pubkey: &[u8]) -> bool {
+        if pubkey.len() != 32 {
+            return false;
+        }
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(pubkey);
+
+        // Try to create a verifying key from the bytes
+        // If it succeeds, the point is on the curve
+        VerifyingKey::from_bytes(&bytes).is_ok()
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -166,6 +299,223 @@ pub enum Chain {
     OptimismMainnet,
 }
 
+#[derive(Error, Debug)]
+pub enum SolanaNameServiceError {
+    #[error("solana name must end with .sol")]
+    InvalidSuffix,
+    #[error("solana name missing label")]
+    MissingLabel,
+    #[error("solana account owner mismatch")]
+    InvalidAccountOwner,
+    #[error("solana rpc error: {0}")]
+    Rpc(String),
+    #[error("solana account not found")]
+    AccountNotFound,
+    #[error("solana account data invalid: {0}")]
+    AccountData(String),
+    #[error("unable to decode solana account data: {0}")]
+    Base64(String),
+    #[error("failed to derive solana name address: {0}")]
+    AddressDerivation(String),
+}
+
+#[async_trait]
+pub trait SolanaNameResolver: Send + Sync {
+    async fn resolve(&self, name: String) -> Result<Vec<u8>, SolanaNameServiceError>;
+}
+
+pub struct SolanaNameService {
+    agent: Arc<ureq::Agent>,
+    rpc_url: String,
+}
+
+impl SolanaNameService {
+    pub fn new(rpc_url: String) -> Result<Self, SolanaNameServiceError> {
+        let agent = Arc::new(ureq::Agent::new_with_defaults());
+        Ok(Self { agent, rpc_url })
+    }
+
+    async fn fetch_account_owner(
+        &self,
+        account_pubkey: &[u8; 32],
+    ) -> Result<Vec<u8>, SolanaNameServiceError> {
+        let account_key = bs58::encode(account_pubkey).into_string();
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getAccountInfo",
+            "params": [account_key, { "encoding": "base64" }]
+        });
+        let agent = Arc::clone(&self.agent);
+        let rpc_url = self.rpc_url.clone();
+        let payload_string = payload.to_string();
+        let rpc_response: RpcResponse<AccountInfo> = spawn_blocking(
+            move || -> Result<RpcResponse<AccountInfo>, SolanaNameServiceError> {
+                let mut response = agent
+                    .post(&rpc_url)
+                    .header("Content-Type", "application/json")
+                    .send(payload_string.into_bytes())
+                    .map_err(|err| SolanaNameServiceError::Rpc(err.to_string()))?;
+                let body = response
+                    .body_mut()
+                    .read_to_string()
+                    .map_err(|err| SolanaNameServiceError::Rpc(err.to_string()))?;
+                serde_json::from_str::<RpcResponse<AccountInfo>>(&body)
+                    .map_err(|err| SolanaNameServiceError::Rpc(err.to_string()))
+            },
+        )
+        .await
+        .map_err(|err| SolanaNameServiceError::Rpc(err.to_string()))??;
+
+        if let Some(error) = rpc_response.error {
+            return Err(SolanaNameServiceError::Rpc(error.message));
+        }
+
+        let account = rpc_response
+            .result
+            .and_then(|result| result.value)
+            .ok_or(SolanaNameServiceError::AccountNotFound)?;
+
+        if account.owner != NAME_SERVICE_PROGRAM_ID {
+            return Err(SolanaNameServiceError::InvalidAccountOwner);
+        }
+
+        let data = BASE64_STANDARD
+            .decode(account.data.0)
+            .map_err(|err| SolanaNameServiceError::Base64(err.to_string()))?;
+
+        if data.len() < 64 {
+            return Err(SolanaNameServiceError::AccountData(
+                "account data too short".to_string(),
+            ));
+        }
+
+        Ok(data[32..64].to_vec())
+    }
+
+    async fn resolve_inner(&self, name: String) -> Result<Vec<u8>, SolanaNameServiceError> {
+        let normalized = name.trim().to_lowercase();
+        if !normalized.ends_with(".sol") {
+            return Err(SolanaNameServiceError::InvalidSuffix);
+        }
+        let label = normalized.trim_end_matches(".sol");
+        if label.is_empty() {
+            return Err(SolanaNameServiceError::MissingLabel);
+        }
+
+        let name_account = Self::derive_domain_account(label)?;
+        self.fetch_account_owner(&name_account).await
+    }
+
+    fn derive_domain_account(label: &str) -> Result<[u8; 32], SolanaNameServiceError> {
+        derivation::get_domain_key(label)
+            .map_err(|err| SolanaNameServiceError::AddressDerivation(err))
+    }
+}
+
+#[derive(Deserialize)]
+struct RpcResponse<T> {
+    result: Option<RpcResult<T>>,
+    error: Option<RpcError>,
+}
+
+#[derive(Deserialize)]
+struct RpcResult<T> {
+    value: Option<T>,
+}
+
+#[derive(Deserialize)]
+struct RpcError {
+    message: String,
+}
+
+#[derive(Deserialize)]
+struct AccountInfo {
+    data: (String, String),
+    owner: String,
+}
+
+#[async_trait]
+impl SolanaNameResolver for SolanaNameService {
+    async fn resolve(&self, name: String) -> Result<Vec<u8>, SolanaNameServiceError> {
+        self.resolve_inner(name).await
+    }
+}
+
+#[cfg(test)]
+mod sol_resolver_tests {
+    use super::*;
+
+    #[test]
+    fn bonfida_sol_derives_expected_account() {
+        let derived = SolanaNameService::derive_domain_account("bonfida").expect("derive bonfida");
+        let expected_bytes = bs58::decode("Crf8hzfthWGbGbLTVCiqRqV5MVnbpHB1L9KQMd6gsinb")
+            .into_vec()
+            .expect("decode bonfida.sol");
+        let expected: [u8; 32] = expected_bytes.try_into().expect("pubkey length");
+        assert_eq!(derived, expected);
+    }
+
+    #[test]
+    fn derivation_module_derives_bonfida_correctly() {
+        // Test the derivation module directly
+        let derived = derivation::get_domain_key("bonfida").expect("derive bonfida");
+        let expected_bytes = bs58::decode("Crf8hzfthWGbGbLTVCiqRqV5MVnbpHB1L9KQMd6gsinb")
+            .into_vec()
+            .expect("decode bonfida.sol");
+        let expected: [u8; 32] = expected_bytes.try_into().expect("pubkey length");
+
+        assert_eq!(
+            derived, expected,
+            "Derived address for 'bonfida' should match expected Solana Name Service address"
+        );
+
+        // Verify the derived address as base58
+        let derived_base58 = bs58::encode(&derived).into_string();
+        assert_eq!(
+            derived_base58, "Crf8hzfthWGbGbLTVCiqRqV5MVnbpHB1L9KQMd6gsinb",
+            "Derived address should encode to expected base58 string"
+        );
+    }
+
+    #[test]
+    fn derivation_produces_off_curve_addresses() {
+        // Test that derivation produces valid PDAs (off-curve addresses)
+        use ed25519_dalek::VerifyingKey;
+
+        let derived = derivation::get_domain_key("bonfida").expect("derive bonfida");
+
+        // A valid PDA should NOT be a valid Ed25519 point
+        assert!(
+            VerifyingKey::from_bytes(&derived).is_err(),
+            "Derived PDA should not be on the Ed25519 curve"
+        );
+    }
+
+    #[test]
+    fn derivation_is_deterministic() {
+        // Test that derivation produces the same result every time
+        let derived1 = derivation::get_domain_key("bonfida").expect("derive bonfida 1");
+        let derived2 = derivation::get_domain_key("bonfida").expect("derive bonfida 2");
+        let derived3 = derivation::get_domain_key("bonfida").expect("derive bonfida 3");
+
+        assert_eq!(derived1, derived2, "Derivation should be deterministic");
+        assert_eq!(derived2, derived3, "Derivation should be deterministic");
+    }
+
+    #[test]
+    fn different_domains_produce_different_addresses() {
+        // Test that different domain names produce different addresses
+        let bonfida = derivation::get_domain_key("bonfida").expect("derive bonfida");
+        let solana = derivation::get_domain_key("solana").expect("derive solana");
+
+        assert_ne!(
+            bonfida, solana,
+            "Different domain names should produce different addresses"
+        );
+    }
+}
+
 impl Chain {
     pub fn from_chain_id(chain_id: u32) -> Option<Self> {
         match chain_id {
@@ -179,6 +529,7 @@ impl Chain {
 
 pub struct ChainClients {
     pub chain_api_map: HashMap<Chain, Box<dyn ChainAPI>>,
+    pub solana_name_service: Option<Box<dyn SolanaNameResolver>>,
 }
 
 impl ChainClients {
@@ -208,7 +559,23 @@ impl ChainClients {
             chain_api_map.insert(Chain::OptimismMainnet, client);
         }
 
-        ChainClients { chain_api_map }
+        let solana_name_service: Option<Box<dyn SolanaNameResolver>> =
+            if !app_config.solana_rpc_url.is_empty() {
+                match SolanaNameService::new(app_config.solana_rpc_url.clone()) {
+                    Ok(client) => Some(Box::new(client)),
+                    Err(err) => {
+                        warn!("Failed to initialize Solana name service: {}", err);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+        ChainClients {
+            chain_api_map,
+            solana_name_service,
+        }
     }
 
     pub fn for_chain(&self, chain: Chain) -> Result<&Box<dyn ChainAPI>, HubError> {
@@ -216,6 +583,18 @@ impl ChainClients {
             Some(client) => Ok(client),
             None => Err(HubError::invalid_internal_state(
                 format!("No client configured for chain: {:?}", chain).as_str(),
+            )),
+        }
+    }
+
+    pub async fn resolve_sol_name(&self, name: String) -> Result<Vec<u8>, HubError> {
+        match &self.solana_name_service {
+            Some(client) => client
+                .resolve(name)
+                .await
+                .map_err(|err| HubError::validation_failure(&err.to_string())),
+            None => Err(HubError::invalid_internal_state(
+                "Solana RPC client not configured",
             )),
         }
     }

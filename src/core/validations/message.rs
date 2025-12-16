@@ -181,6 +181,16 @@ pub fn validate_message(
                         return Err(ValidationError::UnsupportedFeature);
                     }
                 }
+                Ok(UserNameType::UsernameTypeSolana) => {
+                    if version.is_enabled(ProtocolFeature::SolanaNamesValidation) {
+                        let name = &std::str::from_utf8(&proof.name)
+                            .map_err(|_| ValidationError::InvalidData)?
+                            .to_string();
+                        validate_sol_name(name)?;
+                    } else {
+                        return Err(ValidationError::UnsupportedFeature);
+                    }
+                }
                 _ => return Err(ValidationError::InvalidUsernameType),
             }
         }
@@ -368,6 +378,37 @@ pub fn validate_base_name(input: &String) -> Result<(), ValidationError> {
         .map_err(|_| ValidationError::InvalidData)?
     {
         return Err(ValidationError::EnsNameDoesntMatch(
+            input.clone(),
+            FNAME_REGEX.to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn validate_sol_name(input: &String) -> Result<(), ValidationError> {
+    if !input.ends_with(".sol") {
+        return Err(ValidationError::SolNameDoesntEndWith(
+            input.clone(),
+            ".sol".to_string(),
+        ));
+    }
+
+    let name_parts: Vec<&str> = input.split('.').collect();
+    if name_parts.len() != 2 || name_parts[0].is_empty() {
+        return Err(ValidationError::InvalidData);
+    }
+
+    if input.len() > 20 {
+        return Err(ValidationError::SolNameExceedsLength(input.clone()));
+    }
+
+    if !Regex::new(FNAME_REGEX)
+        .unwrap()
+        .is_match(name_parts[0])
+        .map_err(|_| ValidationError::InvalidData)?
+    {
+        return Err(ValidationError::SolNameDoesntMatch(
             input.clone(),
             FNAME_REGEX.to_string(),
         ));
@@ -596,6 +637,8 @@ pub fn validate_user_data_add_body(
                     validate_base_name(&body.value)?;
                 } else if body.value.ends_with(".eth") {
                     validate_ens_name(&body.value)?;
+                } else if body.value.ends_with(".sol") {
+                    validate_sol_name(&body.value)?;
                 } else {
                     validate_fname(&body.value)?;
                 };

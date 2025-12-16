@@ -441,6 +441,7 @@ impl NodeForTest {
             gossip_tx.clone(),
             ChainClients {
                 chain_api_map: Default::default(),
+                solana_name_service: None,
             },
             "".to_string(),
             "".to_string(),
