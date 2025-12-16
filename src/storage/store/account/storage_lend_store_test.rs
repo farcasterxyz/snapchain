@@ -667,4 +667,131 @@ mod tests {
         );
         assert!(borrowed_result.is_active());
     }
+
+    // get_messages_by_borrower_fid Tests
+    #[test]
+    fn test_get_messages_by_borrower_fid_does_not_return_lent_messages() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let lender_fid = FID_FOR_TEST;
+        let borrower_fid = FID_FOR_TEST + 1;
+
+        // FID_FOR_TEST lends to FID_FOR_TEST + 1
+        let storage_lend = messages_factory::storage_lend::create_storage_lend(
+            lender_fid,
+            borrower_fid,
+            100,
+            StorageUnitType::UnitType2024,
+            None,
+            None,
+        );
+        merge_message_success(&store, &db, &storage_lend);
+
+        // Query by lender FID should return empty (lender is not a borrower in this case)
+        let result = StorageLendStore::get_messages_by_borrower_fid(&store, lender_fid).unwrap();
+        assert_eq!(result.len(), 0);
+
+        // Query by borrower FID should return the message
+        let result = StorageLendStore::get_messages_by_borrower_fid(&store, borrower_fid).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], storage_lend);
+    }
+
+    #[test]
+    fn test_get_messages_by_borrower_fid_after_replacement() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let lender_fid = FID_FOR_TEST;
+        let borrower_fid = FID_FOR_TEST + 1;
+        let base_timestamp = 1000;
+
+        // First storage lend
+        let storage_lend1 = messages_factory::storage_lend::create_storage_lend(
+            lender_fid,
+            borrower_fid,
+            100,
+            StorageUnitType::UnitType2024,
+            Some(base_timestamp),
+            None,
+        );
+        merge_message_success(&store, &db, &storage_lend1);
+
+        // Second storage lend with later timestamp should replace the first
+        let storage_lend2 = messages_factory::storage_lend::create_storage_lend(
+            lender_fid,
+            borrower_fid,
+            200,
+            StorageUnitType::UnitType2024,
+            Some(base_timestamp + 100),
+            None,
+        );
+        merge_message_with_conflicts(&store, &db, &storage_lend2, vec![storage_lend1]);
+
+        // Query should return only the replacement message
+        let result = StorageLendStore::get_messages_by_borrower_fid(&store, borrower_fid).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], storage_lend2);
+
+        match &result[0].data.as_ref().unwrap().body {
+            Some(message::message_data::Body::LendStorageBody(body)) => {
+                assert_eq!(body.num_units, 200);
+            }
+            _ => panic!("Expected LendStorageBody"),
+        }
+    }
+
+    #[test]
+    fn test_get_messages_by_borrower_fid_isolation() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let fid1 = FID_FOR_TEST;
+        let fid2 = FID_FOR_TEST + 1;
+        let fid3 = FID_FOR_TEST + 2;
+
+        // FID1 lends to FID2
+        let storage_lend1 = messages_factory::storage_lend::create_storage_lend(
+            fid1,
+            fid2,
+            100,
+            StorageUnitType::UnitType2024,
+            None,
+            None,
+        );
+        // FID2 lends to FID3
+        let storage_lend2 = messages_factory::storage_lend::create_storage_lend(
+            fid2,
+            fid3,
+            50,
+            StorageUnitType::UnitType2024,
+            None,
+            None,
+        );
+        // FID1 lends to FID3
+        let storage_lend3 = messages_factory::storage_lend::create_storage_lend(
+            fid1,
+            fid3,
+            75,
+            StorageUnitType::UnitType2024,
+            None,
+            None,
+        );
+
+        merge_message_success(&store, &db, &storage_lend1);
+        merge_message_success(&store, &db, &storage_lend2);
+        merge_message_success(&store, &db, &storage_lend3);
+
+        // FID1 should have no messages (not a borrower)
+        let fid1_messages = StorageLendStore::get_messages_by_borrower_fid(&store, fid1).unwrap();
+        assert_eq!(fid1_messages.len(), 0);
+
+        // FID2 should have 1 message (from FID1)
+        let fid2_messages = StorageLendStore::get_messages_by_borrower_fid(&store, fid2).unwrap();
+        assert_eq!(fid2_messages.len(), 1);
+        assert_eq!(fid2_messages[0], storage_lend1);
+
+        // FID3 should have 2 messages (from FID1 and FID2)
+        let fid3_messages = StorageLendStore::get_messages_by_borrower_fid(&store, fid3).unwrap();
+        assert_eq!(fid3_messages.len(), 2);
+        assert_eq!(fid3_messages, vec![storage_lend3, storage_lend2]);
+    }
 }
