@@ -8,7 +8,10 @@ use crate::{
     storage::{
         db::{PageOptions, RocksDbTransactionBatch},
         store::{
-            account::{LinkStore, UserDataStore, UsernameProofStore, VerificationStore, FID_BYTES},
+            account::{
+                LinkStore, StorageLendStore, UserDataStore, UsernameProofStore, VerificationStore,
+                FID_BYTES,
+            },
             engine::PostCommitMessage,
             stores::Stores,
         },
@@ -436,10 +439,18 @@ impl Replicator {
                 .messages
             }
             proto::MessageType::LendStorage => {
-                stores
+                let mut messages = stores
                     .storage_lend_store
                     .get_adds_by_fid(fid, &page_options, filter)?
-                    .messages
+                    .messages;
+
+                let borrows = StorageLendStore::get_messages_by_borrower_fid(
+                    &stores.storage_lend_store,
+                    fid,
+                )?;
+
+                messages.extend(borrows);
+                messages
             }
         };
 
@@ -613,10 +624,10 @@ impl Replicator {
 
                     let cache_entry = cache.get(&hash).cloned();
                     if cache_entry.is_none() {
-                        let error_msg = format!(
-                            "User message not found in cache for FID {} and message_type {}: {:?}",
-                            fid, message_type, hash
-                        );
+                        let error_msg =
+                            format!(
+                            "User message not found in cache for FID {} and message_type {}: 0x{}",
+                            fid, message_type, hex::encode(hash));
                         error!(error_msg);
                         return Err(ReplicationError::InternalError(error_msg));
                     }
