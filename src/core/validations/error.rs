@@ -48,6 +48,12 @@ pub enum ValidationError {
     SolNameExceedsLength(String),
     #[error("solName \"{0}\" doesn't end with {1}")]
     SolNameDoesntEndWith(String, String),
+    #[error("qnsName \"{0}\" doesn't match {1}")]
+    QnsNameDoesntMatch(String, String),
+    #[error("qnsName \"{0}\" > 20 characters")]
+    QnsNameExceedsLength(String),
+    #[error("qnsName \"{0}\" doesn't end with {1}")]
+    QnsNameDoesntEndWith(String, String),
     #[error("text > 1024 bytes for long cast")]
     TextTooLongForLongCast,
     #[error("text too short for long cast")]

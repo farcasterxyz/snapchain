@@ -305,6 +305,7 @@ mod tests {
         let mut chain_clients = ChainClients {
             chain_api_map: HashMap::new(),
             solana_name_service: solana_resolver,
+            qns_service: None,
         };
         chain_clients.chain_api_map.insert(
             Chain::EthMainnet,

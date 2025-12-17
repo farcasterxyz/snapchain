@@ -442,6 +442,7 @@ impl NodeForTest {
             ChainClients {
                 chain_api_map: Default::default(),
                 solana_name_service: None,
+                qns_service: None,
             },
             "".to_string(),
             "".to_string(),

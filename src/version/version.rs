@@ -46,6 +46,7 @@ pub enum ProtocolFeature {
     StopRevokingExistingMessages,
     IncreaseUsernameProofSizeLimit,
     SolanaNamesValidation,
+    QnsNamesValidation,
 }
 
 pub struct VersionSchedule {
@@ -175,7 +176,7 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
 
 const ENGINE_VERSION_SCHEDULE_DEVNET: &[VersionSchedule] = [VersionSchedule {
     active_at: 0,
-    version: EngineVersion::V15,
+    version: EngineVersion::V16,
 }]
 .as_slice();
 
@@ -227,7 +228,9 @@ impl EngineVersion {
             ProtocolFeature::StorageLendingLimitFix => self >= &EngineVersion::V13,
             ProtocolFeature::StopRevokingExistingMessages => self >= &EngineVersion::V14,
             ProtocolFeature::IncreaseUsernameProofSizeLimit => self >= &EngineVersion::V15,
-            ProtocolFeature::SolanaNamesValidation => self >= &EngineVersion::V16,
+            ProtocolFeature::SolanaNamesValidation | ProtocolFeature::QnsNamesValidation => {
+                self >= &EngineVersion::V16
+            }
         }
     }
 
@@ -417,7 +420,7 @@ mod version_test {
 
     #[test]
     fn test_latest() {
-        assert_eq!(EngineVersion::latest(), EngineVersion::V15);
+        assert_eq!(EngineVersion::latest(), EngineVersion::V16);
         assert_eq!(
             EngineVersion::version_for(&FarcasterTime::current(), FarcasterNetwork::Devnet),
             EngineVersion::latest()

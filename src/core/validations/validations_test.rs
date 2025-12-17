@@ -1,8 +1,8 @@
 mod tests {
     use crate::core::validations::error::ValidationError;
     use crate::core::validations::message::{
-        validate_user_data_add_body, validate_user_data_primary_address_ethereum,
-        validate_user_data_primary_address_solana,
+        validate_q_name, validate_sol_name, validate_user_data_add_body,
+        validate_user_data_primary_address_ethereum, validate_user_data_primary_address_solana,
     };
     use crate::core::validations::verification::{validate_add_address, validate_fname_transfer};
     use crate::proto;
@@ -327,6 +327,156 @@ mod tests {
 
         // Test Solana with V5 (PrimaryAddresses enabled)
         let result = validate_user_data_add_body(&user_data_body_sol, false, EngineVersion::V5);
+        assert!(result.is_ok());
+    }
+
+    // Tests for validate_sol_name
+
+    #[test]
+    fn test_validate_sol_name_valid() {
+        let name = "bonfida.sol".to_string();
+        let result = validate_sol_name(&name);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_sol_name_valid_short() {
+        let name = "a.sol".to_string();
+        let result = validate_sol_name(&name);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_sol_name_missing_suffix() {
+        let name = "bonfida".to_string();
+        let result = validate_sol_name(&name);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ValidationError::SolNameDoesntEndWith(_, _)
+        ));
+    }
+
+    #[test]
+    fn test_validate_sol_name_wrong_suffix() {
+        let name = "bonfida.eth".to_string();
+        let result = validate_sol_name(&name);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ValidationError::SolNameDoesntEndWith(_, _)
+        ));
+    }
+
+    #[test]
+    fn test_validate_sol_name_too_long() {
+        let name = "averylongsolananamethatexceeds.sol".to_string();
+        let result = validate_sol_name(&name);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ValidationError::SolNameExceedsLength(_)
+        ));
+    }
+
+    #[test]
+    fn test_validate_sol_name_empty_label() {
+        let name = ".sol".to_string();
+        let result = validate_sol_name(&name);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ValidationError::InvalidData));
+    }
+
+    #[test]
+    fn test_validate_sol_name_invalid_chars() {
+        let name = "invalid@name.sol".to_string();
+        let result = validate_sol_name(&name);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ValidationError::SolNameDoesntMatch(_, _)
+        ));
+    }
+
+    // Tests for validate_q_name
+
+    #[test]
+    fn test_validate_q_name_valid() {
+        let name = "cassie.q".to_string();
+        let result = validate_q_name(&name);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_q_name_valid_short() {
+        let name = "a.q".to_string();
+        let result = validate_q_name(&name);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_q_name_missing_suffix() {
+        let name = "cassie".to_string();
+        let result = validate_q_name(&name);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ValidationError::QnsNameDoesntEndWith(_, _)
+        ));
+    }
+
+    #[test]
+    fn test_validate_q_name_wrong_suffix() {
+        let name = "cassie.eth".to_string();
+        let result = validate_q_name(&name);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ValidationError::QnsNameDoesntEndWith(_, _)
+        ));
+    }
+
+    #[test]
+    fn test_validate_q_name_too_long() {
+        let name = "averylongqnsnamethatis.q".to_string();
+        let result = validate_q_name(&name);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ValidationError::QnsNameExceedsLength(_)
+        ));
+    }
+
+    #[test]
+    fn test_validate_q_name_empty_label() {
+        let name = ".q".to_string();
+        let result = validate_q_name(&name);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ValidationError::InvalidData));
+    }
+
+    #[test]
+    fn test_validate_q_name_invalid_chars() {
+        let name = "invalid@name.q".to_string();
+        let result = validate_q_name(&name);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ValidationError::QnsNameDoesntMatch(_, _)
+        ));
+    }
+
+    #[test]
+    fn test_validate_q_name_with_numbers() {
+        let name = "test123.q".to_string();
+        let result = validate_q_name(&name);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_q_name_with_hyphen() {
+        let name = "test-name.q".to_string();
+        let result = validate_q_name(&name);
         assert!(result.is_ok());
     }
 }

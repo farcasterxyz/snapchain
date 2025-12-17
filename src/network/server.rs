@@ -157,7 +157,9 @@ impl MyHubService {
             match &message_data.body {
                 Some(proto::message_data::Body::UserDataBody(user_data)) => {
                     if user_data.r#type() == proto::UserDataType::Username
-                        && (user_data.value.ends_with(".eth") || user_data.value.ends_with(".sol"))
+                        && (user_data.value.ends_with(".eth")
+                            || user_data.value.ends_with(".sol")
+                            || user_data.value.ends_with(".q"))
                     {
                         self.validate_external_username(fid, user_data.value.to_string())
                             .await?;
@@ -395,11 +397,26 @@ impl MyHubService {
         fid: u64,
         proof: &UserNameProof,
     ) -> Result<(), HubError> {
-        let resolved_ens_address = self.resolve_username_owner(proof).await?;
-        if resolved_ens_address != proof.owner {
+        let resolved_owner = self.resolve_username_owner(proof).await?;
+        if resolved_owner != proof.owner {
             return Err(HubError::validation_failure(
                 "invalid ens name, resolved address doesn't match proof owner address",
             ));
+        }
+
+        // QNS names are self-evidentiary - ownership is proven by verifying the ed448 signature
+        // over the message "FARCASTER_QNS:" + name + ":" + big_endian_u64(fid)
+        if UserNameType::try_from(proof.r#type) == Ok(UserNameType::UsernameTypeQns) {
+            let name = std::str::from_utf8(&proof.name)
+                .map_err(|_| HubError::validation_failure("QNS name is not valid utf8"))?;
+            crate::connectors::onchain_events::verify_qns_signature(
+                name,
+                fid,
+                &proof.owner,
+                &proof.signature,
+            )
+            .map_err(|e| HubError::validation_failure(&e.to_string()))?;
+            return Ok(());
         }
 
         let stores = self
@@ -417,11 +434,11 @@ impl MyHubService {
                 match id_register.body {
                     Some(Body::IdRegisterEventBody(id_register)) => {
                         // Check verified addresses if the resolved address doesn't match the custody address
-                        if id_register.to != resolved_ens_address {
+                        if id_register.to != resolved_owner {
                             let verification = VerificationStore::get_verification_add(
                                 &stores.verification_store,
                                 fid,
-                                &resolved_ens_address,
+                                &resolved_owner,
                                 None,
                             )?;
 
@@ -467,6 +484,14 @@ impl MyHubService {
                     ));
                 }
                 return self.chain_clients.resolve_sol_name(name.to_string()).await;
+            }
+            Ok(UserNameType::UsernameTypeQns) => {
+                if !name.ends_with(".q") {
+                    return Err(HubError::validation_failure(
+                        "Quilibrium name does not end with .q",
+                    ));
+                }
+                return self.chain_clients.resolve_qns_name(name.to_string()).await;
             }
             _ => {
                 return Err(HubError::validation_failure(
@@ -1799,9 +1824,9 @@ impl HubService for MyHubService {
         let req = request.into_inner();
         let name_str = std::str::from_utf8(&req.name).unwrap_or("");
 
-        // Check if this is an .eth name (look in username_proof_store) or fname (look in user_data_store)
-        if name_str.ends_with(".eth") || name_str.ends_with(".sol") {
-            // Look for ENS username proofs in the username_proof_store
+        // Check if this is an .eth/.sol/.q name (look in username_proof_store) or fname (look in user_data_store)
+        if name_str.ends_with(".eth") || name_str.ends_with(".sol") || name_str.ends_with(".q") {
+            // Look for external username proofs in the username_proof_store
             let proof_opt = self.shard_stores.iter().find_map(|(_shard_entry, stores)| {
                 match UsernameProofStore::get_username_proof(
                     &stores.username_proof_store,
@@ -1825,7 +1850,7 @@ impl HubService for MyHubService {
                 Ok(Response::new(proof_message))
             } else {
                 Err(Status::not_found(
-                    "ENS username proof not found".to_string(),
+                    "External username proof not found".to_string(),
                 ))
             }
         } else {

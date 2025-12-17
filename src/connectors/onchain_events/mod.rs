@@ -442,6 +442,117 @@ impl SolanaNameResolver for SolanaNameService {
     }
 }
 
+// Quilibrium Name Service (QNS) support
+
+#[derive(Error, Debug)]
+pub enum QnsError {
+    #[error("qns name must end with .q")]
+    InvalidSuffix,
+    #[error("qns name missing label")]
+    MissingLabel,
+    #[error("qns name not found: {0}")]
+    NameNotFound(String),
+    #[error("qns error: {0}")]
+    Sdk(String),
+    #[error("qns client not configured")]
+    NotConfigured,
+    #[error("qns invalid signature: {0}")]
+    InvalidSignature(String),
+}
+
+/// Verify an ed448 signature for a QNS username proof.
+/// Message format: "FARCASTER_QNS:" + name + ":" + big_endian_u64(fid)
+pub fn verify_qns_signature(
+    name: &str,
+    fid: u64,
+    public_key: &[u8],
+    signature: &[u8],
+) -> Result<(), QnsError> {
+    use ed448_goldilocks_plus::{Signature, VerifyingKey};
+
+    // Construct the message: "FARCASTER_QNS:" + name + ":" + big_endian_u64(fid)
+    let mut message = Vec::new();
+    message.extend_from_slice(b"FARCASTER_QNS:");
+    message.extend_from_slice(name.as_bytes());
+    message.extend_from_slice(b":");
+    message.extend_from_slice(&fid.to_be_bytes());
+
+    // Parse the public key (ed448 public keys are 57 bytes)
+    let pubkey_bytes: [u8; 57] = public_key
+        .try_into()
+        .map_err(|_| QnsError::InvalidSignature("public key must be 57 bytes".to_string()))?;
+    let pubkey = VerifyingKey::from_bytes(&pubkey_bytes)
+        .map_err(|e| QnsError::InvalidSignature(format!("invalid public key: {:?}", e)))?;
+
+    // Parse the signature (ed448 signatures are 114 bytes)
+    let sig_bytes: [u8; 114] = signature
+        .try_into()
+        .map_err(|_| QnsError::InvalidSignature("signature must be 114 bytes".to_string()))?;
+    let sig = Signature::from_bytes(&sig_bytes)
+        .map_err(|e| QnsError::InvalidSignature(format!("invalid signature: {:?}", e)))?;
+
+    // Verify the signature using Ed448 "pure" mode (no context)
+    pubkey
+        .verify_raw(&sig, &message)
+        .map_err(|e| QnsError::InvalidSignature(format!("signature verification failed: {:?}", e)))
+}
+
+#[async_trait]
+pub trait QnsResolver: Send + Sync {
+    async fn resolve(&self, name: String) -> Result<Vec<u8>, QnsError>;
+}
+
+pub struct QuilibriumNameService {
+    client: quilibrium_names_sdk::blocking::QnsClient,
+}
+
+impl QuilibriumNameService {
+    pub fn new(rpc_url: String) -> Result<Self, QnsError> {
+        let client = if rpc_url.is_empty() {
+            quilibrium_names_sdk::blocking::QnsClient::default()
+        } else {
+            quilibrium_names_sdk::blocking::QnsClient::with_timeout(
+                &rpc_url,
+                std::time::Duration::from_secs(30),
+            )
+        };
+        Ok(Self { client })
+    }
+
+    fn resolve_inner(&self, name: String) -> Result<Vec<u8>, QnsError> {
+        let normalized = name.trim().to_lowercase();
+        if !normalized.ends_with(".q") {
+            return Err(QnsError::InvalidSuffix);
+        }
+        let label = normalized.trim_end_matches(".q");
+        if label.is_empty() {
+            return Err(QnsError::MissingLabel);
+        }
+
+        let record = self.client.resolve(&normalized).map_err(|e| match e {
+            quilibrium_names_sdk::QnsError::NameNotFound(n) => QnsError::NameNotFound(n),
+            other => QnsError::Sdk(other.to_string()),
+        })?;
+
+        // The authority_key is the owner's ed448 public key (hex string)
+        // Convert it to bytes
+        let owner_hex = record.header.authority_key.trim_start_matches("0x");
+        let owner_bytes = hex::decode(owner_hex)
+            .map_err(|e| QnsError::Sdk(format!("invalid owner hex: {}", e)))?;
+
+        Ok(owner_bytes)
+    }
+}
+
+#[async_trait]
+impl QnsResolver for QuilibriumNameService {
+    async fn resolve(&self, name: String) -> Result<Vec<u8>, QnsError> {
+        // The SDK uses blocking calls, so we use resolve_inner which does sync I/O
+        // This is acceptable because the SDK is designed for blocking use
+        self.resolve_inner(name)
+    }
+}
+
 #[cfg(test)]
 mod sol_resolver_tests {
     use super::*;
@@ -516,6 +627,142 @@ mod sol_resolver_tests {
     }
 }
 
+#[cfg(test)]
+mod qns_signature_tests {
+    use super::*;
+
+    #[test]
+    fn test_verify_qns_signature_rejects_invalid_pubkey() {
+        let name = "test.q";
+        let fid: u64 = 12345;
+        let invalid_pubkey = vec![0u8; 10]; // Too short
+        let signature = vec![0u8; 114];
+
+        let result = verify_qns_signature(name, fid, &invalid_pubkey, &signature);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("public key"),
+            "Expected error about public key, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_verify_qns_signature_rejects_invalid_signature() {
+        let name = "test.q";
+        let fid: u64 = 12345;
+        // Valid length pubkey but random bytes
+        let pubkey = vec![0u8; 57];
+        let invalid_signature = vec![0u8; 10]; // Too short
+
+        let result = verify_qns_signature(name, fid, &pubkey, &invalid_signature);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_qns_signature_constructs_correct_message() {
+        // This test verifies the message format is correct by checking that
+        // a valid keypair can sign and verify
+        use ed448_goldilocks_plus::SigningKey;
+
+        let name = "cassie.q";
+        let fid: u64 = 12345;
+
+        // Generate a test keypair
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = signing_key.verifying_key();
+
+        // Construct the expected message
+        let mut message = Vec::new();
+        message.extend_from_slice(b"FARCASTER_QNS:");
+        message.extend_from_slice(name.as_bytes());
+        message.extend_from_slice(b":");
+        message.extend_from_slice(&fid.to_be_bytes());
+
+        // Sign the message using raw mode (no context)
+        let signature = signing_key.sign_raw(&message);
+
+        // Verify using our function
+        let pubkey_bytes = verifying_key.to_bytes();
+        let sig_bytes = signature.to_bytes();
+        let result = verify_qns_signature(name, fid, &pubkey_bytes, &sig_bytes);
+        assert!(
+            result.is_ok(),
+            "Valid signature should verify: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_verify_qns_signature_rejects_wrong_fid() {
+        use ed448_goldilocks_plus::SigningKey;
+
+        let name = "cassie.q";
+        let fid: u64 = 12345;
+        let wrong_fid: u64 = 99999;
+
+        // Generate a test keypair
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = signing_key.verifying_key();
+
+        // Construct message with correct fid
+        let mut message = Vec::new();
+        message.extend_from_slice(b"FARCASTER_QNS:");
+        message.extend_from_slice(name.as_bytes());
+        message.extend_from_slice(b":");
+        message.extend_from_slice(&fid.to_be_bytes());
+
+        // Sign the message
+        let signature = signing_key.sign_raw(&message);
+
+        // Get pubkey bytes
+        let pubkey_bytes = verifying_key.to_bytes();
+        let sig_bytes = signature.to_bytes();
+
+        // Verify with wrong fid should fail
+        let result = verify_qns_signature(name, wrong_fid, &pubkey_bytes, &sig_bytes);
+        assert!(
+            result.is_err(),
+            "Signature with wrong fid should not verify"
+        );
+    }
+
+    #[test]
+    fn test_verify_qns_signature_rejects_wrong_name() {
+        use ed448_goldilocks_plus::SigningKey;
+
+        let name = "cassie.q";
+        let wrong_name = "alice.q";
+        let fid: u64 = 12345;
+
+        // Generate a test keypair
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = signing_key.verifying_key();
+
+        // Construct message with correct name
+        let mut message = Vec::new();
+        message.extend_from_slice(b"FARCASTER_QNS:");
+        message.extend_from_slice(name.as_bytes());
+        message.extend_from_slice(b":");
+        message.extend_from_slice(&fid.to_be_bytes());
+
+        // Sign the message
+        let signature = signing_key.sign_raw(&message);
+
+        // Get pubkey bytes
+        let pubkey_bytes = verifying_key.to_bytes();
+        let sig_bytes = signature.to_bytes();
+
+        // Verify with wrong name should fail
+        let result = verify_qns_signature(wrong_name, fid, &pubkey_bytes, &sig_bytes);
+        assert!(
+            result.is_err(),
+            "Signature with wrong name should not verify"
+        );
+    }
+}
+
 impl Chain {
     pub fn from_chain_id(chain_id: u32) -> Option<Self> {
         match chain_id {
@@ -530,6 +777,7 @@ impl Chain {
 pub struct ChainClients {
     pub chain_api_map: HashMap<Chain, Box<dyn ChainAPI>>,
     pub solana_name_service: Option<Box<dyn SolanaNameResolver>>,
+    pub qns_service: Option<Box<dyn QnsResolver>>,
 }
 
 impl ChainClients {
@@ -572,9 +820,19 @@ impl ChainClients {
                 None
             };
 
+        let qns_service: Option<Box<dyn QnsResolver>> =
+            match QuilibriumNameService::new(app_config.quilibrium_rpc_url.clone()) {
+                Ok(client) => Some(Box::new(client)),
+                Err(err) => {
+                    warn!("Failed to initialize Quilibrium name service: {}", err);
+                    None
+                }
+            };
+
         ChainClients {
             chain_api_map,
             solana_name_service,
+            qns_service,
         }
     }
 
@@ -595,6 +853,18 @@ impl ChainClients {
                 .map_err(|err| HubError::validation_failure(&err.to_string())),
             None => Err(HubError::invalid_internal_state(
                 "Solana RPC client not configured",
+            )),
+        }
+    }
+
+    pub async fn resolve_qns_name(&self, name: String) -> Result<Vec<u8>, HubError> {
+        match &self.qns_service {
+            Some(client) => client
+                .resolve(name)
+                .await
+                .map_err(|err| HubError::validation_failure(&err.to_string())),
+            None => Err(HubError::invalid_internal_state(
+                "Quilibrium name service client not configured",
             )),
         }
     }
