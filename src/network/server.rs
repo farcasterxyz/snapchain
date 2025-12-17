@@ -204,7 +204,8 @@ impl MyHubService {
             Some(tx),
         )) {
             Ok(_) => {
-                self.statsd_client.count("rpc.submit_message.success", 1, vec![]);
+                self.statsd_client
+                    .count("rpc.submit_message.success", 1, vec![]);
                 debug!("successfully submitted message");
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -224,7 +225,8 @@ impl MyHubService {
         let result = match timeout(MEMPOOL_ADD_REQUEST_TIMEOUT, rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(err)) => {
-                self.statsd_client.count("rpc.mempool_submit_error", 1, vec![]);
+                self.statsd_client
+                    .count("rpc.mempool_submit_error", 1, vec![]);
                 error!(
                     "Error receiving message from mempool channel: {:?}",
                     err.to_string()
@@ -232,7 +234,8 @@ impl MyHubService {
                 return Err(HubError::unavailable("Error adding to mempool"));
             }
             Err(_) => {
-                self.statsd_client.count("rpc.mempool_submit_timeout", 1, vec![]);
+                self.statsd_client
+                    .count("rpc.mempool_submit_timeout", 1, vec![]);
                 error!("Timeout receiving message from mempool channel",);
                 return Err(HubError::unavailable("Error adding to mempool"));
             }
@@ -602,11 +605,13 @@ impl HubService for MyHubService {
         &self,
         request: Request<proto::Message>,
     ) -> Result<Response<proto::Message>, Status> {
-        self.statsd_client.count("rpc.submit_message_in_flight", 1, vec![]);
+        self.statsd_client
+            .count("rpc.submit_message_in_flight", 1, vec![]);
         let start_time = std::time::Instant::now();
 
         authenticate_request(&request, &self.allowed_users).map_err(|err| {
-            self.statsd_client.count("rpc.submit_message_in_flight", -1, vec![]);
+            self.statsd_client
+                .count("rpc.submit_message_in_flight", -1, vec![]);
             err
         })?;
 
@@ -626,12 +631,15 @@ impl HubService for MyHubService {
 
         match result {
             Ok(message) => {
-                self.statsd_client.count("rpc.submit_message.success", 1, vec![]);
-                self.statsd_client.count("rpc.submit_message_in_flight", -1, vec![]);
+                self.statsd_client
+                    .count("rpc.submit_message.success", 1, vec![]);
+                self.statsd_client
+                    .count("rpc.submit_message_in_flight", -1, vec![]);
                 Ok(Response::new(message))
             }
             Err(err) => {
-                self.statsd_client.count("rpc.submit_message.failure", 1, vec![]);
+                self.statsd_client
+                    .count("rpc.submit_message.failure", 1, vec![]);
                 info!(
                     hash = hash,
                     fid = fid,
@@ -655,7 +663,8 @@ impl HubService for MyHubService {
                 if let Ok(err_str) = AsciiMetadataValue::from_str(&err_code) {
                     status.metadata_mut().insert("x-err-code", err_str);
                 }
-                self.statsd_client.count("rpc.submit_message_in_flight", -1, vec![]);
+                self.statsd_client
+                    .count("rpc.submit_message_in_flight", -1, vec![]);
                 Err(status)
             }
         }
@@ -728,8 +737,13 @@ impl HubService for MyHubService {
                         let result = self.submit_message_to_mempool(msg).await;
                         results.push(match result {
                             Ok(message) => {
-                                self.statsd_client.count("rpc.submit_message.success", 1, vec![]);
-                                self.statsd_client.count("rpc.submit_message_in_flight", -1, vec![]);
+                                self.statsd_client
+                                    .count("rpc.submit_message.success", 1, vec![]);
+                                self.statsd_client.count(
+                                    "rpc.submit_message_in_flight",
+                                    -1,
+                                    vec![],
+                                );
                                 proto::BulkMessageResponse {
                                     response: Some(
                                         proto::bulk_message_response::Response::Message(message),
@@ -737,8 +751,13 @@ impl HubService for MyHubService {
                                 }
                             }
                             Err(err) => {
-                                self.statsd_client.count("rpc.submit_message.failure", 1, vec![]);
-                                self.statsd_client.count("rpc.submit_message_in_flight", -1, vec![]);
+                                self.statsd_client
+                                    .count("rpc.submit_message.failure", 1, vec![]);
+                                self.statsd_client.count(
+                                    "rpc.submit_message_in_flight",
+                                    -1,
+                                    vec![],
+                                );
                                 create_error_response(message_hash_for_error, err)
                             }
                         });

@@ -677,7 +677,8 @@ impl Mempool {
 
             self.read_node_mempool.gossip_message(message, source).await;
         } else {
-            self.statsd_client.count("mempool.insert.failure", 1, vec![]);
+            self.statsd_client
+                .count("mempool.insert.failure", 1, vec![]);
         }
 
         result

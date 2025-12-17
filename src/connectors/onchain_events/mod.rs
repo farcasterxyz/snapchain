@@ -487,10 +487,12 @@ impl Subscriber {
     }
 
     fn count(&self, key: &str, value: i64, extra_tags: Vec<(&str, &str)>) {
-        self.statsd_client
-            .count(format!("onchain_events.{}", key).as_str(), value, extra_tags);
+        self.statsd_client.count(
+            format!("onchain_events.{}", key).as_str(),
+            value,
+            extra_tags,
+        );
     }
-
 
     fn gauge(&self, key: &str, value: u64, extra_tags: Vec<(&str, &str)>) {
         self.statsd_client.gauge(
