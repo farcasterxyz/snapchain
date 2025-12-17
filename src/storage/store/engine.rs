@@ -1694,7 +1694,9 @@ impl ShardEngine {
                                             &signer_body,
                                         )
                                     {
-                                        tags.push(("signer_fid", request_fid.to_string()));
+                                        let signer_name =
+                                            onchain_events::map_signer_fid_to_name(request_fid);
+                                        tags.push(("signer_app", signer_name.to_string()));
                                     }
                                 }
                             }

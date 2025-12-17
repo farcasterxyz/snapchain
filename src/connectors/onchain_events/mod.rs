@@ -184,6 +184,15 @@ pub fn get_request_fid_from_signer_event(signer_event_body: &SignerEventBody) ->
     }
 }
 
+/// Maps a signer FID to a human-readable name for metrics to reduce cardinality of the tag.
+pub fn map_signer_fid_to_name(fid: u64) -> &'static str {
+    match fid {
+        9152 => "farcaster",
+        309857 => "base",
+        _ => "unknown",
+    }
+}
+
 #[async_trait]
 pub trait ChainAPI: Send + Sync {
     async fn resolve_ens_name(&self, name: String) -> Result<Address, EnsError>;
@@ -543,12 +552,8 @@ impl Subscriber {
                 // Try to extract request_fid from the signer event metadata
                 if let Some(on_chain_event::Body::SignerEventBody(signer_body)) = &event.body {
                     if let Some(request_fid) = get_request_fid_from_signer_event(signer_body) {
-                        let request_fid_str = request_fid.to_string();
-                        self.count(
-                            "num_signer_events",
-                            1,
-                            vec![("signer_fid", &request_fid_str)],
-                        );
+                        let signer_name = map_signer_fid_to_name(request_fid);
+                        self.count("num_signer_events", 1, vec![("signer_app", signer_name)]);
                     } else {
                         self.count("num_signer_events", 1, vec![]);
                     }
