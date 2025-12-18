@@ -5,7 +5,7 @@ use alloy_primitives::U256;
 use alloy_primitives::{address, ruint::FromUintError, Address, FixedBytes};
 use alloy_provider::{Provider, ProviderBuilder, RootProvider};
 use alloy_rpc_types::{Filter, Log};
-use alloy_sol_types::{sol, SolEvent};
+use alloy_sol_types::{sol, SolEvent, SolType};
 use alloy_transport_http::{Client, Http};
 use async_trait::async_trait;
 use foundry_common::ens::EnsResolver::EnsResolverInstance;
@@ -63,6 +63,17 @@ sol!(
     TierRegistryAbi,
     "src/connectors/onchain_events/tier_registry_abi.json"
 );
+
+sol! {
+    /// SignedKeyRequest metadata structure as defined in the Farcaster contracts.
+    /// See: https://github.com/farcasterxyz/contracts/blob/main/src/validators/SignedKeyRequestValidator.sol
+    struct SignedKeyRequestMetadata {
+        uint256 requestFid;
+        address requestSigner;
+        bytes signature;
+        uint256 deadline;
+    }
+}
 
 // Note these are the registry addresses, not the resolver addresses. We look up the resolver from the registry.
 static ETH_L1_ENS_REGISTRY: Address = address!("00000000000C2E074eC69A0dFb2997BA6C7d2e1e");
@@ -147,6 +158,39 @@ pub enum SubscribeError {
 
     #[error("Unable to find block by hash")]
     UnableToFindBlockByHash,
+}
+
+/// Extracts the requestFid (app FID) from a SignerEventBody's metadata field.
+///
+/// For metadata_type = 1 (SignedKeyRequest), the metadata contains an ABI-encoded
+/// SignedKeyRequestMetadata struct that includes the FID of the application that
+/// requested the signer to be added.
+pub fn get_request_fid_from_signer_event(signer_event_body: &SignerEventBody) -> Option<u64> {
+    // Only metadata_type 1 is SignedKeyRequest which contains requestFid
+    if signer_event_body.metadata_type != 1 {
+        return None;
+    }
+
+    if signer_event_body.metadata.is_empty() {
+        return None;
+    }
+
+    match SignedKeyRequestMetadata::abi_decode(&signer_event_body.metadata, true) {
+        Ok(decoded) => {
+            // Convert U256 to u64, returning None if it doesn't fit
+            decoded.requestFid.try_into().ok()
+        }
+        Err(_) => None,
+    }
+}
+
+/// Maps a signer FID to a human-readable name for metrics to reduce cardinality of the tag.
+pub fn map_signer_fid_to_name(fid: u64) -> &'static str {
+    match fid {
+        9152 => "farcaster",
+        309857 => "base",
+        _ => "unknown",
+    }
 }
 
 #[async_trait]
@@ -451,9 +495,12 @@ impl Subscriber {
         }
     }
 
-    fn count(&self, key: &str, value: i64) {
-        self.statsd_client
-            .count(format!("onchain_events.{}", key).as_str(), value);
+    fn count(&self, key: &str, value: i64, extra_tags: Vec<(&str, &str)>) {
+        self.statsd_client.count(
+            format!("onchain_events.{}", key).as_str(),
+            value,
+            extra_tags,
+        );
     }
 
     fn gauge(&self, key: &str, value: u64, extra_tags: Vec<(&str, &str)>) {
@@ -502,19 +549,29 @@ impl Subscriber {
         match event_type {
             OnChainEventType::EventTypeNone => {}
             OnChainEventType::EventTypeSigner => {
-                self.count("num_signer_events", 1);
+                // Try to extract request_fid from the signer event metadata
+                if let Some(on_chain_event::Body::SignerEventBody(signer_body)) = &event.body {
+                    if let Some(request_fid) = get_request_fid_from_signer_event(signer_body) {
+                        let signer_name = map_signer_fid_to_name(request_fid);
+                        self.count("num_signer_events", 1, vec![("signer_app", signer_name)]);
+                    } else {
+                        self.count("num_signer_events", 1, vec![]);
+                    }
+                } else {
+                    self.count("num_signer_events", 1, vec![]);
+                }
             }
             OnChainEventType::EventTypeSignerMigrated => {
-                self.count("num_signer_migrated_events", 1);
+                self.count("num_signer_migrated_events", 1, vec![]);
             }
             OnChainEventType::EventTypeIdRegister => {
-                self.count("num_id_register_events", 1);
+                self.count("num_id_register_events", 1, vec![]);
             }
             OnChainEventType::EventTypeStorageRent => {
-                self.count("num_storage_events", 1);
+                self.count("num_storage_events", 1, vec![]);
             }
             OnChainEventType::EventTypeTierPurchase => {
-                self.count("num_tier_purchase_events", 1);
+                self.count("num_tier_purchase_events", 1, vec![]);
             }
         };
         match &event.body {
@@ -1313,5 +1370,24 @@ mod tests {
             address,
             address!("0x849151d7D0bF1F34b70d5caD5149D28CC2308bf1")
         );
+    }
+
+    #[test]
+    fn test_get_request_fid() {
+        // Real metadata from an actual onchain signer event
+        let metadata_hex = "000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000023c000000000000000000000000002ef790dd7993a35fd847c053eddae940d05559600000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000065420dd50000000000000000000000000000000000000000000000000000000000000041bd0677376b4740f956a6d591e863d948bc2771d5ac109bfa57bd24127c35ca4b3cd00d56593750802eff94cd28e65b32ab06012a4940f0a5b8c25ca1e54050761b00000000000000000000000000000000000000000000000000000000000000";
+        let metadata_bytes = hex::decode(metadata_hex).expect("Invalid hex string");
+
+        let signer_event = SignerEventBody {
+            key: vec![],
+            key_type: 1,
+            event_type: SignerEventType::Add as i32,
+            metadata: metadata_bytes,
+            metadata_type: 1,
+        };
+
+        let result = get_request_fid_from_signer_event(&signer_event);
+
+        assert_eq!(result, Some(9152));
     }
 }

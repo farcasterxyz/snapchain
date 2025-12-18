@@ -1,4 +1,5 @@
 use super::account::{IntoU8, OnchainEventStorageError, UserDataStore, UsernameProofStore};
+use crate::connectors::onchain_events;
 use crate::consensus::proposer::ProposalSource;
 use crate::core::{
     error::HubError, types::Height, util::FarcasterTime, validations, validations::verification,
@@ -1675,10 +1676,35 @@ impl ShardEngine {
                 match &event.body {
                     Some(hub_event::Body::MergeMessageBody(body)) => {
                         if let Some(message) = &body.message {
+                            let mut tags =
+                                vec![("message_type", (message.msg_type() as i32).to_string())];
+
+                            // Try to get the request_fid from the signer metadata
+                            if let Ok(Some(signer_event)) = self
+                                .stores
+                                .onchain_event_store
+                                .get_active_signer(message.fid(), message.signer.clone(), None)
+                            {
+                                if let Some(proto::on_chain_event::Body::SignerEventBody(
+                                    signer_body,
+                                )) = &signer_event.body
+                                {
+                                    if let Some(request_fid) =
+                                        onchain_events::get_request_fid_from_signer_event(
+                                            &signer_body,
+                                        )
+                                    {
+                                        let signer_name =
+                                            onchain_events::map_signer_fid_to_name(request_fid);
+                                        tags.push(("signer_app", signer_name.to_string()));
+                                    }
+                                }
+                            }
+
                             self.metrics.count(
                                 "commit.merged_message",
                                 1,
-                                vec![("message_type", &(message.msg_type() as i32).to_string())],
+                                tags.iter().map(|(k, v)| (*k, v.as_str())).collect(),
                             )
                         }
                     }

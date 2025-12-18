@@ -436,7 +436,7 @@ impl ReadNodeMempool {
             match message_request {
                 MempoolRequest::AddMessage(message, source, reply_to) => {
                     self.statsd_client
-                        .count("read_mempool.messages_received", 1);
+                        .count("read_mempool.messages_received", 1, vec![]);
                     let results: Vec<Result<(), HubError>> = self
                         .route_mempool_message(&message)
                         .iter()
@@ -451,7 +451,7 @@ impl ReadNodeMempool {
                     if result.is_ok() {
                         self.gossip_message(message, source).await;
                         self.statsd_client
-                            .count("read_mempool.messages_published", 1);
+                            .count("read_mempool.messages_published", 1, vec![]);
                     }
                     if let Some(sender) = reply_to {
                         if let Err(_) = sender.send(result) {
@@ -677,7 +677,8 @@ impl Mempool {
 
             self.read_node_mempool.gossip_message(message, source).await;
         } else {
-            self.statsd_client.count("mempool.insert.failure", 1);
+            self.statsd_client
+                .count("mempool.insert.failure", 1, vec![]);
         }
 
         result
