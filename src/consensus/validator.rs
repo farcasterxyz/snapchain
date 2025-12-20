@@ -1,8 +1,8 @@
 use super::consensus::ValidatorSetConfig;
 use crate::consensus::proposer::{BlockProposer, Proposer, ShardProposer};
 use crate::core::types::{
-    Address, Height, ShardId, SnapchainShard, SnapchainValidator, SnapchainValidatorContext,
-    SnapchainValidatorSet,
+    Address, FullProposalExt, Height, ShardId, SnapchainShard, SnapchainValidator,
+    SnapchainValidatorContext, SnapchainValidatorSet,
 };
 use crate::proto::{full_proposal, Commits, FullProposal, ShardHash};
 use crate::storage::store::node_local_state::LocalStateStore;

@@ -171,8 +171,13 @@ impl MempoolKey {
     }
 }
 
-impl proto::Message {
-    pub fn mempool_key(&self) -> MempoolKey {
+// Extension traits for proto types that depend on mempool types
+pub trait MessageMempoolExt {
+    fn mempool_key(&self) -> MempoolKey;
+}
+
+impl MessageMempoolExt for proto::Message {
+    fn mempool_key(&self) -> MempoolKey {
         if let Some(data) = &self.data {
             // TODO: Consider revisiting choice of timestamp here as backdated messages currently are prioritized.
             return MempoolKey::new(
@@ -185,8 +190,12 @@ impl proto::Message {
     }
 }
 
-impl proto::ValidatorMessage {
-    pub fn mempool_key(&self) -> MempoolKey {
+pub trait ValidatorMessageMempoolExt {
+    fn mempool_key(&self) -> MempoolKey;
+}
+
+impl ValidatorMessageMempoolExt for proto::ValidatorMessage {
+    fn mempool_key(&self) -> MempoolKey {
         if let Some(onchain_event) = &self.on_chain_event {
             MempoolKey::new(
                 MempoolMessageKind::ValidatorMessage,
