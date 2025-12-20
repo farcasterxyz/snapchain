@@ -743,13 +743,11 @@ impl Replicator {
         self.stores
             .close_aged_snapshots(msg.shard_id, oldest_valid_timestamp);
 
-        // Take a snapshot if none exist because there aren't many read nodes running and we may have to wait a long time for the scheduled snapshot after restart. This snapshot won't be at the same height across all nodes, but will be the first one pruned.
-        let take_first_snapshot = self.stores.max_height_for_shard(msg.shard_id).is_none();
-
         // Check if we can take a snapshot of this block
+        // Take a snapshot if none exist because there aren't many read nodes running and we may have to wait a long time for the scheduled snapshot after restart. This snapshot won't be at the same height across all nodes, but will be the first one pruned.
         if block_number > 0
             && block_number % self.snapshot_options.interval != 0
-            && !take_first_snapshot
+            && !self.stores.max_height_for_shard(msg.shard_id).is_none()
         {
             return Ok(());
         }
