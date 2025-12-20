@@ -747,7 +747,7 @@ impl Replicator {
         // Take a snapshot if none exist because there aren't many read nodes running and we may have to wait a long time for the scheduled snapshot after restart. This snapshot won't be at the same height across all nodes, but will be the first one pruned.
         if block_number > 0
             && block_number % self.snapshot_options.interval != 0
-            && !self.stores.max_height_for_shard(msg.shard_id).is_none()
+            && self.stores.max_height_for_shard(msg.shard_id).is_some()
         {
             return Ok(());
         }
