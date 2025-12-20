@@ -114,7 +114,7 @@ pub enum MessageValidationError {
 
 pub struct MergedReplicatorMessage {
     pub fid: u64,
-    pub trie_key: Vec<u8>,
+    pub trie_keys: Vec<Vec<u8>>,
     pub hub_event: HubEvent,
 }
 
@@ -624,13 +624,6 @@ impl ShardEngine {
 
         let (inserts, deletes) = TrieKey::for_hub_event(&hub_event);
 
-        if inserts.len() != 1 {
-            return Err(EngineError::ReplicatorError(format!(
-                "Message generated incorrect number of inserts. Message:{:?}\nHubEvent {:?}",
-                trie_message, hub_event
-            )));
-        }
-
         if !deletes.is_empty() {
             warn!(
                 "Message generated deletes, ignoring them. Message {:?}\nHubEvent {:?}",
@@ -640,7 +633,7 @@ impl ShardEngine {
 
         Ok(MergedReplicatorMessage {
             fid,
-            trie_key: inserts[0].clone(),
+            trie_keys: inserts,
             hub_event,
         })
     }

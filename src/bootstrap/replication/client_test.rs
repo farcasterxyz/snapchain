@@ -847,14 +847,14 @@ mod tests {
                 .replay_replicator_message(&mut txn_batch, &trie_message)
                 .expect("Failed to replay replicator message");
             assert!(fids.contains(&inserted.fid));
-            assert!(all_trie_keys.contains(&inserted.trie_key));
+            assert!(all_trie_keys.contains(&inserted.trie_keys[0]));
             assert!(inserted.hub_event.body.is_some());
 
             trie.insert(
                 &Context::new(),
                 &dest_db,
                 &mut txn_batch,
-                vec![inserted.trie_key.as_slice()],
+                vec![inserted.trie_keys[0].as_slice()],
             )
             .unwrap();
         }
@@ -1685,7 +1685,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("does not match expected trie key"));
+            .contains("does not contain expected trie key"));
 
         // Cleanup
         let _ = shutdown_tx.send(());
