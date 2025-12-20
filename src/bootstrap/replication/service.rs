@@ -5,11 +5,12 @@ use crate::cfg::Config;
 use crate::core::validations;
 use crate::core::validations::message::validate_message_hash;
 use crate::network::gossip;
+use crate::proto::replication_service_client::ReplicationServiceClient;
 use crate::proto::shard_trie_entry_with_message::TrieMessage;
 use crate::proto::{self, MessageType, ReplicationTriePartStatus, ShardSnapshotMetadata};
 use crate::storage::store::block_engine::BlockEngine;
 use crate::storage::store::node_local_state::LocalStateStore;
-use crate::storage::trie::merkle_trie::MerkleTrie;
+use crate::storage::trie::merkle_trie::{DecodedTrieKey, MerkleTrie};
 use crate::storage::{
     constants::RootPrefix,
     db::{PageOptions, RocksDB, RocksDbTransactionBatch},
@@ -949,10 +950,12 @@ impl ReplicatorBootstrap {
             Self::check_fid_roots(
                 &work_item.thread_engine,
                 status.shard_id,
+                status.height,
                 status.virtual_trie_shard as u8,
                 &mut txn_batch,
                 fids_to_check,
-            )?;
+            )
+            .await?;
 
             // 9. Now that the account roots match, commit to DB
             // First, add the work status to the txn_batch so it gets commited atomically with the work done
@@ -982,10 +985,12 @@ impl ReplicatorBootstrap {
                     Self::check_fid_roots(
                         &work_item.thread_engine,
                         status.shard_id,
+                        status.height,
                         status.virtual_trie_shard as u8,
                         &mut txn_batch,
                         vec![last_fid],
-                    )?;
+                    )
+                    .await?;
                 }
                 // Write to the DB that we're all done
                 status.last_response = WorkUnitResponse::Finished as u32;
@@ -1021,10 +1026,83 @@ impl ReplicatorBootstrap {
         return response;
     }
 
-    // Go over all the FIDs that were just processed, and check that the roots match
-    fn check_fid_roots(
+    async fn debug_account_root_mismatch(
         thread_engine: &Arc<ShardEngine>,
         shard_id: u32,
+        height: u64,
+        virtual_trie_shard: u8,
+        fid: u64,
+    ) -> Result<(), BootstrapError> {
+        let fid_key = TrieKey::for_fid(fid);
+        let our_trie_keys_set: HashSet<Vec<u8>> = thread_engine
+            .get_stores()
+            .trie
+            .get_all_values(&merkle_trie::Context::new(), &thread_engine.db, &fid_key)?
+            .into_iter()
+            .collect();
+
+        let mut server_trie_keys = vec![];
+
+        let mut page_token = None;
+        let mut client =
+            ReplicationServiceClient::connect("https://tau.farcaster.xyz:3383".to_string()).await?;
+
+        loop {
+            let request = proto::GetShardTransactionsRequest {
+                shard_id,
+                height,
+                trie_virtual_shard: virtual_trie_shard as u32,
+                page_token,
+                fid: Some(fid),
+            };
+
+            let response = client
+                .get_shard_transactions(request)
+                .await
+                .unwrap()
+                .into_inner();
+
+            server_trie_keys.extend(
+                response
+                    .trie_messages
+                    .into_iter()
+                    .map(|trie_message| trie_message.trie_key),
+            );
+
+            page_token = response.next_page_token;
+            if page_token.is_none() {
+                break;
+            };
+        }
+
+        let server_trie_keys_set: HashSet<Vec<u8>> = server_trie_keys.into_iter().collect();
+
+        let unique_to_us: Vec<DecodedTrieKey> = our_trie_keys_set
+            .difference(&server_trie_keys_set)
+            .map(|key| TrieKey::decode(key).unwrap())
+            .collect();
+
+        for trie_key in unique_to_us {
+            info!(fid, "Trie key missing on server {:#?}", trie_key)
+        }
+
+        let unique_to_server: Vec<DecodedTrieKey> = server_trie_keys_set
+            .difference(&our_trie_keys_set)
+            .map(|key| TrieKey::decode(key).unwrap())
+            .collect();
+
+        for trie_key in unique_to_server {
+            info!(fid, "Trie key missing locally {:#?}", trie_key);
+        }
+
+        Ok(())
+    }
+
+    // Go over all the FIDs that were just processed, and check that the roots match
+    async fn check_fid_roots(
+        thread_engine: &Arc<ShardEngine>,
+        shard_id: u32,
+        height: u64,
         virtual_trie_shard: u8,
         txn_batch: &mut RocksDbTransactionBatch,
         fids_to_check: Vec<u64>,
@@ -1081,6 +1159,15 @@ impl ReplicatorBootstrap {
 
             let expected_root = expected_account.account_root_hash;
             if expected_root != actual_root {
+                Self::debug_account_root_mismatch(
+                    &thread_engine,
+                    shard_id,
+                    height,
+                    virtual_trie_shard,
+                    *fid,
+                )
+                .await
+                .unwrap();
                 return Err(BootstrapError::AccountRootMismatch(format!(
                     "Account root mismatch for fid  {}/{}/{}. expected {}, got {}",
                     shard_id,

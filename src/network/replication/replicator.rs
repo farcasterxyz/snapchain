@@ -2,8 +2,8 @@ use crate::{
     core::util,
     network::replication::{error::ReplicationError, replication_stores::ReplicationStores},
     proto::{
-        self, shard_trie_entry_with_message::TrieMessage, GetShardTransactionsResponse,
-        MessageType, OnChainEventType,
+        self, shard_trie_entry_with_message::TrieMessage, FarcasterNetwork,
+        GetShardTransactionsResponse, MessageType, OnChainEventType,
     },
     storage::{
         db::{PageOptions, RocksDbTransactionBatch},
@@ -475,6 +475,7 @@ impl Replicator {
         shard_id: u32,
         height: u64,
         trie_virtual_shard: u8,
+        fid: Option<u64>,
         page_token: Option<String>,
     ) -> Result<GetShardTransactionsResponse, ReplicationError> {
         // Get the stores for this shard_id and height
@@ -494,10 +495,16 @@ impl Replicator {
         // First, collect MAX_SIZE trie elements starting at the given page_token and prefix
         let mut trie_keys = vec![];
 
+        let prefix = if let Some(fid) = fid {
+            TrieKey::for_fid(fid)
+        } else {
+            vec![trie_virtual_shard]
+        };
+
         let next_page_token = trie.get_paged_values_of_subtree(
             &merkle_trie::Context::new(),
             &stores.db,
-            &[trie_virtual_shard],
+            &prefix,
             &mut trie_keys,
             Self::MESSAGE_LIMIT,
             page_token,
@@ -516,6 +523,7 @@ impl Replicator {
                 )));
             }
 
+            // TODO(aditi): We put messages into the trie for both fids on storage lends, but it's only stored under 1 fid in the so
             let fid = decoded_key.fid;
             let onchain_message_type = decoded_key.onchain_message_type;
             let message_type = decoded_key.message_type;
@@ -743,8 +751,15 @@ impl Replicator {
         self.stores
             .close_aged_snapshots(msg.shard_id, oldest_valid_timestamp);
 
+        // Take a snapshot for testnet nodes if none exist because there aren't many read nodes running and we may have to wait a long time for the scheduled snapshot after restart.
+        let take_first_snapshot = self.stores.network() == FarcasterNetwork::Testnet
+            && self.stores.max_height_for_shard(msg.shard_id).is_none();
+
         // Check if we can take a snapshot of this block
-        if block_number > 0 && block_number % self.snapshot_options.interval != 0 {
+        if block_number > 0
+            && block_number % self.snapshot_options.interval != 0
+            && !take_first_snapshot
+        {
             return Ok(());
         }
 

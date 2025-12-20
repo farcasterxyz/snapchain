@@ -297,6 +297,7 @@ impl RpcClientsManager {
                                 height,
                                 trie_virtual_shard: vts as u32,
                                 page_token: Some(next_page_token),
+                                fid: None,
                             },
                             &config,
                         )
@@ -359,6 +360,7 @@ impl RpcClientsManager {
             height: self.height,
             trie_virtual_shard: vts as u32,
             page_token,
+            fid: None,
         };
 
         let response =

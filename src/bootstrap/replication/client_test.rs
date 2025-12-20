@@ -723,6 +723,7 @@ mod tests {
                     trie_virtual_shard: vts,
                     height,
                     page_token: next_page_token.clone(),
+                    fid: None,
                 };
 
                 // Call the server method and handle the Result
