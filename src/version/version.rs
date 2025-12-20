@@ -3,7 +3,7 @@ use crate::proto::FarcasterNetwork;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
-const LATEST_PROTOCOL_VERSION: u32 = 10;
+const LATEST_PROTOCOL_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, EnumIter)]
 pub enum EngineVersion {
@@ -23,6 +23,7 @@ pub enum EngineVersion {
     V13 = 13,
     V14 = 14,
     V15 = 15,
+    V16 = 16,
 }
 
 pub enum ProtocolFeature {
@@ -44,6 +45,8 @@ pub enum ProtocolFeature {
     StorageLendingLimitFix,
     StopRevokingExistingMessages,
     IncreaseUsernameProofSizeLimit,
+    SolanaNamesValidation,
+    QnsNamesValidation,
 }
 
 pub struct VersionSchedule {
@@ -173,7 +176,7 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
 
 const ENGINE_VERSION_SCHEDULE_DEVNET: &[VersionSchedule] = [VersionSchedule {
     active_at: 0,
-    version: EngineVersion::V15,
+    version: EngineVersion::V16,
 }]
 .as_slice();
 
@@ -225,6 +228,9 @@ impl EngineVersion {
             ProtocolFeature::StorageLendingLimitFix => self >= &EngineVersion::V13,
             ProtocolFeature::StopRevokingExistingMessages => self >= &EngineVersion::V14,
             ProtocolFeature::IncreaseUsernameProofSizeLimit => self >= &EngineVersion::V15,
+            ProtocolFeature::SolanaNamesValidation | ProtocolFeature::QnsNamesValidation => {
+                self >= &EngineVersion::V16
+            }
         }
     }
 
@@ -243,7 +249,8 @@ impl EngineVersion {
             EngineVersion::V10 => 7,
             EngineVersion::V11 | EngineVersion::V12 | EngineVersion::V13 => 8,
             EngineVersion::V14 => 9,
-            EngineVersion::V15 => LATEST_PROTOCOL_VERSION,
+            EngineVersion::V15 => 10,
+            EngineVersion::V16 => LATEST_PROTOCOL_VERSION,
         }
     }
 
@@ -413,7 +420,7 @@ mod version_test {
 
     #[test]
     fn test_latest() {
-        assert_eq!(EngineVersion::latest(), EngineVersion::V15);
+        assert_eq!(EngineVersion::latest(), EngineVersion::V16);
         assert_eq!(
             EngineVersion::version_for(&FarcasterTime::current(), FarcasterNetwork::Devnet),
             EngineVersion::latest()

@@ -9,6 +9,9 @@ stop_at = 200
 start_from = 0
 url = "https://fnames.farcaster.xyz/transfers"
 
+solana_rpc_url = ""
+quilibrium_rpc_url = ""
+
 [consensus]
 num_shards = 1
 shard_ids = [1]

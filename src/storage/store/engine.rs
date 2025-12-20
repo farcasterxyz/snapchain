@@ -1393,7 +1393,7 @@ impl ShardEngine {
         txn: &RocksDbTransactionBatch,
     ) -> Result<Option<UserNameProof>, MessageValidationError> {
         // TODO(aditi): The fnames proofs should live in the username proof store.
-        if name.ends_with(".eth") {
+        if name.ends_with(".eth") || name.ends_with(".sol") {
             let version = EngineVersion::current(self.network);
             let batch_txn = if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
                 txn
