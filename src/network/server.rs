@@ -22,7 +22,8 @@ use crate::proto::{
     ShardChunksResponse, SignerEventType, SignerRequest, StorageLimitsResponse, SubscribeRequest,
     TrieNodeMetadataRequest, TrieNodeMetadataResponse, UserDataRequest, UserNameProof,
     UserNameType, UsernameProofRequest, UsernameProofsResponse, ValidationResponse,
-    VerificationAddAddressBody, VerificationRequest,
+    VerificationAddAddressBody, VerificationFidRequest, VerificationFidResponse,
+    VerificationRequest,
 };
 use crate::storage::constants::OnChainEventPostfix;
 use crate::storage::constants::RootPrefix;
@@ -1470,6 +1471,34 @@ impl HubService for MyHubService {
             &options,
         )
         .as_response()
+    }
+
+    async fn get_fid_by_verification(
+        &self,
+        request: Request<VerificationFidRequest>,
+    ) -> Result<Response<VerificationFidResponse>, Status> {
+        let request = request.into_inner();
+
+        for (_, stores) in &self.shard_stores {
+            let store = &stores.verification_store;
+
+            match VerificationStore::get_fid_by_verification(store, &request.address) {
+                Ok(Some(fid)) => {
+                    return Ok(Response::new(VerificationFidResponse { fid }));
+                }
+
+                Ok(None) => {
+                    // look in the next shard
+                    continue;
+                }
+
+                Err(err) => {
+                    return Err(Status::internal(err.to_string()));
+                }
+            }
+        }
+
+        Err(Status::not_found("verification not found"))
     }
 
     async fn get_all_verification_messages_by_fid(
