@@ -6,7 +6,7 @@ use crate::core::validations;
 use crate::core::validations::message::validate_message_hash;
 use crate::network::gossip;
 use crate::proto::shard_trie_entry_with_message::TrieMessage;
-use crate::proto::{self, MessageType, ReplicationTriePartStatus, ShardSnapshotMetadata};
+use crate::proto::{self, ReplicationTriePartStatus, ShardSnapshotMetadata};
 use crate::storage::store::block_engine::BlockEngine;
 use crate::storage::store::node_local_state::LocalStateStore;
 use crate::storage::trie::merkle_trie::MerkleTrie;
@@ -894,7 +894,7 @@ impl ReplicatorBootstrap {
                     Ok(m) => {
                         // For storage lend messages, we insert 2 keys per message
                         let generated_trie_keys = m.trie_keys;
-                        let fid = m.fid;
+                        let fid = decoded_trie_key.fid;
 
                         if !generated_trie_keys.contains(&trie_key) {
                             return Err(BootstrapError::GenericError(format!(
@@ -909,15 +909,12 @@ impl ReplicatorBootstrap {
 
                         // Check that the fid on the message belongs to the correct vts. For storage lends, there are 2 impacted fids.
                         let actual_vts = TrieKey::fid_shard(fid);
-                        if status.virtual_trie_shard != actual_vts as u32
-                            && decoded_trie_key.message_type != Some(MessageType::LendStorage as u8)
-                        {
-                            return Err(BootstrapError::GenericError(format!("Message belongs to incorrect vts. actual {}, expected {}, trie key {:#?}", actual_vts, status.virtual_trie_shard, trie_key)));
+                        if status.virtual_trie_shard != actual_vts as u32 {
+                            return Err(BootstrapError::GenericError(format!("Trie key belongs to incorrect vts. actual {}, expected {}, trie key {:#?}", actual_vts, status.virtual_trie_shard, trie_key)));
                         }
 
                         // Don't check fids if theyr'e not in this vts because we wouldn't have pulled in all the messages.
-                        if fid > last_fid.unwrap() && status.virtual_trie_shard == actual_vts as u32
-                        {
+                        if fid > last_fid.unwrap() {
                             fids_to_check.push(last_fid.unwrap());
                             last_fid = Some(fid);
                         }
