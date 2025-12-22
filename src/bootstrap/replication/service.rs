@@ -1115,6 +1115,7 @@ impl ReplicatorBootstrap {
                 shard_id,
                 hex::encode(&trie_root)
             );
+            db.close();
             Ok(())
         } else {
             let expected = hex::encode(&expected_shard_root);
@@ -1124,6 +1125,7 @@ impl ReplicatorBootstrap {
                 shard_id, expected, actual
             );
 
+            db.close();
             return Err(BootstrapError::StateRootMismatch {
                 shard_id,
                 expected,
