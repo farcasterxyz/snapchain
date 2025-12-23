@@ -197,7 +197,7 @@ impl ReplicatorBootstrap {
     }
 
     fn get_snapshot_rocksdb_dir(&self) -> String {
-        format!("{}.snapshot", self.rocksdb_dir)
+        format!("{}/.snapshot", self.rocksdb_dir)
     }
 
     fn move_dir_contents(src: &Path, dst: &Path) -> io::Result<()> {
