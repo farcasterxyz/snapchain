@@ -27,6 +27,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use futures::future;
 use prost::Message as _;
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
 use std::{
@@ -37,6 +38,7 @@ use std::{
     },
     u64,
 };
+use std::{fs, io};
 use tokio::signal::ctrl_c;
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::task::JoinSet;
@@ -196,6 +198,18 @@ impl ReplicatorBootstrap {
 
     fn get_snapshot_rocksdb_dir(&self) -> String {
         format!("{}.snapshot", self.rocksdb_dir)
+    }
+
+    fn move_dir_contents(src: &Path, dst: &Path) -> io::Result<()> {
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let from = entry.path();
+            let to = dst.join(entry.file_name());
+
+            fs::rename(from, to)?;
+        }
+
+        Ok(())
     }
 
     fn get_or_gen_vts_status(
@@ -405,11 +419,13 @@ impl ReplicatorBootstrap {
                         .await?;
                 }
 
-                info!("Replication bootstrap finished. Promoting snapshot to main DB.");
+                info!("Replication bootstrap finished. Promoting snapshot to main DB. snapshot dir: {}, main dir: {}", self.get_snapshot_rocksdb_dir(), self.rocksdb_dir);
 
                 // Rename the completed snapshot DB to the main DB name
-                if let Err(e) = std::fs::rename(&self.get_snapshot_rocksdb_dir(), &self.rocksdb_dir)
-                {
+                if let Err(e) = Self::move_dir_contents(
+                    &Path::new(&self.get_snapshot_rocksdb_dir()),
+                    &Path::new(&self.rocksdb_dir),
+                ) {
                     error!("FATAL: Failed to rename snapshot DB: {}. Please do it manually or clear the DB directory.", e);
                     return Ok(WorkUnitResponse::PartiallyComplete);
                 }
