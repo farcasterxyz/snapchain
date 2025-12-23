@@ -6,7 +6,7 @@ use crate::core::validations;
 use crate::core::validations::message::validate_message_hash;
 use crate::network::gossip;
 use crate::proto::shard_trie_entry_with_message::TrieMessage;
-use crate::proto::{self, MessageType, ReplicationTriePartStatus, ShardSnapshotMetadata};
+use crate::proto::{self, ReplicationTriePartStatus, ShardSnapshotMetadata};
 use crate::storage::store::block_engine::BlockEngine;
 use crate::storage::store::node_local_state::LocalStateStore;
 use crate::storage::trie::merkle_trie::MerkleTrie;
@@ -27,6 +27,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use futures::future;
 use prost::Message as _;
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
 use std::{
@@ -37,6 +38,7 @@ use std::{
     },
     u64,
 };
+use std::{fs, io};
 use tokio::signal::ctrl_c;
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::task::JoinSet;
@@ -195,7 +197,19 @@ impl ReplicatorBootstrap {
     }
 
     fn get_snapshot_rocksdb_dir(&self) -> String {
-        format!("{}.snapshot", self.rocksdb_dir)
+        format!("{}/.snapshot", self.rocksdb_dir)
+    }
+
+    fn move_dir_contents(src: &Path, dst: &Path) -> io::Result<()> {
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let from = entry.path();
+            let to = dst.join(entry.file_name());
+
+            fs::rename(from, to)?;
+        }
+
+        Ok(())
     }
 
     fn get_or_gen_vts_status(
@@ -405,11 +419,13 @@ impl ReplicatorBootstrap {
                         .await?;
                 }
 
-                info!("Replication bootstrap finished. Promoting snapshot to main DB.");
+                info!("Replication bootstrap finished. Promoting snapshot to main DB. snapshot dir: {}, main dir: {}", self.get_snapshot_rocksdb_dir(), self.rocksdb_dir);
 
                 // Rename the completed snapshot DB to the main DB name
-                if let Err(e) = std::fs::rename(&self.get_snapshot_rocksdb_dir(), &self.rocksdb_dir)
-                {
+                if let Err(e) = Self::move_dir_contents(
+                    &Path::new(&self.get_snapshot_rocksdb_dir()),
+                    &Path::new(&self.rocksdb_dir),
+                ) {
                     error!("FATAL: Failed to rename snapshot DB: {}. Please do it manually or clear the DB directory.", e);
                     return Ok(WorkUnitResponse::PartiallyComplete);
                 }
@@ -894,7 +910,7 @@ impl ReplicatorBootstrap {
                     Ok(m) => {
                         // For storage lend messages, we insert 2 keys per message
                         let generated_trie_keys = m.trie_keys;
-                        let fid = m.fid;
+                        let fid = decoded_trie_key.fid;
 
                         if !generated_trie_keys.contains(&trie_key) {
                             return Err(BootstrapError::GenericError(format!(
@@ -909,15 +925,12 @@ impl ReplicatorBootstrap {
 
                         // Check that the fid on the message belongs to the correct vts. For storage lends, there are 2 impacted fids.
                         let actual_vts = TrieKey::fid_shard(fid);
-                        if status.virtual_trie_shard != actual_vts as u32
-                            && decoded_trie_key.message_type != Some(MessageType::LendStorage as u8)
-                        {
-                            return Err(BootstrapError::GenericError(format!("Message belongs to incorrect vts. actual {}, expected {}, trie key {:#?}", actual_vts, status.virtual_trie_shard, trie_key)));
+                        if status.virtual_trie_shard != actual_vts as u32 {
+                            return Err(BootstrapError::GenericError(format!("Trie key belongs to incorrect vts. actual {}, expected {}, trie key {:#?}", actual_vts, status.virtual_trie_shard, trie_key)));
                         }
 
                         // Don't check fids if theyr'e not in this vts because we wouldn't have pulled in all the messages.
-                        if fid > last_fid.unwrap() && status.virtual_trie_shard == actual_vts as u32
-                        {
+                        if fid > last_fid.unwrap() {
                             fids_to_check.push(last_fid.unwrap());
                             last_fid = Some(fid);
                         }
@@ -1118,6 +1131,7 @@ impl ReplicatorBootstrap {
                 shard_id,
                 hex::encode(&trie_root)
             );
+            db.close();
             Ok(())
         } else {
             let expected = hex::encode(&expected_shard_root);
@@ -1127,6 +1141,7 @@ impl ReplicatorBootstrap {
                 shard_id, expected, actual
             );
 
+            db.close();
             return Err(BootstrapError::StateRootMismatch {
                 shard_id,
                 expected,
