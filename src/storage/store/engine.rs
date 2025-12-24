@@ -858,7 +858,15 @@ impl ShardEngine {
                         if version.is_enabled(ProtocolFeature::StorageLending) {
                             // process storage lend messages from block events
                             match self.handle_block_event(trie_ctx, block_event, txn_batch) {
-                                Ok(hub_events) => events.extend(hub_events),
+                                Ok(hub_events) => {
+                                    info!(
+                                        num_hub_events = hub_events.len(),
+                                        seqnum = block_event.seqnum(),
+                                        fid = snapchain_txn.fid,
+                                        "Merged block event"
+                                    );
+                                    events.extend(hub_events)
+                                }
                                 Err(err) => {
                                     warn!(
                                         fid = snapchain_txn.fid,
@@ -870,7 +878,9 @@ impl ShardEngine {
                         }
                     } else {
                         warn!(
-                            { seqnum = block_event.seqnum(),  last_block_event_seqnum, fid = snapchain_txn.fid},
+                            seqnum = block_event.seqnum(),
+                            last_block_event_seqnum,
+                            fid = snapchain_txn.fid,
                             "Error merging block event because it's not next"
                         )
                     }
