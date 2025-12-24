@@ -24,6 +24,7 @@ use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, Mempo
 use crate::storage::store::migrations::{MigrationContext, MigrationRunner};
 use crate::storage::store::stores::{StoreLimits, Stores};
 use crate::storage::trie::{self, merkle_trie};
+use crate::utils::block_event_fix::reprocess_block_event;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::{EngineVersion, ProtocolFeature};
 use alloy_primitives::hex::FromHex;
@@ -237,6 +238,12 @@ impl ShardEngine {
             if let Some(_background_handle) = migration_handle {
                 // Background migrations are running, but we don't block startup
                 info!(shard_id, "Background migrations started");
+            }
+
+            if shard_id == 2 {
+                reprocess_block_event(stores.clone(), 23486046, 196012)
+                    .await
+                    .unwrap()
             }
         }
 
