@@ -839,35 +839,40 @@ impl ShardEngine {
 
             if let Some(block_event) = &msg.block_event {
                 // TODO(aditi): Validate hash and insert into any other relevant stores and trie if the message is relevant
-                if version.is_enabled(ProtocolFeature::ReadDataFromShardZero)
-                    && block_event.seqnum() == last_block_event_seqnum + 1
-                {
-                    if let Err(err) = self
-                        .stores
-                        .block_event_store
-                        .put_block_event(block_event, txn_batch)
-                    {
-                        error!(
-                            seqnum = block_event.seqnum().to_string(),
-                            "error merging block event: {}",
-                            err.to_string()
-                        );
-                    } else {
-                        last_block_event_seqnum += 1;
-                    }
+                if version.is_enabled(ProtocolFeature::ReadDataFromShardZero) {
+                    if block_event.seqnum() == last_block_event_seqnum + 1 {
+                        if let Err(err) = self
+                            .stores
+                            .block_event_store
+                            .put_block_event(block_event, txn_batch)
+                        {
+                            error!(
+                                seqnum = block_event.seqnum().to_string(),
+                                "Error merging block event: {}",
+                                err.to_string()
+                            );
+                        } else {
+                            last_block_event_seqnum += 1;
+                        }
 
-                    if version.is_enabled(ProtocolFeature::StorageLending) {
-                        // process storage lend messages from block events
-                        match self.handle_block_event(trie_ctx, block_event, txn_batch) {
-                            Ok(hub_events) => events.extend(hub_events),
-                            Err(err) => {
-                                warn!(
-                                    fid = snapchain_txn.fid,
-                                    "Error merging block event {}",
-                                    err.to_string()
-                                );
+                        if version.is_enabled(ProtocolFeature::StorageLending) {
+                            // process storage lend messages from block events
+                            match self.handle_block_event(trie_ctx, block_event, txn_batch) {
+                                Ok(hub_events) => events.extend(hub_events),
+                                Err(err) => {
+                                    warn!(
+                                        fid = snapchain_txn.fid,
+                                        "Error merging block event {}",
+                                        err.to_string()
+                                    );
+                                }
                             }
                         }
+                    } else {
+                        warn!(
+                            { seqnum = block_event.seqnum(),  last_block_event_seqnum, fid = snapchain_txn.fid},
+                            "Error merging block event because it's not next"
+                        )
                     }
                 }
             }
