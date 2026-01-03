@@ -24,21 +24,17 @@ pub async fn reprocess_block_event(
 
     // Find the block event with the target seqnum
     let mut target_event = None;
-    for txn in &block.transactions {
-        for message in &txn.system_messages {
-            if let Some(block_event) = &message.block_event {
-                // We can only do this for heartbeat events
-                if block_event.seqnum() == target_seqnum
-                    && block_event.data.as_ref().unwrap().r#type() == BlockEventType::Heartbeat
-                {
-                    info!(
-                        "Found matching block event! seqnum={}",
-                        block_event.seqnum()
-                    );
-                    target_event = Some(block_event.clone());
-                    break;
-                }
-            }
+    for block_event in &block.events {
+        // We can only do this for heartbeat events
+        if block_event.seqnum() == target_seqnum
+            && block_event.data.as_ref().unwrap().r#type() == BlockEventType::Heartbeat
+        {
+            info!(
+                "Found matching block event! seqnum={}",
+                block_event.seqnum()
+            );
+            target_event = Some(block_event.clone());
+            break;
         }
     }
 
