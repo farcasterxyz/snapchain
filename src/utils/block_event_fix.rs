@@ -1,6 +1,7 @@
 use crate::storage::db::RocksDbTransactionBatch;
 use crate::storage::store::block_engine::BlockStores;
 use crate::storage::store::stores::Stores;
+use snapchain_proto::BlockEventType;
 use tracing::info;
 
 pub async fn reprocess_block_event(
@@ -26,7 +27,10 @@ pub async fn reprocess_block_event(
     for txn in &block.transactions {
         for message in &txn.system_messages {
             if let Some(block_event) = &message.block_event {
-                if block_event.seqnum() == target_seqnum {
+                // We can only do this for heartbeat events
+                if block_event.seqnum() == target_seqnum
+                    && block_event.data.as_ref().unwrap().r#type() == BlockEventType::Heartbeat
+                {
                     info!(
                         "Found matching block event! seqnum={}",
                         block_event.seqnum()

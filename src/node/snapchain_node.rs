@@ -112,7 +112,7 @@ impl SnapchainNode {
             shard_senders.insert(shard_id, engine.get_senders());
             shard_stores.insert(shard_id, engine.get_stores());
 
-            if shard_id == 2 {
+            if shard_id == 2 && network == FarcasterNetwork::Mainnet {
                 reprocess_block_event(block_stores.clone(), engine.get_stores(), 24235100, 219092)
                     .await
                     .unwrap()
