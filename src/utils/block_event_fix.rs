@@ -20,7 +20,8 @@ pub async fn reconcile_heartbeat_event(
             // Create a transaction batch and put the block event
             let mut txn = RocksDbTransactionBatch::new();
 
-            if target_stores.block_event_store.max_seqnum().unwrap_or(0) < block_event.seqnum() {
+            if target_stores.block_event_store.max_seqnum().unwrap_or(0) + 1 == block_event.seqnum()
+            {
                 info!("Calling put_block_event to insert into block event store...");
                 target_stores
                     .block_event_store
