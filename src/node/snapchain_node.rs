@@ -14,6 +14,7 @@ use crate::storage::store::node_local_state::LocalStateStore;
 use crate::storage::store::stores::StoreLimits;
 use crate::storage::store::stores::Stores;
 use crate::storage::trie::merkle_trie::{self, MerkleTrie};
+use crate::utils::block_event_fix::reconcile_heartbeat_events;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
@@ -50,6 +51,22 @@ impl SnapchainNode {
         engine_post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
     ) -> Self {
         let validator_address = Address(keypair.public().to_bytes());
+
+        // Now create the block validator
+        let block_shard = SnapchainShard::new(0);
+
+        // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
+        let trie = MerkleTrie::new().unwrap();
+        let block_db = RocksDB::open_shard_db(rocksdb_dir.as_str(), 0);
+        let engine = BlockEngine::new(
+            trie,
+            statsd_client.clone(),
+            block_db,
+            config.max_messages_per_block,
+            Some(messages_request_tx.clone()),
+            network,
+        );
+        let block_stores = engine.stores();
 
         let mut consensus_actors = BTreeMap::new();
 
@@ -95,6 +112,21 @@ impl SnapchainNode {
             shard_senders.insert(shard_id, engine.get_senders());
             shard_stores.insert(shard_id, engine.get_stores());
 
+            if config.reconcile_heartbeat_event != 0 {
+                if let Err(err) = reconcile_heartbeat_events(
+                    block_stores.clone(),
+                    engine.get_stores(),
+                    config.reconcile_heartbeat_event,
+                )
+                .await
+                {
+                    warn!(
+                        "Unable to reconcile heartbeat events {:#?}",
+                        err.to_string()
+                    )
+                }
+            }
+
             let shard_proposer = ShardProposer::new(
                 validator_address.clone(),
                 shard.clone(),
@@ -132,21 +164,6 @@ impl SnapchainNode {
             consensus_actors.insert(shard_id, consensus_actor.unwrap());
         }
 
-        // Now create the block validator
-        let block_shard = SnapchainShard::new(0);
-
-        // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
-        let trie = MerkleTrie::new().unwrap();
-        let block_db = RocksDB::open_shard_db(rocksdb_dir.as_str(), 0);
-        let engine = BlockEngine::new(
-            trie,
-            statsd_client.clone(),
-            block_db,
-            config.max_messages_per_block,
-            Some(messages_request_tx.clone()),
-            network,
-        );
-        let block_stores = engine.stores();
         let block_proposer = BlockProposer::new(
             validator_address.clone(),
             block_shard.clone(),

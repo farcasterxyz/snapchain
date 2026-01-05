@@ -10,6 +10,7 @@ use crate::storage::store::block_engine::{BlockEngine, BlockStores};
 use crate::storage::store::engine::{PostCommitMessage, Senders, ShardEngine};
 use crate::storage::store::stores::{StoreLimits, Stores};
 use crate::storage::trie::merkle_trie::{self, MerkleTrie};
+use crate::utils::block_event_fix::reconcile_heartbeat_events;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
@@ -43,6 +44,26 @@ impl SnapchainReadNode {
         engine_post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
     ) -> Self {
         let validator_address = Address(keypair.public().to_bytes());
+
+        // Now create the block validator data structures
+        let block_shard = SnapchainShard::new(0);
+
+        // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
+        let trie = MerkleTrie::new().unwrap();
+        let block_db = RocksDB::open_shard_db(rocksdb_dir.as_str(), 0);
+        let engine = BlockEngine::new(
+            trie,
+            statsd_client.clone(),
+            block_db,
+            config.max_messages_per_block,
+            None,
+            farcaster_network,
+        );
+        let block_stores = engine.stores();
+        info!(
+            "Block db height {}",
+            block_stores.block_store.max_block_number().unwrap()
+        );
 
         let mut consensus_actors = BTreeMap::new();
 
@@ -87,6 +108,21 @@ impl SnapchainReadNode {
             shard_senders.insert(shard_id, engine.get_senders());
             shard_stores.insert(shard_id, engine.get_stores());
 
+            if config.reconcile_heartbeat_event != 0 {
+                if let Err(err) = reconcile_heartbeat_events(
+                    block_stores.clone(),
+                    engine.get_stores(),
+                    config.reconcile_heartbeat_event,
+                )
+                .await
+                {
+                    warn!(
+                        "Unable to reconcile heartbeat events {:#?}",
+                        err.to_string(),
+                    )
+                }
+            }
+
             let consensus_actor = MalachiteReadNodeActors::create_and_start(
                 ctx,
                 Engine::ShardEngine(engine),
@@ -107,25 +143,6 @@ impl SnapchainReadNode {
             consensus_actors.insert(shard_id, consensus_actor.unwrap());
         }
 
-        // Now create the block validator
-        let block_shard = SnapchainShard::new(0);
-
-        // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
-        let trie = MerkleTrie::new().unwrap();
-        let block_db = RocksDB::open_shard_db(rocksdb_dir.as_str(), 0);
-        let engine = BlockEngine::new(
-            trie,
-            statsd_client.clone(),
-            block_db,
-            config.max_messages_per_block,
-            None,
-            farcaster_network,
-        );
-        let block_stores = engine.stores();
-        info!(
-            "Block db height {}",
-            block_stores.block_store.max_block_number().unwrap()
-        );
         let ctx = SnapchainValidatorContext::new(keypair.clone());
         let block_actor = MalachiteReadNodeActors::create_and_start(
             ctx,
