@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.1] - 2026-01-05
+
+### 🚀 Features
+
+- Separate proto files into standalone crate (#729)
+
+### 🐛 Bug Fixes
+
+- Forward date the activation time in testnet for protocol v10 (#728)
+- Support storage lends in replication (#731)
+- Replication client checks to account for storage lend messages (#735)
+- Enable manually triggering reingest for a heartbeat event (#737)
+
+### ⚙️ Miscellaneous Tasks
+
+- Add signer fid tag to metrics (#733)
+- Take a replication snapshot if there are none (#734)
+
 ## [0.11.0] - 2025-12-03
 
 ### 🚀 Features
