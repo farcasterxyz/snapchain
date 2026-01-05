@@ -15,7 +15,6 @@ use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
 use libp2p::PeerId;
-use snapchain_proto::FarcasterNetwork;
 use std::collections::{BTreeMap, HashMap};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -109,9 +108,7 @@ impl SnapchainReadNode {
             shard_senders.insert(shard_id, engine.get_senders());
             shard_stores.insert(shard_id, engine.get_stores());
 
-            if config.reconcile_heartbeat_event != 0
-                && farcaster_network == FarcasterNetwork::Mainnet
-            {
+            if config.reconcile_heartbeat_event != 0 {
                 reconcile_heartbeat_event(
                     block_stores.clone(),
                     engine.get_stores(),

@@ -112,7 +112,7 @@ impl SnapchainNode {
             shard_senders.insert(shard_id, engine.get_senders());
             shard_stores.insert(shard_id, engine.get_stores());
 
-            if config.reconcile_heartbeat_event != 0 && network == FarcasterNetwork::Mainnet {
+            if config.reconcile_heartbeat_event != 0 {
                 reconcile_heartbeat_event(
                     block_stores.clone(),
                     engine.get_stores(),
