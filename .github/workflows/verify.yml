@@ -43,10 +43,10 @@ jobs:
           ref: ${{ env.MALACHITE_GIT_REF }}
           path: ./malachite
 
-      - name: Install Rust 1.86.0
+      - name: Install Rust 1.89.0
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: 1.86.0
+          toolchain: 1.89.0
           profile: default 
           override: true
 
@@ -65,17 +65,17 @@ jobs:
 
       - working-directory: ./snapchain
         env:
-          RUSTFLAGS: "-Dwarnings"
+          RUSTFLAGS: "-Dwarnings -A mismatched_lifetime_syntaxes"
         run: cargo test
 
       - working-directory: ./snapchain
         env:
-          RUSTFLAGS: "-Dwarnings"
+          RUSTFLAGS: "-Dwarnings -A mismatched_lifetime_syntaxes"
         run: cargo build --bins
 
       - working-directory: ./snapchain
         env:
-          RUSTFLAGS: "-Dwarnings"
+          RUSTFLAGS: "-Dwarnings -A mismatched_lifetime_syntaxes"
         run: cargo fmt --all --check
 
       - working-directory: ./snapchain/tests/client_parity_tests
