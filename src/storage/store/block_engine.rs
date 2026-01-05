@@ -2,6 +2,7 @@ use crate::consensus::proposer::ProposalSource;
 use crate::core::error::HubError;
 use crate::core::validations;
 use crate::core::{types::Height, util::FarcasterTime};
+use crate::hyper::StateContext;
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::{
     self, block_event_data, Block, BlockEvent, BlockEventData, BlockEventType, FarcasterNetwork,
@@ -98,6 +99,20 @@ impl BlockStores {
             event_handler: store_event_handler,
         }
     }
+
+    pub fn with_state_context(&self, ctx: StateContext) -> Self {
+        BlockStores {
+            block_store: self.block_store.clone(),
+            block_event_store: self.block_event_store.clone(),
+            onchain_event_store: self.onchain_event_store.with_state_context(ctx),
+            storage_lend_store: self.storage_lend_store.with_state_context(ctx),
+            network: self.network,
+            db: self.db.clone(),
+            trie: self.trie.clone(),
+            event_handler: self.event_handler.clone(),
+        }
+    }
+
     pub fn get_block_by_event_seqnum(&self, seqnum: u64) -> Option<Block> {
         let block_event = self
             .block_event_store
@@ -189,6 +204,10 @@ impl BlockEngine {
 
     pub fn stores(&self) -> BlockStores {
         self.stores.clone()
+    }
+
+    pub fn stores_with_state_context(&self, ctx: StateContext) -> BlockStores {
+        self.stores.with_state_context(ctx)
     }
 
     pub fn trie_root_hash(&self) -> Vec<u8> {
@@ -857,6 +876,10 @@ impl BlockEngine {
                 None
             }
         }
+    }
+
+    pub fn current_state_root(&self) -> Vec<u8> {
+        self.stores.trie.root_hash().unwrap_or_default()
     }
 
     pub fn get_block_by_height(&self, height: Height) -> Option<Block> {

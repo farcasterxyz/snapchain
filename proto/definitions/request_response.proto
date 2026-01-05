@@ -202,6 +202,35 @@ message UsernameProofsResponse {
   repeated UserNameProof proofs = 1;
 }
 
+message NameLookupRequest {
+  bytes name = 1;
+  UserNameType type = 2;
+}
+
+message FidResponse {
+  uint64 fid = 1;
+}
+
+message NameToAddressResponse {
+  uint64 fid = 1;
+  optional bytes custody_address = 2;
+  repeated bytes connected_addresses = 3;
+}
+
+message AddressLookupRequest {
+  bytes address = 1;
+}
+
+message AddressMatch {
+  uint64 fid = 1;
+  bool is_custody = 2;
+  bool is_verified = 3;
+}
+
+message AddressToFidResponse {
+  repeated AddressMatch matches = 1;
+}
+
 message ValidationResponse {
   bool valid = 1;
   Message message = 2;
@@ -312,6 +341,7 @@ message ContactInfoBody {
   FarcasterNetwork network = 4;
   uint64 timestamp = 5;
   string announce_rpc_address = 6;
+  repeated string capabilities = 7;
 }
 
 message GetConnectedPeersRequest {
@@ -320,4 +350,3 @@ message GetConnectedPeersRequest {
 message GetConnectedPeersResponse {
   repeated ContactInfoBody contacts = 1;
 }
-

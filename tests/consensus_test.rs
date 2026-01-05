@@ -243,6 +243,7 @@ impl ReadNodeForTest {
             false,
             fc_network,
             statsd_client.clone(),
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -340,6 +341,7 @@ impl NodeForTest {
             false,
             fc_network,
             statsd_client.clone(),
+            Vec::new(),
         )
         .await
         .unwrap();

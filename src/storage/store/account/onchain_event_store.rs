@@ -2,6 +2,7 @@ use super::{get_from_db_or_txn, make_fid_key, StoreEventHandler};
 use crate::core::error::HubError;
 use crate::core::message::HubEventExt;
 use crate::core::util::FarcasterTime;
+use crate::hyper::StateContext;
 use crate::proto::{
     self, on_chain_event, on_chain_event::Body, FarcasterNetwork, HubEvent, HubEventType,
     IdRegisterEventBody, IdRegisterEventType, MergeOnChainEventBody, OnChainEvent,
@@ -520,6 +521,10 @@ impl OnchainEventStore {
             store_event_handler,
             store_opts,
         }
+    }
+
+    pub fn with_state_context(&self, _ctx: StateContext) -> Self {
+        self.clone()
     }
 
     pub fn merge_onchain_event(

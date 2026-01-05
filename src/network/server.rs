@@ -14,18 +14,19 @@ use crate::network::gossip::GossipEvent;
 use crate::proto::hub_service_server::HubService;
 use crate::proto::{
     self, cast_add_body, casts_by_parent_request, link_body, links_by_target_request, message_data,
-    on_chain_event::Body, reaction_body, reactions_by_target_request, Block, BlocksRequest, CastId,
-    CastsByParentRequest, DbStats, EventRequest, EventsRequest, EventsResponse,
-    FidAddressTypeRequest, FidAddressTypeResponse, FidRequest, FidTimestampRequest, FidsRequest,
+    on_chain_event::Body, reaction_body, reactions_by_target_request, AddressLookupRequest,
+    AddressMatch, AddressToFidResponse, Block, BlocksRequest, CastId, CastsByParentRequest,
+    DbStats, EventRequest, EventsRequest, EventsResponse, FidAddressTypeRequest,
+    FidAddressTypeResponse, FidRequest, FidResponse, FidTimestampRequest, FidsRequest,
     FidsResponse, GetConnectedPeersRequest, GetConnectedPeersResponse, GetInfoRequest,
     GetInfoResponse, Height, HubEvent, IdRegistryEventByAddressRequest, LinkRequest,
-    LinksByFidRequest, LinksByTargetRequest, Message, MessageType, MessagesResponse, OnChainEvent,
-    OnChainEventRequest, OnChainEventResponse, ReactionRequest, ReactionType,
-    ReactionsByFidRequest, ReactionsByTargetRequest, ShardChunk, ShardChunksRequest,
-    ShardChunksResponse, SignerEventType, SignerRequest, StorageLimitsResponse, SubscribeRequest,
-    TrieNodeMetadataRequest, TrieNodeMetadataResponse, UserDataRequest, UserNameProof,
-    UserNameType, UsernameProofRequest, UsernameProofsResponse, ValidationResponse,
-    VerificationAddAddressBody, VerificationRequest,
+    LinksByFidRequest, LinksByTargetRequest, Message, MessageType, MessagesResponse,
+    NameLookupRequest, NameToAddressResponse, OnChainEvent, OnChainEventRequest,
+    OnChainEventResponse, ReactionRequest, ReactionType, ReactionsByFidRequest,
+    ReactionsByTargetRequest, ShardChunk, ShardChunksRequest, ShardChunksResponse, SignerEventType,
+    SignerRequest, StorageLimitsResponse, SubscribeRequest, TrieNodeMetadataRequest,
+    TrieNodeMetadataResponse, UserDataRequest, UserNameProof, UserNameType, UsernameProofRequest,
+    UsernameProofsResponse, ValidationResponse, VerificationAddAddressBody, VerificationRequest,
 };
 use crate::storage::constants::OnChainEventPostfix;
 use crate::storage::constants::RootPrefix;
@@ -599,6 +600,111 @@ impl MyHubService {
             },
             last_chunk,
         )
+    }
+
+    fn resolve_name(&self, req: &NameLookupRequest) -> Result<(u64, UserNameType), Status> {
+        let name_type = UserNameType::try_from(req.r#type)
+            .map_err(|_| Status::invalid_argument("invalid name type"))?;
+
+        match name_type {
+            UserNameType::UsernameTypeFname => {
+                let name = &req.name;
+                if name.is_empty() {
+                    return Err(Status::invalid_argument("name is required"));
+                }
+
+                for stores in self.shard_stores.values() {
+                    match UserDataStore::get_username_proof(
+                        &stores.user_data_store,
+                        &mut RocksDbTransactionBatch::new(),
+                        name,
+                    ) {
+                        Ok(Some(proof)) => return Ok((proof.fid, name_type)),
+                        Ok(None) => continue,
+                        Err(e) => {
+                            error!("error fetching fname proof: {:?}", e);
+                            return Err(Status::internal("store error"));
+                        }
+                    }
+                }
+                Err(Status::not_found("username proof not found"))
+            }
+            UserNameType::UsernameTypeEnsL1 | UserNameType::UsernameTypeBasename => {
+                for stores in self.shard_stores.values() {
+                    match UsernameProofStore::get_username_proof(
+                        &stores.username_proof_store,
+                        &req.name.to_vec(),
+                        &mut RocksDbTransactionBatch::new(),
+                    ) {
+                        Ok(Some(message)) => {
+                            if let Some(data) = message.data {
+                                if let Some(message_data::Body::UsernameProofBody(body)) = data.body
+                                {
+                                    if body.r#type == name_type as i32 {
+                                        return Ok((body.fid, name_type));
+                                    }
+                                }
+                            }
+                        }
+                        Ok(None) => continue,
+                        Err(e) => {
+                            error!("error fetching username proof: {:?}", e);
+                            return Err(Status::internal("store error"));
+                        }
+                    }
+                }
+                Err(Status::not_found("username proof not found"))
+            }
+            _ => Err(Status::invalid_argument("unsupported name type")),
+        }
+    }
+
+    fn find_id_registry_event_by_address(
+        &self,
+        address: &[u8],
+    ) -> Result<Option<OnChainEvent>, Status> {
+        if let Some(evt) = self.id_registry_cache.get(address) {
+            return Ok(Some(evt.clone()));
+        }
+
+        for stores in self.shard_stores.values() {
+            let events = stores
+                .onchain_event_store
+                .get_onchain_events(proto::OnChainEventType::EventTypeIdRegister, None)
+                .map_err(|_| {
+                    Status::internal("on chain event store iterator not found for EventType")
+                })?;
+
+            for evt in events {
+                if let Some(Body::IdRegisterEventBody(body)) = &evt.body {
+                    let key = &body.to;
+                    self.id_registry_cache.insert(key.clone(), evt.clone());
+                    if key == address {
+                        return Ok(Some(evt));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn upsert_address_match(
+        matches: &mut Vec<AddressMatch>,
+        fid: u64,
+        is_custody: bool,
+        is_verified: bool,
+    ) {
+        if let Some(existing) = matches.iter_mut().find(|m| m.fid == fid) {
+            existing.is_custody |= is_custody;
+            existing.is_verified |= is_verified;
+        } else {
+            matches.push(AddressMatch {
+                fid,
+                is_custody,
+                is_verified,
+            });
+        }
     }
 }
 
@@ -1942,6 +2048,110 @@ impl HubService for MyHubService {
         };
 
         Ok(Response::new(response))
+    }
+
+    async fn get_fid_by_name(
+        &self,
+        request: Request<NameLookupRequest>,
+    ) -> Result<Response<FidResponse>, Status> {
+        let req = request.into_inner();
+        let (fid, _) = self.resolve_name(&req)?;
+
+        Ok(Response::new(FidResponse { fid }))
+    }
+
+    async fn get_addresses_by_name(
+        &self,
+        request: Request<NameLookupRequest>,
+    ) -> Result<Response<NameToAddressResponse>, Status> {
+        let req = request.into_inner();
+        let (fid, _) = self.resolve_name(&req)?;
+
+        let stores = self.get_stores_for(fid)?;
+
+        let mut custody_address: Option<Vec<u8>> = None;
+        if let Ok(Some(event)) = stores
+            .onchain_event_store
+            .get_id_register_event_by_fid(fid, None)
+        {
+            if let Some(Body::IdRegisterEventBody(body)) = &event.body {
+                custody_address = Some(body.to.clone());
+            }
+        }
+
+        let mut connected_addresses: Vec<Vec<u8>> = Vec::new();
+        let mut page_token: Option<Vec<u8>> = None;
+        loop {
+            let page_options = PageOptions {
+                page_size: None,
+                page_token: page_token.clone(),
+                reverse: false,
+            };
+
+            let page = VerificationStore::get_verification_adds_by_fid(
+                &stores.verification_store,
+                fid,
+                &page_options,
+            )
+            .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
+
+            for message in page.messages {
+                if let Some(data) = message.data {
+                    if let Some(message_data::Body::VerificationAddAddressBody(body)) = data.body {
+                        connected_addresses.push(body.address);
+                    }
+                }
+            }
+
+            if let Some(next) = page.next_page_token {
+                page_token = Some(next);
+            } else {
+                break;
+            }
+        }
+
+        connected_addresses.sort();
+        connected_addresses.dedup();
+
+        let response = NameToAddressResponse {
+            fid,
+            custody_address,
+            connected_addresses,
+        };
+
+        Ok(Response::new(response))
+    }
+
+    async fn get_fid_by_address(
+        &self,
+        request: Request<AddressLookupRequest>,
+    ) -> Result<Response<AddressToFidResponse>, Status> {
+        let req = request.into_inner();
+        let address = req.address;
+
+        let mut matches: Vec<AddressMatch> = Vec::new();
+
+        if let Some(event) = self.find_id_registry_event_by_address(&address)? {
+            if let Some(Body::IdRegisterEventBody(body)) = &event.body {
+                if body.to == address {
+                    Self::upsert_address_match(&mut matches, event.fid, true, false);
+                }
+            }
+        }
+
+        for stores in self.shard_stores.values() {
+            if let Ok(Some(fid)) =
+                VerificationStore::get_fid_by_address(&stores.verification_store, &address)
+            {
+                Self::upsert_address_match(&mut matches, fid, false, true);
+            }
+        }
+
+        if matches.is_empty() {
+            return Err(Status::not_found("no fid found for address"));
+        }
+
+        Ok(Response::new(AddressToFidResponse { matches }))
     }
 
     async fn get_on_chain_signer(

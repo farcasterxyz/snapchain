@@ -48,6 +48,7 @@ impl PeerDiscoverer {
             true, // behave like read node (subscribe to contact info / statuses)
             fc_network,
             statsd_client,
+            Vec::new(),
         )
         .await
         .map_err(|e| {

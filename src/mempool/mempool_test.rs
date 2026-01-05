@@ -89,6 +89,7 @@ mod tests {
                     false,
                     proto::FarcasterNetwork::Devnet,
                     statsd_client.clone(),
+                    Vec::new(),
                 )
                 .await
                 .unwrap(),

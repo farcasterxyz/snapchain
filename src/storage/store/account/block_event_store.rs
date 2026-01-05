@@ -5,7 +5,6 @@ use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch, RocksdbE
 use prost::Message;
 use std::sync::Arc;
 use thiserror::Error;
-use tracing::error;
 
 #[derive(Error, Debug)]
 pub enum BlockEventStorageError {

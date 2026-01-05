@@ -4,6 +4,7 @@ use super::account::{
 };
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
+use crate::hyper::StateContext;
 use crate::network::http_server::TierType;
 use crate::proto::{
     self, HubEvent, OnChainEvent, StorageLimit, StorageLimitsResponse, StorageUnitDetails,
@@ -213,6 +214,31 @@ impl StoreLimits {
             StorageUnitType::UnitTypeLegacy => &self.limits_legacy,
             StorageUnitType::UnitType2024 => &self.limits_2024,
             StorageUnitType::UnitType2025 => &self.limits_2025,
+        }
+    }
+}
+
+impl Stores {
+    pub fn with_state_context(&self, ctx: StateContext) -> Self {
+        Self {
+            block_event_store: self.block_event_store.clone(),
+            shard_store: self.shard_store.clone(),
+            cast_store: self.cast_store.with_state_context(ctx),
+            link_store: self.link_store.with_state_context(ctx),
+            reaction_store: self.reaction_store.with_state_context(ctx),
+            user_data_store: self.user_data_store.with_state_context(ctx),
+            verification_store: self.verification_store.with_state_context(ctx),
+            onchain_event_store: self.onchain_event_store.with_state_context(ctx),
+            username_proof_store: self.username_proof_store.with_state_context(ctx),
+            storage_lend_store: self.storage_lend_store.with_state_context(ctx),
+            db: self.db.clone(),
+            trie: self.trie.clone(),
+            store_limits: self.store_limits.clone(),
+            event_handler: self.event_handler.clone(),
+            shard_id: self.shard_id,
+            statsd: self.statsd.clone(),
+            prune_lock: self.prune_lock.clone(),
+            network: self.network,
         }
     }
 }

@@ -49,6 +49,12 @@ pub struct CastStoreDef {
     prune_size_limit: u32,
 }
 
+impl CastStoreDef {
+    pub fn new(prune_size_limit: u32) -> Self {
+        Self { prune_size_limit }
+    }
+}
+
 impl StoreDef for CastStoreDef {
     #[inline]
     fn postfix(&self) -> u8 {
@@ -367,7 +373,7 @@ impl CastStore {
         store_event_handler: Arc<StoreEventHandler>,
         prune_size_limit: u32,
     ) -> Store<CastStoreDef> {
-        Store::new_with_store_def(db, store_event_handler, CastStoreDef { prune_size_limit })
+        Store::new_with_store_def(db, store_event_handler, CastStoreDef::new(prune_size_limit))
     }
 
     pub fn new_with_opts(
@@ -379,7 +385,7 @@ impl CastStore {
         Store::new_with_store_def_opts(
             db,
             store_event_handler,
-            CastStoreDef { prune_size_limit },
+            CastStoreDef::new(prune_size_limit),
             store_opts,
         )
     }

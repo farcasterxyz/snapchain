@@ -85,12 +85,14 @@ eth-signature-verifier = { version = "0.3.7", path = "../eth-signature-verifier"
 fancy-regex = "0.14.0"
 aws-config = { version = "1.1.7", features = ["behavior-version-latest"] }
 aws-sdk-s3 = { version = "1.71.0", features = ["behavior-version-latest"] }
-hyper = "1.5.1"
+hyper = { version = "1.5.1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
 serde_qs = "0.13.0"
 base64 = "0.22.1"
 toml = "0.8.19"
+tantivy = "0.22"
+urlencoding = "2.1"
 tokio-cron-scheduler = "0.13.0"
 strum = "0.27.1"
 strum_macros = "0.27.1"
@@ -103,6 +105,7 @@ solar-data-structures = "=0.1.1"
 solar-macros = "=0.1.1"
 solar-config = "=0.1.1"
 nix = { version = "0.29", features = ["resource"] }
+svm-rs-builds = "0.5.22"
 
 
 [dev-dependencies]
@@ -112,4 +115,3 @@ insta = { version = "1.40", features = ["json"] }
 
 [package.metadata.precommit]
 fmt = "cargo fmt --check --quiet"
-

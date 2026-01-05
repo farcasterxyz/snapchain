@@ -13,6 +13,7 @@ use std::sync::Arc;
 use tonic::async_trait;
 use tonic::metadata::MetadataValue;
 
+use crate::api::ApiHttpHandler;
 use crate::proto::{
     self, embed, hub_service_server::HubService, link_body::Target, message_data::Body, CastType,
     FarcasterNetwork, HashScheme, MessageType, ReactionType, SignatureScheme, UserDataType,
@@ -836,6 +837,155 @@ pub struct UserNameProof {
 pub struct UsernameProofsResponse {
     pub proofs: Vec<UserNameProof>,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FidResponse {
+    pub fid: u64,
+}
+
+impl From<proto::FidResponse> for FidResponse {
+    fn from(value: proto::FidResponse) -> Self {
+        FidResponse { fid: value.fid }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NameLookupRequest {
+    pub name: String,
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub name_type: Option<String>,
+}
+
+impl NameLookupRequest {
+    pub fn to_proto(self) -> Result<proto::NameLookupRequest, ErrorResponse> {
+        if self.name.trim().is_empty() {
+            return Err(ErrorResponse {
+                error: "Name is required".to_string(),
+                error_detail: None,
+            });
+        }
+
+        let name_type = if let Some(name_type_str) = &self.name_type {
+            parse_user_name_type(name_type_str).ok_or_else(|| ErrorResponse {
+                error: "Invalid name type".to_string(),
+                error_detail: Some(format!("unknown name type: {}", name_type_str)),
+            })?
+        } else {
+            infer_user_name_type_from_name(&self.name)?
+        };
+
+        Ok(proto::NameLookupRequest {
+            name: self.name.into_bytes(),
+            r#type: name_type as i32,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NameToAddressResponse {
+    pub fid: u64,
+    #[serde(rename = "custodyAddress", skip_serializing_if = "Option::is_none")]
+    pub custody_address: Option<String>,
+    #[serde(rename = "connectedAddresses")]
+    pub connected_addresses: Vec<String>,
+}
+
+impl From<proto::NameToAddressResponse> for NameToAddressResponse {
+    fn from(value: proto::NameToAddressResponse) -> Self {
+        NameToAddressResponse {
+            fid: value.fid,
+            custody_address: value
+                .custody_address
+                .map(|addr| format!("0x{}", hex::encode(addr))),
+            connected_addresses: value
+                .connected_addresses
+                .into_iter()
+                .map(|addr| format!("0x{}", hex::encode(addr)))
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AddressLookupRequest {
+    #[serde(with = "serdehex")]
+    pub address: Vec<u8>,
+}
+
+impl AddressLookupRequest {
+    pub fn to_proto(self) -> Result<proto::AddressLookupRequest, ErrorResponse> {
+        if self.address.is_empty() {
+            return Err(ErrorResponse {
+                error: "Address is required".to_string(),
+                error_detail: None,
+            });
+        }
+
+        Ok(proto::AddressLookupRequest {
+            address: self.address,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AddressMatch {
+    pub fid: u64,
+    #[serde(rename = "isCustody")]
+    pub is_custody: bool,
+    #[serde(rename = "isVerified")]
+    pub is_verified: bool,
+}
+
+impl From<proto::AddressMatch> for AddressMatch {
+    fn from(value: proto::AddressMatch) -> Self {
+        AddressMatch {
+            fid: value.fid,
+            is_custody: value.is_custody,
+            is_verified: value.is_verified,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AddressToFidResponse {
+    pub matches: Vec<AddressMatch>,
+}
+
+impl From<proto::AddressToFidResponse> for AddressToFidResponse {
+    fn from(value: proto::AddressToFidResponse) -> Self {
+        AddressToFidResponse {
+            matches: value.matches.into_iter().map(AddressMatch::from).collect(),
+        }
+    }
+}
+
+fn parse_user_name_type(value: &str) -> Option<UserNameType> {
+    match value.to_ascii_lowercase().as_str() {
+        "fname" | "username" => Some(UserNameType::UsernameTypeFname),
+        "ens" | "ens_l1" | "ensl1" => Some(UserNameType::UsernameTypeEnsL1),
+        "basename" | "base" => Some(UserNameType::UsernameTypeBasename),
+        _ => None,
+    }
+}
+
+fn infer_user_name_type_from_name(name: &str) -> Result<UserNameType, ErrorResponse> {
+    if name.trim().is_empty() {
+        return Err(ErrorResponse {
+            error: "Name is required".to_string(),
+            error_detail: None,
+        });
+    }
+
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".base.eth") {
+        Ok(UserNameType::UsernameTypeBasename)
+    } else if lower.ends_with(".eth") {
+        Ok(UserNameType::UsernameTypeEnsL1)
+    } else {
+        Ok(UserNameType::UsernameTypeFname)
+    }
+}
+
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum OnChainEventType {
@@ -1223,6 +1373,8 @@ pub struct ContactInfoBody {
     snapchain_version: String,
     network: FarcasterNetwork,
     timestamp: u64,
+    #[serde(default)]
+    capabilities: Vec<String>,
 }
 
 impl TryFrom<proto::ContactInfoBody> for ContactInfoBody {
@@ -1241,6 +1393,7 @@ impl TryFrom<proto::ContactInfoBody> for ContactInfoBody {
             snapchain_version: value.snapchain_version.clone(),
             network: value.network(),
             timestamp: value.timestamp,
+            capabilities: value.capabilities.clone(),
         })
     }
 }
@@ -2220,6 +2373,15 @@ pub trait HubHttpService {
         &self,
         req: FidRequest,
     ) -> Result<UsernameProofsResponse, ErrorResponse>;
+    async fn get_fid_by_name(&self, req: NameLookupRequest) -> Result<FidResponse, ErrorResponse>;
+    async fn get_addresses_by_name(
+        &self,
+        req: NameLookupRequest,
+    ) -> Result<NameToAddressResponse, ErrorResponse>;
+    async fn get_fid_by_address(
+        &self,
+        req: AddressLookupRequest,
+    ) -> Result<AddressToFidResponse, ErrorResponse>;
     async fn validate_message(
         &self,
         req: proto::Message,
@@ -2747,6 +2909,51 @@ where
         })
     }
 
+    async fn get_fid_by_name(&self, req: NameLookupRequest) -> Result<FidResponse, ErrorResponse> {
+        let proto_request = req.to_proto()?;
+        let response = self
+            .service
+            .get_fid_by_name(tonic::Request::new(proto_request))
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get fid by name".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+        Ok(FidResponse::from(response.into_inner()))
+    }
+
+    async fn get_addresses_by_name(
+        &self,
+        req: NameLookupRequest,
+    ) -> Result<NameToAddressResponse, ErrorResponse> {
+        let proto_request = req.to_proto()?;
+        let response = self
+            .service
+            .get_addresses_by_name(tonic::Request::new(proto_request))
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get addresses by name".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+        Ok(NameToAddressResponse::from(response.into_inner()))
+    }
+
+    async fn get_fid_by_address(
+        &self,
+        req: AddressLookupRequest,
+    ) -> Result<AddressToFidResponse, ErrorResponse> {
+        let proto_request = req.to_proto()?;
+        let response = self
+            .service
+            .get_fid_by_address(tonic::Request::new(proto_request))
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get fid by address".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+        Ok(AddressToFidResponse::from(response.into_inner()))
+    }
+
     /// POST /v1/validateMessage
     async fn validate_message(
         &self,
@@ -3035,6 +3242,7 @@ where
 // Router implementation
 pub struct Router<Service: HubService> {
     service: Arc<HubHttpServiceImpl<Service>>,
+    api_handler: Option<ApiHttpHandler>,
 }
 
 impl<Service> Router<Service>
@@ -3044,7 +3252,14 @@ where
     pub fn new(service: HubHttpServiceImpl<Service>) -> Self {
         Self {
             service: Arc::new(service),
+            api_handler: None,
         }
+    }
+
+    /// Set the API handler for v2 API endpoints.
+    pub fn with_api_handler(mut self, handler: ApiHttpHandler) -> Self {
+        self.api_handler = Some(handler);
+        self
     }
 
     pub async fn handle(
@@ -3052,6 +3267,19 @@ where
         req: Request<hyper::body::Incoming>,
         config: &Config,
     ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
+        // Check if this is a v2 API request
+        let path = req.uri().path();
+        if let Some(ref handler) = self.api_handler {
+            if handler.can_handle(req.method(), path) {
+                let mut response = handler.handle(req).await?;
+                response.headers_mut().append(
+                    "Access-Control-Allow-Origin",
+                    HeaderValue::from_str(&config.cors_origin).unwrap(),
+                );
+                return Ok(response);
+            }
+        }
+
         let mut response = match (req.method(), req.uri().path()) {
             (&Method::GET, "/v1/info") => {
                 self.handle_request::<InfoRequest, InfoResponse, _>(req, |service, req| {
@@ -3170,6 +3398,28 @@ where
                 self.handle_request::<FidRequest, UsernameProofsResponse, _>(req, |service, req| {
                     Box::pin(async move { service.get_user_name_proofs_by_fid(req).await })
                 })
+                .await
+            }
+            (&Method::GET, "/v1/fidByName") => {
+                self.handle_request::<NameLookupRequest, FidResponse, _>(req, |service, req| {
+                    Box::pin(async move { service.get_fid_by_name(req).await })
+                })
+                .await
+            }
+            (&Method::GET, "/v1/addressesByName") => {
+                self.handle_request::<NameLookupRequest, NameToAddressResponse, _>(
+                    req,
+                    |service, req| {
+                        Box::pin(async move { service.get_addresses_by_name(req).await })
+                    },
+                )
+                .await
+            }
+            (&Method::GET, "/v1/fidByAddress") => {
+                self.handle_request::<AddressLookupRequest, AddressToFidResponse, _>(
+                    req,
+                    |service, req| Box::pin(async move { service.get_fid_by_address(req).await }),
+                )
                 .await
             }
             (&Method::POST, "/v1/validateMessage") => {

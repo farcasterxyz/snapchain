@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+message HyperBlockMetadata {
+  uint64 canonical_block_id = 1;
+  bytes parent_hash = 2;
+  bytes hyper_state_root = 3;
+  uint32 extra_rules_version = 4;
+  uint64 retained_message_count = 5;
+}
+
+message HyperEnvelope {
+  HyperBlockMetadata metadata = 1;
+  bytes payload = 2;
+}

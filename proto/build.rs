@@ -19,6 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "definitions/hub_event.proto",
             "definitions/username_proof.proto",
             "definitions/sync_trie.proto",
+            "definitions/hyper.proto",
             "definitions/node_state.proto",
             "definitions/gossip.proto",
             "definitions/request_response.proto",

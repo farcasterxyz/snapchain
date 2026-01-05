@@ -3,10 +3,11 @@ use crate::consensus::consensus::{MalachiteEventShard, SystemMessage};
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
+use crate::hyper::CAPABILITY_HYPER;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::proto::{
     gossip_message, read_node_message, ContactInfo, ContactInfoBody, FarcasterNetwork,
-    GossipMessage,
+    GossipMessage, HyperEnvelope,
 };
 use crate::storage::store::account::message_bytes_decode;
 use crate::storage::store::mempool_poller::MempoolMessage;
@@ -46,6 +47,7 @@ const MEMPOOL_TOPIC: &str = "mempool";
 const DECIDED_VALUES: &str = "decided-values";
 const READ_NODE_PEER_STATUSES: &str = "read-node-peers";
 const CONTACT_INFO: &str = "contact-info";
+const HYPER_TOPIC: &str = "hyper";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -157,6 +159,7 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
     BroadcastSignedProposal(SignedProposal<Ctx>),
     BroadcastFullProposal(proto::FullProposal),
     BroadcastMempoolMessage(MempoolMessage),
+    BroadcastHyperEnvelope(HyperEnvelope),
     BroadcastStatus(sync::Status<SnapchainValidatorContext>),
     SyncRequest(
         MalachitePeerId,
@@ -174,6 +177,7 @@ pub enum GossipTopic {
     DecidedValues,
     ReadNodePeerStatuses,
     Mempool,
+    Hyper,
     SyncRequest(MalachitePeerId, oneshot::Sender<OutboundRequestId>),
     SyncReply(InboundRequestId),
 }
@@ -202,9 +206,25 @@ pub struct SnapchainGossip {
     bootstrap_reconnect_interval: Duration,
     statsd_client: StatsdClientWrapper,
     peers: BTreeMap<PeerId, ContactInfoBody>,
+    capabilities: Vec<String>,
+    hyper_enabled: bool,
 }
 
 impl SnapchainGossip {
+    pub(crate) fn encode_hyper_envelope(&self, envelope: HyperEnvelope) -> Option<Vec<u8>> {
+        if !self.hyper_enabled {
+            warn!("Hyper envelope dropped; node is not hyper-enabled");
+            None
+        } else {
+            let gossip_message = proto::GossipMessage {
+                gossip_message: Some(proto::gossip_message::GossipMessage::HyperEnvelope(
+                    envelope.into(),
+                )),
+            };
+            Some(gossip_message.encode_to_vec())
+        }
+    }
+
     pub async fn create(
         keypair: Keypair,
         config: &Config,
@@ -212,6 +232,7 @@ impl SnapchainGossip {
         read_node: bool,
         fc_network: FarcasterNetwork,
         statsd_client: StatsdClientWrapper,
+        capabilities: Vec<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair.clone().into())
             .with_tokio()
@@ -346,6 +367,14 @@ impl SnapchainGossip {
 
         // ~5 seconds of buffer (assuming 1K msgs/pec)
         let (tx, rx) = mpsc::channel(5000);
+        let hyper_enabled = capabilities.iter().any(|cap| cap == CAPABILITY_HYPER);
+        if hyper_enabled {
+            let topic = gossipsub::IdentTopic::new(HYPER_TOPIC);
+            if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&topic) {
+                warn!("Failed to subscribe to topic: {:?}", e);
+            }
+        }
+
         Ok(SnapchainGossip {
             swarm,
             tx,
@@ -363,6 +392,8 @@ impl SnapchainGossip {
             connected_bootstrap_addrs: HashSet::new(),
             enable_autodiscovery: config.enable_autodiscovery,
             peers: BTreeMap::new(),
+            capabilities,
+            hyper_enabled,
         })
     }
 
@@ -466,6 +497,7 @@ impl SnapchainGossip {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_millis() as u64,
+                capabilities: self.capabilities.clone(),
             }),
         };
 
@@ -624,6 +656,7 @@ impl SnapchainGossip {
                                 GossipTopic::DecidedValues=> self.publish(encoded_message.clone(), DECIDED_VALUES),
                                 GossipTopic::ReadNodePeerStatuses => self.publish(encoded_message.clone(), READ_NODE_PEER_STATUSES),
                                 GossipTopic::Mempool => self.publish(encoded_message.clone(), MEMPOOL_TOPIC),
+                                GossipTopic::Hyper => self.publish(encoded_message.clone(), HYPER_TOPIC),
                                 GossipTopic::SyncRequest(peer_id, reply_tx) => {
                                     let peer = peer_id.to_libp2p();
                                     let request_id = self.swarm.behaviour_mut().rpc.send_request(peer, Bytes::from(encoded_message.clone()));
@@ -798,6 +831,13 @@ impl SnapchainGossip {
                     );
                     Some(SystemMessage::MalachiteNetwork(shard, event))
                 }
+                Some(proto::gossip_message::GossipMessage::HyperEnvelope(_)) => {
+                    warn!(
+                        "Received hyper envelope from peer {}, ignoring (not yet supported)",
+                        peer_id
+                    );
+                    None
+                }
                 Some(proto::gossip_message::GossipMessage::MempoolMessage(message)) => {
                     if let Some(mempool_message_proto) = message.mempool_message {
                         let mempool_message = match mempool_message_proto {
@@ -956,6 +996,9 @@ impl SnapchainGossip {
                 };
                 Some((vec![GossipTopic::Mempool], gossip_message.encode_to_vec()))
             }
+            Some(GossipEvent::BroadcastHyperEnvelope(envelope)) => self
+                .encode_hyper_envelope(envelope)
+                .map(|bytes| (vec![GossipTopic::Hyper], bytes)),
             Some(GossipEvent::SyncRequest(peer_id, request, reply_tx)) => {
                 let encoded = snapchain_codec.encode(&request);
                 match encoded {

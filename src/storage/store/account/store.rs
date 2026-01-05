@@ -6,6 +6,7 @@ use super::{
 };
 use crate::core::error::HubError;
 use crate::core::message::HubEventExt;
+use crate::hyper::StateContext;
 use crate::proto::{
     hub_event, HubEvent, HubEventType, MergeMessageBody, PruneMessageBody, RevokeMessageBody,
 };
@@ -273,6 +274,7 @@ where
     store_event_handler: Arc<StoreEventHandler>,
     db: Arc<RocksDB>,
     store_opts: StoreOptions,
+    state_context: StateContext,
 }
 
 impl<T: StoreDef + Clone> Store<T> {
@@ -281,12 +283,13 @@ impl<T: StoreDef + Clone> Store<T> {
         store_event_handler: Arc<StoreEventHandler>,
         store_def: T,
     ) -> Store<T> {
-        Store {
-            store_def,
-            store_event_handler,
+        Store::new_with_store_def_ctx(
             db,
-            store_opts: StoreOptions::default(),
-        }
+            store_event_handler,
+            store_def,
+            StoreOptions::default(),
+            StateContext::Legacy,
+        )
     }
 
     pub fn new_with_store_def_opts(
@@ -295,12 +298,43 @@ impl<T: StoreDef + Clone> Store<T> {
         store_def: T,
         store_opts: StoreOptions,
     ) -> Store<T> {
+        Store::new_with_store_def_ctx(
+            db,
+            store_event_handler,
+            store_def,
+            store_opts,
+            StateContext::Legacy,
+        )
+    }
+
+    pub fn new_with_store_def_ctx(
+        db: Arc<RocksDB>,
+        store_event_handler: Arc<StoreEventHandler>,
+        store_def: T,
+        store_opts: StoreOptions,
+        state_context: StateContext,
+    ) -> Store<T> {
         Store {
             store_def,
             store_event_handler,
             db,
             store_opts,
+            state_context,
         }
+    }
+
+    pub fn with_state_context(&self, ctx: StateContext) -> Store<T> {
+        Store {
+            store_def: self.store_def.clone(),
+            store_event_handler: self.store_event_handler.clone(),
+            db: self.db.clone(),
+            store_opts: self.store_opts.clone(),
+            state_context: ctx,
+        }
+    }
+
+    pub fn state_context(&self) -> StateContext {
+        self.state_context
     }
 
     pub fn store_def(&self) -> T {
@@ -899,6 +933,10 @@ impl<T: StoreDef + Clone> Store<T> {
         max_count: u32,
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<Vec<HubEvent>, HubError> {
+        if !self.state_context.allows_pruning() {
+            return Ok(vec![]);
+        }
+
         let mut pruned_events = vec![];
 
         let mut count = current_count;

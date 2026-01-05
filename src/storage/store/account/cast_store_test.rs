@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::super::test_helper::FID_FOR_TEST;
+    use crate::hyper::StateContext;
     use crate::proto::cast_add_body::Parent;
     use crate::proto::reaction_body::Target;
     use crate::proto::{self as message, hub_event, CastType, HubEvent, HubEventType};
@@ -40,6 +41,13 @@ mod tests {
     fn create_test_store_with_prune_limit(
         prune_size_limit: u32,
     ) -> (Store<CastStoreDef>, Arc<RocksDB>, TempDir) {
+        create_test_store_with_prune_limit_ctx(prune_size_limit, StateContext::Legacy)
+    }
+
+    fn create_test_store_with_prune_limit_ctx(
+        prune_size_limit: u32,
+        ctx: StateContext,
+    ) -> (Store<CastStoreDef>, Arc<RocksDB>, TempDir) {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let db = RocksDB::new(db_path.to_str().unwrap());
@@ -47,7 +55,13 @@ mod tests {
         let db = Arc::new(db);
 
         let event_handler = StoreEventHandler::new();
-        let store = CastStore::new(db.clone(), event_handler.clone(), prune_size_limit);
+        let store = Store::new_with_store_def_ctx(
+            db.clone(),
+            event_handler.clone(),
+            CastStoreDef::new(prune_size_limit),
+            StoreOptions::default(),
+            ctx,
+        );
 
         (store, db.clone(), temp_dir)
     }
@@ -1577,6 +1591,84 @@ mod tests {
             let result = CastStore::get_cast_add(&store, FID_FOR_TEST, cast_adds[i].hash.clone());
             assert!(result.unwrap().is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn test_prune_messages_skipped_for_hyper_context() {
+        let (store, db, _temp_dir) = create_test_store_with_prune_limit_ctx(1, StateContext::Hyper);
+
+        let timestamp = time::farcaster_time();
+        let first = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "first cast",
+            Some(timestamp),
+            None,
+        );
+        let second = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "second cast",
+            Some(timestamp + 1),
+            None,
+        );
+
+        merge_messages(&store, &db, vec![&first, &second]);
+
+        let mut txn = RocksDbTransactionBatch::new();
+        let result = store.prune_messages(FID_FOR_TEST, 2, 1, &mut txn).unwrap();
+        assert!(result.is_empty());
+        db.commit(txn).unwrap();
+
+        let remaining =
+            CastStore::get_cast_adds_by_fid(&store, FID_FOR_TEST, &PageOptions::default()).unwrap();
+        assert_eq!(remaining.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_hyper_store_retains_messages_after_legacy_prune() {
+        let (legacy_store, legacy_db, _legacy_dir) =
+            create_test_store_with_prune_limit_ctx(1, StateContext::Legacy);
+        let (hyper_store, hyper_db, _hyper_dir) =
+            create_test_store_with_prune_limit_ctx(1, StateContext::Hyper);
+
+        let timestamp = time::farcaster_time();
+        let first = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "legacy cast",
+            Some(timestamp),
+            None,
+        );
+        let second = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "hyper cast",
+            Some(timestamp + 1),
+            None,
+        );
+
+        merge_messages(&legacy_store, &legacy_db, vec![&first, &second]);
+        let first_hyper = first.clone();
+        let second_hyper = second.clone();
+        merge_messages(&hyper_store, &hyper_db, vec![&first_hyper, &second_hyper]);
+
+        let mut txn = RocksDbTransactionBatch::new();
+        let pruned = legacy_store
+            .prune_messages(FID_FOR_TEST, 2, 1, &mut txn)
+            .unwrap();
+        assert_eq!(pruned.len(), 1);
+        legacy_db.commit(txn).unwrap();
+
+        let legacy_first =
+            CastStore::get_cast_add(&legacy_store, FID_FOR_TEST, first.hash.clone()).unwrap();
+        assert!(legacy_first.is_none());
+        let legacy_second =
+            CastStore::get_cast_add(&legacy_store, FID_FOR_TEST, second.hash.clone()).unwrap();
+        assert!(legacy_second.is_some());
+
+        let hyper_first =
+            CastStore::get_cast_add(&hyper_store, FID_FOR_TEST, first.hash.clone()).unwrap();
+        assert!(hyper_first.is_some());
+        let hyper_second =
+            CastStore::get_cast_add(&hyper_store, FID_FOR_TEST, second.hash.clone()).unwrap();
+        assert!(hyper_second.is_some());
     }
 
     #[tokio::test]

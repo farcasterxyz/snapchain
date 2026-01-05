@@ -5,6 +5,7 @@ use crate::core::{
     error::HubError, message::HubEventExt, types::Height, util::FarcasterTime, validations,
     validations::verification,
 };
+use crate::hyper::StateContext;
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::message_data::Body;
 use crate::proto::shard_trie_entry_with_message::TrieMessage;
@@ -269,6 +270,10 @@ impl ShardEngine {
 
     pub fn get_stores(&self) -> Stores {
         self.stores.clone()
+    }
+
+    pub fn stores_with_state_context(&self, ctx: StateContext) -> Stores {
+        self.stores.with_state_context(ctx)
     }
 
     pub fn get_senders(&self) -> Senders {

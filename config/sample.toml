@@ -1,5 +1,11 @@
 log_format = "json"
 
+[hyper]
+enabled = false
+# Example: set to help operators alert on disk growth.
+# retention_soft_cap = 500000
+metrics_interval = "60s"
+
 [statsd]
 prefix = "snaptest"
 
@@ -15,3 +21,47 @@ shard_ids = [1]
 
 [mempool]
 queue_size = 500
+
+# Farcaster API v2 compatibility layer (optional)
+# Enables additional indexing for Farcaster v2 API endpoints
+[api]
+enabled = false  # Set to true to enable API indexing
+
+# Social graph indexing for follower/following counts
+[api.social_graph]
+enabled = true
+backfill_on_startup = false
+backfill_batch_size = 1000
+
+# Channel indexing
+[api.channels]
+enabled = true
+backfill_on_startup = false
+backfill_batch_size = 1000
+
+# Engagement metrics (likes, recasts, replies)
+[api.metrics]
+enabled = true
+backfill_on_startup = false
+backfill_batch_size = 1000
+trending_window_hours = 24
+
+# Feed generation (following, trending)
+[api.feeds]
+enabled = true
+max_following_fetch = 1000
+default_page_size = 25
+
+# Conversation/thread aggregation
+[api.conversations]
+enabled = true
+max_depth = 10
+max_replies = 500
+
+# Full-text search using Tantivy
+[api.search]
+enabled = false
+backfill_on_startup = false
+backfill_batch_size = 1000
+memory_budget_mb = 50
+# index_path = "/var/lib/snapchain/search_index"  # Optional: custom index path

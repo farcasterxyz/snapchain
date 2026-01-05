@@ -3,6 +3,7 @@ syntax = "proto3";
 import "message.proto";
 import "blocks.proto";
 import "request_response.proto";
+import "hyper.proto";
 
 message ContactInfo {
   ContactInfoBody body = 1;
@@ -16,5 +17,6 @@ message GossipMessage {
     StatusMessage status = 4;
     ReadNodeMessage read_node_message = 5;
     ContactInfo contact_info_message = 6;
+    HyperEnvelope hyper_envelope = 7;
   }
 }

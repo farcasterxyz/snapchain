@@ -8,7 +8,10 @@ pub mod tests {
 
     use crate::{
         core::types::FARCASTER_EPOCH,
-        network::http_server::{HubHttpService, HubHttpServiceImpl},
+        network::http_server::{
+            AddressLookupRequest as HttpAddressLookupRequest, HubHttpService, HubHttpServiceImpl,
+            NameLookupRequest as HttpNameLookupRequest,
+        },
         proto::{hub_service_server::HubService, *},
     };
 
@@ -16,6 +19,9 @@ pub mod tests {
     pub struct MockHubService {
         current_peers: Option<GetConnectedPeersResponse>,
         pub call_counts: Arc<Mutex<HashMap<String, usize>>>,
+        pub fid_lookup_response: FidResponse,
+        pub name_to_address_response: NameToAddressResponse,
+        pub address_lookup_response: AddressToFidResponse,
     }
 
     impl MockHubService {
@@ -23,6 +29,13 @@ pub mod tests {
             Self {
                 current_peers: None,
                 call_counts: Arc::new(Mutex::new(HashMap::new())),
+                fid_lookup_response: FidResponse { fid: 0 },
+                name_to_address_response: NameToAddressResponse {
+                    fid: 0,
+                    custody_address: None,
+                    connected_addresses: vec![],
+                },
+                address_lookup_response: AddressToFidResponse { matches: vec![] },
             }
         }
     }
@@ -221,6 +234,27 @@ pub mod tests {
             Ok(Response::new(response))
         }
 
+        async fn get_fid_by_name(
+            &self,
+            _request: Request<NameLookupRequest>,
+        ) -> Result<Response<FidResponse>, Status> {
+            Ok(Response::new(self.fid_lookup_response.clone()))
+        }
+
+        async fn get_addresses_by_name(
+            &self,
+            _request: Request<NameLookupRequest>,
+        ) -> Result<Response<NameToAddressResponse>, Status> {
+            Ok(Response::new(self.name_to_address_response.clone()))
+        }
+
+        async fn get_fid_by_address(
+            &self,
+            _request: Request<AddressLookupRequest>,
+        ) -> Result<Response<AddressToFidResponse>, Status> {
+            Ok(Response::new(self.address_lookup_response.clone()))
+        }
+
         async fn get_verification(
             &self,
             _request: Request<VerificationRequest>,
@@ -397,6 +431,7 @@ pub mod tests {
                 ],
                 snapchain_version: "0.2.1".to_string(),
                 timestamp: FARCASTER_EPOCH,
+                capabilities: vec![],
             }],
         });
         let http_service = HubHttpServiceImpl {
@@ -416,10 +451,91 @@ pub mod tests {
               "peer_id": "12D3KooWHRyfTBKcjkqjNk5UZarJhzT7rXZYfr4DmaCWJgen62Xk",
               "snapchain_version": "0.2.1",
               "network": "Mainnet",
-              "timestamp": 1609459200000
+              "timestamp": 1609459200000,
+              "capabilities": []
             }
           ]
         }
         "#);
+    }
+
+    #[tokio::test]
+    async fn test_get_fid_by_name_http_handler() {
+        let mut mock_hub_service = MockHubService::new();
+        mock_hub_service.fid_lookup_response = FidResponse { fid: 1234 };
+
+        let http_service = HubHttpServiceImpl {
+            service: Arc::new(mock_hub_service),
+        };
+
+        let response = http_service
+            .get_fid_by_name(HttpNameLookupRequest {
+                name: "alice".to_string(),
+                name_type: Some("fname".to_string()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(response.fid, 1234);
+    }
+
+    #[tokio::test]
+    async fn test_get_addresses_by_name_http_handler() {
+        let mut mock_hub_service = MockHubService::new();
+        mock_hub_service.name_to_address_response = NameToAddressResponse {
+            fid: 9,
+            custody_address: Some(vec![0x10, 0x11]),
+            connected_addresses: vec![vec![0xaa]],
+        };
+
+        let http_service = HubHttpServiceImpl {
+            service: Arc::new(mock_hub_service),
+        };
+
+        let response = http_service
+            .get_addresses_by_name(HttpNameLookupRequest {
+                name: "bob".to_string(),
+                name_type: Some("fname".to_string()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(response.fid, 9);
+        assert_eq!(response.custody_address.as_deref(), Some("0x1011"));
+        assert_eq!(response.connected_addresses, vec!["0xaa".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_get_fid_by_address_http_handler() {
+        let mut mock_hub_service = MockHubService::new();
+        mock_hub_service.address_lookup_response = AddressToFidResponse {
+            matches: vec![
+                AddressMatch {
+                    fid: 77,
+                    is_custody: true,
+                    is_verified: false,
+                },
+                AddressMatch {
+                    fid: 88,
+                    is_custody: false,
+                    is_verified: true,
+                },
+            ],
+        };
+
+        let http_service = HubHttpServiceImpl {
+            service: Arc::new(mock_hub_service),
+        };
+
+        let response = http_service
+            .get_fid_by_address(HttpAddressLookupRequest {
+                address: vec![0xde, 0xad],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(response.matches.len(), 2);
+        assert!(response.matches[0].is_custody);
+        assert!(response.matches[1].is_verified);
     }
 }

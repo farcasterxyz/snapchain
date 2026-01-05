@@ -2141,4 +2141,397 @@ mod tests {
             .await;
         test_helper::assert_contains_all_messages(&response, &[&lend2]);
     }
+
+    #[tokio::test]
+    async fn test_get_fid_by_name_fname() {
+        let (
+            stores,
+            _senders,
+            [mut engine1, _engine2],
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let fid = SHARD1_FID;
+        let signer = test_helper::default_signer();
+        let owner = test_helper::default_custody_address();
+
+        // Register the user
+        test_helper::register_user(fid, signer.clone(), owner.clone(), &mut engine1).await;
+
+        // Create and store an fname proof directly in the user_data_store
+        let fname = "alice";
+        let fname_proof = crate::utils::factory::username_factory::create_username_proof(
+            fid,
+            proto::UserNameType::UsernameTypeFname,
+            &fname.to_string(),
+            None,
+            Some(owner.clone()),
+        );
+
+        // Merge the fname proof into the store
+        let store = &stores.get(&1u32).unwrap().user_data_store;
+        let mut txn = RocksDbTransactionBatch::new();
+        crate::storage::store::account::UserDataStore::merge_username_proof(
+            store,
+            &fname_proof,
+            &mut txn,
+        )
+        .unwrap();
+        store.db().commit(txn).unwrap();
+
+        // Test get_fid_by_name for fname
+        let request = Request::new(proto::NameLookupRequest {
+            name: fname.as_bytes().to_vec(),
+            r#type: proto::UserNameType::UsernameTypeFname as i32,
+        });
+
+        let response = service.get_fid_by_name(request).await;
+        assert!(
+            response.is_ok(),
+            "Failed to get fid by fname: {:?}",
+            response.err()
+        );
+
+        let fid_response = response.unwrap().into_inner();
+        assert_eq!(fid_response.fid, fid);
+    }
+
+    #[tokio::test]
+    async fn test_get_fid_by_name_fname_not_found() {
+        let (
+            _stores,
+            _senders,
+            [mut engine1, _engine2],
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let fid = SHARD1_FID;
+        let signer = test_helper::default_signer();
+        let owner = test_helper::default_custody_address();
+
+        // Register the user but don't add an fname
+        test_helper::register_user(fid, signer.clone(), owner.clone(), &mut engine1).await;
+
+        // Test get_fid_by_name for non-existent fname
+        let request = Request::new(proto::NameLookupRequest {
+            name: b"nonexistent".to_vec(),
+            r#type: proto::UserNameType::UsernameTypeFname as i32,
+        });
+
+        let response = service.get_fid_by_name(request).await;
+        assert!(response.is_err());
+        assert_eq!(response.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_get_fid_by_name_ens() {
+        let (
+            _stores,
+            _senders,
+            [mut engine1, _engine2],
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let fid = SHARD1_FID;
+        let signer = test_helper::default_signer();
+        let owner = hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap();
+
+        // Register the user
+        test_helper::register_user(fid, signer.clone(), owner.clone(), &mut engine1).await;
+
+        // Create an ENS username proof message and store it
+        let ens_username = "alice.eth";
+        let proof_message = messages_factory::username_proof::create_username_proof(
+            fid,
+            UserNameType::UsernameTypeEnsL1,
+            ens_username.to_string(),
+            owner.clone(),
+            "signature".to_string(),
+            messages_factory::farcaster_time() as u64,
+            None,
+        );
+
+        test_helper::commit_message(&mut engine1, &proof_message).await;
+
+        // Test get_fid_by_name for ENS name
+        let request = Request::new(proto::NameLookupRequest {
+            name: ens_username.as_bytes().to_vec(),
+            r#type: proto::UserNameType::UsernameTypeEnsL1 as i32,
+        });
+
+        let response = service.get_fid_by_name(request).await;
+        assert!(
+            response.is_ok(),
+            "Failed to get fid by ENS name: {:?}",
+            response.err()
+        );
+
+        let fid_response = response.unwrap().into_inner();
+        assert_eq!(fid_response.fid, fid);
+    }
+
+    #[tokio::test]
+    async fn test_get_addresses_by_name_fname() {
+        let (
+            stores,
+            _senders,
+            [mut engine1, _engine2],
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let fid = SHARD1_FID;
+        let signer = test_helper::default_signer();
+        let custody_address = test_helper::default_custody_address();
+
+        // Register the user
+        test_helper::register_user(fid, signer.clone(), custody_address.clone(), &mut engine1)
+            .await;
+
+        // Create and store an fname proof
+        let fname = "bob";
+        let fname_proof = crate::utils::factory::username_factory::create_username_proof(
+            fid,
+            proto::UserNameType::UsernameTypeFname,
+            &fname.to_string(),
+            None,
+            Some(custody_address.clone()),
+        );
+
+        let store = &stores.get(&1u32).unwrap().user_data_store;
+        let mut txn = RocksDbTransactionBatch::new();
+        crate::storage::store::account::UserDataStore::merge_username_proof(
+            store,
+            &fname_proof,
+            &mut txn,
+        )
+        .unwrap();
+        store.db().commit(txn).unwrap();
+
+        // Add a verification (connected address) - merge directly to store to bypass signature validation
+        let verified_address = hex::decode("1234567890abcdef1234567890abcdef12345678").unwrap();
+        let verification_add = messages_factory::verifications::create_verification_add(
+            fid,
+            0,
+            verified_address.clone(),
+            vec![], // claim_signature - empty for test
+            vec![], // block_hash - empty for test
+            None,
+            None,
+        );
+        // Merge directly to the store to bypass signature validation
+        let verification_store = &stores.get(&1u32).unwrap().verification_store;
+        let mut txn = RocksDbTransactionBatch::new();
+        verification_store
+            .merge(&verification_add, &mut txn)
+            .unwrap();
+        verification_store.db().commit(txn).unwrap();
+
+        // Test get_addresses_by_name
+        let request = Request::new(proto::NameLookupRequest {
+            name: fname.as_bytes().to_vec(),
+            r#type: proto::UserNameType::UsernameTypeFname as i32,
+        });
+
+        let response = service.get_addresses_by_name(request).await;
+        assert!(
+            response.is_ok(),
+            "Failed to get addresses by name: {:?}",
+            response.err()
+        );
+
+        let addr_response = response.unwrap().into_inner();
+        assert_eq!(addr_response.fid, fid);
+        assert_eq!(addr_response.custody_address, Some(custody_address));
+        assert_eq!(addr_response.connected_addresses.len(), 1);
+        assert_eq!(addr_response.connected_addresses[0], verified_address);
+    }
+
+    #[tokio::test]
+    async fn test_get_fid_by_address_custody() {
+        let (
+            _stores,
+            _senders,
+            [mut engine1, _engine2],
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let fid = SHARD1_FID;
+        let signer = test_helper::default_signer();
+        let custody_address = test_helper::default_custody_address();
+
+        // Register the user
+        test_helper::register_user(fid, signer.clone(), custody_address.clone(), &mut engine1)
+            .await;
+
+        // Test get_fid_by_address for custody address
+        let request = Request::new(proto::AddressLookupRequest {
+            address: custody_address.clone(),
+        });
+
+        let response = service.get_fid_by_address(request).await;
+        assert!(
+            response.is_ok(),
+            "Failed to get fid by custody address: {:?}",
+            response.err()
+        );
+
+        let addr_response = response.unwrap().into_inner();
+        assert_eq!(addr_response.matches.len(), 1);
+        assert_eq!(addr_response.matches[0].fid, fid);
+        assert!(addr_response.matches[0].is_custody);
+        assert!(!addr_response.matches[0].is_verified);
+    }
+
+    #[tokio::test]
+    async fn test_get_fid_by_address_verified() {
+        let (
+            _stores,
+            _senders,
+            [mut engine1, _engine2],
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let fid = SHARD1_FID;
+        let signer = test_helper::default_signer();
+        let custody_address = test_helper::default_custody_address();
+
+        // Register the user
+        test_helper::register_user(fid, signer.clone(), custody_address.clone(), &mut engine1)
+            .await;
+
+        // Add a verification - merge directly to store to bypass signature validation
+        let verified_address = hex::decode("abcdef1234567890abcdef1234567890abcdef12").unwrap();
+        let verification_add = messages_factory::verifications::create_verification_add(
+            fid,
+            0,
+            verified_address.clone(),
+            vec![], // claim_signature - empty for test
+            vec![], // block_hash - empty for test
+            None,
+            None,
+        );
+        let stores = engine1.get_stores();
+        let mut txn = RocksDbTransactionBatch::new();
+        stores
+            .verification_store
+            .merge(&verification_add, &mut txn)
+            .unwrap();
+        stores.verification_store.db().commit(txn).unwrap();
+
+        // Test get_fid_by_address for verified address
+        let request = Request::new(proto::AddressLookupRequest {
+            address: verified_address.clone(),
+        });
+
+        let response = service.get_fid_by_address(request).await;
+        assert!(
+            response.is_ok(),
+            "Failed to get fid by verified address: {:?}",
+            response.err()
+        );
+
+        let addr_response = response.unwrap().into_inner();
+        assert_eq!(addr_response.matches.len(), 1);
+        assert_eq!(addr_response.matches[0].fid, fid);
+        assert!(!addr_response.matches[0].is_custody);
+        assert!(addr_response.matches[0].is_verified);
+    }
+
+    #[tokio::test]
+    async fn test_get_fid_by_address_both() {
+        let (
+            _stores,
+            _senders,
+            [mut engine1, _engine2],
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let fid = SHARD1_FID;
+        let signer = test_helper::default_signer();
+        let custody_address = test_helper::default_custody_address();
+
+        // Register the user
+        test_helper::register_user(fid, signer.clone(), custody_address.clone(), &mut engine1)
+            .await;
+
+        // Add a verification for the same address as custody (edge case)
+        let verification_add = messages_factory::verifications::create_verification_add(
+            fid,
+            0,
+            custody_address.clone(),
+            vec![], // claim_signature - empty for test
+            vec![], // block_hash - empty for test
+            None,
+            None,
+        );
+        let stores = engine1.get_stores();
+        let mut txn = RocksDbTransactionBatch::new();
+        stores
+            .verification_store
+            .merge(&verification_add, &mut txn)
+            .unwrap();
+        stores.verification_store.db().commit(txn).unwrap();
+
+        // Test get_fid_by_address - should show both custody and verified
+        let request = Request::new(proto::AddressLookupRequest {
+            address: custody_address.clone(),
+        });
+
+        let response = service.get_fid_by_address(request).await;
+        assert!(
+            response.is_ok(),
+            "Failed to get fid by address: {:?}",
+            response.err()
+        );
+
+        let addr_response = response.unwrap().into_inner();
+        assert_eq!(addr_response.matches.len(), 1);
+        assert_eq!(addr_response.matches[0].fid, fid);
+        assert!(addr_response.matches[0].is_custody);
+        assert!(addr_response.matches[0].is_verified);
+    }
+
+    #[tokio::test]
+    async fn test_get_fid_by_address_not_found() {
+        let (
+            _stores,
+            _senders,
+            [mut engine1, _engine2],
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let fid = SHARD1_FID;
+        let signer = test_helper::default_signer();
+        let custody_address = test_helper::default_custody_address();
+
+        // Register the user
+        test_helper::register_user(fid, signer.clone(), custody_address.clone(), &mut engine1)
+            .await;
+
+        // Test get_fid_by_address for unknown address
+        let unknown_address = hex::decode("0000000000000000000000000000000000000000").unwrap();
+        let request = Request::new(proto::AddressLookupRequest {
+            address: unknown_address,
+        });
+
+        let response = service.get_fid_by_address(request).await;
+        assert!(response.is_err());
+        assert_eq!(response.unwrap_err().code(), tonic::Code::NotFound);
+    }
 }

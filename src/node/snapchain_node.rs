@@ -19,6 +19,8 @@ use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
 use libp2p::PeerId;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
 
@@ -30,6 +32,7 @@ pub struct SnapchainNode {
     pub shard_stores: HashMap<u32, Stores>,
     pub shard_senders: HashMap<u32, Senders>,
     pub block_stores: BlockStores,
+    pub hyper_block_engine: Option<Arc<Mutex<BlockEngine>>>,
     pub address: Address,
 }
 
@@ -55,6 +58,7 @@ impl SnapchainNode {
 
         let mut shard_senders: HashMap<u32, Senders> = HashMap::new();
         let mut shard_stores: HashMap<u32, Stores> = HashMap::new();
+        let hyper_db_dir: Option<String> = None;
 
         // Create the shard validators
         for shard_id in config.shard_ids.clone() {
@@ -147,6 +151,21 @@ impl SnapchainNode {
             network,
         );
         let block_stores = engine.stores();
+        let hyper_block_engine = if let Some(ref hyper_dir) = hyper_db_dir {
+            let hyper_trie = MerkleTrie::new().unwrap();
+            let hyper_block_db = RocksDB::open_shard_db(hyper_dir.as_str(), 0);
+            let hyper_engine = BlockEngine::new(
+                hyper_trie,
+                statsd_client.clone(),
+                hyper_block_db,
+                config.max_messages_per_block,
+                None,
+                network,
+            );
+            Some(Arc::new(Mutex::new(hyper_engine)))
+        } else {
+            None
+        };
         let block_proposer = BlockProposer::new(
             validator_address.clone(),
             block_shard.clone(),
@@ -190,6 +209,7 @@ impl SnapchainNode {
             shard_senders,
             shard_stores,
             block_stores,
+            hyper_block_engine,
         }
     }
 

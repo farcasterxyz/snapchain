@@ -5,6 +5,7 @@ use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::fname::FnameRequest;
 use snapchain::connectors::onchain_events::{ChainClients, OnchainEventsRequest};
 use snapchain::consensus::consensus::SystemMessage;
+use snapchain::hyper as snapchain_hyper;
 use snapchain::mempool::block_receiver::BlockReceiver;
 use snapchain::mempool::mempool::{Mempool, MempoolRequest, ReadNodeMempool};
 use snapchain::mempool::routing;
@@ -25,6 +26,7 @@ use snapchain::storage::store::engine::{PostCommitMessage, Senders};
 use snapchain::storage::store::node_local_state::{self, LocalStateStore};
 use snapchain::storage::store::stores::Stores;
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
+use snapchain_hyper::CAPABILITY_HYPER;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::net::SocketAddr;
@@ -56,6 +58,7 @@ async fn start_servers(
     chain_clients: ChainClients,
     replicator: Option<Arc<replication::replicator::Replicator>>,
     local_state_store: LocalStateStore,
+    api_handler: Option<snapchain::api::ApiHttpHandler>,
 ) {
     let grpc_addr = app_config.rpc_address.clone();
     let grpc_socket_addr: SocketAddr = grpc_addr.parse().unwrap();
@@ -145,8 +148,13 @@ async fn start_servers(
                     let io = TokioIo::new(stream);
                     let http_server_config = http_server_config.clone();
                     let service_clone = http_service.clone();
+                    let api = api_handler.clone();
                     tokio::spawn(async move {
-                        let router = snapchain::network::http_server::Router::new(service_clone);
+                        let mut router =
+                            snapchain::network::http_server::Router::new(service_clone);
+                        if let Some(handler) = api {
+                            router = router.with_api_handler(handler);
+                        }
                         if let Err(err) = http1::Builder::new()
                             .serve_connection(
                                 io,
@@ -416,6 +424,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(1000);
     let (mempool_tx, mempool_rx) = mpsc::channel(app_config.mempool.queue_size as usize);
 
+    let node_capabilities = if app_config.hyper.enabled {
+        vec![CAPABILITY_HYPER.to_string()]
+    } else {
+        vec![]
+    };
+
     let gossip_result = SnapchainGossip::create(
         keypair.clone(),
         &app_config.gossip,
@@ -423,6 +437,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         app_config.read_node,
         app_config.fc_network,
         statsd_client.clone(),
+        node_capabilities,
     )
     .await;
 
@@ -537,6 +552,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
             None
         };
 
+        // Initialize API indexing system if enabled
+        let api_system = {
+            let hub_event_senders: Vec<(u32, broadcast::Sender<snapchain::proto::HubEvent>)> = node
+                .shard_senders
+                .iter()
+                .map(|(shard_id, senders)| (*shard_id, senders.events_tx.clone()))
+                .collect();
+            snapchain::api::initialize(
+                &app_config.api,
+                node.block_stores.db.clone(),
+                hub_event_senders,
+            )
+        };
+
+        let api_handler = api_system.as_ref().map(|s| s.http_handler.clone());
+
         start_servers(
             &app_config,
             gossip,
@@ -551,6 +582,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             chains_clients,
             replicator,
             local_state_store.clone(),
+            api_handler,
         )
         .await;
 
@@ -559,11 +591,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             select! {
                 _ = ctrl_c() => {
                     info!("Received Ctrl-C, shutting down");
+                    if let Some(api) = api_system {
+                        api.shutdown().await;
+                    }
                     node.stop();
                     return Ok(());
                 }
                 _ = shutdown_rx.recv() => {
                     error!("Received shutdown signal, shutting down");
+                    if let Some(api) = api_system {
+                        api.shutdown().await;
+                    }
                     node.stop();
                     return Ok(());
                 }
@@ -599,6 +637,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                         SystemMessage::ExitWithError(err) => {
                             error!("Exiting due to: {}", err);
+                            if let Some(api) = api_system {
+                                api.shutdown().await;
+                            }
                             node.stop();
                             return Err(err.into());
                         }
@@ -763,6 +804,53 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
+        if let Some(hyper_engine) = node.hyper_block_engine.clone() {
+            let mut hyper_block_rx = block_tx.subscribe();
+            let hyper_gossip_tx = gossip_tx.clone();
+            tokio::spawn(async move {
+                loop {
+                    match hyper_block_rx.recv().await {
+                        Ok(block) => {
+                            let state_root = {
+                                let mut engine = hyper_engine.lock().await;
+                                engine.commit_block(&block);
+                                engine.current_state_root()
+                            };
+                            let envelope =
+                                snapchain_hyper::build_envelope_for_block(&block, state_root)
+                                    .into();
+                            if let Err(err) = hyper_gossip_tx
+                                .send(GossipEvent::BroadcastHyperEnvelope(envelope))
+                                .await
+                            {
+                                warn!(reason = ?err, "Failed to broadcast hyper envelope");
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(skipped, "Hyper block subscriber lagged behind");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
+
+        // Initialize API indexing system if enabled
+        let api_system = {
+            let hub_event_senders: Vec<(u32, broadcast::Sender<snapchain::proto::HubEvent>)> = node
+                .shard_senders
+                .iter()
+                .map(|(shard_id, senders)| (*shard_id, senders.events_tx.clone()))
+                .collect();
+            snapchain::api::initialize(
+                &app_config.api,
+                node.block_stores.db.clone(),
+                hub_event_senders,
+            )
+        };
+
+        let api_handler = api_system.as_ref().map(|s| s.http_handler.clone());
+
         start_servers(
             &app_config,
             gossip,
@@ -777,6 +865,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             chains_clients,
             replicator,
             local_state_store.clone(),
+            api_handler,
         )
         .await;
 
@@ -814,11 +903,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             select! {
                 _ = ctrl_c() => {
                     info!("Received Ctrl-C, shutting down");
+                    if let Some(api) = api_system {
+                        api.shutdown().await;
+                    }
                     node.stop();
                     return Ok(());
                 }
                 _ = shutdown_rx.recv() => {
                     error!("Received shutdown signal, shutting down");
+                    if let Some(api) = api_system {
+                        api.shutdown().await;
+                    }
                     node.stop();
                     return Ok(());
                 }
@@ -847,6 +942,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         },
                         SystemMessage::ExitWithError(err) => {
                             error!("Exiting due to: {}", err);
+                            if let Some(api) = api_system {
+                                api.shutdown().await;
+                            }
                             node.stop();
                             return Err(err.into());
                         }
