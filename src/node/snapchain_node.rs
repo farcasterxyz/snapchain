@@ -14,7 +14,7 @@ use crate::storage::store::node_local_state::LocalStateStore;
 use crate::storage::store::stores::StoreLimits;
 use crate::storage::store::stores::Stores;
 use crate::storage::trie::merkle_trie::{self, MerkleTrie};
-use crate::utils::block_event_fix::reprocess_block_event;
+use crate::utils::block_event_fix::reconcile_heartbeat_event;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
@@ -112,10 +112,14 @@ impl SnapchainNode {
             shard_senders.insert(shard_id, engine.get_senders());
             shard_stores.insert(shard_id, engine.get_stores());
 
-            if shard_id == 2 && network == FarcasterNetwork::Mainnet {
-                reprocess_block_event(block_stores.clone(), engine.get_stores(), 24235100, 219092)
-                    .await
-                    .unwrap()
+            if config.reconcile_heartbeat_event != 0 && network == FarcasterNetwork::Mainnet {
+                reconcile_heartbeat_event(
+                    block_stores.clone(),
+                    engine.get_stores(),
+                    config.reconcile_heartbeat_event,
+                )
+                .await
+                .unwrap()
             }
 
             let shard_proposer = ShardProposer::new(

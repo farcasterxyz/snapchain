@@ -68,6 +68,7 @@ pub struct Config {
     pub consensus_start_delay: u32,
     pub sync_request_timeout: Duration,
     pub sync_status_update_interval: Duration,
+    pub reconcile_heartbeat_event: u64,
 }
 
 impl Config {
@@ -93,6 +94,7 @@ impl Config {
             consensus_start_delay: self.consensus_start_delay,
             sync_request_timeout: self.sync_request_timeout,
             sync_status_update_interval: self.sync_status_update_interval,
+            reconcile_heartbeat_event: self.reconcile_heartbeat_event,
         }
     }
 
@@ -142,6 +144,7 @@ impl Default for Config {
             consensus_start_delay: 2,
             sync_request_timeout: Duration::from_secs(2),
             sync_status_update_interval: Duration::from_secs(10),
+            reconcile_heartbeat_event: 0,
         }
     }
 }
