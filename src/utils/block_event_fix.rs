@@ -10,7 +10,7 @@ pub async fn reconcile_heartbeat_events(
     target_seqnum: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Looking for block event with seqnum {}", target_seqnum);
-    let next_seqnum = target_stores.block_event_store.max_seqnum().unwrap_or(0) + 1;
+    let next_seqnum = target_stores.block_event_store.max_seqnum()? + 1;
     for seqnum in next_seqnum..target_seqnum + 1 {
         if let Some(block_event) = source_stores
             .block_event_store
@@ -23,7 +23,7 @@ pub async fn reconcile_heartbeat_events(
                 let mut txn = RocksDbTransactionBatch::new();
 
                 // Check that we're inserting the next block event
-                let next_seqnum = target_stores.block_event_store.max_seqnum().unwrap_or(0) + 1;
+                let next_seqnum = target_stores.block_event_store.max_seqnum()? + 1;
                 if next_seqnum == block_event.seqnum() {
                     info!("Calling put_block_event to insert into block event store...");
                     target_stores

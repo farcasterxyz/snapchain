@@ -113,13 +113,18 @@ impl SnapchainNode {
             shard_stores.insert(shard_id, engine.get_stores());
 
             if config.reconcile_heartbeat_event != 0 {
-                reconcile_heartbeat_events(
+                if let Err(err) = reconcile_heartbeat_events(
                     block_stores.clone(),
                     engine.get_stores(),
                     config.reconcile_heartbeat_event,
                 )
                 .await
-                .unwrap()
+                {
+                    warn!(
+                        "Unable to reconcile heartbeat events {:#?}",
+                        err.to_string()
+                    )
+                }
             }
 
             let shard_proposer = ShardProposer::new(
