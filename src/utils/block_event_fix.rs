@@ -19,9 +19,9 @@ pub async fn reconcile_heartbeat_event(
 
             // Create a transaction batch and put the block event
             let mut txn = RocksDbTransactionBatch::new();
+            let next_seqnum = target_stores.block_event_store.max_seqnum().unwrap_or(0) + 1;
 
-            if target_stores.block_event_store.max_seqnum().unwrap_or(0) + 1 == block_event.seqnum()
-            {
+            if next_seqnum == block_event.seqnum() {
                 info!("Calling put_block_event to insert into block event store...");
                 target_stores
                     .block_event_store
@@ -35,7 +35,7 @@ pub async fn reconcile_heartbeat_event(
             } else {
                 info!(
                     shard = target_stores.shard_id,
-                    "Block event already exists in shard"
+                    next_seqnum, target_seqnum, "Block event not next in line"
                 )
             }
         } else {
