@@ -42,7 +42,7 @@ pub async fn reconcile_heartbeat_events(
                     )
                 }
             } else {
-                info!("Could not find block event with seqnum {}", seqnum);
+                info!("Block event is not a heartbeat event", seqnum);
             }
         } else {
             info!("Could not find block event with seqnum {}", seqnum);
