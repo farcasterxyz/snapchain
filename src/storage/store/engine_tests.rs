@@ -3845,9 +3845,7 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let mut event_rx = engine.get_senders().events_tx.subscribe();
 
-        // Create a heartbeat block event
-
-        // Propose a state change with the block event
+        // Propose a state change with no block event
         let state_change = engine.propose_state_change(1, vec![], None);
 
         // Validate the proposal
@@ -3857,7 +3855,7 @@ mod tests {
         assert!(valid);
 
         let block_event1 = events_factory::create_heartbeat_event(1);
-        // Create empty shard chunk
+        // Create shard chunk with heartbeat event
         let new_state_change = ShardStateChange {
             shard_id: 1,
             timestamp: state_change.timestamp,
