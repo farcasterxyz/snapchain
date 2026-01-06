@@ -1764,6 +1764,60 @@ impl ShardEngine {
         }
     }
 
+    fn is_cached_txn_valid(
+        &self,
+        cached_txn: &CachedTransaction,
+        shard_root: &[u8],
+        transactions: &[Transaction],
+    ) -> bool {
+        // Check if shard roots match
+        if &cached_txn.shard_root != shard_root {
+            error!(
+                shard_id = self.shard_id,
+                cached_shard_root = hex::encode(&cached_txn.shard_root),
+                commit_shard_root = hex::encode(shard_root),
+                "Cached shard root mismatch"
+            );
+            return false;
+        }
+
+        // TODO(aditi): Ideally we would handle this by putting max block event seqnum in the block header but this requires a protocol upgrade.
+        // Check if there are block events in the transactions
+        let max_block_event_in_txns = transactions
+            .iter()
+            .flat_map(|txn| &txn.system_messages)
+            .filter_map(|msg| msg.block_event.as_ref())
+            .map(|block_event| block_event.seqnum())
+            .max();
+
+        // If there are block events, verify the max seqnum matches the cached txn, if not then make sure that the block event seqnum hasn't changed
+        if let Some(max_seqnum) = max_block_event_in_txns {
+            if max_seqnum != cached_txn.max_block_event_seqnum {
+                error!(
+                    shard_id = self.shard_id,
+                    cached_max_block_event_seqnum = cached_txn.max_block_event_seqnum,
+                    txn_max_block_event_seqnum = max_seqnum,
+                    "Cached txn block events mismatch"
+                );
+                return false;
+            }
+        } else {
+            let initial_max_block_event_seqnum =
+                self.stores.block_event_store.max_seqnum().unwrap_or(0);
+            if initial_max_block_event_seqnum != cached_txn.max_block_event_seqnum {
+                error!(
+                    shard_id = self.shard_id,
+                    cached_max_block_event_seqnum = cached_txn.max_block_event_seqnum,
+                    initial_max_block_event_seqnum,
+                    "Cached txn contains extra block events"
+                );
+                return false;
+            }
+        }
+
+        true
+    }
+
     pub async fn commit_shard_chunk(&mut self, shard_chunk: &ShardChunk) {
         let mut txn = RocksDbTransactionBatch::new();
 
@@ -1772,7 +1826,7 @@ impl ShardEngine {
 
         let mut applied_cached_txn = false;
         if let Some(cached_txn) = self.pending_txn.clone() {
-            if &cached_txn.shard_root == shard_root {
+            if self.is_cached_txn_valid(&cached_txn, shard_root, transactions) {
                 applied_cached_txn = true;
                 self.commit_and_emit_events(
                     shard_chunk,
@@ -1781,13 +1835,6 @@ impl ShardEngine {
                     cached_txn.txn,
                 )
                 .await;
-            } else {
-                error!(
-                    shard_id = self.shard_id,
-                    cached_shard_root = hex::encode(&cached_txn.shard_root),
-                    commit_shard_root = hex::encode(shard_root),
-                    "Cached shard root mismatch"
-                );
             }
         }
 
