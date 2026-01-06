@@ -10,8 +10,8 @@ mod tests {
     use crate::proto::{OnChainEvent, OnChainEventType};
     use crate::storage::db::{PageOptions, RocksDbTransactionBatch};
     use crate::storage::store::account::{HubEventIdGenerator, HubEventStorageExt, UserDataStore};
-    use crate::storage::store::engine::{MessageValidationError, ShardEngine};
-    use crate::storage::store::mempool_poller::MempoolMessage;
+    use crate::storage::store::engine::{MessageValidationError, ShardEngine, ShardStateChange};
+    use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller};
     use crate::storage::store::stores::StoreLimits;
     use crate::storage::store::test_helper::{
         self, assert_block_confirmed_event, block_event_exists, commit_block_events, commit_event,
@@ -3795,6 +3795,89 @@ mod tests {
         assert!(block_event_exists(&engine, &block_event3));
         assert!(block_event_exists(&engine, &block_event4));
         assert_eq!(block_confirmed.max_block_event_seqnum, 4);
+    }
+
+    #[tokio::test]
+    async fn test_cached_txn_validation_with_extra_block_event() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let mut event_rx = engine.get_senders().events_tx.subscribe();
+
+        // Create a heartbeat block event
+        let block_event1 = events_factory::create_heartbeat_event(1);
+
+        // Propose a state change with the block event
+        let state_change = engine.propose_state_change(
+            1,
+            vec![MempoolMessage::BlockEvent {
+                for_shard: 1,
+                message: block_event1.clone(),
+            }],
+            None,
+        );
+
+        // Validate the proposal
+        let height = engine.get_confirmed_height();
+        engine.start_round(height.increment(), Round::Nil);
+        let valid = engine.validate_state_change(&state_change, height.increment());
+        assert!(valid);
+
+        // Create empty shard chunk
+        let new_state_change = ShardStateChange {
+            shard_id: 1,
+            timestamp: state_change.timestamp,
+            new_state_root: state_change.new_state_root,
+            events: vec![],
+            transactions: vec![],
+            version: state_change.version,
+            max_block_event_seqnum: 0,
+        };
+        let chunk =
+            test_helper::state_change_to_shard_chunk(1, height.block_number + 1, &new_state_change);
+        engine.commit_shard_chunk(&chunk).await;
+
+        assert!(!block_event_exists(&engine, &block_event1));
+        let block_confirmed = assert_block_confirmed_event(event_rx.recv().await.unwrap());
+        assert_eq!(block_confirmed.max_block_event_seqnum, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cached_txn_validation_with_missing_block_event() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let mut event_rx = engine.get_senders().events_tx.subscribe();
+
+        // Propose a state change with no block event
+        let state_change = engine.propose_state_change(1, vec![], None);
+
+        // Validate the proposal
+        let height = engine.get_confirmed_height();
+        engine.start_round(height.increment(), Round::Nil);
+        let valid = engine.validate_state_change(&state_change, height.increment());
+        assert!(valid);
+
+        let block_event1 = events_factory::create_heartbeat_event(1);
+        // Create shard chunk with heartbeat event
+        let new_state_change = ShardStateChange {
+            shard_id: 1,
+            timestamp: state_change.timestamp,
+            new_state_root: state_change.new_state_root,
+            events: vec![],
+            transactions: MempoolPoller::create_transactions_from_mempool(vec![
+                MempoolMessage::BlockEvent {
+                    for_shard: 1,
+                    message: block_event1.clone(),
+                },
+            ])
+            .unwrap(),
+            version: state_change.version,
+            max_block_event_seqnum: 1,
+        };
+        let chunk =
+            test_helper::state_change_to_shard_chunk(1, height.block_number + 1, &new_state_change);
+        engine.commit_shard_chunk(&chunk).await;
+
+        assert!(block_event_exists(&engine, &block_event1));
+        let block_confirmed = assert_block_confirmed_event(event_rx.recv().await.unwrap());
+        assert_eq!(block_confirmed.max_block_event_seqnum, 1);
     }
 
     #[tokio::test]

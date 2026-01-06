@@ -155,6 +155,7 @@ struct CachedTransaction {
     shard_root: Vec<u8>,
     events: Vec<HubEvent>,
     max_block_event_seqnum: u64,
+    block_events_hash: Vec<u8>,
     txn: RocksDbTransactionBatch,
 }
 
@@ -418,11 +419,15 @@ impl ShardEngine {
 
         // TODO: this should probably operate automatically via drop trait
         self.stores.trie.reload(&self.db).unwrap();
+
+        let block_events_hash = Self::compute_block_events_hash(&result.transactions);
+
         self.pending_txn = Some(CachedTransaction {
             shard_root: result.new_state_root.clone(),
             events: result.events.clone(),
             txn,
             max_block_event_seqnum: result.max_block_event_seqnum,
+            block_events_hash,
         });
 
         let proposal_duration = now.elapsed();
@@ -1558,11 +1563,15 @@ impl ShardEngine {
                 result = false;
             }
             Ok((events, max_block_event_seqnum)) => {
+                let block_events_hash =
+                    Self::compute_block_events_hash(&shard_state_change.transactions);
+
                 self.pending_txn = Some(CachedTransaction {
                     shard_root: shard_root.clone(),
                     txn,
                     events,
                     max_block_event_seqnum,
+                    block_events_hash,
                 });
             }
         }
@@ -1764,6 +1773,57 @@ impl ShardEngine {
         }
     }
 
+    fn compute_block_events_hash(transactions: &[Transaction]) -> Vec<u8> {
+        let block_events: Vec<_> = transactions
+            .iter()
+            .flat_map(|txn| &txn.system_messages)
+            .filter_map(|msg| msg.block_event.as_ref())
+            .collect();
+
+        if block_events.is_empty() {
+            vec![]
+        } else {
+            let mut events_hasher = blake3::Hasher::new();
+            for event in block_events.iter() {
+                events_hasher.update(&event.hash);
+            }
+            events_hasher.finalize().as_bytes().to_vec()
+        }
+    }
+
+    fn is_cached_txn_valid(
+        &self,
+        cached_txn: &CachedTransaction,
+        shard_root: &[u8],
+        transactions: &[Transaction],
+    ) -> bool {
+        // Check if shard roots match
+        if &cached_txn.shard_root != shard_root {
+            error!(
+                shard_id = self.shard_id,
+                cached_shard_root = hex::encode(&cached_txn.shard_root),
+                commit_shard_root = hex::encode(shard_root),
+                "Cached shard root mismatch"
+            );
+            return false;
+        }
+
+        // TODO(aditi): Ideally we would handle this by putting max block event seqnum in the block header but this requires a protocol upgrade.
+        // Compute block events hash from transactions and compare with cached hash
+        let computed_hash = Self::compute_block_events_hash(transactions);
+        if computed_hash != cached_txn.block_events_hash {
+            error!(
+                shard_id = self.shard_id,
+                cached_block_events_hash = hex::encode(&cached_txn.block_events_hash),
+                computed_block_events_hash = hex::encode(&computed_hash),
+                "Cached block events hash mismatch"
+            );
+            return false;
+        }
+
+        true
+    }
+
     pub async fn commit_shard_chunk(&mut self, shard_chunk: &ShardChunk) {
         let mut txn = RocksDbTransactionBatch::new();
 
@@ -1772,7 +1832,7 @@ impl ShardEngine {
 
         let mut applied_cached_txn = false;
         if let Some(cached_txn) = self.pending_txn.clone() {
-            if &cached_txn.shard_root == shard_root {
+            if self.is_cached_txn_valid(&cached_txn, shard_root, transactions) {
                 applied_cached_txn = true;
                 self.commit_and_emit_events(
                     shard_chunk,
@@ -1781,13 +1841,6 @@ impl ShardEngine {
                     cached_txn.txn,
                 )
                 .await;
-            } else {
-                error!(
-                    shard_id = self.shard_id,
-                    cached_shard_root = hex::encode(&cached_txn.shard_root),
-                    commit_shard_root = hex::encode(shard_root),
-                    "Cached shard root mismatch"
-                );
             }
         }
 
