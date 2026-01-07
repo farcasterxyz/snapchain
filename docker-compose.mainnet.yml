@@ -51,6 +51,10 @@ services:
       - .rocks.snapshot:/app/.rocks.snapshot
     networks:
       - snapchain
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
 
   # Start this if you want perf metrics for your hubble node. Remember to start `grafana` as well.
   statsd:
