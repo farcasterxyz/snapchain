@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.2] - 2026-01-08
+
+### 🐛 Bug Fixes
+
+- Recompute cached transaction if block events don't match (#741)
+- Bump default ulimits for snapchain nodes (#743)
+
 ## [0.11.1] - 2026-01-05
 
 ### 🚀 Features
