@@ -91,7 +91,7 @@ const RETRY_TIMEOUT_SECONDS: u64 = 10;
 const BASE_BLOCK_PAGE_SIZE: u64 = 8000; // Alchemy max is 10K
 
 // Number of blocks to go back from the latest block when starting live sync by default
-const LIVE_SYNC_BLOCK_OFFSET: u64 = 100;
+const LIVE_SYNC_BLOCK_OFFSET: u64 = 500;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
