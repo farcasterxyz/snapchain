@@ -90,6 +90,9 @@ const RETRY_TIMEOUT_SECONDS: u64 = 10;
 
 const BASE_BLOCK_PAGE_SIZE: u64 = 8000; // Alchemy max is 10K
 
+// Number of blocks to go back from the latest block when starting live sync by default
+const LIVE_SYNC_BLOCK_OFFSET: u64 = 100;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub rpc_url: String,
@@ -1265,8 +1268,9 @@ impl Subscriber {
         let live_sync_block;
         match self.start_block_number {
             None => {
-                // By default, start from the first block or the latest block in the db. Whichever is higher
-                live_sync_block = Some(Self::first_block(self.chain).max(latest_block_in_db));
+                // By default, start from latest block on chain minus offset, or the latest block in the db. Whichever is higher
+                let default_start = latest_block_on_chain.saturating_sub(LIVE_SYNC_BLOCK_OFFSET);
+                live_sync_block = Some(default_start.max(latest_block_in_db));
             }
             Some(start_block_number) => {
                 let historical_sync_start_block = latest_block_in_db.max(start_block_number);
