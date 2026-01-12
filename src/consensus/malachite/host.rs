@@ -217,6 +217,21 @@ impl Host {
                 extensions: _,
             } => {
                 let now = tokio::time::Instant::now();
+
+                // Check for empty certificate
+                if certificate.aggregated_signature.signatures.is_empty() {
+                    error!(
+                        height = %certificate.height,
+                        "Received certificate with no signatures. Restarting height."
+                    );
+                    let validator_set = state
+                        .shard_validator
+                        .get_validator_set(certificate.height.as_u64());
+                    consensus_ref
+                        .cast(ConsensusMsg::StartHeight(certificate.height, validator_set))?;
+                    return Ok(());
+                }
+
                 let result = state
                     .shard_validator
                     .get_proposed_value(&certificate.value_id);
