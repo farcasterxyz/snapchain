@@ -115,10 +115,12 @@ pub fn verify_signatures(commits: &proto::Commits, validator_sets: &StoredValida
     ) {
         error!(
             %certificate.height,
-            num_signatures = certificate.aggregated_signature.signatures.len(),
+            num_signatures_in_commits = commits.signatures.len(),
+            num_signatures_in_certificate = certificate.aggregated_signature.signatures.len(),
             num_validators = expected_pubkeys.len(),
             expected_validators = ?expected_pubkeys.iter().map(|v| hex::encode(v)).collect::<Vec<_>>(),
-            actual_signers = ?certificate.aggregated_signature.signatures.iter().map(|s| hex::encode(&s.address.0)).collect::<Vec<_>>(),
+            actual_signers_in_commits = ?commits.signatures.iter().map(|s| hex::encode(&s.signer)).collect::<Vec<_>>(),
+            actual_signers_in_certificate = ?certificate.aggregated_signature.signatures.iter().map(|s| hex::encode(&s.address.0)).collect::<Vec<_>>(),
             "Block did not have quorum"
         );
         return false;
