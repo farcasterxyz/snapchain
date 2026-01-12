@@ -5,7 +5,6 @@ use crate::consensus::validator::StoredValidatorSets;
 use crate::core::error::HubError;
 use crate::core::types::{CommitsExt, Vote, FARCASTER_EPOCH};
 use crate::proto::{self};
-use itertools::Itertools;
 use tracing::error;
 
 #[derive(Clone, Debug, PartialEq, PartialOrd, Eq, Ord)]
