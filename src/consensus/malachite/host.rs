@@ -262,11 +262,19 @@ impl Host {
                 let elapsed = now.elapsed();
                 let height = certificate.height;
                 let round = certificate.round;
+                let signers = certificate
+                    .aggregated_signature
+                    .signatures
+                    .iter()
+                    .map(|s| hex::encode(&s.address.0))
+                    .collect::<Vec<String>>()
+                    .join(", ");
                 info!(
                     height = height.to_string(),
                     round = round.as_i64(),
                     shard = height.shard_index,
                     at = "host_trace",
+                    signers = signers,
                     "Decided value with round: {} ({} ms)",
                     round.as_i64(),
                     elapsed.as_millis()
