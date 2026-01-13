@@ -217,6 +217,21 @@ impl Host {
                 extensions: _,
             } => {
                 let now = tokio::time::Instant::now();
+
+                // Check for empty certificate
+                if certificate.aggregated_signature.signatures.is_empty() {
+                    error!(
+                        height = %certificate.height,
+                        "Received certificate with no signatures. Restarting height."
+                    );
+                    let validator_set = state
+                        .shard_validator
+                        .get_validator_set(certificate.height.as_u64());
+                    consensus_ref
+                        .cast(ConsensusMsg::StartHeight(certificate.height, validator_set))?;
+                    return Ok(());
+                }
+
                 let result = state
                     .shard_validator
                     .get_proposed_value(&certificate.value_id);
@@ -262,11 +277,19 @@ impl Host {
                 let elapsed = now.elapsed();
                 let height = certificate.height;
                 let round = certificate.round;
+                let signers = certificate
+                    .aggregated_signature
+                    .signatures
+                    .iter()
+                    .map(|s| hex::encode(&s.address.0))
+                    .collect::<Vec<String>>()
+                    .join(", ");
                 info!(
                     height = height.to_string(),
                     round = round.as_i64(),
                     shard = height.shard_index,
                     at = "host_trace",
+                    signers = signers,
                     "Decided value with round: {} ({} ms)",
                     round.as_i64(),
                     elapsed.as_millis()
