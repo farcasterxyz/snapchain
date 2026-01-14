@@ -756,7 +756,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     mempool_tx: mempool_tx.clone(),
                     system_tx: system_tx.clone(),
                     event_rx: senders.events_tx.subscribe(),
-                    validator_sets: app_config.consensus.to_stored_validator_sets(*shard_id),
+                    validator_sets: app_config.consensus.to_stored_validator_sets(0), // We care about the validator sets for shard 0 blocks only
                     config: app_config.block_receiver.clone(),
                 };
                 tokio::spawn(async move { block_receiver.run().await });
