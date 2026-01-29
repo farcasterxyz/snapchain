@@ -64,9 +64,16 @@ impl Host {
                     state.consensus_start_delay as u64,
                 ))
                 .await;
+                let validator_set_hex = validator_set
+                    .validators
+                    .iter()
+                    .map(|v| v.address.to_hex())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 info!(
                     height = height.to_string(),
                     validators = validator_set.validators.len(),
+                    validator_set = %validator_set_hex,
                     "Consensus ready. Starting Height"
                 );
                 consensus_ref.cast(ConsensusMsg::StartHeight(height, validator_set))?;
@@ -189,11 +196,21 @@ impl Host {
                         let is_valid = proposed_value.validity.is_valid();
                         reply_to.send(proposed_value)?;
                         let elapsed = now.elapsed();
+                        let validator_set_hex = state
+                            .shard_validator
+                            .get_validator_set(height.as_u64())
+                            .validators
+                            .iter()
+                            .map(|v| v.address.to_hex())
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         info!(
                             height = height.to_string(),
                             shard = height.shard_index,
                             round = round,
                             at = "host_trace",
+                            from = from.to_string(),
+                            validator_set = %validator_set_hex,
                             "Received value at with round: {}, valid_round: {}, valid: {} ({} ms)",
                             round,
                             valid_round,
