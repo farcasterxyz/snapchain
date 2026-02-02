@@ -8,12 +8,19 @@ concurrency: snapchain-publish
 
 permissions:
   contents: read
-  id-token: write # OIDC Depot
+  id-token: write # OIDC
 
 jobs:
   publish-docker-image:
     timeout-minutes: 20
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm64
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - uses: actions/checkout@v4
@@ -24,10 +31,38 @@ jobs:
           username: ${{ vars.DOCKERHUB_USER }}
           password: ${{ secrets.DOCKERHUB_WRITE_PASSWORD }}
 
-      - uses: depot/use-action@v1
-        with:
-          project: ${{ secrets.DEPOT_PROJECT_ID }}
-
-
       - run: ./scripts/publish-image.sh
         shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+
+  create-manifest:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    needs: publish-docker-image
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v2
+        with:
+          username: ${{ vars.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_WRITE_PASSWORD }}
+
+      - name: Create and push multi-arch manifest
+        shell: bash
+        run: |
+          SNAPCHAIN_VERSION=$(awk -F '"' '/^version =/ {print $2}' Cargo.toml)
+          echo "Creating manifest for version $SNAPCHAIN_VERSION"
+
+          # Create and push manifest for version tag
+          docker manifest create farcasterxyz/snapchain:${SNAPCHAIN_VERSION} \
+            farcasterxyz/snapchain:${SNAPCHAIN_VERSION}-amd64 \
+            farcasterxyz/snapchain:${SNAPCHAIN_VERSION}-arm64
+          docker manifest push farcasterxyz/snapchain:${SNAPCHAIN_VERSION}
+
+          # Create and push manifest for latest tag
+          docker manifest create farcasterxyz/snapchain:latest \
+            farcasterxyz/snapchain:${SNAPCHAIN_VERSION}-amd64 \
+            farcasterxyz/snapchain:${SNAPCHAIN_VERSION}-arm64
+          docker manifest push farcasterxyz/snapchain:latest
