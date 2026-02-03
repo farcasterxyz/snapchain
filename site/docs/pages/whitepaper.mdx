@@ -19,7 +19,7 @@ As the network grew to thousands of nodes, some of them get out of sync due to g
 
 Snapchain introduces transaction ordering and blockchain-like semantics to Farcaster. A block production step is added which groups and orders user transactions. Syncing is much simpler since a node only needs to find and download missing blocks. Snapchain, like the deltagraph before it, relies on an external blockchain to handle account creation and fee collection.  
 
-Snapchain is different from most blockchains because its transactions are not turing complete, are account independent and pruned often. A transaction is a "post", "like" or other social operation which only affects a single account. This is important for scaling since it prevents the network from being used for non-social purposes and makes sharding by account easy. Older transactions are pruned to clear data from inactive users or negating transactions, such as when a user likes and unlikes the something. 
+Snapchain is different from most blockchains because its transactions are not turing complete, are account independent and pruned often. A transaction is a "post", "like" or other social operation which only affects a single account. This is important for scaling since it prevents the network from being used for non-social purposes and makes sharding by account easy. Older transactions are pruned to clear data from inactive users or negating transactions, such as when a user likes and unlikes something. 
 
 The initial release of snapchain should support a TPS of [> 9000](https://youtu.be/-p_SWPZ1_ew?si=peDiLXEZ1csgFGPc&t=98) which would support 2 million daily users. 
 
