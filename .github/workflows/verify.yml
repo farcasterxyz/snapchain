@@ -80,7 +80,7 @@ jobs:
 
       - working-directory: ./snapchain/tests/client_parity_tests
         run: |
-          npx node-gyp install
+          npx node-gyp@12.2.0 install
           yarn install
 
       - working-directory: ./snapchain/tests/client_parity_tests
