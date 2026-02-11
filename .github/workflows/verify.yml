@@ -79,7 +79,9 @@ jobs:
         run: cargo fmt --all --check
 
       - working-directory: ./snapchain/tests/client_parity_tests
-        run: yarn install 
+        run: |
+          npx node-gyp@12.2.0 install
+          yarn install
 
       - working-directory: ./snapchain/tests/client_parity_tests
         run: yarn test 
