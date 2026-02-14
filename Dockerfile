@@ -9,7 +9,6 @@ ARG ETH_SIGNATURE_VERIFIER_GIT_REPO_URL=https://github.com/CassOnMars/eth-signat
 ENV ETH_SIGNATURE_VERIFIER_GIT_REPO_URL=$ETH_SIGNATURE_VERIFIER_GIT_REPO_URL
 ARG ETH_SIGNATURE_VERIFIER_GIT_REF=8deb4a091982c345949dc66bf8684489d9f11889
 ENV RUST_BACKTRACE=1
-RUN echo "clear cache" # Invalidate cache to pick up latest eth-signature-verifier
 RUN <<EOF
 set -eu
 apt-get update && apt-get install -y libclang-dev git libjemalloc-dev llvm-dev make protobuf-compiler libssl-dev openssh-client cmake
@@ -22,8 +21,6 @@ cd ..
 git clone $MALACHITE_GIT_REPO_URL
 cd malachite
 git checkout $MALACHITE_GIT_REF
-cd code
-cargo build
 EOF
 
 # Unfortunately, we can't prefetch creates without including the source code,
