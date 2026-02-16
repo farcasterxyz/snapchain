@@ -28,7 +28,7 @@ services:
 
         [gossip]
         address="/ip4/0.0.0.0/udp/3382/quic-v1"
-        bootstrap_peers = "/ip4/54.236.164.51/udp/3382/quic-v1, /ip4/54.87.204.167/udp/3382/quic-v1, /ip4/44.197.255.20/udp/3382/quic-v1, /ip4/54.157.62.17/udp/3382/quic-v1, /ip4/34.195.157.114/udp/3382/quic-v1, /ip4/107.20.169.236/udp/3382/quic-v1, /ip4/34.4.32.36/udp/3382/quic-v1"
+        bootstrap_peers = "/ip4/54.236.164.51/udp/3382/quic-v1, /ip4/54.87.204.167/udp/3382/quic-v1, /ip4/44.197.255.20/udp/3382/quic-v1, /ip4/54.157.62.17/udp/3382/quic-v1, /ip4/34.195.157.114/udp/3382/quic-v1, /ip4/107.20.169.236/udp/3382/quic-v1, /ip4/34.4.32.36/udp/3382/quic-v1, /ip4/85.237.203.140/udp/3382/quic-v1"
 
         [consensus]
         shard_ids = [1,2]
@@ -87,7 +87,8 @@ services:
           "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
           "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
           "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
-          "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860"
+          "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860",
+          "ae46d4ae50bee1a9cf6d798ddddd1d7f54c8314eaf85ac0efa3bf685c9506119"
         ]
 
           [[consensus.validator_sets]]
@@ -99,7 +100,8 @@ services:
           "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
           "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
           "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
-          "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860"
+          "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860",
+          "ae46d4ae50bee1a9cf6d798ddddd1d7f54c8314eaf85ac0efa3bf685c9506119"
         ]
 
           [[consensus.validator_sets]]
@@ -111,7 +113,8 @@ services:
           "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
           "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
           "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
-          "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860"
+          "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860",
+          "ae46d4ae50bee1a9cf6d798ddddd1d7f54c8314eaf85ac0efa3bf685c9506119"
         ]
 
         [snapshot]
