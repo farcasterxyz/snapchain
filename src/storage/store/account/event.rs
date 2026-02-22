@@ -36,6 +36,8 @@ impl HubEventIdGenerator {
 
     fn set_current_height(&mut self, height: u64) {
         self.current_height = height;
+        self.current_shard_index = 0;
+        self.current_timestamp = 0;
         self.current_seq = 0;
     }
 
