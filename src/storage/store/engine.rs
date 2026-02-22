@@ -352,7 +352,11 @@ impl ShardEngine {
                     })
                     .min()
             };
-            min_ts_hash(a).cmp(&min_ts_hash(b))
+            // Transactions without valid user messages sort last (preserve original order
+            // among them) so they don't get artificially prioritized over user transactions.
+            let a_key = min_ts_hash(a).unwrap_or([u8::MAX; 24]);
+            let b_key = min_ts_hash(b).unwrap_or([u8::MAX; 24]);
+            a_key.cmp(&b_key)
         });
 
         let mut events = vec![];
