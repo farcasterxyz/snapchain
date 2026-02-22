@@ -15,6 +15,7 @@ use crate::proto::{
     UserNameProof,
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
+use crate::storage::store::account::message::make_ts_hash;
 use crate::storage::store::account::{
     BlockEventStorageError, CastStore, MessagesPage, StorageLendStore, StoreOptions,
     VerificationStore,
@@ -335,6 +336,24 @@ impl ShardEngine {
                 }
             })
             .collect_vec();
+
+        // Sort transactions by the minimum tsHash of their user messages.
+        // This ensures events are emitted in chronological order across FIDs,
+        // preventing clients from undoing optimistic updates due to out-of-order
+        // MERGE_MESSAGE / MERGE_FAILURE events. (See issue #424)
+        snapchain_txns.sort_by(|a, b| {
+            let min_ts_hash = |txn: &Transaction| -> Option<[u8; 24]> {
+                txn.user_messages
+                    .iter()
+                    .filter_map(|msg| {
+                        msg.data.as_ref().and_then(|data| {
+                            make_ts_hash(data.timestamp, &msg.hash).ok()
+                        })
+                    })
+                    .min()
+            };
+            min_ts_hash(a).cmp(&min_ts_hash(b))
+        });
 
         let mut events = vec![];
         let mut validation_error_count = 0;
