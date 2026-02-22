@@ -1,8 +1,14 @@
 # Mainnet validator sets
 #
-# This file defines the validator sets for each shard at different heights.
-# When the validator set changes (e.g. a new validator joins), add a new entry
-# with the effective_at height and the updated list of validator public keys.
+# This file is the single source of truth for validator configurations on mainnet.
+# It defines the validator sets for each shard at different block heights.
+#
+# When the validator set changes (e.g. a new validator joins), add a new
+# [[validator_sets]] entry with the effective_at height, the target shard_ids,
+# and the updated list of validator public keys.
+#
+# TODO: Add comments identifying which organization operates each validator
+# public key (e.g. Warpcast, Neynar, etc.) to improve transparency.
 #
 # Extracted from docker-compose.mainnet.yml to avoid duplication and make
 # validator set updates easier to review and manage. (See issue #437)
