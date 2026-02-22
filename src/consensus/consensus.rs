@@ -43,6 +43,13 @@ pub struct ValidatorSetConfig {
     pub shard_ids: Vec<u32>,
 }
 
+/// Wrapper for loading validator sets from a separate file.
+/// The file should contain a TOML array of `[[validator_sets]]` entries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorSetsFile {
+    pub validator_sets: Vec<ValidatorSetConfig>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub private_key: String,
@@ -63,6 +70,12 @@ pub struct Config {
     pub max_messages_per_block: u32,
     validator_sets: Option<Vec<ValidatorSetConfig>>,
     validator_addresses: Option<Vec<String>>, // Deprecated
+
+    /// Path to an external TOML file containing validator sets.
+    /// When set, validator sets are loaded from this file instead of being
+    /// specified inline. This avoids duplicating the validator list across
+    /// multiple node configs. (See issue #437)
+    pub validator_sets_file: Option<String>,
 
     // Number of seconds to wait before kicking off start height
     pub consensus_start_delay: u32,
@@ -91,6 +104,7 @@ impl Config {
             max_messages_per_block: self.max_messages_per_block,
             validator_addresses: None,
             validator_sets: Some(validator_sets.clone()),
+            validator_sets_file: None,
             consensus_start_delay: self.consensus_start_delay,
             sync_request_timeout: self.sync_request_timeout,
             sync_status_update_interval: self.sync_status_update_interval,
@@ -99,9 +113,20 @@ impl Config {
     }
 
     pub fn get_validator_set_config(&self, shard_id: u32) -> Vec<ValidatorSetConfig> {
+        // Priority: inline validator_sets > validator_sets_file > validator_addresses (deprecated)
         if let Some(sets) = &self.validator_sets {
             assert!(sets.len() > 0);
             return sets.to_vec();
+        }
+
+        // Load from external file if specified (fixes #437)
+        if let Some(path) = &self.validator_sets_file {
+            let contents = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("Failed to read validator sets file '{}': {}", path, e));
+            let file: ValidatorSetsFile = toml::from_str(&contents)
+                .unwrap_or_else(|e| panic!("Failed to parse validator sets file '{}': {}", path, e));
+            assert!(file.validator_sets.len() > 0, "Validator sets file '{}' is empty", path);
+            return file.validator_sets;
         }
 
         if let Some(addresses) = &self.validator_addresses {
@@ -113,7 +138,7 @@ impl Config {
             }];
         }
 
-        panic!("No validator configuration provided")
+        panic!("No validator configuration provided. Set validator_sets, validator_sets_file, or validator_addresses in the consensus config.")
     }
 
     pub fn to_stored_validator_sets(&self, shard_id: u32) -> StoredValidatorSets {
@@ -141,6 +166,7 @@ impl Default for Config {
             max_messages_per_block: 1000,
             validator_addresses: None,
             validator_sets: None,
+            validator_sets_file: None,
             consensus_start_delay: 2,
             sync_request_timeout: Duration::from_secs(2),
             sync_status_update_interval: Duration::from_secs(10),
