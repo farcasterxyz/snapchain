@@ -15,7 +15,7 @@ use crate::proto::{
     UserNameProof,
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
-use crate::storage::store::account::message::make_ts_hash;
+use crate::storage::store::account::make_ts_hash;
 use crate::storage::store::account::{
     BlockEventStorageError, CastStore, MessagesPage, StorageLendStore, StoreOptions,
     VerificationStore,
