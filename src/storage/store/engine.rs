@@ -388,9 +388,11 @@ impl ShardEngine {
         // Use set_current_block_context to ensure events persisted to disk
         // include block_number and shard_index (fixes #461).
         // Timestamp will be set later when the proposal is created.
-        self.stores
-            .event_handler
-            .set_current_block_context(height.block_number, height.shard_index, 0);
+        self.stores.event_handler.set_current_block_context(
+            height.block_number,
+            height.shard_index,
+            0,
+        );
     }
 
     pub fn propose_state_change(
@@ -413,9 +415,7 @@ impl ShardEngine {
         // Update the event handler with the proposal timestamp so events
         // persisted to disk include it (fixes #461). The block_number and
         // shard_index were already set by start_round.
-        self.stores
-            .event_handler
-            .set_timestamp(timestamp.to_u64());
+        self.stores.event_handler.set_timestamp(timestamp.to_u64());
         let result = self
             .prepare_proposal(
                 &merkle_trie::Context::with_callback(count_callback),
@@ -1552,13 +1552,11 @@ impl ShardEngine {
             count_fn("trie.mem_get_count.for_validate", read_count.1, vec![]);
         };
 
-        self.stores
-            .event_handler
-            .set_current_block_context(
-                height.block_number,
-                height.shard_index,
-                shard_state_change.timestamp.to_u64(),
-            );
+        self.stores.event_handler.set_current_block_context(
+            height.block_number,
+            height.shard_index,
+            shard_state_change.timestamp.to_u64(),
+        );
 
         let proposal_result = self.replay_proposal(
             &merkle_trie::Context::with_callback(count_callback),
