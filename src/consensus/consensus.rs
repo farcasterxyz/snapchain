@@ -123,9 +123,14 @@ impl Config {
         if let Some(path) = &self.validator_sets_file {
             let contents = std::fs::read_to_string(path)
                 .unwrap_or_else(|e| panic!("Failed to read validator sets file '{}': {}", path, e));
-            let file: ValidatorSetsFile = toml::from_str(&contents)
-                .unwrap_or_else(|e| panic!("Failed to parse validator sets file '{}': {}", path, e));
-            assert!(file.validator_sets.len() > 0, "Validator sets file '{}' is empty", path);
+            let file: ValidatorSetsFile = toml::from_str(&contents).unwrap_or_else(|e| {
+                panic!("Failed to parse validator sets file '{}': {}", path, e)
+            });
+            assert!(
+                file.validator_sets.len() > 0,
+                "Validator sets file '{}' is empty",
+                path
+            );
             return file.validator_sets;
         }
 
