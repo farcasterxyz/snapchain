@@ -7,7 +7,7 @@ license = "GPL-3.0"
 
 [dependencies]
 prost = "0.13.3"
-tonic = { version = "0.12.3", features = ["tls", "tls-native-roots"] }
+tonic = { version = "0.12.3", features = ["tls", "tls-native-roots", "gzip"] }
 serde = { version = "1.0", features = ["derive"] }
 futures-core = "0.3.31"
 hex = "0.4.3"
