@@ -385,9 +385,12 @@ impl ShardEngine {
 
     pub fn start_round(&mut self, height: Height, _round: Round) {
         self.pending_txn = None;
+        // Use set_current_block_context to ensure events persisted to disk
+        // include block_number and shard_index (fixes #461).
+        // Timestamp will be set later when the proposal is created.
         self.stores
             .event_handler
-            .set_current_height(height.block_number);
+            .set_current_block_context(height.block_number, height.shard_index, 0);
     }
 
     pub fn propose_state_change(
@@ -407,6 +410,12 @@ impl ShardEngine {
             count_fn("trie.mem_get_count.for_propose", read_count.1, vec![]);
         };
         let timestamp = timestamp.unwrap_or_else(FarcasterTime::current);
+        // Update the event handler with the proposal timestamp so events
+        // persisted to disk include it (fixes #461). The block_number and
+        // shard_index were already set by start_round.
+        self.stores
+            .event_handler
+            .set_timestamp(timestamp.to_u64());
         let result = self
             .prepare_proposal(
                 &merkle_trie::Context::with_callback(count_callback),
@@ -1545,7 +1554,11 @@ impl ShardEngine {
 
         self.stores
             .event_handler
-            .set_current_height(height.block_number);
+            .set_current_block_context(
+                height.block_number,
+                height.shard_index,
+                shard_state_change.timestamp.to_u64(),
+            );
 
         let proposal_result = self.replay_proposal(
             &merkle_trie::Context::with_callback(count_callback),
@@ -1853,8 +1866,12 @@ impl ShardEngine {
                 );
             }
             let header = &shard_chunk.header.as_ref().unwrap();
-            let block_number = header.height.unwrap().block_number;
-            self.stores.event_handler.set_current_height(block_number);
+            let height = header.height.unwrap();
+            self.stores.event_handler.set_current_block_context(
+                height.block_number,
+                height.shard_index,
+                header.timestamp,
+            );
             let version = self.version_for(&FarcasterTime::new(header.timestamp));
 
             let count_fn = self.metrics.make_count_fn();
