@@ -37,6 +37,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
+    use tonic::codec::CompressionEncoding;
     use tonic::transport::Server;
     use tonic::{Request, Response, Status};
 
@@ -155,10 +156,17 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let mut builder =
-            Server::builder().add_service(ReplicationServiceServer::new(mock_service));
+        let mut builder = Server::builder().add_service(
+            ReplicationServiceServer::new(mock_service)
+                .accept_compressed(CompressionEncoding::Gzip)
+                .send_compressed(CompressionEncoding::Gzip),
+        );
         if let Some(hub) = mock_hub_service {
-            builder = builder.add_service(HubServiceServer::new(hub));
+            builder = builder.add_service(
+                HubServiceServer::new(hub)
+                    .accept_compressed(CompressionEncoding::Gzip)
+                    .send_compressed(CompressionEncoding::Gzip),
+            );
         }
         let server_future = builder.serve_with_incoming_shutdown(
             tokio_stream::wrappers::TcpListenerStream::new(listener),
@@ -890,7 +898,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server_addr = format!("http://{}", addr);
 
-        let replication_service = ReplicationServiceServer::new(replication_server);
+        let replication_service = ReplicationServiceServer::new(replication_server)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .send_compressed(CompressionEncoding::Gzip);
 
         tokio::spawn(async move {
             Server::builder()
@@ -1177,7 +1187,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server_addr = format!("http://{}", addr);
 
-        let replication_service = ReplicationServiceServer::new(replication_server);
+        let replication_service = ReplicationServiceServer::new(replication_server)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .send_compressed(CompressionEncoding::Gzip);
 
         tokio::spawn(async move {
             Server::builder()
