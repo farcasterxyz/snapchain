@@ -179,3 +179,138 @@ impl Default for Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_load_validator_sets_from_file() {
+        let toml_content = r#"
+[[validator_sets]]
+public_key = "abc123"
+shard_ids = [1, 2]
+
+[[validator_sets]]
+public_key = "def456"
+shard_ids = [1]
+"#;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(toml_content.as_bytes()).unwrap();
+
+        let config = Config {
+            validator_sets_file: Some(file.path().to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+
+        let sets = config.get_validator_set_config(1);
+        assert_eq!(sets.len(), 2);
+        assert_eq!(sets[0].public_key, "abc123");
+        assert_eq!(sets[0].shard_ids, vec![1, 2]);
+        assert_eq!(sets[1].public_key, "def456");
+        assert_eq!(sets[1].shard_ids, vec![1]);
+    }
+
+    #[test]
+    fn test_inline_validator_sets_take_priority_over_file() {
+        // When both inline validator_sets and validator_sets_file are set,
+        // inline should take priority.
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"[[validator_sets]]\npublic_key = \"from_file\"\nshard_ids = [1]\n")
+            .unwrap();
+
+        let config = Config {
+            validator_sets: Some(vec![ValidatorSetConfig {
+                public_key: "from_inline".to_string(),
+                shard_ids: vec![1, 2],
+            }]),
+            validator_sets_file: Some(file.path().to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+
+        let sets = config.get_validator_set_config(1);
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].public_key, "from_inline");
+    }
+
+    #[test]
+    #[should_panic(expected = "Failed to read validator sets file")]
+    fn test_missing_validator_sets_file_panics() {
+        let config = Config {
+            validator_sets_file: Some("/nonexistent/path/validators.toml".to_string()),
+            ..Default::default()
+        };
+        config.get_validator_set_config(1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Failed to parse validator sets file")]
+    fn test_invalid_toml_in_validator_sets_file_panics() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"this is not valid toml [[[").unwrap();
+
+        let config = Config {
+            validator_sets_file: Some(file.path().to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+        config.get_validator_set_config(1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Validator sets file")]
+    fn test_empty_validator_sets_file_panics() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Valid TOML but no validator_sets entries
+        file.write_all(b"").unwrap();
+
+        let config = Config {
+            validator_sets_file: Some(file.path().to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+        config.get_validator_set_config(1);
+    }
+
+    #[test]
+    #[should_panic(expected = "No validator configuration provided")]
+    fn test_no_validator_config_panics() {
+        let config = Config::default();
+        config.get_validator_set_config(1);
+    }
+
+    #[test]
+    fn test_deprecated_validator_addresses_still_works() {
+        let config = Config {
+            validator_addresses: Some(vec!["addr1".to_string(), "addr2".to_string()]),
+            ..Default::default()
+        };
+
+        let sets = config.get_validator_set_config(1);
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].public_key, "addr1");
+        assert_eq!(sets[0].shard_ids, vec![1]);
+    }
+
+    #[test]
+    fn test_with_method_clears_file_reference() {
+        // The `with()` method should produce a config with validator_sets_file = None,
+        // since it embeds the resolved validator sets inline.
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            b"[[validator_sets]]\npublic_key = \"key1\"\nshard_ids = [1]\n",
+        )
+        .unwrap();
+
+        let config = Config {
+            validator_sets_file: Some(file.path().to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+
+        let sets = config.get_validator_set_config(1);
+        let new_config = config.with(&sets);
+        assert!(new_config.validator_sets_file.is_none());
+        assert!(new_config.validator_sets.is_some());
+        assert_eq!(new_config.validator_sets.unwrap()[0].public_key, "key1");
+    }
+}
