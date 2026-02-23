@@ -1702,4 +1702,55 @@ mod tests {
         // Cleanup
         let _ = shutdown_tx.send(());
     }
+
+    #[tokio::test]
+    async fn test_gzip_compression_enabled_on_server() {
+        // Verify that a client configured with gzip can communicate with a
+        // gzip-enabled server. This ensures the compression feature flag in
+        // Cargo.toml and the accept/send_compressed calls are correct.
+        let mock_service = MockReplicationService::default();
+        let (addr, shutdown_tx) = spawn_mock_server(mock_service).await;
+
+        // Connect with gzip compression explicitly enabled
+        let mut client = ReplicationServiceClient::connect(format!("http://{}", addr))
+            .await
+            .unwrap()
+            .accept_compressed(CompressionEncoding::Gzip)
+            .send_compressed(CompressionEncoding::Gzip);
+
+        // Make a request — if gzip isn't properly configured, this would fail
+        let request = tonic::Request::new(proto::GetAllMessagesBySyncIdsRequest {
+            sync_ids: vec![],
+        });
+        let response = client.get_all_messages_by_sync_ids(request).await;
+
+        // The response should succeed (empty sync_ids = empty response)
+        assert!(response.is_ok());
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn test_gzip_compression_backward_compatible() {
+        // Verify that a client WITHOUT gzip can still talk to a gzip-enabled
+        // server. gRPC gzip is negotiated — if the client doesn't request it,
+        // the server should respond uncompressed.
+        let mock_service = MockReplicationService::default();
+        let (addr, shutdown_tx) = spawn_mock_server(mock_service).await;
+
+        // Connect WITHOUT compression
+        let mut client = ReplicationServiceClient::connect(format!("http://{}", addr))
+            .await
+            .unwrap();
+
+        let request = tonic::Request::new(proto::GetAllMessagesBySyncIdsRequest {
+            sync_ids: vec![],
+        });
+        let response = client.get_all_messages_by_sync_ids(request).await;
+
+        // Should still work — gzip is optional, not required
+        assert!(response.is_ok());
+
+        let _ = shutdown_tx.send(());
+    }
 }
