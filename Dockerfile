@@ -31,7 +31,7 @@ git checkout $MALACHITE_GIT_REF
 EOF
 
 COPY Cargo.lock Cargo.toml ./
-COPY proto/Cargo.toml ./proto/Cargo.toml
+COPY proto ./proto
 # cargo-chef prepare needs the full source tree for `cargo metadata` to resolve
 # binary targets (default-run, src/bin/*). The recipe.json output only captures
 # dependency info, so the builder's `cook` layer stays cached even when source changes.
