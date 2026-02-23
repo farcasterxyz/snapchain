@@ -3966,4 +3966,158 @@ mod tests {
         );
         assert!(!message_exists_in_trie(&mut engine, &lend_message))
     }
+
+    #[tokio::test]
+    async fn test_events_persist_block_number_shard_index_timestamp() {
+        // Verify that events written to disk include block_number, shard_index,
+        // and timestamp fields (fixes #461). Previously these were only populated
+        // at read/emit time.
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let msg = default_message("persist-block-fields");
+        let chunk = commit_message(&mut engine, &msg).await;
+        let chunk_header = chunk.header.as_ref().unwrap();
+        let chunk_height = chunk_header.height.unwrap();
+        let chunk_timestamp = chunk_header.timestamp;
+
+        // Read events back from disk for the block that just committed
+        let events = HubEvent::get_events(
+            engine.db.clone(),
+            HubEventIdGenerator::make_event_id_for_block_number(chunk_height.block_number),
+            Some(HubEventIdGenerator::make_event_id_for_block_number(
+                chunk_height.block_number + 1,
+            )),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            !events.events.is_empty(),
+            "Should have events for this block"
+        );
+
+        // Every event in this block should have the correct block context
+        for event in &events.events {
+            assert_eq!(
+                event.block_number, chunk_height.block_number,
+                "Event block_number should match the committed block"
+            );
+            assert_eq!(
+                event.shard_index, chunk_height.shard_index,
+                "Event shard_index should match the committed block"
+            );
+            assert_eq!(
+                event.timestamp, chunk_timestamp,
+                "Event timestamp should match the committed block"
+            );
+        }
+
+        // Find the merge event specifically and double-check it
+        let merge_events: Vec<&HubEvent> = events
+            .events
+            .iter()
+            .filter(|e| e.r#type == HubEventType::MergeMessage as i32)
+            .collect();
+        assert_eq!(merge_events.len(), 1, "Should have exactly one merge event");
+        assert_eq!(merge_events[0].block_number, chunk_height.block_number);
+        assert_eq!(merge_events[0].shard_index, chunk_height.shard_index);
+        assert_eq!(merge_events[0].timestamp, chunk_timestamp);
+    }
+
+    #[tokio::test]
+    async fn test_block_context_resets_between_blocks() {
+        // Verify that block context (block_number, shard_index, timestamp) updates
+        // correctly across multiple blocks — each block's events should have their
+        // own block's context, not a stale one.
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        // Commit two separate blocks
+        let msg1 = default_message("block-context-1");
+        let chunk1 = commit_message(&mut engine, &msg1).await;
+        let h1 = chunk1.header.as_ref().unwrap().height.unwrap();
+        let ts1 = chunk1.header.as_ref().unwrap().timestamp;
+
+        let msg2 = default_message("block-context-2");
+        let chunk2 = commit_message(&mut engine, &msg2).await;
+        let h2 = chunk2.header.as_ref().unwrap().height.unwrap();
+        let ts2 = chunk2.header.as_ref().unwrap().timestamp;
+
+        // Block numbers should be different
+        assert_ne!(h1.block_number, h2.block_number);
+
+        // Check events in block 1
+        let events1 = HubEvent::get_events(
+            engine.db.clone(),
+            HubEventIdGenerator::make_event_id_for_block_number(h1.block_number),
+            Some(HubEventIdGenerator::make_event_id_for_block_number(h1.block_number + 1)),
+            None,
+        )
+        .unwrap();
+        for event in &events1.events {
+            assert_eq!(event.block_number, h1.block_number);
+            assert_eq!(event.timestamp, ts1);
+        }
+
+        // Check events in block 2
+        let events2 = HubEvent::get_events(
+            engine.db.clone(),
+            HubEventIdGenerator::make_event_id_for_block_number(h2.block_number),
+            Some(HubEventIdGenerator::make_event_id_for_block_number(h2.block_number + 1)),
+            None,
+        )
+        .unwrap();
+        for event in &events2.events {
+            assert_eq!(event.block_number, h2.block_number);
+            assert_eq!(event.timestamp, ts2);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_current_block_context_on_event_handler() {
+        // Unit test for the StoreEventHandler's set_current_block_context method
+        use crate::storage::store::account::StoreEventHandler;
+        use crate::storage::store::account::HubEventStorageExt;
+
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        // Set block context directly
+        engine
+            .get_stores()
+            .event_handler
+            .set_current_block_context(42, 3, 1700000000);
+
+        // Set timestamp separately
+        engine.get_stores().event_handler.set_timestamp(1700000001);
+
+        // Commit a message and verify the event picks up the context
+        let msg = default_message("context-test");
+        let messages = vec![MempoolMessage::UserMessage(msg.clone())];
+        let state_change = engine.propose_state_change(1, messages, None);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
+
+        // The events should reflect the block context set by validate_and_commit
+        // (which calls start_round internally), not our manual set above.
+        // This test verifies the methods exist and work without panicking.
+    }
 }
