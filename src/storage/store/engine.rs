@@ -346,9 +346,9 @@ impl ShardEngine {
                 txn.user_messages
                     .iter()
                     .filter_map(|msg| {
-                        msg.data.as_ref().and_then(|data| {
-                            make_ts_hash(data.timestamp, &msg.hash).ok()
-                        })
+                        msg.data
+                            .as_ref()
+                            .and_then(|data| make_ts_hash(data.timestamp, &msg.hash).ok())
                     })
                     .min()
             };
