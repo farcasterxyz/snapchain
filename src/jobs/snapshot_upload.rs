@@ -67,6 +67,7 @@ pub async fn upload_snapshot(
         if age > STALE_BACKUP_THRESHOLD {
             warn!(
                 age_hours = age.as_secs() / 3600,
+                path = %backup_dir,
                 "Removing stale backup directory"
             );
             std::fs::remove_dir_all(backup_dir)?;
