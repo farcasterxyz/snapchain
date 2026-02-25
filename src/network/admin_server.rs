@@ -266,10 +266,6 @@ impl AdminService for MyAdminService {
     ) -> std::result::Result<Response<Empty>, Status> {
         authenticate_request(&request, &self.allowed_users)?;
 
-        if std::fs::exists(self.snapshot_config.backup_dir.clone())? {
-            return Err(Status::aborted("snapshot already in progress"));
-        }
-
         let fc_network = self.fc_network.clone();
         let snapshot_config = self.snapshot_config.clone();
         let shard_stores = self.shard_stores.clone();
