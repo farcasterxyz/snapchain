@@ -7,9 +7,11 @@ use crate::storage::store::stores::Stores;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio_cron_scheduler::{Job, JobSchedulerError};
-use tracing::{error, info};
+use tracing::{error, info, warn};
+
+const STALE_BACKUP_THRESHOLD: Duration = Duration::from_secs(12 * 60 * 60);
 
 async fn backup_and_upload(
     fc_network: FarcasterNetwork,
@@ -41,8 +43,37 @@ pub async fn upload_snapshot(
     statsd_client: StatsdClientWrapper,
     only_for_shard_ids: Option<HashSet<u32>>,
 ) -> Result<(), SnapshotError> {
-    if std::fs::exists(snapshot_config.backup_dir.clone())? {
-        return Err(SnapshotError::UploadAlreadyInProgress);
+    let backup_dir = &snapshot_config.backup_dir;
+    if std::fs::exists(backup_dir)? {
+        let age = match std::fs::metadata(backup_dir)?.modified() {
+            Ok(modified) => match modified.elapsed() {
+                Ok(duration) => duration,
+                Err(err) => {
+                    warn!(
+                        error = ?err,
+                        "Backup directory mtime is in the future; treating as stale"
+                    );
+                    STALE_BACKUP_THRESHOLD + Duration::from_secs(1)
+                }
+            },
+            Err(err) => {
+                warn!(
+                    error = ?err,
+                    "Unable to read backup directory mtime; treating as stale"
+                );
+                STALE_BACKUP_THRESHOLD + Duration::from_secs(1)
+            }
+        };
+        if age > STALE_BACKUP_THRESHOLD {
+            warn!(
+                age_hours = age.as_secs() / 3600,
+                path = %backup_dir,
+                "Removing stale backup directory"
+            );
+            std::fs::remove_dir_all(backup_dir)?;
+        } else {
+            return Err(SnapshotError::UploadAlreadyInProgress);
+        }
     }
 
     let now = SystemTime::now()
