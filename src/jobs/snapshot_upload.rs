@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_cron_scheduler::{Job, JobSchedulerError};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 async fn backup_and_upload(
     fc_network: FarcasterNetwork,
@@ -42,7 +42,17 @@ pub async fn upload_snapshot(
     only_for_shard_ids: Option<HashSet<u32>>,
 ) -> Result<(), SnapshotError> {
     if std::fs::exists(snapshot_config.backup_dir.clone())? {
-        return Err(SnapshotError::UploadAlreadyInProgress);
+        let metadata = std::fs::metadata(snapshot_config.backup_dir.clone())?;
+        let age = metadata.modified()?.elapsed().unwrap_or_default();
+        if age > std::time::Duration::from_secs(12 * 60 * 60) {
+            warn!(
+                age_hours = age.as_secs() / 3600,
+                "Removing stale backup directory"
+            );
+            std::fs::remove_dir_all(snapshot_config.backup_dir.clone())?;
+        } else {
+            return Err(SnapshotError::UploadAlreadyInProgress);
+        }
     }
 
     let now = SystemTime::now()
