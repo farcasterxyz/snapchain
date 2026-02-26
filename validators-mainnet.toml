@@ -1,0 +1,94 @@
+# Mainnet validator sets
+#
+# This file is the single source of truth for validator configurations on mainnet.
+# It defines the validator sets for each shard at different block heights.
+#
+# When the validator set changes (e.g. a new validator joins), add a new
+# [[validator_sets]] entry with the effective_at height, the target shard_ids,
+# and the updated list of validator public keys.
+#
+# TODO: Add comments identifying which organization operates each validator
+# public key (e.g. Warpcast, Neynar, etc.) to improve transparency.
+#
+# Extracted from docker-compose.mainnet.yml to avoid duplication and make
+# validator set updates easier to review and manage. (See issue #437)
+
+[[validator_sets]]
+effective_at = 0
+shard_ids = [ 0, 1, 2 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "2c0f58a364b7959c85e49b5a50d14d220c16f8bd7879b0d5d3f68b32de83ecb8",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+]
+
+[[validator_sets]]
+effective_at = 26_386_684
+shard_ids = [ 0 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+]
+
+[[validator_sets]]
+effective_at = 26_701_296
+shard_ids = [ 1 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+]
+
+[[validator_sets]]
+effective_at = 26_556_206
+shard_ids = [ 2 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+]
+
+[[validator_sets]]
+effective_at = 28_415_000
+shard_ids = [ 0 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+  "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860",
+]
+
+[[validator_sets]]
+effective_at = 28_852_000
+shard_ids = [ 1 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+  "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860",
+]
+
+[[validator_sets]]
+effective_at = 28_706_000
+shard_ids = [ 2 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+  "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860",
+]
