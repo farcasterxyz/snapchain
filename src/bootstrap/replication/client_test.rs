@@ -37,6 +37,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
+    use tonic::codec::CompressionEncoding;
     use tonic::transport::Server;
     use tonic::{Request, Response, Status};
 
@@ -155,10 +156,17 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let mut builder =
-            Server::builder().add_service(ReplicationServiceServer::new(mock_service));
+        let mut builder = Server::builder().add_service(
+            ReplicationServiceServer::new(mock_service)
+                .accept_compressed(CompressionEncoding::Gzip)
+                .send_compressed(CompressionEncoding::Gzip),
+        );
         if let Some(hub) = mock_hub_service {
-            builder = builder.add_service(HubServiceServer::new(hub));
+            builder = builder.add_service(
+                HubServiceServer::new(hub)
+                    .accept_compressed(CompressionEncoding::Gzip)
+                    .send_compressed(CompressionEncoding::Gzip),
+            );
         }
         let server_future = builder.serve_with_incoming_shutdown(
             tokio_stream::wrappers::TcpListenerStream::new(listener),
@@ -890,7 +898,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server_addr = format!("http://{}", addr);
 
-        let replication_service = ReplicationServiceServer::new(replication_server);
+        let replication_service = ReplicationServiceServer::new(replication_server)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .send_compressed(CompressionEncoding::Gzip);
 
         tokio::spawn(async move {
             Server::builder()
@@ -1177,7 +1187,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server_addr = format!("http://{}", addr);
 
-        let replication_service = ReplicationServiceServer::new(replication_server);
+        let replication_service = ReplicationServiceServer::new(replication_server)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .send_compressed(CompressionEncoding::Gzip);
 
         tokio::spawn(async move {
             Server::builder()
@@ -1688,6 +1700,57 @@ mod tests {
             .contains("does not contain expected trie key"));
 
         // Cleanup
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn test_gzip_compression_enabled_on_server() {
+        // Verify that a client configured with gzip can communicate with a
+        // gzip-enabled server. This ensures the compression feature flag in
+        // Cargo.toml and the accept/send_compressed calls are correct.
+        let mock_service = MockReplicationService::default();
+        let (addr, shutdown_tx) = spawn_mock_server(mock_service).await;
+
+        // Connect with gzip compression explicitly enabled
+        let mut client = ReplicationServiceClient::connect(format!("http://{}", addr))
+            .await
+            .unwrap()
+            .accept_compressed(CompressionEncoding::Gzip)
+            .send_compressed(CompressionEncoding::Gzip);
+
+        // Make a request — if gzip isn't properly configured, this would fail
+        let request = tonic::Request::new(proto::GetAllMessagesBySyncIdsRequest {
+            sync_ids: vec![],
+        });
+        let response = client.get_all_messages_by_sync_ids(request).await;
+
+        // The response should succeed (empty sync_ids = empty response)
+        assert!(response.is_ok());
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn test_gzip_compression_backward_compatible() {
+        // Verify that a client WITHOUT gzip can still talk to a gzip-enabled
+        // server. gRPC gzip is negotiated — if the client doesn't request it,
+        // the server should respond uncompressed.
+        let mock_service = MockReplicationService::default();
+        let (addr, shutdown_tx) = spawn_mock_server(mock_service).await;
+
+        // Connect WITHOUT compression
+        let mut client = ReplicationServiceClient::connect(format!("http://{}", addr))
+            .await
+            .unwrap();
+
+        let request = tonic::Request::new(proto::GetAllMessagesBySyncIdsRequest {
+            sync_ids: vec![],
+        });
+        let response = client.get_all_messages_by_sync_ids(request).await;
+
+        // Should still work — gzip is optional, not required
+        assert!(response.is_ok());
+
         let _ = shutdown_tx.send(());
     }
 }

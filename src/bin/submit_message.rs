@@ -23,7 +23,11 @@ async fn main() {
             .unwrap(),
     );
 
-    let mut client = HubServiceClient::connect(args.addr).await.unwrap();
+    let mut client = HubServiceClient::connect(args.addr)
+        .await
+        .unwrap()
+        .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+        .send_compressed(tonic::codec::CompressionEncoding::Gzip);
     let count = args.count;
 
     let mut success = 0;

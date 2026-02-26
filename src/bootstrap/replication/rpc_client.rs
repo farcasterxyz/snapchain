@@ -110,7 +110,10 @@ impl RpcClientsManager {
         drop(data); // Release the lock before connecting
 
         //  If it's a new peer, connect and store it
-        let client = ReplicationServiceClient::connect(peer_address.clone()).await?;
+        let client = ReplicationServiceClient::connect(peer_address.clone())
+            .await?
+            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .send_compressed(tonic::codec::CompressionEncoding::Gzip);
         let new_peer = Arc::new(Peer {
             client,
             stats: Mutex::new(PeerStats::default()),
@@ -317,7 +320,10 @@ impl RpcClientsManager {
         peer_address: String,
         shard_id: u32,
     ) -> Result<GetShardSnapshotMetadataResponse, BootstrapError> {
-        let mut client = ReplicationServiceClient::connect(peer_address).await?;
+        let mut client = ReplicationServiceClient::connect(peer_address)
+            .await?
+            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .send_compressed(tonic::codec::CompressionEncoding::Gzip);
 
         let mut req = tonic::Request::new(proto::GetShardSnapshotMetadataRequest { shard_id });
         req.set_timeout(Duration::from_secs(60));
@@ -379,7 +385,10 @@ impl RpcClientsManager {
     where
         F: FnMut(Block) -> Result<(), BootstrapError>,
     {
-        let mut client = HubServiceClient::connect(peer_address).await?;
+        let mut client = HubServiceClient::connect(peer_address)
+            .await?
+            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .send_compressed(tonic::codec::CompressionEncoding::Gzip);
 
         let request = proto::BlocksRequest {
             shard_id: 0,
