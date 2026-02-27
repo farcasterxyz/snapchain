@@ -18,16 +18,6 @@ env:
   MALACHITE_GIT_REF: "13bca14cd209d985c3adf101a02924acde8723a5"
 
 jobs:
-  build:
-    timeout-minutes: 20
-    runs-on:
-      - runs-on=${{ github.run_id }}
-      - runner=64cpu-linux-arm64
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build via Docker Compose
-        run: docker compose build
-
   test:
     timeout-minutes: 20
     runs-on:

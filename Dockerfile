@@ -1,4 +1,4 @@
-FROM rust:1.89 AS builder
+FROM rust:1.89 AS chef
 
 WORKDIR /usr/src/app
 
@@ -12,6 +12,7 @@ ENV RUST_BACKTRACE=1
 RUN <<EOF
 set -eu
 apt-get update && apt-get install -y libclang-dev git libjemalloc-dev llvm-dev make protobuf-compiler libssl-dev openssh-client cmake
+cargo install cargo-chef
 cd ..
 git clone $ETH_SIGNATURE_VERIFIER_GIT_REPO_URL
 cd eth-signature-verifier
@@ -23,10 +24,20 @@ cd malachite
 git checkout $MALACHITE_GIT_REF
 EOF
 
-# Unfortunately, we can't prefetch creates without including the source code,
-# since the Cargo configuration references files in src.
-# This means we'll re-fetch all crates every time the source code changes,
-# which isn't ideal.
+# Analyze dependencies and create a build recipe
+FROM chef AS planner
+COPY Cargo.lock Cargo.toml ./
+COPY proto ./proto
+COPY src ./src
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+
+# Build ONLY dependencies (cached until Cargo.lock/Cargo.toml change)
+COPY --from=planner /usr/src/app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Build the actual source (only this layer invalidates on src/ changes)
 COPY Cargo.lock Cargo.toml ./
 COPY proto ./proto
 COPY src ./src
