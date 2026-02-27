@@ -44,7 +44,9 @@ jobs:
           file: ./Dockerfile
           platforms: linux/${{ matrix.arch }}
           push: false
-          cache-from: type=gha,scope=build-${{ matrix.arch }}
+          cache-from: |
+            type=gha,scope=build-${{ matrix.arch }}
+            type=registry,ref=ghcr.io/farcasterxyz/snapchain/cache:${{ matrix.arch }}
           cache-to: |
             type=gha,mode=max,scope=build-${{ matrix.arch }}
             type=registry,mode=max,ref=ghcr.io/farcasterxyz/snapchain/cache:${{ matrix.arch }}
