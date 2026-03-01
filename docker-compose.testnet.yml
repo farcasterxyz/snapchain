@@ -30,7 +30,7 @@ services:
 
         [gossip]
         address="/ip4/0.0.0.0/udp/3382/quic-v1"
-        bootstrap_peers = "/ip4/18.214.165.252/udp/3382/quic-v1, /ip4/3.212.167.138/udp/3382/quic-v1, /ip4/107.21.184.149/udp/3382/quic-v1, /ip4/18.206.50.132/udp/3382/quic-v1,"
+        bootstrap_peers = "/ip4/18.214.165.252/udp/3382/quic-v1, /ip4/3.212.167.138/udp/3382/quic-v1, /ip4/107.21.184.149/udp/3382/quic-v1, /ip4/18.206.50.132/udp/3382/quic-v1"
 
         [consensus]
         validator_addresses=["e89dda4bff3ed5f75f56656a661f9f3e972b7206852dee7bfa65c6cee341e7ae", "719a2a8331e05a3c5e2f4689fc71e7eabfea96d79c69df773a6fc8d8962dfda4", "5b5eb128729aedd86b626f0d60267f770025a551989c422a8f6959ce0bcf24de", "9b8e23233565a6d75e545b3750052ca0a19fe71b21bfb91a020498875f426e2e"]
