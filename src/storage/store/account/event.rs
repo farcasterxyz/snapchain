@@ -18,20 +18,33 @@ pub struct EventsPage {
 }
 
 pub struct HubEventIdGenerator {
-    current_height: u64, // current block number
-    current_seq: u64,    // current event index within the block number
+    current_height: u64,      // current block number
+    current_shard_index: u32, // current shard index
+    current_timestamp: u64,   // current block timestamp
+    current_seq: u64,         // current event index within the block number
 }
 
 impl HubEventIdGenerator {
     fn new(current_block: Option<u64>, last_seq: Option<u64>) -> Self {
         HubEventIdGenerator {
             current_height: current_block.unwrap_or(0),
+            current_shard_index: 0,
+            current_timestamp: 0,
             current_seq: last_seq.unwrap_or(0),
         }
     }
 
     fn set_current_height(&mut self, height: u64) {
         self.current_height = height;
+        self.current_shard_index = 0;
+        self.current_timestamp = 0;
+        self.current_seq = 0;
+    }
+
+    fn set_current_block_context(&mut self, height: u64, shard_index: u32, timestamp: u64) {
+        self.current_height = height;
+        self.current_shard_index = shard_index;
+        self.current_timestamp = timestamp;
         self.current_seq = 0;
     }
 
@@ -105,6 +118,20 @@ impl StoreEventHandler {
         generator.set_current_height(height);
     }
 
+    /// Set the full block context (block number, shard index, timestamp) so that
+    /// events persisted to disk include these fields. Previously these were only
+    /// populated at read/emit time. (See issue #461)
+    pub fn set_current_block_context(&self, height: u64, shard_index: u32, timestamp: u64) {
+        let mut generator = self.generator.lock().unwrap();
+        generator.set_current_block_context(height, shard_index, timestamp);
+    }
+
+    /// Update just the timestamp (useful when it becomes known after start_round).
+    pub fn set_timestamp(&self, timestamp: u64) {
+        let mut generator = self.generator.lock().unwrap();
+        generator.current_timestamp = timestamp;
+    }
+
     // This is named "commit_transaction" but the commit doesn't actually happen here. This function is provided a [txn] that's committed elsewhere.
     pub fn commit_transaction(
         &self,
@@ -117,6 +144,11 @@ impl StoreEventHandler {
         // Generate the event ID
         let event_id = generator.generate_id(&raw_event)?;
         raw_event.id = event_id;
+
+        // Persist block_number, shard_index, and timestamp to disk (fixes #461)
+        raw_event.block_number = generator.current_height;
+        raw_event.shard_index = generator.current_shard_index;
+        raw_event.timestamp = generator.current_timestamp;
 
         HubEvent::put_event_transaction(txn, &raw_event)?;
 
