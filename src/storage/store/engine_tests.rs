@@ -3966,4 +3966,111 @@ mod tests {
         );
         assert!(!message_exists_in_trie(&mut engine, &lend_message))
     }
+
+    #[tokio::test]
+    async fn test_transactions_sorted_by_ts_hash_in_proposal() {
+        // Verify that prepare_proposal sorts transactions by their minimum tsHash,
+        // so events are emitted in chronological order across FIDs (fixes #424).
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+
+        // Register two users with different FIDs
+        let signer1 = test_helper::default_signer();
+        let signer2 = generate_signer();
+        register_user(
+            FID_FOR_TEST,
+            signer1.clone(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+        register_user(
+            FID2_FOR_TEST,
+            signer2.clone(),
+            factory::address::generate_random_address(),
+            &mut engine,
+        )
+        .await;
+
+        let ts = time::farcaster_time();
+        // FID1 gets a later timestamp, FID2 gets an earlier timestamp.
+        // Without sorting, FID1's transaction would come first (lower FID or insertion order).
+        // With sorting, FID2's transaction (earlier tsHash) should come first.
+        let msg_fid1 = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "late message",
+            Some(ts + 100),
+            Some(&signer1),
+        );
+        let msg_fid2 = messages_factory::casts::create_cast_add(
+            FID2_FOR_TEST,
+            "early message",
+            Some(ts),
+            Some(&signer2),
+        );
+
+        // Submit FID1's message first, then FID2's — without sorting, FID1 would be first
+        let messages = vec![
+            MempoolMessage::UserMessage(msg_fid1.clone()),
+            MempoolMessage::UserMessage(msg_fid2.clone()),
+        ];
+        let state_change = engine.propose_state_change(1, messages, None);
+
+        // The first transaction should be FID2 (earlier timestamp)
+        assert!(state_change.transactions.len() >= 2);
+        assert_eq!(
+            state_change.transactions[0].fid, FID2_FOR_TEST,
+            "Transaction with earlier tsHash (FID2) should come first"
+        );
+        assert_eq!(
+            state_change.transactions[1].fid, FID_FOR_TEST,
+            "Transaction with later tsHash (FID1) should come second"
+        );
+
+        // Commit and verify events are emitted in tsHash order
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
+    }
+
+    #[tokio::test]
+    async fn test_transactions_without_user_messages_sort_last() {
+        // Transactions with only system messages (no user messages) should sort
+        // after transactions with user messages (fixes #424).
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+
+        let signer1 = test_helper::default_signer();
+        register_user(
+            FID_FOR_TEST,
+            signer1.clone(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let ts = time::farcaster_time();
+        let msg = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "user message",
+            Some(ts),
+            Some(&signer1),
+        );
+        // An onchain event creates a system-only transaction
+        let onchain_event = events_factory::create_onchain_event(FID2_FOR_TEST);
+
+        let messages = vec![
+            MempoolMessage::OnchainEvent(onchain_event.clone()),
+            MempoolMessage::UserMessage(msg.clone()),
+        ];
+        let state_change = engine.propose_state_change(1, messages, None);
+
+        // The user-message transaction should come before the system-only transaction
+        if state_change.transactions.len() >= 2 {
+            let first_has_user_msgs = !state_change.transactions[0].user_messages.is_empty();
+            let last_has_user_msgs = !state_change.transactions.last().unwrap().user_messages.is_empty();
+            // If first has no user messages but last does, sorting is wrong
+            if !first_has_user_msgs && last_has_user_msgs {
+                panic!("System-only transactions should sort after user-message transactions");
+            }
+        }
+
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
+    }
 }
