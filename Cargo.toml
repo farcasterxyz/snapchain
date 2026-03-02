@@ -21,7 +21,7 @@ atty = "0.2"
 libp2p-connection-limits = "0.5.0"
 serde_json = "1.0"
 sha2 = "0.10.6"
-tonic = { version ="0.12.3", features = ["tls", "tls-native-roots"] }
+tonic = { version ="0.12.3", features = ["tls", "tls-native-roots", "gzip"] }
 rustls = { version = "0.23", features = ["ring"] }
 prost = "0.13.3"
 futures = "0.3.28"

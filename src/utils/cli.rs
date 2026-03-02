@@ -77,7 +77,10 @@ pub async fn follow_blocks(
     addr: String,
     block_tx: mpsc::Sender<Block>,
 ) -> Result<(), Box<dyn Error>> {
-    let mut client = proto::hub_service_client::HubServiceClient::connect(addr).await?;
+    let mut client = proto::hub_service_client::HubServiceClient::connect(addr)
+        .await?
+        .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+        .send_compressed(tonic::codec::CompressionEncoding::Gzip);
 
     let mut i = 1;
 

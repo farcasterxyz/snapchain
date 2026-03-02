@@ -36,6 +36,7 @@ use tokio::select;
 use tokio::signal::ctrl_c;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_cron_scheduler::JobScheduler;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::Server;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -94,7 +95,9 @@ async fn start_servers(
             replicator,
             block_stores.clone(),
             statsd_client.clone(),
-        ));
+        ))
+        .accept_compressed(CompressionEncoding::Gzip)
+        .send_compressed(CompressionEncoding::Gzip);
         Some(service)
     } else {
         None
@@ -105,10 +108,15 @@ async fn start_servers(
 
     tokio::spawn(async move {
         info!(grpc_addr = grpc_addr, "GrpcService listening",);
-        let mut server = Server::builder().add_service(HubServiceServer::from_arc(grpc_service));
+        let hub_service = HubServiceServer::from_arc(grpc_service)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .send_compressed(CompressionEncoding::Gzip);
+        let mut server = Server::builder().add_service(hub_service);
 
         if admin_service.enabled() {
-            let admin_service = AdminServiceServer::new(admin_service);
+            let admin_service = AdminServiceServer::new(admin_service)
+                .accept_compressed(CompressionEncoding::Gzip)
+                .send_compressed(CompressionEncoding::Gzip);
             server = server.add_service(admin_service);
         }
 
