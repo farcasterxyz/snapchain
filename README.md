@@ -27,7 +27,7 @@ Snapchain is in the migration phase. Please check the [release docs](https://www
 
 A snapchain node lets you read and write messages to the network. You will need a machine with the following system requirements to get started: 
 
-- 16 GB of RAM
+- 32 GB of RAM
 - 4 CPU cores or vCPUs
 - 1.5TB of free storage
 - A public IP address
