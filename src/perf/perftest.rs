@@ -224,10 +224,10 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                 }
             }
             time = stats_calculation_timer.tick() => {
-                let avg_time_to_confirmation = if time_to_confirmation.len() > 0 {time_to_confirmation.iter().sum::<u64>() as f64 / time_to_confirmation.len() as f64} else {0f64};
-                let max_time_to_confirmation = if time_to_confirmation.len() > 0 {time_to_confirmation.clone().into_iter().max().unwrap()} else {0};
-                let avg_block_time = if block_times.len() > 0 {block_times.iter().sum::<u64>() as f64 / block_times.len() as f64} else {0f64};
-                let max_block_time = if block_times.len() > 0 {block_times.clone().into_iter().max().unwrap()} else {0};
+                let avg_time_to_confirmation = if !time_to_confirmation.is_empty() {time_to_confirmation.iter().sum::<u64>() as f64 / time_to_confirmation.len() as f64} else {0f64};
+                let max_time_to_confirmation = if !time_to_confirmation.is_empty() {time_to_confirmation.clone().into_iter().max().unwrap()} else {0};
+                let avg_block_time = if !block_times.is_empty() {block_times.iter().sum::<u64>() as f64 / block_times.len() as f64} else {0f64};
+                let max_block_time = if !block_times.is_empty() {block_times.clone().into_iter().max().unwrap()} else {0};
                 let time_elapsed = time.duration_since(start).as_secs();
                 let confirmed_msgs_per_sec = num_messages_confirmed as f64 / cfg.stats_calculation_interval.as_secs_f64();
                 let submitted_msgs_per_sec = num_messages_submitted as f64 / cfg.stats_calculation_interval.as_secs_f64();
