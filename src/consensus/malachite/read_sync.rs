@@ -20,6 +20,7 @@ use informalsystems_malachitebft_engine::util::ticker::ticker;
 use informalsystems_malachitebft_engine::util::timers::{TimeoutElapsed, TimerScheduler};
 
 use crate::core::types::SnapchainValidatorContext;
+use crate::core::CommitsExt;
 use crate::proto::{self, Height};
 
 use super::read_host::{ReadHostMsg, ReadHostRef};
@@ -345,14 +346,18 @@ impl ReadSync {
                         let decided_value = value_response.value.as_ref().unwrap();
                         let value_bytes =
                             value_response.value.as_ref().unwrap().value_bytes.as_ref();
+
+                        let commits =
+                            proto::Commits::from_commit_certificate(&decided_value.certificate);
+
                         let value = if decided_value.certificate.value_id.shard_index == 0 {
-                            proto::decided_value::Value::Block(
-                                proto::Block::decode(value_bytes).unwrap(),
-                            )
+                            let mut block = proto::Block::decode(value_bytes).unwrap();
+                            block.commits = Some(commits);
+                            proto::decided_value::Value::Block(block)
                         } else {
-                            proto::decided_value::Value::Shard(
-                                proto::ShardChunk::decode(value_bytes).unwrap(),
-                            )
+                            let mut shard_chunk = proto::ShardChunk::decode(value_bytes).unwrap();
+                            shard_chunk.commits = Some(commits);
+                            proto::decided_value::Value::Shard(shard_chunk)
                         };
                         debug!(peer_id = %peer, height = %decided_value.certificate.height, "Received sync value response");
                         self.host.cast(ReadHostMsg::ProcessDecidedValue {
