@@ -1138,9 +1138,8 @@ pub struct HubEvent {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EventsResponse {
     pub events: Vec<HubEvent>,
-    // TODO: What's the best way to support next page token with multiple shards?
-    // #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
-    // pub next_page_token: Option<String>,
+    #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
 }
 
 #[allow(non_snake_case)]
@@ -1973,12 +1972,9 @@ fn map_proto_messages_response_to_json_paged_response(
             .iter()
             .map(|m| map_proto_message_to_json_message(m.clone()).unwrap())
             .collect(),
-        next_page_token: Some(
-            messages_response
-                .next_page_token
-                .map(|t| BASE64_STANDARD.encode(t))
-                .unwrap_or_else(|| "".to_string()),
-        ),
+        next_page_token: messages_response
+            .next_page_token
+            .map(|t| BASE64_STANDARD.encode(t)),
     })
 }
 
@@ -2958,6 +2954,9 @@ where
                 .iter()
                 .map(|e| map_proto_hub_event_to_json_hub_event(e.clone()).unwrap())
                 .collect(),
+            next_page_token: events_response
+                .next_page_token
+                .map(|t| BASE64_STANDARD.encode(t)),
         })
     }
 
