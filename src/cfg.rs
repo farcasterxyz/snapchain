@@ -81,8 +81,72 @@ impl Default for ReplicationConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct LoggingConfig {
+    pub level: String,
+    pub preset: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub consensus_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub storage_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub network_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mempool_level: Option<String>,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: "info".to_string(),
+            preset: "default".to_string(),
+            consensus_level: None,
+            storage_level: None,
+            network_level: None,
+            mempool_level: None,
+        }
+    }
+}
+
+impl LoggingConfig {
+    pub fn build_env_filter(&self) -> String {
+        let (preset_consensus, preset_storage, preset_network, preset_mempool) =
+            match self.preset.as_str() {
+                "production" => ("warn", "warn", "error", "warn"),
+                _ => (
+                    self.level.as_str(),
+                    self.level.as_str(),
+                    self.level.as_str(),
+                    self.level.as_str(),
+                ),
+            };
+
+        let consensus = self
+            .consensus_level
+            .as_deref()
+            .unwrap_or(preset_consensus);
+        let storage = self.storage_level.as_deref().unwrap_or(preset_storage);
+        let network = self.network_level.as_deref().unwrap_or(preset_network);
+        let mempool = self.mempool_level.as_deref().unwrap_or(preset_mempool);
+
+        format!(
+            "snapchain::consensus={consensus},\
+             snapchain::storage={storage},\
+             snapchain::network={network},\
+             snapchain::mempool={mempool},\
+             {global}",
+            consensus = consensus,
+            storage = storage,
+            network = network,
+            mempool = mempool,
+            global = self.level,
+        )
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     pub log_format: String,
+    pub logging: LoggingConfig,
     pub fnames: connectors::fname::Config,
     pub onchain_events: connectors::onchain_events::Config,
     pub base_onchain_events: connectors::onchain_events::Config,
@@ -110,6 +174,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             log_format: "text".to_string(),
+            logging: LoggingConfig::default(),
             fnames: connectors::fname::Config::default(),
             onchain_events: connectors::onchain_events::Config::default(),
             base_onchain_events: connectors::onchain_events::Config::default(),
@@ -145,10 +210,12 @@ pub struct CliArgs {
 
     #[arg(long, action, help = "Start the node with a clean database")]
     clear_db: bool,
-    // All new arguments that are to override values from config files or environment variables
-    // should be probably be optional (`Option<T>`) and without a default. Setting a default
-    // in this case will have the effect of automatically overriding all previous configuration
-    // layers. Remember to add the override code below and a test case.
+
+    #[arg(
+        long,
+        help = "Minimum log level: error | warn | info | debug | trace (overrides config)"
+    )]
+    log_level: Option<String>,
 }
 
 pub fn load_and_merge_config(args: Vec<String>) -> Result<Config, Box<dyn Error>> {
@@ -169,7 +236,58 @@ pub fn load_and_merge_config(args: Vec<String>) -> Result<Config, Box<dyn Error>
     if let Some(log_format) = cli_args.log_format {
         config.log_format = log_format;
     }
+    if let Some(log_level) = cli_args.log_level {
+        config.logging.level = log_level;
+    }
     config.clear_db = cli_args.clear_db;
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_filter_is_info() {
+        let cfg = LoggingConfig::default();
+        let filter = cfg.build_env_filter();
+        assert!(filter.ends_with(",info"), "filter was: {filter}");
+        assert!(filter.contains("snapchain::consensus=info"), "filter was: {filter}");
+        assert!(filter.contains("snapchain::storage=info"), "filter was: {filter}");
+    }
+
+    #[test]
+    fn test_production_preset_quiets_hot_paths() {
+        let cfg = LoggingConfig {
+            preset: "production".to_string(),
+            ..LoggingConfig::default()
+        };
+        let filter = cfg.build_env_filter();
+        assert!(filter.contains("snapchain::consensus=warn"), "filter was: {filter}");
+        assert!(filter.contains("snapchain::storage=warn"), "filter was: {filter}");
+        assert!(filter.contains("snapchain::network=error"), "filter was: {filter}");
+        assert!(filter.contains("snapchain::mempool=warn"), "filter was: {filter}");
+        assert!(filter.ends_with(",info"), "filter was: {filter}");
+    }
+
+    #[test]
+    fn test_per_subsystem_override_beats_preset() {
+        let cfg = LoggingConfig {
+            preset: "production".to_string(),
+            consensus_level: Some("debug".to_string()), 
+            ..LoggingConfig::default()
+        };
+        let filter = cfg.build_env_filter();
+        assert!(filter.contains("snapchain::consensus=debug"), "filter was: {filter}");
+        assert!(filter.contains("snapchain::storage=warn"), "filter was: {filter}");
+    }
+
+    #[test]
+    fn test_cli_log_level_override() {
+        let mut config = Config::default();
+        config.logging.level = "debug".to_string();
+        let filter = config.logging.build_env_filter();
+        assert!(filter.ends_with(",debug"), "filter was: {filter}");
+    }
 }
