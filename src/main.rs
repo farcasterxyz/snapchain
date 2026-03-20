@@ -281,7 +281,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Resolution order (highest priority wins):
+    //   1. RUST_LOG env var — preserves the developer escape hatch for ad-hoc overrides
+    //   2. app_config.logging — driven by [logging] in the TOML, env SNAPCHAIN_LOGGING__*,
+    //      or the --log-level CLI flag (see cfg.rs)
+    //
+    // In production, set `preset = "production"` in [logging] (or via
+    // SNAPCHAIN_LOGGING__PRESET=production) to suppress high-volume hot-path logs.
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(app_config.logging.build_env_filter())
+    });
     match app_config.log_format.as_str() {
         "text" => tracing_subscriber::fmt().with_env_filter(env_filter).init(),
         "json" => tracing_subscriber::fmt()
