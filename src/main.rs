@@ -168,7 +168,6 @@ async fn start_servers(
         http_shutdown_tx.send(()).await.ok();
     });
 
-    // Start gossip last
     tokio::spawn(async move {
         info!("Starting gossip");
         gossip.start().await;
@@ -281,13 +280,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    // Resolution order (highest priority wins):
-    //   1. RUST_LOG env var — preserves the developer escape hatch for ad-hoc overrides
-    //   2. app_config.logging — driven by [logging] in the TOML, env SNAPCHAIN_LOGGING__*,
-    //      or the --log-level CLI flag (see cfg.rs)
-    //
-    // In production, set `preset = "production"` in [logging] (or via
-    // SNAPCHAIN_LOGGING__PRESET=production) to suppress high-volume hot-path logs.
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new(app_config.logging.build_env_filter())
     });
@@ -342,6 +334,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let statsd_client =
         cadence::StatsdClient::builder(app_config.statsd.prefix.as_str(), sink).build();
     let statsd_client = StatsdClientWrapper::new(statsd_client, app_config.statsd.use_tags);
+
     let db_is_empty = !fs::exists(app_config.rocksdb_dir.clone()).unwrap()
         || is_dir_empty(&app_config.rocksdb_dir).unwrap();
 
@@ -353,6 +346,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     ReplicatorBootstrap, WorkUnitResponse,
                 };
                 use tokio::time::{sleep, Duration};
+
                 crypto::CryptoProvider::install_default(ring::default_provider())
                     .expect("Failed to install rustls crypto provider");
 
@@ -361,7 +355,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 match replicator.bootstrap_using_replication().await {
                     Ok(r) => {
-                        // Check for the specific success response
                         if r == WorkUnitResponse::Finished {
                             info!("Bootstrap using replication was successful. Will start snapchain now...");
                             sleep(Duration::from_secs(5)).await;
@@ -573,7 +566,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                                 if let Err(err) = sync_complete_tx.send(true)
                                 {
-                                   
                                     info!("Could not send sync complete message to jobs: {}", err.to_string());
                                 }
 
@@ -585,7 +577,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                         SystemMessage::BlockRequest {block_event_seqnum: _ , block_tx: _ } => {},
                         SystemMessage::MalachiteNetwork(shard, event) => {
-                           ]
+                           
                             node.dispatch_network_event(shard, event);
                         },
                         SystemMessage::Mempool(_) => {},
@@ -606,8 +598,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         let (block_tx, block_rx) = broadcast::channel(1000);
 
+
         let (engine_post_commit_tx, engine_post_commit_rx) = if app_config.replication.enable {
-             let (tx, rx) = mpsc::channel::<PostCommitMessage>(1);
+            let (tx, rx) = mpsc::channel::<PostCommitMessage>(1);
             (Some(tx), Some(rx))
         } else {
             (None, None)
@@ -748,7 +741,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     mempool_tx: mempool_tx.clone(),
                     system_tx: system_tx.clone(),
                     event_rx: senders.events_tx.subscribe(),
-                    validator_sets: app_config.consensus.to_stored_validator_sets(0), 
+                    validator_sets: app_config.consensus.to_stored_validator_sets(0), // We care about the validator sets for shard 0 blocks only
                     config: app_config.block_receiver.clone(),
                 };
                 tokio::spawn(async move { block_receiver.run().await });
@@ -772,7 +765,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .await;
 
-        // TODO(aditi): We may want to reconsider this code when we upload snapshots on a schedule.
         if app_config.snapshot.backup_on_startup {
             let shard_ids = app_config.consensus.shard_ids.clone();
             let block_stores = node.block_stores.clone();
@@ -817,6 +809,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 Some(msg) = system_rx.recv() => {
                     match msg {
                         SystemMessage::MalachiteNetwork(shard, event) => {
+                            // Forward to appropriate consensus actors
                             node.dispatch(shard, event);
                         },
                         SystemMessage::Mempool(msg) => {
@@ -830,8 +823,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             block_tx.send(block).unwrap();
                         },
                         SystemMessage::DecidedValueForReadNode(_) => {
+                            // Ignore these for validator nodes
                         }
-                            sync_complete_tx.send(true)?; 
+                        SystemMessage::ReadNodeFinishedInitialSync{shard_id: _} => {
+                            // Ignore these for validator nodes
+                            sync_complete_tx.send(true)?; // TODO: is this necessary?
                         },
                         SystemMessage::ExitWithError(err) => {
                             error!("Exiting due to: {}", err);
