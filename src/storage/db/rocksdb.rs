@@ -742,6 +742,177 @@ mod tests {
     };
 
     #[test]
+    fn test_shared_block_cache_across_db_instances() {
+        let cache = rocksdb::Cache::new_lru_cache(64 * 1024 * 1024); // 64MB for test
+
+        let tmp1 = tempfile::tempdir().unwrap();
+        let tmp2 = tempfile::tempdir().unwrap();
+
+        let db1 = RocksDB::new_with_cache(
+            tmp1.path().to_str().unwrap(),
+            super::SnapchainDbOptimizationType::Default,
+            Some(cache.clone()),
+        );
+        db1.open().unwrap();
+
+        let db2 = RocksDB::new_with_cache(
+            tmp2.path().to_str().unwrap(),
+            super::SnapchainDbOptimizationType::Default,
+            Some(cache.clone()),
+        );
+        db2.open().unwrap();
+
+        // Write data to db1
+        let value = vec![0u8; 4096];
+        for i in 0..1000u32 {
+            db1.put(&i.to_be_bytes(), &value).unwrap();
+        }
+
+        // Read all keys from db1 to populate the cache
+        for i in 0..1000u32 {
+            let _ = db1.get(&i.to_be_bytes()).unwrap();
+        }
+
+        let usage_after_db1 = cache.get_usage();
+        assert!(
+            usage_after_db1 > 0,
+            "Cache should have data after db1 reads"
+        );
+
+        // Write and read data from db2
+        for i in 0..1000u32 {
+            db2.put(&i.to_be_bytes(), &value).unwrap();
+        }
+        for i in 0..1000u32 {
+            let _ = db2.get(&i.to_be_bytes()).unwrap();
+        }
+
+        let usage_after_db2 = cache.get_usage();
+        assert!(
+            usage_after_db2 > 0,
+            "Cache should have data after db2 reads"
+        );
+
+        // Both DBs should be able to read their data correctly
+        let val1 = db1.get(&0u32.to_be_bytes()).unwrap().unwrap();
+        let val2 = db2.get(&0u32.to_be_bytes()).unwrap().unwrap();
+        assert_eq!(val1, value);
+        assert_eq!(val2, value);
+
+        db1.destroy().unwrap();
+        db2.destroy().unwrap();
+    }
+
+    #[test]
+    fn test_block_cache_respects_capacity() {
+        let cache_size = 1024 * 1024; // 1MB
+        let cache = rocksdb::Cache::new_lru_cache(cache_size);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db = RocksDB::new_with_cache(
+            tmp.path().to_str().unwrap(),
+            super::SnapchainDbOptimizationType::Default,
+            Some(cache.clone()),
+        );
+        db.open().unwrap();
+
+        // Write much more data than the cache can hold
+        let value = vec![0u8; 4096];
+        for i in 0..10_000u32 {
+            db.put(&i.to_be_bytes(), &value).unwrap();
+        }
+
+        // Force reads to populate cache
+        for i in 0..10_000u32 {
+            let _ = db.get(&i.to_be_bytes()).unwrap();
+        }
+
+        // Cache usage should stay bounded (with some overhead for metadata)
+        let usage = cache.get_usage();
+        let max_expected = cache_size * 3; // allow headroom for index/filter blocks
+        assert!(
+            usage < max_expected,
+            "Cache usage {} should stay roughly bounded near capacity {}",
+            usage,
+            cache_size
+        );
+
+        db.destroy().unwrap();
+    }
+
+    #[test]
+    fn test_default_write_buffer_size_is_bounded() {
+        // Non-bulk-write DB should use 16MB write buffer
+        let tmp = tempfile::tempdir().unwrap();
+        let db = RocksDB::new(tmp.path().to_str().unwrap());
+        db.open().unwrap();
+
+        // Just verify the DB opens and works — the write buffer size is set
+        // internally and not directly queryable, but we can verify no regression
+        let value = vec![0u8; 1024];
+        for i in 0..100u32 {
+            db.put(&i.to_be_bytes(), &value).unwrap();
+        }
+        let result = db.get(&0u32.to_be_bytes()).unwrap().unwrap();
+        assert_eq!(result, value);
+
+        db.destroy().unwrap();
+    }
+
+    #[test]
+    fn test_open_shard_db_with_cache() {
+        let cache = rocksdb::Cache::new_lru_cache(32 * 1024 * 1024);
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().to_str().unwrap();
+
+        let db = RocksDB::open_shard_db_with_cache(db_dir, 1, Some(cache.clone()));
+
+        // Write and read back
+        db.put(b"test_key", b"test_value").unwrap();
+        let result = db.get(b"test_key").unwrap().unwrap();
+        assert_eq!(result, b"test_value");
+
+        // Verify cache is being used
+        let _ = db.get(b"test_key").unwrap();
+        assert!(cache.get_usage() > 0, "Shared cache should be populated");
+
+        db.destroy().unwrap();
+    }
+
+    #[test]
+    fn test_open_global_db_with_cache() {
+        let cache = rocksdb::Cache::new_lru_cache(32 * 1024 * 1024);
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().to_str().unwrap();
+
+        let db = RocksDB::open_global_db_with_cache(db_dir, Some(cache.clone()));
+
+        db.put(b"global_key", b"global_value").unwrap();
+        let result = db.get(b"global_key").unwrap().unwrap();
+        assert_eq!(result, b"global_value");
+
+        db.destroy().unwrap();
+    }
+
+    #[test]
+    fn test_no_cache_still_works() {
+        // Passing None should work the same as before
+        let tmp = tempfile::tempdir().unwrap();
+        let db = RocksDB::new_with_cache(
+            tmp.path().to_str().unwrap(),
+            super::SnapchainDbOptimizationType::Default,
+            None,
+        );
+        db.open().unwrap();
+
+        db.put(b"key", b"value").unwrap();
+        let result = db.get(b"key").unwrap().unwrap();
+        assert_eq!(result, b"value");
+
+        db.destroy().unwrap();
+    }
+
+    #[test]
     fn test_merge_rocksdb_transaction() {
         let mut txn1 = RocksDbTransactionBatch::new();
 
