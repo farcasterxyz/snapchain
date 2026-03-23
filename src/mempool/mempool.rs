@@ -775,8 +775,10 @@ impl Mempool {
                     self.statsd_client.time("mempool.inbound_message_poll_interval_ms", now.duration_since(last_inbound_message_poll_time).as_millis() as u64);
                     last_inbound_message_poll_time = now;
                     // We want to pull in multiple messages per poll so that throughput is not blocked on the polling frequency. The number of messages we pull should be fixed and relatively small so that the mempool isn't always stuck here.
+                    let total_messages: u64 = self.messages.values().map(|m| m.len() as u64).sum();
+                    self.statsd_client.gauge("mempool.total_messages", total_messages, vec![]);
                     for _ in 0..256 {
-                        if self.config.allow_unlimited_mempool_size || (self.messages.len() as u64) < self.config.capacity_per_shard {
+                        if self.config.allow_unlimited_mempool_size || total_messages < self.config.capacity_per_shard {
                             match self.read_node_mempool.mempool_rx.try_recv() {
                                 Ok(MempoolRequest::AddMessage(message, source, reply_to)) => {
                                     let result = self.insert(message, source).await;
@@ -804,6 +806,7 @@ impl Mempool {
 
                             }
                         } else {
+                            self.statsd_client.count("mempool.capacity_limited", 1, vec![]);
                             break;
                         }
                     }

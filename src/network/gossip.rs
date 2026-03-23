@@ -487,6 +487,7 @@ impl SnapchainGossip {
                 _ = reconnect_timer.tick() => {
                     self.check_and_reconnect_to_bootstrap_peers().await;
                     self.statsd_client.gauge("gossip.connected_peers", self.swarm.connected_peers().count() as u64, vec![]);
+                    self.statsd_client.gauge("gossip.sync_channels", self.sync_channels.len() as u64, vec![]);
                 },
                 _ = publish_contact_info_timer.tick() => {
                     if self.read_node {
@@ -607,7 +608,8 @@ impl SnapchainGossip {
                                 sync::Event::OutboundFailure {peer, connection_id: _, error, request_id: _} => {
                                     warn!("Failed to send RPC request to peer: {:?} due to: {:?}", peer, error);
                                 }
-                                sync::Event::InboundFailure {peer, connection_id: _, error, request_id: _} => {
+                                sync::Event::InboundFailure {peer, connection_id: _, error, request_id} => {
+                                    self.sync_channels.remove(&request_id);
                                     warn!("Failed to send RPC response to peer: {:?} due to: {:?}", peer, error);
                                 }
                                 _ => {}

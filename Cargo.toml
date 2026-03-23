@@ -103,6 +103,7 @@ solar-data-structures = "=0.1.1"
 solar-macros = "=0.1.1"
 solar-config = "=0.1.1"
 nix = { version = "0.29", features = ["resource"] }
+tikv-jemallocator = "0.6"
 
 
 [dev-dependencies]
