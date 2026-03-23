@@ -31,7 +31,7 @@ mod tests {
 
     use self::test_helper::{default_custody_address, default_signer};
 
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use crate::mempool::mempool::{MempoolRequest, MempoolSource};
     use crate::mempool::routing::{MessageRouter, ShardRouter};
@@ -127,6 +127,81 @@ mod tests {
             block_decision_tx,
             system_rx,
         )
+    }
+
+    /// Like `setup` but accepts a full `mempool::Config` instead of just `enable_rate_limits`.
+    /// Returns the same tuple minus the gossip fields (None gossip).
+    async fn setup_with_mempool_config(
+        mempool_config: mempool::Config,
+        num_shards: u32,
+    ) -> (
+        HashMap<u32, ShardEngine>,
+        BlockEngine,
+        Mempool,
+        mpsc::Sender<MempoolRequest>,
+        mpsc::Sender<MempoolMessagesRequest>,
+        broadcast::Sender<ShardChunk>,
+        broadcast::Sender<Block>,
+    ) {
+        let statsd_client = StatsdClientWrapper::new(
+            cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
+            true,
+        );
+
+        let (mempool_tx, mempool_rx) = mpsc::channel(10_000);
+        let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
+        let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
+        let (block_decision_tx, block_decision_rx) = broadcast::channel(100);
+        let mut shard_stores = HashMap::new();
+        let mut engines = HashMap::new();
+        for i in 1..num_shards + 1 {
+            let (engine, _) = test_helper::new_engine().await;
+            shard_stores.insert(i, engine.get_stores());
+            engines.insert(i, engine);
+        }
+
+        let (block_engine, _) = block_engine_test_helpers::setup();
+        let gossip_tx = mpsc::channel(100).0;
+
+        let mempool = Mempool::new(
+            mempool_config,
+            FarcasterNetwork::Devnet,
+            mempool_rx,
+            messages_request_rx,
+            num_shards,
+            shard_stores,
+            block_engine.stores(),
+            gossip_tx,
+            shard_decision_rx,
+            block_decision_rx,
+            statsd_client,
+        );
+
+        (
+            engines,
+            block_engine,
+            mempool,
+            mempool_tx,
+            messages_request_tx,
+            shard_decision_tx,
+            block_decision_tx,
+        )
+    }
+
+    async fn send_and_await(
+        mempool_tx: &mpsc::Sender<MempoolRequest>,
+        message: MempoolMessage,
+    ) -> Result<(), crate::core::error::HubError> {
+        let (tx, rx) = oneshot::channel();
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                message,
+                MempoolSource::Local,
+                Some(tx),
+            ))
+            .await
+            .unwrap();
+        rx.await.unwrap()
     }
 
     async fn pull_message(
@@ -894,5 +969,465 @@ mod tests {
         )
         .await;
         pull_message(&messages_request_tx, 1, None).await;
+    }
+
+    // -------------------------------------------------------------------------
+    // Per-FID mempool limit: logic tests
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_per_fid_mempool_limit_blocks_excess_messages() {
+        let config = mempool::Config {
+            max_mempool_messages_per_fid: 5,
+            ..Default::default()
+        };
+        let (
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = setup_with_mempool_config(config, 1).await;
+        tokio::spawn(async move { mempool.run().await });
+
+        let fid = 9999;
+        for i in 0..5 {
+            let result = send_and_await(
+                &mempool_tx,
+                MempoolMessage::UserMessage(create_cast_add(
+                    fid,
+                    &format!("msg {}", i),
+                    None,
+                    None,
+                )),
+            )
+            .await;
+            assert!(result.is_ok(), "message {} should be accepted", i);
+        }
+
+        // 6th message for the same FID must be rejected
+        let result = send_and_await(
+            &mempool_tx,
+            MempoolMessage::UserMessage(create_cast_add(fid, "msg 5", None, None)),
+        )
+        .await;
+        assert!(result.is_err(), "6th message should be rejected");
+        assert_eq!(
+            result.unwrap_err().code,
+            "bad_request.rate_limited",
+            "error should be rate_limited"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_per_fid_mempool_limit_zero_disables_cap() {
+        let config = mempool::Config {
+            max_mempool_messages_per_fid: 0,
+            ..Default::default()
+        };
+        let (
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = setup_with_mempool_config(config, 1).await;
+        tokio::spawn(async move { mempool.run().await });
+
+        let fid = 7777;
+        // With cap disabled, all 200 messages should be accepted
+        for i in 0..200 {
+            let result = send_and_await(
+                &mempool_tx,
+                MempoolMessage::UserMessage(create_cast_add(
+                    fid,
+                    &format!("msg {}", i),
+                    None,
+                    None,
+                )),
+            )
+            .await;
+            assert!(
+                result.is_ok(),
+                "message {} should be accepted when cap is 0",
+                i
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_per_fid_mempool_limit_different_fids_are_independent() {
+        let config = mempool::Config {
+            max_mempool_messages_per_fid: 2,
+            ..Default::default()
+        };
+        let (
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = setup_with_mempool_config(config, 1).await;
+        tokio::spawn(async move { mempool.run().await });
+
+        // Fill cap for fid_a
+        let fid_a = 1111;
+        let fid_b = 2222;
+        for i in 0..2 {
+            send_and_await(
+                &mempool_tx,
+                MempoolMessage::UserMessage(create_cast_add(
+                    fid_a,
+                    &format!("a {}", i),
+                    None,
+                    None,
+                )),
+            )
+            .await
+            .unwrap();
+        }
+
+        // fid_a is now at cap; fid_b should still accept messages
+        for i in 0..2 {
+            let result = send_and_await(
+                &mempool_tx,
+                MempoolMessage::UserMessage(create_cast_add(
+                    fid_b,
+                    &format!("b {}", i),
+                    None,
+                    None,
+                )),
+            )
+            .await;
+            assert!(
+                result.is_ok(),
+                "fid_b message {} should be independent of fid_a cap",
+                i
+            );
+        }
+
+        // fid_a should be rejected
+        let result = send_and_await(
+            &mempool_tx,
+            MempoolMessage::UserMessage(create_cast_add(fid_a, "a overflow", None, None)),
+        )
+        .await;
+        assert!(result.is_err(), "fid_a should be at cap");
+    }
+
+    #[tokio::test]
+    async fn test_per_fid_mempool_limit_does_not_affect_onchain_events() {
+        let config = mempool::Config {
+            max_mempool_messages_per_fid: 1,
+            ..Default::default()
+        };
+        let (
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = setup_with_mempool_config(config, 1).await;
+        tokio::spawn(async move { mempool.run().await });
+
+        let fid = 5555;
+
+        // Fill the user-message cap
+        send_and_await(
+            &mempool_tx,
+            MempoolMessage::UserMessage(create_cast_add(fid, "user msg", None, None)),
+        )
+        .await
+        .unwrap();
+
+        // Onchain events for the same FID must pass through regardless
+        for i in 0..5 {
+            let event = events_factory::create_rent_event(
+                fid,
+                i + 1,
+                proto::StorageUnitType::UnitType2025,
+                false,
+                proto::FarcasterNetwork::Devnet,
+            );
+            let result = send_and_await(&mempool_tx, MempoolMessage::OnchainEvent(event)).await;
+            assert!(
+                result.is_ok(),
+                "onchain event {} should not be blocked by user-message cap",
+                i
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_per_fid_mempool_limit_count_drains_after_shard_commit() {
+        let config = mempool::Config {
+            max_mempool_messages_per_fid: 2,
+            ..Default::default()
+        };
+        let (
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            shard_decision_tx,
+            _block_decision_tx,
+        ) = setup_with_mempool_config(config, 1).await;
+        tokio::spawn(async move { mempool.run().await });
+
+        let fid = 3333;
+        let cast1 = create_cast_add(fid, "msg 0", None, None);
+        let cast2 = create_cast_add(fid, "msg 1", None, None);
+
+        send_and_await(&mempool_tx, MempoolMessage::UserMessage(cast1.clone()))
+            .await
+            .unwrap();
+        send_and_await(&mempool_tx, MempoolMessage::UserMessage(cast2.clone()))
+            .await
+            .unwrap();
+
+        // At cap — next message should fail
+        let result = send_and_await(
+            &mempool_tx,
+            MempoolMessage::UserMessage(create_cast_add(fid, "msg 2", None, None)),
+        )
+        .await;
+        assert!(result.is_err(), "should be at cap before commit");
+
+        // Commit a shard chunk containing both messages
+        let chunk = ShardChunk {
+            header: Some(ShardHeader {
+                height: Some(Height {
+                    shard_index: 1,
+                    block_number: 1,
+                }),
+                timestamp: 0,
+                parent_hash: vec![],
+                shard_root: vec![],
+            }),
+            hash: vec![],
+            transactions: vec![Transaction {
+                fid,
+                user_messages: vec![cast1, cast2],
+                system_messages: vec![],
+                account_root: vec![],
+            }],
+            commits: None,
+        };
+        shard_decision_tx.send(chunk).unwrap();
+
+        // Give the mempool time to process the commit
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Count should be drained — new messages should be accepted again
+        let result = send_and_await(
+            &mempool_tx,
+            MempoolMessage::UserMessage(create_cast_add(fid, "msg after commit", None, None)),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "should accept new messages after commit drains the count"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Per-FID mempool limit: performance comparison tests
+    // Run with: cargo test perf_ -- --ignored --nocapture
+    // -------------------------------------------------------------------------
+
+    async fn measure_insert_throughput(
+        mempool_tx: &mpsc::Sender<MempoolRequest>,
+        messages: Vec<MempoolMessage>,
+    ) -> (Duration, usize) {
+        let total = messages.len();
+        let start = Instant::now();
+        let mut accepted = 0;
+        for msg in messages {
+            if send_and_await(mempool_tx, msg).await.is_ok() {
+                accepted += 1;
+            }
+        }
+        (start.elapsed(), accepted)
+    }
+
+    #[tokio::test]
+    #[ignore = "performance test – run with: cargo test perf_ -- --ignored --nocapture"]
+    async fn test_perf_many_fids_no_cap() {
+        let config = mempool::Config {
+            max_mempool_messages_per_fid: 0,
+            ..Default::default()
+        };
+        let (
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = setup_with_mempool_config(config, 1).await;
+        tokio::spawn(async move { mempool.run().await });
+
+        const FIDS: u64 = 100;
+        const MSGS_PER_FID: usize = 10;
+        let messages: Vec<_> = (1..=FIDS)
+            .flat_map(|fid| {
+                (0..MSGS_PER_FID).map(move |i| {
+                    MempoolMessage::UserMessage(create_cast_add(
+                        fid,
+                        &format!("m{}", i),
+                        None,
+                        None,
+                    ))
+                })
+            })
+            .collect();
+
+        let (elapsed, accepted) = measure_insert_throughput(&mempool_tx, messages).await;
+        let total = FIDS as usize * MSGS_PER_FID;
+        eprintln!(
+            "[no cap  ] many-FIDs: {}/{} accepted in {:?}  ({:.0} msg/s)",
+            accepted,
+            total,
+            elapsed,
+            total as f64 / elapsed.as_secs_f64()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "performance test – run with: cargo test perf_ -- --ignored --nocapture"]
+    async fn test_perf_many_fids_with_cap() {
+        let config = mempool::Config {
+            max_mempool_messages_per_fid: 100, // cap well above MSGS_PER_FID so nobody is rejected
+            ..Default::default()
+        };
+        let (
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = setup_with_mempool_config(config, 1).await;
+        tokio::spawn(async move { mempool.run().await });
+
+        const FIDS: u64 = 100;
+        const MSGS_PER_FID: usize = 10;
+        let messages: Vec<_> = (1..=FIDS)
+            .flat_map(|fid| {
+                (0..MSGS_PER_FID).map(move |i| {
+                    MempoolMessage::UserMessage(create_cast_add(
+                        fid,
+                        &format!("m{}", i),
+                        None,
+                        None,
+                    ))
+                })
+            })
+            .collect();
+
+        let (elapsed, accepted) = measure_insert_throughput(&mempool_tx, messages).await;
+        let total = FIDS as usize * MSGS_PER_FID;
+        eprintln!(
+            "[cap=100  ] many-FIDs: {}/{} accepted in {:?}  ({:.0} msg/s)",
+            accepted,
+            total,
+            elapsed,
+            total as f64 / elapsed.as_secs_f64()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "performance test – run with: cargo test perf_ -- --ignored --nocapture"]
+    async fn test_perf_single_fid_spam_no_cap() {
+        let config = mempool::Config {
+            max_mempool_messages_per_fid: 0,
+            ..Default::default()
+        };
+        let (
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = setup_with_mempool_config(config, 1).await;
+        tokio::spawn(async move { mempool.run().await });
+
+        const N: usize = 500;
+        let fid = 42;
+        let messages: Vec<_> = (0..N)
+            .map(|i| {
+                MempoolMessage::UserMessage(create_cast_add(
+                    fid,
+                    &format!("spam {}", i),
+                    None,
+                    None,
+                ))
+            })
+            .collect();
+
+        let (elapsed, accepted) = measure_insert_throughput(&mempool_tx, messages).await;
+        eprintln!(
+            "[no cap  ] single-FID spam: {}/{} accepted in {:?}  ({:.0} msg/s)",
+            accepted,
+            N,
+            elapsed,
+            N as f64 / elapsed.as_secs_f64()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "performance test – run with: cargo test perf_ -- --ignored --nocapture"]
+    async fn test_perf_single_fid_spam_with_cap() {
+        const CAP: u32 = 50;
+        let config = mempool::Config {
+            max_mempool_messages_per_fid: CAP,
+            ..Default::default()
+        };
+        let (
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = setup_with_mempool_config(config, 1).await;
+        tokio::spawn(async move { mempool.run().await });
+
+        const N: usize = 500;
+        let fid = 42;
+        let messages: Vec<_> = (0..N)
+            .map(|i| {
+                MempoolMessage::UserMessage(create_cast_add(
+                    fid,
+                    &format!("spam {}", i),
+                    None,
+                    None,
+                ))
+            })
+            .collect();
+
+        let (elapsed, accepted) = measure_insert_throughput(&mempool_tx, messages).await;
+        eprintln!(
+            "[cap={CAP:<4}] single-FID spam: {}/{} accepted in {:?}  ({:.0} msg/s, {} rejected fast)",
+            accepted,
+            N,
+            elapsed,
+            N as f64 / elapsed.as_secs_f64(),
+            N - accepted,
+        );
     }
 }

@@ -130,6 +130,7 @@ pub struct Config {
     pub capacity_per_shard: u64,
     pub rx_poll_interval: Duration,
     pub enable_rate_limits: bool,
+    pub max_mempool_messages_per_fid: u32, // 0 = disabled
 }
 
 impl Default for Config {
@@ -140,6 +141,7 @@ impl Default for Config {
             capacity_per_shard: 1_000_000,
             rx_poll_interval: Duration::from_millis(1),
             enable_rate_limits: false,
+            max_mempool_messages_per_fid: 100,
         }
     }
 }
@@ -489,6 +491,7 @@ pub struct Mempool {
     statsd_client: StatsdClientWrapper,
     read_node_mempool: ReadNodeMempool,
     rate_limits: Option<RateLimits>,
+    fid_message_counts: HashMap<u64, usize>, // fid -> pending message count across all shards
 }
 
 impl Mempool {
@@ -507,6 +510,7 @@ impl Mempool {
     ) -> Self {
         Mempool {
             messages: HashMap::new(),
+            fid_message_counts: HashMap::new(),
             messages_request_rx,
             shard_decision_rx,
             block_decision_rx,
@@ -550,6 +554,21 @@ impl Mempool {
         }
     }
 
+    fn fid_exceeds_mempool_limit(&self, message: &MempoolMessage) -> bool {
+        if self.config.max_mempool_messages_per_fid == 0 {
+            return false;
+        }
+        match message {
+            MempoolMessage::UserMessage(_) => self
+                .fid_message_counts
+                .get(&message.fid())
+                .map_or(false, |count| {
+                    *count >= self.config.max_mempool_messages_per_fid as usize
+                }),
+            _ => false, // Never limit validator/onchain/fname/block messages
+        }
+    }
+
     fn message_already_exists(&mut self, shard: u32, message: &MempoolMessage) -> bool {
         self.read_node_mempool
             .message_already_exists(shard, message)
@@ -565,6 +584,15 @@ impl Mempool {
                     match shard_messages.pop_first() {
                         None => break,
                         Some((_, next_message)) => {
+                            if matches!(next_message, MempoolMessage::UserMessage(_)) {
+                                let fid = next_message.fid();
+                                if let Some(count) = self.fid_message_counts.get_mut(&fid) {
+                                    *count = count.saturating_sub(1);
+                                    if *count == 0 {
+                                        self.fid_message_counts.remove(&fid);
+                                    }
+                                }
+                            }
                             let result = self.message_is_valid(request.shard_id, &next_message);
                             if result.is_ok() {
                                 messages.push(next_message);
@@ -660,9 +688,20 @@ impl Mempool {
             None => {}
         }
 
+        // Per-FID mempool cap: reject before consuming rate limit tokens
+        if self.fid_exceeds_mempool_limit(&message) {
+            self.statsd_client
+                .count_with_shard(shard_id, "mempool.per_fid_limit_hit", 1, vec![]);
+            return Err(HubError::rate_limited(&format!(
+                "per-fid mempool limit exceeded for FID {}",
+                message.fid()
+            )));
+        }
+
         // TODO(aditi): Maybe we don't need to run validations here?
         let result = self.message_is_valid(shard_id, &message);
         if result.is_ok() {
+            let fid = message.fid();
             match self.messages.get_mut(&shard_id) {
                 None => {
                     let mut messages = BTreeMap::new();
@@ -681,6 +720,14 @@ impl Mempool {
                 }
             }
 
+            // Increment per-FID count for UserMessage variants
+            if matches!(message, MempoolMessage::UserMessage(_)) {
+                self.fid_message_counts
+                    .entry(fid)
+                    .and_modify(|c| *c += 1)
+                    .or_insert(1);
+            }
+
             self.statsd_client
                 .count_with_shard(shard_id, "mempool.insert.success", 1, vec![]);
 
@@ -697,13 +744,30 @@ impl Mempool {
         if let Some(mempool) = self.messages.get_mut(&height.shard_index) {
             for transaction in transactions {
                 for user_message in &transaction.user_messages {
-                    mempool.remove(&user_message.mempool_key());
-                    self.statsd_client.count_with_shard(
-                        height.shard_index,
-                        "mempool.remove.success",
-                        1,
-                        vec![],
-                    );
+                    if let Some(_) = mempool.remove(&user_message.mempool_key()) {
+                        // Only decrement if the message was still present (non-proposer path).
+                        // Proposers already decremented in pull_messages.
+                        let fid = user_message.fid();
+                        if let Some(count) = self.fid_message_counts.get_mut(&fid) {
+                            *count = count.saturating_sub(1);
+                            if *count == 0 {
+                                self.fid_message_counts.remove(&fid);
+                            }
+                        }
+                        self.statsd_client.count_with_shard(
+                            height.shard_index,
+                            "mempool.remove.success",
+                            1,
+                            vec![],
+                        );
+                    } else {
+                        self.statsd_client.count_with_shard(
+                            height.shard_index,
+                            "mempool.remove.success",
+                            1,
+                            vec![],
+                        );
+                    }
                 }
                 for system_message in &transaction.system_messages {
                     mempool.remove(&system_message.mempool_key());
