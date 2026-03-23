@@ -8,7 +8,6 @@ mod tests {
     };
     use hex::FromHex as _;
     use std::collections::HashMap;
-    use std::time::Duration;
     use std::{sync::Arc, vec};
 
     fn traverse(node: &TrieNode) -> &TrieNode {
@@ -819,81 +818,6 @@ mod tests {
         assert_eq!(node.hash(), hash_before);
 
         // Cleanup
-        db.destroy().unwrap();
-    }
-
-    #[test]
-    fn test_evict_stale_children() {
-        let ctx = &Context::new();
-
-        let tmp_path = tempfile::tempdir()
-            .unwrap()
-            .path()
-            .as_os_str()
-            .to_string_lossy()
-            .to_string();
-        let db = Arc::new(RocksDB::new(&tmp_path));
-        db.open().unwrap();
-        let mut txn = RocksDbTransactionBatch::new();
-
-        let mut node = TrieNode::new();
-
-        // Insert several keys that diverge at the first byte after the uncompacted prefix
-        let key1: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xAA];
-        let key2: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xBB];
-        let key3: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xCC];
-        node.insert(ctx, &mut hm(), &db, &mut txn, vec![key1.clone()], 0)
-            .unwrap();
-        node.insert(ctx, &mut hm(), &db, &mut txn, vec![key2.clone()], 0)
-            .unwrap();
-        node.insert(ctx, &mut hm(), &db, &mut txn, vec![key3.clone()], 0)
-            .unwrap();
-        db.commit(txn).unwrap();
-
-        // Traverse to where child nodes are in memory
-        fn count_loaded_nodes(node: &TrieNode) -> usize {
-            let mut count = 0;
-            for child in node.children().values() {
-                if let TrieNodeType::Node(child_node) = child {
-                    count += 1;
-                    count += count_loaded_nodes(child_node);
-                }
-            }
-            count
-        }
-
-        let loaded_before = count_loaded_nodes(&node);
-        assert!(
-            loaded_before > 0,
-            "Should have loaded child nodes in memory"
-        );
-
-        // Evict with zero duration — everything should be evicted (all nodes are "stale")
-        node.evict_stale_children(Duration::ZERO);
-
-        let loaded_after = count_loaded_nodes(&node);
-        assert_eq!(loaded_after, 0, "All children should be evicted");
-
-        // Verify data is still accessible after eviction (re-loaded from DB)
-        assert!(node.exists(ctx, &db, &key1, 0).unwrap());
-        assert!(node.exists(ctx, &db, &key2, 0).unwrap());
-        assert!(node.exists(ctx, &db, &key3, 0).unwrap());
-
-        // After re-access, nodes should be loaded again
-        let loaded_reaccessed = count_loaded_nodes(&node);
-        assert!(
-            loaded_reaccessed > 0,
-            "Nodes should be reloaded after access"
-        );
-
-        // Evict with a very large duration — nothing should be evicted
-        node.evict_stale_children(Duration::from_secs(3600));
-        let loaded_after_long_idle = count_loaded_nodes(&node);
-        assert_eq!(
-            loaded_after_long_idle, loaded_reaccessed,
-            "No nodes should be evicted with a long idle threshold"
-        );
-
         db.destroy().unwrap();
     }
 }

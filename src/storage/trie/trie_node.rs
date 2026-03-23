@@ -8,7 +8,7 @@ use crate::proto::DbTrieNode;
 use prost::Message as _;
 use std::collections::HashMap;
 use std::sync::atomic;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tracing::error;
 
 // This represents 6 bytes (1 byte for virtual shard id, 4 for fid and 1 for message type).
@@ -688,28 +688,6 @@ impl TrieNode {
         }
 
         Ok(values)
-    }
-
-    pub fn evict_stale_children(&mut self, max_idle: Duration) {
-        let to_evict: Vec<u8> = self
-            .children
-            .iter()
-            .filter_map(|(&ch, child)| match child {
-                TrieNodeType::Node(node) if node.last_accessed.elapsed() > max_idle => Some(ch),
-                _ => None,
-            })
-            .collect();
-
-        for ch in to_evict {
-            self.children
-                .insert(ch, TrieNodeType::Serialized(SerializedTrieNode::new()));
-        }
-
-        for child in self.children.values_mut() {
-            if let TrieNodeType::Node(node) = child {
-                node.evict_stale_children(max_idle);
-            }
-        }
     }
 
     // Keeping this around since it is useful for debugging
