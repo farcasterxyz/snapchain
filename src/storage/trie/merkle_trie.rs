@@ -713,6 +713,12 @@ impl MerkleTrie {
         }
     }
 
+    pub fn evict_stale(&mut self, max_idle: std::time::Duration) {
+        if let Some(root) = self.root.as_mut() {
+            root.evict_stale_children(max_idle);
+        }
+    }
+
     #[cfg(test)]
     pub fn get_root_node(&mut self) -> Option<&mut TrieNode> {
         self.root.as_mut()

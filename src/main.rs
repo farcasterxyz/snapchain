@@ -461,7 +461,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (onchain_events_request_tx, onchain_events_request_rx) = broadcast::channel(100);
     let (fname_request_tx, fname_request_rx) = broadcast::channel(100);
 
-    let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
+    let shared_block_cache = rocksdb::Cache::new_lru_cache(512 * 1024 * 1024);
+    let global_db = RocksDB::open_global_db_with_cache(
+        &app_config.rocksdb_dir,
+        Some(shared_block_cache.clone()),
+    );
     let local_state_store = LocalStateStore::new(global_db);
 
     if app_config.read_node {
@@ -485,6 +489,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_config.fc_network,
             registry,
             engine_post_commit_tx,
+            Some(shared_block_cache.clone()),
         )
         .await;
 
@@ -634,6 +639,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_config.fc_network,
             registry,
             engine_post_commit_tx,
+            Some(shared_block_cache.clone()),
         )
         .await;
 
