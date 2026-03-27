@@ -21,8 +21,15 @@ async fn backup_and_upload(
     now: i64,
     statsd_client: StatsdClientWrapper,
 ) -> Result<(), SnapshotError> {
+    info!(shard_id, "Starting backup for shard");
+    statsd_client.emit_jemalloc_stats();
+
     let backup_dir = snapshot_config.backup_dir.clone();
     let tar_gz_path = storage::db::backup::backup_db(db, &backup_dir, shard_id, now)?;
+
+    info!(shard_id, "Backup complete, starting upload for shard");
+    statsd_client.emit_jemalloc_stats();
+
     storage::db::snapshot::upload_to_s3(
         fc_network,
         tar_gz_path,
@@ -32,6 +39,10 @@ async fn backup_and_upload(
     )
     .await?;
     clear_old_snapshots(fc_network, &snapshot_config, shard_id).await?;
+
+    info!(shard_id, "Upload complete for shard");
+    statsd_client.emit_jemalloc_stats();
+
     Ok(())
 }
 
@@ -130,6 +141,9 @@ pub async fn upload_snapshot(
     if let Err(err) = std::fs::remove_dir_all(snapshot_config.backup_dir.clone()) {
         info!("Unable to remove snapshot directory: {}", err.to_string());
     }
+
+    info!("Snapshot upload complete, emitting jemalloc stats after cleanup");
+    statsd_client.emit_jemalloc_stats();
 
     Ok(())
 }
