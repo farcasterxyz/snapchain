@@ -21,8 +21,15 @@ async fn backup_and_upload(
     now: i64,
     statsd_client: StatsdClientWrapper,
 ) -> Result<(), SnapshotError> {
+    info!(shard_id, "Starting backup for shard");
+    statsd_client.emit_jemalloc_stats();
+
     let backup_dir = snapshot_config.backup_dir.clone();
     let tar_gz_path = storage::db::backup::backup_db(db, &backup_dir, shard_id, now)?;
+
+    info!(shard_id, "Backup complete, starting upload for shard");
+    statsd_client.emit_jemalloc_stats();
+
     storage::db::snapshot::upload_to_s3(
         fc_network,
         tar_gz_path,
@@ -32,6 +39,10 @@ async fn backup_and_upload(
     )
     .await?;
     clear_old_snapshots(fc_network, &snapshot_config, shard_id).await?;
+
+    info!(shard_id, "Upload complete for shard");
+    statsd_client.emit_jemalloc_stats();
+
     Ok(())
 }
 
@@ -44,7 +55,11 @@ pub async fn upload_snapshot(
     only_for_shard_ids: Option<HashSet<u32>>,
 ) -> Result<(), SnapshotError> {
     let backup_dir = &snapshot_config.backup_dir;
-    if std::fs::exists(backup_dir)? {
+    std::fs::create_dir_all(backup_dir)?;
+
+    // Check if the backup directory has contents from a previous run
+    let has_contents = std::fs::read_dir(backup_dir)?.next().is_some();
+    if has_contents {
         let age = match std::fs::metadata(backup_dir)?.modified() {
             Ok(modified) => match modified.elapsed() {
                 Ok(duration) => duration,
@@ -68,9 +83,17 @@ pub async fn upload_snapshot(
             warn!(
                 age_hours = age.as_secs() / 3600,
                 path = %backup_dir,
-                "Removing stale backup directory"
+                "Removing stale backup contents"
             );
-            std::fs::remove_dir_all(backup_dir)?;
+            for entry in std::fs::read_dir(backup_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    std::fs::remove_dir_all(&path)?;
+                } else {
+                    std::fs::remove_file(&path)?;
+                }
+            }
         } else {
             return Err(SnapshotError::UploadAlreadyInProgress);
         }
@@ -127,9 +150,23 @@ pub async fn upload_snapshot(
         }
     }
 
-    if let Err(err) = std::fs::remove_dir_all(snapshot_config.backup_dir.clone()) {
-        info!("Unable to remove snapshot directory: {}", err.to_string());
+    // Clear backup directory contents but keep the directory itself (may be a bind mount)
+    if let Ok(entries) = std::fs::read_dir(&snapshot_config.backup_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let result = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            if let Err(err) = result {
+                info!("Unable to remove backup file {:?}: {}", path, err);
+            }
+        }
     }
+
+    info!("Snapshot upload complete, emitting jemalloc stats after cleanup");
+    statsd_client.emit_jemalloc_stats();
 
     Ok(())
 }

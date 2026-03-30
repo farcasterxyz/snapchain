@@ -23,6 +23,7 @@ jobs:
     runs-on:
       - runs-on=${{ github.run_id }}
       - runner=64cpu-linux-arm64
+      - volume=80gb
     steps:
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
