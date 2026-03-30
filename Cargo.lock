@@ -1738,14 +1738,14 @@ dependencies = [
 
 [[package]]
 name = "bindgen"
-version = "0.71.1"
+version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f58bf3d7db68cfbac37cfc485a8d711e87e064c3d0fe0435b92f7a407f9d6b3"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
 dependencies = [
  "bitflags 2.9.1",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "regex",
@@ -5318,16 +5318,16 @@ dependencies = [
 
 [[package]]
 name = "librocksdb-sys"
-version = "0.16.0+8.10.0"
-source = "git+https://github.com/rust-rocksdb/rust-rocksdb.git?rev=1cf906dc4087f06631820f13855e6b27bd21b972#1cf906dc4087f06631820f13855e6b27bd21b972"
+version = "0.18.0+10.7.5"
+source = "git+https://github.com/rust-rocksdb/rust-rocksdb.git?rev=a4f178d0ca668c4b48d993ab8aef6f4004780f23#a4f178d0ca668c4b48d993ab8aef6f4004780f23"
 dependencies = [
- "bindgen 0.69.5",
+ "bindgen 0.72.1",
  "bzip2-sys",
  "cc",
- "glob",
  "libc",
  "libz-sys",
  "lz4-sys",
+ "tikv-jemalloc-sys",
  "zstd-sys",
 ]
 
@@ -7018,8 +7018,8 @@ dependencies = [
 
 [[package]]
 name = "rocksdb"
-version = "0.22.0"
-source = "git+https://github.com/rust-rocksdb/rust-rocksdb.git?rev=1cf906dc4087f06631820f13855e6b27bd21b972#1cf906dc4087f06631820f13855e6b27bd21b972"
+version = "0.24.0"
+source = "git+https://github.com/rust-rocksdb/rust-rocksdb.git?rev=a4f178d0ca668c4b48d993ab8aef6f4004780f23#a4f178d0ca668c4b48d993ab8aef6f4004780f23"
 dependencies = [
  "libc",
  "librocksdb-sys",
@@ -9936,7 +9936,6 @@ version = "2.0.15+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eb81183ddd97d0c74cedf1d50d85c8d08c1b8b68ee863bdee9e706eedba1a237"
 dependencies = [
- "bindgen 0.71.1",
  "cc",
  "pkg-config",
 ]
