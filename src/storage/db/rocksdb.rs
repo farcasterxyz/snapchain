@@ -219,8 +219,8 @@ impl RocksDB {
             // allows us to "double-buffer" writes, allowing for more efficient flush-to-disk.
             opts.set_min_write_buffer_number_to_merge(2);
         } else {
-            // Default mode: bound memtable memory to 16MB × 2 = 32MB per DB instance
-            opts.set_write_buffer_size(16 * 1024 * 1024);
+            // Set explicitly for visibility — matches the RocksDB default (64 MB).
+            opts.set_write_buffer_size(64 * 1024 * 1024);
         }
 
         opts.create_if_missing(true); // Creates a database if it does not exist
@@ -451,13 +451,27 @@ impl RocksDB {
         start_prefix: Option<Vec<u8>>,
         stop_prefix: Option<Vec<u8>>,
         page_options: &PageOptions,
-        mut f: F,
+        f: F,
     ) -> Result<bool, HubError>
     where
         F: FnMut(&[u8], &[u8]) -> Result<bool, HubError>,
     {
         let iter_opts = RocksDB::get_iterator_options(start_prefix, stop_prefix, page_options);
+        self.iterate_with_opts(iter_opts, page_options.page_size, f)
+    }
 
+    // Shared iteration body used by both the public paged iterator and by
+    // bulk-delete paths that need to customize ReadOptions (e.g. disabling
+    // the block cache on prune sweeps).
+    fn iterate_with_opts<F>(
+        &self,
+        iter_opts: IteratorOptions,
+        page_size: Option<usize>,
+        mut f: F,
+    ) -> Result<bool, HubError>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<bool, HubError>,
+    {
         // TODO: maybe write a generic function to handle both branches
         match self.db().as_ref() {
             Some(DBProvider::Transaction(db)) => {
@@ -478,9 +492,9 @@ impl RocksDB {
                             all_done = false;
                             break;
                         }
-                        if page_options.page_size.is_some() {
+                        if let Some(limit) = page_size {
                             count += 1;
-                            if count >= page_options.page_size.unwrap() {
+                            if count >= limit {
                                 all_done = true;
                                 break;
                             }
@@ -514,9 +528,9 @@ impl RocksDB {
                             all_done = false;
                             break;
                         }
-                        if page_options.page_size.is_some() {
+                        if let Some(limit) = page_size {
                             count += 1;
-                            if count >= page_options.page_size.unwrap() {
+                            if count >= limit {
                                 all_done = true;
                                 break;
                             }
@@ -532,7 +546,7 @@ impl RocksDB {
 
                 Ok(all_done)
             }
-            None => return Err(RocksdbError::DbNotOpen.into()),
+            None => Err(RocksdbError::DbNotOpen.into()),
         }
     }
 
@@ -681,22 +695,26 @@ impl RocksDB {
 
     // Deletes keys in the given prefix range, respecting page_options.
     // Returns the number of keys deleted.
+    //
+    // Set `skip_cache = true` on large cold sweeps (e.g. event pruning) so the
+    // iterator does not populate the shared block cache and evict the hot
+    // consensus working set. Normal deletes should pass `false`.
     pub fn delete_page(
         &self,
         start_prefix: Option<Vec<u8>>,
         stop_prefix: Option<Vec<u8>>,
         page_options: &PageOptions,
+        skip_cache: bool,
     ) -> Result<u32, HubError> {
+        let mut iter_opts = RocksDB::get_iterator_options(start_prefix, stop_prefix, page_options);
+        if skip_cache {
+            iter_opts.opts.fill_cache(false);
+        }
         let mut txn = self.txn();
-        self.for_each_iterator_by_prefix_paged(
-            start_prefix,
-            stop_prefix,
-            page_options,
-            |key, _| {
-                txn.delete(key.to_vec());
-                Ok(false) // Continue iterating
-            },
-        )?;
+        self.iterate_with_opts(iter_opts, page_options.page_size, |key, _| {
+            txn.delete(key.to_vec());
+            Ok(false) // Continue iterating
+        })?;
 
         let count = txn.len();
         self.commit(txn)?;
@@ -708,6 +726,7 @@ impl RocksDB {
     // or until shutdown is requested via the shutdown_rx channel.
     // The progress_callback function can be used to report progress.
     // The throttle parameter can be used to control the rate of deletion.
+    // Set `skip_cache` to true for large cold sweeps; see `delete_page`.
     // Returns the total number of keys deleted.
     pub async fn delete_paginated(
         &self,
@@ -716,10 +735,16 @@ impl RocksDB {
         page_options: &PageOptions,
         throttle: Duration,
         progress_callback: Option<impl Fn(u32) + Send>,
+        skip_cache: bool,
     ) -> Result<u32, HubError> {
         let mut total_deleted = 0;
         loop {
-            match self.delete_page(start_prefix.clone(), stop_prefix.clone(), page_options)? {
+            match self.delete_page(
+                start_prefix.clone(),
+                stop_prefix.clone(),
+                page_options,
+                skip_cache,
+            )? {
                 0 => break, // No more keys to delete
                 count => total_deleted += count,
             }

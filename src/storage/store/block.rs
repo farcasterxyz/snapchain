@@ -320,6 +320,7 @@ impl BlockStore {
                 Some(|total_pruned: u32| {
                     info!("Pruning blocks... pruned: {}", total_pruned);
                 }),
+                false, // skip_cache
             )
             .await
             .map_err(|_| BlockStorageError::TooManyBlocksInResult)?; // TODO: Return the right error
