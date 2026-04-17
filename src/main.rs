@@ -200,12 +200,22 @@ async fn schedule_background_jobs(
         }
     }
 
+    let event_pruning_schedule = app_config
+        .pruning
+        .event_pruning_schedule
+        .as_deref()
+        .unwrap_or("0 0 0 * * *"); // default: midnight UTC every day
     let event_pruning_job = snapchain::jobs::event_pruning::event_pruning_job(
-        "0 0 0 * * *", // midnight UTC every day
+        event_pruning_schedule,
         app_config.pruning.event_retention,
         shard_stores.clone(),
     )
-    .unwrap();
+    .unwrap_or_else(|e| {
+        panic!(
+            "invalid pruning.event_pruning_schedule {:?} (expected 6-field cron 'sec min hour day month dow'): {:?}",
+            event_pruning_schedule, e
+        )
+    });
     jobs.push(event_pruning_job);
 
     if app_config.snapshot.snapshot_upload_enabled() {
