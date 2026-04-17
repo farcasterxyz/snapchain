@@ -1805,6 +1805,11 @@ impl ShardEngine {
                 commit_shard_root = hex::encode(shard_root),
                 "Cached shard root mismatch"
             );
+            self.metrics.count(
+                "commit.cache_miss",
+                1,
+                vec![("reason", "shard_root_mismatch")],
+            );
             return false;
         }
 
@@ -1817,6 +1822,11 @@ impl ShardEngine {
                 cached_block_events_hash = hex::encode(&cached_txn.block_events_hash),
                 computed_block_events_hash = hex::encode(&computed_hash),
                 "Cached block events hash mismatch"
+            );
+            self.metrics.count(
+                "commit.cache_miss",
+                1,
+                vec![("reason", "block_events_hash_mismatch")],
             );
             return false;
         }
@@ -1834,6 +1844,7 @@ impl ShardEngine {
         if let Some(cached_txn) = self.pending_txn.clone() {
             if self.is_cached_txn_valid(&cached_txn, shard_root, transactions) {
                 applied_cached_txn = true;
+                self.metrics.count("commit.cache_hit", 1, vec![]);
                 self.commit_and_emit_events(
                     shard_chunk,
                     cached_txn.events,
@@ -1842,6 +1853,14 @@ impl ShardEngine {
                 )
                 .await;
             }
+        } else {
+            // is_cached_txn_valid emits its own miss metric when pending_txn
+            // exists but doesn't match. This branch covers the other case:
+            // there was never a prevalidated proposal for this value on this
+            // node (e.g. this node wasn't the proposer and didn't see the
+            // propose round that decided).
+            self.metrics
+                .count("commit.cache_miss", 1, vec![("reason", "no_pending_txn")]);
         }
 
         if !applied_cached_txn {
