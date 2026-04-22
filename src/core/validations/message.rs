@@ -219,6 +219,10 @@ pub fn validate_message(
             }
             validate_lend_storage_body(&lend_storage_body)?;
         }
+        // TODO(NEYN-10571): implement static validation for KeyAddBody / KeyRemoveBody
+        // (field presence, key length, deadline, scopes enum values, ttl <= MAX_TTL).
+        Some(proto::message_data::Body::KeyAddBody(_))
+        | Some(proto::message_data::Body::KeyRemoveBody(_)) => {}
         None => {}
     }
 
