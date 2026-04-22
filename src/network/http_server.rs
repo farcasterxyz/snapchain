@@ -1925,6 +1925,11 @@ fn map_proto_message_data_to_json_message_data(
                 lend_storage_body: Some(result),
             });
         }
+        // TODO(NEYN-10568): map KeyAdd/KeyRemove bodies to JSON once downstream tickets land.
+        Some(Body::KeyAddBody(_)) | Some(Body::KeyRemoveBody(_)) => Err(ErrorResponse {
+            error: "KEY_ADD/KEY_REMOVE JSON mapping not yet implemented".to_string(),
+            error_detail: None,
+        }),
         None => Err(ErrorResponse {
             error: "No message data".to_string(),
             error_detail: None,
