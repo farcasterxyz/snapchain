@@ -1745,7 +1745,7 @@ dependencies = [
  "bitflags 2.9.1",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "regex",
@@ -7821,6 +7821,7 @@ dependencies = [
  "serde",
  "tonic",
  "tonic-build",
+ "variant_count",
 ]
 
 [[package]]
@@ -8981,6 +8982,17 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "variant_count"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1935e10c6f04d22688d07c0790f2fc0e1b1c5c2c55bc0cc87ed67656e587dd8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.104",
+]
 
 [[package]]
 name = "vcpkg"

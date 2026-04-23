@@ -7,7 +7,7 @@ use crate::proto::{
 };
 use crate::storage::util::{blake3_20, bytes_compare};
 
-use super::{cast, link, reaction, verification};
+use super::{cast, key, link, reaction, verification};
 use crate::version::version::{EngineVersion, ProtocolFeature};
 use alloy_primitives::hex::FromHex;
 use alloy_primitives::Address;
@@ -219,10 +219,12 @@ pub fn validate_message(
             }
             validate_lend_storage_body(&lend_storage_body)?;
         }
-        // TODO(NEYN-10571): implement static validation for KeyAddBody / KeyRemoveBody
-        // (field presence, key length, deadline, scopes enum values, ttl <= MAX_TTL).
-        Some(proto::message_data::Body::KeyAddBody(_))
-        | Some(proto::message_data::Body::KeyRemoveBody(_)) => {}
+        Some(proto::message_data::Body::KeyAddBody(key_add_body)) => {
+            key::validate_key_add_body(&key_add_body)?;
+        }
+        Some(proto::message_data::Body::KeyRemoveBody(key_remove_body)) => {
+            key::validate_key_remove_body(&key_remove_body)?;
+        }
         None => {}
     }
 

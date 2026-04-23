@@ -4,6 +4,27 @@ use alloy_sol_types::{sol, SolType};
 use serde_json::{json, Value};
 
 use crate::core::validations::error::ValidationError;
+use crate::proto::{KeyAddBody, KeyRemoveBody, MessageType};
+
+// Ed25519 public keys are 32 bytes on the wire.
+pub const ED25519_PUBLIC_KEY_LEN: usize = 32;
+
+// Only key type currently defined by the FIP.
+pub const KEY_TYPE_ED25519: u32 = 1;
+
+// KEY_REMOVE signature_type discriminator: 1 = custody (EIP-712), 2 = self-revocation (Ed25519).
+pub const KEY_REMOVE_SIG_TYPE_CUSTODY: u32 = 1;
+pub const KEY_REMOVE_SIG_TYPE_SELF: u32 = 2;
+
+// Maximum sliding TTL window accepted in a KeyAddBody. FIP specifies 90 days; larger values are
+// rejected at static validation so a misbehaving signer can't request an effectively-permanent key.
+pub const MAX_KEY_TTL_SECONDS: u32 = 90 * 24 * 60 * 60;
+
+// Upper bound on the number of entries in `KeyAddBody.scopes`. Scopes are semantically a set of
+// `MessageType` discriminants, so by pigeonhole any list longer than the MessageType enum's
+// variant count is guaranteed to contain duplicates. Keep this in sync with the enum in
+// `proto/definitions/message.proto` — bumping a new MessageType adds one slot.
+pub const MAX_KEY_ADD_SCOPES: usize = MessageType::VARIANT_COUNT;
 
 // EIP-712 domain shared by KEY_ADD and KEY_REMOVE custody signatures. The FIP specifies a single
 // domain "Farcaster KeyAdd" for both primary types; the primary type itself disambiguates.
@@ -284,6 +305,72 @@ pub fn verify_signed_key_request_metadata(
         request_signer: decoded.requestSigner,
         deadline,
     })
+}
+
+// -- Static body validation ----------------------------------------------------------------------
+//
+// Field-level checks that do not depend on engine state. Signature recovery, custody comparison,
+// nonce ordering, and key-already-exists checks live in the engine layer — not here.
+
+/// Fail-closed check that every scope is a recognized `MessageType` enum value. Returns
+/// `EmptyScopes` when the list is empty and `InvalidScope(raw)` for any bad value, including the
+/// custody-level operations (`KEY_ADD` / `KEY_REMOVE`) which a signer must never be able to
+/// authorize — allowing those would let a signer mint or revoke other signers.
+fn validate_key_add_scopes(scopes: &[i32]) -> Result<(), ValidationError> {
+    if scopes.is_empty() {
+        return Err(ValidationError::EmptyScopes);
+    }
+    if scopes.len() > MAX_KEY_ADD_SCOPES {
+        return Err(ValidationError::TooManyScopes(MAX_KEY_ADD_SCOPES));
+    }
+    for scope in scopes {
+        match MessageType::try_from(*scope) {
+            Ok(MessageType::None) | Ok(MessageType::KeyAdd) | Ok(MessageType::KeyRemove) => {
+                return Err(ValidationError::InvalidScope(*scope));
+            }
+            Ok(_) => (),
+            Err(_) => return Err(ValidationError::InvalidScope(*scope)),
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_key_add_body(body: &KeyAddBody) -> Result<(), ValidationError> {
+    if body.key.len() != ED25519_PUBLIC_KEY_LEN {
+        return Err(ValidationError::InvalidKeyLength);
+    }
+    if body.key_type != KEY_TYPE_ED25519 {
+        return Err(ValidationError::InvalidKeyType);
+    }
+    if body.deadline == 0 {
+        return Err(ValidationError::MissingDeadline);
+    }
+    if body.ttl == 0 || body.ttl > MAX_KEY_TTL_SECONDS {
+        return Err(ValidationError::InvalidTtl(MAX_KEY_TTL_SECONDS));
+    }
+    if body.metadata_type != METADATA_TYPE_SIGNED_KEY_REQUEST {
+        return Err(ValidationError::InvalidMetadataType);
+    }
+    if body.metadata.is_empty() {
+        return Err(ValidationError::MissingMetadata);
+    }
+    validate_key_add_scopes(&body.scopes)?;
+    Ok(())
+}
+
+pub fn validate_key_remove_body(body: &KeyRemoveBody) -> Result<(), ValidationError> {
+    if body.key.len() != ED25519_PUBLIC_KEY_LEN {
+        return Err(ValidationError::InvalidKeyLength);
+    }
+    if body.signature_type != KEY_REMOVE_SIG_TYPE_CUSTODY
+        && body.signature_type != KEY_REMOVE_SIG_TYPE_SELF
+    {
+        return Err(ValidationError::InvalidSignatureType);
+    }
+    if body.deadline == 0 {
+        return Err(ValidationError::MissingDeadline);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -601,5 +688,227 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, ValidationError::InvalidSignedKeyRequest);
+    }
+
+    // -- Static body validation tests -----------------------------------------------------------
+
+    fn sample_key_add_body() -> KeyAddBody {
+        KeyAddBody {
+            key: vec![0x42u8; 32],
+            key_type: KEY_TYPE_ED25519,
+            custody_signature: vec![0u8; 65],
+            deadline: 1_700_000_000,
+            nonce: 1,
+            metadata: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            metadata_type: METADATA_TYPE_SIGNED_KEY_REQUEST,
+            registration_tx_hash: vec![],
+            scopes: vec![MessageType::CastAdd as i32],
+            ttl: 86_400,
+        }
+    }
+
+    fn sample_key_remove_body() -> KeyRemoveBody {
+        KeyRemoveBody {
+            key: vec![0xAAu8; 32],
+            signature: vec![0u8; 65],
+            signature_type: KEY_REMOVE_SIG_TYPE_CUSTODY,
+            deadline: 1_700_000_000,
+            nonce: 2,
+        }
+    }
+
+    #[test]
+    fn key_add_body_accepts_well_formed_input() {
+        let body = sample_key_add_body();
+        assert_eq!(validate_key_add_body(&body), Ok(()));
+    }
+
+    #[test]
+    fn key_add_body_rejects_wrong_key_length() {
+        let mut body = sample_key_add_body();
+        body.key = vec![0x42u8; 31];
+        assert_eq!(
+            validate_key_add_body(&body),
+            Err(ValidationError::InvalidKeyLength)
+        );
+    }
+
+    #[test]
+    fn key_add_body_rejects_unknown_key_type() {
+        let mut body = sample_key_add_body();
+        body.key_type = 2;
+        assert_eq!(
+            validate_key_add_body(&body),
+            Err(ValidationError::InvalidKeyType)
+        );
+    }
+
+    #[test]
+    fn key_add_body_rejects_missing_deadline() {
+        let mut body = sample_key_add_body();
+        body.deadline = 0;
+        assert_eq!(
+            validate_key_add_body(&body),
+            Err(ValidationError::MissingDeadline)
+        );
+    }
+
+    #[test]
+    fn key_add_body_rejects_zero_ttl() {
+        let mut body = sample_key_add_body();
+        body.ttl = 0;
+        assert_eq!(
+            validate_key_add_body(&body),
+            Err(ValidationError::InvalidTtl(MAX_KEY_TTL_SECONDS))
+        );
+    }
+
+    #[test]
+    fn key_add_body_rejects_ttl_over_max() {
+        let mut body = sample_key_add_body();
+        body.ttl = MAX_KEY_TTL_SECONDS + 1;
+        assert_eq!(
+            validate_key_add_body(&body),
+            Err(ValidationError::InvalidTtl(MAX_KEY_TTL_SECONDS))
+        );
+    }
+
+    #[test]
+    fn key_add_body_accepts_ttl_at_max() {
+        let mut body = sample_key_add_body();
+        body.ttl = MAX_KEY_TTL_SECONDS;
+        assert_eq!(validate_key_add_body(&body), Ok(()));
+    }
+
+    #[test]
+    fn key_add_body_rejects_unknown_metadata_type() {
+        let mut body = sample_key_add_body();
+        body.metadata_type = 2;
+        assert_eq!(
+            validate_key_add_body(&body),
+            Err(ValidationError::InvalidMetadataType)
+        );
+    }
+
+    #[test]
+    fn key_add_body_rejects_empty_metadata() {
+        let mut body = sample_key_add_body();
+        body.metadata = vec![];
+        assert_eq!(
+            validate_key_add_body(&body),
+            Err(ValidationError::MissingMetadata)
+        );
+    }
+
+    #[test]
+    fn key_add_body_rejects_empty_scopes() {
+        let mut body = sample_key_add_body();
+        body.scopes = vec![];
+        assert_eq!(
+            validate_key_add_body(&body),
+            Err(ValidationError::EmptyScopes)
+        );
+    }
+
+    #[test]
+    fn key_add_body_rejects_invalid_scope_value() {
+        let mut body = sample_key_add_body();
+        // 9999 is far outside the MessageType enum range.
+        body.scopes = vec![MessageType::CastAdd as i32, 9999];
+        assert_eq!(
+            validate_key_add_body(&body),
+            Err(ValidationError::InvalidScope(9999))
+        );
+    }
+
+    #[test]
+    fn key_add_body_rejects_none_scope() {
+        let mut body = sample_key_add_body();
+        body.scopes = vec![MessageType::None as i32];
+        assert_eq!(
+            validate_key_add_body(&body),
+            Err(ValidationError::InvalidScope(0))
+        );
+    }
+
+    #[test]
+    fn key_add_body_rejects_key_add_scope() {
+        let mut body = sample_key_add_body();
+        body.scopes = vec![MessageType::CastAdd as i32, MessageType::KeyAdd as i32];
+        assert_eq!(
+            validate_key_add_body(&body),
+            Err(ValidationError::InvalidScope(MessageType::KeyAdd as i32))
+        );
+    }
+
+    #[test]
+    fn key_add_body_rejects_too_many_scopes() {
+        let mut body = sample_key_add_body();
+        // Enum-valid but over-length: we pick one legal scope and repeat it past the cap.
+        body.scopes = vec![MessageType::CastAdd as i32; MAX_KEY_ADD_SCOPES + 1];
+        assert_eq!(
+            validate_key_add_body(&body),
+            Err(ValidationError::TooManyScopes(MAX_KEY_ADD_SCOPES))
+        );
+    }
+
+    #[test]
+    fn key_add_body_accepts_scopes_at_max() {
+        let mut body = sample_key_add_body();
+        body.scopes = vec![MessageType::CastAdd as i32; MAX_KEY_ADD_SCOPES];
+        assert_eq!(validate_key_add_body(&body), Ok(()));
+    }
+
+    #[test]
+    fn key_add_body_rejects_key_remove_scope() {
+        let mut body = sample_key_add_body();
+        body.scopes = vec![MessageType::KeyRemove as i32];
+        assert_eq!(
+            validate_key_add_body(&body),
+            Err(ValidationError::InvalidScope(MessageType::KeyRemove as i32))
+        );
+    }
+
+    #[test]
+    fn key_remove_body_accepts_custody_sig_type() {
+        let body = sample_key_remove_body();
+        assert_eq!(validate_key_remove_body(&body), Ok(()));
+    }
+
+    #[test]
+    fn key_remove_body_accepts_self_sig_type() {
+        let mut body = sample_key_remove_body();
+        body.signature_type = KEY_REMOVE_SIG_TYPE_SELF;
+        assert_eq!(validate_key_remove_body(&body), Ok(()));
+    }
+
+    #[test]
+    fn key_remove_body_rejects_wrong_key_length() {
+        let mut body = sample_key_remove_body();
+        body.key = vec![0xAAu8; 33];
+        assert_eq!(
+            validate_key_remove_body(&body),
+            Err(ValidationError::InvalidKeyLength)
+        );
+    }
+
+    #[test]
+    fn key_remove_body_rejects_unknown_signature_type() {
+        let mut body = sample_key_remove_body();
+        body.signature_type = 3;
+        assert_eq!(
+            validate_key_remove_body(&body),
+            Err(ValidationError::InvalidSignatureType)
+        );
+    }
+
+    #[test]
+    fn key_remove_body_rejects_missing_deadline() {
+        let mut body = sample_key_remove_body();
+        body.deadline = 0;
+        assert_eq!(
+            validate_key_remove_body(&body),
+            Err(ValidationError::MissingDeadline)
+        );
     }
 }
