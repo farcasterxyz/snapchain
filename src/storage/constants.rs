@@ -117,6 +117,10 @@ pub enum UserPostfix {
     /* Gasless-key nonce counters, scoped under `RootPrefix::GaslessKey` */
     GaslessKeyUserNonce = 102, // per-FID user nonce for KEY_ADD + custody KEY_REMOVE
     GaslessKeyAppNonce = 103,  // per-AppFID nonce for self-revocation KEY_REMOVE
+
+    /* Sliding-TTL last-used-at for gasless keys, scoped under `RootPrefix::GaslessKey`.
+     * Per-(FID, public-key) timestamp; bumped on every validated use of a TTL'd key. */
+    GaslessKeyLastUsedAt = 104,
 }
 
 impl UserPostfix {
