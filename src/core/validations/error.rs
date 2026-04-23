@@ -154,4 +154,12 @@ pub enum ValidationError {
     InvalidStorageUnitType,
     #[error("num storage units too large")]
     ExceededMaxStorageUnits,
+    #[error("invalid metadata type")]
+    InvalidMetadataType,
+    #[error("SignedKeyRequest metadata is malformed or signature does not verify")]
+    InvalidSignedKeyRequest,
+    #[error("SignedKeyRequest deadline has expired")]
+    SignedKeyRequestExpired,
+    #[error("requestSigner does not match custody address of requestFid")]
+    SignedKeyRequestCustodyMismatch,
 }
