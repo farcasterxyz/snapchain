@@ -162,4 +162,22 @@ pub enum ValidationError {
     SignedKeyRequestExpired,
     #[error("requestSigner does not match custody address of requestFid")]
     SignedKeyRequestCustodyMismatch,
+    #[error("key must be 32 bytes")]
+    InvalidKeyLength,
+    #[error("invalid key type")]
+    InvalidKeyType,
+    #[error("scopes must be non-empty")]
+    EmptyScopes,
+    #[error("scopes list exceeds max of {0} entries")]
+    TooManyScopes(usize),
+    #[error("scope \"{0}\" is not a valid MessageType")]
+    InvalidScope(i32),
+    #[error("ttl must be > 0 and <= {0} seconds")]
+    InvalidTtl(u32),
+    #[error("deadline is missing")]
+    MissingDeadline,
+    #[error("metadata is missing")]
+    MissingMetadata,
+    #[error("invalid signature type")]
+    InvalidSignatureType,
 }
