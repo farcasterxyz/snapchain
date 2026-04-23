@@ -56,6 +56,10 @@ pub enum RootPrefix {
     ReplicationBootstrapStatus = 21,
 
     LendStorageByRecipient = 22,
+
+    /* Gasless-key nonces (user + app counters for KEY_ADD / KEY_REMOVE replay protection).
+     * "Gasless" distinguishes these from on-chain signer events and from storage-layer "keys". */
+    GaslessKey = 23,
 }
 
 /** Copied from the JS code */
@@ -109,6 +113,10 @@ pub enum UserPostfix {
     LinkCompactStateMessage = 100,
 
     LendStorages = 101,
+
+    /* Gasless-key nonce counters, scoped under `RootPrefix::GaslessKey` */
+    GaslessKeyUserNonce = 102, // per-FID user nonce for KEY_ADD + custody KEY_REMOVE
+    GaslessKeyAppNonce = 103,  // per-AppFID nonce for self-revocation KEY_REMOVE
 }
 
 impl UserPostfix {
