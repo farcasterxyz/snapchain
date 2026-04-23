@@ -180,4 +180,6 @@ pub enum ValidationError {
     MissingMetadata,
     #[error("invalid signature type")]
     InvalidSignatureType,
+    #[error("key is already registered for this fid")]
+    KeyAlreadyRegistered,
 }

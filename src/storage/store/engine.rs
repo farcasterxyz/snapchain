@@ -1224,6 +1224,7 @@ impl ShardEngine {
                 StorageLendStore::merge(store, msg, txn_batch)
                     .map_err(|e| MessageValidationError::StoreError(e))?
             }
+            MessageType::KeyAdd => vec![self.merge_key_add(msg, txn_batch)?],
             unhandled_type => {
                 return Err(MessageValidationError::InvalidMessageType(
                     unhandled_type as i32,
@@ -1234,6 +1235,160 @@ impl ShardEngine {
         self.metrics
             .time_with_shard("merge_message_time_us", elapsed.as_micros() as u64);
         Ok(event)
+    }
+
+    /// Orchestrates the full KEY_ADD flow for NEYN-10573: metadata verification against the
+    /// `requestFid`'s custody address, EIP-712 custody-signature recovery for the adding FID,
+    /// conflict resolution against both the gasless-key index and the on-chain signer index,
+    /// nonce CAS, record write, and `last_used_at` initialization.
+    ///
+    /// Static body validation (key length, key_type, scopes, ttl bound, deadline presence) is
+    /// already handled upstream by `validations::message::validate_message` via
+    /// `key::validate_key_add_body` (NEYN-10571). This function assumes that ran and focuses on
+    /// the state-dependent work.
+    ///
+    /// ## Ordering rationale
+    ///
+    /// Steps are ordered so that cheap/pure checks fail first and expensive state writes happen
+    /// last — any early `Err` leaves the txn batch unchanged. The one exception is the nonce CAS,
+    /// which has to stage a write even on "success", but that stage is rolled back if any later
+    /// step fails (the whole txn batch is discarded together on error).
+    ///
+    /// Active-key cap (1000 per FID combined) and pending-FID resolution via
+    /// `registration_tx_hash` are intentionally out of scope — they're owned by NEYN-10579 and
+    /// NEYN-10577 respectively and block this ticket only at the future-merge level.
+    fn merge_key_add(
+        &self,
+        msg: &proto::Message,
+        txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Result<proto::HubEvent, MessageValidationError> {
+        use crate::core::validations::error::ValidationError;
+        use crate::core::validations::key::{
+            recover_key_add_custody_address, verify_signed_key_request_metadata, KeyAddPayload,
+            ETH_MAINNET_CHAIN_ID,
+        };
+        use crate::storage::store::account::{
+            check_and_set_user_nonce, exists_gasless_key, init_last_used_at,
+            put_gasless_key_record, GaslessKeyRecord,
+        };
+
+        let message_data = msg
+            .data
+            .as_ref()
+            .ok_or(MessageValidationError::NoMessageData)?;
+        let fid = message_data.fid;
+        let key_add_body = match &message_data.body {
+            Some(Body::KeyAddBody(body)) => body,
+            _ => {
+                return Err(MessageValidationError::InvalidMessageType(
+                    message_data.r#type,
+                ))
+            }
+        };
+
+        // Use the message's own timestamp as the reference for deadline checks. This is
+        // deterministic across nodes (replay-safe) and upstream `validate_message` has already
+        // bounded `message.timestamp` to a reasonable window around current block time.
+        let current_timestamp = message_data.timestamp as u64;
+        let chain_id = ETH_MAINNET_CHAIN_ID;
+
+        // Step 3 (SignedKeyRequest metadata validation): verify the ABI-encoded metadata blob,
+        // then compare the recovered `requestSigner` against the custody address on file for
+        // `requestFid`. The first is pure crypto; the second is a storage lookup and lives
+        // here — keeping `core::validations` free of storage deps (see NEYN-10570 note).
+        let verified = verify_signed_key_request_metadata(
+            key_add_body.metadata_type,
+            &key_add_body.metadata,
+            &key_add_body.key,
+            current_timestamp,
+            chain_id,
+        )?;
+
+        let request_fid_event = self
+            .stores
+            .onchain_event_store
+            .get_id_register_event_by_fid(verified.request_fid, Some(txn_batch))
+            .map_err(|_| MessageValidationError::MissingFid)?
+            .ok_or(ValidationError::InvalidSignedKeyRequest)?;
+        let request_fid_custody = match request_fid_event.body {
+            Some(proto::on_chain_event::Body::IdRegisterEventBody(b)) => b,
+            _ => return Err(ValidationError::InvalidSignedKeyRequest.into()),
+        };
+        if request_fid_custody.to.as_slice() != verified.request_signer.as_slice() {
+            return Err(ValidationError::SignedKeyRequestCustodyMismatch.into());
+        }
+
+        // Step 5 (EIP-712 custody recovery for this FID's KeyAdd payload). The recovered
+        // address must match the custody address currently on file for `fid`.
+        let payload = KeyAddPayload {
+            fid,
+            key: &key_add_body.key,
+            key_type: key_add_body.key_type,
+            scopes: &key_add_body.scopes,
+            ttl: key_add_body.ttl,
+            nonce: key_add_body.nonce,
+            deadline: key_add_body.deadline,
+        };
+        let recovered =
+            recover_key_add_custody_address(&payload, &key_add_body.custody_signature, chain_id)?;
+        let this_fid_event = self
+            .stores
+            .onchain_event_store
+            .get_id_register_event_by_fid(fid, Some(txn_batch))
+            .map_err(|_| MessageValidationError::MissingFid)?
+            .ok_or(MessageValidationError::MissingFid)?;
+        let this_fid_custody = match this_fid_event.body {
+            Some(proto::on_chain_event::Body::IdRegisterEventBody(b)) => b,
+            _ => return Err(MessageValidationError::MissingFid),
+        };
+        if this_fid_custody.to.as_slice() != recovered.as_slice() {
+            return Err(ValidationError::InvalidSignature.into());
+        }
+
+        // Step 8 (conflict resolution). Gasless-first per design — writes go to the gasless
+        // store first, so reads match the write order for any future invariant checks. Both
+        // branches return the same typed variant; callers don't need to distinguish which
+        // index rejected them — "you can't add this key again" is the actionable signal.
+        if exists_gasless_key(&self.db, txn_batch, fid, &key_add_body.key)? {
+            return Err(ValidationError::KeyAlreadyRegistered.into());
+        }
+        let existing_onchain = self
+            .stores
+            .onchain_event_store
+            .get_active_signer(fid, key_add_body.key.clone(), Some(txn_batch))
+            .map_err(|_| MessageValidationError::MissingSigner)?;
+        if existing_onchain.is_some() {
+            return Err(ValidationError::KeyAlreadyRegistered.into());
+        }
+
+        // Step 4 (nonce CAS). Stages the bump on txn_batch; rolls back with everything else
+        // if any later step fails. The store rejects `new_nonce <= stored`, which implicitly
+        // covers `nonce == 0` (stored defaults to 0).
+        check_and_set_user_nonce(&self.db, txn_batch, fid, key_add_body.nonce)?;
+
+        // State writes. Record embeds the full message (source of truth) plus the cached
+        // request_fid. last_used_at is initialized to the message's own timestamp so the
+        // sliding-TTL window begins at creation.
+        let record = GaslessKeyRecord {
+            message: Some(msg.clone()),
+            request_fid: verified.request_fid,
+        };
+        put_gasless_key_record(&self.db, txn_batch, fid, &key_add_body.key, &record)?;
+        init_last_used_at(
+            &self.db,
+            txn_batch,
+            fid,
+            &key_add_body.key,
+            message_data.timestamp,
+        )?;
+
+        Ok(HubEvent::new_event(
+            HubEventType::MergeMessage,
+            hub_event::Body::MergeMessageBody(proto::MergeMessageBody {
+                message: Some(msg.clone()),
+                deleted_messages: vec![],
+            }),
+        ))
     }
 
     fn prune_messages(
@@ -1364,12 +1519,22 @@ impl ShardEngine {
             .map_err(|_| MessageValidationError::MissingFid)?
             .ok_or(MessageValidationError::MissingFid)?;
 
-        // 2. Check that the user has a valid signer
-        self.stores
-            .onchain_event_store
-            .get_active_signer(message_data.fid, message.signer.clone(), Some(txn_batch))
-            .map_err(|_| MessageValidationError::MissingSigner)?
-            .ok_or(MessageValidationError::MissingSigner)?;
+        // 2. Check that the user has a valid signer.
+        //
+        // KEY_ADD / KEY_REMOVE are special: they authenticate via a custody EIP-712 signature
+        // (and, for self-revocation KEY_REMOVE, via the Ed25519 key being revoked signing
+        // itself). The outer `message.signer` on these messages is the Ed25519 key being
+        // added or removed — by definition either not yet in the signer store (KEY_ADD) or
+        // about to leave it (KEY_REMOVE). Their real authentication happens in the merge
+        // path (see `merge_key_add` / NEYN-10574), so skip the active-signer check here.
+        let msg_type = MessageType::try_from(message_data.r#type).unwrap_or(MessageType::None);
+        if msg_type != MessageType::KeyAdd && msg_type != MessageType::KeyRemove {
+            self.stores
+                .onchain_event_store
+                .get_active_signer(message_data.fid, message.signer.clone(), Some(txn_batch))
+                .map_err(|_| MessageValidationError::MissingSigner)?
+                .ok_or(MessageValidationError::MissingSigner)?;
+        }
 
         // Don't allow storage lends to be merged directly without going through shard 0
         if message_data.r#type() == MessageType::LendStorage {
