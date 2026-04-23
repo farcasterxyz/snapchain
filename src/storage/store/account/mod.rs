@@ -1,6 +1,7 @@
 pub use self::block_event_store::*;
 pub use self::cast_store::*;
 pub use self::event::*;
+pub use self::key_nonce_store::*;
 pub use self::link_store::*;
 pub use self::message::*;
 pub use self::name_registry_events::*;
@@ -20,6 +21,7 @@ mod onchain_event_store;
 mod store;
 
 mod block_event_store;
+mod key_nonce_store;
 mod name_registry_events;
 mod reaction_store;
 mod storage_lend_store;
@@ -29,6 +31,8 @@ mod verification_store;
 
 #[cfg(test)]
 mod cast_store_test;
+#[cfg(test)]
+mod key_nonce_store_test;
 #[cfg(test)]
 mod on_chain_event_store_tests;
 #[cfg(test)]
