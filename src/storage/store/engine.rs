@@ -1225,6 +1225,7 @@ impl ShardEngine {
                     .map_err(|e| MessageValidationError::StoreError(e))?
             }
             MessageType::KeyAdd => vec![self.merge_key_add(msg, txn_batch)?],
+            MessageType::KeyRemove => vec![self.merge_key_remove(msg, txn_batch)?],
             unhandled_type => {
                 return Err(MessageValidationError::InvalidMessageType(
                     unhandled_type as i32,
@@ -1391,6 +1392,143 @@ impl ShardEngine {
         ))
     }
 
+    /// Orchestrates the KEY_REMOVE flow for NEYN-10574: deactivates a gasless key under one of two
+    /// authorization modes, then clears the sibling `last_used_at` entry.
+    ///
+    /// ## Why we look up the record first
+    ///
+    /// The `GaslessKeyRecord` lookup serves three purposes in one read:
+    ///   1. Enforces "key is currently active for this FID" — absent record => `KeyNotRegistered`.
+    ///      This is also the spam-protection rail for self-revocation: an attacker can't consume
+    ///      app-nonce counters by flooding KEY_REMOVE messages against keys that don't exist.
+    ///   2. Provides the cached `request_fid` used by the self-revocation nonce scope. Recomputing
+    ///      it would require an ABI-decode + EIP-712 recover on every self-revoke (~10µs) — the
+    ///      whole point of caching it in the record is to avoid that on hot paths.
+    ///   3. Supplies the prior KEY_ADD message that rides along in the emitted event's
+    ///      `deleted_messages`, matching the convention used by other remove-type merges
+    ///      (see `store.rs:229`).
+    ///
+    /// ## Authorization modes
+    ///
+    /// * `signature_type == 1` (custody) — inner `body.signature` is an EIP-712 signature over the
+    ///   `KeyRemove` typed data; the recovered address must match `fid`'s on-file custody
+    ///   address. Replay protection advances the **user** nonce namespace for `fid`.
+    /// * `signature_type == 2` (self) — the outer `message.signer` is the Ed25519 key being
+    ///   revoked, and the envelope signature (already verified upstream by `validate_message`)
+    ///   proves the holder authorized this removal. We just assert `message.signer == body.key`;
+    ///   no additional crypto needed here. Replay protection advances the **app** nonce namespace
+    ///   for the verified `request_fid` recovered at KEY_ADD time.
+    ///
+    /// The inner `body.signature` field is unused for self-revocation — the envelope already
+    /// carries an equivalent signature. Keeping the field on the wire preserves a uniform shape
+    /// across both modes for client libraries, at no cost here.
+    ///
+    /// On-chain signers are intentionally out of scope — they are removed by on-chain
+    /// `SIGNER_EVENT_TYPE_REMOVE` events via the Key Registry contract, not by this path.
+    fn merge_key_remove(
+        &self,
+        msg: &proto::Message,
+        txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Result<proto::HubEvent, MessageValidationError> {
+        use crate::core::validations::error::ValidationError;
+        use crate::core::validations::key::{
+            recover_key_remove_custody_address, KeyRemovePayload, KeyRemoveSignatureType,
+            ETH_MAINNET_CHAIN_ID,
+        };
+        use crate::storage::store::account::{
+            check_and_set_app_nonce, check_and_set_user_nonce, delete_gasless_key_record,
+            delete_last_used_at, get_gasless_key_record,
+        };
+
+        let message_data = msg
+            .data
+            .as_ref()
+            .ok_or(MessageValidationError::NoMessageData)?;
+        let fid = message_data.fid;
+        let key_remove_body = match &message_data.body {
+            Some(Body::KeyRemoveBody(body)) => body,
+            _ => {
+                return Err(MessageValidationError::InvalidMessageType(
+                    message_data.r#type,
+                ))
+            }
+        };
+        let chain_id = ETH_MAINNET_CHAIN_ID;
+
+        // Active-key lookup. Does triple duty: existence check, request_fid source for
+        // self-revocation, and prior-message source for the emitted event's deleted_messages.
+        let record = get_gasless_key_record(&self.db, txn_batch, fid, &key_remove_body.key)?
+            .ok_or(ValidationError::KeyNotRegistered)?;
+
+        // `?` here is belt-and-suspenders: `validate_user_message` already ran
+        // `validate_key_remove_body`, which rejects unknown discriminants via the same TryFrom. If
+        // that upstream contract is ever bypassed (e.g. a future internal injection path), this
+        // re-check keeps the function safe in isolation. Exhaustive match below means adding a
+        // future variant forces us to update this site — the constant-based match couldn't.
+        let sig_type = KeyRemoveSignatureType::try_from(key_remove_body.signature_type)?;
+        match sig_type {
+            KeyRemoveSignatureType::Custody => {
+                // Custody EIP-712 revocation. Recover, then compare to the FID's on-file custody
+                // address from its IdRegisterEvent. No separate "this fid exists" branch —
+                // validate_user_message already asserted that.
+                let payload = KeyRemovePayload {
+                    fid,
+                    key: &key_remove_body.key,
+                    nonce: key_remove_body.nonce,
+                    deadline: key_remove_body.deadline,
+                };
+                let recovered = recover_key_remove_custody_address(
+                    &payload,
+                    &key_remove_body.signature,
+                    chain_id,
+                )?;
+                let this_fid_event = self
+                    .stores
+                    .onchain_event_store
+                    .get_id_register_event_by_fid(fid, Some(txn_batch))
+                    .map_err(|_| MessageValidationError::MissingFid)?
+                    .ok_or(MessageValidationError::MissingFid)?;
+                let this_fid_custody = match this_fid_event.body {
+                    Some(proto::on_chain_event::Body::IdRegisterEventBody(b)) => b,
+                    _ => return Err(MessageValidationError::MissingFid),
+                };
+                if this_fid_custody.to.as_slice() != recovered.as_slice() {
+                    return Err(ValidationError::InvalidSignature.into());
+                }
+                check_and_set_user_nonce(&self.db, txn_batch, fid, key_remove_body.nonce)?;
+            }
+            KeyRemoveSignatureType::SelfRevoke => {
+                // Self-revocation. The envelope signer is the key being revoked, and the envelope
+                // Ed25519 signature was already verified upstream. Asserting signer == body.key
+                // is all that's left — any other signer means this message is not authorized by
+                // the key's holder.
+                if msg.signer.as_slice() != key_remove_body.key.as_slice() {
+                    return Err(ValidationError::InvalidSignature.into());
+                }
+                check_and_set_app_nonce(
+                    &self.db,
+                    txn_batch,
+                    record.request_fid,
+                    key_remove_body.nonce,
+                )?;
+            }
+        }
+
+        // State writes. Order: record first (the authoritative existence signal), then
+        // last_used_at (cleanup of the sibling store). Both are per-(fid, key) so no cross-key
+        // interleaving concerns.
+        delete_gasless_key_record(&self.db, txn_batch, fid, &key_remove_body.key)?;
+        delete_last_used_at(&self.db, txn_batch, fid, &key_remove_body.key)?;
+
+        Ok(HubEvent::new_event(
+            HubEventType::MergeMessage,
+            hub_event::Body::MergeMessageBody(proto::MergeMessageBody {
+                message: Some(msg.clone()),
+                deleted_messages: record.message.into_iter().collect(),
+            }),
+        ))
+    }
+
     fn prune_messages(
         &mut self,
         fid: u64,
@@ -1526,7 +1664,7 @@ impl ShardEngine {
         // itself). The outer `message.signer` on these messages is the Ed25519 key being
         // added or removed — by definition either not yet in the signer store (KEY_ADD) or
         // about to leave it (KEY_REMOVE). Their real authentication happens in the merge
-        // path (see `merge_key_add` / NEYN-10574), so skip the active-signer check here.
+        // path (see `merge_key_add` / `merge_key_remove`), so skip the active-signer check here.
         let msg_type = MessageType::try_from(message_data.r#type).unwrap_or(MessageType::None);
         if msg_type != MessageType::KeyAdd && msg_type != MessageType::KeyRemove {
             self.stores

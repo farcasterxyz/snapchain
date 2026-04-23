@@ -12,9 +12,36 @@ pub const ED25519_PUBLIC_KEY_LEN: usize = 32;
 // Only key type currently defined by the FIP.
 pub const KEY_TYPE_ED25519: u32 = 1;
 
-// KEY_REMOVE signature_type discriminator: 1 = custody (EIP-712), 2 = self-revocation (Ed25519).
-pub const KEY_REMOVE_SIG_TYPE_CUSTODY: u32 = 1;
-pub const KEY_REMOVE_SIG_TYPE_SELF: u32 = 2;
+/// Authorization mode for KEY_REMOVE. Wire representation is a `uint32` (the proto stays
+/// `uint32 signature_type = 3` for ecosystem-tooling compatibility), but every call site inside
+/// Rust should go through this enum: `TryFrom<u32>` is the boundary, and downstream match
+/// statements get exhaustiveness-checked by the compiler.
+///
+/// The explicit `#[repr(u32)]` + discriminant values pin the wire encoding, so a future
+/// round-trip like `KeyRemoveSignatureType::Custody as u32 == 1` is compile-time guaranteed —
+/// renaming a variant cannot drift the on-wire value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum KeyRemoveSignatureType {
+    /// EIP-712 custody signature; recovered signer must equal the FID's custody address.
+    /// Consumes the user-nonce namespace.
+    Custody = 1,
+    /// Standard Ed25519 signature from the key being removed (the Message envelope signature is
+    /// sufficient — the signer IS the key). Consumes the app-nonce namespace scoped by the
+    /// verified `requestFid` cached at KEY_ADD time. Enables mass revocation by a compromised app.
+    SelfRevoke = 2,
+}
+
+impl TryFrom<u32> for KeyRemoveSignatureType {
+    type Error = ValidationError;
+    fn try_from(v: u32) -> Result<Self, Self::Error> {
+        match v {
+            1 => Ok(Self::Custody),
+            2 => Ok(Self::SelfRevoke),
+            _ => Err(ValidationError::InvalidSignatureType),
+        }
+    }
+}
 
 // Maximum sliding TTL window accepted in a KeyAddBody. FIP specifies 90 days; larger values are
 // rejected at static validation so a misbehaving signer can't request an effectively-permanent key.
@@ -362,11 +389,9 @@ pub fn validate_key_remove_body(body: &KeyRemoveBody) -> Result<(), ValidationEr
     if body.key.len() != ED25519_PUBLIC_KEY_LEN {
         return Err(ValidationError::InvalidKeyLength);
     }
-    if body.signature_type != KEY_REMOVE_SIG_TYPE_CUSTODY
-        && body.signature_type != KEY_REMOVE_SIG_TYPE_SELF
-    {
-        return Err(ValidationError::InvalidSignatureType);
-    }
+    // Reject unknown discriminants here; downstream merge code can then match exhaustively on the
+    // typed enum and the compiler enforces coverage of all variants.
+    KeyRemoveSignatureType::try_from(body.signature_type)?;
     if body.deadline == 0 {
         return Err(ValidationError::MissingDeadline);
     }
@@ -711,7 +736,7 @@ mod tests {
         KeyRemoveBody {
             key: vec![0xAAu8; 32],
             signature: vec![0u8; 65],
-            signature_type: KEY_REMOVE_SIG_TYPE_CUSTODY,
+            signature_type: KeyRemoveSignatureType::Custody as u32,
             deadline: 1_700_000_000,
             nonce: 2,
         }
@@ -878,7 +903,7 @@ mod tests {
     #[test]
     fn key_remove_body_accepts_self_sig_type() {
         let mut body = sample_key_remove_body();
-        body.signature_type = KEY_REMOVE_SIG_TYPE_SELF;
+        body.signature_type = KeyRemoveSignatureType::SelfRevoke as u32;
         assert_eq!(validate_key_remove_body(&body), Ok(()));
     }
 

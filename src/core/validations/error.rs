@@ -182,4 +182,6 @@ pub enum ValidationError {
     InvalidSignatureType,
     #[error("key is already registered for this fid")]
     KeyAlreadyRegistered,
+    #[error("key is not registered for this fid")]
+    KeyNotRegistered,
 }
