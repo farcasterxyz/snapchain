@@ -121,6 +121,11 @@ pub enum UserPostfix {
     /* Sliding-TTL last-used-at for gasless keys, scoped under `RootPrefix::GaslessKey`.
      * Per-(FID, public-key) timestamp; bumped on every validated use of a TTL'd key. */
     GaslessKeyLastUsedAt = 104,
+
+    /* Off-chain signer record index, scoped under `RootPrefix::GaslessKey`.
+     * Per-(FID, public-key) `GaslessKeyRecord` carrying scopes, ttl, request_fid. Populated by
+     * KEY_ADD and deleted by KEY_REMOVE; read by scope enforcement and RPC. */
+    GaslessKeyByFid = 105,
 }
 
 impl UserPostfix {
