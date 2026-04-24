@@ -73,11 +73,11 @@ jobs:
         if: github.event_name == 'pull_request'
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: '3.12'
 
       - name: Install diff-cover
         if: github.event_name == 'pull_request'
-        run: pip install diff-cover
+        run: pip install diff-cover==9.2.0
 
       - name: Generate diff coverage report
         if: github.event_name == 'pull_request'
