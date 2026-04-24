@@ -449,8 +449,8 @@ impl ShardEngine {
             let msg_type = message.msg_type().as_str_name();
             let message_summary = format!(
                 "message_type: {}, msg_hash: {}\n",
-                hex::encode(&message.hash),
-                msg_type
+                msg_type,
+                hex::encode(&message.hash)
             );
             summary += message_summary.as_str()
         }
