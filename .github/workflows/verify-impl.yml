@@ -90,7 +90,7 @@ jobs:
       - working-directory: ./snapchain
         env:
           RUSTFLAGS: "-Dwarnings -A mismatched_lifetime_syntaxes"
-        run: cargo build --bins
+        run: cargo check --bins
 
       - working-directory: ./snapchain
         env:
