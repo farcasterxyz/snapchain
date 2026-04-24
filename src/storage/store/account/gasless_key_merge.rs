@@ -13,9 +13,10 @@
 use std::sync::Arc;
 
 use super::{
-    check_and_set_app_nonce, check_and_set_user_nonce, delete_gasless_key_owner,
-    delete_gasless_key_record, delete_last_used_at, get_gasless_key_owner_fid,
-    get_gasless_key_record, init_last_used_at, put_gasless_key_owner, put_gasless_key_record,
+    check_and_set_app_nonce, check_and_set_user_nonce, decrement_gasless_key_count,
+    delete_gasless_key_owner, delete_gasless_key_record, delete_last_used_at,
+    get_gasless_key_count, get_gasless_key_owner_fid, get_gasless_key_record,
+    increment_gasless_key_count, init_last_used_at, put_gasless_key_owner, put_gasless_key_record,
     GaslessKeyRecord, OnchainEventStore,
 };
 use crate::core::message::HubEventExt;
@@ -23,7 +24,7 @@ use crate::core::validations::error::ValidationError;
 use crate::core::validations::key::{
     recover_key_add_custody_address, recover_key_remove_custody_address,
     verify_signed_key_request_metadata, KeyAddPayload, KeyRemovePayload, KeyRemoveSignatureType,
-    ETH_MAINNET_CHAIN_ID,
+    ETH_MAINNET_CHAIN_ID, MAX_GASLESS_KEYS_PER_FID,
 };
 use crate::proto::{self, hub_event, message_data::Body, HubEvent, HubEventType};
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
@@ -46,9 +47,14 @@ use crate::storage::store::engine::MessageValidationError;
 /// which has to stage a write even on "success", but that stage is rolled back if any later
 /// step fails (the whole txn batch is discarded together on error).
 ///
-/// Active-key cap (1000 per FID combined) and pending-FID resolution via
-/// `registration_tx_hash` are intentionally out of scope — they're owned by NEYN-10579 and
-/// NEYN-10577 respectively and block this ticket only at the future-merge level.
+/// Per-FID gasless-key cap (1000) is enforced here (NEYN-10579): a KEY_ADD that would push the
+/// per-FID gasless count to or past `MAX_GASLESS_KEYS_PER_FID` is rejected with
+/// `ActiveKeyCapExceeded`. The count is tracked by a per-FID counter entry mutated alongside the
+/// primary record. On-chain signers are explicitly not counted — they have their own cap at the
+/// L2 KeyRegistry contract and are tracked under a separate storage namespace.
+///
+/// Pending-FID resolution via `registration_tx_hash` is still out of scope — owned by
+/// NEYN-10577.
 pub fn merge_key_add(
     db: &Arc<RocksDB>,
     onchain_event_store: &OnchainEventStore,
@@ -144,6 +150,15 @@ pub fn merge_key_add(
         return Err(ValidationError::KeyAlreadyRegistered.into());
     }
 
+    // Per-FID gasless-key cap (NEYN-10579). Read through the txn batch so staged same-batch
+    // increments are visible — two KEY_ADDs in one commit see each other's counter bumps and the
+    // cap is enforced precisely at 1000. Ordered after conflict resolution so a KEY_ADD that
+    // would collide fails for the more specific reason instead of being mis-attributed.
+    let gasless_count = get_gasless_key_count(db, txn_batch, fid)?;
+    if gasless_count >= MAX_GASLESS_KEYS_PER_FID {
+        return Err(ValidationError::ActiveKeyCapExceeded(MAX_GASLESS_KEYS_PER_FID).into());
+    }
+
     // Step 4 (nonce CAS). Stages the bump on txn_batch; rolls back with everything else
     // if any later step fails. The store rejects `new_nonce <= stored`, which implicitly
     // covers `nonce == 0` (stored defaults to 0).
@@ -165,6 +180,10 @@ pub fn merge_key_add(
         &key_add_body.key,
         message_data.timestamp,
     )?;
+    // Increment the per-FID gasless-key counter in lock-step with the record write. The cap
+    // check above read the old value; this staged put makes any subsequent KEY_ADD in the same
+    // txn batch see the new count.
+    increment_gasless_key_count(db, txn_batch, fid)?;
 
     Ok(HubEvent::new_event(
         HubEventType::MergeMessage,
@@ -283,6 +302,10 @@ pub fn merge_key_remove(
     delete_gasless_key_record(db, txn_batch, fid, &key_remove_body.key)?;
     delete_gasless_key_owner(db, txn_batch, &key_remove_body.key)?;
     delete_last_used_at(db, txn_batch, fid, &key_remove_body.key)?;
+    // Decrement the per-FID gasless-key counter. The record existence check at the top of this
+    // function guarantees this decrement corresponds to a real prior KEY_ADD; the counter stays
+    // in sync with the number of distinct records on disk.
+    decrement_gasless_key_count(db, txn_batch, fid)?;
 
     Ok(HubEvent::new_event(
         HubEventType::MergeMessage,

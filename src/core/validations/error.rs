@@ -184,4 +184,6 @@ pub enum ValidationError {
     KeyAlreadyRegistered,
     #[error("key is not registered for this fid")]
     KeyNotRegistered,
+    #[error("active-key cap exceeded: {0} keys per FID")]
+    ActiveKeyCapExceeded(u32),
 }

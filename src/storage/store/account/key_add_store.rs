@@ -231,3 +231,90 @@ pub fn delete_gasless_key_owner(
     txn.delete(key);
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Per-FID gasless-key counter (NEYN-10579 active-key cap)
+// ---------------------------------------------------------------------------
+//
+// Enforcing the 1000-active-keys-per-FID cap cheaply requires an O(1) read at KEY_ADD merge
+// time. Scanning the by-FID prefix would be O(existing_keys), which degrades as the FID
+// approaches the cap — exactly when we most want the check to be cheap. The counter is
+// maintained in lock-step with `merge_key_add` / `merge_key_remove`: increment on a successful
+// add, decrement on a successful remove. The gasless count combines with an on-demand count of
+// on-chain signers (bounded by the L2 KeyRegistry and typically single-digit per FID) to
+// produce the combined cap check.
+
+const GASLESS_KEY_COUNT_KEY_BYTES: usize = ROOT_PREFIX_BYTES + USER_POSTFIX_BYTES + FID_BYTES;
+const GASLESS_KEY_COUNT_VALUE_BYTES: usize = 4; // u32 big-endian
+
+pub fn make_gasless_key_count_by_fid_key(fid: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(GASLESS_KEY_COUNT_KEY_BYTES);
+    key.push(RootPrefix::GaslessKey as u8);
+    key.push(UserPostfix::GaslessKeyCountByFid as u8);
+    key.extend_from_slice(&make_fid_key(fid));
+    key
+}
+
+/// Returns the current gasless-key count for `fid`. Absent entry is a zero count — the index is
+/// sparse by design (decrement to zero deletes the entry). Corrupt-width values surface as
+/// `internal_error` rather than being silently reinterpreted.
+pub fn get_gasless_key_count(
+    db: &RocksDB,
+    txn: &RocksDbTransactionBatch,
+    fid: u64,
+) -> Result<u32, HubError> {
+    let key = make_gasless_key_count_by_fid_key(fid);
+    match get_from_db_or_txn(db, txn, &key)? {
+        None => Ok(0),
+        Some(bytes) => {
+            if bytes.len() != GASLESS_KEY_COUNT_VALUE_BYTES {
+                return Err(HubError {
+                    code: "internal_error".to_string(),
+                    message: format!(
+                        "corrupt gasless-key count value: expected {} bytes, got {}",
+                        GASLESS_KEY_COUNT_VALUE_BYTES,
+                        bytes.len()
+                    ),
+                });
+            }
+            let mut buf = [0u8; GASLESS_KEY_COUNT_VALUE_BYTES];
+            buf.copy_from_slice(&bytes);
+            Ok(u32::from_be_bytes(buf))
+        }
+    }
+}
+
+/// Reads the current count through the txn batch, adds one (saturating at `u32::MAX`), and stages
+/// the new value in the same batch. Callers must invoke this exactly once on a successful
+/// `merge_key_add` — double-counting would corrupt the cap check.
+pub fn increment_gasless_key_count(
+    db: &RocksDB,
+    txn: &mut RocksDbTransactionBatch,
+    fid: u64,
+) -> Result<(), HubError> {
+    let current = get_gasless_key_count(db, txn, fid)?;
+    let next = current.saturating_add(1);
+    let key = make_gasless_key_count_by_fid_key(fid);
+    txn.put(key, next.to_be_bytes().to_vec());
+    Ok(())
+}
+
+/// Reads the current count through the txn batch, subtracts one (saturating at 0), and stages the
+/// new value. When the new value is 0, the entry is deleted rather than stored, keeping the index
+/// sparse so a `get_gasless_key_count` on an FID with no active gasless keys returns 0 without an
+/// on-disk lookup hit.
+pub fn decrement_gasless_key_count(
+    db: &RocksDB,
+    txn: &mut RocksDbTransactionBatch,
+    fid: u64,
+) -> Result<(), HubError> {
+    let current = get_gasless_key_count(db, txn, fid)?;
+    let next = current.saturating_sub(1);
+    let key = make_gasless_key_count_by_fid_key(fid);
+    if next == 0 {
+        txn.delete(key);
+    } else {
+        txn.put(key, next.to_be_bytes().to_vec());
+    }
+    Ok(())
+}
