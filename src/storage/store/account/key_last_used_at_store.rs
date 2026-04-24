@@ -93,10 +93,12 @@ pub fn get_last_used_at(
     }
 }
 
-/// Initializes the `last_used_at` counter for a newly-added gasless key to `message.timestamp`.
-/// Called from the `KEY_ADD` merge path after all other validation passes. Writes unconditionally:
-/// KEY_ADD-on-existing-key is already rejected upstream, and a re-add after KEY_REMOVE finds no
-/// entry (KEY_REMOVE deletes it) so the overwrite is a clean insert.
+/// Initializes the `last_used_at` counter for a gasless key to `message.timestamp`. Called from
+/// the `KEY_ADD` merge path after all other validation passes. Writes unconditionally, which
+/// also gives us the resubmission semantics chosen for NEYN-10624: a same-key KEY_ADD that
+/// upserts the record resets the sliding-TTL window to the new message's timestamp. An add
+/// following a KEY_REMOVE similarly starts a fresh window (KEY_REMOVE deletes the prior entry,
+/// so the write is an insert rather than an overwrite in that case).
 pub fn init_last_used_at(
     db: &RocksDB,
     txn: &mut RocksDbTransactionBatch,

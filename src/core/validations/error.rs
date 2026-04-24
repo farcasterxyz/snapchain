@@ -180,8 +180,12 @@ pub enum ValidationError {
     MissingMetadata,
     #[error("invalid signature type")]
     InvalidSignatureType,
-    #[error("key is already registered for this fid")]
-    KeyAlreadyRegistered,
+    #[error("key is already registered onchain for this fid")]
+    KeyAlreadyRegisteredOnchain,
+    #[error("key is already claimed by a different fid")]
+    KeyClaimedByDifferentFid,
+    #[error("key is already registered for this fid by a different requesting fid")]
+    KeyRegisteredByDifferentRequestingFid,
     #[error("key is not registered for this fid")]
     KeyNotRegistered,
     #[error("active-key cap exceeded: {0} keys per FID")]
