@@ -12,7 +12,7 @@ ENV RUST_BACKTRACE=1
 RUN <<EOF
 set -eu
 apt-get update && apt-get install -y libclang-dev git libjemalloc-dev llvm-dev make protobuf-compiler libssl-dev openssh-client cmake
-cargo install cargo-chef
+cargo install cargo-chef --locked
 cd ..
 git clone $ETH_SIGNATURE_VERIFIER_GIT_REPO_URL
 cd eth-signature-verifier
