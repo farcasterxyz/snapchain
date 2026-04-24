@@ -7,11 +7,12 @@ EOA / ERC-1271 / ERC-6492 signatures in a single `eth_call`.
 ## Provenance
 
 - `Erc6492.sol` — copied verbatim from
-  [`royal-markets/eth-signature-verifier@8deb4a0`](https://github.com/CassOnMars/eth-signature-verifier/blob/8deb4a091982c345949dc66bf8684489d9f11889/contracts/Erc6492.sol),
-  which extracted it from
-  [`WalletConnect/erc6492`](https://github.com/WalletConnect/erc6492). The
-  `UniversalSigValidator` and `ValidateSigOffchain` contracts are AmbireTech's
+  [`royal-markets/eth-signature-verifier@eb941d6`](https://github.com/royal-markets/eth-signature-verifier/blob/eb941d619a3c/contracts/Erc6492.sol),
+  which extracted and lightly modified it from Reown's (formerly WalletConnect's)
+  [`reown-com/erc6492`](https://github.com/reown-com/erc6492/blob/main/contracts/Erc6492.sol).
+  The `UniversalSigValidator` and `ValidateSigOffchain` contracts are AmbireTech's
   reference implementation of [EIP-6492](https://eips.ethereum.org/EIPS/eip-6492).
+  The file is byte-identical to both upstreams as of 2026-04-24.
 - `ValidateSigOffchain.bytecode` — deterministic compile output of `Erc6492.sol`;
   see the build recipe below.
 

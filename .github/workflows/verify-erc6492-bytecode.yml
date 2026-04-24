@@ -30,9 +30,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Foundry
+        # Pinned so a future forge release can't silently change the build behavior;
+        # bump intentionally when we want newer foundry. Solc is separately pinned to
+        # 0.8.28 via `forge build --use` below and `foundry.toml`, so bytecode
+        # determinism does not depend on this version.
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: stable
+          version: v1.5.1
 
       - name: Build Erc6492.sol
         working-directory: src/core/validations/erc6492
