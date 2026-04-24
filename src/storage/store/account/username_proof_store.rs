@@ -3,13 +3,14 @@ use super::{
     store::{Store, StoreDef},
     IntoU8, MessagesPage, StoreEventHandler, TS_HASH_LENGTH,
 };
-use crate::core::error::HubError;
+use crate::core::message::HubEventExt;
 use crate::proto::message_data::Body;
 use crate::proto::{self, HubEvent, HubEventType, MergeUserNameProofBody, Message, MessageType};
 use crate::storage::constants::{RootPrefix, UserPostfix};
 use crate::storage::db::PageOptions;
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::util;
+use crate::{core::error::HubError, storage::store::account::StoreOptions};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -185,7 +186,7 @@ impl StoreDef for UsernameProofStoreDef {
     fn get_merge_conflicts(
         &self,
         db: &RocksDB,
-        txn: &mut RocksDbTransactionBatch,
+        txn: &RocksDbTransactionBatch,
         message: &Message,
         ts_hash: &[u8; TS_HASH_LENGTH],
     ) -> Result<Vec<Message>, HubError> {
@@ -280,7 +281,7 @@ impl StoreDef for UsernameProofStoreDef {
             _ => None,
         };
 
-        HubEvent::from(
+        HubEvent::new_event(
             HubEventType::MergeUsernameProof,
             proto::hub_event::Body::MergeUsernameProofBody(MergeUserNameProofBody {
                 username_proof: None,
@@ -317,7 +318,7 @@ impl StoreDef for UsernameProofStoreDef {
             (None, None)
         };
 
-        HubEvent::from(
+        HubEvent::new_event(
             HubEventType::MergeUsernameProof,
             proto::hub_event::Body::MergeUsernameProofBody(MergeUserNameProofBody {
                 username_proof: username_proof_body,
@@ -372,20 +373,36 @@ impl UsernameProofStore {
         )
     }
 
+    pub fn new_with_opts(
+        db: Arc<RocksDB>,
+        store_event_handler: Arc<StoreEventHandler>,
+        prune_size_limit: u32,
+        options: StoreOptions,
+    ) -> Store<UsernameProofStoreDef> {
+        Store::new_with_store_def_opts(
+            db,
+            store_event_handler,
+            UsernameProofStoreDef { prune_size_limit },
+            options,
+        )
+    }
+
     pub fn get_username_proof(
         store: &Store<UsernameProofStoreDef>,
         name: &Vec<u8>,
+        txn: &RocksDbTransactionBatch,
     ) -> Result<Option<Message>, HubError> {
         let by_name_key = UsernameProofStoreDef::make_username_proof_by_name_key(name);
-        let fid_result = store.db().get(by_name_key.as_slice())?;
+        let fid_result = get_from_db_or_txn(&store.db(), txn, by_name_key.as_slice())?;
+
         if fid_result.is_none() {
-            return Err(HubError {
-                code: "not_found".to_string(),
-                message: format!(
+            return Err(HubError::not_found(
+                format!(
                     "NotFound: Username proof not found for name {}",
                     String::from_utf8_lossy(name)
-                ),
-            });
+                )
+                .as_str(),
+            ));
         }
 
         let fid = read_fid_key(&fid_result.unwrap(), 0);
@@ -401,7 +418,7 @@ impl UsernameProofStore {
             ..Default::default()
         };
 
-        store.get_add(&partial_message)
+        store.get_add(&partial_message, Some(txn))
     }
 
     pub fn get_username_proofs_by_fid(
@@ -429,6 +446,6 @@ impl UsernameProofStore {
             ..Default::default()
         };
 
-        store.get_add(&partial_message)
+        store.get_add(&partial_message, None)
     }
 }

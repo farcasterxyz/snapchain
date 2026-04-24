@@ -2,17 +2,15 @@ use std::collections::BTreeMap;
 
 use super::validator::StoredValidatorSets;
 use crate::consensus::consensus::SystemMessage;
-use crate::core::types::{SnapchainValidatorContext, Vote};
-use crate::core::util::FarcasterTime;
+use crate::core::types::{CommitsExt, SnapchainValidatorContext};
+use crate::core::util::{verify_signatures, FarcasterTime};
 use crate::proto::{self, DecidedValue, FarcasterNetwork, Height};
-use crate::storage::store::engine::{BlockEngine, ShardEngine};
+use crate::storage::store::block_engine::BlockEngine;
+use crate::storage::store::engine::ShardEngine;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::EngineVersion;
 use bytes::Bytes;
-use informalsystems_malachitebft_core_types::{NilOrVal, ThresholdParams};
 use informalsystems_malachitebft_sync::RawDecidedValue;
-use itertools::Itertools;
-use libp2p::identity::ed25519::PublicKey;
 use prost::Message;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -48,11 +46,11 @@ impl ReadValidator {
         }
     }
 
-    fn commit_decided_value(&mut self, value: &DecidedValue, height: Height) {
+    async fn commit_decided_value(&mut self, value: &DecidedValue, height: Height) {
         match &mut self.engine {
             Engine::ShardEngine(shard_engine) => match &value.value {
                 Some(proto::decided_value::Value::Shard(shard_chunk)) => {
-                    shard_engine.commit_shard_chunk(&shard_chunk);
+                    shard_engine.commit_shard_chunk(&shard_chunk).await;
                     info!(
                         %height,
                         hash = hex::encode(&shard_chunk.hash),
@@ -80,12 +78,12 @@ impl ReadValidator {
         self.last_height = height;
     }
 
-    fn process_buffered_blocks(&mut self) -> u64 {
+    async fn process_buffered_blocks(&mut self) -> u64 {
         let mut num_blocks_processed = 0;
         // This works only because [buffered_blocks] is ordered by height. It's important to maintain this property
         while let Some((height, value)) = self.buffered_blocks.pop_first() {
             if height == self.last_height.increment() {
-                self.commit_decided_value(&value, height);
+                self.commit_decided_value(&value, height).await;
                 num_blocks_processed += 1;
             } else if height > self.last_height.increment() {
                 self.buffered_blocks.insert(height, value);
@@ -109,57 +107,15 @@ impl ReadValidator {
     }
 
     fn verify_signatures(&self, value: &proto::DecidedValue) -> bool {
-        let certificate = match value.value.as_ref().unwrap() {
-            proto::decided_value::Value::Shard(shard_chunk) => shard_chunk
-                .commits
-                .as_ref()
-                .unwrap()
-                .to_commit_certificate(),
-
-            proto::decided_value::Value::Block(block) => {
-                block.commits.as_ref().unwrap().to_commit_certificate()
+        let commits = match value.value.as_ref().unwrap() {
+            proto::decided_value::Value::Shard(shard_chunk) => {
+                shard_chunk.commits.as_ref().unwrap()
             }
+
+            proto::decided_value::Value::Block(block) => block.commits.as_ref().unwrap(),
         };
 
-        let validator_set = self
-            .validator_sets
-            .get_validator_set(certificate.height.as_u64());
-
-        let mut expected_pubkeys = validator_set
-            .validators
-            .iter()
-            .map(|validator| validator.public_key.to_bytes());
-
-        if !ThresholdParams::default().quorum.is_met(
-            certificate.aggregated_signature.signatures.len() as u64,
-            expected_pubkeys.len() as u64,
-        ) {
-            error!(%certificate.height, last_height = %self.last_height, "Block did not have quorum");
-            return false;
-        }
-
-        for signature in certificate.aggregated_signature.signatures {
-            let address_bytes = &signature.address.0;
-            if !expected_pubkeys.contains(address_bytes) {
-                error!(%certificate.height, last_height = %self.last_height, "Block contained signatures from unexpected signers");
-                return false;
-            }
-
-            let vote = Vote::new_precommit(
-                certificate.height,
-                certificate.round,
-                NilOrVal::Val(certificate.value_id.clone()),
-                signature.address.clone(),
-            );
-
-            let public_key = PublicKey::try_from_bytes(address_bytes).unwrap();
-            if !public_key.verify(&vote.to_sign_bytes(), &signature.signature.0) {
-                error!(%certificate.height, last_height = %self.last_height, "Block contained invalid signatures");
-                return false;
-            }
-        }
-
-        true
+        verify_signatures(&commits, &self.validator_sets)
     }
 
     pub fn validate_protocol_version(&self, value: &DecidedValue) -> bool {
@@ -193,7 +149,7 @@ impl ReadValidator {
         true
     }
 
-    pub fn process_decided_value(&mut self, value: DecidedValue) -> u64 {
+    pub async fn process_decided_value(&mut self, value: DecidedValue) -> u64 {
         let height = Self::get_decided_value_height(&value);
         let verified = self.verify_signatures(&value);
         if !verified {
@@ -216,8 +172,8 @@ impl ReadValidator {
                 0
             }
         } else if height == self.last_height.increment() {
-            self.commit_decided_value(&value, height);
-            let num_buffered_blocks_processed = self.process_buffered_blocks();
+            self.commit_decided_value(&value, height).await;
+            let num_buffered_blocks_processed = self.process_buffered_blocks().await;
             num_buffered_blocks_processed + 1
         } else {
             debug!(%height, last_height = %self.last_height, "Dropping decided block because height is too low");
@@ -232,6 +188,7 @@ impl ReadValidator {
             self.shard_id,
             "read_validator.num_commited_values",
             num_committed_values,
+            vec![],
         );
         num_committed_values
     }

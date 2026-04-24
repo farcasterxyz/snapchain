@@ -4,11 +4,11 @@ use super::super::{
     util::{blake3_20, bytes_compare},
 };
 use super::errors::TrieError;
-use super::merkle_trie::TrieSnapshot;
 use crate::proto::DbTrieNode;
 use prost::Message as _;
 use std::collections::HashMap;
 use std::sync::atomic;
+use std::time::Instant;
 use tracing::error;
 
 // This represents 6 bytes (1 byte for virtual shard id, 4 for fid and 1 for message type).
@@ -21,7 +21,7 @@ const MAX_VALUES_RETURNED_PER_CALL: usize = 1024;
 pub struct Context<'a> {
     db_read_count: atomic::AtomicU64,
     mem_read_count: atomic::AtomicU64,
-    on_drop: Option<Box<dyn FnOnce((u64, u64)) + 'a>>,
+    on_drop: Option<Box<dyn FnOnce((u64, u64)) + Send + 'a>>,
 }
 
 impl<'a> Context<'a> {
@@ -35,7 +35,7 @@ impl<'a> Context<'a> {
 
     pub fn with_callback<F>(callback: F) -> Self
     where
-        F: FnOnce((u64, u64)) + 'a,
+        F: FnOnce((u64, u64)) + Send + 'a,
     {
         Self {
             db_read_count: atomic::AtomicU64::new(0),
@@ -57,16 +57,29 @@ impl<'a> Drop for Context<'a> {
 
 /// Represents a node in a MerkleTrie. Automatically updates the hashes when items are added,
 /// and keeps track of the number of items in the subtree.
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct TrieNode {
     items: usize,
     children: HashMap<u8, TrieNodeType>,
     child_hashes: HashMap<u8, Vec<u8>>,
     key: Option<Vec<u8>>,
+    last_accessed: Instant,
 }
 
-// An empty struct that represents a serialized trie node, which will need to be loaded from the db
-// TODO: since SerializedTrieNode is now empty, do we need it at all?
+impl Default for TrieNode {
+    fn default() -> Self {
+        TrieNode {
+            items: 0,
+            children: HashMap::new(),
+            child_hashes: HashMap::new(),
+            key: None,
+            last_accessed: Instant::now(),
+        }
+    }
+}
+
+// An empty struct that represents a serialized trie node. It does not contain any data, but it is used to indicate that
+// a node exists in the trie and needs to be loaded from the database when accessed.
 #[derive(Debug, Clone)]
 pub struct SerializedTrieNode {}
 
@@ -90,13 +103,14 @@ impl TrieNode {
             children: HashMap::new(),
             child_hashes: HashMap::new(),
             key: None,
+            last_accessed: Instant::now(),
         }
     }
 
     #[inline]
     pub(crate) fn make_primary_key(prefix: &[u8], child_char: Option<u8>) -> Vec<u8> {
         let mut key = Vec::with_capacity(1 + prefix.len() + 1);
-        key.push(RootPrefix::SyncMerkleTrieNode as u8);
+        key.push(RootPrefix::MerkleTrieNode as u8);
         key.extend_from_slice(prefix);
         if let Some(char) = child_char {
             key.push(char);
@@ -146,6 +160,7 @@ impl TrieNode {
             } else {
                 Some(db_trie_node.key)
             },
+            last_accessed: Instant::now(),
         })
     }
 }
@@ -190,7 +205,6 @@ impl TrieNode {
         blake3_20(&concat_hashes)
     }
 
-    #[cfg(test)]
     pub fn value(&self) -> Option<Vec<u8>> {
         // Value is only defined for leaf nodes
         if self.is_leaf() {
@@ -198,6 +212,21 @@ impl TrieNode {
         } else {
             None
         }
+    }
+
+    #[cfg(test)]
+    pub fn set_children(&mut self, children: HashMap<u8, TrieNodeType>) {
+        self.children = children;
+    }
+
+    #[cfg(test)]
+    pub fn set_child_hashes(&mut self, child_hashes: HashMap<u8, Vec<u8>>) {
+        self.child_hashes = child_hashes;
+    }
+
+    #[cfg(test)]
+    pub fn child_hashes(&self) -> &HashMap<u8, Vec<u8>> {
+        &self.child_hashes
     }
 
     pub fn children(&self) -> &HashMap<u8, TrieNodeType> {
@@ -288,7 +317,6 @@ impl TrieNode {
                 .filter_map(|(i, key)| {
                     if bytes_compare(self.key.as_ref().unwrap_or(&vec![]), key.as_slice()) == 0 {
                         // Key already exists, do nothing
-                        results[i] = false;
                         None
                     } else {
                         Some((i + if inserted { 1 } else { 0 }, key)) // If we already pop()ed the first key, the index is i + 1
@@ -589,7 +617,10 @@ impl TrieNode {
                     }
                 }
                 match entry.into_mut() {
-                    TrieNodeType::Node(node) => Ok(node),
+                    TrieNodeType::Node(node) => {
+                        node.last_accessed = Instant::now();
+                        Ok(node)
+                    }
                     _ => Err(TrieError::InvalidChildNode { child_char: char }),
                 }
             }
@@ -619,32 +650,6 @@ impl TrieNode {
         Ok(())
     }
 
-    fn excluded_hash(
-        &mut self,
-        ctx: &Context,
-        db: &RocksDB,
-        prefix: &[u8],
-        prefix_char: u8,
-    ) -> Result<(usize, String), TrieError> {
-        let mut excluded_items = 0;
-        let mut child_hashes = vec![];
-
-        let mut sorted_children = self.children.keys().map(|c| *c).collect::<Vec<_>>();
-        sorted_children.sort();
-
-        for char in sorted_children {
-            if char != prefix_char {
-                let child_node = self.get_or_load_child(ctx, db, prefix, char)?;
-                child_hashes.push(child_node.hash().clone());
-                excluded_items += child_node.items;
-            }
-        }
-
-        let hash = blake3_20(&child_hashes.concat());
-
-        Ok((excluded_items, hex::encode(hash.as_slice())))
-    }
-
     fn put_to_txn(&self, txn: &mut RocksDbTransactionBatch, prefix: &[u8]) {
         let key = Self::make_primary_key(prefix, None);
         let serialized = Self::serialize(self);
@@ -654,18 +659,6 @@ impl TrieNode {
     fn delete_to_txn(&self, txn: &mut RocksDbTransactionBatch, prefix: &[u8]) {
         let key = Self::make_primary_key(prefix, None);
         txn.delete(key);
-    }
-
-    #[allow(dead_code)] // TODO
-    pub fn unload_children(&mut self) {
-        let mut serialized_children = HashMap::new();
-        for (char, child) in self.children.iter_mut() {
-            if let TrieNodeType::Node(_) = child {
-                serialized_children
-                    .insert(*char, TrieNodeType::Serialized(SerializedTrieNode::new()));
-            }
-        }
-        self.children = serialized_children;
     }
 
     pub fn get_all_values<'a>(
@@ -695,46 +688,6 @@ impl TrieNode {
         }
 
         Ok(values)
-    }
-
-    pub fn get_snapshot(
-        &mut self,
-        ctx: &Context,
-        db: &RocksDB,
-        prefix: &[u8],
-        current_index: usize,
-    ) -> Result<TrieSnapshot, TrieError> {
-        let mut excluded_hashes = vec![];
-        let mut num_messages = 0;
-
-        let mut current_node = self; // traverse from the current node
-        for (i, char) in prefix.iter().enumerate().skip(current_index) {
-            let current_prefix = prefix[0..i].to_vec();
-
-            let (excluded_items, excluded_hash) =
-                current_node.excluded_hash(ctx, db, &current_prefix, *char)?;
-
-            excluded_hashes.push(excluded_hash);
-            num_messages += excluded_items;
-
-            if !current_node.children.contains_key(char) {
-                return Ok(TrieSnapshot {
-                    prefix: current_prefix,
-                    excluded_hashes,
-                    num_messages,
-                });
-            }
-
-            current_node = current_node.get_or_load_child(ctx, db, &current_prefix, *char)?;
-        }
-
-        excluded_hashes.push(hex::encode(current_node.hash().as_slice()));
-
-        Ok(TrieSnapshot {
-            prefix: prefix.to_vec(),
-            excluded_hashes,
-            num_messages,
-        })
     }
 
     // Keeping this around since it is useful for debugging

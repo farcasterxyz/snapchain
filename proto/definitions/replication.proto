@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+import "message.proto";
+import "onchain_event.proto";
+import "blocks.proto";
+
+service ReplicationService {
+  rpc GetShardSnapshotMetadata(GetShardSnapshotMetadataRequest) returns (GetShardSnapshotMetadataResponse);
+  rpc GetShardTransactions(GetShardTransactionsRequest) returns (GetShardTransactionsResponse);
+
+}
+
+message GetShardSnapshotMetadataRequest {
+  uint32 shard_id = 1;
+}
+
+message ShardSnapshotMetadata {
+  uint32 shard_id = 1;
+  uint64 height = 2;
+  uint64 timestamp = 3;
+  optional ShardChunk shard_chunk = 5;
+  optional Block block = 6;
+  uint64 num_items = 7;
+}
+
+message GetShardSnapshotMetadataResponse {
+  repeated ShardSnapshotMetadata snapshots = 1;
+}
+
+message GetShardTransactionsRequest {
+  // Shard + height of the snapshot. Only those combinations returned from the `GetShardSnapshotMetadata`
+  // are valid
+  uint32 shard_id = 1;
+  uint64 height = 2;
+
+  // The trie prefix to iterate under. Only leaf node keys under this sub tree will be returned.
+  uint32 trie_virtual_shard = 3;
+
+  // If NONE, then start from the left-most leaf node under the prefix
+  optional string page_token = 4;
+}
+
+message GetShardTransactionsResponse {
+  // List of trie keys and its associated message
+  repeated ShardTrieEntryWithMessage trie_messages = 1;
+
+  // For each (unique) FID that was sent in `messages` above, that FID's account root
+  // hash in the trie.
+  repeated FidAccountRootHash fid_account_roots = 2;
+
+  // If this is None, all entries under the prefix have been returned
+  optional string next_page_token = 3;
+}
+
+
+message ShardTrieEntryWithMessage {
+  // The trie key of the leaf node.   
+  bytes trie_key = 1;
+
+  // This should always be present, will be None only if a trie key's message
+  // was not found in the DB, which should be never happen..
+  oneof trie_message {
+    Message user_message = 2;
+    OnChainEvent on_chain_event = 3;
+    FnameTransfer fname_transfer = 4;
+  }
+}
+
+message FidAccountRootHash {
+  uint64 fid = 1;
+  bytes account_root_hash = 2;
+  uint64 num_messages = 3;
+}
+
+message ReplicationTriePartStatus {
+  uint32 shard_id = 1;
+  uint64 height = 2;
+  uint32 virtual_trie_shard = 3;
+  optional string next_page_token = 4;
+
+  // These fields are used by the client to store the progress in the DB
+  uint32 last_response = 5; // The WorkUnitResponse from the last pass
+  optional uint64 last_fid = 6; // The last FID processed (to continue from last pass)
+}

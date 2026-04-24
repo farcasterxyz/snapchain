@@ -338,6 +338,7 @@ impl ShardStore {
                         self.shard_id, total_pruned
                     );
                 }),
+                false, // skip_cache
             )
             .await
             .map_err(|e| ShardStorageError::HubError(e))?;

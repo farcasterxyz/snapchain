@@ -5,7 +5,7 @@ use alloy_primitives::U256;
 use alloy_primitives::{address, ruint::FromUintError, Address, FixedBytes};
 use alloy_provider::{Provider, ProviderBuilder, RootProvider};
 use alloy_rpc_types::{Filter, Log};
-use alloy_sol_types::{sol, SolEvent};
+use alloy_sol_types::{sol, SolEvent, SolType};
 use alloy_transport_http::{Client, Http};
 use async_trait::async_trait;
 use foundry_common::ens::EnsResolver::EnsResolverInstance;
@@ -29,9 +29,10 @@ use crate::{
     proto::{
         on_chain_event, IdRegisterEventBody, IdRegisterEventType, OnChainEvent, OnChainEventType,
         SignerEventBody, SignerEventType, SignerMigratedEventBody, StorageRentEventBody,
-        ValidatorMessage, VerificationAddAddressBody,
+        VerificationAddAddressBody,
     },
-    storage::store::{engine::MempoolMessage, node_local_state::LocalStateStore},
+    storage::store::mempool_poller::MempoolMessage,
+    storage::store::node_local_state::LocalStateStore,
     utils::statsd_wrapper::StatsdClientWrapper,
 };
 
@@ -63,6 +64,19 @@ sol!(
     "src/connectors/onchain_events/tier_registry_abi.json"
 );
 
+sol! {
+    /// SignedKeyRequest metadata structure as defined in the Farcaster contracts.
+    /// See: https://github.com/farcasterxyz/contracts/blob/main/src/validators/SignedKeyRequestValidator.sol
+    // Also declared in `src/core/validations/key.rs` for off-chain KEY_ADD validation (NEYN-10570).
+    // TODO: extract a shared module that both sides depend on so this lives in exactly one place.
+    struct SignedKeyRequestMetadata {
+        uint256 requestFid;
+        address requestSigner;
+        bytes signature;
+        uint256 deadline;
+    }
+}
+
 // Note these are the registry addresses, not the resolver addresses. We look up the resolver from the registry.
 static ETH_L1_ENS_REGISTRY: Address = address!("00000000000C2E074eC69A0dFb2997BA6C7d2e1e");
 static BASE_MAINNET_ENS_REGISTRY: Address = address!("0xB94704422c2a1E396835A571837Aa5AE53285a95");
@@ -75,6 +89,8 @@ static BASE_MAINNET_CHAIN_ID: u32 = 8453; // Base mainnet
 const RENT_EXPIRY_IN_SECONDS: u64 = 365 * 24 * 60 * 60; // One year
 
 const RETRY_TIMEOUT_SECONDS: u64 = 10;
+
+const BASE_BLOCK_PAGE_SIZE: u64 = 8000; // Alchemy max is 10K
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -144,6 +160,39 @@ pub enum SubscribeError {
 
     #[error("Unable to find block by hash")]
     UnableToFindBlockByHash,
+}
+
+/// Extracts the requestFid (app FID) from a SignerEventBody's metadata field.
+///
+/// For metadata_type = 1 (SignedKeyRequest), the metadata contains an ABI-encoded
+/// SignedKeyRequestMetadata struct that includes the FID of the application that
+/// requested the signer to be added.
+pub fn get_request_fid_from_signer_event(signer_event_body: &SignerEventBody) -> Option<u64> {
+    // Only metadata_type 1 is SignedKeyRequest which contains requestFid
+    if signer_event_body.metadata_type != 1 {
+        return None;
+    }
+
+    if signer_event_body.metadata.is_empty() {
+        return None;
+    }
+
+    match SignedKeyRequestMetadata::abi_decode(&signer_event_body.metadata, true) {
+        Ok(decoded) => {
+            // Convert U256 to u64, returning None if it doesn't fit
+            decoded.requestFid.try_into().ok()
+        }
+        Err(_) => None,
+    }
+}
+
+/// Maps a signer FID to a human-readable name for metrics to reduce cardinality of the tag.
+pub fn map_signer_fid_to_name(fid: u64) -> &'static str {
+    match fid {
+        9152 => "farcaster",
+        309857 => "base",
+        _ => "unknown",
+    }
 }
 
 #[async_trait]
@@ -448,14 +497,20 @@ impl Subscriber {
         }
     }
 
-    fn count(&self, key: &str, value: i64) {
-        self.statsd_client
-            .count(format!("onchain_events.{}", key).as_str(), value);
+    fn count(&self, key: &str, value: i64, extra_tags: Vec<(&str, &str)>) {
+        self.statsd_client.count(
+            format!("onchain_events.{}", key).as_str(),
+            value,
+            extra_tags,
+        );
     }
 
-    fn gauge(&self, key: &str, value: u64) {
-        self.statsd_client
-            .gauge(format!("onchain_events.{}", key).as_str(), value);
+    fn gauge(&self, key: &str, value: u64, extra_tags: Vec<(&str, &str)>) {
+        self.statsd_client.gauge(
+            format!("onchain_events.{}", key).as_str(),
+            value,
+            extra_tags,
+        );
     }
 
     async fn add_onchain_event(
@@ -496,46 +551,58 @@ impl Subscriber {
         match event_type {
             OnChainEventType::EventTypeNone => {}
             OnChainEventType::EventTypeSigner => {
-                self.count("num_signer_events", 1);
+                // Try to extract request_fid from the signer event metadata
+                if let Some(on_chain_event::Body::SignerEventBody(signer_body)) = &event.body {
+                    if let Some(request_fid) = get_request_fid_from_signer_event(signer_body) {
+                        let signer_name = map_signer_fid_to_name(request_fid);
+                        self.count("num_signer_events", 1, vec![("signer_app", signer_name)]);
+                    } else {
+                        self.count("num_signer_events", 1, vec![]);
+                    }
+                } else {
+                    self.count("num_signer_events", 1, vec![]);
+                }
             }
             OnChainEventType::EventTypeSignerMigrated => {
-                self.count("num_signer_migrated_events", 1);
+                self.count("num_signer_migrated_events", 1, vec![]);
             }
             OnChainEventType::EventTypeIdRegister => {
-                self.count("num_id_register_events", 1);
+                self.count("num_id_register_events", 1, vec![]);
             }
             OnChainEventType::EventTypeStorageRent => {
-                self.count("num_storage_events", 1);
+                self.count("num_storage_events", 1, vec![]);
             }
             OnChainEventType::EventTypeTierPurchase => {
-                self.count("num_tier_purchase_events", 1);
+                self.count("num_tier_purchase_events", 1, vec![]);
             }
         };
         match &event.body {
             Some(on_chain_event::Body::IdRegisterEventBody(id_register_event_body)) => {
                 if id_register_event_body.event_type() == IdRegisterEventType::Register {
-                    self.gauge("latest_fid_registered", fid);
+                    self.gauge("latest_fid_registered", fid, vec![]);
                 }
             }
             _ => {}
         }
         self.gauge(
-            &format!("latest_block_number_on_{}", self.chain.to_string()),
+            "latest_block_number",
             block_number as u64,
+            vec![("chain", &self.chain.to_string())],
         );
         let delay = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64
             - (event.block_timestamp * 1000);
-        self.gauge("on_chain_to_ingest_delay", delay);
+        self.gauge(
+            "on_chain_to_ingest_delay",
+            delay,
+            vec![("chain", &self.chain.to_string())],
+        );
         if let Err(err) = self
             .mempool_tx
             .send(MempoolRequest::AddMessage(
-                MempoolMessage::ValidatorMessage(ValidatorMessage {
-                    on_chain_event: Some(event.clone()),
-                    fname_transfer: None,
-                }),
+                MempoolMessage::OnchainEvent(event.clone()),
                 MempoolSource::Local,
                 None,
             ))
@@ -788,7 +855,7 @@ impl Subscriber {
                 let TierRegistryAbi::PurchasedTier {
                     fid,
                     tier,
-                    forDays,
+                    forDays: for_days,
                     payer,
                 } = event.log_decode()?.inner.data;
                 add_event(
@@ -796,7 +863,7 @@ impl Subscriber {
                     OnChainEventType::EventTypeTierPurchase,
                     on_chain_event::Body::TierPurchaseEventBody(TierPurchaseBody {
                         tier_type: tier.try_into()?,
-                        for_days: forDays.try_into()?,
+                        for_days: for_days.try_into()?,
                         payer: payer.to_vec(),
                     }),
                 )
@@ -916,6 +983,60 @@ impl Subscriber {
         }
     }
 
+    // We're running into issues using getFilterChanges for this, possibly because the events are
+    // so rare. Or perhaps due to an alchemy issue. We weren't getting any events. So swtich to raw
+    // polling. We're only seeing a few events per day, so this should be fine.
+    async fn poll_tier_registry_events(
+        &mut self,
+        tier_registry: &Contract,
+        from_block: &mut u64,
+    ) -> Result<(), SubscribeError> {
+        // Get the current block number
+        let current_block = self.latest_block_on_chain().await?;
+
+        // If there are new blocks to process
+        while *from_block <= current_block {
+            let mut to_block = match self.stop_block_number {
+                Some(stop_block) => stop_block.min(current_block),
+                None => current_block,
+            };
+
+            // Paginate through blocks in batches
+            to_block = to_block.min(*from_block + BASE_BLOCK_PAGE_SIZE);
+
+            // Create filter for tier_registry events
+            let filter = Filter::new()
+                .address(tier_registry.address)
+                .from_block(*from_block)
+                .to_block(to_block);
+
+            info!(
+                from_block = *from_block,
+                to_block,
+                chain = self.chain.to_string(),
+                "Polling tier_registry events"
+            );
+
+            // Get and process logs
+            match self.get_logs(&filter, tier_registry.event_kind()).await {
+                Ok(_) => {
+                    // Update the last processed block
+                    *from_block = to_block + 1;
+                    self.record_block_number(to_block);
+                }
+                Err(err) => {
+                    error!(
+                        chain = self.chain.to_string(),
+                        "Error getting tier_registry logs: {}", err
+                    );
+                    return Err(err);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn latest_block_on_chain(&mut self) -> Result<u64, SubscribeError> {
         let mut retry_count = 0;
         loop {
@@ -960,22 +1081,53 @@ impl Subscriber {
             chain = self.chain.to_string(),
             "Starting live sync"
         );
-        let contract_addresses: Vec<Address> = self
-            .contracts()
-            .iter()
-            .map(|contract| contract.address)
-            .collect();
-        let filter = Filter::new()
-            .address(contract_addresses)
-            .from_block(start_block_number);
 
-        let filter = match self.stop_block_number {
-            None => filter,
-            Some(stop_block) => filter.to_block(stop_block),
+        // Separate tier_registry from other contracts
+        let mut tier_registry_contract: Option<Contract> = None;
+        let mut other_contracts: Vec<Contract> = Vec::new();
+
+        for contract in self.contracts() {
+            match contract.kind {
+                ContractKind::TierRegistry => {
+                    tier_registry_contract = Some(contract);
+                }
+                _ => {
+                    other_contracts.push(contract);
+                }
+            }
+        }
+
+        // Set up streaming for non-tier_registry contracts if any exist
+        let mut stream = if !other_contracts.is_empty() {
+            let contract_addresses: Vec<Address> = other_contracts
+                .iter()
+                .map(|contract| contract.address)
+                .collect();
+            let filter = Filter::new()
+                .address(contract_addresses)
+                .from_block(start_block_number);
+
+            let filter = match self.stop_block_number {
+                None => filter,
+                Some(stop_block) => filter.to_block(stop_block),
+            };
+
+            let subscription = self.provider.watch_logs(&filter).await?;
+            Some(subscription.into_stream())
+        } else {
+            None
         };
 
-        let subscription = self.provider.watch_logs(&filter).await?;
-        let mut stream = subscription.into_stream();
+        // Set up polling for tier_registry if it exists
+        let mut tier_registry_poll_interval = if tier_registry_contract.is_some() {
+            Some(tokio::time::interval(tokio::time::Duration::from_secs(30)))
+        } else {
+            None
+        };
+
+        // Track the last block polled for tier_registry
+        let mut tier_registry_last_block = start_block_number;
+
         loop {
             tokio::select! {
                  biased;
@@ -1004,7 +1156,32 @@ impl Subscriber {
                         }
                     }
                  }
-                 events = stream.next() => {
+                 _ = async {
+                     if let Some(ref mut interval) = tier_registry_poll_interval {
+                         interval.tick().await;
+                     } else {
+                         // If no tier_registry, wait forever
+                         futures_util::future::pending::<()>().await;
+                     }
+                 } => {
+                     if let Some(ref tier_registry) = tier_registry_contract {
+                         // Poll tier_registry events
+                         if let Err(err) = self.poll_tier_registry_events(tier_registry, &mut tier_registry_last_block).await {
+                             error!(
+                                 chain = self.chain.to_string(),
+                                 "Error polling tier_registry events: {}", err
+                             );
+                         }
+                     }
+                 }
+                 events = async {
+                     if let Some(ref mut s) = stream {
+                         s.next().await
+                     } else {
+                         // If no stream, wait forever
+                         futures_util::future::pending().await
+                     }
+                 } => {
                      match events {
                          None => {
                             // We want to trigger a retry here
@@ -1195,5 +1372,24 @@ mod tests {
             address,
             address!("0x849151d7D0bF1F34b70d5caD5149D28CC2308bf1")
         );
+    }
+
+    #[test]
+    fn test_get_request_fid() {
+        // Real metadata from an actual onchain signer event
+        let metadata_hex = "000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000023c000000000000000000000000002ef790dd7993a35fd847c053eddae940d05559600000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000065420dd50000000000000000000000000000000000000000000000000000000000000041bd0677376b4740f956a6d591e863d948bc2771d5ac109bfa57bd24127c35ca4b3cd00d56593750802eff94cd28e65b32ab06012a4940f0a5b8c25ca1e54050761b00000000000000000000000000000000000000000000000000000000000000";
+        let metadata_bytes = hex::decode(metadata_hex).expect("Invalid hex string");
+
+        let signer_event = SignerEventBody {
+            key: vec![],
+            key_type: 1,
+            event_type: SignerEventType::Add as i32,
+            metadata: metadata_bytes,
+            metadata_type: 1,
+        };
+
+        let result = get_request_fid_from_signer_event(&signer_event);
+
+        assert_eq!(result, Some(9152));
     }
 }

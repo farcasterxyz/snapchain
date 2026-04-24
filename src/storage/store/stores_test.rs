@@ -2,6 +2,7 @@
 mod tests {
     use crate::core::util::get_farcaster_time;
     use crate::proto;
+    use crate::proto::reaction_body::Target;
     use crate::proto::ReactionType;
     use crate::storage::store::{stores, test_helper};
     use crate::storage::{db, trie};
@@ -18,7 +19,7 @@ mod tests {
         let db = db::RocksDB::new(db_path.to_str().unwrap());
         db.open().unwrap();
 
-        let trie = trie::merkle_trie::MerkleTrie::new(16).unwrap();
+        let trie = trie::merkle_trie::MerkleTrie::new().unwrap();
         let limits = stores::StoreLimits::new(
             test_helper::limits::test(),
             test_helper::limits::zero(),
@@ -41,7 +42,7 @@ mod tests {
         let message = messages_factory::reactions::create_reaction_add(
             123,
             ReactionType::Like,
-            "".to_string(),
+            Target::TargetUrl("".to_string()),
             None,
             None,
         );

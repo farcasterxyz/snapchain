@@ -159,7 +159,7 @@ pub fn get_blocks_in_range(
     get_block_page_by_prefix(db, page_options, Some(start_primary_key), stop_prefix)
 }
 
-pub fn put_block(db: &RocksDB, block: &Block) -> Result<(), BlockStorageError> {
+fn put_block(db: &RocksDB, block: &Block) -> Result<(), BlockStorageError> {
     let mut txn = db.txn();
     let header = block
         .header
@@ -320,6 +320,7 @@ impl BlockStore {
                 Some(|total_pruned: u32| {
                     info!("Pruning blocks... pruned: {}", total_pruned);
                 }),
+                false, // skip_cache
             )
             .await
             .map_err(|_| BlockStorageError::TooManyBlocksInResult)?; // TODO: Return the right error

@@ -4,6 +4,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::header::HeaderValue;
 use hyper::{body::Bytes, Method};
 use hyper::{HeaderMap, Request, Response, StatusCode};
+use libp2p::PeerId;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::convert::Infallible;
 use std::future::Future;
@@ -19,12 +20,9 @@ use crate::proto::{
 };
 use crate::proto::{
     casts_by_parent_request, hub_event, link_request, links_by_target_request, on_chain_event,
-    reaction_request, reactions_by_target_request, GetConnectedPeersRequest,
-    GetConnectedPeersResponse, Protocol,
+    reaction_request, reactions_by_target_request, GetConnectedPeersRequest, Protocol,
 };
 use crate::storage::store::account::message_decode;
-
-use super::server::MyHubService;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
@@ -154,6 +152,8 @@ pub struct MessageData {
         skip_serializing_if = "Option::is_none"
     )]
     pub link_compact_state_body: Option<LinkCompactStateBody>,
+    #[serde(rename = "lendStorageBody", skip_serializing_if = "Option::is_none")]
+    pub lend_storage_body: Option<LendStorageBody>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -283,6 +283,16 @@ pub struct LinkCompactStateBody {
     pub target_fids: Vec<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LendStorageBody {
+    #[serde(rename = "toFid")]
+    pub to_fid: u64,
+    #[serde(rename = "numUnits")]
+    pub num_units: u64,
+    #[serde(rename = "unitType")]
+    pub unit_type: StorageUnitType,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CastId {
     pub fid: u64,
@@ -316,6 +326,8 @@ pub struct InfoResponse {
     pub version: String,
     #[serde(rename = "peer_id")]
     pub peer_id: String,
+    #[serde(rename = "nextEngineVersionTimestamp")]
+    pub next_engine_version_timestamp: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1204,6 +1216,76 @@ impl IdRegistryEventByAddressRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContactInfoBody {
+    gossip_address: String,
+    announce_rpc_address: String,
+    peer_id: String,
+    snapchain_version: String,
+    network: FarcasterNetwork,
+    timestamp: u64,
+}
+
+impl TryFrom<proto::ContactInfoBody> for ContactInfoBody {
+    type Error = ErrorResponse;
+
+    fn try_from(value: proto::ContactInfoBody) -> Result<Self, Self::Error> {
+        Ok(ContactInfoBody {
+            gossip_address: value.gossip_address.clone(),
+            announce_rpc_address: value.announce_rpc_address.clone(),
+            peer_id: PeerId::from_bytes(&value.peer_id)
+                .map_err(|err| ErrorResponse {
+                    error: "Invalid peer id".to_string(),
+                    error_detail: Some(err.to_string()),
+                })?
+                .to_string(),
+            snapchain_version: value.snapchain_version.clone(),
+            network: value.network(),
+            timestamp: value.timestamp,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GetConnectedPeersResponse {
+    contacts: Vec<ContactInfoBody>,
+}
+
+impl TryFrom<proto::GetConnectedPeersResponse> for GetConnectedPeersResponse {
+    type Error = ErrorResponse;
+
+    fn try_from(value: proto::GetConnectedPeersResponse) -> Result<Self, Self::Error> {
+        Ok(GetConnectedPeersResponse {
+            contacts: value
+                .contacts
+                .into_iter()
+                .map(ContactInfoBody::try_from)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SubmitBulkMessagesResponse {
+    pub messages: Vec<BulkMessageResponse>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum BulkMessageResponse {
+    Message(Message),
+    Error(MessageError),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MessageError {
+    #[serde(with = "serdehex")]
+    pub hash: Vec<u8>,
+    #[serde(rename = "errCode")]
+    pub err_code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ValidationResult {
     pub valid: bool,
     pub message: Option<Message>,
@@ -1217,9 +1299,16 @@ pub struct ErrorResponse {
 }
 
 // Implementation struct
-#[derive(Clone)]
-pub struct HubHttpServiceImpl {
-    pub service: Arc<MyHubService>,
+pub struct HubHttpServiceImpl<T: HubService> {
+    pub service: Arc<T>,
+}
+
+impl<T: HubService> Clone for HubHttpServiceImpl<T> {
+    fn clone(&self) -> Self {
+        HubHttpServiceImpl {
+            service: Arc::clone(&self.service),
+        }
+    }
 }
 
 fn map_get_info_response_to_json_info_response(
@@ -1234,6 +1323,7 @@ fn map_get_info_response_to_json_info_response(
         num_shards: info_response.num_shards,
         peer_id: info_response.peer_id,
         version: info_response.version,
+        next_engine_version_timestamp: info_response.next_engine_version_timestamp,
         shard_infos: info_response
             .shard_infos
             .iter()
@@ -1450,6 +1540,20 @@ fn map_proto_verification_remove_body_to_json_verification_remove_body(
     })
 }
 
+fn map_proto_lend_storage_body_to_json_lend_storage_body(
+    lend_storage_body: proto::LendStorageBody,
+) -> Result<LendStorageBody, ErrorResponse> {
+    Ok(LendStorageBody {
+        to_fid: lend_storage_body.to_fid,
+        num_units: lend_storage_body.num_units,
+        unit_type: match lend_storage_body.unit_type {
+            2 => StorageUnitType::UnitType2025,
+            1 => StorageUnitType::UnitType2024,
+            _ => StorageUnitType::UnitTypeLegacy,
+        },
+    })
+}
+
 fn map_proto_message_data_to_json_message_data(
     message_data: proto::MessageData,
 ) -> Result<MessageData, ErrorResponse> {
@@ -1483,6 +1587,7 @@ fn map_proto_message_data_to_json_message_data(
                 username_proof_body: None,
                 frame_action_body: None,
                 link_compact_state_body: None,
+                lend_storage_body: None,
             })
         }
         Some(Body::CastRemoveBody(cast_remove_body)) => Ok(MessageData {
@@ -1514,6 +1619,7 @@ fn map_proto_message_data_to_json_message_data(
             username_proof_body: None,
             frame_action_body: None,
             link_compact_state_body: None,
+            lend_storage_body: None,
         }),
         Some(Body::FrameActionBody(frame_action_body)) => {
             return Ok(MessageData {
@@ -1554,6 +1660,7 @@ fn map_proto_message_data_to_json_message_data(
                     address: frame_action_body.address,
                 }),
                 link_compact_state_body: None,
+                lend_storage_body: None,
             });
         }
         Some(Body::LinkBody(link_body)) => {
@@ -1585,6 +1692,7 @@ fn map_proto_message_data_to_json_message_data(
                 username_proof_body: None,
                 frame_action_body: None,
                 link_compact_state_body: None,
+                lend_storage_body: None,
             });
         }
         Some(Body::LinkCompactStateBody(link_compact_state_body)) => {
@@ -1616,6 +1724,7 @@ fn map_proto_message_data_to_json_message_data(
                 link_body: None,
                 username_proof_body: None,
                 frame_action_body: None,
+                lend_storage_body: None,
                 link_compact_state_body: Some(result),
             });
         }
@@ -1648,6 +1757,7 @@ fn map_proto_message_data_to_json_message_data(
                 username_proof_body: None,
                 frame_action_body: None,
                 link_compact_state_body: None,
+                lend_storage_body: None,
             });
         }
         Some(Body::UserDataBody(user_data_body)) => {
@@ -1679,6 +1789,7 @@ fn map_proto_message_data_to_json_message_data(
                 username_proof_body: None,
                 frame_action_body: None,
                 link_compact_state_body: None,
+                lend_storage_body: None,
             });
         }
         Some(Body::UsernameProofBody(username_proof_body)) => {
@@ -1711,6 +1822,7 @@ fn map_proto_message_data_to_json_message_data(
                 username_proof_body: Some(result),
                 frame_action_body: None,
                 link_compact_state_body: None,
+                lend_storage_body: None,
             });
         }
         Some(Body::VerificationAddAddressBody(verification_add_address_body)) => {
@@ -1744,6 +1856,7 @@ fn map_proto_message_data_to_json_message_data(
                 username_proof_body: None,
                 frame_action_body: None,
                 link_compact_state_body: None,
+                lend_storage_body: None,
             });
         }
         Some(Body::VerificationRemoveBody(verification_remove_body)) => {
@@ -1777,8 +1890,46 @@ fn map_proto_message_data_to_json_message_data(
                 username_proof_body: None,
                 frame_action_body: None,
                 link_compact_state_body: None,
+                lend_storage_body: None,
             });
         }
+        Some(Body::LendStorageBody(lend_storage_body)) => {
+            let result = map_proto_lend_storage_body_to_json_lend_storage_body(lend_storage_body)?;
+            return Ok(MessageData {
+                message_type: MessageType::try_from(message_data.r#type)
+                    .map_err(|_| ErrorResponse {
+                        error: "Invalid message type".to_string(),
+                        error_detail: None,
+                    })?
+                    .as_str_name()
+                    .to_owned(),
+                fid: message_data.fid,
+                network: FarcasterNetwork::try_from(message_data.network)
+                    .map_err(|_| ErrorResponse {
+                        error: "Invalid network".to_string(),
+                        error_detail: None,
+                    })?
+                    .as_str_name()
+                    .to_owned(),
+                timestamp: message_data.timestamp,
+                cast_add_body: None,
+                cast_remove_body: None,
+                reaction_body: None,
+                verification_add_address_body: None,
+                verification_remove_body: None,
+                user_data_body: None,
+                link_body: None,
+                username_proof_body: None,
+                frame_action_body: None,
+                link_compact_state_body: None,
+                lend_storage_body: Some(result),
+            });
+        }
+        // TODO(NEYN-10568): map KeyAdd/KeyRemove bodies to JSON once downstream tickets land.
+        Some(Body::KeyAddBody(_)) | Some(Body::KeyRemoveBody(_)) => Err(ErrorResponse {
+            error: "KEY_ADD/KEY_REMOVE JSON mapping not yet implemented".to_string(),
+            error_detail: None,
+        }),
         None => Err(ErrorResponse {
             error: "No message data".to_string(),
             error_detail: None,
@@ -2083,6 +2234,11 @@ pub trait HubHttpService {
         req: proto::Message,
         headers: HeaderMap<HeaderValue>,
     ) -> Result<Message, ErrorResponse>;
+    async fn submit_bulk_messages(
+        &self,
+        req: proto::SubmitBulkMessagesRequest,
+        headers: HeaderMap<HeaderValue>,
+    ) -> Result<SubmitBulkMessagesResponse, ErrorResponse>;
     async fn get_verifications_by_fid(
         &self,
         req: FidRequest,
@@ -2112,7 +2268,10 @@ pub trait HubHttpService {
 }
 
 #[async_trait]
-impl HubHttpService for HubHttpServiceImpl {
+impl<T> HubHttpService for HubHttpServiceImpl<T>
+where
+    T: HubService,
+{
     async fn get_info(&self, _request: InfoRequest) -> Result<InfoResponse, ErrorResponse> {
         let response = self
             .service
@@ -2652,6 +2811,68 @@ impl HubHttpService for HubHttpServiceImpl {
         map_proto_message_to_json_message(proto_resp)
     }
 
+    // POST /v1/submitBulkMessages
+    async fn submit_bulk_messages(
+        &self,
+        req: proto::SubmitBulkMessagesRequest,
+        headers: HeaderMap<HeaderValue>,
+    ) -> Result<SubmitBulkMessagesResponse, ErrorResponse> {
+        let service = &self.service;
+        let mut grpc_req = tonic::Request::new(req);
+
+        // Forward authorization header if present
+        if let Some(auth) = headers.get("authorization") {
+            match auth.to_str() {
+                Err(err) => {
+                    return Err(ErrorResponse {
+                        error: "Invalid auth header".to_string(),
+                        error_detail: Some(err.to_string()),
+                    })
+                }
+                Ok(auth) => {
+                    grpc_req
+                        .metadata_mut()
+                        .append("authorization", MetadataValue::from_str(auth).unwrap());
+                }
+            }
+        };
+
+        let response = service
+            .submit_bulk_messages(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to submit bulk messages".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+
+        let proto_resp = response.into_inner();
+
+        let mapped_responses = proto_resp
+            .messages
+            .into_iter()
+            .map(|bulk_resp| match bulk_resp.response {
+                Some(proto::bulk_message_response::Response::Message(msg)) => {
+                    map_proto_message_to_json_message(msg).map(BulkMessageResponse::Message)
+                }
+                Some(proto::bulk_message_response::Response::MessageError(err)) => {
+                    Ok(BulkMessageResponse::Error(MessageError {
+                        hash: err.hash,
+                        err_code: err.err_code,
+                        message: err.message,
+                    }))
+                }
+                None => Err(ErrorResponse {
+                    error: "Invalid bulk message response from server".to_string(),
+                    error_detail: None,
+                }),
+            })
+            .collect::<Result<Vec<BulkMessageResponse>, _>>()?;
+
+        Ok(SubmitBulkMessagesResponse {
+            messages: mapped_responses,
+        })
+    }
+
     /// GET /v1/verificationsByFid
     async fn get_verifications_by_fid(
         &self,
@@ -2812,17 +3033,20 @@ impl HubHttpService for HubHttpServiceImpl {
                 error: "Failed to get connected peers".to_string(),
                 error_detail: Some(e.to_string()),
             })?;
-        Ok(response.into_inner())
+        Ok(GetConnectedPeersResponse::try_from(response.into_inner())?)
     }
 }
 
 // Router implementation
-pub struct Router {
-    service: Arc<HubHttpServiceImpl>,
+pub struct Router<Service: HubService> {
+    service: Arc<HubHttpServiceImpl<Service>>,
 }
 
-impl Router {
-    pub fn new(service: HubHttpServiceImpl) -> Self {
+impl<Service> Router<Service>
+where
+    Service: HubService,
+{
+    pub fn new(service: HubHttpServiceImpl<Service>) -> Self {
         Self {
             service: Arc::new(service),
         }
@@ -2918,8 +3142,6 @@ impl Router {
                 .await
             }
             (&Method::GET, "/v1/linksByTargetFid") => {
-                // For linksByTargetFid we assume that the service uses a FidTimestampRequest
-                // (similar to castsByFid) to return all link messages for a target fid.
                 self.handle_request::<LinksByTargetRequest, PagedResponse, _>(
                     req,
                     |service, req| {
@@ -2928,7 +3150,6 @@ impl Router {
                 )
                 .await
             }
-            // missing user_data_type
             (&Method::GET, "/v1/userDataByFid") => {
                 self.handle_request::<FidRequest, PagedResponse, _>(req, |service, req| {
                     Box::pin(async move { service.get_user_data_by_fid(req).await })
@@ -2971,14 +3192,21 @@ impl Router {
                 })
                 .await
             }
-            // Missing address
+            (&Method::POST, "/v1/submitBulkMessages") => {
+                self.handle_bulk_protobuf_request::<SubmitBulkMessagesResponse, _>(
+                    req,
+                    |service, headers, req| {
+                        Box::pin(async move { service.submit_bulk_messages(req, headers).await })
+                    },
+                )
+                .await
+            }
             (&Method::GET, "/v1/verificationsByFid") => {
                 self.handle_request::<FidRequest, PagedResponse, _>(req, |service, req| {
                     Box::pin(async move { service.get_verifications_by_fid(req).await })
                 })
                 .await
             }
-            // Missing signer
             (&Method::GET, "/v1/onChainSignersByFid") => {
                 self.handle_request::<FidRequest, OnChainEventResponse, _>(req, |service, req| {
                     Box::pin(async move { service.get_on_chain_signers_by_fid(req).await })
@@ -3050,7 +3278,11 @@ impl Router {
     async fn handle_protobuf_request<Resp, F>(
         &self,
         req: Request<hyper::body::Incoming>,
-        handler: impl FnOnce(Arc<HubHttpServiceImpl>, HeaderMap<HeaderValue>, proto::Message) -> F,
+        handler: impl FnOnce(
+            Arc<HubHttpServiceImpl<Service>>,
+            HeaderMap<HeaderValue>,
+            proto::Message,
+        ) -> F,
     ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible>
     where
         Resp: Serialize,
@@ -3117,7 +3349,7 @@ impl Router {
     async fn handle_request<Req, Resp, F>(
         &self,
         req: Request<hyper::body::Incoming>,
-        handler: impl FnOnce(Arc<HubHttpServiceImpl>, Req) -> F,
+        handler: impl FnOnce(Arc<HubHttpServiceImpl<Service>>, Req) -> F,
     ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible>
     where
         Req: DeserializeOwned,
@@ -3148,6 +3380,78 @@ impl Router {
                 .body(Full::new(Bytes::from(serde_json::to_vec(&err).unwrap())).boxed())
                 .unwrap()),
         }
+    }
+
+    async fn handle_bulk_protobuf_request<Resp, F>(
+        &self,
+        req: Request<hyper::body::Incoming>,
+        handler: impl FnOnce(
+            Arc<HubHttpServiceImpl<Service>>,
+            HeaderMap<HeaderValue>,
+            proto::SubmitBulkMessagesRequest,
+        ) -> F,
+    ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible>
+    where
+        Resp: Serialize,
+        F: Future<Output = Result<Resp, ErrorResponse>>,
+    {
+        if req
+            .headers()
+            .get("content-type")
+            .map_or(true, |v| v != "application/octet-stream")
+        {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(
+                    Full::new(Bytes::from(
+                        "Invalid content-type. Must be application/octet-stream",
+                    ))
+                    .boxed(),
+                )
+                .unwrap());
+        }
+
+        let headers = req.headers().clone();
+
+        let req_obj = match self.parse_bulk_protobuf_request(req).await {
+            Ok(req) => req,
+            Err(resp) => return Ok(resp.map(|b| Full::new(b).boxed())),
+        };
+
+        match handler(self.service.clone(), headers, req_obj).await {
+            Ok(resp) => Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Full::new(Bytes::from(serde_json::to_vec(&resp).unwrap())).boxed())
+                .unwrap()),
+            Err(err) => Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header("content-type", "application/json")
+                .body(Full::new(Bytes::from(serde_json::to_vec(&err).unwrap())).boxed())
+                .unwrap()),
+        }
+    }
+
+    // Add this new parser for the bulk request body
+    async fn parse_bulk_protobuf_request(
+        &self,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<proto::SubmitBulkMessagesRequest, Response<Bytes>> {
+        use prost::Message;
+
+        let body_bytes = req.collect().await.map_err(|e| {
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Bytes::from(format!("Internal server error: {}", e)))
+                .unwrap()
+        })?;
+
+        proto::SubmitBulkMessagesRequest::decode(body_bytes.to_bytes()).map_err(|e| {
+            Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Bytes::from(format!("Invalid protobuf data: {}", e)))
+                .unwrap()
+        })
     }
 
     async fn parse_protobuf_request(

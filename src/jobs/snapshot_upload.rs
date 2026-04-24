@@ -2,14 +2,16 @@ use crate::proto::FarcasterNetwork;
 use crate::storage;
 use crate::storage::db::snapshot::{clear_old_snapshots, SnapshotError};
 use crate::storage::db::RocksDB;
+use crate::storage::store::block_engine::BlockStores;
 use crate::storage::store::stores::Stores;
-use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio_cron_scheduler::{Job, JobSchedulerError};
-use tracing::{error, info};
+use tracing::{error, info, warn};
+
+const STALE_BACKUP_THRESHOLD: Duration = Duration::from_secs(12 * 60 * 60);
 
 async fn backup_and_upload(
     fc_network: FarcasterNetwork,
@@ -19,8 +21,15 @@ async fn backup_and_upload(
     now: i64,
     statsd_client: StatsdClientWrapper,
 ) -> Result<(), SnapshotError> {
+    info!(shard_id, "Starting backup for shard");
+    statsd_client.emit_jemalloc_stats();
+
     let backup_dir = snapshot_config.backup_dir.clone();
-    let tar_gz_path = RocksDB::backup_db(db, &backup_dir, shard_id, now)?;
+    let tar_gz_path = storage::db::backup::backup_db(db, &backup_dir, shard_id, now)?;
+
+    info!(shard_id, "Backup complete, starting upload for shard");
+    statsd_client.emit_jemalloc_stats();
+
     storage::db::snapshot::upload_to_s3(
         fc_network,
         tar_gz_path,
@@ -30,19 +39,64 @@ async fn backup_and_upload(
     )
     .await?;
     clear_old_snapshots(fc_network, &snapshot_config, shard_id).await?;
+
+    info!(shard_id, "Upload complete for shard");
+    statsd_client.emit_jemalloc_stats();
+
     Ok(())
 }
 
 pub async fn upload_snapshot(
     snapshot_config: storage::db::snapshot::Config,
     fc_network: FarcasterNetwork,
-    block_store: BlockStore,
+    block_stores: BlockStores,
     shard_stores: HashMap<u32, Stores>,
     statsd_client: StatsdClientWrapper,
     only_for_shard_ids: Option<HashSet<u32>>,
 ) -> Result<(), SnapshotError> {
-    if std::fs::exists(snapshot_config.backup_dir.clone())? {
-        return Err(SnapshotError::UploadAlreadyInProgress);
+    let backup_dir = &snapshot_config.backup_dir;
+    std::fs::create_dir_all(backup_dir)?;
+
+    // Check if the backup directory has contents from a previous run
+    let has_contents = std::fs::read_dir(backup_dir)?.next().is_some();
+    if has_contents {
+        let age = match std::fs::metadata(backup_dir)?.modified() {
+            Ok(modified) => match modified.elapsed() {
+                Ok(duration) => duration,
+                Err(err) => {
+                    warn!(
+                        error = ?err,
+                        "Backup directory mtime is in the future; treating as stale"
+                    );
+                    STALE_BACKUP_THRESHOLD + Duration::from_secs(1)
+                }
+            },
+            Err(err) => {
+                warn!(
+                    error = ?err,
+                    "Unable to read backup directory mtime; treating as stale"
+                );
+                STALE_BACKUP_THRESHOLD + Duration::from_secs(1)
+            }
+        };
+        if age > STALE_BACKUP_THRESHOLD {
+            warn!(
+                age_hours = age.as_secs() / 3600,
+                path = %backup_dir,
+                "Removing stale backup contents"
+            );
+            for entry in std::fs::read_dir(backup_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    std::fs::remove_dir_all(&path)?;
+                } else {
+                    std::fs::remove_file(&path)?;
+                }
+            }
+        } else {
+            return Err(SnapshotError::UploadAlreadyInProgress);
+        }
     }
 
     let now = SystemTime::now()
@@ -58,7 +112,7 @@ pub async fn upload_snapshot(
             fc_network,
             snapshot_config.clone(),
             0,
-            block_store.db.clone(),
+            block_stores.db.clone(),
             now as i64,
             statsd_client.clone(),
         )
@@ -96,9 +150,23 @@ pub async fn upload_snapshot(
         }
     }
 
-    if let Err(err) = std::fs::remove_dir_all(snapshot_config.backup_dir.clone()) {
-        info!("Unable to remove snapshot directory: {}", err.to_string());
+    // Clear backup directory contents but keep the directory itself (may be a bind mount)
+    if let Ok(entries) = std::fs::read_dir(&snapshot_config.backup_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let result = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            if let Err(err) = result {
+                info!("Unable to remove backup file {:?}: {}", path, err);
+            }
+        }
     }
+
+    info!("Snapshot upload complete, emitting jemalloc stats after cleanup");
+    statsd_client.emit_jemalloc_stats();
 
     Ok(())
 }
@@ -107,20 +175,20 @@ pub fn snapshot_upload_job(
     schedule: &str,
     snapshot_config: storage::db::snapshot::Config,
     fc_network: FarcasterNetwork,
-    block_store: BlockStore,
+    block_stores: BlockStores,
     shard_stores: HashMap<u32, Stores>,
     statsd_client: StatsdClientWrapper,
 ) -> Result<Job, JobSchedulerError> {
     Job::new_async(schedule, move |_, _| {
         let snapshot_config = snapshot_config.clone();
-        let block_store = block_store.clone();
+        let block_stores = block_stores.clone();
         let shard_stores = shard_stores.clone();
         let statsd_client = statsd_client.clone();
         Box::pin(async move {
             if let Err(err) = upload_snapshot(
                 snapshot_config,
                 fc_network,
-                block_store,
+                block_stores,
                 shard_stores,
                 statsd_client,
                 None,

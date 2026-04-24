@@ -10,9 +10,16 @@ target/
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
+logs/
+
 .rocks/
-.rocks.testnet/
+.rocks.*/
 nodes/
 Procfile
 .vscode/
+.cargo/
 /.idea
+node_modules
+grafana/data
+.claude/settings.json
+/.target_local

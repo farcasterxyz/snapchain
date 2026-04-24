@@ -7,8 +7,7 @@ use super::{
     store::{Store, StoreDef},
     MessagesPage, StoreEventHandler,
 };
-
-use crate::proto::{self};
+use crate::core::message::HubEventExt;
 use crate::{
     core::error::HubError,
     proto::{
@@ -22,6 +21,10 @@ use crate::{proto::MessageData, storage::constants::UserPostfix};
 use crate::{
     proto::MessageType,
     storage::db::{RocksDB, RocksDbTransactionBatch},
+};
+use crate::{
+    proto::{self},
+    storage::store::account::StoreOptions,
 };
 use std::sync::Arc;
 
@@ -158,6 +161,20 @@ impl UserDataStore {
         )
     }
 
+    pub fn new_with_opts(
+        db: Arc<RocksDB>,
+        store_event_handler: Arc<StoreEventHandler>,
+        prune_size_limit: u32,
+        options: StoreOptions,
+    ) -> Store<UserDataStoreDef> {
+        Store::new_with_store_def_opts(
+            db,
+            store_event_handler,
+            UserDataStoreDef { prune_size_limit },
+            options,
+        )
+    }
+
     pub fn get_user_data_add(
         store: &Store<UserDataStoreDef>,
         fid: u64,
@@ -176,7 +193,7 @@ impl UserDataStore {
             ..Default::default()
         };
 
-        store.get_add(&partial_message)
+        store.get_add(&partial_message, None)
     }
 
     pub fn get_user_data_adds_by_fid(
@@ -228,7 +245,7 @@ impl UserDataStore {
 
     pub fn get_username_proof(
         store: &Store<UserDataStoreDef>,
-        txn: &mut RocksDbTransactionBatch,
+        txn: &RocksDbTransactionBatch,
         name: &[u8],
     ) -> Result<Option<UserNameProof>, HubError> {
         get_username_proof(&store.db(), txn, name)
@@ -281,7 +298,7 @@ impl UserDataStore {
             put_username_proof_transaction(txn, username_proof, existing_fid);
         }
 
-        let mut hub_event = HubEvent::from(
+        let mut hub_event = HubEvent::new_event(
             HubEventType::MergeUsernameProof,
             proto::hub_event::Body::MergeUsernameProofBody(MergeUserNameProofBody {
                 username_proof: Some(username_proof.clone()),

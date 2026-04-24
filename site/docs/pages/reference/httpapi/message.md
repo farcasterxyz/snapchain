@@ -54,10 +54,62 @@ curl -X POST "http://127.0.0.1:3381/v1/submitMessage" \
 }
 ```
 
+
+## submitBulkMessages
+
+Submit several signed protobuf-serialized messages to the Hub at once. Each one will be submitted to the node sequentially.
+
+**Query Parameters**
+| Parameter | Description                         | Example |
+| --------- | ----------------------------------- | ------- |
+|           | This endpoint accepts no parameters |         |
+
+**Example**
+
+```bash
+curl -X POST "http://127.0.0.1:3381/v1/submitBulkMessages" \
+     -H "Content-Type: application/octet-stream" \
+     --data-binary "@SubmitBulkMessagesRequest.encoded.protobuf"
+
+```
+
+**Response**
+
+```json
+[
+  {
+    "data": {
+      "type": "MESSAGE_TYPE_CAST_ADD",
+      "fid": 2,
+      "timestamp": 48994466,
+      "network": "FARCASTER_NETWORK_MAINNET",
+      "castAddBody": {
+        "embedsDeprecated": [],
+        "mentions": [],
+        "parentCastId": {
+          "fid": 226,
+          "hash": "0xa48dd46161d8e57725f5e26e34ec19c13ff7f3b9"
+        },
+        "text": "Cast Text",
+        "mentionsPositions": [],
+        "embeds": []
+      }
+    },
+    "hash": "0xd2b1ddc6c88e865a33cb1a565e0058d757042974",
+    "hashScheme": "HASH_SCHEME_BLAKE3",
+    "signature": "3msLXzxB4eEYe...dHrY1vkxcPAA==",
+    "signatureScheme": "SIGNATURE_SCHEME_ED25519",
+    "signer": "0x78ff9a...58c"
+  },
+  { // ....
+  }
+]
+```
+
 ### Auth
 
 If the rpc auth has been enabled on the server (using `--rpc-auth username:password`), you will need to also pass in the
-username and password while calling `submitMessage` using HTTP Basic Auth.
+username and password while calling `submitMessage` or `submitBulkMessages` using HTTP Basic Auth.
 
 **Example**
 

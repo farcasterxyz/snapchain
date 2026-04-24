@@ -6,6 +6,7 @@ use serial_test::serial;
 use snapchain::connectors::onchain_events::ChainClients;
 use snapchain::consensus::consensus::{SystemMessage, ValidatorSetConfig};
 use snapchain::consensus::proposer::GENESIS_MESSAGE;
+use snapchain::mempool::block_receiver::{self, BlockReceiver};
 use snapchain::mempool::mempool::{
     self, Mempool, MempoolMessagesRequest, MempoolRequest, MempoolSource,
 };
@@ -19,10 +20,11 @@ use snapchain::proto::{self, Height, StorageUnitType};
 use snapchain::proto::{Block, FarcasterNetwork, IdRegisterEventType, SignerEventType};
 use snapchain::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use snapchain::storage::store::account::{CastStore, OnchainEventStore, UserDataStore};
-use snapchain::storage::store::engine::MempoolMessage;
+use snapchain::storage::store::block_engine::BlockStores;
+use snapchain::storage::store::mempool_poller::MempoolMessage;
 use snapchain::storage::store::node_local_state::LocalStateStore;
 use snapchain::storage::store::stores::Stores;
-use snapchain::storage::store::BlockStore;
+use snapchain::storage::trie::merkle_trie::{self, TrieKey};
 use snapchain::utils::factory::{self, messages_factory};
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::HashMap;
@@ -32,7 +34,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time;
 use tonic::transport::Server;
 use tracing::{error, info};
-use tracing_subscriber::EnvFilter;
+// use tracing_subscriber::EnvFilter;
 
 const HOST_FOR_TEST: &str = "127.0.0.1";
 const BASE_PORT_FOR_TEST: u32 = 9482;
@@ -77,23 +79,21 @@ where
 }
 
 trait Node {
-    fn block_store(&self) -> &BlockStore;
+    fn block_stores(&self) -> &BlockStores;
     fn shard_stores(&self) -> &HashMap<u32, Stores>;
 
     fn num_blocks(&self) -> usize {
         let blocks_page = self
-            .block_store()
+            .block_stores()
+            .block_store
             .get_blocks(0, None, &PageOptions::default())
             .unwrap();
         blocks_page.blocks.len()
     }
 
-    fn num_shard_chunks(&self) -> usize {
-        let mut count = 0;
-        for (_shard_id, stores) in self.shard_stores().iter() {
-            count += stores.shard_store.get_shard_chunks(0, None).unwrap().len();
-        }
-        count
+    fn num_shard_chunks(&self, shard_id: u32) -> usize {
+        let stores = self.shard_stores().get(&shard_id).unwrap();
+        stores.shard_store.get_shard_chunks(0, None).unwrap().len()
     }
 
     fn total_messages(&self) -> usize {
@@ -108,11 +108,17 @@ trait Node {
         messages_count
     }
 
+    fn num_block_events(&self) -> u64 {
+        self.block_stores().block_event_store.max_seqnum().unwrap()
+    }
+
     fn fid_registered(&self, fid: u64) -> Option<proto::OnChainEvent> {
         for stores in self.shard_stores().values() {
-            if let Ok(result) =
-                OnchainEventStore::get_id_register_event_by_fid(&stores.onchain_event_store, fid)
-            {
+            if let Ok(result) = OnchainEventStore::get_id_register_event_by_fid(
+                &stores.onchain_event_store,
+                fid,
+                None,
+            ) {
                 if result.is_some() {
                     return Some(result.unwrap());
                 }
@@ -153,14 +159,13 @@ trait Node {
 struct NodeForTest {
     node: SnapchainNode,
     db: Arc<RocksDB>,
-    block_store: BlockStore,
     mempool_tx: mpsc::Sender<MempoolRequest>,
     handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Node for NodeForTest {
-    fn block_store(&self) -> &BlockStore {
-        &self.block_store
+    fn block_stores(&self) -> &BlockStores {
+        &self.node.block_stores
     }
     fn shard_stores(&self) -> &HashMap<u32, Stores> {
         &self.node.shard_stores
@@ -184,13 +189,12 @@ struct ReadNodeForTest {
     handles: Vec<tokio::task::JoinHandle<()>>,
     node: SnapchainReadNode,
     db: Arc<RocksDB>,
-    block_store: BlockStore,
     _messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
 }
 
 impl Node for ReadNodeForTest {
-    fn block_store(&self) -> &BlockStore {
-        &self.block_store
+    fn block_stores(&self) -> &BlockStores {
+        &self.node.block_stores
     }
     fn shard_stores(&self) -> &HashMap<u32, Stores> {
         &self.node.shard_stores
@@ -231,11 +235,11 @@ impl ReadNodeForTest {
 
         let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
 
-        let fc_network = FarcasterNetwork::Testnet;
+        let fc_network = FarcasterNetwork::Devnet;
         let mut gossip = SnapchainGossip::create(
             keypair.clone(),
             &config,
-            system_tx.clone(),
+            Some(system_tx.clone()),
             false,
             fc_network,
             statsd_client.clone(),
@@ -250,21 +254,19 @@ impl ReadNodeForTest {
         let data_dir = &make_tmp_path();
         let db = Arc::new(RocksDB::new(data_dir));
         db.open().unwrap();
-        let block_store = BlockStore::new(db.clone());
-        let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
+        let (_, messages_request_rx) = mpsc::channel(100);
         let node = SnapchainReadNode::create(
             keypair.clone(),
             consensus_config,
             peer_id,
             gossip_tx.clone(),
             system_tx.clone(),
-            messages_request_tx,
-            block_store.clone(),
             make_tmp_path(),
             statsd_client.clone(),
-            16,
             fc_network,
             registry,
+            None,
+            None,
         )
         .await;
 
@@ -296,7 +298,6 @@ impl ReadNodeForTest {
             handles: join_handles,
             node,
             db: db.clone(),
-            block_store,
             _messages_request_rx: messages_request_rx,
         }
     }
@@ -323,14 +324,20 @@ impl NodeForTest {
         consensus_config =
             consensus_config.with((1..=num_shards).collect(), validator_sets.clone());
         consensus_config.block_time = time::Duration::from_millis(250);
+        // TODO(aditi): We need to figure out the right values for these timeouts. 1s (default) is long, but these are too short.
+        // consensus_config.propose_time = time::Duration::from_millis(250);
+        // consensus_config.prevote_time = time::Duration::from_millis(100);
+        // consensus_config.precommit_time = time::Duration::from_millis(100);
+        // consensus_config.step_delta = time::Duration::from_millis(100);
+        consensus_config.sync_status_update_interval = time::Duration::from_millis(250); // This is aggressive but makes sync faster in the tests
 
         let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
-        let fc_network = FarcasterNetwork::Testnet;
+        let fc_network = FarcasterNetwork::Devnet;
 
         let mut gossip = SnapchainGossip::create(
             keypair.clone(),
             &config,
-            system_tx.clone(),
+            Some(system_tx.clone()),
             false,
             fc_network,
             statsd_client.clone(),
@@ -342,30 +349,29 @@ impl NodeForTest {
         let registry = SharedRegistry::global();
         let peer_id = gossip.swarm.local_peer_id().clone();
         println!("StartNode validator peer id: {}", peer_id.to_string());
-        let (block_tx, mut block_rx) = mpsc::channel::<Block>(100);
+        let (block_tx, mut block_rx) = broadcast::channel::<Block>(100);
         let data_dir = &make_tmp_path();
         let db = Arc::new(RocksDB::new(data_dir));
         db.open().unwrap();
-        let block_store = BlockStore::new(db.clone());
         let global_db = RocksDB::open_global_db(&data_dir);
         let node_local_store = LocalStateStore::new(global_db);
         let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
         let node = SnapchainNode::create(
             keypair.clone(),
-            consensus_config,
+            consensus_config.clone(),
             peer_id,
             gossip_tx.clone(),
             shard_decision_tx,
-            Some(block_tx),
+            Some(block_tx.clone()),
             messages_request_tx,
-            block_store.clone(),
             node_local_store,
             make_tmp_path(),
             statsd_client.clone(),
-            16,
             fc_network,
             registry,
+            None,
+            None,
         )
         .await;
 
@@ -399,7 +405,7 @@ impl NodeForTest {
         let mut join_handles = Vec::new();
 
         let handle = tokio::spawn(async move {
-            while let Some(block) = block_rx.recv().await {
+            while let Ok(block) = block_rx.recv().await {
                 assert_valid_block(&block);
             }
         });
@@ -415,8 +421,10 @@ impl NodeForTest {
             messages_request_rx,
             num_shards,
             node.shard_stores.clone(),
+            node.block_stores.clone(),
             gossip_tx.clone(),
             shard_decision_rx,
+            block_tx.subscribe(),
             statsd_client.clone(),
         );
         let handle = tokio::spawn(async move { mempool.run().await });
@@ -424,12 +432,12 @@ impl NodeForTest {
 
         let service = MyHubService::new(
             "".to_string(),
-            block_store.clone(),
+            node.block_stores.clone(),
             node.shard_stores.clone(),
             node.shard_senders.clone(),
             statsd_client.clone(),
             num_shards,
-            FarcasterNetwork::Testnet,
+            FarcasterNetwork::Devnet,
             Box::new(routing::EvenOddRouterForTest {}),
             mempool_tx.clone(),
             gossip_tx.clone(),
@@ -460,6 +468,25 @@ impl NodeForTest {
         });
         join_handles.push(handle);
 
+        for shard_id in 1..num_shards + 1 {
+            let senders = node.shard_senders.get(&shard_id).unwrap();
+            let mut block_receiver = BlockReceiver {
+                shard_id: shard_id,
+                stores: node.shard_stores.get(&shard_id).unwrap().clone(),
+                block_rx: block_tx.subscribe(),
+                mempool_tx: mempool_tx.clone(),
+                system_tx: system_tx.clone(),
+                event_rx: senders.events_tx.subscribe(),
+                validator_sets: consensus_config.to_stored_validator_sets(shard_id),
+                config: block_receiver::Config {
+                    enabled: true,
+                    ..block_receiver::Config::default()
+                },
+            };
+            let handle = tokio::spawn(async move { block_receiver.run().await });
+            join_handles.push(handle);
+        }
+
         let node_for_dispatch = node.clone();
         let handle = tokio::spawn(async move {
             loop {
@@ -467,6 +494,15 @@ impl NodeForTest {
                     match system_event {
                         SystemMessage::MalachiteNetwork(event_shard, event) => {
                             node_for_dispatch.dispatch(event_shard, event);
+                        }
+                        SystemMessage::BlockRequest {
+                            block_event_seqnum,
+                            block_tx,
+                        } => {
+                            let block = node_for_dispatch
+                                .block_stores
+                                .get_block_by_event_seqnum(block_event_seqnum);
+                            block_tx.send(block).unwrap();
                         }
                         _ => {
                             // noop
@@ -480,7 +516,6 @@ impl NodeForTest {
         Self {
             node,
             db: db.clone(),
-            block_store,
             mempool_tx,
             handles: join_handles,
         }
@@ -577,10 +612,26 @@ impl TestNetwork {
         }
     }
 
+    pub fn max_block_event_seqnum(&self) -> u64 {
+        self.nodes
+            .iter()
+            .map(|node| node.num_block_events())
+            .max()
+            .unwrap_or(0)
+    }
+
     pub fn max_block_height(&self) -> usize {
         self.nodes
             .iter()
             .map(|node| node.num_blocks())
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub fn max_shard_height(&self, shard_id: u32) -> usize {
+        self.nodes
+            .iter()
+            .map(|node| node.num_shard_chunks(shard_id))
             .max()
             .unwrap_or(0)
     }
@@ -595,7 +646,7 @@ impl TestNetwork {
                 100,
                 StorageUnitType::UnitType2025,
                 false,
-                FarcasterNetwork::Testnet,
+                FarcasterNetwork::Devnet,
             ),
             factory::events_factory::create_signer_event(
                 fid,
@@ -615,10 +666,7 @@ impl TestNetwork {
         for event in on_chain_events {
             let result = self.nodes[0]
                 .add_message(
-                    MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
-                        on_chain_event: Some(event),
-                        fname_transfer: None,
-                    }),
+                    MempoolMessage::OnchainEvent(event),
                     MempoolSource::Local,
                     None,
                 )
@@ -648,7 +696,7 @@ impl TestNetwork {
 
                 None
             },
-            tokio::time::Duration::from_secs(5),
+            tokio::time::Duration::from_secs(15),
             tokio::time::Duration::from_millis(100),
         )
         .await
@@ -697,7 +745,31 @@ impl TestNetwork {
 
                 None
             },
-            tokio::time::Duration::from_secs(5),
+            tokio::time::Duration::from_secs(15),
+            tokio::time::Duration::from_millis(100),
+        )
+        .await
+    }
+
+    pub async fn wait_for_next_block_event(&self) -> Option<()> {
+        let target_seqnum = self.max_block_event_seqnum() + 1;
+        wait_for(
+            || {
+                for node in &self.nodes {
+                    if node.block_stores().block_event_store.max_seqnum().unwrap() != target_seqnum
+                    {
+                        return None;
+                    }
+
+                    for stores in node.shard_stores().values() {
+                        if stores.block_event_store.max_seqnum().unwrap() != target_seqnum {
+                            return None;
+                        }
+                    }
+                }
+                Some(())
+            },
+            tokio::time::Duration::from_secs(15),
             tokio::time::Duration::from_millis(100),
         )
         .await
@@ -723,6 +795,21 @@ impl TestNetwork {
         .await
     }
 
+    // Waits for all validator nodes to reach at least `height` blocks.
+    pub async fn wait_for_shard_chunk(&self, shard_id: u32, height: usize) -> Option<()> {
+        wait_for(
+            || {
+                self.nodes
+                    .iter()
+                    .all(|node| node.num_shard_chunks(shard_id) >= height)
+                    .then_some(())
+            },
+            tokio::time::Duration::from_secs(15),
+            tokio::time::Duration::from_millis(100),
+        )
+        .await
+    }
+
     // Waits for all reader nodes to reach at least `height` blocks.
     pub async fn read_wait_for_block(&self, height: usize) -> Option<()> {
         wait_for(
@@ -730,6 +817,33 @@ impl TestNetwork {
                 self.read_nodes
                     .iter()
                     .all(|node| node.num_blocks() >= height)
+                    .then_some(())
+            },
+            tokio::time::Duration::from_secs(15),
+            tokio::time::Duration::from_millis(100),
+        )
+        .await
+    }
+
+    pub async fn wait_for_next_block_on_all_shards(&self) {
+        let next_block_height = self.max_block_height() + 1;
+        self.wait_for_block(next_block_height).await.unwrap();
+
+        for shard_id in 1..self.num_shards + 1 {
+            let next_shard_height = self.max_shard_height(shard_id) + 1;
+            self.wait_for_shard_chunk(shard_id, next_shard_height)
+                .await
+                .unwrap();
+        }
+    }
+
+    // Waits for all read nodes to reach at least `height` for the specified shard.
+    pub async fn read_wait_for_shard_chunk(&self, shard_id: u32, height: usize) -> Option<()> {
+        wait_for(
+            || {
+                self.read_nodes
+                    .iter()
+                    .all(|node| node.num_shard_chunks(shard_id) >= height)
                     .then_some(())
             },
             tokio::time::Duration::from_secs(15),
@@ -760,7 +874,7 @@ impl TestNetwork {
 
                 None
             },
-            tokio::time::Duration::from_secs(5),
+            tokio::time::Duration::from_secs(15),
             tokio::time::Duration::from_millis(100),
         )
         .await
@@ -778,32 +892,6 @@ where
     for (i, node) in network.read_nodes.iter().enumerate() {
         f(node, true, i);
     }
-}
-
-fn assert_network_has_num_blocks(network: &TestNetwork, num_blocks: usize) {
-    on_all_nodes(network, |node, is_read, index| {
-        assert!(
-            node.num_blocks() >= num_blocks,
-            "Node (read={}, idx={}) should have confirmed at least {} blocks, but has {}",
-            is_read,
-            index,
-            num_blocks,
-            node.num_blocks()
-        );
-    });
-}
-
-fn assert_network_has_num_shard_chunks(network: &TestNetwork, num_chunks: usize) {
-    on_all_nodes(network, |node, is_read, index| {
-        assert!(
-            node.num_shard_chunks() >= num_chunks,
-            "Node (read={}, idx={}) should have confirmed at least {} shard chunks, but has {}",
-            is_read,
-            index,
-            num_chunks,
-            node.num_shard_chunks()
-        );
-    });
 }
 
 fn assert_network_has_messages(network: &TestNetwork, num_messages: usize) {
@@ -835,29 +923,26 @@ fn assert_network_has_cast(network: &TestNetwork, fid: u64, hash: Vec<u8>) {
 #[tokio::test]
 #[serial]
 async fn test_basic_consensus() {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .try_init();
+    // Useful for debugging
+    // let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    // let _ = tracing_subscriber::fmt()
+    //     .with_env_filter(env_filter)
+    //     .try_init();
 
     let num_shards = 2;
     let mut network = TestNetwork::create(3, num_shards).await;
     network.start_validators().await;
 
-    network.register_and_wait_for_fid(1000).await;
+    network.register_and_wait_for_fid(1000).await.unwrap();
     let cast = network
         .send_and_wait_for_cast(1000, "Hello, world")
         .await
         .unwrap();
 
     // Wait for nodes to reach the next block height
-    let next_block_height = network.max_block_height() + 1;
-    network.wait_for_block(next_block_height).await;
+    network.wait_for_next_block_on_all_shards().await;
 
-    assert_network_has_num_blocks(&network, next_block_height);
-    assert_network_has_num_shard_chunks(&network, 3);
     assert_network_has_messages(&network, 1);
-
     // Assert that all nodes have the cast message
     assert_network_has_cast(&network, 1000, cast.hash.clone());
 }
@@ -874,18 +959,14 @@ async fn test_basic_sync() {
         network.start_validator_node(i).await;
     }
 
-    network.register_and_wait_for_fid(1000).await;
+    network.register_and_wait_for_fid(1000).await.unwrap();
     let cast = network
         .send_and_wait_for_cast(1000, "Hello, world")
         .await
         .unwrap();
 
-    // Wait for the next block to arrive on all nodes
-    let next_block_height = network.max_block_height() + 1;
-    network.wait_for_block(next_block_height).await;
+    network.wait_for_next_block_on_all_shards().await;
 
-    assert_network_has_num_blocks(&network, next_block_height);
-    assert_network_has_num_shard_chunks(&network, 2);
     assert_network_has_messages(&network, 1);
 
     // Add the node to the network and start producing blocks again.
@@ -893,12 +974,17 @@ async fn test_basic_sync() {
 
     // Wait for all nodes to reach the same block height
     let target_height = network.max_block_height();
-    network.wait_for_block(target_height).await;
+    network.wait_for_block(target_height).await.unwrap();
 
-    assert_network_has_num_blocks(&network, target_height);
-    assert_network_has_num_shard_chunks(&network, 2);
+    for shard_id in 1..num_shards + 1 {
+        let target_height = network.max_shard_height(shard_id);
+        network
+            .wait_for_shard_chunk(shard_id, target_height)
+            .await
+            .unwrap();
+    }
+
     assert_network_has_messages(&network, 1);
-
     // Assert that all nodes have the cast message
     assert_network_has_cast(&network, 1000, cast.hash.clone());
 }
@@ -910,14 +996,14 @@ async fn test_read_node() {
     let mut network = TestNetwork::create(3, num_shards).await;
     network.start_validators().await;
 
-    network.register_and_wait_for_fid(1000).await;
+    network.register_and_wait_for_fid(1000).await.unwrap();
     let cast = network
         .send_and_wait_for_cast(1000, "Hello, world")
         .await
         .unwrap();
 
     // Wait for the next block to arrive on all nodes
-    network.wait_for_block(network.max_block_height() + 1).await;
+    network.wait_for_next_block_on_all_shards().await;
 
     network.start_read_node().await;
     network.start_read_node().await;
@@ -928,7 +1014,13 @@ async fn test_read_node() {
         "Read nodes did not reach the target block height"
     );
 
-    assert_network_has_num_blocks(&network, target_height);
+    for shard_id in 1..num_shards + 1 {
+        let target_height = network.max_shard_height(shard_id);
+        network
+            .read_wait_for_shard_chunk(shard_id, target_height)
+            .await
+            .unwrap();
+    }
 
     // Assert that all nodes have the cast message
     assert_network_has_cast(&network, 1000, cast.hash.clone());
@@ -944,8 +1036,8 @@ async fn test_cross_shard_interactions() {
     let first_fid = 20270;
     let second_fid = 211428;
 
-    network.register_and_wait_for_fid(first_fid).await;
-    network.register_and_wait_for_fid(second_fid).await;
+    network.register_and_wait_for_fid(first_fid).await.unwrap();
+    network.register_and_wait_for_fid(second_fid).await.unwrap();
 
     let router = ShardRouter {};
     // Ensure that the two fids are routed to different shards
@@ -956,42 +1048,36 @@ async fn test_cross_shard_interactions() {
 
     let fname = "erica";
 
-    let transfer1 = proto::ValidatorMessage {
-        on_chain_event: None,
-        fname_transfer: Some(proto::FnameTransfer {
-            id: 43782,
-            from_fid: 0,
-            proof: Some(proto::UserNameProof {
-                timestamp: 1741384226,
-                name: fname.as_bytes().to_vec(),
-                fid: second_fid,
-                owner: hex::decode("2b4d92e7626c5fc56cb4641f6f758563de1f6bdc").unwrap(),
-                signature: hex::decode("050b42fdda7b0a7309a1fb8a2cbc9a5f4bbf241aec74f53191f9665d9b9f572d4f452ac807911af7b6980219482d6f7fda7f99f23ab19c961b4701b9934fa2f91b").unwrap(),
-                r#type: proto::UserNameType::UsernameTypeFname as i32,
-            }),
-        })
+    let transfer1 = proto::FnameTransfer {
+        id: 43782,
+        from_fid: 0,
+        proof: Some(proto::UserNameProof {
+            timestamp: 1741384226,
+            name: fname.as_bytes().to_vec(),
+            fid: second_fid,
+            owner: hex::decode("2b4d92e7626c5fc56cb4641f6f758563de1f6bdc").unwrap(),
+            signature: hex::decode("050b42fdda7b0a7309a1fb8a2cbc9a5f4bbf241aec74f53191f9665d9b9f572d4f452ac807911af7b6980219482d6f7fda7f99f23ab19c961b4701b9934fa2f91b").unwrap(),
+            r#type: proto::UserNameType::UsernameTypeFname as i32,
+        }),
     };
 
-    let transfer2 = proto::ValidatorMessage {
-        on_chain_event: None,
-        fname_transfer: Some(proto::FnameTransfer {
-            id: 829595,
-            from_fid: second_fid,
-            proof: Some(proto::UserNameProof {
-                timestamp: 1741384226,
-                name: fname.as_bytes().to_vec(),
-                fid: first_fid,
-                owner: hex::decode("92ce59c18a97646e9a7e011653d8417d3a08bb2b").unwrap(),
-                signature: hex::decode("00c3601c515edffe208e7128f47f89c2fb7b8e0beaaf615158305ddf02818a71679a8e7062503be59a19d241bd0b47396a3c294cfafd0d5478db1ae8249463bd1c").unwrap(),
-                r#type: proto::UserNameType::UsernameTypeFname as i32,
-            }),
-        })
+    let transfer2 = proto::FnameTransfer {
+        id: 829595,
+        from_fid: second_fid,
+        proof: Some(proto::UserNameProof {
+            timestamp: 1741384227,
+            name: fname.as_bytes().to_vec(),
+            fid: first_fid,
+            owner: hex::decode("92ce59c18a97646e9a7e011653d8417d3a08bb2b").unwrap(),
+            signature: hex::decode("00c3601c515edffe208e7128f47f89c2fb7b8e0beaaf615158305ddf02818a71679a8e7062503be59a19d241bd0b47396a3c294cfafd0d5478db1ae8249463bd1c").unwrap(),
+            r#type: proto::UserNameType::UsernameTypeFname as i32,
+        }),
     };
 
     let node = &network.nodes[0];
 
     node.add_message(
-        MempoolMessage::ValidatorMessage(transfer1.clone()),
+        MempoolMessage::FnameTransfer(transfer1),
         MempoolSource::Local,
         None,
     )
@@ -999,7 +1085,7 @@ async fn test_cross_shard_interactions() {
     .unwrap();
 
     node.add_message(
-        MempoolMessage::ValidatorMessage(transfer2.clone()),
+        MempoolMessage::FnameTransfer(transfer2),
         MempoolSource::Local,
         None,
     )
@@ -1011,4 +1097,77 @@ async fn test_cross_shard_interactions() {
         .wait_for_username_registered_to_fid(first_fid, fname.to_string())
         .await
         .unwrap();
+}
+
+#[tokio::test]
+#[serial]
+async fn test_decoupling_shard_0_from_other_shards() {
+    let num_shards = 2;
+    let mut network = TestNetwork::create(3, num_shards).await;
+    network.start_validators().await;
+
+    // Register some data to both shards to make sure the setup is working
+    let first_fid = 20270;
+    let second_fid = 211428;
+
+    network.register_and_wait_for_fid(first_fid).await.unwrap();
+    network.register_and_wait_for_fid(second_fid).await.unwrap();
+
+    // Corrupt the trie for both shards on one of the nodes so consensus halts on shards 1 and 2.
+    for stores in network.nodes[0].node.shard_stores.values_mut() {
+        let mut txn = RocksDbTransactionBatch::new();
+        let message = messages_factory::casts::create_cast_add(123455, "hi", None, None);
+        stores
+            .trie
+            .insert(
+                &merkle_trie::Context::new(),
+                &stores.db,
+                &mut txn,
+                vec![&TrieKey::for_message(&message)[0]],
+            )
+            .unwrap();
+        stores.db.commit(txn).unwrap();
+    }
+
+    let mut max_shard_height = 0;
+    for stores in network.nodes[0].shard_stores().values() {
+        max_shard_height = max_shard_height.max(stores.shard_store.max_block_number().unwrap());
+    }
+
+    // Make sure that shard 0 proceeds to a height beyond the last shard chunk successfully produced for the purpose of testing that shard 0 works even if other shards are down
+    network
+        .wait_for_block(max_shard_height as usize + 4)
+        .await
+        .unwrap();
+
+    let last_block = network.nodes[0]
+        .block_stores()
+        .block_store
+        .get_last_block()
+        .unwrap()
+        .unwrap();
+    let last_shard_witnesses = last_block.shard_witness.unwrap().shard_chunk_witnesses;
+    assert_eq!(last_shard_witnesses.len() as u32, num_shards);
+
+    let previous_block = network.nodes[0]
+        .block_stores()
+        .block_store
+        .get_block_by_height(last_block.header.unwrap().height.unwrap().block_number - 1)
+        .unwrap()
+        .unwrap();
+    let prev_shard_witnesses = previous_block.shard_witness.unwrap().shard_chunk_witnesses;
+    assert_eq!(last_shard_witnesses, prev_shard_witnesses);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_cross_shard_communication() {
+    let num_shards = 2;
+    let mut network = TestNetwork::create(3, num_shards).await;
+    network.start_validators().await;
+
+    network.wait_for_next_block_event().await.unwrap();
+    network.wait_for_next_block_event().await.unwrap();
+
+    assert!(network.max_block_event_seqnum() >= network.max_block_height() as u64 / 5);
 }

@@ -1,4 +1,7 @@
-use super::rpc_extensions::{authenticate_request, AsMessagesResponse, AsSingleMessageResponse};
+use super::rpc_extensions::{
+    authenticate_request, AsMessagesResponse, AsSingleMessageResponse, FidRequestExt,
+    FidTimestampRequestExt, LinksByFidRequestExt, ReactionsByFidRequestExt,
+};
 use crate::connectors::onchain_events::{Chain, ChainClients};
 use crate::core::error::HubError;
 use crate::core::types::SnapchainValidatorContext;
@@ -9,49 +12,20 @@ use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::mempool::routing;
 use crate::network::gossip::GossipEvent;
 use crate::proto::hub_service_server::HubService;
-use crate::proto::link_body;
-use crate::proto::links_by_target_request;
-use crate::proto::message_data;
-use crate::proto::on_chain_event::Body;
-use crate::proto::reaction_body;
-use crate::proto::reactions_by_target_request;
-use crate::proto::CastsByParentRequest;
-use crate::proto::FidsRequest;
-use crate::proto::FidsResponse;
-use crate::proto::GetInfoResponse;
-use crate::proto::HubEvent;
-use crate::proto::IdRegistryEventByAddressRequest;
-use crate::proto::LinksByTargetRequest;
-use crate::proto::MessageType;
-use crate::proto::OnChainEvent;
-use crate::proto::OnChainEventRequest;
-use crate::proto::OnChainEventResponse;
-use crate::proto::ReactionType;
-use crate::proto::ReactionsByTargetRequest;
-use crate::proto::SignerEventType;
-use crate::proto::SignerRequest;
-use crate::proto::TrieNodeMetadataRequest;
-use crate::proto::TrieNodeMetadataResponse;
-use crate::proto::UserNameProof;
-use crate::proto::UserNameType;
-use crate::proto::UsernameProofRequest;
-use crate::proto::UsernameProofsResponse;
-use crate::proto::ValidationResponse;
-use crate::proto::VerificationAddAddressBody;
-use crate::proto::{self};
-use crate::proto::{cast_add_body, Height};
-use crate::proto::{casts_by_parent_request, ShardChunk};
-use crate::proto::{Block, CastId, DbStats};
 use crate::proto::{
-    BlocksRequest, EventRequest, EventsRequest, EventsResponse, GetConnectedPeersRequest,
-    GetConnectedPeersResponse, ShardChunksRequest, ShardChunksResponse, SubscribeRequest,
-};
-use crate::proto::{FidAddressTypeRequest, FidAddressTypeResponse};
-use crate::proto::{FidRequest, FidTimestampRequest};
-use crate::proto::{GetInfoRequest, StorageLimitsResponse};
-use crate::proto::{
-    LinkRequest, LinksByFidRequest, Message, MessagesResponse, ReactionRequest,
-    ReactionsByFidRequest, UserDataRequest, VerificationRequest,
+    self, cast_add_body, casts_by_parent_request, link_body, links_by_target_request, message_data,
+    on_chain_event::Body, reaction_body, reactions_by_target_request, Block, BlocksRequest, CastId,
+    CastsByParentRequest, DbStats, EventRequest, EventsRequest, EventsResponse,
+    FidAddressTypeRequest, FidAddressTypeResponse, FidRequest, FidTimestampRequest, FidsRequest,
+    FidsResponse, GetConnectedPeersRequest, GetConnectedPeersResponse, GetInfoRequest,
+    GetInfoResponse, Height, HubEvent, IdRegistryEventByAddressRequest, LinkRequest,
+    LinksByFidRequest, LinksByTargetRequest, Message, MessageType, MessagesResponse, OnChainEvent,
+    OnChainEventRequest, OnChainEventResponse, ReactionRequest, ReactionType,
+    ReactionsByFidRequest, ReactionsByTargetRequest, ShardChunk, ShardChunksRequest,
+    ShardChunksResponse, SignerEventType, SignerRequest, StorageLimitsResponse, SubscribeRequest,
+    TrieNodeMetadataRequest, TrieNodeMetadataResponse, UserDataRequest, UserNameProof,
+    UserNameType, UsernameProofRequest, UsernameProofsResponse, ValidationResponse,
+    VerificationAddAddressBody, VerificationRequest,
 };
 use crate::storage::constants::OnChainEventPostfix;
 use crate::storage::constants::RootPrefix;
@@ -64,11 +38,12 @@ use crate::storage::store::account::{
     CastStore, LinkStore, ReactionStore, UserDataStore, VerificationStore,
 };
 use crate::storage::store::account::{EventsPage, HubEventIdGenerator};
-use crate::storage::store::engine::{MempoolMessage, MessageValidationError, Senders, ShardEngine};
+use crate::storage::store::block_engine::{self, BlockStores};
+use crate::storage::store::engine::{self, Senders, ShardEngine};
+use crate::storage::store::mempool_poller::MempoolMessage;
 use crate::storage::store::stores::Stores;
-use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
-use crate::version::version::EngineVersion;
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use hex::ToHex;
 use moka::policy::EvictionPolicy;
 use moka::sync::{Cache, CacheBuilder};
@@ -87,7 +62,7 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
 
 pub struct MyHubService {
     allowed_users: HashMap<String, String>,
-    block_store: BlockStore,
+    block_stores: BlockStores,
     shard_stores: HashMap<u32, Stores>,
     shard_senders: HashMap<u32, Senders>,
     num_shards: u32,
@@ -105,7 +80,7 @@ pub struct MyHubService {
 impl MyHubService {
     pub fn new(
         rpc_auth: String,
-        block_store: BlockStore,
+        block_stores: BlockStores,
         shard_stores: HashMap<u32, Stores>,
         shard_senders: HashMap<u32, Senders>,
         statsd_client: StatsdClientWrapper,
@@ -140,7 +115,7 @@ impl MyHubService {
         let service = Self {
             allowed_users,
             network,
-            block_store,
+            block_stores,
             shard_senders,
             shard_stores,
             statsd_client,
@@ -159,87 +134,68 @@ impl MyHubService {
     async fn submit_message_internal(
         &self,
         message: proto::Message,
-        bypass_validation: bool,
     ) -> Result<proto::Message, HubError> {
         let fid = message.fid();
         if fid == 0 {
             return Err(HubError::invalid_parameter("fid cannot be 0"));
         }
 
-        let dst_shard = self.message_router.route_fid(fid, self.num_shards);
+        let dst_shard = routing::route_message(&self.message_router, &message, self.num_shards);
 
-        let stores = match self.shard_stores.get(&dst_shard) {
-            Some(store) => store,
-            None => return Err(HubError::invalid_parameter("shard not found for fid")),
-        };
+        self.simulate_message_for_shard(&message, dst_shard).await?;
 
-        if !bypass_validation {
-            // TODO: This is a hack to get around the fact that self cannot be made mutable
-            let mut readonly_engine = ShardEngine::new(
-                stores.db.clone(),
-                self.network,
-                stores.trie.clone(),
-                1,
-                stores.store_limits.clone(),
-                self.statsd_client.clone(),
-                100,
-                None,
-                None,
-            );
-            let result = readonly_engine.simulate_message(&message);
+        // Process the submitted message
+        self.submit_message_to_mempool(message).await
+    }
 
-            if let Err(err) = result {
-                return match err {
-                    MessageValidationError::StoreError(hub_error) => {
-                        // Forward hub errors as is, otherwise we end up wrapping them
-                        Err(hub_error)
-                    }
-                    _ => Err(HubError::validation_failure(&err.to_string())),
-                };
-            }
+    async fn submit_message_to_mempool(
+        &self,
+        message: proto::Message,
+    ) -> Result<proto::Message, HubError> {
+        let fid = message.fid();
 
-            // We're doing the ens and address validations here for now because we don't want L1 interactions to be on the consensus critical path. Eventually this will move to the fname server.
-            if let Some(message_data) = &message.data {
-                match &message_data.body {
-                    Some(proto::message_data::Body::UserDataBody(user_data)) => {
-                        if user_data.r#type() == proto::UserDataType::Username {
-                            if user_data.value.ends_with(".eth") {
-                                self.validate_ens_username(fid, user_data.value.to_string())
-                                    .await?;
+        // We're doing the ens and address validations here for now because we don't want L1 interactions to be on the consensus critical path.
+        // Eventually this will move to the fname server.
+        if let Some(message_data) = &message.data {
+            match &message_data.body {
+                Some(proto::message_data::Body::UserDataBody(user_data)) => {
+                    if user_data.r#type() == proto::UserDataType::Username {
+                        if user_data.value.ends_with(".eth") {
+                            self.validate_ens_username(fid, user_data.value.to_string())
+                                .await?;
+                        }
+                    };
+                }
+                Some(proto::message_data::Body::UsernameProofBody(proof)) => {
+                    self.validate_ens_username_proof(fid, &proof).await?;
+                }
+                Some(proto::message_data::Body::VerificationAddAddressBody(body)) => {
+                    if body.verification_type == 1 {
+                        let claim_result =
+                            validations::verification::make_verification_address_claim(
+                                message_data.fid,
+                                &body.address,
+                                self.network,
+                                &body.block_hash,
+                                proto::Protocol::Ethereum,
+                            );
+                        match claim_result {
+                            Ok(claim) => {
+                                self.validate_contract_signature(claim, body).await?;
                             }
-                        };
-                    }
-                    Some(proto::message_data::Body::UsernameProofBody(proof)) => {
-                        self.validate_ens_username_proof(fid, &proof).await?;
-                    }
-                    Some(proto::message_data::Body::VerificationAddAddressBody(body)) => {
-                        if body.verification_type == 1 {
-                            let claim_result =
-                                validations::verification::make_verification_address_claim(
-                                    message_data.fid,
-                                    &body.address,
-                                    self.network,
-                                    &body.block_hash,
-                                    proto::Protocol::Ethereum,
-                                );
-                            match claim_result {
-                                Ok(claim) => {
-                                    self.validate_contract_signature(claim, body).await?;
-                                }
-                                Err(err) => {
-                                    return Err(HubError::validation_failure(
-                                        format!(
-                                            "could not create verification address claim: {}",
-                                            err.to_string()
-                                        )
-                                        .as_str(),
-                                    ))
-                                }
+                            Err(err) => {
+                                return Err(HubError::validation_failure(
+                                    format!(
+                                        "could not create verification address claim: {}",
+                                        err.to_string()
+                                    )
+                                    .as_str(),
+                                ))
                             }
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
 
@@ -251,12 +207,13 @@ impl MyHubService {
             Some(tx),
         )) {
             Ok(_) => {
-                self.statsd_client.count("rpc.submit_message.success", 1);
+                self.statsd_client
+                    .count("rpc.submit_message.success", 1, vec![]);
                 debug!("successfully submitted message");
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.statsd_client
-                    .count("rpc.submit_message.channel_full", 1);
+                    .count("rpc.submit_message.channel_full", 1, vec![]);
                 return Err(HubError::unavailable("mempool channel is full"));
             }
             Err(e) => {
@@ -271,6 +228,8 @@ impl MyHubService {
         let result = match timeout(MEMPOOL_ADD_REQUEST_TIMEOUT, rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(err)) => {
+                self.statsd_client
+                    .count("rpc.mempool_submit_error", 1, vec![]);
                 error!(
                     "Error receiving message from mempool channel: {:?}",
                     err.to_string()
@@ -278,6 +237,8 @@ impl MyHubService {
                 return Err(HubError::unavailable("Error adding to mempool"));
             }
             Err(_) => {
+                self.statsd_client
+                    .count("rpc.mempool_submit_timeout", 1, vec![]);
                 error!("Timeout receiving message from mempool channel",);
                 return Err(HubError::unavailable("Error adding to mempool"));
             }
@@ -301,6 +262,120 @@ impl MyHubService {
     fn get_stores_for(&self, fid: u64) -> Result<&Stores, Status> {
         let shard_id = self.message_router.route_fid(fid, self.num_shards);
         self.get_stores_for_shard(shard_id)
+    }
+
+    async fn simulate_message_for_shard(
+        &self,
+        message: &proto::Message,
+        shard_id: u32,
+    ) -> Result<(), HubError> {
+        if shard_id == 0 {
+            // Handle shard 0 (block engine) specially
+            let mut block_engine = block_engine::BlockEngine::new(
+                self.block_stores.trie.clone(),
+                self.statsd_client.clone(),
+                self.block_stores.db.clone(),
+                100,
+                None,
+                self.network,
+            );
+
+            block_engine.simulate_message(message).map_err(|e| match e {
+                block_engine::MessageValidationError::HubError(hub_error) => hub_error,
+                _ => HubError::validation_failure(&e.to_string()),
+            })
+        } else {
+            let stores = match self.shard_stores.get(&shard_id) {
+                Some(store) => store,
+                None => return Err(HubError::invalid_parameter("shard not found for fid")),
+            };
+
+            // TODO: This is a hack to get around the fact that self cannot be made mutable
+            let mut readonly_engine = ShardEngine::new(
+                stores.db.clone(),
+                self.network,
+                stores.trie.clone(),
+                1,
+                stores.store_limits.clone(),
+                self.statsd_client.clone(),
+                100,
+                None,
+                None,
+                None,
+            )
+            .await?;
+
+            readonly_engine
+                .simulate_message(message)
+                .map_err(|err| match err {
+                    engine::MessageValidationError::StoreError(hub_error) => {
+                        // Forward hub errors as is, otherwise we end up wrapping them
+                        hub_error
+                    }
+                    _ => HubError::validation_failure(&err.to_string()),
+                })
+        }
+    }
+
+    async fn simulate_bulk_messages_for_shard(
+        &self,
+        messages: &[proto::Message],
+        shard_id: u32,
+    ) -> Vec<Result<(), HubError>> {
+        if shard_id == 0 {
+            messages
+                .iter()
+                .map(|_| {
+                    Err(HubError::validation_failure(
+                        "submit bulk messages not supported for shard 0",
+                    ))
+                })
+                .collect()
+        } else {
+            let stores = match self.shard_stores.get(&shard_id) {
+                Some(store) => store,
+                None => {
+                    let error = HubError::invalid_parameter("shard not found for fid");
+                    return messages.iter().map(|_| Err(error.clone())).collect();
+                }
+            };
+
+            // Create shard engine for bulk simulation
+            let mut readonly_engine = match ShardEngine::new(
+                stores.db.clone(),
+                self.network,
+                stores.trie.clone(),
+                shard_id,
+                stores.store_limits.clone(),
+                self.statsd_client.clone(),
+                100,
+                None,
+                None,
+                None,
+            )
+            .await
+            {
+                Ok(engine) => engine,
+                Err(err) => {
+                    let hub_error = HubError::invalid_internal_state(&err.to_string());
+                    return messages.iter().map(|_| Err(hub_error.clone())).collect();
+                }
+            };
+
+            readonly_engine
+                .simulate_bulk_messages(messages)
+                .into_iter()
+                .map(|result| {
+                    result.map_err(|err| match err {
+                        engine::MessageValidationError::StoreError(hub_error) => {
+                            // Forward hub errors as is, otherwise we end up wrapping them
+                            hub_error
+                        }
+                        _ => HubError::validation_failure(&err.to_string()),
+                    })
+                })
+                .collect()
+        }
     }
 
     pub async fn validate_contract_signature(
@@ -339,7 +414,7 @@ impl MyHubService {
 
         let id_register = stores
             .onchain_event_store
-            .get_id_register_event_by_fid(fid)
+            .get_id_register_event_by_fid(fid, None)
             .map_err(|_| HubError::internal_db_error("Could not fetch id registration"))?;
 
         match id_register {
@@ -353,6 +428,7 @@ impl MyHubService {
                                 &stores.verification_store,
                                 fid,
                                 &resolved_ens_address,
+                                None,
                             )?;
 
                             match verification {
@@ -421,6 +497,7 @@ impl MyHubService {
         let proof_message = UsernameProofStore::get_username_proof(
             &stores.username_proof_store,
             &name.as_bytes().to_vec(),
+            &mut RocksDbTransactionBatch::new(),
         )?;
         match proof_message {
             Some(message) => match message.data {
@@ -531,11 +608,13 @@ impl HubService for MyHubService {
         &self,
         request: Request<proto::Message>,
     ) -> Result<Response<proto::Message>, Status> {
-        self.statsd_client.count("rpc.submit_message_in_flight", 1);
+        self.statsd_client
+            .count("rpc.submit_message_in_flight", 1, vec![]);
         let start_time = std::time::Instant::now();
 
         authenticate_request(&request, &self.allowed_users).map_err(|err| {
-            self.statsd_client.count("rpc.submit_message_in_flight", -1);
+            self.statsd_client
+                .count("rpc.submit_message_in_flight", -1, vec![]);
             err
         })?;
 
@@ -546,7 +625,7 @@ impl HubService for MyHubService {
         message_bytes_decode(&mut message);
         let fid = message.fid();
         let msg_type = message.msg_type().into_i32();
-        let result = self.submit_message_internal(message, false).await;
+        let result = self.submit_message_internal(message).await;
 
         self.statsd_client.time(
             "rpc.submit_message.duration",
@@ -555,12 +634,15 @@ impl HubService for MyHubService {
 
         match result {
             Ok(message) => {
-                self.statsd_client.count("rpc.submit_message.success", 1);
-                self.statsd_client.count("rpc.submit_message_in_flight", -1);
+                self.statsd_client
+                    .count("rpc.submit_message.success", 1, vec![]);
+                self.statsd_client
+                    .count("rpc.submit_message_in_flight", -1, vec![]);
                 Ok(Response::new(message))
             }
             Err(err) => {
-                self.statsd_client.count("rpc.submit_message.failure", 1);
+                self.statsd_client
+                    .count("rpc.submit_message.failure", 1, vec![]);
                 info!(
                     hash = hash,
                     fid = fid,
@@ -584,10 +666,116 @@ impl HubService for MyHubService {
                 if let Ok(err_str) = AsciiMetadataValue::from_str(&err_code) {
                     status.metadata_mut().insert("x-err-code", err_str);
                 }
-                self.statsd_client.count("rpc.submit_message_in_flight", -1);
+                self.statsd_client
+                    .count("rpc.submit_message_in_flight", -1, vec![]);
                 Err(status)
             }
         }
+    }
+
+    // Submit multiple messages in a single RPC call
+    async fn submit_bulk_messages(
+        &self,
+        request: Request<proto::SubmitBulkMessagesRequest>,
+    ) -> Result<Response<proto::SubmitBulkMessagesResponse>, Status> {
+        let version = EngineVersion::current(self.network);
+        if !version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
+            return Err(Status::invalid_argument(
+                "Dependent messages are not supported in this version",
+            ));
+        }
+
+        authenticate_request(&request, &self.allowed_users)?;
+
+        let mut messages = request.into_inner().messages;
+        let num_messages = messages.len();
+        debug!(
+            "Received call to [submit_bulk_messages] RPC with {} messages",
+            num_messages
+        );
+
+        // Helper to create error responses
+        fn create_error_response(hash: Vec<u8>, err: HubError) -> proto::BulkMessageResponse {
+            proto::BulkMessageResponse {
+                response: Some(proto::bulk_message_response::Response::MessageError(
+                    proto::MessageError {
+                        hash,
+                        err_code: err.code,
+                        message: err.message,
+                    },
+                )),
+            }
+        }
+
+        // Decode all message data_bytes fields first
+        for msg in &mut messages {
+            message_bytes_decode(msg);
+        }
+
+        // 1. Group messages by their destination shard
+        let mut messages_by_shard: HashMap<u32, Vec<proto::Message>> = HashMap::new();
+        for msg in messages {
+            let shard_id = routing::route_message(&self.message_router, &msg, self.num_shards);
+            messages_by_shard.entry(shard_id).or_default().push(msg);
+        }
+
+        let mut results = Vec::with_capacity(num_messages);
+
+        // 2. Process each shard's batch transactionally for validation
+        for (shard_id, batch) in messages_by_shard {
+            self.statsd_client
+                .count("rpc.submit_message_in_flight", batch.len() as i64, vec![]);
+
+            // 3. Simulate the entire batch for the shard using our helper
+            let sim_results = self
+                .simulate_bulk_messages_for_shard(&batch, shard_id)
+                .await;
+
+            // 4. Process simulation results
+            for (sim_result, msg) in sim_results.into_iter().zip(batch.into_iter()) {
+                match sim_result {
+                    Ok(()) => {
+                        // 4a. If simulation succeeds, submit the message to the mempool
+                        let message_hash_for_error = msg.hash.clone();
+                        let result = self.submit_message_to_mempool(msg).await;
+                        results.push(match result {
+                            Ok(message) => {
+                                self.statsd_client
+                                    .count("rpc.submit_message.success", 1, vec![]);
+                                self.statsd_client.count(
+                                    "rpc.submit_message_in_flight",
+                                    -1,
+                                    vec![],
+                                );
+                                proto::BulkMessageResponse {
+                                    response: Some(
+                                        proto::bulk_message_response::Response::Message(message),
+                                    ),
+                                }
+                            }
+                            Err(err) => {
+                                self.statsd_client
+                                    .count("rpc.submit_message.failure", 1, vec![]);
+                                self.statsd_client.count(
+                                    "rpc.submit_message_in_flight",
+                                    -1,
+                                    vec![],
+                                );
+                                create_error_response(message_hash_for_error, err)
+                            }
+                        });
+                    }
+                    Err(hub_error) => {
+                        // 4b. If simulation fails, create an error response for the message
+                        results.push(create_error_response(msg.hash, hub_error));
+                    }
+                }
+            }
+        }
+
+        Ok(Response::new(proto::SubmitBulkMessagesResponse {
+            messages: results,
+        }))
     }
 
     type GetBlocksStream = ReceiverStream<Result<Block, Status>>;
@@ -603,7 +791,7 @@ impl HubService for MyHubService {
 
         info!( {start_block_number, stop_block_number}, "Received call to [get_blocks] RPC");
 
-        let block_store = self.block_store.clone();
+        let block_store = self.block_stores.block_store.clone();
 
         tokio::spawn(async move {
             let mut next_page_token = None;
@@ -697,11 +885,39 @@ impl HubService for MyHubService {
         let current_time = get_farcaster_time().unwrap_or(0);
         let block_info = proto::ShardInfo {
             shard_id: 0,
-            max_height: self.block_store.max_block_number().unwrap_or(0),
-            num_messages: 0,
+            max_height: self
+                .block_stores
+                .block_store
+                .max_block_number()
+                .unwrap_or(0),
+            num_messages: self
+                .block_stores
+                .trie
+                .get_count(
+                    &self.block_stores.db,
+                    &mut RocksDbTransactionBatch::new(),
+                    &[],
+                )
+                .map_err(|err| Status::internal(err.to_string()))?,
+            num_onchain_events: 0,
+            // TODO(aditi): [num_onchain_events] is making the endpoint really slow, enable once there's a faster implementation
+            // num_onchain_events: self
+            //     .block_stores
+            //     .db
+            //     .count_keys_at_prefix(vec![
+            //         RootPrefix::OnChainEvent as u8,
+            //         OnChainEventPostfix::OnChainEvents as u8,
+            //     ])
+            //     .map_err(|err| Status::from_error(Box::new(err)))?
+            //     as u64,
             num_fid_registrations: 0,
-            approx_size: self.block_store.db.approximate_size(),
-            block_delay: current_time - self.block_store.max_block_timestamp().unwrap_or(0),
+            approx_size: self.block_stores.block_store.db.approximate_size(),
+            block_delay: current_time
+                - self
+                    .block_stores
+                    .block_store
+                    .max_block_timestamp()
+                    .unwrap_or(0),
             mempool_size: 0,
         };
         shard_infos.push(block_info);
@@ -723,11 +939,10 @@ impl HubService for MyHubService {
 
         for (shard_index, shard_store) in self.shard_stores.iter() {
             let shard_approx_size = shard_store.db.approximate_size();
-            let shard_num_messages = shard_store.trie.get_count(
-                &shard_store.db,
-                &mut RocksDbTransactionBatch::new(),
-                &[],
-            );
+            let shard_num_messages = shard_store
+                .trie
+                .get_count(&shard_store.db, &mut RocksDbTransactionBatch::new(), &[])
+                .map_err(|err| Status::internal(err.to_string()))?;
             let shard_fid_registrations = shard_store
                 .db
                 .count_keys_at_prefix(vec![
@@ -743,6 +958,7 @@ impl HubService for MyHubService {
                 shard_id: *shard_index,
                 max_height: shard_store.shard_store.max_block_number().unwrap_or(0),
                 num_messages: shard_num_messages,
+                num_onchain_events: 0, // TODO(aditi): Populating this is making the endpoint slow, enable once there's a faster implementation
                 num_fid_registrations: shard_fid_registrations,
                 approx_size: shard_approx_size,
                 block_delay: current_time.saturating_sub(max_block_time),
@@ -757,6 +973,11 @@ impl HubService for MyHubService {
             total_approx_size += shard_approx_size;
         }
 
+        let current_farcaster_time = FarcasterTime::new(current_time);
+        let next_engine_version_timestamp =
+            EngineVersion::next_version_timestamp_for(&current_farcaster_time, self.network)
+                .unwrap_or(0);
+
         Ok(Response::new(GetInfoResponse {
             db_stats: Some(DbStats {
                 num_fid_registrations: total_fid_registrations,
@@ -767,6 +988,7 @@ impl HubService for MyHubService {
             num_shards: self.num_shards,
             version: self.version.clone(),
             peer_id: self.peer_id.clone(),
+            next_engine_version_timestamp,
         }))
     }
 
@@ -1233,6 +1455,7 @@ impl HubService for MyHubService {
             &stores.verification_store,
             request.fid,
             &request.address,
+            None,
         )
         .as_response()
     }
@@ -1261,6 +1484,19 @@ impl HubService for MyHubService {
         let (start_ts, stop_ts) = request.timestamps();
         stores
             .verification_store
+            .get_all_messages_by_fid(request.fid, start_ts, stop_ts, &request.page_options())
+            .as_response()
+    }
+
+    async fn get_all_lend_storage_messages_by_fid(
+        &self,
+        request: Request<FidTimestampRequest>,
+    ) -> Result<Response<MessagesResponse>, Status> {
+        let request = request.into_inner();
+        let (start_ts, stop_ts) = request.timestamps();
+        // These messages are stored on all shards. Query them from the block shard because this is the source of truth.
+        self.block_stores
+            .storage_lend_store
             .get_all_messages_by_fid(request.fid, start_ts, stop_ts, &request.page_options())
             .as_response()
     }
@@ -1584,6 +1820,7 @@ impl HubService for MyHubService {
                 match UsernameProofStore::get_username_proof(
                     &stores.username_proof_store,
                     &req.name,
+                    &mut RocksDbTransactionBatch::new(),
                 ) {
                     Ok(Some(message)) => message.data.and_then(|data| {
                         if let Some(message_data::Body::UsernameProofBody(user_name_proof)) =
@@ -1718,7 +1955,7 @@ impl HubService for MyHubService {
         let maybe_event = self.shard_stores.iter().find_map(|(_shard_id, stores)| {
             match stores
                 .onchain_event_store
-                .get_active_signer(fid, signer.clone())
+                .get_active_signer(fid, signer.clone(), None)
             {
                 Ok(Some(event)) => Some(Ok(event)),
                 Ok(None) => None,
@@ -1796,7 +2033,10 @@ impl HubService for MyHubService {
         let fid = req.fid;
 
         let maybe_event = self.shard_stores.iter().find_map(|(_shard_id, stores)| {
-            match stores.onchain_event_store.get_id_register_event_by_fid(fid) {
+            match stores
+                .onchain_event_store
+                .get_id_register_event_by_fid(fid, None)
+            {
                 Ok(Some(event)) => Some(Ok(event)),
                 Ok(None) => None,
                 Err(e) => Some(Err(Status::internal(format!("Store error: {:?}", e)))),
@@ -1861,7 +2101,9 @@ impl HubService for MyHubService {
         // Check if the address is a custody address (from IdRegistry)
         for store in self.shard_stores.values() {
             // Check IdRegistry for custody address
-            if let Ok(Some(id_event)) = store.onchain_event_store.get_id_register_event_by_fid(fid)
+            if let Ok(Some(id_event)) = store
+                .onchain_event_store
+                .get_id_register_event_by_fid(fid, None)
             {
                 if let Some(Body::IdRegisterEventBody(body)) = &id_event.body {
                     if body.to == address {
@@ -1890,9 +2132,12 @@ impl HubService for MyHubService {
             }
 
             // Check verified addresses
-            if let Ok(Some(_verification)) =
-                VerificationStore::get_verification_add(&store.verification_store, fid, &address)
-            {
+            if let Ok(Some(_verification)) = VerificationStore::get_verification_add(
+                &store.verification_store,
+                fid,
+                &address,
+                None,
+            ) {
                 is_verified = true;
             }
 

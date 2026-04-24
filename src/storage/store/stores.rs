@@ -1,20 +1,21 @@
 use super::account::{
-    EventsPage, ReactionStore, ReactionStoreDef, StorageSlot, UserDataStore, UserDataStoreDef,
-    VerificationStore, VerificationStoreDef,
+    EventsPage, HubEventStorageExt, ReactionStore, ReactionStoreDef, StorageSlot, UserDataStore,
+    UserDataStoreDef, VerificationStore, VerificationStoreDef,
 };
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
 use crate::network::http_server::TierType;
 use crate::proto::{
-    self, HubEvent, StorageLimit, StorageLimitsResponse, StorageUnitDetails, StorageUnitType,
-    StoreType,
+    self, HubEvent, OnChainEvent, StorageLimit, StorageLimitsResponse, StorageUnitDetails,
+    StorageUnitType, StoreType,
 };
 use crate::proto::{MessageType, TierDetails};
-use crate::storage::constants::PAGE_SIZE_MAX;
-use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
+use crate::storage::constants::{RootPrefix, PAGE_SIZE_MAX};
+use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch, RocksdbError};
 use crate::storage::store::account::{
-    CastStore, CastStoreDef, IntoU8, LinkStore, OnchainEventStorageError, OnchainEventStore, Store,
-    StoreEventHandler, UsernameProofStore, UsernameProofStoreDef,
+    BlockEventStore, CastStore, CastStoreDef, IntoU8, LinkStore, OnchainEventStorageError,
+    OnchainEventStore, StorageLendStore, StorageLendStoreDef, Store, StoreEventHandler,
+    StoreOptions, UsernameProofStore, UsernameProofStoreDef,
 };
 use crate::storage::store::shard::ShardStore;
 use crate::storage::trie::merkle_trie;
@@ -43,6 +44,7 @@ pub enum StoresError {
 
 #[derive(Clone)]
 pub struct Stores {
+    pub block_event_store: BlockEventStore,
     pub shard_store: ShardStore,
     pub cast_store: Store<CastStoreDef>,
     pub link_store: Store<LinkStore>,
@@ -51,8 +53,9 @@ pub struct Stores {
     pub verification_store: Store<VerificationStoreDef>,
     pub onchain_event_store: OnchainEventStore,
     pub username_proof_store: Store<UsernameProofStoreDef>,
-    pub(crate) db: Arc<RocksDB>,
-    pub(crate) trie: merkle_trie::MerkleTrie,
+    pub storage_lend_store: Store<StorageLendStoreDef>,
+    pub db: Arc<RocksDB>,
+    pub trie: merkle_trie::MerkleTrie,
     pub store_limits: StoreLimits,
     pub event_handler: Arc<StoreEventHandler>,
     pub shard_id: u32,
@@ -69,6 +72,7 @@ pub struct Limits {
     pub user_data: u32,
     pub user_name_proofs: u32,
     pub verifications: u32,
+    pub storage_lends: u32,
 }
 
 impl Limits {
@@ -86,6 +90,7 @@ impl Limits {
                 user_data: 50,
                 user_name_proofs: 5,
                 verifications: 25,
+                storage_lends: 1,
             },
             // Extended Storage limits https://github.com/farcasterxyz/protocol/discussions/191
             // Units rented after Aug 24, 2024
@@ -96,6 +101,7 @@ impl Limits {
                 user_data: 50,
                 user_name_proofs: 5,
                 verifications: 25,
+                storage_lends: 1,
             },
             // Storage Redenomination FIP: https://github.com/farcasterxyz/protocol/discussions/229
             // Units rented after Jul 16, 2025
@@ -106,6 +112,7 @@ impl Limits {
                 user_data: 25,
                 user_name_proofs: 2,
                 verifications: 5,
+                storage_lends: 1,
             },
         }
     }
@@ -133,6 +140,11 @@ impl Limits {
             MessageType::UserDataAdd => StoreType::UserData,
             MessageType::UsernameProof => StoreType::UsernameProofs,
             MessageType::FrameAction => StoreType::None,
+            MessageType::LendStorage => StoreType::StorageLends,
+            // TODO(NEYN-10568): map KEY_ADD/KEY_REMOVE to their shard 0 signer store once
+            // NEYN-10580 (shard routing) and NEYN-10573/10574 (engine handling) land.
+            MessageType::KeyAdd => StoreType::None,
+            MessageType::KeyRemove => StoreType::None,
             MessageType::None => StoreType::None,
         }
     }
@@ -152,6 +164,7 @@ impl Limits {
                 MessageType::VerificationRemove,
             ],
             StoreType::UsernameProofs => vec![MessageType::UsernameProof],
+            StoreType::StorageLends => vec![MessageType::LendStorage],
             StoreType::None => vec![],
         }
     }
@@ -164,6 +177,7 @@ impl Limits {
             StoreType::UserData => self.user_data,
             StoreType::Verifications => self.verifications,
             StoreType::UsernameProofs => self.user_name_proofs,
+            StoreType::StorageLends => self.storage_lends,
             StoreType::None => 0,
         }
     }
@@ -221,22 +235,74 @@ impl Stores {
     pub fn new(
         db: Arc<RocksDB>,
         shard_id: u32,
+        trie: merkle_trie::MerkleTrie,
+        store_limits: StoreLimits,
+        network: proto::FarcasterNetwork,
+        statsd: StatsdClientWrapper,
+    ) -> Stores {
+        Self::new_with_opts(
+            db,
+            shard_id,
+            trie,
+            store_limits,
+            network,
+            statsd,
+            StoreOptions::default(),
+        )
+    }
+
+    pub fn new_with_opts(
+        db: Arc<RocksDB>,
+        shard_id: u32,
         mut trie: merkle_trie::MerkleTrie,
         store_limits: StoreLimits,
         network: proto::FarcasterNetwork,
         statsd: StatsdClientWrapper,
+        store_opts: StoreOptions,
     ) -> Stores {
         trie.initialize(&db).unwrap();
 
         let event_handler = StoreEventHandler::new();
         let shard_store = ShardStore::new(db.clone(), shard_id);
-        let cast_store = CastStore::new(db.clone(), event_handler.clone(), 100);
-        let link_store = LinkStore::new(db.clone(), event_handler.clone(), 100);
-        let reaction_store = ReactionStore::new(db.clone(), event_handler.clone(), 100);
-        let user_data_store = UserDataStore::new(db.clone(), event_handler.clone(), 100);
-        let verification_store = VerificationStore::new(db.clone(), event_handler.clone(), 100);
-        let onchain_event_store = OnchainEventStore::new(db.clone(), event_handler.clone());
-        let username_proof_store = UsernameProofStore::new(db.clone(), event_handler.clone(), 100);
+        let cast_store =
+            CastStore::new_with_opts(db.clone(), event_handler.clone(), 100, store_opts.clone());
+        let reaction_store = ReactionStore::new_with_opts(
+            db.clone(),
+            event_handler.clone(),
+            100,
+            store_opts.clone(),
+        );
+        let link_store =
+            LinkStore::new_with_opts(db.clone(), event_handler.clone(), 100, store_opts.clone());
+        let user_data_store = UserDataStore::new_with_opts(
+            db.clone(),
+            event_handler.clone(),
+            100,
+            store_opts.clone(),
+        );
+        let verification_store = VerificationStore::new_with_opts(
+            db.clone(),
+            event_handler.clone(),
+            100,
+            store_opts.clone(),
+        );
+        let username_proof_store = UsernameProofStore::new_with_opts(
+            db.clone(),
+            event_handler.clone(),
+            100,
+            store_opts.clone(),
+        );
+
+        let onchain_event_store =
+            OnchainEventStore::new_with_opts(db.clone(), event_handler.clone(), store_opts.clone());
+
+        let storage_lend_store = StorageLendStore::new_with_opts(
+            db.clone(),
+            event_handler.clone(),
+            100,
+            store_opts.clone(),
+        );
+
         Stores {
             shard_id,
             trie,
@@ -248,13 +314,66 @@ impl Stores {
             verification_store,
             onchain_event_store,
             username_proof_store,
+            storage_lend_store,
             db: db.clone(),
             store_limits,
             event_handler,
             network,
             statsd,
             prune_lock: Arc::new(RwLock::new(false)),
+            block_event_store: BlockEventStore { db: db.clone() },
         }
+    }
+
+    fn make_schema_version_key() -> Vec<u8> {
+        vec![RootPrefix::DBSchemaVersion as u8]
+    }
+
+    pub fn get_schema_version(&self) -> Result<u32, RocksdbError> {
+        match self.db.get(&Self::make_schema_version_key())? {
+            Some(bytes) => Ok(u32::from_be_bytes(bytes.try_into().unwrap_or_default())),
+            None => Ok(0), // Default to version 0
+        }
+    }
+
+    pub fn set_schema_version(&self, version: u32) -> Result<(), RocksdbError> {
+        self.db
+            .put(&Self::make_schema_version_key(), &version.to_be_bytes())
+    }
+
+    pub fn get_storage_slot_for_fid(
+        &self,
+        fid: u64,
+        count_borrowed_storage: bool,
+        pending_events: &[OnChainEvent],
+    ) -> Result<StorageSlot, StoresError> {
+        let lent_storage = StorageLendStore::get_lent_storage(&self.storage_lend_store, fid)
+            .map_err(|err| StoresError::StoreError {
+                inner: err,
+                hash: vec![],
+            })?;
+        let borrowed_storage = if count_borrowed_storage {
+            StorageLendStore::get_borrowed_storage(&self.storage_lend_store, fid).map_err(
+                |err| StoresError::StoreError {
+                    inner: err,
+                    hash: vec![],
+                },
+            )?
+        } else {
+            StorageSlot::new(0, 0, 0, u32::MAX)
+        };
+        let slot = self
+            .onchain_event_store
+            .get_storage_slot_for_fid(
+                fid,
+                self.network,
+                pending_events,
+                &lent_storage,
+                &borrowed_storage,
+            )
+            .map_err(|e| StoresError::OnchainEventError(e))?;
+
+        Ok(slot)
     }
 
     pub fn get_usage(
@@ -264,11 +383,9 @@ impl Stores {
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<(u32, u32), StoresError> {
         let store_type = Limits::message_type_to_store_type(message_type);
-        let message_count = self.get_usage_by_store_type(fid, store_type, txn_batch);
-        let slot = self
-            .onchain_event_store
-            .get_storage_slot_for_fid(fid, self.network)
-            .map_err(|e| StoresError::OnchainEventError(e))?;
+        let message_count = self.get_usage_by_store_type(fid, store_type, txn_batch)?;
+        let count_borrowed_storage = store_type != StoreType::StorageLends;
+        let slot = self.get_storage_slot_for_fid(fid, count_borrowed_storage, &[])?;
         let max_messages = self.store_limits.max_messages(&slot, store_type);
 
         Ok((message_count, max_messages))
@@ -280,17 +397,23 @@ impl Stores {
         fid: u64,
         store_type: StoreType,
         txn_batch: &mut RocksDbTransactionBatch,
-    ) -> u32 {
+    ) -> Result<u32, StoresError> {
         let mut total_count = 0;
         for each_message_type in Limits::store_type_to_message_types(store_type) {
-            let count = self.trie.get_count(
-                &self.db,
-                txn_batch,
-                &TrieKey::for_message_type(fid, each_message_type.into_u8()),
-            ) as u32;
+            let count = self
+                .trie
+                .get_count(
+                    &self.db,
+                    txn_batch,
+                    &TrieKey::for_message_type(fid, each_message_type.into_u8()),
+                )
+                .map_err(|e| StoresError::StoreError {
+                    inner: HubError::internal_db_error(&format!("Trie error: {}", e)),
+                    hash: TrieKey::for_message_type(fid, each_message_type.into_u8()).to_vec(),
+                })? as u32;
             total_count += count;
         }
-        total_count
+        Ok(total_count)
     }
 
     pub fn is_pro_user(
@@ -306,13 +429,34 @@ impl Stores {
     }
 
     pub fn get_storage_limits(&self, fid: u64) -> Result<StorageLimitsResponse, StoresError> {
-        let slot = self
-            .onchain_event_store
-            .get_storage_slot_for_fid(fid, self.network)
-            .map_err(|e| StoresError::OnchainEventError(e))?;
-
         let txn_batch = &mut RocksDbTransactionBatch::new();
         let mut limits = vec![];
+        let purchased_slot = self
+            .onchain_event_store
+            .get_storage_slot_for_fid(
+                fid,
+                self.network,
+                &[],
+                &StorageSlot::new(0, 0, 0, u32::MAX),
+                &StorageSlot::new(0, 0, 0, u32::MAX),
+            )
+            .map_err(|e| StoresError::OnchainEventError(e))?;
+        let borrowed_slot = StorageLendStore::get_borrowed_storage(&self.storage_lend_store, fid)
+            .map_err(|err| StoresError::StoreError {
+            inner: err,
+            hash: vec![],
+        })?;
+        let lent_slot =
+            StorageLendStore::get_lent_storage(&self.storage_lend_store, fid).map_err(|err| {
+                StoresError::StoreError {
+                    inner: err,
+                    hash: vec![],
+                }
+            })?;
+        let net_slot = self
+            .onchain_event_store
+            .get_storage_slot_for_fid(fid, self.network, &[], &lent_slot, &borrowed_slot)
+            .map_err(|e| StoresError::OnchainEventError(e))?;
         for store_type in vec![
             StoreType::Casts,
             StoreType::Links,
@@ -320,8 +464,16 @@ impl Stores {
             StoreType::UserData,
             StoreType::Verifications,
             StoreType::UsernameProofs,
+            StoreType::StorageLends,
         ] {
-            let used = self.get_usage_by_store_type(fid, store_type, txn_batch);
+            // You can't lend out borrowed storage. The limit is the number of units you've purchased.
+            let slot = if store_type == StoreType::StorageLends {
+                purchased_slot.clone()
+            } else {
+                net_slot.clone()
+            };
+            let used = self.get_usage_by_store_type(fid, store_type, txn_batch)?;
+            // TODO(aditi): Should subtract 1 here for storage lends because we require keeping 1 storage unit available for revoking lent storage
             let max_messages = self.store_limits.max_messages(&slot, store_type);
             let name = match store_type {
                 StoreType::None => "NONE",
@@ -331,6 +483,7 @@ impl Stores {
                 StoreType::UserData => "USER_DATA",
                 StoreType::Verifications => "VERIFICATIONS",
                 StoreType::UsernameProofs => "USERNAME_PROOFS",
+                StoreType::StorageLends => "STORAGE_LENDS",
             };
             let limit = StorageLimit {
                 store_type: store_type.try_into().unwrap(),
@@ -345,21 +498,30 @@ impl Stores {
 
         let response = StorageLimitsResponse {
             limits,
-            units: slot.units_for(StorageUnitType::UnitTypeLegacy)
-                + slot.units_for(StorageUnitType::UnitType2024)
-                + slot.units_for(StorageUnitType::UnitType2025),
+            units: net_slot.units_for(StorageUnitType::UnitTypeLegacy)
+                + net_slot.units_for(StorageUnitType::UnitType2024)
+                + net_slot.units_for(StorageUnitType::UnitType2025),
             unit_details: vec![
                 StorageUnitDetails {
                     unit_type: StorageUnitType::UnitTypeLegacy as i32,
-                    unit_size: slot.units_for(StorageUnitType::UnitTypeLegacy),
+                    unit_size: net_slot.units_for(StorageUnitType::UnitTypeLegacy),
+                    purchased_unit_size: purchased_slot.units_for(StorageUnitType::UnitTypeLegacy),
+                    borrowed_unit_size: borrowed_slot.units_for(StorageUnitType::UnitTypeLegacy),
+                    lent_unit_size: lent_slot.units_for(StorageUnitType::UnitTypeLegacy),
                 },
                 StorageUnitDetails {
                     unit_type: StorageUnitType::UnitType2024 as i32,
-                    unit_size: slot.units_for(StorageUnitType::UnitType2024),
+                    unit_size: net_slot.units_for(StorageUnitType::UnitType2024),
+                    purchased_unit_size: purchased_slot.units_for(StorageUnitType::UnitType2024),
+                    borrowed_unit_size: borrowed_slot.units_for(StorageUnitType::UnitType2024),
+                    lent_unit_size: lent_slot.units_for(StorageUnitType::UnitType2024),
                 },
                 StorageUnitDetails {
                     unit_type: StorageUnitType::UnitType2025 as i32,
-                    unit_size: slot.units_for(StorageUnitType::UnitType2025),
+                    unit_size: net_slot.units_for(StorageUnitType::UnitType2025),
+                    purchased_unit_size: purchased_slot.units_for(StorageUnitType::UnitType2025),
+                    borrowed_unit_size: borrowed_slot.units_for(StorageUnitType::UnitType2025),
+                    lent_unit_size: lent_slot.units_for(StorageUnitType::UnitType2025),
                 },
             ],
             tier_subscriptions: vec![TierDetails {
@@ -503,7 +665,7 @@ impl Stores {
             elapsed.as_secs()
         );
         self.statsd
-            .count_with_shard(self.shard_id, "prune.events", count as u64);
+            .count_with_shard(self.shard_id, "prune.events", count as u64, vec![]);
         self.statsd.time_with_shard(
             self.shard_id,
             "prune.events_time_ms",
@@ -566,7 +728,7 @@ impl Stores {
             elapsed.as_millis() as u64,
         );
         self.statsd
-            .count_with_shard(self.shard_id, "prune.shard_chunks", count as u64);
+            .count_with_shard(self.shard_id, "prune.shard_chunks", count as u64, vec![]);
         info!(
             "Pruning shard chunks complete for shard {}. Pruned {} chunks in {} seconds",
             self.shard_id,

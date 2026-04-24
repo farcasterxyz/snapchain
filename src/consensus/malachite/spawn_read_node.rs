@@ -102,9 +102,11 @@ impl MalachiteReadNodeActors {
 
         let sync_config = ValueSyncConfig {
             request_timeout: config.sync_request_timeout,
+            status_update_interval: config.sync_status_update_interval,
             ..ValueSyncConfig::default()
         };
-        let network_actor = spawn_network_actor(gossip_tx.clone(), local_peer_id).await?;
+        let network_actor =
+            spawn_network_actor(gossip_tx.clone(), local_peer_id, statsd_client.clone()).await?;
         let host_actor =
             spawn_read_host(shard_id, statsd_client, engine, system_tx, config).await?;
         let sync_actor = spawn_read_sync_actor(

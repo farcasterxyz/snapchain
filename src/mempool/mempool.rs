@@ -9,10 +9,13 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::time::Instant;
 
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
-use crate::proto::{FarcasterNetwork, OnChainEventType};
+use crate::mempool::routing;
+use crate::proto::{Block, FarcasterNetwork, Height, MessageType, OnChainEventType, Transaction};
+use crate::storage::store::block_engine::BlockStores;
 use crate::{
     core::types::SnapchainValidatorContext,
     network::gossip::GossipEvent,
@@ -23,7 +26,7 @@ use crate::{
             account::{
                 get_message_by_key, make_message_primary_key, make_ts_hash, type_to_set_postfix,
             },
-            engine::MempoolMessage,
+            mempool_poller::MempoolMessage,
             stores::Stores,
         },
     },
@@ -58,6 +61,8 @@ pub struct RateLimits {
     shard_stores: HashMap<u32, Stores>,
     rate_limits_by_fid: Cache<u64, Arc<DirectRateLimiter>>,
     statsd_client: StatsdClientWrapper,
+    message_router: Box<dyn MessageRouter>,
+    num_shards: u32,
 }
 
 impl RateLimits {
@@ -65,6 +70,7 @@ impl RateLimits {
         shard_stores: HashMap<u32, Stores>,
         config: RateLimitsConfig,
         statsd_client: StatsdClientWrapper,
+        num_shards: u32,
     ) -> Self {
         RateLimits {
             shard_stores,
@@ -73,6 +79,8 @@ impl RateLimits {
                 .time_to_idle(config.time_to_idle)
                 .eviction_policy(EvictionPolicy::lru())
                 .build(),
+            message_router: Box::new(ShardRouter {}),
+            num_shards,
         }
     }
 
@@ -80,12 +88,9 @@ impl RateLimits {
         self.rate_limits_by_fid.invalidate(&fid);
     }
 
-    fn get_rate_limiter_for_fid(
-        &mut self,
-        shard_id: u32,
-        fid: u64,
-    ) -> Option<Arc<DirectRateLimiter>> {
+    fn get_rate_limiter_for_fid(&mut self, fid: u64) -> Option<Arc<DirectRateLimiter>> {
         self.rate_limits_by_fid.optionally_get_with(fid, || {
+            let shard_id = self.message_router.route_fid(fid, self.num_shards);
             let stores = self.shard_stores.get(&shard_id).unwrap();
             let storage_limits = stores.get_storage_limits(fid).unwrap();
             let storage_allowance: u32 = storage_limits
@@ -104,16 +109,69 @@ impl RateLimits {
         })
     }
 
-    pub fn consume_for_fid(&mut self, shard_id: u32, fid: u64) -> bool {
-        let rate_limiter = self.get_rate_limiter_for_fid(shard_id, fid);
+    pub fn consume_for_fid(&mut self, fid: u64) -> bool {
+        let rate_limiter = self.get_rate_limiter_for_fid(fid);
         self.statsd_client.gauge(
             "mempool.rate_limiter_entries",
             self.rate_limits_by_fid.entry_count(),
+            vec![],
         );
         match rate_limiter {
             Some(rate_limiter) => rate_limiter.check().is_ok(),
             None => false,
         }
+    }
+}
+
+// -------------------------------------------------------------------------------------------
+// KEY_ADD rate limiter (NEYN-10579)
+// -------------------------------------------------------------------------------------------
+//
+// Separate from the storage-quota-derived `RateLimits` above: this is a fixed, FIP-required
+// safety guardrail at 1/min per FID for KEY_ADD messages specifically. `KEY_REMOVE` is
+// intentionally never rate-limited — revocation of a compromised key must never be blockable.
+// Gating in the mempool covers both RPC-submitted and gossip-forwarded KEY_ADD messages: a
+// rejection in `message_is_valid` both keeps the message out of the pool and suppresses
+// downstream gossip (since `insert_into_shard` only gossips on the success branch).
+//
+// Always-on (not gated by `Config::enable_rate_limits`) because this is a safety guardrail,
+// not a tunable throughput knob.
+pub struct KeyAddRateLimits {
+    rate_limits_by_fid: Cache<u64, Arc<DirectRateLimiter>>,
+    statsd_client: StatsdClientWrapper,
+}
+
+impl KeyAddRateLimits {
+    pub fn new(statsd_client: StatsdClientWrapper) -> Self {
+        Self {
+            rate_limits_by_fid: CacheBuilder::new(1_000_000)
+                // 2× the 60s quota window: keeps idle entries around long enough to still block
+                // a follow-up burst, and lets LRU reclaim entries that haven't sent a KEY_ADD
+                // in a while without leaking memory per distinct FID observed.
+                .time_to_idle(Duration::from_secs(120))
+                .eviction_policy(EvictionPolicy::lru())
+                .build(),
+            statsd_client,
+        }
+    }
+
+    /// Returns `true` if the caller is under-limit (may proceed), `false` if rate-limited.
+    /// Mirrors the `RateLimits::consume_for_fid` shape so the caller sites remain symmetric.
+    pub fn consume_for_fid(&self, fid: u64) -> bool {
+        let limiter = self.rate_limits_by_fid.get_with(fid, || {
+            // 1 KEY_ADD per minute per FID (FIP, NEYN-10579). The quota value is fixed — this
+            // guardrail is not negotiable per-FID because a malicious or misbehaving client
+            // could otherwise spray KEY_ADDs and force the merge path to do expensive crypto.
+            Arc::new(RateLimiter::direct(Quota::per_minute(
+                NonZeroU32::new(1).unwrap(),
+            )))
+        });
+        self.statsd_client.gauge(
+            "mempool.key_add_rate_limiter_entries",
+            self.rate_limits_by_fid.entry_count(),
+            vec![],
+        );
+        limiter.check().is_ok()
     }
 }
 
@@ -165,8 +223,13 @@ impl MempoolKey {
     }
 }
 
-impl proto::Message {
-    pub fn mempool_key(&self) -> MempoolKey {
+// Extension traits for proto types that depend on mempool types
+pub trait MessageMempoolExt {
+    fn mempool_key(&self) -> MempoolKey;
+}
+
+impl MessageMempoolExt for proto::Message {
+    fn mempool_key(&self) -> MempoolKey {
         if let Some(data) = &self.data {
             // TODO: Consider revisiting choice of timestamp here as backdated messages currently are prioritized.
             return MempoolKey::new(
@@ -179,25 +242,37 @@ impl proto::Message {
     }
 }
 
-impl proto::ValidatorMessage {
-    pub fn mempool_key(&self) -> MempoolKey {
-        if let Some(fname) = &self.fname_transfer {
-            if let Some(proof) = &fname.proof {
-                return MempoolKey::new(
-                    MempoolMessageKind::ValidatorMessage,
-                    proof.timestamp,
-                    fname.id.to_string(),
-                );
-            }
-        }
-        if let Some(event) = &self.on_chain_event {
-            return MempoolKey::new(
+pub trait ValidatorMessageMempoolExt {
+    fn mempool_key(&self) -> MempoolKey;
+}
+
+impl ValidatorMessageMempoolExt for proto::ValidatorMessage {
+    fn mempool_key(&self) -> MempoolKey {
+        if let Some(onchain_event) = &self.on_chain_event {
+            MempoolKey::new(
                 MempoolMessageKind::ValidatorMessage,
-                event.block_timestamp,
-                hex::encode(&event.transaction_hash) + &event.log_index.to_string(),
-            );
+                onchain_event.block_timestamp,
+                hex::encode(&onchain_event.transaction_hash) + &onchain_event.log_index.to_string(),
+            )
+        } else if let Some(fname_transfer) = &self.fname_transfer {
+            MempoolKey::new(
+                MempoolMessageKind::ValidatorMessage,
+                fname_transfer.proof.as_ref().unwrap().timestamp,
+                fname_transfer.id.to_string(),
+            )
+        } else if let Some(block_event) = &self.block_event {
+            MempoolKey::new(
+                MempoolMessageKind::ValidatorMessage,
+                block_event.block_timestamp(),
+                block_event.seqnum().to_string(),
+            )
+        } else {
+            MempoolKey::new(
+                MempoolMessageKind::ValidatorMessage,
+                0,
+                "unknown".to_string(),
+            )
         }
-        todo!();
     }
 }
 
@@ -222,7 +297,34 @@ impl MempoolMessage {
     pub fn mempool_key(&self) -> MempoolKey {
         match self {
             MempoolMessage::UserMessage(msg) => msg.mempool_key(),
-            MempoolMessage::ValidatorMessage(msg) => msg.mempool_key(),
+            MempoolMessage::OnchainEvent(event)
+            | MempoolMessage::OnchainEventForMigration(event) => {
+                let validator_message = proto::ValidatorMessage {
+                    on_chain_event: Some(event.clone()),
+                    fname_transfer: None,
+                    block_event: None,
+                };
+                validator_message.mempool_key()
+            }
+            MempoolMessage::FnameTransfer(fname) => {
+                let validator_message = proto::ValidatorMessage {
+                    on_chain_event: None,
+                    fname_transfer: Some(fname.clone()),
+                    block_event: None,
+                };
+                validator_message.mempool_key()
+            }
+            MempoolMessage::BlockEvent {
+                for_shard: _,
+                message: block_event,
+            } => {
+                let validator_message = proto::ValidatorMessage {
+                    on_chain_event: None,
+                    fname_transfer: None,
+                    block_event: Some(block_event.clone()),
+                };
+                validator_message.mempool_key()
+            }
         }
     }
 }
@@ -235,11 +337,13 @@ pub struct MempoolMessagesRequest {
 
 pub struct ReadNodeMempool {
     shard_stores: HashMap<u32, Stores>,
+    block_stores: BlockStores,
     message_router: Box<dyn MessageRouter>,
     num_shards: u32,
     mempool_rx: mpsc::Receiver<MempoolRequest>,
     gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     statsd_client: StatsdClientWrapper,
+    network: FarcasterNetwork,
 }
 
 impl ReadNodeMempool {
@@ -247,30 +351,39 @@ impl ReadNodeMempool {
         mempool_rx: mpsc::Receiver<MempoolRequest>,
         num_shards: u32,
         shard_stores: HashMap<u32, Stores>,
+        block_stores: BlockStores,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         statsd_client: StatsdClientWrapper,
+        network: FarcasterNetwork,
     ) -> Self {
         ReadNodeMempool {
             shard_stores,
+            block_stores,
             num_shards,
             mempool_rx,
             message_router: Box::new(ShardRouter {}),
             gossip_tx,
             statsd_client,
+            network,
         }
     }
 
     fn message_already_exists(&self, shard: u32, message: &MempoolMessage) -> bool {
         let fid = message.fid();
 
-        let stores = self.shard_stores.get(&shard);
+        let db = if shard == 0 {
+            Some(&self.block_stores.db)
+        } else {
+            self.shard_stores.get(&shard).map(|stores| &stores.db)
+        };
+
         // Default to false in the error paths
-        match stores {
+        match db {
             None => {
                 error!("Error finding store for shard: {}", shard);
                 false
             }
-            Some(stores) => match message {
+            Some(db) => match message {
                 MempoolMessage::UserMessage(message) => match &message.data {
                     None => false,
                     Some(message_data) => {
@@ -287,7 +400,7 @@ impl ReadNodeMempool {
                                     Some(&ts_hash),
                                 );
                                 let existing_message = get_message_by_key(
-                                    &stores.db,
+                                    db,
                                     &mut RocksDbTransactionBatch::new(),
                                     &primary_key,
                                 );
@@ -299,7 +412,10 @@ impl ReadNodeMempool {
                         }
                     }
                 },
-                MempoolMessage::ValidatorMessage(_) => {
+                MempoolMessage::OnchainEvent(_)
+                | MempoolMessage::OnchainEventForMigration(_)
+                | MempoolMessage::FnameTransfer(_)
+                | MempoolMessage::BlockEvent { .. } => {
                     // Don't do duplicate checks for validator messages. They are infrequent, and engine can handle duplicates.
                     false
                 }
@@ -326,9 +442,50 @@ impl ReadNodeMempool {
         }
     }
 
-    fn message_is_valid(&mut self, message: &MempoolMessage) -> Result<(), HubError> {
-        let fid = message.fid();
-        let shard = self.message_router.route_fid(fid, self.num_shards);
+    fn route_mempool_message(&self, message: &MempoolMessage) -> Vec<u32> {
+        let fid_shard = self
+            .message_router
+            .route_fid(message.fid(), self.num_shards);
+
+        // Fname transfers are mirrored to both the sender and receiver shard.
+        match message {
+            MempoolMessage::FnameTransfer(_fname_transfer) => {
+                let version = EngineVersion::current(self.network);
+                // Send the username transfer to all other shards, transfers from a->b->c are
+                // correctly tracked. Due to current limitations of the engine, if we transfer from
+                // shard 1 to shard 2, and then transfer within shard 2, we will keep the transfer
+                // around forever on shard 1. See test_fname_transfer for an example.
+                if version.is_enabled(ProtocolFeature::UsernameShardRoutingFix) {
+                    (1..self.num_shards + 1).collect()
+                } else {
+                    vec![fid_shard]
+                }
+            }
+            MempoolMessage::OnchainEventForMigration(_) => {
+                // TODO(aditi): Remove this codepath after migrating onchain events to shard 0
+                vec![0]
+            }
+            MempoolMessage::OnchainEvent(_) => {
+                // Onchain events need to get to shard 0 so that we can support other messages (lend storage) in shard 0.
+                vec![0, fid_shard]
+            }
+            MempoolMessage::BlockEvent {
+                for_shard,
+                message: _,
+            } => {
+                vec![*for_shard]
+            }
+            MempoolMessage::UserMessage(message) => {
+                vec![routing::route_message(
+                    &self.message_router,
+                    message,
+                    self.num_shards,
+                )]
+            }
+        }
+    }
+
+    fn message_is_valid(&mut self, shard: u32, message: &MempoolMessage) -> Result<(), HubError> {
         if self.message_already_exists(shard, message) {
             return Err(HubError::duplicate("message has already been merged"));
         }
@@ -340,12 +497,22 @@ impl ReadNodeMempool {
             match message_request {
                 MempoolRequest::AddMessage(message, source, reply_to) => {
                     self.statsd_client
-                        .count("read_mempool.messages_received", 1);
-                    let result = self.message_is_valid(&message);
+                        .count("read_mempool.messages_received", 1, vec![]);
+                    let results: Vec<Result<(), HubError>> = self
+                        .route_mempool_message(&message)
+                        .iter()
+                        .map(|shard| self.message_is_valid(*shard, &message))
+                        .collect();
+                    // If the message is valid on any shard then keep it. Else all shards return errors and just take the first error.
+                    let result = if results.iter().any(|res| res.is_ok()) {
+                        Ok(())
+                    } else {
+                        results[0].clone()
+                    };
                     if result.is_ok() {
                         self.gossip_message(message, source).await;
                         self.statsd_client
-                            .count("read_mempool.messages_published", 1);
+                            .count("read_mempool.messages_published", 1, vec![]);
                     }
                     if let Some(sender) = reply_to {
                         if let Err(_) = sender.send(result) {
@@ -365,15 +532,28 @@ impl ReadNodeMempool {
     }
 }
 
+/// True iff the message body is a `KeyAddBody`. Defensive to missing `data` — a malformed
+/// message without `data` cannot be a KEY_ADD and therefore shouldn't trip the KEY_ADD limiter;
+/// it will fail later validation on its own.
+fn is_key_add(message: &proto::Message) -> bool {
+    match &message.data {
+        Some(data) => matches!(data.body, Some(proto::message_data::Body::KeyAddBody(_))),
+        None => false,
+    }
+}
+
 pub struct Mempool {
     config: Config,
     messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
     messages: HashMap<u32, BTreeMap<MempoolKey, MempoolMessage>>,
     shard_decision_rx: broadcast::Receiver<ShardChunk>,
+    block_decision_rx: broadcast::Receiver<Block>,
     statsd_client: StatsdClientWrapper,
     read_node_mempool: ReadNodeMempool,
     rate_limits: Option<RateLimits>,
-    network: FarcasterNetwork,
+    // Always present (not `Option`) — KEY_ADD rate limiting is a FIP-required safety
+    // guardrail, not a configurable throughput knob. See `KeyAddRateLimits`.
+    key_add_rate_limits: KeyAddRateLimits,
 }
 
 impl Mempool {
@@ -384,46 +564,72 @@ impl Mempool {
         messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
         num_shards: u32,
         shard_stores: HashMap<u32, Stores>,
+        block_stores: BlockStores,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         shard_decision_rx: broadcast::Receiver<ShardChunk>,
+        block_decision_rx: broadcast::Receiver<Block>,
         statsd_client: StatsdClientWrapper,
     ) -> Self {
         Mempool {
             messages: HashMap::new(),
             messages_request_rx,
             shard_decision_rx,
+            block_decision_rx,
             rate_limits: if config.enable_rate_limits {
                 Some(RateLimits::new(
                     shard_stores.clone(),
                     RateLimitsConfig::default(),
                     statsd_client.clone(),
+                    num_shards,
                 ))
             } else {
                 None
             },
+            key_add_rate_limits: KeyAddRateLimits::new(statsd_client.clone()),
             config,
             read_node_mempool: ReadNodeMempool::new(
                 mempool_rx,
                 num_shards,
                 shard_stores,
+                block_stores,
                 gossip_tx,
                 statsd_client.clone(),
+                network,
             ),
             statsd_client,
-            network,
         }
     }
 
-    fn message_exceeds_rate_limits(&mut self, shard_id: u32, message: &MempoolMessage) -> bool {
+    fn message_exceeds_rate_limits(&mut self, message: &MempoolMessage) -> bool {
         match message {
-            MempoolMessage::UserMessage(message) => {
+            MempoolMessage::UserMessage(user_msg) => {
+                let fid = user_msg.fid();
+
+                // KEY_ADD-specific 1/min limit (NEYN-10579). Gated in the mempool — not at RPC —
+                // so both RPC-submitted and gossip-forwarded KEY_ADDs are dropped without
+                // re-propagation when over limit. KEY_REMOVE is intentionally NEVER rate-limited:
+                // revocation of a compromised key must not be blockable. Non-key user messages
+                // fall through to the storage-quota limiter below.
+                // TODO(#10): this is also the hook for lazy `registration_tx_hash` replacement
+                // eviction — wire in once the pending-FID flow lands.
+                if is_key_add(user_msg) {
+                    if !self.key_add_rate_limits.consume_for_fid(fid) {
+                        self.statsd_client
+                            .count("mempool.key_add_rate_limit_hit", 1, vec![]);
+                        return true;
+                    }
+                }
+
                 if let Some(rate_limits) = &mut self.rate_limits {
-                    !rate_limits.consume_for_fid(shard_id, message.fid())
+                    !rate_limits.consume_for_fid(fid)
                 } else {
                     false
                 }
             }
-            MempoolMessage::ValidatorMessage(_) => false,
+            MempoolMessage::OnchainEvent(_)
+            | MempoolMessage::OnchainEventForMigration(_)
+            | MempoolMessage::FnameTransfer(_)
+            | MempoolMessage::BlockEvent { .. } => false,
         }
     }
 
@@ -442,7 +648,7 @@ impl Mempool {
                     match shard_messages.pop_first() {
                         None => break,
                         Some((_, next_message)) => {
-                            let result = self.message_is_valid(&next_message);
+                            let result = self.message_is_valid(request.shard_id, &next_message);
                             if result.is_ok() {
                                 messages.push(next_message);
                             }
@@ -457,18 +663,47 @@ impl Mempool {
         }
     }
 
-    pub fn message_is_valid(&mut self, message: &MempoolMessage) -> Result<(), HubError> {
-        let shard = self
-            .read_node_mempool
-            .message_router
-            .route_fid(message.fid(), self.read_node_mempool.num_shards);
+    pub fn message_is_valid(
+        &mut self,
+        shard: u32,
+        message: &MempoolMessage,
+    ) -> Result<(), HubError> {
+        // Pre-feature admission gate for KEY_ADD / KEY_REMOVE. Provisional until
+        // NEYN-10619 consolidates feature-gating into a single validate_user_message
+        // hook at mempool admission.
+        if let MempoolMessage::UserMessage(user_msg) = message {
+            let msg_type = user_msg.msg_type();
+            if matches!(msg_type, MessageType::KeyAdd | MessageType::KeyRemove) {
+                let version = EngineVersion::current(self.read_node_mempool.network);
+                if !version.is_enabled(ProtocolFeature::GaslessSigners) {
+                    return Err(HubError::validation_failure(
+                        "gasless signers not yet active",
+                    ));
+                }
+            }
+        }
+
+        // Check for block events that have already been merged
+        if let MempoolMessage::BlockEvent { message, for_shard } = message {
+            if *for_shard == 0 {
+                return Err(HubError::invalid_internal_state(
+                    "block event cannot be submitted to shard 0",
+                ));
+            }
+            let stores = self.read_node_mempool.shard_stores.get(&for_shard).unwrap();
+            if let Ok(max_seqnum) = stores.block_event_store.max_seqnum() {
+                if message.seqnum() <= max_seqnum {
+                    return Err(HubError::duplicate("block event has already been merged"));
+                }
+            }
+        }
 
         if self.message_already_exists(shard, message) {
             return Err(HubError::duplicate("message has already been merged"));
         }
-        if self.message_exceeds_rate_limits(shard, message) {
+        if self.message_exceeds_rate_limits(message) {
             self.statsd_client
-                .count_with_shard(shard, "mempool.rate_limit_hit", 1);
+                .count_with_shard(shard, "mempool.rate_limit_hit", 1, vec![]);
             return Err(HubError::rate_limited(&format!(
                 "rate limit exceeded for FID {}",
                 message.fid()
@@ -482,43 +717,29 @@ impl Mempool {
         message: MempoolMessage,
         source: MempoolSource,
     ) -> Result<(), HubError> {
-        let fid = message.fid();
-        let original_shard_id = self
-            .read_node_mempool
-            .message_router
-            .route_fid(fid, self.read_node_mempool.num_shards);
+        let shard_ids = self.read_node_mempool.route_mempool_message(&message);
 
-        let result = self
-            .insert_into_shard(original_shard_id, message.clone(), source.clone())
-            .await;
-
-        // Fname transfers are mirrored to both the sender and receiver shard.
-        if let MempoolMessage::ValidatorMessage(inner_message) = &message {
-            if let Some(_fname_transfer) = &inner_message.fname_transfer {
-                let version = EngineVersion::current(self.network);
-                // Send the username transfer to all other shards, transfers from a->b->c are
-                // correctly tracked. Due to current limitations of the engine, if we transfer from
-                // shard 1 to shard 2, and then transfer within shard 2, we will keep the transfer
-                // around forever on shard 1. See test_fname_transfer for an example.
-                if version.is_enabled(ProtocolFeature::UsernameShardRoutingFix) {
-                    for copy_shard in 1..self.read_node_mempool.num_shards {
-                        if copy_shard != original_shard_id {
-                            let copy_result = self
-                                .insert_into_shard(copy_shard, message.clone(), source.clone())
-                                .await;
-                            if copy_result.is_err() {
-                                warn!(
-                                    "Failed to insert fname transfer into copy shard {}: {:?}",
-                                    copy_shard, copy_result
-                                );
-                            }
-                        }
-                    }
-                }
+        let mut errors = vec![];
+        for shard_id in shard_ids {
+            if let Err(err) = self
+                .insert_into_shard(shard_id, message.clone(), source.clone())
+                .await
+            {
+                error!(
+                    shard_id = shard_id.to_string(),
+                    "Unable to insert message into mempool for shard: {}",
+                    err.to_string()
+                );
+                errors.push(err)
             }
         }
 
-        result
+        if !errors.is_empty() {
+            // Just pick the first error because we need to return some error
+            return Err(errors[0].clone());
+        }
+
+        Ok(())
     }
 
     async fn insert_into_shard(
@@ -538,7 +759,7 @@ impl Mempool {
         }
 
         // TODO(aditi): Maybe we don't need to run validations here?
-        let result = self.message_is_valid(&message);
+        let result = self.message_is_valid(shard_id, &message);
         if result.is_ok() {
             match self.messages.get_mut(&shard_id) {
                 None => {
@@ -559,18 +780,53 @@ impl Mempool {
             }
 
             self.statsd_client
-                .count_with_shard(shard_id, "mempool.insert.success", 1);
+                .count_with_shard(shard_id, "mempool.insert.success", 1, vec![]);
 
             self.read_node_mempool.gossip_message(message, source).await;
         } else {
-            self.statsd_client.count("mempool.insert.failure", 1);
+            self.statsd_client
+                .count("mempool.insert.failure", 1, vec![]);
         }
 
         result
     }
 
+    fn remove_committed_txns(&mut self, height: Height, transactions: &Vec<Transaction>) {
+        if let Some(mempool) = self.messages.get_mut(&height.shard_index) {
+            for transaction in transactions {
+                for user_message in &transaction.user_messages {
+                    mempool.remove(&user_message.mempool_key());
+                    self.statsd_client.count_with_shard(
+                        height.shard_index,
+                        "mempool.remove.success",
+                        1,
+                        vec![],
+                    );
+                }
+                for system_message in &transaction.system_messages {
+                    mempool.remove(&system_message.mempool_key());
+                    if let Some(onchain_event) = &system_message.on_chain_event {
+                        if onchain_event.r#type() == OnChainEventType::EventTypeStorageRent {
+                            // If the user buys more storage, we should bump their rate limit
+                            if let Some(rate_limits) = &mut self.rate_limits {
+                                rate_limits.invalidate_rate_limiter_for_fid(onchain_event.fid);
+                            }
+                        }
+                    }
+                    self.statsd_client.count_with_shard(
+                        height.shard_index,
+                        "mempool.remove.success",
+                        1,
+                        vec![],
+                    );
+                }
+            }
+        }
+    }
+
     pub async fn run(&mut self) {
         let mut poll_interval = tokio::time::interval(self.config.rx_poll_interval);
+        let mut last_inbound_message_poll_time = Instant::now();
         loop {
             tokio::select! {
                 biased;
@@ -580,33 +836,28 @@ impl Mempool {
                         self.pull_messages(messages_request).await
                     }
                 }
+                block = self.block_decision_rx.recv() => {
+                    match block  {
+                        Ok(block) => {
+                            let header = block.header.expect("Expects block to have a header");
+                            let height = header.height.expect("Expects header to have a height");
+                            self.remove_committed_txns(height, &block.transactions)
+
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            panic!("Block decision tx is closed.");
+                        },
+                        Err(broadcast::error::RecvError::Lagged(count)) => {
+                            error!(lag = count, "Block decision rx is lagged");
+                        }
+                    }
+                }
                 chunk = self.shard_decision_rx.recv() => {
                     match chunk {
                         Ok(chunk) => {
                             let header = chunk.header.expect("Expects chunk to have a header");
                             let height = header.height.expect("Expects header to have a height");
-                            if let Some(mempool) = self.messages.get_mut(&height.shard_index) {
-                                for transaction in chunk.transactions {
-                                    for user_message in transaction.user_messages {
-                                        mempool.remove(&user_message.mempool_key());
-                                        self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
-                                    }
-                                    for system_message in transaction.system_messages {
-                                        mempool.remove(&system_message.mempool_key());
-                                        if let Some(onchain_event) = system_message.on_chain_event
-                                        {
-                                            if onchain_event.r#type() == OnChainEventType::EventTypeStorageRent{
-                                                // If the user buys more storage, we should bump their rate limit
-                                                if let Some(rate_limits) = &mut self.rate_limits {
-                                                    rate_limits.invalidate_rate_limiter_for_fid(onchain_event.fid);
-                                                }
-
-                                            }
-                                        }
-                                       self.statsd_client.count_with_shard(height.shard_index, "mempool.remove.success", 1);
-                                    }
-                                }
-                            }
+                            self.remove_committed_txns(height, &chunk.transactions)
                         },
                         Err(broadcast::error::RecvError::Closed) => {
                             panic!("Shard decision tx is closed.");
@@ -617,9 +868,15 @@ impl Mempool {
                     }
                 }
                 _ = poll_interval.tick() => {
+                    let now = Instant::now();
+                    self.statsd_client.gauge("mempool.queue_size", self.read_node_mempool.mempool_rx.len() as u64, vec![]);
+                    self.statsd_client.time("mempool.inbound_message_poll_interval_ms", now.duration_since(last_inbound_message_poll_time).as_millis() as u64);
+                    last_inbound_message_poll_time = now;
                     // We want to pull in multiple messages per poll so that throughput is not blocked on the polling frequency. The number of messages we pull should be fixed and relatively small so that the mempool isn't always stuck here.
+                    let total_messages: u64 = self.messages.values().map(|m| m.len() as u64).sum();
+                    self.statsd_client.gauge("mempool.total_messages", total_messages, vec![]);
                     for _ in 0..256 {
-                        if self.config.allow_unlimited_mempool_size || (self.messages.len() as u64) < self.config.capacity_per_shard {
+                        if self.config.allow_unlimited_mempool_size || total_messages < self.config.capacity_per_shard {
                             match self.read_node_mempool.mempool_rx.try_recv() {
                                 Ok(MempoolRequest::AddMessage(message, source, reply_to)) => {
                                     let result = self.insert(message, source).await;
@@ -647,6 +904,7 @@ impl Mempool {
 
                             }
                         } else {
+                            self.statsd_client.count("mempool.capacity_limited", 1, vec![]);
                             break;
                         }
                     }

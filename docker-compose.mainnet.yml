@@ -1,5 +1,5 @@
 services:
-  snap_read:
+  snapchain:
     image: farcasterxyz/snapchain:latest
     pull_policy: always
     #    build: # For testing
@@ -22,18 +22,97 @@ services:
         read_node = true
 
         [statsd]
-        prefix="snap_read"
-        addr="127.0.0.1:8125"
-        use_tags=false
+        prefix="snapchain"
+        addr="statsd:8125"
+        use_tags=true
 
         [gossip]
         address="/ip4/0.0.0.0/udp/3382/quic-v1"
-        bootstrap_peers = "/ip4/54.236.164.51/udp/3382/quic-v1, /ip4/54.87.204.167/udp/3382/quic-v1, /ip4/44.197.255.20/udp/3382/quic-v1, /ip4/34.195.157.114/udp/3382/quic-v1, /ip4/107.20.169.236/udp/3382/quic-v1"
+        bootstrap_peers = "/ip4/54.236.164.51/udp/3382/quic-v1, /ip4/54.87.204.167/udp/3382/quic-v1, /ip4/44.197.255.20/udp/3382/quic-v1, /ip4/54.157.62.17/udp/3382/quic-v1, /ip4/34.195.157.114/udp/3382/quic-v1, /ip4/107.20.169.236/udp/3382/quic-v1, /ip4/34.4.32.36/udp/3382/quic-v1"
 
         [consensus]
-        validator_addresses = ["6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72", "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102", "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8", "2c0f58a364b7959c85e49b5a50d14d220c16f8bd7879b0d5d3f68b32de83ecb8", "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970"]
         shard_ids = [1,2]
         num_shards = 2
+
+
+          [[consensus.validator_sets]]
+          effective_at = 0
+          shard_ids = [ 0, 1, 2 ]
+          validator_public_keys = [
+          "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+          "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+          "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+          "2c0f58a364b7959c85e49b5a50d14d220c16f8bd7879b0d5d3f68b32de83ecb8",
+          "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102"
+        ]
+
+          [[consensus.validator_sets]]
+          effective_at = 26_386_684
+          shard_ids = [ 0 ]
+          validator_public_keys = [
+          "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+          "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+          "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+          "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+          "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102"
+        ]
+
+          [[consensus.validator_sets]]
+          effective_at = 26_701_296
+          shard_ids = [ 1 ]
+          validator_public_keys = [
+          "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+          "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+          "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+          "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+          "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102"
+        ]
+
+          [[consensus.validator_sets]]
+          effective_at = 26_556_206
+          shard_ids = [ 2 ]
+          validator_public_keys = [
+          "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+          "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+          "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+          "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+          "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102"
+        ]
+          [[consensus.validator_sets]]
+          effective_at = 28_415_000
+          shard_ids = [ 0 ]
+          validator_public_keys = [
+          "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+          "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+          "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+          "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+          "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+          "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860"
+        ]
+
+          [[consensus.validator_sets]]
+          effective_at = 28_852_000
+          shard_ids = [ 1 ]
+          validator_public_keys = [
+          "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+          "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+          "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+          "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+          "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+          "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860"
+        ]
+
+          [[consensus.validator_sets]]
+          effective_at = 28_706_000
+          shard_ids = [ 2 ]
+          validator_public_keys = [
+          "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+          "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+          "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+          "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+          "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+          "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860"
+        ]
 
         [snapshot]
         endpoint_url = "https://e1f9f185c6e63471dd39f96abd3413c4.r2.cloudflarestorage.com"
@@ -49,6 +128,49 @@ services:
     volumes:
       - .rocks:/app/.rocks
       - .rocks.snapshot:/app/.rocks.snapshot
+    networks:
+      - snapchain
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+  # Start this if you want perf metrics for your hubble node. Remember to start `grafana` as well.
+  statsd:
+    image: graphiteapp/graphite-statsd:1.1.10-5
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-zv", "localhost", "8126"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 1m
+    ports:
+      # - '80:80' # Graphite web
+      # - '2003:2003' # Carbon line receiver
+      # - '2004:2004' # Carbon pickle receiver
+      # - '7002:7002' # Carbon cache query
+      - '${STATSD_PUBLISH:-8125}:8125/udp' # StatsD
+      - '${STATSD_ADMIN_PUBLISH:-8126}:8126' # StatsD admin
+    networks:
+      - snapchain
+
+  # Start this if you want to see perf metrics for your hubble node. Remember to start `statsd` as well.
+  grafana:
+    image: grafana/grafana:10.0.3
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 1m
+    # Mount the grafana config file
+    volumes:
+      - ./grafana/grafana.ini:/etc/grafana/grafana.ini
+      - ./grafana/data:/var/lib/grafana  # Persistent Grafana data
+    ports:
+      - '3000:3000' # Grafana web
     networks:
       - snapchain
 

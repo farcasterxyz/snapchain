@@ -1,11 +1,16 @@
 use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
+use crate::consensus::validator::StoredValidatorSet;
+use crate::consensus::validator::StoredValidatorSets;
+use crate::core::types::ShardId;
 use crate::mempool::mempool::MempoolRequest;
 use crate::proto;
+use crate::proto::Block;
 pub use informalsystems_malachitebft_core_consensus::Params as ConsensusParams;
 pub use informalsystems_malachitebft_core_consensus::State as ConsensusState;
 use libp2p::identity::ed25519::{Keypair, SecretKey};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tokio::sync::oneshot;
 
 #[derive(Clone, Debug)]
 pub enum MalachiteEventShard {
@@ -20,7 +25,14 @@ pub enum SystemMessage {
 
     DecidedValueForReadNode(proto::DecidedValue),
 
-    ReadNodeFinishedInitialSync { shard_id: u32 },
+    BlockRequest {
+        block_event_seqnum: u64,
+        block_tx: oneshot::Sender<Option<Block>>,
+    },
+
+    ReadNodeFinishedInitialSync {
+        shard_id: u32,
+    },
     ExitWithError(String),
 }
 
@@ -55,6 +67,8 @@ pub struct Config {
     // Number of seconds to wait before kicking off start height
     pub consensus_start_delay: u32,
     pub sync_request_timeout: Duration,
+    pub sync_status_update_interval: Duration,
+    pub reconcile_heartbeat_event: u64,
 }
 
 impl Config {
@@ -79,6 +93,8 @@ impl Config {
             validator_sets: Some(validator_sets.clone()),
             consensus_start_delay: self.consensus_start_delay,
             sync_request_timeout: self.sync_request_timeout,
+            sync_status_update_interval: self.sync_status_update_interval,
+            reconcile_heartbeat_event: self.reconcile_heartbeat_event,
         }
     }
 
@@ -99,6 +115,16 @@ impl Config {
 
         panic!("No validator configuration provided")
     }
+
+    pub fn to_stored_validator_sets(&self, shard_id: u32) -> StoredValidatorSets {
+        let validator_set_config = self.get_validator_set_config(shard_id);
+        let validator_sets = validator_set_config
+            .iter()
+            .map(|config| StoredValidatorSet::new(ShardId::new(shard_id), &config))
+            .collect();
+
+        StoredValidatorSets::new(shard_id, validator_sets)
+    }
 }
 
 impl Default for Config {
@@ -117,6 +143,8 @@ impl Default for Config {
             validator_sets: None,
             consensus_start_delay: 2,
             sync_request_timeout: Duration::from_secs(2),
+            sync_status_update_interval: Duration::from_secs(10),
+            reconcile_heartbeat_event: 0,
         }
     }
 }

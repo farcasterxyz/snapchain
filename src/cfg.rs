@@ -1,6 +1,7 @@
 use crate::{
     connectors::{self},
-    consensus, mempool,
+    consensus,
+    mempool::{self, block_receiver},
     network::{self, http_server},
     proto::FarcasterNetwork,
     storage,
@@ -14,6 +15,10 @@ use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::path::Path;
 use std::time::Duration;
+
+pub const DEFAULT_GOSSIP_PORT: u16 = 3382;
+pub const DEFAULT_RPC_PORT: u16 = 3383;
+pub const DEFAULT_HTTP_PORT: u16 = 3381;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct StatsdConfig {
@@ -42,6 +47,12 @@ pub struct PruningConfig {
     pub block_retention: Option<Duration>,
     #[serde(with = "humantime_serde")]
     pub event_retention: Duration,
+    // 6-field cron syntax (sec min hour day month dow), e.g. "0 15 0 * * *"
+    // for 00:15 UTC daily. When unset, defaults to "0 0 0 * * *" (00:00 UTC).
+    // Operators can set a per-validator offset so that pruning is not
+    // synchronized across the cluster.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub event_pruning_schedule: Option<String>,
 }
 
 impl Default for PruningConfig {
@@ -49,6 +60,29 @@ impl Default for PruningConfig {
         Self {
             block_retention: None,
             event_retention: Duration::from_secs(60 * 60 * 24 * 3), // 3 days
+            event_pruning_schedule: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ReplicationConfig {
+    pub enable: bool,
+
+    // Note: you shouldn't set these values in the config file, they are
+    // intended to be statically defined across the whole network.
+    pub snapshot_interval: u64, // Specified in number of blocks
+
+    #[serde(with = "humantime_serde")]
+    pub snapshot_max_age: Duration,
+}
+
+impl Default for ReplicationConfig {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            snapshot_interval: (60 * 60 * 8), // every ~8 hours (in number of blocks)
+            snapshot_max_age: Duration::from_secs(60 * 60 * 24), // keep snapshots for 24 hours
         }
     }
 }
@@ -70,12 +104,13 @@ pub struct Config {
     pub rocksdb_dir: String,
     pub clear_db: bool,
     pub statsd: StatsdConfig,
-    pub trie_branching_factor: u32,
     pub l1_rpc_url: String,
     pub fc_network: FarcasterNetwork,
     pub read_node: bool,
     pub pruning: PruningConfig,
     pub http_server: http_server::Config,
+    pub replication: ReplicationConfig,
+    pub block_receiver: block_receiver::Config,
 }
 
 impl Default for Config {
@@ -90,18 +125,19 @@ impl Default for Config {
             mempool: mempool::mempool::Config::default(),
             rpc_auth: "".to_string(),
             admin_rpc_auth: "".to_string(),
-            rpc_address: "0.0.0.0:3383".to_string(),
-            http_address: "0.0.0.0:3381".to_string(),
+            rpc_address: format!("0.0.0.0:{}", DEFAULT_RPC_PORT),
+            http_address: format!("0.0.0.0:{}", DEFAULT_HTTP_PORT),
             rocksdb_dir: ".rocks".to_string(),
             clear_db: false,
             statsd: StatsdConfig::default(),
-            trie_branching_factor: 16,
             l1_rpc_url: "".to_string(),
             fc_network: FarcasterNetwork::Devnet,
             snapshot: storage::db::snapshot::Config::default(),
             read_node: false,
             pruning: PruningConfig::default(),
             http_server: http_server::Config::default(),
+            replication: ReplicationConfig::default(),
+            block_receiver: block_receiver::Config::default(),
         }
     }
 }

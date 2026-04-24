@@ -4,7 +4,7 @@ use super::{
     store::{Store, StoreDef},
     MessagesPage, StoreEventHandler, PAGE_SIZE_MAX, TS_HASH_LENGTH,
 };
-use crate::{core::error::HubError, proto::SignatureScheme};
+use crate::{core::error::HubError, proto::SignatureScheme, storage::store::account::StoreOptions};
 use crate::{proto::message_data::Body, storage::db::PageOptions};
 use crate::{
     proto::MessageData,
@@ -283,6 +283,20 @@ impl ReactionStore {
         )
     }
 
+    pub fn new_with_opts(
+        db: Arc<RocksDB>,
+        store_event_handler: Arc<StoreEventHandler>,
+        prune_size_limit: u32,
+        store_opts: StoreOptions,
+    ) -> Store<ReactionStoreDef> {
+        Store::new_with_store_def_opts(
+            db,
+            store_event_handler,
+            ReactionStoreDef { prune_size_limit },
+            store_opts,
+        )
+    }
+
     pub fn get_reaction_add(
         store: &Store<ReactionStoreDef>,
         fid: u64,
@@ -302,7 +316,7 @@ impl ReactionStore {
             ..Default::default()
         };
 
-        store.get_add(&partial_message)
+        store.get_add(&partial_message, None)
     }
 
     pub fn get_reaction_remove(

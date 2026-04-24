@@ -114,6 +114,8 @@ pub enum ValidationError {
     EthAddressMissing,
     #[error("solana address is missing")]
     SolAddressMissing,
+    #[error("CAIP-19 string too long")]
+    Caip19TooLong,
     #[error("blockHash must be 32 bytes")]
     InvalidBlockhashLength,
     #[error("blockHash is missing")]
@@ -144,6 +146,48 @@ pub enum ValidationError {
     MissingEmbed,
     #[error("timestamp more than 10 mins in the future")]
     TimestampTooFarInFuture,
+    #[error("timestamp more than 10 mins in the past")]
+    TimestampTooFarInThePast,
     #[error(transparent)]
     HubError(#[from] HubError),
+    #[error("invalid storage unit type")]
+    InvalidStorageUnitType,
+    #[error("num storage units too large")]
+    ExceededMaxStorageUnits,
+    #[error("invalid metadata type")]
+    InvalidMetadataType,
+    #[error("SignedKeyRequest metadata is malformed or signature does not verify")]
+    InvalidSignedKeyRequest,
+    #[error("SignedKeyRequest deadline has expired")]
+    SignedKeyRequestExpired,
+    #[error("requestSigner does not match custody address of requestFid")]
+    SignedKeyRequestCustodyMismatch,
+    #[error("key must be 32 bytes")]
+    InvalidKeyLength,
+    #[error("invalid key type")]
+    InvalidKeyType,
+    #[error("scopes must be non-empty")]
+    EmptyScopes,
+    #[error("scopes list exceeds max of {0} entries")]
+    TooManyScopes(usize),
+    #[error("scope \"{0}\" is not a valid MessageType")]
+    InvalidScope(i32),
+    #[error("ttl must be > 0 and <= {0} seconds")]
+    InvalidTtl(u32),
+    #[error("deadline is missing")]
+    MissingDeadline,
+    #[error("metadata is missing")]
+    MissingMetadata,
+    #[error("invalid signature type")]
+    InvalidSignatureType,
+    #[error("key is already registered onchain for this fid")]
+    KeyAlreadyRegisteredOnchain,
+    #[error("key is already claimed by a different fid")]
+    KeyClaimedByDifferentFid,
+    #[error("key is already registered for this fid by a different requesting fid")]
+    KeyRegisteredByDifferentRequestingFid,
+    #[error("key is not registered for this fid")]
+    KeyNotRegistered,
+    #[error("active-key cap exceeded: {0} keys per FID")]
+    ActiveKeyCapExceeded(u32),
 }

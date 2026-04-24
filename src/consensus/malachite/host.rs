@@ -1,7 +1,7 @@
 //! Implementation of a host actor for bridiging consensus and the application via a set of channels.
 
 use crate::consensus::validator::{ProposalSource, ShardValidator};
-use crate::core::types::SnapchainValidatorContext;
+use crate::core::types::{CommitsExt, FullProposalExt, SnapchainValidatorContext};
 use crate::network::gossip::GossipEvent;
 use crate::proto::{self, decided_value, full_proposal, Block, Commits, FullProposal, ShardChunk};
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
@@ -80,6 +80,7 @@ impl Host {
                 state.shard_validator.start_round(height, round, proposer);
                 info!(
                     height = height.to_string(),
+                    shard = height.shard_index,
                     round = round.as_i64(),
                     at = "host_trace",
                     "Started height with round: {}",
@@ -115,6 +116,7 @@ impl Host {
                 let elapsed = now.elapsed();
                 info!(
                     height = height.to_string(),
+                    shard = height.shard_index,
                     round = round.as_i64(),
                     at = "host_trace",
                     "Proposed value with round: {} ({} ms)",
@@ -189,6 +191,7 @@ impl Host {
                         let elapsed = now.elapsed();
                         info!(
                             height = height.to_string(),
+                            shard = height.shard_index,
                             round = round,
                             at = "host_trace",
                             "Received value at with round: {}, valid_round: {}, valid: {} ({} ms)",
@@ -214,6 +217,21 @@ impl Host {
                 extensions: _,
             } => {
                 let now = tokio::time::Instant::now();
+
+                // Check for empty certificate
+                if certificate.aggregated_signature.signatures.is_empty() {
+                    error!(
+                        height = %certificate.height,
+                        "Received certificate with no signatures. Restarting height."
+                    );
+                    let validator_set = state
+                        .shard_validator
+                        .get_validator_set(certificate.height.as_u64());
+                    consensus_ref
+                        .cast(ConsensusMsg::StartHeight(certificate.height, validator_set))?;
+                    return Ok(());
+                }
+
                 let result = state
                     .shard_validator
                     .get_proposed_value(&certificate.value_id);
@@ -259,10 +277,19 @@ impl Host {
                 let elapsed = now.elapsed();
                 let height = certificate.height;
                 let round = certificate.round;
+                let signers = certificate
+                    .aggregated_signature
+                    .signatures
+                    .iter()
+                    .map(|s| hex::encode(&s.address.0))
+                    .collect::<Vec<String>>()
+                    .join(", ");
                 info!(
                     height = height.to_string(),
                     round = round.as_i64(),
+                    shard = height.shard_index,
                     at = "host_trace",
+                    signers = signers,
                     "Decided value with round: {} ({} ms)",
                     round.as_i64(),
                     elapsed.as_millis()
@@ -295,7 +322,9 @@ impl Host {
             }
 
             HostMsg::GetDecidedValue { height, reply_to } => {
-                info!(height = height.as_u64(), "Get decided value");
+                state
+                    .statsd
+                    .count_with_shard(height.shard_index, "sync.return_value", 1, vec![]);
                 let proposal = state.shard_validator.get_decided_value(height).await;
                 let decided_value = match proposal {
                     Some((commits, proposal)) => match proposal {
@@ -320,6 +349,9 @@ impl Host {
                 value_bytes,
                 reply_to,
             } => {
+                state
+                    .statsd
+                    .count_with_shard(height.shard_index, "sync.process_value", 1, vec![]);
                 let proposal = if height.shard_index == 0 {
                     let decoded_block = Block::decode(value_bytes.as_ref()).unwrap();
                     FullProposal {
@@ -342,7 +374,9 @@ impl Host {
                     .add_proposed_value(&proposal, ProposalSource::Sync);
                 info!(
                     height = height.to_string(),
-                    "Processed value via sync: {}", proposed_value.value
+                    shard = height.shard_index,
+                    "Processed value via sync: {}",
+                    proposed_value.value
                 );
                 reply_to.send(proposed_value)?;
             }

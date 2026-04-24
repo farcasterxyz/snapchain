@@ -1,18 +1,20 @@
-use std::sync::Arc;
-
-use prost::{DecodeError, Message};
-
 use super::{get_from_db_or_txn, make_fid_key, StoreEventHandler};
 use crate::core::error::HubError;
+use crate::core::message::HubEventExt;
 use crate::core::util::FarcasterTime;
 use crate::proto::{
-    self, on_chain_event, FarcasterNetwork, IdRegisterEventBody, IdRegisterEventType, OnChainEvent,
+    self, on_chain_event, on_chain_event::Body, FarcasterNetwork, HubEvent, HubEventType,
+    IdRegisterEventBody, IdRegisterEventType, MergeOnChainEventBody, OnChainEvent,
     OnChainEventType, SignerEventBody, SignerEventType, TierType,
 };
-use crate::proto::{HubEvent, HubEventType, MergeOnChainEventBody};
+use crate::proto::{LendStorageBody, StorageUnitType};
 use crate::storage::constants::{OnChainEventPostfix, RootPrefix, PAGE_SIZE_MAX};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch, RocksdbError};
+use crate::storage::store::account::StoreOptions;
 use crate::storage::util::increment_vec_u8;
+use prost::{DecodeError, Message};
+use std::collections::VecDeque;
+use std::sync::Arc;
 use thiserror::Error;
 
 static PAGE_SIZE: usize = 1000;
@@ -79,10 +81,13 @@ pub fn merge_onchain_event(
     db: &RocksDB,
     txn: &mut RocksDbTransactionBatch,
     onchain_event: OnChainEvent,
+    store_opts: &StoreOptions,
 ) -> Result<(), OnchainEventStorageError> {
     let primary_key = make_onchain_event_primary_key(&onchain_event);
-    if let Some(_) = get_from_db_or_txn(db, txn, &primary_key)? {
-        return Err(OnchainEventStorageError::DuplicateOnchainEvent);
+    if !store_opts.conflict_free {
+        if let Some(_) = get_from_db_or_txn(db, txn, &primary_key)? {
+            return Err(OnchainEventStorageError::DuplicateOnchainEvent);
+        }
     }
     txn.put(primary_key, onchain_event.encode_to_vec());
     build_secondary_indices(db, txn, &onchain_event)?;
@@ -127,7 +132,7 @@ fn build_secondary_indices_for_id_register(
         return Ok(());
     }
     let id_register_by_fid_key = make_id_register_by_fid_key(onchain_event.fid);
-    match get_event_by_secondary_key(db, id_register_by_fid_key.clone())? {
+    match get_event_by_secondary_key(db, id_register_by_fid_key.clone(), Some(txn))? {
         Some(existing_event) => {
             if existing_event.block_number > onchain_event.block_number {
                 return Ok(());
@@ -148,7 +153,7 @@ fn build_secondary_indices_for_signer(
 ) -> Result<(), OnchainEventStorageError> {
     let signer_key =
         make_signer_onchain_event_by_signer_key(onchain_event.fid, signer_event_body.key.clone());
-    match get_event_by_secondary_key(db, signer_key.clone())? {
+    match get_event_by_secondary_key(db, signer_key.clone(), Some(txn))? {
         Some(existing_event) => {
             if existing_event.block_number > onchain_event.block_number {
                 return Ok(());
@@ -166,6 +171,10 @@ fn build_secondary_indices_for_signer(
 
     if signer_event_body.event_type() == SignerEventType::AdminReset {
         let mut next_page_token = None;
+        let mut start_prefix = make_onchain_event_type_prefix(OnChainEventType::EventTypeSigner);
+        start_prefix.extend(make_fid_key(onchain_event.fid));
+        let stop_prefix = increment_vec_u8(&start_prefix);
+
         loop {
             let events_page = get_onchain_events(
                 db,
@@ -174,8 +183,8 @@ fn build_secondary_indices_for_signer(
                     page_token: next_page_token,
                     reverse: false,
                 },
-                OnChainEventType::EventTypeSigner,
-                Some(onchain_event.fid),
+                start_prefix.clone(),
+                stop_prefix.clone(),
             )?;
 
             let onchain_event = events_page.onchain_events.into_iter().find(|event| {
@@ -219,7 +228,7 @@ fn build_secondary_indices(
 ) -> Result<(), OnchainEventStorageError> {
     if let Some(body) = &onchain_event.body {
         match body {
-            on_chain_event::Body::IdRegisterEventBody(id_register_event_body) => {
+            Body::IdRegisterEventBody(id_register_event_body) => {
                 build_secondary_indices_for_id_register(
                     db,
                     txn,
@@ -242,9 +251,15 @@ fn build_secondary_indices(
 fn get_event_by_secondary_key(
     db: &RocksDB,
     secondary_key: Vec<u8>,
+    txn_batch: Option<&RocksDbTransactionBatch>,
 ) -> Result<Option<OnChainEvent>, OnchainEventStorageError> {
-    match db.get(&secondary_key)? {
-        Some(event_primary_key) => match db.get(&event_primary_key)? {
+    let txn_batch = if let Some(txn_batch) = txn_batch {
+        txn_batch
+    } else {
+        &mut RocksDbTransactionBatch::new()
+    };
+    match get_from_db_or_txn(db, txn_batch, &secondary_key)? {
+        Some(event_primary_key) => match get_from_db_or_txn(db, txn_batch, &event_primary_key)? {
             Some(onchain_event) => {
                 let onchain_event = OnChainEvent::decode(onchain_event.as_slice())?;
                 Ok(Some(onchain_event))
@@ -258,17 +273,9 @@ fn get_event_by_secondary_key(
 pub fn get_onchain_events(
     db: &RocksDB,
     page_options: &PageOptions,
-    event_type: OnChainEventType,
-    fid: Option<u64>,
+    start_prefix: Vec<u8>,
+    stop_prefix: Vec<u8>,
 ) -> Result<OnchainEventsPage, OnchainEventStorageError> {
-    let mut start_prefix = make_onchain_event_type_prefix(event_type);
-
-    if let Some(fid) = &fid {
-        start_prefix.extend(make_fid_key(*fid));
-    }
-
-    let stop_prefix = increment_vec_u8(&start_prefix);
-
     let mut onchain_events = vec![];
     let mut last_key = vec![];
     db.for_each_iterator_by_prefix_paged(
@@ -311,11 +318,9 @@ where
     F: Fn(&OnChainEvent) -> bool,
 {
     let mut start_prefix = make_onchain_event_type_prefix(event_type);
-
     if let Some(fid) = &fid {
         start_prefix.extend(make_fid_key(*fid));
     }
-
     let stop_prefix = increment_vec_u8(&start_prefix);
 
     let mut onchain_events = vec![];
@@ -390,6 +395,23 @@ impl StorageSlot {
         }
     }
 
+    pub fn from_storage_lend(storage_lend: &LendStorageBody) -> StorageSlot {
+        let mut storage_slot = StorageSlot::new(0, 0, 0, u32::MAX);
+        match storage_lend.unit_type() {
+            StorageUnitType::UnitType2024 => {
+                storage_slot.units_2024 = storage_lend.num_units as u32
+            }
+            StorageUnitType::UnitTypeLegacy => {
+                storage_slot.units_legacy = storage_lend.num_units as u32
+            }
+            StorageUnitType::UnitType2025 => {
+                storage_slot.units_2025 = storage_lend.num_units as u32
+            }
+        }
+
+        storage_slot
+    }
+
     pub fn from_event(
         onchain_event: &OnChainEvent,
         network: FarcasterNetwork,
@@ -462,12 +484,21 @@ impl StorageSlot {
         self.invalidate_at = std::cmp::min(self.invalidate_at, other.invalidate_at);
         true
     }
+
+    pub fn sub(&mut self, other: &StorageSlot) {
+        if other.is_active() {
+            self.units_legacy -= other.units_legacy;
+            self.units_2024 -= other.units_2024;
+            self.units_2025 -= other.units_2025;
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct OnchainEventStore {
     pub(crate) db: Arc<RocksDB>,
-    store_event_handler: Arc<StoreEventHandler>,
+    pub store_event_handler: Arc<StoreEventHandler>,
+    store_opts: StoreOptions,
 }
 
 impl OnchainEventStore {
@@ -475,6 +506,19 @@ impl OnchainEventStore {
         OnchainEventStore {
             db,
             store_event_handler,
+            store_opts: StoreOptions::default(),
+        }
+    }
+
+    pub fn new_with_opts(
+        db: Arc<RocksDB>,
+        store_event_handler: Arc<StoreEventHandler>,
+        store_opts: StoreOptions,
+    ) -> OnchainEventStore {
+        OnchainEventStore {
+            db,
+            store_event_handler,
+            store_opts,
         }
     }
 
@@ -483,8 +527,8 @@ impl OnchainEventStore {
         onchain_event: OnChainEvent,
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<HubEvent, OnchainEventStorageError> {
-        merge_onchain_event(&self.db, txn, onchain_event.clone())?;
-        let hub_event = &mut HubEvent::from(
+        merge_onchain_event(&self.db, txn, onchain_event.clone(), &self.store_opts)?;
+        let hub_event = &mut HubEvent::new_event(
             HubEventType::MergeOnChainEvent,
             proto::hub_event::Body::MergeOnChainEventBody(MergeOnChainEventBody {
                 on_chain_event: Some(onchain_event.clone()),
@@ -497,6 +541,22 @@ impl OnchainEventStore {
         Ok(hub_event.clone())
     }
 
+    pub fn get_all_onchain_events(
+        &self,
+        page_options: &PageOptions,
+    ) -> Result<OnchainEventsPage, OnchainEventStorageError> {
+        let start_prefix = vec![
+            RootPrefix::OnChainEvent as u8,
+            OnChainEventPostfix::OnChainEvents as u8,
+        ];
+        get_onchain_events(
+            &self.db,
+            page_options,
+            start_prefix.clone(),
+            increment_vec_u8(&start_prefix),
+        )
+    }
+
     pub fn get_onchain_events(
         &self,
         event_type: OnChainEventType,
@@ -504,6 +564,12 @@ impl OnchainEventStore {
     ) -> Result<Vec<OnChainEvent>, OnchainEventStorageError> {
         let mut onchain_events = vec![];
         let mut next_page_token = None;
+        let mut start_prefix = make_onchain_event_type_prefix(event_type);
+        if let Some(fid) = &fid {
+            start_prefix.extend(make_fid_key(*fid));
+        }
+        let stop_prefix = increment_vec_u8(&start_prefix);
+
         loop {
             let onchain_events_page = get_onchain_events(
                 &self.db,
@@ -512,8 +578,8 @@ impl OnchainEventStore {
                     page_token: next_page_token,
                     reverse: false,
                 },
-                event_type,
-                fid,
+                start_prefix.clone(),
+                stop_prefix.clone(),
             )?;
             onchain_events.extend(onchain_events_page.onchain_events);
             if onchain_events_page.next_page_token.is_none() {
@@ -540,9 +606,11 @@ impl OnchainEventStore {
                 None => false,
                 Some(body) => match body {
                     on_chain_event::Body::SignerEventBody(signer_event_body) => {
-                        if let Ok(active_signer) =
-                            self.get_active_signer(onchain_event.fid, signer_event_body.key.clone())
-                        {
+                        if let Ok(active_signer) = self.get_active_signer(
+                            onchain_event.fid,
+                            signer_event_body.key.clone(),
+                            None,
+                        ) {
                             active_signer.is_some()
                         } else {
                             false
@@ -558,16 +626,25 @@ impl OnchainEventStore {
         &self,
         page_options: &PageOptions,
     ) -> Result<(Vec<u64>, Option<Vec<u8>>), OnchainEventStorageError> {
+        let start_prefix = make_onchain_event_type_prefix(OnChainEventType::EventTypeIdRegister);
         let onchain_events_page = get_onchain_events(
             &self.db,
             page_options,
-            OnChainEventType::EventTypeIdRegister,
-            None,
+            start_prefix.clone(),
+            increment_vec_u8(&start_prefix),
         )?;
 
         let fids = onchain_events_page
             .onchain_events
             .iter()
+            .filter(|event| {
+                // Filter out events that are not IdRegisterEventBody.event_type == IdRegisterEventType::Register
+                if let Some(Body::IdRegisterEventBody(body)) = &event.body {
+                    body.event_type() == IdRegisterEventType::Register
+                } else {
+                    false
+                }
+            })
             .map(|event| event.fid)
             .collect();
         let next_page_token = onchain_events_page.next_page_token;
@@ -579,17 +656,19 @@ impl OnchainEventStore {
     pub fn get_id_register_event_by_fid(
         &self,
         fid: u64,
+        txn_batch: Option<&RocksDbTransactionBatch>,
     ) -> Result<Option<OnChainEvent>, OnchainEventStorageError> {
-        get_event_by_secondary_key(&self.db, make_id_register_by_fid_key(fid))
+        get_event_by_secondary_key(&self.db, make_id_register_by_fid_key(fid), txn_batch)
     }
 
     pub fn get_active_signer(
         &self,
         fid: u64,
         signer: Vec<u8>,
+        txn_batch: Option<&RocksDbTransactionBatch>,
     ) -> Result<Option<OnChainEvent>, OnchainEventStorageError> {
         let signer_key = make_signer_onchain_event_by_signer_key(fid, signer);
-        let signer = get_event_by_secondary_key(&self.db, signer_key)
+        let signer = get_event_by_secondary_key(&self.db, signer_key, txn_batch)
             .map_err(|e| OnchainEventStorageError::from(e))?;
         if let Some(signer) = signer {
             if let Some(body) = &signer.body {
@@ -659,6 +738,9 @@ impl OnchainEventStore {
         &self,
         fid: u64,
         network: FarcasterNetwork,
+        pending_events: &[OnChainEvent],
+        lent_storage: &StorageSlot,
+        borrowed_storage: &StorageSlot,
     ) -> Result<StorageSlot, OnchainEventStorageError> {
         let rent_events =
             self.get_onchain_events(OnChainEventType::EventTypeStorageRent, Some(fid))?;
@@ -666,6 +748,16 @@ impl OnchainEventStore {
         for rent_event in rent_events {
             storage_slot.merge(&StorageSlot::from_event(&rent_event, network)?);
         }
+        // Now, virtually merge any pending rent events from the current transaction
+        for event in pending_events {
+            if event.fid == fid && event.r#type() == OnChainEventType::EventTypeStorageRent {
+                storage_slot.merge(&StorageSlot::from_event(event, network)?);
+            }
+        }
+
+        storage_slot.sub(lent_storage);
+        storage_slot.merge(borrowed_storage);
+
         Ok(storage_slot)
     }
 
@@ -676,5 +768,99 @@ impl OnchainEventStore {
             None => Ok(false),
             Some(_) => Ok(true),
         }
+    }
+}
+
+pub struct FIDIterator {
+    db: Arc<RocksDB>,
+    last_fid: u64,
+    fids: VecDeque<u64>,
+}
+
+impl FIDIterator {
+    const PAGE_SIZE_MAX: usize = 100;
+
+    pub fn new(db: Arc<RocksDB>, start_fid: u64) -> Self {
+        FIDIterator {
+            db,
+            last_fid: start_fid,
+            fids: VecDeque::new(),
+        }
+    }
+
+    fn fetch(&mut self) -> Result<Option<u64>, OnchainEventStorageError> {
+        let mut start_prefix =
+            make_onchain_event_type_prefix(OnChainEventType::EventTypeIdRegister);
+        let stop_prefix = increment_vec_u8(&start_prefix);
+        start_prefix.extend(make_fid_key(self.last_fid + 1));
+
+        let page_options = PageOptions {
+            page_size: Some(Self::PAGE_SIZE_MAX),
+            page_token: None,
+            reverse: false,
+        };
+
+        let mut last_fid: u64 = 0;
+
+        self.db
+            .for_each_iterator_by_prefix_paged(
+                Some(start_prefix),
+                Some(stop_prefix),
+                &page_options,
+                |_key, value| {
+                    let onchain_event =
+                        OnChainEvent::decode(value).map_err(|e| HubError::from(e))?;
+
+                    // Filter out events that are not IdRegisterEventBody.event_type == IdRegisterEventType::Register
+                    if let Some(Body::IdRegisterEventBody(body)) = &onchain_event.body {
+                        if body.event_type() != IdRegisterEventType::Register {
+                            return Ok(false); // Skip this event
+                        }
+                    } else {
+                        return Ok(false); // Skip this event
+                    }
+
+                    if self.fids.back() == Some(&onchain_event.fid) {
+                        // Skip this ID register event. There is a small number of FIDs that have 2 ID register events
+                        // because of an old issue. See FIDs 20617, 20671 for eg.
+                    } else {
+                        self.fids.push_back(onchain_event.fid);
+                        last_fid = onchain_event.fid;
+                    }
+
+                    if self.fids.len() >= page_options.page_size.unwrap_or(PAGE_SIZE_MAX) {
+                        return Ok(true); // Stop iterating
+                    }
+
+                    Ok(false) // Continue iterating
+                },
+            )
+            .map_err(|e| OnchainEventStorageError::HubError(e))?;
+
+        let ref_fid = if last_fid > 0 { Some(last_fid) } else { None };
+        Ok(ref_fid)
+    }
+}
+
+impl Iterator for FIDIterator {
+    type Item = u64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.fids.is_empty() {
+            match self.fetch() {
+                Ok(None) | Err(_) => {
+                    // Done fetching, no more FIDs
+                    return None;
+                }
+                Ok(Some(_fid)) => {}
+            }
+        }
+
+        if let Some(fid) = self.fids.pop_front() {
+            self.last_fid = fid;
+            return Some(fid);
+        }
+
+        None
     }
 }

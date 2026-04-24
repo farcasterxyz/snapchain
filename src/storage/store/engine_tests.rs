@@ -3,22 +3,26 @@ mod tests {
     use crate::core::util::{
         calculate_message_hash, from_farcaster_time, get_farcaster_time, FarcasterTime,
     };
+    use crate::proto::reaction_body::Target;
+    use crate::proto::HubEvent;
     use crate::proto::{self, CastId, Embed, FarcasterNetwork, HubEventType, ReactionType};
     use crate::proto::{FnameTransfer, ShardChunk, UserNameProof};
-    use crate::proto::{HubEvent, ValidatorMessage};
     use crate::proto::{OnChainEvent, OnChainEventType};
     use crate::storage::db::{PageOptions, RocksDbTransactionBatch};
-    use crate::storage::store::account::{HubEventIdGenerator, UserDataStore};
-    use crate::storage::store::engine::{MempoolMessage, ShardEngine};
+    use crate::storage::store::account::{HubEventIdGenerator, HubEventStorageExt, UserDataStore};
+    use crate::storage::store::engine::{MessageValidationError, ShardEngine, ShardStateChange};
+    use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller};
     use crate::storage::store::stores::StoreLimits;
     use crate::storage::store::test_helper::{
-        self, commit_event, commit_event_at, commit_message_at, commit_messages,
-        default_custody_address, key_exists_in_trie, limits, EngineOptions, FID3_FOR_TEST,
+        self, assert_block_confirmed_event, block_event_exists, commit_block_events, commit_event,
+        commit_event_at, commit_message_at, commit_messages, default_custody_address,
+        key_exists_in_trie, limits, trie_ctx, EngineOptions, FID3_FOR_TEST,
     };
     use crate::storage::store::test_helper::{
         commit_message, message_exists_in_trie, register_user, FID2_FOR_TEST, FID_FOR_TEST,
     };
     use crate::storage::trie::merkle_trie::TrieKey;
+    use crate::utils::factory::events_factory::create_merge_message_event;
     use crate::utils::factory::signers::generate_signer;
     use crate::utils::factory::{self, events_factory, messages_factory, time, username_factory};
     use crate::version::version::{EngineVersion, ProtocolFeature};
@@ -98,18 +102,6 @@ mod tests {
         assert_event_id(event, None, event_seq);
     }
 
-    fn assert_revoke_event(event: &HubEvent, revoked_message: &proto::Message, event_seq: u64) {
-        let generated_event = match &event.body {
-            Some(proto::hub_event::Body::RevokeMessageBody(msg)) => msg,
-            _ => panic!("Unexpected event type: {:?}", event.body),
-        };
-        assert_eq!(
-            to_hex(&revoked_message.hash),
-            to_hex(&generated_event.message.as_ref().unwrap().hash)
-        );
-        assert_event_id(event, None, event_seq);
-    }
-
     fn assert_onchain_hub_event(event: &HubEvent, onchain_event: &OnChainEvent, event_seq: u64) {
         let generated_event = match &event.body {
             Some(proto::hub_event::Body::MergeOnChainEventBody(onchain)) => onchain,
@@ -167,7 +159,7 @@ mod tests {
             panic!("Failed to propose message");
         }
 
-        let chunk = test_helper::validate_and_commit_state_change(engine, &state_change);
+        let chunk = test_helper::validate_and_commit_state_change(engine, &state_change).await;
         assert_eq!(
             state_change.new_state_root,
             chunk.header.as_ref().unwrap().shard_root
@@ -206,7 +198,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_engine_basic_propose() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         // State root starts empty
         assert_eq!("", to_hex(&engine.trie_root_hash()));
 
@@ -222,10 +214,9 @@ mod tests {
         // Propose a message that doesn't require storage
         let state_change = engine.propose_state_change(
             1,
-            vec![MempoolMessage::ValidatorMessage(ValidatorMessage {
-                on_chain_event: Some(events_factory::create_onchain_event(FID_FOR_TEST)),
-                fname_transfer: None,
-            })],
+            vec![MempoolMessage::OnchainEvent(
+                events_factory::create_onchain_event(FID_FOR_TEST),
+            )],
             None,
         );
 
@@ -239,18 +230,20 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "State change commit failed: merkle trie root hash mismatch")]
     async fn test_engine_commit_with_mismatched_hash() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let mut state_change = engine.propose_state_change(1, vec![], None);
         let invalid_hash = from_hex("ffffffffffffffffffffffffffffffffffffffff");
 
         {
-            let valid = engine.validate_state_change(&state_change);
+            let valid = engine
+                .validate_state_change(&state_change, engine.get_confirmed_height().increment());
             assert!(valid);
         }
 
         {
             state_change.new_state_root = invalid_hash.clone();
-            let valid = engine.validate_state_change(&state_change);
+            let valid = engine
+                .validate_state_change(&state_change, engine.get_confirmed_height().increment());
             assert!(!valid);
         }
 
@@ -258,12 +251,12 @@ mod tests {
 
         chunk.header.as_mut().unwrap().shard_root = invalid_hash;
 
-        engine.commit_shard_chunk(&chunk);
+        engine.commit_shard_chunk(&chunk).await;
     }
 
     #[tokio::test]
     async fn test_engine_rejects_message_with_invalid_hash() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -287,7 +280,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_engine_rejects_message_with_invalid_signature() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -312,15 +305,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_engine_commit_no_messages_happy_path() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let state_change = engine.propose_state_change(1, vec![], None);
         let expected_roots = vec![""];
 
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         assert_eq!(expected_roots[0], to_hex(&engine.trie_root_hash()));
 
-        let valid = engine.validate_state_change(&state_change);
+        let valid =
+            engine.validate_state_change(&state_change, engine.get_confirmed_height().increment());
         assert!(valid);
     }
 
@@ -328,7 +322,7 @@ mod tests {
     async fn test_engine_commit_with_single_message() {
         // enable_logging();
         let (msg1, _) = entities();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -362,14 +356,15 @@ mod tests {
         // And it's not inserted into the trie
         assert_eq!(message_exists_in_trie(&mut engine, &msg1), false);
 
-        let valid = engine.validate_state_change(&state_change);
+        let valid =
+            engine.validate_state_change(&state_change, engine.get_confirmed_height().increment());
         assert!(valid);
 
         // validate does not write to the store
         let casts_result = engine.get_casts_by_fid(msg1.fid());
         test_helper::assert_messages_empty(&casts_result);
 
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         // commit does write to the store
         let casts_result = engine.get_casts_by_fid(msg1.fid());
@@ -401,7 +396,7 @@ mod tests {
         let timestamp = messages_factory::farcaster_time();
         let cast =
             messages_factory::casts::create_cast_add(FID_FOR_TEST, "msg1", Some(timestamp), None);
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -441,7 +436,7 @@ mod tests {
     async fn test_commit_link_messages() {
         let timestamp = messages_factory::farcaster_time();
         let target_fid = 15;
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -511,7 +506,7 @@ mod tests {
     async fn test_commit_reaction_messages() {
         let timestamp = messages_factory::farcaster_time();
         let target_url = "exampleurl".to_string();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -523,7 +518,7 @@ mod tests {
         let reaction_add = messages_factory::reactions::create_reaction_add(
             FID_FOR_TEST,
             ReactionType::Like,
-            target_url.clone(),
+            Target::TargetUrl(target_url.clone()),
             Some(timestamp),
             None,
         );
@@ -536,7 +531,7 @@ mod tests {
         let reaction_remove = messages_factory::reactions::create_reaction_remove(
             FID_FOR_TEST,
             ReactionType::Like,
-            target_url.clone(),
+            Target::TargetUrl(target_url.clone()),
             Some(timestamp),
             None,
         );
@@ -550,7 +545,7 @@ mod tests {
     #[tokio::test]
     async fn test_commit_user_data_messages() {
         let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -576,7 +571,7 @@ mod tests {
     #[tokio::test]
     async fn test_commit_verification_messages() {
         let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::register_user(
             FID3_FOR_TEST,
             test_helper::default_signer(),
@@ -616,7 +611,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_ethereum_address_with_verification() {
         let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         // Register a user
         test_helper::register_user(
@@ -645,12 +640,16 @@ mod tests {
         let verification_result = engine.get_verifications_by_fid(FID3_FOR_TEST);
         assert_eq!(1, verification_result.unwrap().messages.len());
 
+        // Empty transaction batch
+        let mut txn_batch = RocksDbTransactionBatch::new();
+
         // Now validate the Ethereum address verification
         let eth_address_bytes = hex::decode(eth_address).unwrap();
         let result = engine.verify_fid_owns_address(
             FID3_FOR_TEST,
             proto::Protocol::Ethereum,
             &eth_address_bytes,
+            &mut txn_batch,
         );
         assert!(result.is_ok(), "Ethereum address validation should succeed");
 
@@ -660,6 +659,7 @@ mod tests {
             wrong_fid,
             proto::Protocol::Ethereum,
             &eth_address_bytes,
+            &mut txn_batch,
         );
         assert!(
             wrong_fid_result.is_err(),
@@ -676,6 +676,7 @@ mod tests {
             FID3_FOR_TEST,
             proto::Protocol::Solana,
             &eth_address_bytes,
+            &mut txn_batch,
         );
         assert!(
             wrong_protocol_result.is_err(),
@@ -691,7 +692,7 @@ mod tests {
     #[tokio::test]
     async fn test_primary_address_revoked_when_verification_deleted() {
         let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         // Register a user
         test_helper::register_user(
@@ -784,7 +785,7 @@ mod tests {
     #[tokio::test]
     async fn test_primary_address_validation_requires_verification() {
         let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         // Register a user
         test_helper::register_user(
@@ -832,7 +833,7 @@ mod tests {
     #[tokio::test]
     async fn test_removing_non_primary_verification_keeps_primary_address() {
         let timestamp = messages_factory::farcaster_time();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         // Register a user
         test_helper::register_user(
@@ -945,7 +946,8 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             network: Some(FarcasterNetwork::Testnet), // To test basename support
             ..Default::default()
-        });
+        })
+        .await;
         let owner = "owner".to_string().encode_to_vec();
         let signature = "signature".to_string();
         let signer = test_helper::default_signer();
@@ -1005,13 +1007,9 @@ mod tests {
             false
         );
         commit_message_at(&mut engine, &base_username_proof_add, before_base_support).await;
-        assert_eq!(
-            engine.trie_key_exists(
-                test_helper::trie_ctx(),
-                &TrieKey::for_message(&base_username_proof_add)
-            ),
-            false
-        );
+        assert!(!TrieKey::for_message(&base_username_proof_add)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
 
         // Works on the latest engine version
         commit_message(&mut engine, &base_username_proof_add).await;
@@ -1054,14 +1052,14 @@ mod tests {
     #[tokio::test]
     async fn test_account_roots() {
         let cast = messages_factory::casts::create_cast_add(FID_FOR_TEST, "msg1", None, None);
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         let txn = &mut RocksDbTransactionBatch::new();
-        let account_root =
-            engine
-                .get_stores()
-                .trie
-                .get_hash(&engine.db, txn, &TrieKey::for_fid(FID_FOR_TEST));
+        let account_root = engine
+            .get_stores()
+            .trie
+            .get_hash(&engine.db, txn, &TrieKey::for_fid(FID_FOR_TEST))
+            .unwrap();
         let shard_root = engine.get_stores().trie.root_hash().unwrap();
 
         // Account root and shard root is empty initially
@@ -1077,11 +1075,11 @@ mod tests {
         .await;
         commit_message(&mut engine, &cast).await;
 
-        let updated_account_root =
-            engine
-                .get_stores()
-                .trie
-                .get_hash(&engine.db, txn, &TrieKey::for_fid(FID_FOR_TEST));
+        let updated_account_root = engine
+            .get_stores()
+            .trie
+            .get_hash(&engine.db, txn, &TrieKey::for_fid(FID_FOR_TEST))
+            .unwrap();
         let updated_shard_root = engine.get_stores().trie.root_hash().unwrap();
         // Account root is not empty after a message is committed
         assert_eq!(updated_account_root.len() > 0, true);
@@ -1090,16 +1088,16 @@ mod tests {
         let another_fid_event = events_factory::create_onchain_event(FID_FOR_TEST + 1);
         test_helper::commit_event(&mut engine, &another_fid_event).await;
 
-        let account_root_another_fid =
-            engine
-                .get_stores()
-                .trie
-                .get_hash(&engine.db, txn, &TrieKey::for_fid(FID_FOR_TEST + 1));
-        let account_root_original_fid =
-            engine
-                .get_stores()
-                .trie
-                .get_hash(&engine.db, txn, &TrieKey::for_fid(FID_FOR_TEST));
+        let account_root_another_fid = engine
+            .get_stores()
+            .trie
+            .get_hash(&engine.db, txn, &TrieKey::for_fid(FID_FOR_TEST + 1))
+            .unwrap();
+        let account_root_original_fid = engine
+            .get_stores()
+            .trie
+            .get_hash(&engine.db, txn, &TrieKey::for_fid(FID_FOR_TEST))
+            .unwrap();
         let latest_shard_root = engine.get_stores().trie.root_hash().unwrap();
         // Only the account root for the new fid and the shard root is updated, original fid account root remains the same
         assert_eq!(account_root_another_fid.len() > 0, true);
@@ -1111,7 +1109,7 @@ mod tests {
     async fn test_engine_send_messages_one_by_one() {
         // enable_logging();
         let (msg1, msg2) = entities();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let mut previous_root = "".to_string();
 
         let height = engine.get_confirmed_height();
@@ -1143,7 +1141,7 @@ mod tests {
             assert_ne!(previous_root, to_hex(&state_change.new_state_root));
             previous_root = to_hex(&state_change.new_state_root);
 
-            test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+            test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
             assert_eq!(previous_root, to_hex(&engine.trie_root_hash()));
 
@@ -1169,7 +1167,7 @@ mod tests {
             assert_ne!(previous_root, to_hex(&state_change.new_state_root));
             previous_root = to_hex(&state_change.new_state_root);
 
-            test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+            test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
             assert_eq!(previous_root, to_hex(&engine.trie_root_hash()));
 
@@ -1183,7 +1181,7 @@ mod tests {
     async fn test_engine_send_two_messages() {
         // enable_logging();
         let (msg1, msg2) = entities();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -1214,7 +1212,7 @@ mod tests {
             assert_ne!(previous_root, to_hex(&state_change.new_state_root));
             previous_root = to_hex(&state_change.new_state_root);
 
-            test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+            test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
             // Committed state root is the same as what was proposed
             assert_eq!(previous_root, to_hex(&engine.trie_root_hash()));
@@ -1226,8 +1224,782 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_simulate_bulk_messages_invalid_message_in_batch() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+
+        // 1. Register user
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let initial_root_hash = engine.trie_root_hash();
+
+        // 2. Create a batch with a valid message followed by an invalid one.
+        let valid_cast = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "This is a valid message.",
+            None,
+            Some(&test_helper::default_signer()),
+        );
+        let invalid_cast_text = "a".repeat(321); // Exceeds CastAdd limit
+        let invalid_cast = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            &invalid_cast_text,
+            None,
+            Some(&test_helper::default_signer()),
+        );
+
+        let messages_batch = vec![valid_cast.clone(), invalid_cast.clone()];
+
+        // 3. Simulate the batch
+        let result = engine.simulate_bulk_messages(&messages_batch);
+
+        println!("Simulation result: {:?}", result);
+
+        // 4. Assert failure and state integrity
+        assert!(
+            result[0].is_err(),
+            "If there are any errors, the first message should fail"
+        );
+        assert!(
+            result[1].is_err(),
+            "Simulation should fail for second message"
+        );
+
+        let validation_error = result[1].as_ref().unwrap_err();
+        assert!(
+            matches!(
+                validation_error,
+                MessageValidationError::MessageValidationError(
+                    crate::core::validations::error::ValidationError::TextTooLong
+                )
+            ),
+            "Error should be for the invalid message"
+        );
+
+        let final_root_hash = engine.trie_root_hash();
+        assert_eq!(
+            initial_root_hash, final_root_hash,
+            "Trie root should not change after a failed simulation"
+        );
+
+        // Verify that NEITHER message was committed, confirming atomicity
+        assert!(
+            !message_exists_in_trie(&mut engine, &valid_cast),
+            "Valid message should not be in the trie after a failed batch simulation"
+        );
+        assert!(
+            !message_exists_in_trie(&mut engine, &invalid_cast),
+            "Invalid message should not be in the trie"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_simulate_bulk_messages_empty_batch() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let initial_root_hash = engine.trie_root_hash();
+
+        let messages_batch: Vec<proto::Message> = vec![];
+
+        let result = engine.simulate_bulk_messages(&messages_batch);
+
+        assert!(
+            result.len() == 0,
+            "Simulating an empty batch should succeed"
+        );
+
+        let final_root_hash = engine.trie_root_hash();
+        assert_eq!(
+            initial_root_hash, final_root_hash,
+            "Trie root should not change after simulating an empty batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_simulate_bulk_messages_valid_batch() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+
+        // 1. Register user
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let initial_root_hash = engine.trie_root_hash();
+
+        // 2. Create a batch with a valid message followed by an invalid one.
+        let valid_cast1 = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "This is a valid message.",
+            None,
+            Some(&test_helper::default_signer()),
+        );
+
+        let valid_cast2 = messages_factory::casts::create_cast_add(
+            FID_FOR_TEST,
+            "This is another valid message.",
+            None,
+            Some(&test_helper::default_signer()),
+        );
+
+        let messages_batch = vec![valid_cast1.clone(), valid_cast2.clone()];
+
+        // 3. Simulate the batch
+        let result = engine.simulate_bulk_messages(&messages_batch);
+
+        // 4. Assert all success and state integrity
+        assert!(
+            result[0].is_ok(),
+            "Simulation should succeed for first message"
+        );
+        assert!(
+            result[1].is_ok(),
+            "Simulation should succeed for second message"
+        );
+
+        let final_root_hash = engine.trie_root_hash();
+        assert_eq!(
+            initial_root_hash, final_root_hash,
+            "Trie root should not change after a failed simulation"
+        );
+
+        // Verify that NEITHER message was committed, confirming atomicity
+        assert!(
+            !message_exists_in_trie(&mut engine, &valid_cast1),
+            "Valid message should not be in the trie after a simulation"
+        );
+        assert!(
+            !message_exists_in_trie(&mut engine, &valid_cast2),
+            "Valid message should not be in the trie after a simulation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_simulate_bulk_messages_username_proof_and_user_data_add() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let signer = test_helper::default_signer();
+        let owner = test_helper::default_custody_address();
+        let timestamp = time::farcaster_time();
+        let username = "testuser.eth".to_string();
+
+        // 1. Register user
+        register_user(FID_FOR_TEST, signer.clone(), owner.clone(), &mut engine).await;
+
+        // Verify that setting the username fails before the proof is available
+        let initial_user_data_add = messages_factory::user_data::create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::Username,
+            &username,
+            Some(timestamp),
+            Some(&signer),
+        );
+        let pre_check_result = engine.simulate_message(&initial_user_data_add);
+        assert!(
+            pre_check_result.is_err(),
+            "Setting username should fail without a proof"
+        );
+
+        let initial_root_hash = engine.trie_root_hash();
+
+        // 2. Create a batch: 1. Add UsernameProof, 2. Set username with UserDataAdd
+        let username_proof_add = messages_factory::username_proof::create_username_proof(
+            FID_FOR_TEST,
+            proto::UserNameType::UsernameTypeEnsL1,
+            username.clone(),
+            owner,
+            "signature".to_string(), // Signature is not validated in this path
+            timestamp as u64,
+            Some(&signer),
+        );
+
+        let user_data_add = messages_factory::user_data::create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::Username,
+            &username,
+            Some(timestamp + 1), // Timestamp must be after the proof
+            Some(&signer),
+        );
+
+        let messages_batch = vec![username_proof_add.clone(), user_data_add.clone()];
+
+        // 3. Simulate the batch
+        let result = engine.simulate_bulk_messages(&messages_batch);
+
+        println!("Simulation result: {:?}", result);
+
+        // 4. Assert success and state integrity
+        assert!(
+            result.iter().all(|r| r.is_ok()),
+            "Simulation of UsernameProof and dependent UserDataAdd should succeed"
+        );
+
+        // 5. Verify that the engine's state has not been modified
+        let final_root_hash = engine.trie_root_hash();
+        assert_eq!(
+            initial_root_hash, final_root_hash,
+            "Trie root should not change after a successful simulation"
+        );
+
+        // Verify that neither message was actually committed to the trie or DB
+        assert!(
+            !message_exists_in_trie(&mut engine, &username_proof_add),
+            "UsernameProof should not be in the trie after simulation"
+        );
+        assert!(
+            !message_exists_in_trie(&mut engine, &user_data_add),
+            "UserDataAdd should not be in the trie after simulation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bulk_username_proof_and_user_data_add_commit() {
+        // 1. Setup
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let signer = test_helper::default_signer();
+        let owner = test_helper::default_custody_address();
+        let timestamp = time::farcaster_time();
+        let username = "testuser.eth".to_string();
+
+        register_user(FID_FOR_TEST, signer.clone(), owner.clone(), &mut engine).await;
+        let mut event_rx = engine.get_senders().events_tx.subscribe();
+        let initial_root_hash = engine.trie_root_hash();
+
+        // 2. Create a batch: 1. Add UsernameProof, 2. Set username with UserDataAdd
+        let username_proof_add = messages_factory::username_proof::create_username_proof(
+            FID_FOR_TEST,
+            proto::UserNameType::UsernameTypeEnsL1,
+            username.clone(),
+            owner,
+            "signature".to_string(), // Signature is not validated in this path for devnet
+            timestamp as u64,
+            Some(&signer),
+        );
+
+        let user_data_add = messages_factory::user_data::create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::Username,
+            &username,
+            Some(timestamp + 1), // Timestamp must be after the proof
+            Some(&signer),
+        );
+
+        let messages_batch = vec![
+            MempoolMessage::UserMessage(user_data_add.clone()),
+            MempoolMessage::UserMessage(username_proof_add.clone()),
+        ];
+
+        // 3. Propose and commit the batch of messages
+        let state_change = engine.propose_state_change(1, messages_batch, None);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
+
+        // 4. Assertions
+        let final_root_hash = engine.trie_root_hash();
+        assert_ne!(
+            initial_root_hash, final_root_hash,
+            "Trie root should change after a successful commit"
+        );
+        assert_eq!(
+            state_change.new_state_root, final_root_hash,
+            "Final trie root should match the state change root"
+        );
+
+        // Assert that both messages exist in the trie
+        assert!(
+            message_exists_in_trie(&mut engine, &username_proof_add),
+            "UsernameProof message should be in the trie after commit"
+        );
+        assert!(
+            message_exists_in_trie(&mut engine, &user_data_add),
+            "UserDataAdd message should be in the trie after commit"
+        );
+
+        // Assert that both messages exist in their respective stores
+        let proof_result = engine.get_username_proofs_by_fid(FID_FOR_TEST).unwrap();
+        assert_eq!(
+            proof_result.messages.len(),
+            1,
+            "UsernameProof should be in the store"
+        );
+        assert_eq!(proof_result.messages[0].hash, username_proof_add.hash);
+
+        let user_data_result = engine.get_user_data_by_fid(FID_FOR_TEST).unwrap();
+        assert_eq!(
+            user_data_result.messages.len(),
+            1,
+            "UserDataAdd should be in the store"
+        );
+        assert_eq!(user_data_result.messages[0].hash, user_data_add.hash);
+
+        // Assert that the correct events were emitted
+        let block_confirmed_event = recv_next_event(&mut event_rx, false).await;
+        assert_eq!(
+            block_confirmed_event.r#type,
+            HubEventType::BlockConfirmed as i32
+        );
+
+        let event1 = recv_next_event(&mut event_rx, false).await;
+        let event2 = recv_next_event(&mut event_rx, false).await;
+
+        // We need to check for both event types, as their order is not guaranteed.
+        let mut seen_username_proof_event = false;
+        let mut seen_user_data_event = false;
+
+        // Check first event
+        match event1.body.as_ref().unwrap() {
+            proto::hub_event::Body::MergeUsernameProofBody(body) => {
+                assert_eq!(
+                    body.username_proof_message.as_ref().unwrap().hash,
+                    username_proof_add.hash
+                );
+                seen_username_proof_event = true;
+            }
+            proto::hub_event::Body::MergeMessageBody(body) => {
+                assert_eq!(body.message.as_ref().unwrap().hash, user_data_add.hash);
+                seen_user_data_event = true;
+            }
+            _ => panic!("Unexpected event type for event1"),
+        }
+
+        // Check second event
+        match event2.body.as_ref().unwrap() {
+            proto::hub_event::Body::MergeUsernameProofBody(body) => {
+                assert_eq!(
+                    body.username_proof_message.as_ref().unwrap().hash,
+                    username_proof_add.hash
+                );
+                seen_username_proof_event = true;
+            }
+            proto::hub_event::Body::MergeMessageBody(body) => {
+                assert_eq!(body.message.as_ref().unwrap().hash, user_data_add.hash);
+                seen_user_data_event = true;
+            }
+            _ => panic!("Unexpected event type for event2"),
+        }
+
+        assert!(
+            seen_username_proof_event,
+            "MergeUsernameProof event was not seen"
+        );
+        assert!(seen_user_data_event, "MergeMessage event was not seen");
+
+        // Ensure no other events were emitted
+        assert!(
+            try_recv_next_event(&mut event_rx, false).is_err(),
+            "There should be no more events"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_simulate_verification_and_user_name_proof() {
+        // 1. Setup
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            network: Some(FarcasterNetwork::Testnet), // To test ENS support
+            ..Default::default()
+        })
+        .await;
+        let signer = test_helper::default_signer();
+        let custody_address = test_helper::default_custody_address();
+        let timestamp = time::farcaster_time();
+        let username = "testuser.eth".to_string();
+
+        register_user(FID3_FOR_TEST, signer.clone(), custody_address, &mut engine).await;
+
+        let initial_root_hash = engine.trie_root_hash();
+
+        // 2. Create a batch:
+        //    - Message 1: Verify the owner_address for the FID
+        //    - Message 2: Add a UsernameProof for an ENS name owned by owner_address
+        let owner_address = hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap();
+        let verification_add = messages_factory::verifications::create_verification_add(
+            FID3_FOR_TEST,
+            0, // EOA verification
+            owner_address.clone(),
+            hex::decode("b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c").unwrap(),
+            hex::decode("d74860c4bbf574d5ad60f03a478a30f990e05ac723e138a5c860cdb3095f4296").unwrap(),
+            Some(timestamp),
+            Some(&signer),
+        );
+
+        let username_proof_add = messages_factory::username_proof::create_username_proof(
+            FID3_FOR_TEST,
+            proto::UserNameType::UsernameTypeEnsL1,
+            username.clone(),
+            owner_address,
+            "signature".to_string(), // Signature is not validated in this path for devnet
+            (timestamp + 1) as u64,
+            Some(&signer),
+        );
+
+        let messages_batch = vec![verification_add.clone(), username_proof_add.clone()];
+
+        // 3. Simulate the batch
+        let result = engine.simulate_bulk_messages(&messages_batch);
+
+        // 4. Assert success and state integrity
+        assert!(
+            result.iter().all(|r| r.is_ok()),
+            "Simulation of verification and dependent username proof should succeed"
+        );
+
+        // 5. Verify that the engine's state has not been modified
+        let final_root_hash = engine.trie_root_hash();
+        assert_eq!(
+            initial_root_hash, final_root_hash,
+            "Trie root should not change after a successful simulation"
+        );
+
+        // Verify that neither message was actually committed to the trie or DB
+        assert!(
+            !message_exists_in_trie(&mut engine, &verification_add),
+            "Verification should not be in the trie after simulation"
+        );
+        assert!(
+            !message_exists_in_trie(&mut engine, &username_proof_add),
+            "UsernameProof should not be in the trie after simulation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bulk_verification_and_user_name_proof() {
+        // 1. Setup
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            network: Some(FarcasterNetwork::Testnet), // To test ENS support
+            ..Default::default()
+        })
+        .await;
+        let signer = test_helper::default_signer();
+        let custody_address = test_helper::default_custody_address();
+        let timestamp = time::farcaster_time();
+        let username = "testuser.eth".to_string();
+
+        register_user(FID3_FOR_TEST, signer.clone(), custody_address, &mut engine).await;
+        let mut event_rx = engine.get_senders().events_tx.subscribe();
+        let initial_root_hash = engine.trie_root_hash();
+
+        // 2. Create a batch:
+        //    - Message 1: Verify the owner_address for the FID
+        //    - Message 2: Add a UsernameProof for an ENS name owned by owner_address
+        let owner_address = hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap();
+        let verification_add = messages_factory::verifications::create_verification_add(
+            FID3_FOR_TEST,
+            0, // EOA verification
+            owner_address.clone(),
+            hex::decode("b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c").unwrap(),
+            hex::decode("d74860c4bbf574d5ad60f03a478a30f990e05ac723e138a5c860cdb3095f4296").unwrap(),
+            Some(timestamp),
+            Some(&signer),
+        );
+
+        let username_proof_add = messages_factory::username_proof::create_username_proof(
+            FID3_FOR_TEST,
+            proto::UserNameType::UsernameTypeEnsL1,
+            username.clone(),
+            owner_address,
+            "signature".to_string(), // Signature is not validated in this path for devnet
+            (timestamp + 1) as u64,
+            Some(&signer),
+        );
+
+        let messages_batch = vec![
+            MempoolMessage::UserMessage(verification_add.clone()),
+            MempoolMessage::UserMessage(username_proof_add.clone()),
+        ];
+
+        // 3. Propose and commit the batch of messages
+        let state_change = engine.propose_state_change(1, messages_batch, None);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
+
+        // 4. Assertions
+        let final_root_hash = engine.trie_root_hash();
+        assert_ne!(
+            initial_root_hash, final_root_hash,
+            "Trie root should change after a successful commit"
+        );
+        assert_eq!(
+            state_change.new_state_root, final_root_hash,
+            "Final trie root should match the state change root"
+        );
+
+        // Assert that both messages exist in the trie (i.e., both succeeded and were committed)
+        assert!(
+            message_exists_in_trie(&mut engine, &verification_add),
+            "VerificationAdd message should be in the trie after commit"
+        );
+        assert!(
+            message_exists_in_trie(&mut engine, &username_proof_add),
+            "UsernameProof message should be in the trie after commit"
+        );
+
+        // Assert that both messages exist in their respective stores
+        let verification_result = engine.get_verifications_by_fid(FID3_FOR_TEST).unwrap();
+        assert_eq!(
+            verification_result.messages.len(),
+            1,
+            "Verification should be in the store"
+        );
+        assert_eq!(verification_result.messages[0].hash, verification_add.hash);
+
+        let proof_result = engine.get_username_proofs_by_fid(FID3_FOR_TEST).unwrap();
+        assert_eq!(
+            proof_result.messages.len(),
+            1,
+            "UsernameProof should be in the store"
+        );
+        assert_eq!(proof_result.messages[0].hash, username_proof_add.hash);
+
+        // Assert that the correct events were emitted
+        let block_confirmed_event = recv_next_event(&mut event_rx, false).await;
+        assert_eq!(
+            block_confirmed_event.r#type,
+            HubEventType::BlockConfirmed as i32
+        );
+
+        let event1 = recv_next_event(&mut event_rx, false).await;
+        let event2 = recv_next_event(&mut event_rx, false).await;
+
+        let mut seen_verification_event = false;
+        let mut seen_username_proof_event = false;
+
+        match event1.body.as_ref().unwrap() {
+            proto::hub_event::Body::MergeMessageBody(body) => {
+                if body.message.as_ref().unwrap().hash == verification_add.hash {
+                    seen_verification_event = true;
+                }
+            }
+            proto::hub_event::Body::MergeUsernameProofBody(body) => {
+                if body.username_proof_message.as_ref().unwrap().hash == username_proof_add.hash {
+                    seen_username_proof_event = true;
+                }
+            }
+            _ => panic!("Unexpected event type for event1"),
+        }
+        match event2.body.as_ref().unwrap() {
+            proto::hub_event::Body::MergeMessageBody(body) => {
+                if body.message.as_ref().unwrap().hash == verification_add.hash {
+                    seen_verification_event = true;
+                }
+            }
+            proto::hub_event::Body::MergeUsernameProofBody(body) => {
+                if body.username_proof_message.as_ref().unwrap().hash == username_proof_add.hash {
+                    seen_username_proof_event = true;
+                }
+            }
+            _ => panic!("Unexpected event type for event2"),
+        }
+
+        assert!(
+            seen_verification_event,
+            "MergeMessage for verification event was not seen"
+        );
+        assert!(
+            seen_username_proof_event,
+            "MergeUsernameProof event was not seen"
+        );
+
+        assert!(
+            try_recv_next_event(&mut event_rx, false).is_err(),
+            "There should be no more events"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bulk_register_add_signer_and_cast_commit() {
+        // 1. Setup
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let mut event_rx = engine.get_senders().events_tx.subscribe();
+
+        let new_fid = FID3_FOR_TEST;
+        let new_signer = generate_signer();
+        let custody_address = default_custody_address();
+        let timestamp = time::farcaster_time();
+
+        let initial_root_hash = engine.trie_root_hash();
+
+        // 2. Create a batch of dependent on-chain events and a message
+        //    Event 1: Register the new FID
+        let id_register_event = events_factory::create_id_register_event(
+            new_fid,
+            proto::IdRegisterEventType::Register,
+            custody_address,
+            None,
+        );
+
+        //    Event 2: Add a new signer for this FID
+        let signer_add_event = events_factory::create_signer_event(
+            new_fid,
+            new_signer.clone(),
+            proto::SignerEventType::Add,
+            None,
+            None,
+        );
+
+        //    Message 3: Create a cast signed by the new signer
+        let cast_add = messages_factory::casts::create_cast_add(
+            new_fid,
+            "Hello, Farcaster!",
+            Some(timestamp),
+            Some(&new_signer),
+        );
+
+        let messages_batch = vec![
+            MempoolMessage::OnchainEvent(test_helper::default_storage_event(new_fid)),
+            MempoolMessage::OnchainEvent(id_register_event.clone()),
+            MempoolMessage::OnchainEvent(signer_add_event.clone()),
+            MempoolMessage::UserMessage(cast_add.clone()),
+        ];
+
+        // 3. Propose and commit the entire batch
+        let state_change = engine.propose_state_change(1, messages_batch, None);
+        let chunk = test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
+
+        // 4. Assertions
+
+        // 4a. Assert state integrity
+        let final_root_hash = engine.trie_root_hash();
+        assert_ne!(
+            initial_root_hash, final_root_hash,
+            "Trie root should change after a successful commit"
+        );
+        assert_eq!(
+            state_change.new_state_root, final_root_hash,
+            "Final trie root should match the state change root"
+        );
+        assert_eq!(
+            chunk.header.as_ref().unwrap().shard_root,
+            final_root_hash,
+            "ShardChunk root hash should match the final trie root"
+        );
+
+        // 4b. Assert existence in stores and trie
+        let stores = engine.get_stores();
+
+        // Verify ID registration
+        let stored_id_event = stores
+            .onchain_event_store
+            .get_id_register_event_by_fid(new_fid, None)
+            .unwrap();
+        assert!(
+            stored_id_event.is_some(),
+            "ID Register event should be in the store"
+        );
+        assert_eq!(
+            stored_id_event.unwrap().transaction_hash,
+            id_register_event.transaction_hash
+        );
+        assert!(key_exists_in_trie(
+            &mut engine,
+            &TrieKey::for_onchain_event(&id_register_event)
+        ));
+
+        // Verify signer registration
+        let stored_signer = stores
+            .onchain_event_store
+            .get_active_signer(
+                new_fid,
+                new_signer.verifying_key().to_bytes().to_vec(),
+                None,
+            )
+            .unwrap();
+
+        assert!(
+            stored_signer.is_some(),
+            "Signer should be active in the store"
+        );
+        assert!(key_exists_in_trie(
+            &mut engine,
+            &TrieKey::for_onchain_event(&signer_add_event)
+        ));
+
+        // Verify Cast message
+        let stored_casts = stores
+            .cast_store
+            .get_adds_by_fid::<fn(&proto::Message) -> bool>(new_fid, &PageOptions::default(), None)
+            .unwrap();
+
+        assert_eq!(
+            stored_casts.messages.len(),
+            1,
+            "CastAdd message should be in the store"
+        );
+        assert_eq!(stored_casts.messages[0].hash, cast_add.hash);
+        assert!(message_exists_in_trie(&mut engine, &cast_add));
+
+        // 4c. Assert event emission
+        let block_confirmed_event = recv_next_event(&mut event_rx, false).await;
+        assert_eq!(
+            block_confirmed_event.r#type,
+            HubEventType::BlockConfirmed as i32
+        );
+
+        let event1 = recv_next_event(&mut event_rx, false).await;
+        let event2 = recv_next_event(&mut event_rx, false).await;
+        let event3 = recv_next_event(&mut event_rx, false).await;
+        let event4 = recv_next_event(&mut event_rx, false).await;
+
+        let mut seen_storage_event = false;
+        let mut seen_id_register = false;
+        let mut seen_signer_add = false;
+        let mut seen_cast_add = false;
+
+        for event in [event1, event2, event3, event4] {
+            match event.body.as_ref().unwrap() {
+                proto::hub_event::Body::MergeOnChainEventBody(body) => {
+                    let event_body = body.on_chain_event.as_ref().unwrap();
+                    if event_body.r#type() == proto::OnChainEventType::EventTypeStorageRent {
+                        seen_storage_event = true;
+                    } else if event_body.transaction_hash == id_register_event.transaction_hash {
+                        seen_id_register = true;
+                    } else if event_body.transaction_hash == signer_add_event.transaction_hash {
+                        seen_signer_add = true;
+                    }
+                }
+                proto::hub_event::Body::MergeMessageBody(body) => {
+                    if body.message.as_ref().unwrap().hash == cast_add.hash {
+                        seen_cast_add = true;
+                    }
+                }
+                _ => panic!("Unexpected event type received: {:?}", event.r#type),
+            }
+        }
+
+        assert!(
+            seen_storage_event,
+            "MergeOnChainEvent for storage rent was not seen"
+        );
+        assert!(
+            seen_id_register,
+            "MergeOnChainEvent for ID registration was not seen"
+        );
+        assert!(
+            seen_signer_add,
+            "MergeOnChainEvent for signer add was not seen"
+        );
+        assert!(seen_cast_add, "MergeMessage for CastAdd was not seen");
+
+        assert!(
+            try_recv_next_event(&mut event_rx, false).is_err(),
+            "There should be no more events"
+        );
+    }
+
+    #[tokio::test]
     async fn test_add_remove_in_same_tx_respects_crdt_rules() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -1257,22 +2029,19 @@ mod tests {
             MempoolMessage::UserMessage(cast3.clone()),
         ];
         let state_change = engine.propose_state_change(1, messages, None);
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         // We merged an add, a remove and a second remove which should win over the first (later timestamp)
         // In the end, the add and the intermediate remove should not exist
-        assert_eq!(
-            test_helper::key_exists_in_trie(&mut engine, &TrieKey::for_message(cast1)),
-            false
-        );
-        assert_eq!(
-            test_helper::key_exists_in_trie(&mut engine, &TrieKey::for_message(cast2)),
-            false
-        );
-        assert_eq!(
-            test_helper::key_exists_in_trie(&mut engine, &TrieKey::for_message(cast3)),
-            true
-        );
+        assert!(!TrieKey::for_message(&cast1)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
+        assert!(!TrieKey::for_message(&cast2)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
+        assert!(TrieKey::for_message(&cast3)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
 
         let messages = &engine
             .get_stores()
@@ -1302,14 +2071,11 @@ mod tests {
     #[tokio::test]
     async fn test_engine_send_onchain_event() {
         let onchain_event = default_onchain_event();
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let mut event_rx = engine.get_senders().events_tx.subscribe();
         let state_change = engine.propose_state_change(
             1,
-            vec![MempoolMessage::ValidatorMessage(ValidatorMessage {
-                on_chain_event: Some(onchain_event.clone()),
-                fname_transfer: None,
-            })],
+            vec![MempoolMessage::OnchainEvent(onchain_event.clone())],
             None,
         );
         assert_eq!(1, state_change.shard_id);
@@ -1321,7 +2087,7 @@ mod tests {
         assert_eq!(0, events.events.len());
         assert!(event_rx.try_recv().is_err());
 
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         let height = engine.get_confirmed_height();
         assert_eq!(height.shard_index, 1);
@@ -1356,7 +2122,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_ids() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -1375,7 +2141,7 @@ mod tests {
             ],
             None,
         );
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         let cast3 = default_message("cast3");
         let cast4 = default_message("cast4");
@@ -1387,7 +2153,7 @@ mod tests {
             ],
             None,
         );
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         // Ignore first 3 blocks which are user registration events
         let events = HubEvent::get_events(
@@ -1422,7 +2188,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_messages_not_merged_with_no_storage() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         let cast_add =
             messages_factory::casts::create_cast_add(FID_FOR_TEST + 1, "no storage", None, None);
@@ -1440,7 +2206,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_messages_with_invalid_network_are_not_merged() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         let signer = test_helper::default_signer();
         register_user(
@@ -1467,7 +2233,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_messages_pruned_with_exceeded_storage() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -1557,7 +2323,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_messages_partially_merged_with_insufficient_storage() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let signer = test_helper::default_signer();
         test_helper::register_user(
             FID_FOR_TEST,
@@ -1612,7 +2378,7 @@ mod tests {
             MempoolMessage::UserMessage(cast3.clone()),
         ];
         let state_change = engine.propose_state_change(1, messages, None);
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
         let _block_confirmed_event1 = &event_rx.try_recv().unwrap();
         assert_merge_event(&event_rx.try_recv().unwrap(), &cast1, 1);
         assert_merge_event(&event_rx.try_recv().unwrap(), &cast2, 2);
@@ -1625,7 +2391,8 @@ mod tests {
             MempoolMessage::UserMessage(cast6.clone()),
         ];
         let state_change = engine.propose_state_change(1, messages, None);
-        let _chunk = test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        let _chunk =
+            test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
         // Receive the merge and prune events (skipping block confirmed event)
         assert_merge_event(
             &try_recv_next_event(&mut event_rx, true).unwrap(),
@@ -1642,7 +2409,6 @@ mod tests {
             &cast6,
             3,
         );
-
         assert_prune_event(
             &try_recv_next_event(&mut event_rx, false).unwrap(),
             &cast1,
@@ -1677,8 +2443,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_revoking_a_signer_deletes_all_messages_from_that_signer() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+    async fn test_revoking_a_signer_does_not_delete_all_messages_from_that_signer() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let signer = generate_signer();
         let another_signer = generate_signer();
         let timestamp = factory::time::farcaster_time();
@@ -1757,16 +2523,16 @@ mod tests {
         test_helper::commit_event(&mut engine, &revoke_event).await;
         // First receive BLOCK_CONFIRMED event
         let _ = &event_rx.try_recv().unwrap();
-        // Then receive the revoke events with updated sequence numbers
+        // Then receive the onchain event
         assert_onchain_hub_event(&event_rx.try_recv().unwrap(), &revoke_event, 1);
-        assert_revoke_event(&event_rx.try_recv().unwrap(), &msg1, 2);
-        assert_revoke_event(&event_rx.try_recv().unwrap(), &msg2, 3);
+        assert_eq!(
+            event_rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        );
 
         assert_eq!(event_rx.try_recv().is_err(), true); // No more events
-
-        // Only the messages from the revoked signer are deleted
         let messages = engine.get_casts_by_fid(FID_FOR_TEST).unwrap();
-        assert_eq!(1, messages.messages.len());
+        assert_eq!(3, messages.messages.len());
 
         // Different Fid with the same signer is unaffected
         let messages = engine.get_casts_by_fid(FID_FOR_TEST + 1).unwrap();
@@ -1790,7 +2556,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_fname() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         test_helper::register_user(
             FID_FOR_TEST,
@@ -1818,13 +2584,10 @@ mod tests {
 
         let state_change = engine.propose_state_change(
             1,
-            vec![MempoolMessage::ValidatorMessage(ValidatorMessage {
-                on_chain_event: None,
-                fname_transfer: Some(fname_transfer.clone()),
-            })],
+            vec![MempoolMessage::FnameTransfer(fname_transfer.clone())],
             None,
         );
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         // Emits a hub event for the user name proof
         let transfer_event = &try_recv_next_event(&mut event_rx, true).unwrap();
@@ -1850,7 +2613,8 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             fname_signer_address: Some(signer.address()),
             ..EngineOptions::default()
-        });
+        })
+        .await;
 
         test_helper::register_user(
             FID_FOR_TEST,
@@ -1876,13 +2640,10 @@ mod tests {
 
         let state_change = engine.propose_state_change(
             1,
-            vec![MempoolMessage::ValidatorMessage(ValidatorMessage {
-                on_chain_event: None,
-                fname_transfer: Some(fname_transfer.clone()),
-            })],
+            vec![MempoolMessage::FnameTransfer(fname_transfer.clone())],
             None,
         );
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         // Emits a hub event for the user name proof
         // Receive the actual username proof event (skipping BLOCK_CONFIRMED event)
@@ -1913,13 +2674,10 @@ mod tests {
 
         let state_change = engine.propose_state_change(
             1,
-            vec![MempoolMessage::ValidatorMessage(ValidatorMessage {
-                on_chain_event: None,
-                fname_transfer: Some(fname_transfer.clone()),
-            })],
+            vec![MempoolMessage::FnameTransfer(fname_transfer.clone())],
             None,
         );
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         // First receive BLOCK_CONFIRMED event
         let _block_confirmed_event = &event_rx.try_recv().unwrap();
@@ -1945,12 +2703,14 @@ mod tests {
             shard_id: 1,
             fname_signer_address: Some(fname_signer_address.clone()),
             ..Default::default()
-        });
+        })
+        .await;
         let (mut engine2, _) = test_helper::new_engine_with_options(EngineOptions {
             shard_id: 2,
             fname_signer_address: Some(fname_signer_address.clone()),
             ..Default::default()
-        });
+        })
+        .await;
 
         let fid1 = FID_FOR_TEST;
         let signer = generate_signer();
@@ -1994,10 +2754,9 @@ mod tests {
             Some(&signer),
         );
         commit_message(&mut engine1, &fid1_username_msg).await;
-        assert!(key_exists_in_trie(
-            &mut engine1,
-            &TrieKey::for_message(&fid1_username_msg)
-        ));
+        assert!(TrieKey::for_message(&fid1_username_msg)
+            .iter()
+            .all(|key| engine1.trie_key_exists(&trie_ctx(), &key)));
 
         let is_username_present = |engine: &ShardEngine, fid: u64| {
             let result =
@@ -2083,7 +2842,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_ens_username() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let ens_name = &"farcaster.eth".to_string();
         let owner = test_helper::default_custody_address();
         let signature = "signature".to_string();
@@ -2124,7 +2883,8 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             fname_signer_address: Some(signer.address()),
             ..EngineOptions::default()
-        });
+        })
+        .await;
 
         test_helper::register_user(
             FID_FOR_TEST,
@@ -2185,10 +2945,9 @@ mod tests {
             &mut engine,
             &TrieKey::for_fname(FID_FOR_TEST, fname)
         ));
-        assert!(!test_helper::key_exists_in_trie(
-            &mut engine,
-            &TrieKey::for_message(&fid_username_msg)
-        ));
+        assert!(!TrieKey::for_message(&fid_username_msg)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
 
         let original_fid_user_data = engine.get_user_data_by_fid(FID_FOR_TEST).unwrap();
         assert_eq!(original_fid_user_data.messages.len(), 0);
@@ -2196,7 +2955,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_id_registration() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::commit_event(
             &mut engine,
             &test_helper::default_storage_event(FID_FOR_TEST),
@@ -2236,7 +2995,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_signer() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         test_helper::commit_event(
             &mut engine,
             &test_helper::default_storage_event(FID_FOR_TEST),
@@ -2283,7 +3042,8 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             limits: Some(single_message_limit),
             ..Default::default()
-        });
+        })
+        .await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -2343,7 +3103,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fname_validation() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let fname = &"acp".to_string();
         test_helper::register_user(
             FID_FOR_TEST,
@@ -2394,14 +3154,11 @@ mod tests {
         };
         let state_change = engine.propose_state_change(
             1,
-            vec![MempoolMessage::ValidatorMessage(proto::ValidatorMessage {
-                on_chain_event: None,
-                fname_transfer: Some(fname_transfer),
-            })],
+            vec![MempoolMessage::FnameTransfer(fname_transfer)],
             None,
         );
 
-        test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         // When fname is owned by a different fid, message is not merged
         {
@@ -2455,7 +3212,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simulate_message() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         let message = messages_factory::casts::create_cast_add(
             FID_FOR_TEST,
@@ -2523,7 +3280,8 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             network: Some(FarcasterNetwork::Mainnet),
             ..Default::default()
-        });
+        })
+        .await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -2593,12 +3351,9 @@ mod tests {
 
         test_helper::commit_event_at(&mut engine, &good_signer_revoke_event, &current_time).await;
 
-        // The bad signer cast should still exist, but the good signer cast should be revoked
+        // As of the latest changes, both will still exist. We will only reject new messages with the signer.
         assert_eq!(message_exists_in_trie(&mut engine, &bad_signer_cast), true); // Still exists due to bug
-        assert_eq!(
-            message_exists_in_trie(&mut engine, &good_signer_cast),
-            false
-        ); // Revoked
+        assert_eq!(message_exists_in_trie(&mut engine, &good_signer_cast), true);
     }
 
     #[tokio::test]
@@ -2630,7 +3385,8 @@ mod tests {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             network: Some(FarcasterNetwork::Testnet), // To test pro support
             ..Default::default()
-        });
+        })
+        .await;
         // Before active
         purchase_pro_at_time(&mut engine, 1748950000, false).await;
 
@@ -2640,7 +3396,7 @@ mod tests {
 
     #[tokio::test]
     async fn pro_users_get_10k_casts() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -2659,14 +3415,15 @@ mod tests {
             Some(proto::CastType::TenKCast),
             vec![],
             None,
+            vec![],
             None,
             None,
         );
 
         commit_message_at(&mut engine, &long_cast, &FarcasterTime::current()).await;
-        assert!(
-            !engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&long_cast)),
-        );
+        assert!(!TrieKey::for_message(&long_cast)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
 
         commit_event(&mut engine, &pro_event).await;
         assert!(engine.trie_key_exists(
@@ -2675,12 +3432,14 @@ mod tests {
         ));
 
         commit_message_at(&mut engine, &long_cast, &FarcasterTime::current()).await;
-        assert!(engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&long_cast)),);
+        assert!(TrieKey::for_message(&long_cast)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
     }
 
     #[tokio::test]
     async fn pro_users_get_four_embeds() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -2715,13 +3474,14 @@ mod tests {
                 },
             ],
             None,
+            vec![],
             None,
             None,
         );
         commit_message_at(&mut engine, &four_embeds, &FarcasterTime::current()).await;
-        assert!(
-            !engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&four_embeds)),
-        );
+        assert!(!TrieKey::for_message(&four_embeds)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
 
         commit_event(&mut engine, &pro_event).await;
         assert!(engine.trie_key_exists(
@@ -2730,14 +3490,14 @@ mod tests {
         ));
 
         commit_message_at(&mut engine, &four_embeds, &FarcasterTime::current()).await;
-        assert!(
-            engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&four_embeds)),
-        );
+        assert!(TrieKey::for_message(&four_embeds)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
     }
 
     #[tokio::test]
     async fn pro_users_get_banners() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         register_user(
             FID_FOR_TEST,
             test_helper::default_signer(),
@@ -2758,7 +3518,9 @@ mod tests {
             Some(time::current_timestamp_with_offset(-1)),
         );
         commit_message_at(&mut engine, &banner, &FarcasterTime::current()).await;
-        assert!(!engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&banner)),);
+        assert!(!TrieKey::for_message(&banner)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
 
         commit_event(&mut engine, &pro_event).await;
         assert!(engine.trie_key_exists(
@@ -2767,12 +3529,14 @@ mod tests {
         ));
 
         commit_message_at(&mut engine, &banner, &FarcasterTime::current()).await;
-        assert!(engine.trie_key_exists(test_helper::trie_ctx(), &TrieKey::for_message(&banner)),);
+        assert!(TrieKey::for_message(&banner)
+            .iter()
+            .all(|key| engine.trie_key_exists(&trie_ctx(), &key)));
     }
 
     #[tokio::test]
     async fn test_block_confirmed_event_is_always_first() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let mut event_rx = engine.get_senders().events_tx.subscribe();
 
         // Register user to create some events
@@ -2844,7 +3608,7 @@ mod tests {
         // Test that events are committed to the database in the correct order.
         // This is distinct from the previous test which checks that events are emitted
         // from the channel in the right order.
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
 
         // Register user
         test_helper::register_user(
@@ -2894,12 +3658,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_block_confirmed_event_with_no_messages() {
-        let (mut engine, _tmpdir) = test_helper::new_engine();
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let mut event_rx = engine.get_senders().events_tx.subscribe();
 
         // Create empty state change
         let state_change = engine.propose_state_change(1, vec![], None);
-        let _chunk = test_helper::validate_and_commit_state_change(&mut engine, &state_change);
+        let _chunk =
+            test_helper::validate_and_commit_state_change(&mut engine, &state_change).await;
 
         // Verify only BLOCK_CONFIRMED event is received
         let event = event_rx.recv().await.unwrap();
@@ -2924,5 +3689,281 @@ mod tests {
         let timeout_result =
             tokio::time::timeout(std::time::Duration::from_millis(100), event_rx.recv()).await;
         assert!(timeout_result.is_err()); // Should timeout, no more events
+    }
+
+    #[tokio::test]
+    async fn test_post_commit() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            post_commit_tx: Some(tx),
+            ..Default::default()
+        })
+        .await;
+
+        let mut handles = vec![];
+
+        let handle = tokio::spawn(async move {
+            let result =
+                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
+
+            assert!(
+                result.is_ok() && result.as_ref().unwrap().is_some(),
+                "Did not receive a successful post-commit hook"
+            );
+
+            let value = result.unwrap().unwrap();
+
+            assert!(
+                value.channel.send(true).is_ok(),
+                "Failed to send post-commit callback"
+            );
+        });
+        handles.push(handle);
+
+        let handle = tokio::spawn(async move {
+            test_helper::register_user(
+                FID_FOR_TEST,
+                test_helper::default_signer(),
+                test_helper::default_custody_address(),
+                &mut engine,
+            )
+            .await;
+        });
+        handles.push(handle);
+
+        for handle in handles {
+            if let Err(e) = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await {
+                panic!("Task failed: {:?}", e);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_post_commit_does_not_block_on_receiver() {
+        let (tx, mut _rx) = tokio::sync::mpsc::channel(1);
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            post_commit_tx: Some(tx),
+            ..Default::default()
+        })
+        .await;
+
+        let commit_future = test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        );
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), commit_future).await;
+
+        assert!(
+            result.is_ok(),
+            "Post-commit hook should not block on receiver"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_merge_block_events() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let mut event_rx = engine.get_senders().events_tx.subscribe();
+
+        // Don't merge event unless all previous have been merged
+        let block_event2 = events_factory::create_heartbeat_event(2);
+        commit_block_events(&mut engine, vec![&block_event2]).await;
+        assert!(!block_event_exists(&engine, &block_event2));
+        let block_confirmed = assert_block_confirmed_event(event_rx.recv().await.unwrap());
+        assert_eq!(block_confirmed.max_block_event_seqnum, 0);
+
+        // Ordering within a transaction matters
+        let block_event1 = events_factory::create_heartbeat_event(1);
+        commit_block_events(&mut engine, vec![&block_event2, &block_event1]).await;
+        assert!(block_event_exists(&engine, &block_event1));
+        assert!(!block_event_exists(&engine, &block_event2));
+        let block_confirmed = assert_block_confirmed_event(event_rx.recv().await.unwrap());
+        assert_eq!(block_confirmed.max_block_event_seqnum, 1);
+
+        // Merge multiple block events in a single block
+        let block_event3 = events_factory::create_heartbeat_event(3);
+        let block_event4 = events_factory::create_heartbeat_event(4);
+        commit_block_events(
+            &mut engine,
+            vec![&block_event2, &block_event3, &block_event4],
+        )
+        .await;
+        let block_confirmed = assert_block_confirmed_event(event_rx.recv().await.unwrap());
+        assert!(block_event_exists(&engine, &block_event2));
+        assert!(block_event_exists(&engine, &block_event3));
+        assert!(block_event_exists(&engine, &block_event4));
+        assert_eq!(block_confirmed.max_block_event_seqnum, 4);
+    }
+
+    #[tokio::test]
+    async fn test_cached_txn_validation_with_extra_block_event() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let mut event_rx = engine.get_senders().events_tx.subscribe();
+
+        // Create a heartbeat block event
+        let block_event1 = events_factory::create_heartbeat_event(1);
+
+        // Propose a state change with the block event
+        let state_change = engine.propose_state_change(
+            1,
+            vec![MempoolMessage::BlockEvent {
+                for_shard: 1,
+                message: block_event1.clone(),
+            }],
+            None,
+        );
+
+        // Validate the proposal
+        let height = engine.get_confirmed_height();
+        engine.start_round(height.increment(), Round::Nil);
+        let valid = engine.validate_state_change(&state_change, height.increment());
+        assert!(valid);
+
+        // Create empty shard chunk
+        let new_state_change = ShardStateChange {
+            shard_id: 1,
+            timestamp: state_change.timestamp,
+            new_state_root: state_change.new_state_root,
+            events: vec![],
+            transactions: vec![],
+            version: state_change.version,
+            max_block_event_seqnum: 0,
+        };
+        let chunk =
+            test_helper::state_change_to_shard_chunk(1, height.block_number + 1, &new_state_change);
+        engine.commit_shard_chunk(&chunk).await;
+
+        assert!(!block_event_exists(&engine, &block_event1));
+        let block_confirmed = assert_block_confirmed_event(event_rx.recv().await.unwrap());
+        assert_eq!(block_confirmed.max_block_event_seqnum, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cached_txn_validation_with_missing_block_event() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let mut event_rx = engine.get_senders().events_tx.subscribe();
+
+        // Propose a state change with no block event
+        let state_change = engine.propose_state_change(1, vec![], None);
+
+        // Validate the proposal
+        let height = engine.get_confirmed_height();
+        engine.start_round(height.increment(), Round::Nil);
+        let valid = engine.validate_state_change(&state_change, height.increment());
+        assert!(valid);
+
+        let block_event1 = events_factory::create_heartbeat_event(1);
+        // Create shard chunk with heartbeat event
+        let new_state_change = ShardStateChange {
+            shard_id: 1,
+            timestamp: state_change.timestamp,
+            new_state_root: state_change.new_state_root,
+            events: vec![],
+            transactions: MempoolPoller::create_transactions_from_mempool(vec![
+                MempoolMessage::BlockEvent {
+                    for_shard: 1,
+                    message: block_event1.clone(),
+                },
+            ])
+            .unwrap(),
+            version: state_change.version,
+            max_block_event_seqnum: 1,
+        };
+        let chunk =
+            test_helper::state_change_to_shard_chunk(1, height.block_number + 1, &new_state_change);
+        engine.commit_shard_chunk(&chunk).await;
+
+        assert!(block_event_exists(&engine, &block_event1));
+        let block_confirmed = assert_block_confirmed_event(event_rx.recv().await.unwrap());
+        assert_eq!(block_confirmed.max_block_event_seqnum, 1);
+    }
+
+    #[tokio::test]
+    async fn test_storage_lending() {
+        let (mut engine, _temp_dir) = test_helper::new_engine().await;
+
+        let lender_fid = FID_FOR_TEST;
+        register_user(
+            lender_fid,
+            generate_signer(),
+            default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let borrower_fid = FID2_FOR_TEST;
+        register_user(
+            borrower_fid,
+            generate_signer(),
+            default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let lend_message = messages_factory::storage_lend::create_storage_lend(
+            lender_fid,
+            borrower_fid,
+            1, // Lend 1 unit
+            crate::proto::StorageUnitType::UnitType2025,
+            Some(1),
+            None,
+        );
+        let storage_lend_block_event = create_merge_message_event(lend_message, 1);
+        commit_block_events(&mut engine, vec![&storage_lend_block_event]).await;
+
+        // Verify the borrower now has storage
+        let borrower_storage = engine
+            .get_stores()
+            .get_storage_slot_for_fid(borrower_fid, true, &vec![])
+            .unwrap();
+        assert_eq!(
+            borrower_storage.units_for(crate::proto::StorageUnitType::UnitType2025),
+            2
+        );
+        // Verify the lender's storage was reduced
+        let lender_storage = engine
+            .get_stores()
+            .get_storage_slot_for_fid(lender_fid, true, &vec![])
+            .unwrap();
+        // Lender should have default storage minus 1 unit lent
+        assert_eq!(
+            lender_storage.units_for(crate::proto::StorageUnitType::UnitType2025),
+            0
+        );
+
+        // Reclaim the lent storage
+        let lend_message = messages_factory::storage_lend::create_storage_lend(
+            lender_fid,
+            borrower_fid,
+            0, // Set lent storage to 0
+            crate::proto::StorageUnitType::UnitType2025,
+            Some(2),
+            None,
+        );
+        commit_block_events(
+            &mut engine,
+            vec![&create_merge_message_event(lend_message.clone(), 2)],
+        )
+        .await;
+        // Verify the lender's storage was returned
+        let borrower_storage = engine
+            .get_stores()
+            .get_storage_slot_for_fid(borrower_fid, true, &vec![])
+            .unwrap();
+        assert_eq!(
+            borrower_storage.units_for(crate::proto::StorageUnitType::UnitType2025),
+            1
+        );
+        let lender_storage = engine
+            .get_stores()
+            .get_storage_slot_for_fid(lender_fid, true, &vec![])
+            .unwrap();
+        assert_eq!(
+            lender_storage.units_for(crate::proto::StorageUnitType::UnitType2025),
+            1
+        );
+        assert!(!message_exists_in_trie(&mut engine, &lend_message))
     }
 }

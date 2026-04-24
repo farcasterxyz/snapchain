@@ -3,22 +3,21 @@ use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::spawn_read_node::MalachiteReadNodeActors;
 use crate::consensus::read_validator::Engine;
 use crate::core::types::{Address, ShardId, SnapchainShard, SnapchainValidatorContext};
-use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::network::gossip::GossipEvent;
 use crate::proto;
 use crate::storage::db::RocksDB;
-use crate::storage::store::engine::{BlockEngine, Senders, ShardEngine};
-use crate::storage::store::stores::StoreLimits;
-use crate::storage::store::stores::Stores;
-use crate::storage::store::BlockStore;
-use crate::storage::trie::merkle_trie;
+use crate::storage::store::block_engine::{BlockEngine, BlockStores};
+use crate::storage::store::engine::{PostCommitMessage, Senders, ShardEngine};
+use crate::storage::store::stores::{StoreLimits, Stores};
+use crate::storage::trie::merkle_trie::{self, MerkleTrie};
+use crate::utils::block_event_fix::reconcile_heartbeat_events;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
 use libp2p::PeerId;
 use std::collections::{BTreeMap, HashMap};
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{info, warn};
 
 const MAX_SHARDS: u32 = 64;
 
@@ -27,6 +26,7 @@ pub struct SnapchainReadNode {
     pub consensus_actors: BTreeMap<u32, MalachiteReadNodeActors>,
     pub shard_stores: HashMap<u32, Stores>,
     pub shard_senders: HashMap<u32, Senders>,
+    pub block_stores: BlockStores,
     pub address: Address,
 }
 
@@ -37,15 +37,35 @@ impl SnapchainReadNode {
         local_peer_id: PeerId,
         gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
         system_tx: mpsc::Sender<SystemMessage>,
-        messages_request_tx: mpsc::Sender<MempoolMessagesRequest>,
-        block_store: BlockStore,
         rocksdb_dir: String,
         statsd_client: StatsdClientWrapper,
-        trie_branching_factor: u32,
         farcaster_network: proto::FarcasterNetwork,
         registry: &SharedRegistry,
+        engine_post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
+        block_cache: Option<rocksdb::Cache>,
     ) -> Self {
         let validator_address = Address(keypair.public().to_bytes());
+
+        // Now create the block validator data structures
+        let block_shard = SnapchainShard::new(0);
+
+        // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
+        let trie = MerkleTrie::new().unwrap();
+        let block_db =
+            RocksDB::open_shard_db_with_cache(rocksdb_dir.as_str(), 0, block_cache.clone());
+        let engine = BlockEngine::new(
+            trie,
+            statsd_client.clone(),
+            block_db,
+            config.max_messages_per_block,
+            None,
+            farcaster_network,
+        );
+        let block_stores = engine.stores();
+        info!(
+            "Block db height {}",
+            block_stores.block_store.max_block_number().unwrap()
+        );
 
         let mut consensus_actors = BTreeMap::new();
 
@@ -62,9 +82,13 @@ impl SnapchainReadNode {
 
             let ctx = SnapchainValidatorContext::new(keypair.clone());
 
-            let db = RocksDB::open_shard_db(rocksdb_dir.clone().as_str(), shard_id);
-            let trie = merkle_trie::MerkleTrie::new(trie_branching_factor).unwrap(); //TODO: don't unwrap()
-            let engine = ShardEngine::new(
+            let db = RocksDB::open_shard_db_with_cache(
+                rocksdb_dir.clone().as_str(),
+                shard_id,
+                block_cache.clone(),
+            );
+            let trie = merkle_trie::MerkleTrie::new().unwrap(); //TODO: don't unwrap()
+            let engine = match ShardEngine::new(
                 db.clone(),
                 farcaster_network,
                 trie,
@@ -72,12 +96,38 @@ impl SnapchainReadNode {
                 StoreLimits::default(),
                 statsd_client.clone(),
                 config.max_messages_per_block,
-                Some(messages_request_tx.clone()),
+                None, // For a read-only node, we will never pull from the mempool
                 None,
-            );
+                engine_post_commit_tx.clone(),
+            )
+            .await
+            {
+                Ok(engine) => engine,
+                Err(err) => {
+                    panic!(
+                        "Failed to create shard engine for shard {}: {}",
+                        shard_id, err
+                    );
+                }
+            };
 
             shard_senders.insert(shard_id, engine.get_senders());
             shard_stores.insert(shard_id, engine.get_stores());
+
+            if config.reconcile_heartbeat_event != 0 {
+                if let Err(err) = reconcile_heartbeat_events(
+                    block_stores.clone(),
+                    engine.get_stores(),
+                    config.reconcile_heartbeat_event,
+                )
+                .await
+                {
+                    warn!(
+                        "Unable to reconcile heartbeat events {:#?}",
+                        err.to_string(),
+                    )
+                }
+            }
 
             let consensus_actor = MalachiteReadNodeActors::create_and_start(
                 ctx,
@@ -99,11 +149,6 @@ impl SnapchainReadNode {
             consensus_actors.insert(shard_id, consensus_actor.unwrap());
         }
 
-        // Now create the block validator
-        let block_shard = SnapchainShard::new(0);
-
-        // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
-        let engine = BlockEngine::new(block_store.clone(), statsd_client.clone());
         let ctx = SnapchainValidatorContext::new(keypair.clone());
         let block_actor = MalachiteReadNodeActors::create_and_start(
             ctx,
@@ -127,6 +172,7 @@ impl SnapchainReadNode {
             address: validator_address,
             shard_senders,
             shard_stores,
+            block_stores,
         }
     }
 

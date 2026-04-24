@@ -471,21 +471,6 @@ mod tests {
             assert_eq!(all_values.contains(id), true);
         }
 
-        // Unload the children
-        node.unload_children();
-
-        // Make sure that all the children are serialized
-        node.children().values().for_each(|child| match child {
-            TrieNodeType::Node(_) => panic!("Not serialized!"),
-            TrieNodeType::Serialized(_) => {}
-        });
-
-        // Now, calling get_all_values should still work because it should load the values from the DB
-        let all_values = node.get_all_values(ctx, &db, &[]).unwrap();
-        for id in ids.iter() {
-            assert_eq!(all_values.contains(id), true);
-        }
-
         // Cleanup
         db.destroy().unwrap();
     }

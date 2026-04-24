@@ -4,10 +4,10 @@ use super::{
     store::{Store, StoreDef},
     MessagesPage, StoreEventHandler, HASH_LENGTH, PAGE_SIZE_MAX, TRUE_VALUE, TS_HASH_LENGTH,
 };
-use crate::core::error::HubError;
 use crate::storage::constants::{RootPrefix, UserPostfix};
 use crate::storage::db::PageOptions;
 use crate::storage::util::{bytes_compare, increment_vec_u8};
+use crate::{core::error::HubError, storage::store::account::StoreOptions};
 use crate::{
     proto::{self as message, Message, MessageType},
     storage::db::{RocksDB, RocksDbTransactionBatch},
@@ -370,6 +370,20 @@ impl CastStore {
         Store::new_with_store_def(db, store_event_handler, CastStoreDef { prune_size_limit })
     }
 
+    pub fn new_with_opts(
+        db: Arc<RocksDB>,
+        store_event_handler: Arc<StoreEventHandler>,
+        prune_size_limit: u32,
+        store_opts: StoreOptions,
+    ) -> Store<CastStoreDef> {
+        Store::new_with_store_def_opts(
+            db,
+            store_event_handler,
+            CastStoreDef { prune_size_limit },
+            store_opts,
+        )
+    }
+
     pub fn get_cast_add(
         store: &Store<CastStoreDef>,
         fid: u64,
@@ -390,7 +404,7 @@ impl CastStore {
             ..Default::default()
         };
 
-        store.get_add(&partial_message)
+        store.get_add(&partial_message, None)
     }
 
     pub fn get_cast_remove(

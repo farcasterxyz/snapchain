@@ -65,11 +65,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     {
         // common metrics thread
         let handle = thread::spawn(move || loop {
-            statsd_client.gauge("branching_factor", args.branching_factor as u64);
-            statsd_client.gauge("messages_per_block", args.messages_per_block as u64);
-            statsd_client.gauge("turbohash", turbohash);
-            statsd_client.gauge("users_per_shard", args.users_per_shard as u64);
-            statsd_client.gauge("shard_count", args.shard_count as u64);
+            statsd_client.gauge("branching_factor", args.branching_factor as u64, vec![]);
+            statsd_client.gauge("messages_per_block", args.messages_per_block as u64, vec![]);
+            statsd_client.gauge("turbohash", turbohash, vec![]);
+            statsd_client.gauge("users_per_shard", args.users_per_shard as u64, vec![]);
+            statsd_client.gauge("shard_count", args.shard_count as u64, vec![]);
 
             thread::sleep(Duration::from_secs(1));
         });
@@ -96,7 +96,7 @@ fn run_shard(
     let db = db::RocksDB::new(db_path_str);
     db.open()?;
 
-    let mut t = merkle_trie::MerkleTrie::new(args.branching_factor)?;
+    let mut t = merkle_trie::MerkleTrie::new()?;
     t.initialize(&db)?;
 
     let gen_type = GeneratorTypes::MultiUser;
@@ -116,8 +116,18 @@ fn run_shard(
 
     let sdc = statsd_client.clone();
     let count_callback = move |read_count: (u64, u64)| {
-        sdc.count_with_shard(shard_id, "engine.trie.db_get_count.total", read_count.0);
-        sdc.count_with_shard(shard_id, "engine.trie.mem_get_count.total", read_count.1);
+        sdc.count_with_shard(
+            shard_id,
+            "engine.trie.db_get_count.total",
+            read_count.0,
+            vec![],
+        );
+        sdc.count_with_shard(
+            shard_id,
+            "engine.trie.mem_get_count.total",
+            read_count.1,
+            vec![],
+        );
     };
 
     let mut ctx = Context::with_callback(count_callback.clone());

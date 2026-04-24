@@ -52,9 +52,54 @@ pub mod time {
 pub mod events_factory {
     use super::*;
     use crate::{
-        proto::{self, StorageUnitType, TierPurchaseBody, TierType},
+        proto::{
+            self, BlockEvent, BlockEventData, BlockEventType, HeartbeatEventBody,
+            MergeMessageEventBody, StorageUnitType, TierPurchaseBody, TierType,
+        },
         storage::store::account::{StorageSlot, UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP},
     };
+
+    pub fn create_heartbeat_event(seqnum: u64) -> BlockEvent {
+        let data = BlockEventData {
+            seqnum,
+            r#type: BlockEventType::Heartbeat as i32,
+            block_number: 0,
+            event_index: 0,
+            block_timestamp: 0,
+            body: Some(message::block_event_data::Body::HeartbeatEventBody(
+                HeartbeatEventBody {},
+            )),
+        };
+        let hash = blake3::hash(data.encode_to_vec().as_slice())
+            .as_bytes()
+            .to_vec();
+        BlockEvent {
+            hash,
+            data: Some(data),
+        }
+    }
+
+    pub fn create_merge_message_event(message: proto::Message, seqnum: u64) -> BlockEvent {
+        let data = BlockEventData {
+            seqnum,
+            r#type: BlockEventType::MergeMessage as i32,
+            block_number: 0,
+            event_index: 0,
+            block_timestamp: 0,
+            body: Some(message::block_event_data::Body::MergeMessageEventBody(
+                MergeMessageEventBody {
+                    message: Some(message),
+                },
+            )),
+        };
+        let hash = blake3::hash(data.encode_to_vec().as_slice())
+            .as_bytes()
+            .to_vec();
+        BlockEvent {
+            hash,
+            data: Some(data),
+        }
+    }
 
     pub fn create_onchain_event(fid: u64) -> OnChainEvent {
         OnChainEvent {
@@ -293,14 +338,15 @@ pub mod messages_factory {
 
     pub mod casts {
         use super::*;
-        use crate::proto::{self, CastRemoveBody, CastType, Embed};
+        use crate::proto::{self, cast_add_body::Parent, CastRemoveBody, CastType, Embed};
 
         pub fn create_cast_add_rich(
             fid: u64,
             text: &str,
             cast_type: Option<CastType>,
             embeds: Vec<Embed>,
-            parent: Option<proto::CastId>,
+            parent: Option<Parent>,
+            mentions: Vec<u64>,
             timestamp: Option<u32>,
             private_key: Option<&SigningKey>,
         ) -> message::Message {
@@ -308,9 +354,9 @@ pub mod messages_factory {
                 text: text.to_string(),
                 embeds,
                 embeds_deprecated: vec![],
-                mentions: vec![],
+                mentions,
                 mentions_positions: vec![],
-                parent: parent.map(|p| proto::cast_add_body::Parent::ParentCastId(p)),
+                parent,
                 r#type: cast_type.unwrap_or(CastType::Cast) as i32,
             };
             create_message_with_data(
@@ -334,6 +380,7 @@ pub mod messages_factory {
                 Some(CastType::Cast),
                 vec![],
                 None,
+                vec![],
                 timestamp,
                 private_key,
             )
@@ -352,10 +399,11 @@ pub mod messages_factory {
                 text,
                 Some(CastType::Cast),
                 vec![],
-                Some(proto::CastId {
+                Some(Parent::ParentCastId(proto::CastId {
                     fid: parent_fid,
                     hash: parent_hash.clone(),
-                }),
+                })),
+                vec![],
                 timestamp,
                 private_key,
             )
@@ -457,13 +505,13 @@ pub mod messages_factory {
         pub fn create_reaction_add(
             fid: u64,
             reaction_type: ReactionType,
-            target_url: String,
+            target: Target,
             timestamp: Option<u32>,
             private_key: Option<&SigningKey>,
         ) -> message::Message {
             let reaction_body = ReactionBody {
                 r#type: reaction_type as i32,
-                target: Some(Target::TargetUrl(target_url)),
+                target: Some(target),
             };
             create_message_with_data(
                 fid,
@@ -477,13 +525,13 @@ pub mod messages_factory {
         pub fn create_reaction_remove(
             fid: u64,
             reaction_type: ReactionType,
-            target_url: String,
+            target: Target,
             timestamp: Option<u32>,
             private_key: Option<&SigningKey>,
         ) -> message::Message {
             let reaction_body = ReactionBody {
                 r#type: reaction_type as i32,
-                target: Some(Target::TargetUrl(target_url)),
+                target: Some(target),
             };
             create_message_with_data(
                 fid,
@@ -514,6 +562,34 @@ pub mod messages_factory {
                 fid,
                 MessageType::UserDataAdd,
                 message::message_data::Body::UserDataBody(user_data_body),
+                timestamp,
+                private_key,
+            )
+        }
+    }
+
+    pub mod storage_lend {
+        use message::LendStorageBody;
+
+        use super::*;
+
+        pub fn create_storage_lend(
+            from_fid: u64,
+            to_fid: u64,
+            units: u64,
+            unit_type: message::StorageUnitType,
+            timestamp: Option<u32>,
+            private_key: Option<&SigningKey>,
+        ) -> message::Message {
+            let lend_storage_body = LendStorageBody {
+                to_fid,
+                num_units: units,
+                unit_type: unit_type as i32,
+            };
+            create_message_with_data(
+                from_fid,
+                MessageType::LendStorage,
+                message::message_data::Body::LendStorageBody(lend_storage_body),
                 timestamp,
                 private_key,
             )
@@ -627,13 +703,14 @@ pub mod username_factory {
     use crate::proto::FnameTransfer;
     use crate::proto::UserNameProof;
     use crate::storage::store::test_helper::default_custody_address;
+    use crate::utils::factory::address::generate_random_address;
 
     pub fn create_username_proof(
         fid: u64,
         username_type: crate::proto::UserNameType,
         name: &String,
         timestamp: Option<u64>,
-        owner: Vec<u8>,
+        owner: Option<Vec<u8>>,
     ) -> UserNameProof {
         let timestamp = timestamp
             .map(|t| t as u64)
@@ -641,7 +718,7 @@ pub mod username_factory {
         UserNameProof {
             timestamp,
             name: name.as_bytes().to_vec(),
-            owner,
+            owner: owner.unwrap_or(generate_random_address()),
             signature: rand::random::<[u8; 32]>().to_vec(),
             fid,
             r#type: username_type as i32,

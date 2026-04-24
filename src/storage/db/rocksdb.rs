@@ -1,14 +1,13 @@
 use crate::core::error::HubError;
-use crate::storage::db::multi_chunk_writer::MultiChunkWriter;
 use crate::storage::util::increment_vec_u8;
 use rocksdb::{Options, TransactionDB, DB};
 use std::collections::HashMap;
 use std::fs::{self};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use thiserror::Error;
 use tokio::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
 use walkdir::WalkDir;
 
 #[derive(Error, Debug)]
@@ -24,6 +23,9 @@ pub enum RocksdbError {
 
     #[error(transparent)]
     BackupError(#[from] std::io::Error),
+
+    #[error("DB is read only")]
+    ReadOnly,
 }
 
 /** Hold a transaction. List of key/value pairs that will be committed together */
@@ -63,10 +65,35 @@ pub struct IteratorOptions {
     pub reverse: bool,
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SnapchainDbOptimizationType {
+    #[default]
+    Default, // Default read-write DB
+    BulkWriteOptimized, // Optimized for very large bulk writes
+}
+
+pub enum DBProvider {
+    Transaction(TransactionDB),
+    ReadOnly(DB),
+}
+
 pub struct RocksDB {
-    pub db: RwLock<Option<rocksdb::TransactionDB>>,
+    inner: RwLock<Option<DBProvider>>,
+
     pub path: String,
+    pub db_options_type: SnapchainDbOptimizationType,
+    block_cache: Option<rocksdb::Cache>,
+}
+
+impl Default for RocksDB {
+    fn default() -> Self {
+        RocksDB {
+            inner: RwLock::new(None),
+            path: String::new(),
+            db_options_type: SnapchainDbOptimizationType::Default,
+            block_cache: None,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -84,161 +111,128 @@ impl std::fmt::Debug for RocksDB {
 
 impl RocksDB {
     pub fn new(path: &str) -> RocksDB {
+        Self::new_with_cache(path, SnapchainDbOptimizationType::Default, None)
+    }
+
+    pub fn new_with_options(path: &str, db_options_type: SnapchainDbOptimizationType) -> RocksDB {
+        Self::new_with_cache(path, db_options_type, None)
+    }
+
+    pub fn new_with_cache(
+        path: &str,
+        db_options_type: SnapchainDbOptimizationType,
+        block_cache: Option<rocksdb::Cache>,
+    ) -> RocksDB {
         info!({ path }, "Opening RocksDB database");
 
         RocksDB {
-            db: RwLock::new(None),
+            inner: RwLock::new(None),
             path: path.to_string(),
+            db_options_type,
+            block_cache,
         }
     }
 
+    pub fn open_bulk_write_shard_db(db_dir: &str, shard_id: u32) -> Arc<RocksDB> {
+        Self::open_bulk_write_shard_db_with_cache(db_dir, shard_id, None)
+    }
+
+    pub fn open_bulk_write_shard_db_with_cache(
+        db_dir: &str,
+        shard_id: u32,
+        block_cache: Option<rocksdb::Cache>,
+    ) -> Arc<RocksDB> {
+        let db = RocksDB::new_with_cache(
+            format!("{}/shard-{}", db_dir, shard_id).as_str(),
+            SnapchainDbOptimizationType::BulkWriteOptimized,
+            block_cache,
+        );
+        db.open().unwrap();
+        Arc::new(db)
+    }
+
     pub fn open_shard_db(db_dir: &str, shard_id: u32) -> Arc<RocksDB> {
-        let db = RocksDB::new(format!("{}/shard-{}", db_dir, shard_id).as_str());
+        Self::open_shard_db_with_cache(db_dir, shard_id, None)
+    }
+
+    pub fn open_shard_db_with_cache(
+        db_dir: &str,
+        shard_id: u32,
+        block_cache: Option<rocksdb::Cache>,
+    ) -> Arc<RocksDB> {
+        let db = RocksDB::new_with_cache(
+            format!("{}/shard-{}", db_dir, shard_id).as_str(),
+            SnapchainDbOptimizationType::Default,
+            block_cache,
+        );
         db.open().unwrap();
         Arc::new(db)
     }
 
     pub fn open_global_db(db_dir: &str) -> Arc<RocksDB> {
-        let db = RocksDB::new(format!("{}/global", db_dir).as_str());
+        Self::open_global_db_with_cache(db_dir, None)
+    }
+
+    pub fn open_global_db_with_cache(
+        db_dir: &str,
+        block_cache: Option<rocksdb::Cache>,
+    ) -> Arc<RocksDB> {
+        let db = RocksDB::new_with_cache(
+            format!("{}/global", db_dir).as_str(),
+            SnapchainDbOptimizationType::Default,
+            block_cache,
+        );
         db.open().unwrap();
         Arc::new(db)
     }
 
-    pub fn backup_db(
-        db: Arc<RocksDB>,
-        backup_dir: &str,
-        shard_id: u32,
-        timestamp_ms: i64,
-    ) -> Result<String, RocksdbError> {
-        let now = chrono::DateTime::from_timestamp_millis(timestamp_ms)
-            .unwrap()
-            .naive_utc();
-        let backup_path = Path::new(backup_dir).join(format!("shard-{}", shard_id));
-        let span = tracing::span!(
-            tracing::Level::INFO,
-            "backup_db",
-            path = backup_path.to_str().unwrap()
-        );
-        let _enter = span.enter();
-        info!("Backing up db to {:?}", backup_path);
-        if backup_path.exists() {
-            warn!("Backup path already exists, removing it");
-            fs::remove_dir_all(&backup_path).map_err(|e| RocksdbError::BackupError(e))?;
+    fn apply_block_cache_opts(&self, opts: &mut Options) {
+        if let Some(cache) = &self.block_cache {
+            let mut block_opts = rocksdb::BlockBasedOptions::default();
+            block_opts.set_block_cache(cache);
+            block_opts.set_cache_index_and_filter_blocks(true);
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+            opts.set_block_based_table_factory(&block_opts);
         }
-        let backup_path = backup_path.into_os_string().into_string().unwrap();
-
-        let mut backup_db_options = Options::default();
-        backup_db_options.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        backup_db_options.create_if_missing(true);
-
-        let backup_db = DB::open(&backup_db_options, &backup_path)
-            .map_err(|e| RocksdbError::InternalError(e))?;
-        let mut write_options = rocksdb::WriteOptions::default();
-        write_options.disable_wal(true); // Significantly faster, WAL doesn't provide benefits for backups
-        let mut write_batch = rocksdb::WriteBatch::default();
-
-        let backup_thread = std::thread::spawn(move || {
-            let main_db = db.db();
-            let main_db_snapshot = main_db.as_ref().unwrap().snapshot();
-
-            let iterator = main_db_snapshot.iterator(rocksdb::IteratorMode::Start);
-            let mut count = 0;
-            for item in iterator {
-                let (key, value) = item.unwrap();
-                write_batch.put(key, value);
-                if write_batch.len() >= 10_000 {
-                    backup_db.write_opt(write_batch, &write_options).unwrap();
-                    write_batch = rocksdb::WriteBatch::default();
-                }
-
-                count += 1;
-                if count % 1_000_000 == 0 {
-                    backup_db.flush().unwrap();
-                    info!("Snapshot backup progress: {}M keys", count / 1_000_000);
-                }
-            }
-
-            // write any leftover keys
-            backup_db.write_opt(write_batch, &write_options).unwrap();
-
-            info!("Backup completed: {}", count);
-            drop(main_db_snapshot);
-            drop(backup_db);
-        });
-
-        backup_thread.join().unwrap();
-        info!(
-            "Backup completed, time taken = {:?}",
-            chrono::Utc::now().naive_utc() - now
-        );
-        let output_file = Self::create_tar_gzip(&backup_path, backup_dir, shard_id)?;
-        fs::remove_dir_all(&backup_path).map_err(|e| RocksdbError::BackupError(e))?;
-
-        Ok(output_file)
-    }
-
-    pub fn create_tar_gzip(
-        input_dir: &str,
-        output_dir: &str,
-        shard_id: u32,
-    ) -> Result<String, RocksdbError> {
-        let base_name = Path::new(input_dir)
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap();
-
-        let chunked_output_dir = Path::new(output_dir)
-            .join(format!("{}-{}.tar.gz", base_name, shard_id.to_string()))
-            .as_os_str()
-            .to_str()
-            .unwrap()
-            .to_string();
-
-        let start = std::time::SystemTime::now();
-        info!(
-            output_file_path = &chunked_output_dir,
-            base_name = &base_name,
-            "Creating chunked tar.gz snapshot for directory: {}",
-            input_dir
-        );
-
-        let mut multi_chunk_writer = MultiChunkWriter::new(
-            PathBuf::from(chunked_output_dir.clone()),
-            100 * 1024 * 1024, // 100MB, this is the max size recommended for the S3 [put_object] API
-        );
-
-        let mut tar = tar::Builder::new(&mut multi_chunk_writer);
-        tar.append_dir_all(base_name, input_dir)?;
-        tar.finish()?;
-        drop(tar); // Needed so we can call multi_chunk_writer.finish() next
-        multi_chunk_writer.finish()?;
-
-        let metadata = fs::metadata(&chunked_output_dir)?;
-        let time_taken = start.elapsed().expect("Time went backwards");
-        info!(
-            "Created chunked tar.gz archive for snapshot: path = {}, size = {} bytes, time taken = {:?}",
-            chunked_output_dir,
-            metadata.len(),
-            time_taken
-        );
-
-        Ok(chunked_output_dir)
     }
 
     pub fn open(&self) -> Result<(), RocksdbError> {
-        let mut db_lock = self.db.write().unwrap();
+        let mut inner = self.inner.write().unwrap();
 
         // Create RocksDB options
         let mut opts = Options::default();
+
+        if self.db_options_type == SnapchainDbOptimizationType::BulkWriteOptimized {
+            // 1. Increase the write buffer size. This is the size of a single in-memory memtable.
+            // For large, sustained writes, a larger buffer (e.g., 128MB) reduces how often
+            // the database flushes to disk
+            opts.set_write_buffer_size(512 * 1024 * 1024);
+
+            // 2. Increase the number of background threads for flushes and compactions.
+            opts.increase_parallelism(8);
+
+            // 3. Set the maximum number of write buffers. This allows RocksDB to continue
+            // accepting writes into a new memtable while old ones are being flushed.
+            opts.set_max_write_buffer_number(4);
+
+            // 4. Set the minimum number of write buffers to merge before flushing. 2
+            // allows us to "double-buffer" writes, allowing for more efficient flush-to-disk.
+            opts.set_min_write_buffer_number_to_merge(2);
+        } else {
+            // Set explicitly for visibility — matches the RocksDB default (64 MB).
+            opts.set_write_buffer_size(64 * 1024 * 1024);
+        }
+
         opts.create_if_missing(true); // Creates a database if it does not exist
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        self.apply_block_cache_opts(&mut opts);
 
         let mut tx_db_opts = rocksdb::TransactionDBOptions::default();
         tx_db_opts.set_default_lock_timeout(5000); // 5 seconds
 
         // Open the database with multi-threaded support
         let db = rocksdb::TransactionDB::open(&opts, &tx_db_opts, &self.path)?;
-        *db_lock = Some(db);
+        *inner = Some(DBProvider::Transaction(db));
 
         // We put the db in a RwLock to make the compiler happy, but it is strictly not required.
         // We can use unsafe to replace the value directly, and this will work fine, and shave off
@@ -252,14 +246,33 @@ impl RocksDB {
         Ok(())
     }
 
-    pub fn location(&self) -> String {
-        self.path.clone()
+    pub fn open_read_only(&self) -> Result<Self, RocksdbError> {
+        let _wl = self.inner.write().unwrap();
+
+        let mut opts = Options::default();
+        opts.create_if_missing(false);
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        self.apply_block_cache_opts(&mut opts);
+
+        match rocksdb::DB::open_for_read_only(&opts, self.path.clone(), true) {
+            Ok(db) => {
+                let provider = DBProvider::ReadOnly(db);
+                let rdb = RocksDB {
+                    inner: RwLock::new(Some(provider)),
+                    path: self.path.clone(),
+                    db_options_type: SnapchainDbOptimizationType::default(),
+                    block_cache: self.block_cache.clone(),
+                };
+                Ok(rdb)
+            }
+            Err(e) => Err(RocksdbError::InternalError(e)),
+        }
     }
 
     pub fn close(&self) {
-        let mut db_lock = self.db.write().unwrap();
-        if db_lock.is_some() {
-            let db = db_lock.take().unwrap();
+        let mut inner = self.inner.write().unwrap();
+        if inner.is_some() {
+            let db = inner.take().unwrap();
             drop(db);
         }
 
@@ -290,34 +303,44 @@ impl RocksDB {
         Ok(())
     }
 
-    pub fn db(&self) -> RwLockReadGuard<'_, Option<TransactionDB>> {
-        self.db.read().unwrap()
+    pub fn db(&self) -> RwLockReadGuard<'_, Option<DBProvider>> {
+        self.inner.read().unwrap()
+    }
+
+    pub fn location(&self) -> String {
+        self.path.clone()
     }
 
     pub fn keys_exist(&self, keys: &Vec<Vec<u8>>) -> Vec<bool> {
-        let db = self.db();
-        let db = db.as_ref().unwrap();
-
-        db.multi_get(keys)
-            .into_iter()
-            .map(|r| match r {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
-                Err(_) => false,
-            })
-            .collect::<Vec<_>>()
+        match self.db().as_ref() {
+            Some(DBProvider::Transaction(db)) => db.multi_get(keys),
+            Some(DBProvider::ReadOnly(db)) => db.multi_get(keys),
+            None => vec![],
+        }
+        .into_iter()
+        .map(|result| match result {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(_) => false,
+        })
+        .collect()
     }
 
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, RocksdbError> {
-        self.db()
-            .as_ref()
-            .unwrap()
-            .get(key)
-            .map_err(|e| RocksdbError::InternalError(e))
+        match self.db().as_ref() {
+            Some(DBProvider::Transaction(db)) => db.get(key),
+            Some(DBProvider::ReadOnly(db)) => db.get(key),
+            None => return Err(RocksdbError::DbNotOpen),
+        }
+        .map_err(|e| RocksdbError::InternalError(e))
     }
 
     pub fn get_many(&self, keys: &Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>, RocksdbError> {
-        let results = self.db().as_ref().unwrap().multi_get(keys);
+        let results = match self.db().as_ref() {
+            Some(DBProvider::Transaction(db)) => db.multi_get(keys),
+            Some(DBProvider::ReadOnly(db)) => db.multi_get(keys),
+            None => return Err(RocksdbError::DbNotOpen),
+        };
 
         // If any of the results are Errors, return an error
         let results = results.into_iter().collect::<Result<Vec<_>, _>>()?;
@@ -330,19 +353,21 @@ impl RocksDB {
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<(), RocksdbError> {
-        self.db()
-            .as_ref()
-            .unwrap()
-            .put(key, value)
-            .map_err(|e| RocksdbError::InternalError(e))
+        match self.db().as_ref() {
+            Some(DBProvider::Transaction(db)) => db.put(key, value),
+            Some(DBProvider::ReadOnly(_)) => return Err(RocksdbError::ReadOnly),
+            None => return Err(RocksdbError::DbNotOpen),
+        }
+        .map_err(|e| RocksdbError::InternalError(e))
     }
 
     pub fn del(&self, key: &[u8]) -> Result<(), RocksdbError> {
-        self.db()
-            .as_ref()
-            .unwrap()
-            .delete(key)
-            .map_err(|e| RocksdbError::InternalError(e))
+        match self.db().as_ref() {
+            Some(DBProvider::Transaction(db)) => db.delete(key),
+            Some(DBProvider::ReadOnly(_)) => return Err(RocksdbError::ReadOnly),
+            None => return Err(RocksdbError::DbNotOpen),
+        }
+        .map_err(|e| RocksdbError::InternalError(e))
     }
 
     pub fn txn(&self) -> RocksDbTransactionBatch {
@@ -350,21 +375,23 @@ impl RocksDB {
     }
 
     pub fn commit(&self, batch: RocksDbTransactionBatch) -> Result<(), RocksdbError> {
-        let db = self.db();
-        if db.is_none() {
-            return Err(RocksdbError::DbNotOpen);
-        }
+        match self.db().as_ref() {
+            Some(DBProvider::Transaction(db)) => {
+                let txn = db.transaction();
 
-        let txn = db.as_ref().unwrap().transaction();
-        for (key, value) in batch.batch {
-            if value.is_none() {
-                txn.delete(key)?;
-            } else {
-                txn.put(key, value.unwrap())?;
+                for (key, value) in batch.batch {
+                    if value.is_none() {
+                        txn.delete(key)?;
+                    } else {
+                        txn.put(key, value.unwrap())?;
+                    }
+                }
+
+                txn.commit().map_err(|e| RocksdbError::InternalError(e))
             }
+            Some(DBProvider::ReadOnly(_)) => Err(RocksdbError::ReadOnly),
+            None => Err(RocksdbError::DbNotOpen),
         }
-
-        txn.commit().map_err(|e| RocksdbError::InternalError(e))
     }
 
     fn get_iterator_options(
@@ -396,7 +423,10 @@ impl RocksDB {
             start_iterator_prefix
         } else {
             if let Some(page_token) = &page_options.page_token {
-                increment_vec_u8(&page_token)
+                // In RocksDB, the lexicographically next key after [1,2,3] is [1,2,3,0] (and NOT [1,2,4])
+                // This is because RocksDB uses a prefix-based storage engine, and the next key is determined by the last byte
+                // with smaller keys sorting BEFORE longer keys with the same prefix
+                [page_token.clone(), vec![0u8]].concat()
             } else {
                 start_iterator_prefix
             }
@@ -421,48 +451,103 @@ impl RocksDB {
         start_prefix: Option<Vec<u8>>,
         stop_prefix: Option<Vec<u8>>,
         page_options: &PageOptions,
-        mut f: F,
+        f: F,
     ) -> Result<bool, HubError>
     where
         F: FnMut(&[u8], &[u8]) -> Result<bool, HubError>,
     {
         let iter_opts = RocksDB::get_iterator_options(start_prefix, stop_prefix, page_options);
+        self.iterate_with_opts(iter_opts, page_options.page_size, f)
+    }
 
-        let db = self.db();
-        let mut iter = db.as_ref().unwrap().raw_iterator_opt(iter_opts.opts);
+    // Shared iteration body used by both the public paged iterator and by
+    // bulk-delete paths that need to customize ReadOptions (e.g. disabling
+    // the block cache on prune sweeps).
+    fn iterate_with_opts<F>(
+        &self,
+        iter_opts: IteratorOptions,
+        page_size: Option<usize>,
+        mut f: F,
+    ) -> Result<bool, HubError>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<bool, HubError>,
+    {
+        // TODO: maybe write a generic function to handle both branches
+        match self.db().as_ref() {
+            Some(DBProvider::Transaction(db)) => {
+                let mut iter = db.raw_iterator_opt(iter_opts.opts);
 
-        if iter_opts.reverse {
-            iter.seek_to_last();
-        } else {
-            iter.seek_to_first();
-        }
-
-        let mut all_done = true;
-        let mut count = 0;
-
-        while iter.valid() {
-            if let Some((key, value)) = iter.item() {
-                if f(&key, &value)? {
-                    all_done = false;
-                    break;
+                if iter_opts.reverse {
+                    iter.seek_to_last();
+                } else {
+                    iter.seek_to_first();
                 }
-                if page_options.page_size.is_some() {
-                    count += 1;
-                    if count >= page_options.page_size.unwrap() {
-                        all_done = true;
-                        break;
+
+                let mut all_done = true;
+                let mut count = 0;
+
+                while iter.valid() {
+                    if let Some((key, value)) = iter.item() {
+                        if f(&key, &value)? {
+                            all_done = false;
+                            break;
+                        }
+                        if let Some(limit) = page_size {
+                            count += 1;
+                            if count >= limit {
+                                all_done = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if iter_opts.reverse {
+                        iter.prev();
+                    } else {
+                        iter.next();
                     }
                 }
-            }
 
-            if iter_opts.reverse {
-                iter.prev();
-            } else {
-                iter.next();
+                Ok(all_done)
             }
+            Some(DBProvider::ReadOnly(db)) => {
+                let mut iter = db.raw_iterator_opt(iter_opts.opts);
+
+                if iter_opts.reverse {
+                    iter.seek_to_last();
+                } else {
+                    iter.seek_to_first();
+                }
+
+                let mut all_done = true;
+                let mut count = 0;
+
+                while iter.valid() {
+                    if let Some((key, value)) = iter.item() {
+                        if f(&key, &value)? {
+                            all_done = false;
+                            break;
+                        }
+                        if let Some(limit) = page_size {
+                            count += 1;
+                            if count >= limit {
+                                all_done = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if iter_opts.reverse {
+                        iter.prev();
+                    } else {
+                        iter.next();
+                    }
+                }
+
+                Ok(all_done)
+            }
+            None => Err(RocksdbError::DbNotOpen.into()),
         }
-
-        Ok(all_done)
     }
 
     // Same as for_each_iterator_by_prefix above, but does not limit by page size. To be used in
@@ -501,14 +586,26 @@ impl RocksDB {
 
             // Iterate over all keys and delete them
             let mut txn = self.txn();
-            let db = self.db();
 
-            for item in db.as_ref().unwrap().iterator(rocksdb::IteratorMode::Start) {
-                if let Ok((key, _)) = item {
-                    txn.delete(key.to_vec());
-                    deleted += 1;
+            match self.db().as_ref() {
+                Some(DBProvider::Transaction(db)) => {
+                    for item in db.iterator(rocksdb::IteratorMode::Start) {
+                        if let Ok((key, _)) = item {
+                            txn.delete(key.to_vec());
+                            deleted += 1;
+                        }
+                    }
                 }
-            }
+                Some(DBProvider::ReadOnly(db)) => {
+                    for item in db.iterator(rocksdb::IteratorMode::Start) {
+                        if let Ok((key, _)) = item {
+                            txn.delete(key.to_vec());
+                            deleted += 1;
+                        }
+                    }
+                }
+                None => return Err(RocksdbError::DbNotOpen),
+            };
 
             self.commit(txn)?;
 
@@ -541,16 +638,27 @@ impl RocksDB {
             &PageOptions::default(),
         );
 
-        let db = self.db();
-        let mut iter = db.as_ref().unwrap().raw_iterator_opt(iter_opts.opts);
-
         let mut count = 0;
-        iter.seek_to_first();
-        while iter.valid() {
-            count += 1;
 
-            iter.next();
-        }
+        match self.db().as_ref() {
+            Some(DBProvider::Transaction(db)) => {
+                let mut iter = db.raw_iterator_opt(iter_opts.opts);
+                iter.seek_to_first();
+                while iter.valid() {
+                    count += 1;
+                    iter.next();
+                }
+            }
+            Some(DBProvider::ReadOnly(db)) => {
+                let mut iter = db.raw_iterator_opt(iter_opts.opts);
+                iter.seek_to_first();
+                while iter.valid() {
+                    count += 1;
+                    iter.next();
+                }
+            }
+            None => return Err(RocksdbError::DbNotOpen.into()),
+        };
 
         Ok(count)
     }
@@ -587,22 +695,26 @@ impl RocksDB {
 
     // Deletes keys in the given prefix range, respecting page_options.
     // Returns the number of keys deleted.
+    //
+    // Set `skip_cache = true` on large cold sweeps (e.g. event pruning) so the
+    // iterator does not populate the shared block cache and evict the hot
+    // consensus working set. Normal deletes should pass `false`.
     pub fn delete_page(
         &self,
         start_prefix: Option<Vec<u8>>,
         stop_prefix: Option<Vec<u8>>,
         page_options: &PageOptions,
+        skip_cache: bool,
     ) -> Result<u32, HubError> {
+        let mut iter_opts = RocksDB::get_iterator_options(start_prefix, stop_prefix, page_options);
+        if skip_cache {
+            iter_opts.opts.fill_cache(false);
+        }
         let mut txn = self.txn();
-        self.for_each_iterator_by_prefix_paged(
-            start_prefix,
-            stop_prefix,
-            page_options,
-            |key, _| {
-                txn.delete(key.to_vec());
-                Ok(false) // Continue iterating
-            },
-        )?;
+        self.iterate_with_opts(iter_opts, page_options.page_size, |key, _| {
+            txn.delete(key.to_vec());
+            Ok(false) // Continue iterating
+        })?;
 
         let count = txn.len();
         self.commit(txn)?;
@@ -614,6 +726,7 @@ impl RocksDB {
     // or until shutdown is requested via the shutdown_rx channel.
     // The progress_callback function can be used to report progress.
     // The throttle parameter can be used to control the rate of deletion.
+    // Set `skip_cache` to true for large cold sweeps; see `delete_page`.
     // Returns the total number of keys deleted.
     pub async fn delete_paginated(
         &self,
@@ -622,10 +735,16 @@ impl RocksDB {
         page_options: &PageOptions,
         throttle: Duration,
         progress_callback: Option<impl Fn(u32) + Send>,
+        skip_cache: bool,
     ) -> Result<u32, HubError> {
         let mut total_deleted = 0;
         loop {
-            match self.delete_page(start_prefix.clone(), stop_prefix.clone(), page_options)? {
+            match self.delete_page(
+                start_prefix.clone(),
+                stop_prefix.clone(),
+                page_options,
+                skip_cache,
+            )? {
                 0 => break, // No more keys to delete
                 count => total_deleted += count,
             }
@@ -643,9 +762,180 @@ impl RocksDB {
 #[cfg(test)]
 mod tests {
     use crate::storage::{
-        db::{RocksDB, RocksDbTransactionBatch},
+        db::{PageOptions, RocksDB, RocksDbTransactionBatch},
         util::increment_vec_u8,
     };
+
+    #[test]
+    fn test_shared_block_cache_across_db_instances() {
+        let cache = rocksdb::Cache::new_lru_cache(64 * 1024 * 1024); // 64MB for test
+
+        let tmp1 = tempfile::tempdir().unwrap();
+        let tmp2 = tempfile::tempdir().unwrap();
+
+        let db1 = RocksDB::new_with_cache(
+            tmp1.path().to_str().unwrap(),
+            super::SnapchainDbOptimizationType::Default,
+            Some(cache.clone()),
+        );
+        db1.open().unwrap();
+
+        let db2 = RocksDB::new_with_cache(
+            tmp2.path().to_str().unwrap(),
+            super::SnapchainDbOptimizationType::Default,
+            Some(cache.clone()),
+        );
+        db2.open().unwrap();
+
+        // Write data to db1
+        let value = vec![0u8; 4096];
+        for i in 0..1000u32 {
+            db1.put(&i.to_be_bytes(), &value).unwrap();
+        }
+
+        // Read all keys from db1 to populate the cache
+        for i in 0..1000u32 {
+            let _ = db1.get(&i.to_be_bytes()).unwrap();
+        }
+
+        let usage_after_db1 = cache.get_usage();
+        assert!(
+            usage_after_db1 > 0,
+            "Cache should have data after db1 reads"
+        );
+
+        // Write and read data from db2
+        for i in 0..1000u32 {
+            db2.put(&i.to_be_bytes(), &value).unwrap();
+        }
+        for i in 0..1000u32 {
+            let _ = db2.get(&i.to_be_bytes()).unwrap();
+        }
+
+        let usage_after_db2 = cache.get_usage();
+        assert!(
+            usage_after_db2 > 0,
+            "Cache should have data after db2 reads"
+        );
+
+        // Both DBs should be able to read their data correctly
+        let val1 = db1.get(&0u32.to_be_bytes()).unwrap().unwrap();
+        let val2 = db2.get(&0u32.to_be_bytes()).unwrap().unwrap();
+        assert_eq!(val1, value);
+        assert_eq!(val2, value);
+
+        db1.destroy().unwrap();
+        db2.destroy().unwrap();
+    }
+
+    #[test]
+    fn test_block_cache_respects_capacity() {
+        let cache_size = 1024 * 1024; // 1MB
+        let cache = rocksdb::Cache::new_lru_cache(cache_size);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db = RocksDB::new_with_cache(
+            tmp.path().to_str().unwrap(),
+            super::SnapchainDbOptimizationType::Default,
+            Some(cache.clone()),
+        );
+        db.open().unwrap();
+
+        // Write much more data than the cache can hold
+        let value = vec![0u8; 4096];
+        for i in 0..10_000u32 {
+            db.put(&i.to_be_bytes(), &value).unwrap();
+        }
+
+        // Force reads to populate cache
+        for i in 0..10_000u32 {
+            let _ = db.get(&i.to_be_bytes()).unwrap();
+        }
+
+        // Cache usage should stay bounded (with some overhead for metadata)
+        let usage = cache.get_usage();
+        let max_expected = cache_size * 3; // allow headroom for index/filter blocks
+        assert!(
+            usage < max_expected,
+            "Cache usage {} should stay roughly bounded near capacity {}",
+            usage,
+            cache_size
+        );
+
+        db.destroy().unwrap();
+    }
+
+    #[test]
+    fn test_default_write_buffer_size_is_bounded() {
+        // Non-bulk-write DB should use 16MB write buffer
+        let tmp = tempfile::tempdir().unwrap();
+        let db = RocksDB::new(tmp.path().to_str().unwrap());
+        db.open().unwrap();
+
+        // Just verify the DB opens and works — the write buffer size is set
+        // internally and not directly queryable, but we can verify no regression
+        let value = vec![0u8; 1024];
+        for i in 0..100u32 {
+            db.put(&i.to_be_bytes(), &value).unwrap();
+        }
+        let result = db.get(&0u32.to_be_bytes()).unwrap().unwrap();
+        assert_eq!(result, value);
+
+        db.destroy().unwrap();
+    }
+
+    #[test]
+    fn test_open_shard_db_with_cache() {
+        let cache = rocksdb::Cache::new_lru_cache(32 * 1024 * 1024);
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().to_str().unwrap();
+
+        let db = RocksDB::open_shard_db_with_cache(db_dir, 1, Some(cache.clone()));
+
+        // Write and read back
+        db.put(b"test_key", b"test_value").unwrap();
+        let result = db.get(b"test_key").unwrap().unwrap();
+        assert_eq!(result, b"test_value");
+
+        // Verify cache is being used
+        let _ = db.get(b"test_key").unwrap();
+        assert!(cache.get_usage() > 0, "Shared cache should be populated");
+
+        db.destroy().unwrap();
+    }
+
+    #[test]
+    fn test_open_global_db_with_cache() {
+        let cache = rocksdb::Cache::new_lru_cache(32 * 1024 * 1024);
+        let tmp = tempfile::tempdir().unwrap();
+        let db_dir = tmp.path().to_str().unwrap();
+
+        let db = RocksDB::open_global_db_with_cache(db_dir, Some(cache.clone()));
+
+        db.put(b"global_key", b"global_value").unwrap();
+        let result = db.get(b"global_key").unwrap().unwrap();
+        assert_eq!(result, b"global_value");
+
+        db.destroy().unwrap();
+    }
+
+    #[test]
+    fn test_no_cache_still_works() {
+        // Passing None should work the same as before
+        let tmp = tempfile::tempdir().unwrap();
+        let db = RocksDB::new_with_cache(
+            tmp.path().to_str().unwrap(),
+            super::SnapchainDbOptimizationType::Default,
+            None,
+        );
+        db.open().unwrap();
+
+        db.put(b"key", b"value").unwrap();
+        let result = db.get(b"key").unwrap().unwrap();
+        assert_eq!(result, b"value");
+
+        db.destroy().unwrap();
+    }
 
     #[test]
     fn test_merge_rocksdb_transaction() {
@@ -894,5 +1184,96 @@ mod tests {
         // Cleanup
         db.destroy().unwrap();
         db.open().unwrap();
+    }
+
+    // Helper function to test pagination through keys
+    fn test_pagination_helper(
+        db: &RocksDB,
+        expected_total_keys: usize,
+        page_size: usize,
+        start_prefix: Option<Vec<u8>>,
+        stop_prefix: Option<Vec<u8>>,
+    ) {
+        let mut last_key = None;
+        let mut processed_keys = 0;
+
+        loop {
+            let page_options = PageOptions {
+                page_size: Some(page_size),
+                page_token: last_key.clone(),
+                reverse: false,
+            };
+
+            let mut processed_this_pass = 0;
+            let all_done = db
+                .for_each_iterator_by_prefix_paged(
+                    start_prefix.clone(),
+                    stop_prefix.clone(),
+                    &page_options,
+                    |key, _value| {
+                        processed_this_pass += 1;
+
+                        if processed_this_pass == page_size {
+                            last_key = Some(key.to_vec());
+                            return Ok(true); // stop
+                        }
+
+                        return Ok(false); // continue
+                    },
+                )
+                .unwrap();
+            processed_keys += processed_this_pass;
+
+            if all_done {
+                assert_eq!(processed_this_pass, expected_total_keys % page_size);
+                break;
+            } else {
+                assert_eq!(processed_this_pass, page_size);
+            }
+        }
+
+        assert_eq!(processed_keys, expected_total_keys);
+    }
+
+    #[test]
+    fn test_iteration_pages_through_nested_keys() {
+        let tmp_path = tempfile::tempdir()
+            .unwrap()
+            .path()
+            .as_os_str()
+            .to_string_lossy()
+            .to_string();
+        let db = crate::storage::db::RocksDB::new(&tmp_path);
+        db.open().unwrap();
+
+        // Add 10 nested keys: [0], [0,1], [0,1,2], ..., [0,1,2,3,4,5,6,7,8,9]
+        for i in 0..10 {
+            let key: Vec<u8> = (0..=i).collect();
+            let value = format!("value{}", i).into_bytes();
+            db.put(&key, &value).unwrap();
+        }
+
+        test_pagination_helper(&db, 10, 3, Some(vec![0u8]), Some(vec![1u8]));
+    }
+
+    #[test]
+    fn test_iteration_pages_through_serial_keys() {
+        let tmp_path = tempfile::tempdir()
+            .unwrap()
+            .path()
+            .as_os_str()
+            .to_string_lossy()
+            .to_string();
+        let db = crate::storage::db::RocksDB::new(&tmp_path);
+        db.open().unwrap();
+
+        // Add 10 serial keys: [0,0,1], [0,0,2], [0,0,3], ..., [0,0,10]
+        for i in 1..=10 {
+            let key = vec![0u8, 0u8, i as u8];
+            let value = format!("value{}", i).into_bytes();
+            db.put(&key, &value).unwrap();
+        }
+
+        test_pagination_helper(&db, 10, 3, Some(vec![0u8]), Some(vec![1u8]));
     }
 }

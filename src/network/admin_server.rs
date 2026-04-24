@@ -1,5 +1,6 @@
 use crate::connectors::fname::FnameRequest;
 use crate::connectors::onchain_events::OnchainEventsRequest;
+use crate::jobs::migrate_onchain_events::migrate_onchain_events;
 use crate::jobs::snapshot_upload::upload_snapshot;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::network::rpc_extensions::authenticate_request;
@@ -7,12 +8,14 @@ use crate::network::server::MEMPOOL_ADD_REQUEST_TIMEOUT;
 use crate::proto::admin_service_server::AdminService;
 use crate::proto::{
     self, Empty, FarcasterNetwork, FnameTransfer, OnChainEvent, RetryFnameRequest,
-    RetryOnchainEventsRequest, UploadSnapshotRequest, UserNameProof, ValidatorMessage,
+    RetryOnchainEventsRequest, RunOnchainEventsMigrationRequest, UploadSnapshotRequest,
+    UserNameProof,
 };
 use crate::storage;
-use crate::storage::store::engine::MempoolMessage;
+use crate::storage::store::block_engine::BlockStores;
+use crate::storage::store::mempool_poller::MempoolMessage;
+use crate::storage::store::node_local_state::LocalStateStore;
 use crate::storage::store::stores::Stores;
-use crate::storage::store::BlockStore;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use rocksdb;
 use std::collections::HashMap;
@@ -30,9 +33,10 @@ pub struct MyAdminService {
     fname_request_tx: broadcast::Sender<FnameRequest>,
     snapshot_config: storage::db::snapshot::Config,
     shard_stores: HashMap<u32, Stores>,
-    block_store: BlockStore,
+    block_stores: BlockStores,
     fc_network: FarcasterNetwork,
     statsd_client: StatsdClientWrapper,
+    local_state_store: LocalStateStore,
 }
 
 #[derive(Debug, Error)]
@@ -51,10 +55,11 @@ impl MyAdminService {
         onchain_events_request_tx: broadcast::Sender<OnchainEventsRequest>,
         fname_request_tx: broadcast::Sender<FnameRequest>,
         shard_stores: HashMap<u32, Stores>,
-        block_store: BlockStore,
+        block_stores: BlockStores,
         snapshot_config: storage::db::snapshot::Config,
         fc_network: FarcasterNetwork,
         statsd_client: StatsdClientWrapper,
+        local_state_store: LocalStateStore,
     ) -> Self {
         let mut allowed_users = HashMap::new();
         for auth in rpc_auth.split(",") {
@@ -70,10 +75,11 @@ impl MyAdminService {
             onchain_events_request_tx,
             fname_request_tx,
             shard_stores,
-            block_store,
+            block_stores,
             snapshot_config,
             fc_network,
             statsd_client,
+            local_state_store,
         }
     }
 
@@ -118,10 +124,7 @@ impl AdminService for MyAdminService {
         let (tx, rx) = oneshot::channel();
         self.mempool_tx
             .try_send(MempoolRequest::AddMessage(
-                MempoolMessage::ValidatorMessage(ValidatorMessage {
-                    on_chain_event: Some(onchain_event.clone()),
-                    fname_transfer: None,
-                }),
+                MempoolMessage::OnchainEvent(onchain_event.clone()),
                 MempoolSource::RPC,
                 Some(tx),
             ))
@@ -170,13 +173,10 @@ impl AdminService for MyAdminService {
         let (tx, rx) = oneshot::channel();
         self.mempool_tx
             .try_send(MempoolRequest::AddMessage(
-                MempoolMessage::ValidatorMessage(ValidatorMessage {
-                    on_chain_event: None,
-                    fname_transfer: Some(FnameTransfer {
-                        id: username_proof.fid,
-                        from_fid: 0, // Assume the username is being transfer from the "root" fid to the one in the username proof
-                        proof: Some(username_proof.clone()),
-                    }),
+                MempoolMessage::FnameTransfer(FnameTransfer {
+                    id: username_proof.fid,
+                    from_fid: 0, // Assume the username is being transfer from the "root" fid to the one in the username proof
+                    proof: Some(username_proof.clone()),
                 }),
                 MempoolSource::RPC,
                 Some(tx),
@@ -266,14 +266,10 @@ impl AdminService for MyAdminService {
     ) -> std::result::Result<Response<Empty>, Status> {
         authenticate_request(&request, &self.allowed_users)?;
 
-        if std::fs::exists(self.snapshot_config.backup_dir.clone())? {
-            return Err(Status::aborted("snapshot already in progress"));
-        }
-
         let fc_network = self.fc_network.clone();
         let snapshot_config = self.snapshot_config.clone();
         let shard_stores = self.shard_stores.clone();
-        let block_store = self.block_store.clone();
+        let block_stores = self.block_stores.clone();
         let statsd_client = self.statsd_client.clone();
         let shard_ids = if request.get_ref().shard_indexes.is_empty() {
             None
@@ -285,7 +281,7 @@ impl AdminService for MyAdminService {
             if let Err(err) = upload_snapshot(
                 snapshot_config,
                 fc_network,
-                block_store,
+                block_stores,
                 shard_stores,
                 statsd_client,
                 shard_ids,
@@ -294,6 +290,36 @@ impl AdminService for MyAdminService {
             {
                 error!("Error uploading snapshot {}", err.to_string());
             }
+        });
+
+        Ok(Response::new(Empty {}))
+    }
+
+    async fn run_onchain_events_migration(
+        &self,
+        request: Request<RunOnchainEventsMigrationRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        authenticate_request(&request, &self.allowed_users)?;
+
+        let shard_stores = self
+            .shard_stores
+            .get(&(request.into_inner().shard_id as u32))
+            .ok_or(Status::invalid_argument("invalid shard id"))?
+            .clone();
+        let block_stores = self.block_stores.clone();
+        let mempool_tx = self.mempool_tx.clone();
+        let local_state_store = self.local_state_store.clone();
+        let statsd_client = self.statsd_client.clone();
+
+        tokio::spawn(async move {
+            migrate_onchain_events(
+                shard_stores,
+                block_stores.db,
+                mempool_tx,
+                local_state_store,
+                statsd_client,
+            )
+            .await;
         });
 
         Ok(Response::new(Empty {}))

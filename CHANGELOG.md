@@ -2,6 +2,250 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.3] - 2026-01-20
+
+### 🐛 Bug Fixes
+
+- Skip committed block if commit certificate is empty (#747)
+- Provide correct validator sets to block receiver (#748)
+
+## [0.11.2] - 2026-01-08
+
+### 🐛 Bug Fixes
+
+- Recompute cached transaction if block events don't match (#741)
+- Bump default ulimits for snapchain nodes (#743)
+
+## [0.11.1] - 2026-01-05
+
+### 🚀 Features
+
+- Separate proto files into standalone crate (#729)
+
+### 🐛 Bug Fixes
+
+- Forward date the activation time in testnet for protocol v10 (#728)
+- Support storage lends in replication (#731)
+- Replication client checks to account for storage lend messages (#735)
+- Enable manually triggering reingest for a heartbeat event (#737)
+
+### ⚙️ Miscellaneous Tasks
+
+- Add signer fid tag to metrics (#733)
+- Take a replication snapshot if there are none (#734)
+
+## [0.11.0] - 2025-12-03
+
+### 🚀 Features
+
+- Increase message size limit for username proofs (#722)
+
+### 🐛 Bug Fixes
+
+- Set correct ports for replication peer addresses (#724)
+
+### ⚙️ Miscellaneous Tasks
+
+- Add more information about lent and borrowed units to rpc (#717)
+- Add more metrics to mempool (#718)
+- Activate decentralized sync entrypoint (#723)
+
+## [0.10.0] - 2025-10-22
+
+### 🚀 Features
+
+- Stop revoking all  messages signed by revoked signers (#714)
+
+### 🐛 Bug Fixes
+
+- Reset events sequence number on validate (#713)
+
+## [0.9.2] - 2025-10-14
+
+### 🐛 Bug Fixes
+
+- Add http server support for storage lend messages (#709)
+
+### ⚙️ Miscellaneous Tasks
+
+- Send onchain events to shard 0 (#705)
+- Downgrade failed onchain event merge log to warn (#710)
+
+## [0.9.1] - 2025-10-09
+
+### ⚙️ Miscellaneous Tasks
+
+- Add bulk rpc for querying `LendStorage` messages (#702)
+- Enable replication server by default (#703)
+- Stop populating num_onchain_events in the GetInfo endpoint (#706)
+
+## [0.9.0] - 2025-10-01
+
+### 🚀 Features
+
+- Implement pruning for storage lends (#683)
+- Enable submitting storage lends via rpc (#688)
+- Do a "fast" catchup on shard-0 by streaming blocks during replication (#693)
+- Enable migrating onchain events to shard 0 and fix bugs with storage lending (#669)
+
+### 🐛 Bug Fixes
+
+- Make shard-0 block to Sep 3 2025 (#692)
+- Update ETA constant for replication (#694)
+
+### ⚙️ Miscellaneous Tasks
+
+- Separate out ContactInfo and GossipMessage protos (#695)
+- Increase minimum storage requirement for storage lending (#698)
+- Set protocol release date to 10/8 (#699)
+
+## [0.8.1] - 2025-09-23
+
+### 🚀 Features
+
+- Enable sending onchain events to shard 0 (#676)
+- Configure or get (from public IP) announce_rpc_address (#681)
+- Discover nodes to sync with using gossip p2p (#682)
+- Ensure we have at least 65k FD limit to start replicator (#685)
+- Pick shard-0 blocks for replicator (#687)
+- Add progress for replication and other nice to haves (#689)
+
+### 🐛 Bug Fixes
+
+- Generate replicator snapshots every 8 hours (#680)
+- Handle duplicates while inserting in the trie (#679)
+- Dont create block_store in main() (#686)
+
+### 🧪 Testing
+
+- Add multi-page/rpc errors tests (#677)
+
+### ⚙️ Miscellaneous Tasks
+
+- Push protocol release out by 2 weeks (#690)
+
+## [0.8.0] - 2025-09-16
+
+### 🚀 Features
+
+- Add trie paged iteration + remove attach_to_root (#660)
+- Add trie-based replication server (#663)
+- Add profile token user data type (#666)
+- Add the ability to start a node via replication (#667)
+- Support storage lending in the shard and block engines (#665)
+- Add client manager + tests for replication rpc requests (#672)
+
+### 🐛 Bug Fixes
+
+- Hardcode the trie_branching_factor to 16 (#668)
+- Update block event seqnum correctly if there are multiple block events in a single transaction (#673)
+- Simplify the replication by removing trie/DB threads (#671)
+- Rename replication rs files (#675)
+
+### ⚙️ Miscellaneous Tasks
+
+- Add chain tag to some onchain event metrics (#664)
+
+## [0.7.0] - 2025-09-03
+
+### 🚀 Features
+
+- Produce transactions and events in shard 0 (#634)
+- Allow attaching orphaned nodes to the merkle trie (#651)
+- Read block events from shard 0 in other shards (#639)
+
+## [0.6.0] - 2025-08-27
+
+### 🐛 Bug Fixes
+
+- Paged iterator doesn't go through sub-keys (#652)
+
+### ⚙️ Miscellaneous Tasks
+
+- Push EngineVersion::V8 activation date up a week (#655)
+- Add metric for confirmed shard heights (#656)
+
+## [0.5.1] - 2025-08-25
+
+### 🚀 Features
+
+- Add ability to batch insert into trie (#637)
+- Create a new bulk-optimized DB option (#638)
+- Allow conflict-free stores for replicator (#648)
+
+### 🐛 Bug Fixes
+
+- Don't return duplicate FIDs (#641)
+- Fix consensus tests (#644)
+- Fix build (#647)
+- Correctly route fnames to all shards (#650)
+
+## [0.5.0] - 2025-08-18
+
+### 🚀 Features
+
+- Add support for onchain events and verification messages in a single transaction (#608)
+- Return account root hash for each fid in transaction (#621)
+- Decouple shard 0 block production from other shards block production (#619)
+
+### 🐛 Bug Fixes
+
+- Update tagging instructions in readme
+- Fix tests to increment and decrement hash values correctly (#613)
+- Switch to polling getLogs for Base pro events to fix not picking up events (#616)
+- Fix testnet version schedule to reflect when upgrade actually happened (#618)
+- Handle replicator cursor gets stuck (#617)
+- Add additional sync metrics to improve visibility (#631)
+- Fix fname secondary DB index (#622)
+- Don't run parallel migrations + quiet migration logs (#632)
+- Supress version check log message (#633)
+
+### 💼 Other
+
+- Log flaky test failure (#628)
+
+### ⚙️ Miscellaneous Tasks
+
+- Add link store tests (#612)
+- Enable new version on testnet (#636)
+- Extract mempool polling logic into a module for sharing (#629)
+- Pull engine metrics publishing out into a module for sharing (#630)
+
+## [0.4.1] - 2025-08-01
+
+### 🚀 Features
+
+- Activate the storage unit redenomination a few days earlier on testnet (#577)
+- Add endpoint for connected peers (#541)
+- Add direct peers config for gossip (#590)
+- Expose next engine version timestamp in GetInfo API (#595)
+- Make snapshot metadata compatible with snapdown (#597)
+- Add SubmitBulkMessages rpc/http API (#600)
+- Port install and autoupgrade script from hubble (#596)
+- Allow multi message simulation with dependent messages (#602)
+- Add Grafana to install script (#605)
+
+### 🐛 Bug Fixes
+
+- Properly validate `targetFid` param in `linksByTargetFid` (#579)
+- Fix broken storage unit related tests (#585)
+- Resolve grpc and http api docs inconsistencies (#580)
+- Make peer id legible in the currentPeers endpoint (#591)
+- Cleanup dead code and comments in trie code (#594)
+- Add progress info to snapshot download (#599)
+- Suppress the "No valid cached transaction to apply" warning for read-only nodes (#603)
+
+### ⚙️ Miscellaneous Tasks
+
+- /v1/info response with values out of bounds (#575)
+- Add more metrics for events emitted (#593)
+- Add tests to ensure that snapchain validations are in sync with client validations (#598)
+- Add cast store tests (#601)
+- Add tests for the user data store (#604)
+- Add reaction store tests (#607)
+- Add verification store tests (#609)
+- Add username proof store tests (#610)
+
 ## [0.4.0] - 2025-07-09
 
 ### 🚀 Features

@@ -9,13 +9,22 @@ mod tests {
         core::util::to_farcaster_time,
         mempool::mempool::{self, Mempool, MempoolMessagesRequest},
         network::gossip::{Config, SnapchainGossip},
-        proto::{self, Height, ShardChunk, ShardHeader, Transaction, ValidatorMessage},
+        proto::{
+            self, Block, BlockHeader, FarcasterNetwork, Height, ShardChunk, ShardHeader,
+            StorageUnitType, Transaction,
+        },
         storage::store::{
-            engine::{MempoolMessage, ShardEngine},
+            block_engine::BlockEngine,
+            block_engine_test_helpers,
+            engine::ShardEngine,
+            mempool_poller::MempoolMessage,
             test_helper::{self, commit_event, default_storage_event, FID_FOR_TEST},
         },
         utils::{
-            factory::{events_factory, messages_factory},
+            factory::{
+                events_factory,
+                messages_factory::{self, storage_lend::create_storage_lend},
+            },
             statsd_wrapper::StatsdClientWrapper,
         },
     };
@@ -25,6 +34,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::mempool::mempool::{MempoolRequest, MempoolSource};
+    use crate::mempool::routing::{MessageRouter, ShardRouter};
     use crate::utils::factory::username_factory;
     use libp2p::identity::ed25519::Keypair;
     use messages_factory::casts::create_cast_add;
@@ -35,13 +45,16 @@ mod tests {
     async fn setup(
         config: Option<Config>,
         enable_rate_limits: bool,
+        num_shards: u32,
     ) -> (
-        ShardEngine,
+        HashMap<u32, ShardEngine>,
+        BlockEngine,
         Option<SnapchainGossip>,
         Mempool,
         mpsc::Sender<MempoolRequest>,
         mpsc::Sender<MempoolMessagesRequest>,
         broadcast::Sender<ShardChunk>,
+        broadcast::Sender<Block>,
         mpsc::Receiver<SystemMessage>,
     ) {
         let keypair = Keypair::generate();
@@ -54,18 +67,25 @@ mod tests {
         let (mempool_tx, mempool_rx) = mpsc::channel(100);
         let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
         let (shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
-        let (engine, _) = test_helper::new_engine();
+        let (block_decision_tx, block_decision_rx) = broadcast::channel(100);
         let mut shard_senders = HashMap::new();
-        shard_senders.insert(1, engine.get_senders());
         let mut shard_stores = HashMap::new();
-        shard_stores.insert(1, engine.get_stores());
+        let mut engines = HashMap::new();
+        for i in 1..num_shards + 1 {
+            let (engine, _) = test_helper::new_engine().await;
+            shard_senders.insert(i, engine.get_senders());
+            shard_stores.insert(i, engine.get_stores());
+            engines.insert(i, engine);
+        }
+
+        let (block_engine, _) = block_engine_test_helpers::setup();
 
         let gossip = match config {
             Some(config) => Some(
                 SnapchainGossip::create(
                     keypair.clone(),
                     &config,
-                    system_tx,
+                    Some(system_tx),
                     false,
                     proto::FarcasterNetwork::Devnet,
                     statsd_client.clone(),
@@ -84,30 +104,62 @@ mod tests {
         mempool_config.enable_rate_limits = enable_rate_limits;
         let mempool = Mempool::new(
             mempool_config,
-            engine.network,
+            FarcasterNetwork::Devnet,
             mempool_rx,
             messages_request_rx,
-            1,
+            num_shards,
             shard_stores,
+            block_engine.stores(),
             gossip_tx,
             shard_decision_rx,
+            block_decision_rx,
             statsd_client,
         );
 
         (
-            engine,
+            engines,
+            block_engine,
             gossip,
             mempool,
             mempool_tx,
             messages_request_tx,
             shard_decision_tx,
+            block_decision_tx,
             system_rx,
         )
     }
 
+    async fn pull_message(
+        messages_request_tx: &mpsc::Sender<MempoolMessagesRequest>,
+        shard_id: u32,
+        expected_message: Option<MempoolMessage>,
+    ) {
+        // Setup channel to retrieve messages
+        let (mempool_retrieval_tx, mempool_retrieval_rx) = oneshot::channel();
+
+        // Query mempool for the messages
+        messages_request_tx
+            .send(MempoolMessagesRequest {
+                shard_id,
+                max_messages_per_block: 1,
+                message_tx: mempool_retrieval_tx,
+            })
+            .await
+            .unwrap();
+
+        let result = mempool_retrieval_rx.await.unwrap();
+        if let Some(expected_message) = expected_message {
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0], expected_message)
+        } else {
+            assert_eq!(result.len(), 0)
+        }
+    }
+
     #[tokio::test]
     async fn test_duplicate_user_message_is_invalid() {
-        let (mut engine, _, mut mempool, _, _, _, _) = setup(None, false).await;
+        let (mut engines, _, _, mut mempool, _, _, _, _, _) = setup(None, false, 1).await;
+        let mut engine = engines.get_mut(&1).unwrap();
         test_helper::register_user(
             1234,
             default_signer(),
@@ -116,16 +168,42 @@ mod tests {
         )
         .await;
         let cast = create_cast_add(1234, "hello", None, None);
-        let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast.clone()));
+        let valid = mempool.message_is_valid(1, &MempoolMessage::UserMessage(cast.clone()));
         assert!(valid.is_ok());
         test_helper::commit_message(&mut engine, &cast).await;
-        let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast.clone()));
+        let valid = mempool.message_is_valid(1, &MempoolMessage::UserMessage(cast.clone()));
+        assert!(!valid.is_ok())
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_block_event_is_invalid() {
+        let (mut engines, _, _, mut mempool, _, _, _, _, _) = setup(None, false, 1).await;
+        let mut engine = engines.get_mut(&1).unwrap();
+        let block_event = events_factory::create_heartbeat_event(1);
+        let valid = mempool.message_is_valid(
+            1,
+            &MempoolMessage::BlockEvent {
+                for_shard: 1,
+                message: block_event.clone(),
+            },
+        );
+        assert!(valid.is_ok());
+
+        test_helper::commit_block_events(&mut engine, vec![&block_event]).await;
+        let valid = mempool.message_is_valid(
+            1,
+            &MempoolMessage::BlockEvent {
+                for_shard: 1,
+                message: block_event.clone(),
+            },
+        );
         assert!(!valid.is_ok())
     }
 
     #[tokio::test]
     async fn test_duplicate_onchain_event_is_valid() {
-        let (mut engine, _, mut mempool, _, _, _, _) = setup(None, false).await;
+        let (mut engines, _, _, mut mempool, _, _, _, _, _) = setup(None, false, 1).await;
+        let mut engine = engines.get_mut(&1).unwrap();
         let onchain_event = events_factory::create_rent_event(
             1234,
             10,
@@ -133,23 +211,20 @@ mod tests {
             false,
             proto::FarcasterNetwork::Devnet,
         );
-        let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
-            on_chain_event: Some(onchain_event.clone()),
-            fname_transfer: None,
-        }));
+        let valid =
+            mempool.message_is_valid(1, &MempoolMessage::OnchainEvent(onchain_event.clone()));
         assert!(valid.is_ok());
         test_helper::commit_event(&mut engine, &onchain_event).await;
-        let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
-            on_chain_event: Some(onchain_event.clone()),
-            fname_transfer: None,
-        }));
+        let valid =
+            mempool.message_is_valid(1, &MempoolMessage::OnchainEvent(onchain_event.clone()));
         // Mempool allows duplicate on-chain events
         assert!(valid.is_ok())
     }
 
     #[tokio::test]
     async fn test_duplicate_fname_transfer_is_valid() {
-        let (mut engine, _, mut mempool, _, _, _, _) = setup(None, false).await;
+        let (mut engines, _, _, mut mempool, _, _, _, _, _) = setup(None, false, 1).await;
+        let mut engine = engines.get_mut(&1).unwrap();
         test_helper::register_user(
             1,
             default_signer(),
@@ -160,26 +235,22 @@ mod tests {
         let signer = alloy_signer_local::PrivateKeySigner::random();
         let fname_transfer =
             username_factory::create_transfer(1, "farcaster", None, None, None, signer.clone());
-        let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
-            on_chain_event: None,
-            fname_transfer: Some(fname_transfer.clone()),
-        }));
+        let valid =
+            mempool.message_is_valid(1, &MempoolMessage::FnameTransfer(fname_transfer.clone()));
         assert!(valid.is_ok());
         test_helper::commit_fname_transfer(&mut engine, &fname_transfer).await;
 
         // Transferring the same fname again should be valid
         let fname_transfer =
             username_factory::create_transfer(2, "farcaster", None, Some(1), None, signer);
-        let valid = mempool.message_is_valid(&MempoolMessage::ValidatorMessage(ValidatorMessage {
-            on_chain_event: None,
-            fname_transfer: Some(fname_transfer),
-        }));
+        let valid = mempool.message_is_valid(1, &MempoolMessage::FnameTransfer(fname_transfer));
         assert!(valid.is_ok())
     }
 
     #[tokio::test]
     async fn test_rate_limits_applied() {
-        let (mut engine, _, mut mempool, _, _, _, _) = setup(None, true).await;
+        let (mut engines, _, _, mut mempool, _, _, _, _, _) = setup(None, true, 1).await;
+        let mut engine = engines.get_mut(&1).unwrap();
 
         let id_register_event = events_factory::create_id_register_event(
             FID_FOR_TEST,
@@ -198,20 +269,98 @@ mod tests {
         commit_event(&mut engine, &signer_event).await;
 
         let cast = create_cast_add(FID_FOR_TEST, "hello", None, None);
-        let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast));
+        let valid = mempool.message_is_valid(1, &MempoolMessage::UserMessage(cast));
         assert!(!valid.is_ok());
 
         commit_event(&mut engine, &default_storage_event(FID_FOR_TEST)).await;
 
         let cast = create_cast_add(FID_FOR_TEST, "hello", None, None);
-        let valid = mempool.message_is_valid(&MempoolMessage::UserMessage(cast));
+        let valid = mempool.message_is_valid(1, &MempoolMessage::UserMessage(cast));
         assert!(valid.is_ok());
     }
 
     #[tokio::test]
+    async fn test_copying_fname_transfer() {
+        let (
+            _,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 2).await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let first_fid = 20270;
+        let second_fid = 211428;
+        // Ensure that the two fids are routed to different shards
+        let router = ShardRouter {};
+        assert_ne!(
+            router.route_fid(first_fid, 2),
+            router.route_fid(second_fid, 2)
+        );
+
+        // Make sure both transfers are routed to both shards
+        let signer = alloy_signer_local::PrivateKeySigner::random();
+        let fname_transfer = username_factory::create_transfer(
+            first_fid,
+            "farcaster",
+            None,
+            Some(second_fid),
+            None,
+            signer.clone(),
+        );
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::FnameTransfer(fname_transfer.clone()),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        let fname_transfer = username_factory::create_transfer(
+            second_fid,
+            "farcaster",
+            None,
+            Some(first_fid),
+            None,
+            signer,
+        );
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::FnameTransfer(fname_transfer.clone()),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        let (req, res) = oneshot::channel();
+        mempool_tx.send(MempoolRequest::GetSize(req)).await.unwrap();
+        let size = res.await.unwrap();
+        assert_eq!(*size.get(&1).unwrap(), 2);
+        assert_eq!(*size.get(&2).unwrap(), 2);
+    }
+
+    #[tokio::test]
     async fn test_mempool_size() {
-        let (_, _, mut mempool, mempool_tx, _request_tx, _decision_tx, _) =
-            setup(None, false).await;
+        let (
+            _,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
         tokio::spawn(async move {
             mempool.run().await;
         });
@@ -247,8 +396,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_mempool_prioritization() {
-        let (_, _, mut mempool, mempool_tx, messages_request_tx, _shard_decision_tx, _) =
-            setup(None, false).await;
+        let (
+            _,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
 
         // Spawn mempool task
         tokio::spawn(async move {
@@ -283,10 +441,7 @@ mod tests {
 
         mempool_tx
             .send(MempoolRequest::AddMessage(
-                MempoolMessage::ValidatorMessage(ValidatorMessage {
-                    on_chain_event: Some(onchain_event),
-                    fname_transfer: None,
-                }),
+                MempoolMessage::OnchainEvent(onchain_event.clone()),
                 MempoolSource::Local,
                 None,
             ))
@@ -296,43 +451,34 @@ mod tests {
         // Wait for processing
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        let pull_message = async || {
-            // Setup channel to retrieve messages
-            let (mempool_retrieval_tx, mempool_retrieval_rx) = oneshot::channel();
-
-            // Query mempool for the messages
-            messages_request_tx
-                .send(MempoolMessagesRequest {
-                    shard_id: 1,
-                    max_messages_per_block: 1,
-                    message_tx: mempool_retrieval_tx,
-                })
-                .await
-                .unwrap();
-
-            let result = mempool_retrieval_rx.await.unwrap();
-            return result[0].clone();
-        };
-
-        match pull_message().await {
-            MempoolMessage::UserMessage(_) => {
-                panic!("Expected validator message, got user message")
-            }
-            MempoolMessage::ValidatorMessage(_) => {}
-        }
-
-        match pull_message().await {
-            MempoolMessage::UserMessage(_) => {}
-            MempoolMessage::ValidatorMessage(_) => {
-                panic!("Expected user message, got validator message")
-            }
-        }
+        pull_message(
+            &messages_request_tx,
+            1,
+            Some(MempoolMessage::OnchainEvent(onchain_event)),
+        )
+        .await;
+        pull_message(
+            &messages_request_tx,
+            1,
+            Some(MempoolMessage::UserMessage(cast.clone())),
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_mempool_eviction() {
-        let (mut engine, _, mut mempool, mempool_tx, messages_request_tx, shard_decision_tx, _) =
-            setup(None, false).await;
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
+        let mut engine = engines.get_mut(&1).unwrap();
         test_helper::register_user(
             1234,
             default_signer(),
@@ -417,6 +563,115 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].fid(), fid);
     }
+    #[tokio::test]
+    async fn test_mempool_eviction_shard0() {
+        let (
+            _engines,
+            mut block_engine,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            _shard_decision_tx,
+            block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
+        block_engine_test_helpers::register_user(
+            1234,
+            default_signer(),
+            default_custody_address(),
+            5,
+            &mut block_engine,
+        );
+
+        // Spawn mempool task
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let fid = 1234;
+
+        let storage_lend1 = create_storage_lend(
+            fid,
+            fid + 1,
+            1,
+            StorageUnitType::UnitType2025,
+            Some(1),
+            None,
+        );
+
+        let storage_lend2 = create_storage_lend(
+            fid,
+            fid + 1,
+            1,
+            StorageUnitType::UnitType2025,
+            Some(2),
+            None,
+        );
+
+        let _ = mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(storage_lend1.clone()),
+                MempoolSource::Local,
+                None,
+            ))
+            .await;
+
+        let _ = mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(storage_lend2.clone()),
+                MempoolSource::Local,
+                None,
+            ))
+            .await;
+
+        // Wait for processing
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let transaction = Transaction {
+            fid,
+            user_messages: vec![storage_lend1],
+            system_messages: vec![],
+            account_root: vec![],
+        };
+
+        let header = BlockHeader {
+            height: Some(Height {
+                shard_index: 0,
+                block_number: 1,
+            }),
+            ..Default::default()
+        };
+
+        // Create fake block
+        let block = Block {
+            header: Some(header),
+            transactions: vec![transaction],
+            ..Default::default()
+        };
+
+        let _ = block_decision_tx.send(block);
+
+        // Wait for block processing
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Setup channel to retrieve messages
+        let (mempool_retrieval_tx, mempool_retrieval_rx) = oneshot::channel();
+
+        // Query mempool for the messages
+        messages_request_tx
+            .send(MempoolMessagesRequest {
+                shard_id: 0,
+                max_messages_per_block: 2,
+                message_tx: mempool_retrieval_tx,
+            })
+            .await
+            .unwrap();
+
+        let result = mempool_retrieval_rx.await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].mempool_key().identity(), storage_lend2.hex_hash())
+    }
 
     #[tokio::test]
     async fn test_mempool_gossip() {
@@ -427,17 +682,28 @@ mod tests {
         let config1 = Config::new(node1_addr.clone(), node2_addr.clone());
         let config2 = Config::new(node2_addr.clone(), node1_addr.clone());
 
-        let (_, gossip1, mut mempool1, mempool_tx1, _mempool_requests_tx1, _shard_decision_tx1, _) =
-            setup(Some(config1), false).await;
         let (
+            _,
+            _,
+            gossip1,
+            mut mempool1,
+            mempool_tx1,
+            _mempool_requests_tx1,
+            _shard_decision_tx1,
+            _block_decision_tx1,
+            _,
+        ) = setup(Some(config1), false, 1).await;
+        let (
+            _,
             _,
             gossip2,
             mut mempool2,
             mempool_tx2,
             mempool_requests_tx2,
             _shard_decision_tx1,
+            _block_decision_tx1,
             mut system_rx2,
-        ) = setup(Some(config2), false).await;
+        ) = setup(Some(config2), false, 1).await;
 
         // Spawn gossip tasks
         tokio::spawn(async move {
@@ -529,8 +795,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_mempool_error() {
-        let (mut engine, _, mut mempool, mempool_tx, _request_tx, _decision_tx, _) =
-            setup(None, false).await;
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
+        let mut engine = engines.get_mut(&1).unwrap();
 
         test_helper::register_user(
             1234,
@@ -563,5 +839,60 @@ mod tests {
 
         let error = result.unwrap_err();
         assert_eq!(error.code, "bad_request.duplicate");
+    }
+
+    #[tokio::test]
+    async fn test_onchain_event_for_migration_routing() {
+        // Setup with 2 shards
+        let (
+            _,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 2).await;
+
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let fid = 1234;
+        // Ensure this FID routes to shard 2
+        let router = ShardRouter {};
+        assert_eq!(router.route_fid(fid, 2), 1);
+
+        let onchain_event = events_factory::create_rent_event(
+            fid,
+            10,
+            proto::StorageUnitType::UnitType2025,
+            false,
+            proto::FarcasterNetwork::Devnet,
+        );
+
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::OnchainEventForMigration(onchain_event.clone()),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        // Wait for processing
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        pull_message(
+            &messages_request_tx,
+            0,
+            Some(MempoolMessage::OnchainEventForMigration(
+                onchain_event.clone(),
+            )),
+        )
+        .await;
+        pull_message(&messages_request_tx, 1, None).await;
     }
 }

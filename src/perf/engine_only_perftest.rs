@@ -2,8 +2,9 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::mempool::mempool::{self, Mempool, MempoolRequest, MempoolSource};
 use crate::proto::{FarcasterNetwork, Height, ShardChunk, ShardHeader};
-use crate::storage::store::engine::{MempoolMessage, ShardStateChange};
-use crate::storage::store::test_helper;
+use crate::storage::store::engine::ShardStateChange;
+use crate::storage::store::mempool_poller::MempoolMessage;
+use crate::storage::store::{block_engine_test_helpers, test_helper};
 use crate::utils::cli::compose_message;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::HashMap;
@@ -36,12 +37,21 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
     let (gossip_tx, _gossip_rx) = mpsc::channel(100);
     let (_shard_decision_tx, shard_decision_rx) = broadcast::channel(100);
+    let (_block_decision_tx, block_decision_rx) = broadcast::channel(100);
 
     let (mut engine, _tmpdir) = test_helper::new_engine_with_options(test_helper::EngineOptions {
         limits: Some(test_helper::limits::unlimited_store_limits()),
-        messages_request_tx: Some(messages_request_tx),
+        messages_request_tx: Some(messages_request_tx.clone()),
         ..Default::default()
-    });
+    })
+    .await;
+
+    let (block_engine, _) = block_engine_test_helpers::setup_with_options(
+        block_engine_test_helpers::BlockEngineOptions {
+            messages_request_tx: Some(messages_request_tx.clone()),
+            ..Default::default()
+        },
+    );
 
     let statsd_client = StatsdClientWrapper::new(
         cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
@@ -57,8 +67,10 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         messages_request_rx,
         1,
         shard_stores,
+        block_engine.stores(),
         gossip_tx,
         shard_decision_rx,
+        block_decision_rx,
         statsd_client,
     );
 
@@ -95,15 +107,23 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
             i += 1;
         }
 
-        let messages = engine.pull_messages(Duration::from_millis(50)).await?;
+        let messages = engine
+            .mempool_poller
+            .pull_messages(Duration::from_millis(50))
+            .await?;
         let state_change = engine.propose_state_change(1, messages, None);
 
-        let valid = engine.validate_state_change(&state_change);
+        let valid =
+            engine.validate_state_change(&state_change, engine.get_confirmed_height().increment());
         assert!(valid);
 
         // TODO: need block height below
-        let chunk = state_change_to_shard_chunk(1, 1, &state_change);
-        engine.commit_shard_chunk(&chunk);
+        let chunk = state_change_to_shard_chunk(
+            1,
+            engine.get_confirmed_height().increment().block_number,
+            &state_change,
+        );
+        engine.commit_shard_chunk(&chunk).await;
 
         println!("{}", engine.trie_num_items());
     }

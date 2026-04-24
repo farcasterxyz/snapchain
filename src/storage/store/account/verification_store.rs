@@ -6,6 +6,7 @@ use super::{
 use crate::{
     core::error::HubError,
     proto::{Protocol, SignatureScheme, VerificationAddAddressBody, VerificationRemoveBody},
+    storage::store::account::StoreOptions,
 };
 use crate::{proto::message_data::Body, storage::db::PageOptions};
 use crate::{
@@ -254,10 +255,25 @@ impl VerificationStore {
         )
     }
 
+    pub fn new_with_opts(
+        db: Arc<RocksDB>,
+        store_event_handler: Arc<StoreEventHandler>,
+        prune_size_limit: u32,
+        store_opts: StoreOptions,
+    ) -> Store<VerificationStoreDef> {
+        Store::new_with_store_def_opts(
+            db,
+            store_event_handler,
+            VerificationStoreDef { prune_size_limit },
+            store_opts,
+        )
+    }
+
     pub fn get_verification_add(
         store: &Store<VerificationStoreDef>,
         fid: u64,
         address: &[u8],
+        maybe_txn: Option<&RocksDbTransactionBatch>,
     ) -> Result<Option<Message>, HubError> {
         let partial_message = Message {
             data: Some(MessageData {
@@ -274,7 +290,7 @@ impl VerificationStore {
             ..Default::default()
         };
 
-        store.get_add(&partial_message)
+        store.get_add(&partial_message, maybe_txn)
     }
 
     pub fn get_verification_remove(

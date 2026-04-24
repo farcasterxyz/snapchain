@@ -27,22 +27,18 @@ Snapchain is in the migration phase. Please check the [release docs](https://www
 
 A snapchain node lets you read and write messages to the network. You will need a machine with the following system requirements to get started: 
 
-- 16 GB of RAM
+- 32 GB of RAM
 - 4 CPU cores or vCPUs
-- 1TB of free storage
+- 1.5TB of free storage
 - A public IP address
 - Ports 3381 - 3383 exposed on both TCP and UDP. 
 
-You can start a new node or upgrade an existing node with the following commands: 
+You can start a new node or upgrade an existing node with the following command: 
 
 ```bash
-mkdir snapchain
-cd snapchain
-docker compose down # If you have a previous version running
-wget https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/docker-compose.mainnet.yml -O docker-compose.yml
-docker compose up  # append -d to run in the background
+curl -sSL https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/scripts/snapchain-bootstrap.sh | bash
 ```
-
+You can manage your node using the snapchain.sh script. It uses docker compose to run the node in a container. The script provides commands to start, stop, and check the logs of your node.
 A brand new node will download historical snapshots to catchup to the latest state before it begins sync. This can take up to 2 hours. Check the node's status by running `curl http://localhost:3381/v1/info`. You should see `maxHeight` increasing and `blockDelay` decreasing until it approaches zero. 
 
 ## Upgrade
@@ -51,8 +47,7 @@ To upgrade your Snapchain node to the latest version, follow these steps:
 
 ```bash
 cd snapchain
-docker compose pull
-docker compose up -d --force-recreate
+./snapchain.sh upgrade
 ```
 
 This ensures your node is always running the latest available version.
@@ -77,10 +72,6 @@ Before you begin, ensure you have the following installed:
 
 Clone the snapchain and dependent repos and build snapchain:
 ```
-git clone git@github.com:CassOnMars/eth-signature-verifier.git
-cd eth-signature-verifier
-git checkout 8deb4a091982c345949dc66bf8684489d9f11889
-cd ..
 git clone git@github.com:informalsystems/malachite.git
 cd malachite
 git checkout 13bca14cd209d985c3adf101a02924acde8723a5
@@ -135,4 +126,5 @@ make clean
 4. Commit the change and create and merge the PR
 5. Ensure you have the release commit `git checkout main && git pull`
 6. Tag the commit using `git tag v0.x.y`, and push it with `git push origin HEAD --tags` to trigger the docker build
-7. Once automated build is complete, confirm the Docker image was [published](https://hub.docker.com/r/farcasterxyz/snapchain)
+7. Also tag with @latest using `git tag -f @latest`, and push it (with --force) so install scripts will use the latest version
+8. Once automated build is complete, confirm the Docker image was [published](https://hub.docker.com/r/farcasterxyz/snapchain)

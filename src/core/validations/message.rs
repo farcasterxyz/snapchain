@@ -2,12 +2,12 @@ use crate::core::util::FarcasterTime;
 use crate::core::validations::error::ValidationError;
 use crate::core::validations::validate_cast_id;
 use crate::proto::{
-    self, FarcasterNetwork, FrameActionBody, MessageData, MessageType, UserDataBody, UserDataType,
-    UserNameType,
+    self, FarcasterNetwork, FrameActionBody, MessageData, MessageType, StorageUnitType,
+    UserDataBody, UserDataType, UserNameType,
 };
 use crate::storage::util::{blake3_20, bytes_compare};
 
-use super::{cast, link, reaction, verification};
+use super::{cast, key, link, reaction, verification};
 use crate::version::version::{EngineVersion, ProtocolFeature};
 use alloy_primitives::hex::FromHex;
 use alloy_primitives::Address;
@@ -18,6 +18,7 @@ use prost::Message;
 const MAX_DATA_BYTES: usize = 2048;
 const MAX_DATA_BYTES_FOR_10K_CAST: usize = 16_384;
 const MAX_DATA_BYTES_FOR_LINK_COMPACT: usize = 65536;
+const MAX_DATA_BYTES_FOR_USERNAME_PROOF: usize = 16_384;
 const EMBEDS_V1_CUTOFF: u32 = 73612800;
 const TWITTER_USERNAME_REGEX: &str = "^[a-z0-9_]{0,15}$";
 const FNAME_REGEX: &str = "^[a-z0-9][a-z0-9-]{0,15}$";
@@ -119,6 +120,10 @@ pub fn validate_message(
                 MAX_DATA_BYTES_FOR_LINK_COMPACT
             } else if is_pro_user && message_data.r#type() == MessageType::CastAdd {
                 MAX_DATA_BYTES_FOR_10K_CAST
+            } else if message_data.r#type() == MessageType::UsernameProof
+                && version.is_enabled(ProtocolFeature::IncreaseUsernameProofSizeLimit)
+            {
+                MAX_DATA_BYTES_FOR_USERNAME_PROOF
             } else {
                 MAX_DATA_BYTES
             }
@@ -207,7 +212,34 @@ pub fn validate_message(
         Some(proto::message_data::Body::FrameActionBody(frame_action_body)) => {
             validate_frame_action_body(&frame_action_body)?;
         }
+        Some(proto::message_data::Body::LendStorageBody(lend_storage_body)) => {
+            // We have this backdating check for storage lends because we prune out removes eagerly and don't want people to reconcile old storage lends successfully.
+            if message_data.timestamp < block_timestamp.decr_by(60 * 10).to_u64() as u32 {
+                return Err(ValidationError::TimestampTooFarInThePast);
+            }
+            validate_lend_storage_body(&lend_storage_body)?;
+        }
+        Some(proto::message_data::Body::KeyAddBody(key_add_body)) => {
+            key::validate_key_add_body(&key_add_body)?;
+        }
+        Some(proto::message_data::Body::KeyRemoveBody(key_remove_body)) => {
+            key::validate_key_remove_body(&key_remove_body)?;
+        }
         None => {}
+    }
+
+    Ok(())
+}
+
+fn validate_lend_storage_body(
+    lend_storage_body: &proto::LendStorageBody,
+) -> Result<(), ValidationError> {
+    StorageUnitType::try_from(lend_storage_body.unit_type)
+        .map_err(|_| ValidationError::InvalidStorageUnitType)?;
+
+    // This is $1,000 worth of storage units and provides more storage than anybody would currently use.
+    if lend_storage_body.num_units > 5000 {
+        return Err(ValidationError::ExceededMaxStorageUnits);
     }
 
     Ok(())
@@ -238,7 +270,7 @@ fn validate_signature(
     Ok(())
 }
 
-fn validate_message_hash(
+pub fn validate_message_hash(
     hash_scheme: i32,
     data_bytes: &Vec<u8>,
     hash: &Vec<u8>,
@@ -450,6 +482,54 @@ pub fn validate_user_data_primary_address_solana(input: &String) -> Result<(), V
     Ok(())
 }
 
+pub fn validate_caip19_format(input: &String) -> Result<(), ValidationError> {
+    // Empty string is allowed for unsetting the profile token
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    if input.len() > 256 {
+        return Err(ValidationError::Caip19TooLong);
+    }
+
+    // CAIP-19 format: chain_id + "/" + asset_namespace + ":" + asset_reference
+    // Optional asset_id: chain_id + "/" + asset_namespace + ":" + asset_reference + "/" + token_id
+    // Example: eip155:1/erc20:0x6b175474e89094c44da98b954eedeac495271d0f
+    // Example with token_id: eip155:1/erc721:0x06012c8cf97BEaD5deAe237070F9587f8E7A266d/771769
+
+    // Basic regex pattern for CAIP-19 format
+    // chain_id: namespace:reference (CAIP-2 format)
+    // asset_namespace: [-a-z0-9]{3,8}
+    // asset_reference: [-.%a-zA-Z0-9]{1,128}
+    // optional token_id: any alphanumeric string after the last /
+    let caip19_regex =
+        r"^[a-z0-9]+:[a-zA-Z0-9]+/[a-z0-9-]{3,8}:[-.%a-zA-Z0-9]{1,128}(/[a-zA-Z0-9]+)?$";
+
+    if !Regex::new(caip19_regex)
+        .unwrap()
+        .is_match(input)
+        .map_err(|_| ValidationError::InvalidData)?
+    {
+        return Err(ValidationError::InvalidData);
+    }
+
+    // Additional validation: ensure the asset_reference part doesn't exceed 128 characters
+    let parts: Vec<&str> = input.split('/').collect();
+    if parts.len() < 2 || parts.len() > 3 {
+        return Err(ValidationError::InvalidData);
+    }
+
+    let asset_part = parts[1];
+    if let Some(colon_pos) = asset_part.find(':') {
+        let asset_reference = &asset_part[colon_pos + 1..];
+        if asset_reference.len() > 128 {
+            return Err(ValidationError::InvalidData);
+        }
+    }
+
+    Ok(())
+}
+
 pub fn validate_user_location(location: &str) -> Result<(), ValidationError> {
     if location.is_empty() {
         return Ok(());
@@ -547,6 +627,12 @@ pub fn validate_user_data_add_body(
                 return Err(ValidationError::UnsupportedFeature);
             }
             validate_user_data_primary_address_solana(&body.value)?;
+        }
+        UserDataType::ProfileToken => {
+            if !version.is_enabled(ProtocolFeature::UserProfileToken) {
+                return Err(ValidationError::UnsupportedFeature);
+            }
+            validate_caip19_format(&body.value)?;
         }
         UserDataType::None => return Err(ValidationError::InvalidUserDataType),
     }

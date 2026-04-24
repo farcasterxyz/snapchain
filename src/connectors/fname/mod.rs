@@ -8,8 +8,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::{
-    proto::{FnameTransfer, UserNameProof, UserNameType, ValidatorMessage},
-    storage::store::{engine::MempoolMessage, node_local_state::LocalStateStore},
+    proto::{FnameTransfer, UserNameProof, UserNameType},
+    storage::store::mempool_poller::MempoolMessage,
+    storage::store::node_local_state::LocalStateStore,
     utils::statsd_wrapper::StatsdClientWrapper,
 };
 
@@ -147,12 +148,12 @@ impl Fetcher {
 
     fn count(&self, key: &str, value: i64) {
         self.statsd_client
-            .count(format!("fnames.{}", key).as_str(), value);
+            .count(format!("fnames.{}", key).as_str(), value, vec![]);
     }
 
     fn gauge(&self, key: &str, value: u64) {
         self.statsd_client
-            .gauge(format!("fnames.{}", key).as_str(), value);
+            .gauge(format!("fnames.{}", key).as_str(), value, vec![]);
     }
 
     async fn fetch(&mut self) -> Result<(), FetchError> {
@@ -219,13 +220,10 @@ impl Fetcher {
         if let Err(err) = self
             .mempool_tx
             .send(MempoolRequest::AddMessage(
-                MempoolMessage::ValidatorMessage(ValidatorMessage {
-                    on_chain_event: None,
-                    fname_transfer: Some(FnameTransfer {
-                        id: t.id,
-                        from_fid: t.from,
-                        proof: Some(username_proof),
-                    }),
+                MempoolMessage::FnameTransfer(FnameTransfer {
+                    id: t.id,
+                    from_fid: t.from,
+                    proof: Some(username_proof),
                 }),
                 MempoolSource::Local,
                 None,
