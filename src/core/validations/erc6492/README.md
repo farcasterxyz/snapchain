@@ -1,0 +1,58 @@
+# ERC-6492 signature verification helper
+
+This directory vendors the Solidity source and compiled bytecode for AmbireTech's
+`ValidateSigOffchain` helper, used by [`../erc6492.rs`](../erc6492.rs) to verify
+EOA / ERC-1271 / ERC-6492 signatures in a single `eth_call`.
+
+## Provenance
+
+- `Erc6492.sol` — copied verbatim from
+  [`royal-markets/eth-signature-verifier@8deb4a0`](https://github.com/CassOnMars/eth-signature-verifier/blob/8deb4a091982c345949dc66bf8684489d9f11889/contracts/Erc6492.sol),
+  which extracted it from
+  [`WalletConnect/erc6492`](https://github.com/WalletConnect/erc6492). The
+  `UniversalSigValidator` and `ValidateSigOffchain` contracts are AmbireTech's
+  reference implementation of [EIP-6492](https://eips.ethereum.org/EIPS/eip-6492).
+- `ValidateSigOffchain.bytecode` — deterministic compile output of `Erc6492.sol`;
+  see the build recipe below.
+
+## Build recipe (bit-exact reproducible)
+
+```
+forge build --use 0.8.28
+```
+
+from this directory. Deterministic settings live in [`foundry.toml`](./foundry.toml):
+solc 0.8.28, optimizer off, EVM version `cancun`, `bytecode_hash = "none"`,
+`cbor_metadata = false`. These strip the trailing IPFS/CBOR metadata hash from the
+produced bytecode so the output is bit-exact across machines and solc patch
+releases.
+
+## Verification
+
+The expected SHA-256 of `ValidateSigOffchain.bytecode` is pinned in two places:
+
+1. In the module-level doc comment of [`../erc6492.rs`](../erc6492.rs).
+2. Enforced by the `verify-erc6492-bytecode` CI job
+   ([`../../../../../.github/workflows/verify-erc6492-bytecode.yml`](../../../../../.github/workflows/verify-erc6492-bytecode.yml)),
+   which rebuilds from source on every PR that touches this directory and
+   refuses to merge if the hash drifts.
+
+To verify locally:
+
+```
+cd src/core/validations/erc6492
+forge build --use 0.8.28
+python3 -c "import json,sys; d=json.load(open('out/Erc6492.sol/ValidateSigOffchain.json')); \
+    bc=d['bytecode']['object']; sys.stdout.buffer.write(bytes.fromhex(bc[2:] if bc.startswith('0x') else bc))" \
+    | shasum -a 256
+diff <(python3 -c "...same as above...") ValidateSigOffchain.bytecode
+```
+
+(The CI job does the equivalent check non-interactively.)
+
+## Why the bytecode is committed instead of produced via `build.rs`
+
+Having `build.rs` invoke `forge` would add a foundry toolchain dependency to every
+`cargo build` — CI runs, the Dockerfile's builder stage, and every contributor's
+laptop. Committing the blob and gating drift via a single CI job keeps `cargo build`
+free of foundry while preserving full transparency and tamper-evidence.

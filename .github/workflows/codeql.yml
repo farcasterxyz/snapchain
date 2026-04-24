@@ -37,12 +37,6 @@ jobs:
         ref: 13bca14cd209d985c3adf101a02924acde8723a5
         path: ./malachite
 
-    - name: Checkout eth-signature-verifier (path dependency)
-      uses: actions/checkout@v4
-      with:
-        repository: CassOnMars/eth-signature-verifier
-        path: ./eth-signature-verifier
-
     - name: Install Rust 1.95.0
       uses: actions-rs/toolchain@v1
       with:
@@ -57,8 +51,6 @@ jobs:
 
     # Warm the target dir + fetch all deps so the buildless extractor (rust-analyzer)
     # has a fully resolvable workspace when it runs `cargo metadata`.
-    # No -Dwarnings here: path-dep crates like eth-signature-verifier emit warnings
-    # that would fail the check but are irrelevant to CodeQL extraction.
     - name: cargo check
       working-directory: ./snapchain
       run: cargo check --workspace --all-targets --locked

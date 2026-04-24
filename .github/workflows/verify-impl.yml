@@ -35,11 +35,6 @@ jobs:
           components: llvm-tools-preview
           override: true
 
-      - uses: actions/checkout@v6
-        with:
-          repository: CassOnMars/eth-signature-verifier
-          path: ./eth-signature-verifier
-
       - uses: actions/setup-node@v6
         with:
           node-version: 22

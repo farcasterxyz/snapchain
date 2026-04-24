@@ -1,0 +1,75 @@
+name: Verify ERC-6492 bytecode
+
+# Rebuild src/core/validations/erc6492/ValidateSigOffchain.bytecode from the
+# committed Solidity source and fail if the output drifts from the pinned SHA-256.
+# Runs only on PRs/pushes that touch the vendored contract directory so the
+# foundry toolchain is not on the critical path of every build.
+
+on:
+  pull_request:
+    paths:
+      - "src/core/validations/erc6492/**"
+      - ".github/workflows/verify-erc6492-bytecode.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/core/validations/erc6492/**"
+      - ".github/workflows/verify-erc6492-bytecode.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EXPECTED_SHA256: 7929acc3c7f14ff8fcfe6b7752a6b0327811da4697ce7b3bb438bf7b237ab410
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Build Erc6492.sol
+        working-directory: src/core/validations/erc6492
+        run: forge build --use 0.8.28
+
+      - name: Extract raw bytecode and compare SHA-256
+        working-directory: src/core/validations/erc6492
+        run: |
+          python3 - <<'PY' > rebuilt.bytecode
+          import json, sys
+          d = json.load(open("out/Erc6492.sol/ValidateSigOffchain.json"))
+          bc = d["bytecode"]["object"]
+          if bc.startswith("0x"):
+              bc = bc[2:]
+          sys.stdout.buffer.write(bytes.fromhex(bc))
+          PY
+
+          rebuilt=$(sha256sum rebuilt.bytecode | awk '{print $1}')
+          committed=$(sha256sum ValidateSigOffchain.bytecode | awk '{print $1}')
+
+          echo "expected:  $EXPECTED_SHA256"
+          echo "rebuilt:   $rebuilt"
+          echo "committed: $committed"
+
+          if [ "$rebuilt" != "$EXPECTED_SHA256" ]; then
+            echo "::error::Rebuilt bytecode does not match the pinned SHA-256."
+            echo "         Either Erc6492.sol was edited without updating the bytecode"
+            echo "         + the pinned hash in src/core/validations/erc6492.rs, or the"
+            echo "         build is non-deterministic (check foundry.toml settings)."
+            exit 1
+          fi
+
+          if [ "$committed" != "$EXPECTED_SHA256" ]; then
+            echo "::error::Committed ValidateSigOffchain.bytecode does not match the"
+            echo "         pinned SHA-256. It may have been edited directly without a"
+            echo "         matching Solidity source change."
+            exit 1
+          fi
+
+          echo "Bytecode matches pinned hash."
