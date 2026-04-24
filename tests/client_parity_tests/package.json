@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@farcaster/core": "0.18.5",
-    "@noble/curves": "^1.0.0"
+    "@noble/curves": "^2.2.0"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",
