@@ -1,19 +1,26 @@
 //! On-chain signature verification for EOA, ERC-1271, and ERC-6492 signatures.
 //!
+//! Dispatches in a single `eth_call`:
+//! * **Address has code** → ERC-1271 `isValidSignature(bytes32,bytes)` → match
+//!   `0x1626ba7e` magic value.
+//! * **Address has no code** → deploy AmbireTech's `ValidateSigOffchain` helper,
+//!   which internally checks the `0x64926492…` ERC-6492 suffix and otherwise
+//!   falls through to `ecrecover` for plain EOA signatures.
+//!
 //! The Rust side is inlined from `royal-markets/eth-signature-verifier` (MIT,
 //! © 2024 Royal Markets, Inc.), which in turn extracted and lightly modified it
 //! from Reown's (formerly WalletConnect's) `reown-com/erc6492` (MIT, © 2024
 //! WalletConnect, Inc.).
 //!
 //! The Solidity helper (`ValidateSigOffchain` / `UniversalSigValidator`) and its
-//! compiled bytecode live in [`erc6492/`](./erc6492/); see
-//! [`erc6492/README.md`](./erc6492/README.md) for provenance and the
-//! bit-exact build recipe.
+//! compiled bytecode live in [`contract_signature/`](./contract_signature/);
+//! see [`contract_signature/README.md`](./contract_signature/README.md) for
+//! provenance and the bit-exact build recipe.
 //!
-//! The committed `erc6492/ValidateSigOffchain.bytecode` must match SHA-256
-//! `7929acc3c7f14ff8fcfe6b7752a6b0327811da4697ce7b3bb438bf7b237ab410`. This
-//! invariant is enforced on every PR that touches `erc6492/` by the
-//! `verify-erc6492-bytecode` CI job.
+//! The committed `contract_signature/ValidateSigOffchain.bytecode` must match
+//! SHA-256 `7929acc3c7f14ff8fcfe6b7752a6b0327811da4697ce7b3bb438bf7b237ab410`.
+//! This invariant is enforced on every PR that touches `contract_signature/`
+//! by the `verify-contract-signature-bytecode` CI job.
 
 use alloy_primitives::{Address, Bytes, FixedBytes};
 use alloy_provider::Provider;
@@ -22,9 +29,9 @@ use alloy_sol_types::{sol, SolCall, SolConstructor};
 use alloy_transport::{RpcError, Transport, TransportErrorKind};
 
 /// Counterfactual-deployment helper from AmbireTech's ERC-6492 reference
-/// implementation. See [`erc6492/README.md`](./erc6492/README.md).
+/// implementation. See [`contract_signature/README.md`](./contract_signature/README.md).
 const VALIDATE_SIG_OFFCHAIN_BYTECODE: &[u8] =
-    include_bytes!("erc6492/ValidateSigOffchain.bytecode");
+    include_bytes!("contract_signature/ValidateSigOffchain.bytecode");
 
 /// First byte of the return value indicates success for `ValidateSigOffchain`.
 const SUCCESS_RESULT: u8 = 0x01;
@@ -276,7 +283,7 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     /// Keep in sync with the SHA-256 pinned in the module-level doc comment and
-    /// the `verify-erc6492-bytecode` CI workflow. A mismatch here means
+    /// the `verify-contract-signature-bytecode` CI workflow. A mismatch here means
     /// `ValidateSigOffchain.bytecode` was changed (or regenerated from edited
     /// Solidity) without updating the rest of the invariants.
     const EXPECTED_BYTECODE_SHA256: &str =

@@ -1,8 +1,8 @@
-# ERC-6492 signature verification helper
+# Contract signature verification helper
 
 This directory vendors the Solidity source and compiled bytecode for AmbireTech's
-`ValidateSigOffchain` helper, used by [`../erc6492.rs`](../erc6492.rs) to verify
-EOA / ERC-1271 / ERC-6492 signatures in a single `eth_call`.
+`ValidateSigOffchain` helper, used by [`../contract_signature.rs`](../contract_signature.rs)
+to verify EOA / ERC-1271 / ERC-6492 signatures in a single `eth_call`.
 
 ## Provenance
 
@@ -32,16 +32,16 @@ releases.
 
 The expected SHA-256 of `ValidateSigOffchain.bytecode` is pinned in two places:
 
-1. In the module-level doc comment of [`../erc6492.rs`](../erc6492.rs).
-2. Enforced by the `verify-erc6492-bytecode` CI job
-   ([`../../../../../.github/workflows/verify-erc6492-bytecode.yml`](../../../../../.github/workflows/verify-erc6492-bytecode.yml)),
+1. In the module-level doc comment of [`../contract_signature.rs`](../contract_signature.rs).
+2. Enforced by the `verify-contract-signature-bytecode` CI job
+   ([`../../../../../.github/workflows/verify-contract-signature-bytecode.yml`](../../../../../.github/workflows/verify-contract-signature-bytecode.yml)),
    which rebuilds from source on every PR that touches this directory and
    refuses to merge if the hash drifts.
 
 To verify locally:
 
 ```
-cd src/core/validations/erc6492
+cd src/core/validations/contract_signature
 forge build --use 0.8.28
 python3 -c "import json,sys; d=json.load(open('out/Erc6492.sol/ValidateSigOffchain.json')); \
     bc=d['bytecode']['object']; sys.stdout.buffer.write(bytes.fromhex(bc[2:] if bc.startswith('0x') else bc))" \

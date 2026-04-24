@@ -1,20 +1,20 @@
-name: Verify ERC-6492 bytecode
+name: Verify contract-signature bytecode
 
-# Rebuild src/core/validations/erc6492/ValidateSigOffchain.bytecode from the
-# committed Solidity source and fail if the output drifts from the pinned SHA-256.
-# Runs only on PRs/pushes that touch the vendored contract directory so the
-# foundry toolchain is not on the critical path of every build.
+# Rebuild src/core/validations/contract_signature/ValidateSigOffchain.bytecode
+# from the committed Solidity source and fail if the output drifts from the
+# pinned SHA-256. Runs only on PRs/pushes that touch the vendored contract
+# directory so the foundry toolchain is not on the critical path of every build.
 
 on:
   pull_request:
     paths:
-      - "src/core/validations/erc6492/**"
-      - ".github/workflows/verify-erc6492-bytecode.yml"
+      - "src/core/validations/contract_signature/**"
+      - ".github/workflows/verify-contract-signature-bytecode.yml"
   push:
     branches: [main]
     paths:
-      - "src/core/validations/erc6492/**"
-      - ".github/workflows/verify-erc6492-bytecode.yml"
+      - "src/core/validations/contract_signature/**"
+      - ".github/workflows/verify-contract-signature-bytecode.yml"
   workflow_dispatch:
 
 permissions:
@@ -39,11 +39,11 @@ jobs:
           version: v1.5.1
 
       - name: Build Erc6492.sol
-        working-directory: src/core/validations/erc6492
+        working-directory: src/core/validations/contract_signature
         run: forge build --use 0.8.28
 
       - name: Extract raw bytecode and compare SHA-256
-        working-directory: src/core/validations/erc6492
+        working-directory: src/core/validations/contract_signature
         run: |
           python3 - <<'PY' > rebuilt.bytecode
           import json, sys
@@ -64,8 +64,8 @@ jobs:
           if [ "$rebuilt" != "$EXPECTED_SHA256" ]; then
             echo "::error::Rebuilt bytecode does not match the pinned SHA-256."
             echo "         Either Erc6492.sol was edited without updating the bytecode"
-            echo "         + the pinned hash in src/core/validations/erc6492.rs, or the"
-            echo "         build is non-deterministic (check foundry.toml settings)."
+            echo "         + the pinned hash in src/core/validations/contract_signature.rs,"
+            echo "         or the build is non-deterministic (check foundry.toml settings)."
             exit 1
           fi
 

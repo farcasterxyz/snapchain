@@ -1,4 +1,4 @@
-use crate::core::validations::erc6492::{self, Verification};
+use crate::core::validations::contract_signature::{self, Verification};
 use crate::core::validations::error::ValidationError;
 use crate::proto::{self, FarcasterNetwork, VerificationAddAddressBody};
 use alloy_dyn_abi::TypedData;
@@ -303,7 +303,7 @@ where
 
     let hash = prehash.unwrap();
 
-    match erc6492::verify_signature(
+    match contract_signature::verify_signature(
         alloy_primitives::Bytes::from(body.claim_signature.clone()),
         alloy_primitives::Address::from(&body.address.clone().try_into().unwrap()),
         hash,
@@ -553,12 +553,13 @@ pub fn validate_remove_address(
 #[cfg(test)]
 mod contract_signature_tests {
     //! Exercises `validate_verification_contract_signature` — the one call site
-    //! of `erc6492::verify_signature`. Uses the in-process `MockTransport` from
-    //! `erc6492::test_support` so the whole EIP-712 hash + `verify_signature`
-    //! dispatch path is covered without a network or anvil.
+    //! of `contract_signature::verify_signature`. Uses the in-process
+    //! `MockTransport` from `contract_signature::test_support` so the whole
+    //! EIP-712 hash + `verify_signature` dispatch path is covered without a
+    //! network or anvil.
 
     use super::*;
-    use crate::core::validations::erc6492::test_support::*;
+    use crate::core::validations::contract_signature::test_support::*;
 
     fn body_with(signature: Vec<u8>) -> proto::VerificationAddAddressBody {
         proto::VerificationAddAddressBody {
