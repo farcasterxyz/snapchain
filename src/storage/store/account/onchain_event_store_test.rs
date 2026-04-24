@@ -85,9 +85,12 @@ mod tests {
             valid_2024_rent_event.block_timestamp as u32 + one_year_in_seconds * 2
         );
 
-        let sep_1_2025 = 1756710000;
-        let valid_2025_rent_event =
-            factory::events_factory::create_rent_event_with_timestamp(11, 3, sep_1_2025);
+        let september_first_2025_timestamp = 1756710000;
+        let valid_2025_rent_event = factory::events_factory::create_rent_event_with_timestamp(
+            11,
+            3,
+            september_first_2025_timestamp,
+        );
         let slot =
             StorageSlot::from_event(&valid_2025_rent_event, FarcasterNetwork::Mainnet).unwrap();
         assert_eq!(slot.is_active(), true);
@@ -221,7 +224,7 @@ mod tests {
             FarcasterNetwork::Mainnet,
         );
 
-        // Get timestamp for a date in Aug 2025
+        // Get timestamp for a date in Sep 2025
         let sep_1_2025 = 1756710000;
         let valid_2025_rent_event =
             factory::events_factory::create_rent_event_with_timestamp(12, 1, sep_1_2025);
