@@ -40,7 +40,6 @@ jobs:
         with:
           toolchain: 1.89.0
           components: llvm-tools-preview
-          override: true
 
       - uses: actions/checkout@v4
         with:
