@@ -126,6 +126,23 @@ pub enum UserPostfix {
      * Per-(FID, public-key) `GaslessKeyRecord` carrying scopes, ttl, request_fid. Populated by
      * KEY_ADD and deleted by KEY_REMOVE; read by scope enforcement and RPC. */
     GaslessKeyByFid = 105,
+
+    /* Gasless-signer global-uniqueness index, scoped under `RootPrefix::GaslessKey`.
+     * Per-public-key -> owning FID (4B BE). Populated by KEY_ADD and cleared by KEY_REMOVE;
+     * read by `merge_key_add` to reject cross-FID reuse of the same Ed25519 public key as a
+     * gasless signer. Scope is gasless-only — on-chain signer keys are not indexed here and
+     * an on-chain signer may still coexist with a gasless entry under a different FID; this
+     * index does not touch that relationship. The primary by-FID index has `[FID][PublicKey]`
+     * ordering so it is not scannable by key — this secondary index is the only way to answer
+     * "which FID currently holds this key as a gasless signer?" in O(1). */
+    GaslessKeyByPublicKey = 106,
+
+    /* Per-FID gasless-key count, scoped under `RootPrefix::GaslessKey`. Per-FID u32 big-endian
+     * count incremented by KEY_ADD and decremented by KEY_REMOVE; used to enforce the per-FID
+     * gasless-key cap (`MAX_GASLESS_KEYS_PER_FID`, NEYN-10579). On-chain signers are not
+     * counted here — they have their own cap at the L2 KeyRegistry. Absent entry == 0;
+     * decrementing to 0 deletes the entry to keep the index sparse. */
+    GaslessKeyCountByFid = 107,
 }
 
 impl UserPostfix {

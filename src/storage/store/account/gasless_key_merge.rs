@@ -13,16 +13,19 @@
 use std::sync::Arc;
 
 use super::{
-    check_and_set_app_nonce, check_and_set_user_nonce, delete_gasless_key_record,
-    delete_last_used_at, exists_gasless_key, get_gasless_key_record, init_last_used_at,
-    put_gasless_key_record, GaslessKeyRecord, OnchainEventStore,
+    check_and_set_app_nonce, check_and_set_user_nonce, decrement_gasless_key_count,
+    delete_gasless_key_owner, delete_gasless_key_record, delete_last_used_at,
+    get_gasless_key_count, get_gasless_key_owner_fid, get_gasless_key_record,
+    increment_gasless_key_count, init_last_used_at, put_gasless_key_owner, put_gasless_key_record,
+    GaslessKeyRecord, OnchainEventStore,
 };
+use crate::core::error::HubError;
 use crate::core::message::HubEventExt;
 use crate::core::validations::error::ValidationError;
 use crate::core::validations::key::{
     recover_key_add_custody_address, recover_key_remove_custody_address,
     verify_signed_key_request_metadata, KeyAddPayload, KeyRemovePayload, KeyRemoveSignatureType,
-    ETH_MAINNET_CHAIN_ID,
+    ETH_MAINNET_CHAIN_ID, MAX_GASLESS_KEYS_PER_FID,
 };
 use crate::proto::{self, hub_event, message_data::Body, HubEvent, HubEventType};
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
@@ -45,9 +48,31 @@ use crate::storage::store::engine::MessageValidationError;
 /// which has to stage a write even on "success", but that stage is rolled back if any later
 /// step fails (the whole txn batch is discarded together on error).
 ///
-/// Active-key cap (1000 per FID combined) and pending-FID resolution via
-/// `registration_tx_hash` are intentionally out of scope — they're owned by NEYN-10579 and
-/// NEYN-10577 respectively and block this ticket only at the future-merge level.
+/// ## Resubmission (NEYN-10624)
+///
+/// A KEY_ADD for a key that this FID already owns in the gasless store is treated as a
+/// scope/TTL update rather than a collision. The update is authorized only when the new
+/// message's verified `requestFid` matches the stored `request_fid` on the existing record —
+/// i.e. only the originating requesting fid can modify its own key's scopes or sliding-TTL
+/// window. Mismatched owner FID surfaces as `KeyClaimedByDifferentFid` (cross-user take-over
+/// attempt) and mismatched `request_fid` as `KeyRegisteredByDifferentRequestingFid` (cross-app
+/// take-over attempt). The nonce CAS continues to enforce strict monotonicity, so a
+/// resubmission must carry a higher nonce than any prior KEY_ADD / KEY_REMOVE on the user
+/// namespace for this FID. On upsert, the previous KEY_ADD message rides along in the emitted
+/// `MergeMessageBody.deleted_messages`, mirroring the shape of KEY_REMOVE events.
+///
+/// ## Per-FID gasless-key cap (NEYN-10579)
+///
+/// A KEY_ADD that would push the per-FID gasless count to or past `MAX_GASLESS_KEYS_PER_FID`
+/// (1000) is rejected with `ActiveKeyCapExceeded`. The count is tracked by a per-FID counter
+/// entry mutated alongside the primary record. On-chain signers are explicitly not counted —
+/// they have their own cap at the L2 KeyRegistry contract and are tracked under a separate
+/// storage namespace. The cap is not enforced on the resubmission (upsert) branch: replacing
+/// an existing record is net-zero for the counter, so an FID already at the cap can still
+/// modify a key it already owns.
+///
+/// Pending-FID resolution via `registration_tx_hash` is still out of scope — owned by
+/// NEYN-10577.
 pub fn merge_key_add(
     db: &Arc<RocksDB>,
     onchain_event_store: &OnchainEventStore,
@@ -123,33 +148,89 @@ pub fn merge_key_add(
         return Err(ValidationError::InvalidSignature.into());
     }
 
-    // Step 8 (conflict resolution). Gasless-first per design — writes go to the gasless
-    // store first, so reads match the write order for any future invariant checks. Both
-    // branches return the same typed variant; callers don't need to distinguish which
-    // index rejected them — "you can't add this key again" is the actionable signal.
-    if exists_gasless_key(db, txn_batch, fid, &key_add_body.key)? {
-        return Err(ValidationError::KeyAlreadyRegistered.into());
-    }
+    // Step 8 (conflict resolution). On-chain first so a signer that was minted via L2 doesn't
+    // silently get shadowed by a gasless registration; this branch also short-circuits before
+    // the gasless reads below on that path. The same-FID on-chain collision stays a reject —
+    // resubmission applies only to the gasless store (NEYN-10624).
     let existing_onchain = onchain_event_store
         .get_active_signer(fid, key_add_body.key.clone(), Some(txn_batch))
         .map_err(|_| MessageValidationError::MissingSigner)?;
     if existing_onchain.is_some() {
-        return Err(ValidationError::KeyAlreadyRegistered.into());
+        return Err(ValidationError::KeyAlreadyRegisteredOnchain.into());
+    }
+
+    // Gasless by-public-key index is authoritative for "which FID (if any) currently claims
+    // this key as a gasless signer?" — written and deleted in lock-step with the primary
+    // by-FID record. Three outcomes:
+    //   * None                    → first-time add for this FID; proceed.
+    //   * Some(other_fid) ≠ fid   → cross-user collision; reject with
+    //                               `KeyClaimedByDifferentFid`.
+    //   * Some(fid)               → same-FID resubmission; authorize as an upsert iff the
+    //                               new message's verified `requestFid` matches the stored
+    //                               `request_fid` on the prior record (NEYN-10624).
+    //                               Mismatch rejects with
+    //                               `KeyRegisteredByDifferentRequestingFid`.
+    //
+    // A `Some(fid)` with no primary record is an internal inconsistency (owner index and
+    // by-fid record are supposed to move in lockstep) — surfaced as an `internal_error`
+    // rather than a user-facing rejection, so it's loud in logs.
+    //
+    // On the upsert branch the prior `GaslessKeyRecord` is carried forward so its embedded
+    // KEY_ADD message can ride in the emitted event's `deleted_messages`.
+    let prior_record = match get_gasless_key_owner_fid(db, txn_batch, &key_add_body.key)? {
+        None => None,
+        Some(owner_fid) if owner_fid != fid => {
+            return Err(ValidationError::KeyClaimedByDifferentFid.into());
+        }
+        Some(_) => {
+            let record = get_gasless_key_record(db, txn_batch, fid, &key_add_body.key)?
+                .ok_or_else(|| HubError {
+                    code: "internal_error".to_string(),
+                    message: format!(
+                        "gasless owner index has fid={} for key but primary record missing",
+                        fid
+                    ),
+                })?;
+            if record.request_fid != verified.request_fid {
+                return Err(ValidationError::KeyRegisteredByDifferentRequestingFid.into());
+            }
+            Some(record)
+        }
+    };
+
+    // Per-FID gasless-key cap (NEYN-10579). Skipped entirely on the upsert path — replacing an
+    // existing record doesn't grow the counter, so the cap check would be a false reject for
+    // an FID already at 1000 that's legitimately modifying scope/TTL on a key it already owns.
+    // For first-time adds: read through the txn batch so staged same-batch increments are
+    // visible — two KEY_ADDs in one commit see each other's counter bumps and the cap is
+    // enforced precisely at 1000.
+    if prior_record.is_none() {
+        let gasless_count = get_gasless_key_count(db, txn_batch, fid)?;
+        if gasless_count >= MAX_GASLESS_KEYS_PER_FID {
+            return Err(ValidationError::ActiveKeyCapExceeded(MAX_GASLESS_KEYS_PER_FID).into());
+        }
     }
 
     // Step 4 (nonce CAS). Stages the bump on txn_batch; rolls back with everything else
     // if any later step fails. The store rejects `new_nonce <= stored`, which implicitly
-    // covers `nonce == 0` (stored defaults to 0).
+    // covers `nonce == 0` (stored defaults to 0). This also makes resubmission safe against
+    // replay: a second KEY_ADD carrying the same or lower nonce than the first is rejected
+    // here, so the upsert path can't be driven by a replayed original message.
     check_and_set_user_nonce(db, txn_batch, fid, key_add_body.nonce)?;
 
     // State writes. Record embeds the full message (source of truth) plus the cached
-    // request_fid. last_used_at is initialized to the message's own timestamp so the
-    // sliding-TTL window begins at creation.
+    // request_fid. `put_gasless_key_record` overwrites unconditionally, so an upsert simply
+    // replaces the prior embedded message with the new one — scopes/TTL/etc. on that message
+    // are re-read on every scope evaluation (see `active_key.rs`). The owner-index write is
+    // a no-op re-put on resubmission (same fid → same value) but issued unconditionally for
+    // symmetry with the first-time path. `last_used_at` is reset to the new message's
+    // timestamp: the sliding-TTL window restarts on each accepted KEY_ADD.
     let record = GaslessKeyRecord {
         message: Some(msg.clone()),
         request_fid: verified.request_fid,
     };
     put_gasless_key_record(db, txn_batch, fid, &key_add_body.key, &record)?;
+    put_gasless_key_owner(db, txn_batch, &key_add_body.key, fid)?;
     init_last_used_at(
         db,
         txn_batch,
@@ -157,12 +238,23 @@ pub fn merge_key_add(
         &key_add_body.key,
         message_data.timestamp,
     )?;
+    // Increment the per-FID gasless-key counter in lock-step with the record write, but only
+    // on the first-time-add branch. On upsert (resubmission) the net count is unchanged — we're
+    // replacing a record, not adding one — and bumping the counter would cause
+    // `decrement_gasless_key_count` on a future KEY_REMOVE to underflow or run short.
+    let is_first_time_add = prior_record.is_none();
+    if is_first_time_add {
+        increment_gasless_key_count(db, txn_batch, fid)?;
+    }
+
+    let deleted_messages: Vec<proto::Message> =
+        prior_record.and_then(|r| r.message).into_iter().collect();
 
     Ok(HubEvent::new_event(
         HubEventType::MergeMessage,
         hub_event::Body::MergeMessageBody(proto::MergeMessageBody {
             message: Some(msg.clone()),
-            deleted_messages: vec![],
+            deleted_messages,
         }),
     ))
 }
@@ -267,11 +359,18 @@ pub fn merge_key_remove(
         }
     }
 
-    // State writes. Order: record first (the authoritative existence signal), then
-    // last_used_at (cleanup of the sibling store). Both are per-(fid, key) so no cross-key
-    // interleaving concerns.
+    // State writes. Order: record first (the authoritative existence signal), then the
+    // gasless by-public-key owner entry (releases the gasless-namespace uniqueness claim),
+    // then last_used_at (cleanup of the sibling store). Clearing record first matches the
+    // existing read-order convention; clearing the owner entry releases the gasless claim
+    // so a subsequent gasless KEY_ADD from any FID can succeed.
     delete_gasless_key_record(db, txn_batch, fid, &key_remove_body.key)?;
+    delete_gasless_key_owner(db, txn_batch, &key_remove_body.key)?;
     delete_last_used_at(db, txn_batch, fid, &key_remove_body.key)?;
+    // Decrement the per-FID gasless-key counter. The record existence check at the top of this
+    // function guarantees this decrement corresponds to a real prior KEY_ADD; the counter stays
+    // in sync with the number of distinct records on disk.
+    decrement_gasless_key_count(db, txn_batch, fid)?;
 
     Ok(HubEvent::new_event(
         HubEventType::MergeMessage,

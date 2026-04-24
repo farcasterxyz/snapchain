@@ -47,6 +47,12 @@ impl TryFrom<u32> for KeyRemoveSignatureType {
 // rejected at static validation so a misbehaving signer can't request an effectively-permanent key.
 pub const MAX_KEY_TTL_SECONDS: u32 = 90 * 24 * 60 * 60;
 
+// Cap on active *gasless* keys per FID. On-chain signers are not counted here — they have their
+// own cap at the L2 KeyRegistry contract and are outside this limit. Enforced at KEY_ADD merge
+// time by `merge_key_add`: a gasless KEY_ADD that would push the per-FID count to or past this
+// value is rejected with `ActiveKeyCapExceeded`.
+pub const MAX_GASLESS_KEYS_PER_FID: u32 = 1000;
+
 // Upper bound on the number of entries in `KeyAddBody.scopes`. Scopes are semantically a set of
 // `MessageType` discriminants, so by pigeonhole any list longer than the MessageType enum's
 // variant count is guaranteed to contain duplicates. Keep this in sync with the enum in
@@ -259,7 +265,7 @@ fn signed_key_request_types() -> Value {
     })
 }
 
-fn signed_key_request_typed_data(
+pub(crate) fn signed_key_request_typed_data(
     request_fid: u64,
     key: &[u8],
     deadline: u64,

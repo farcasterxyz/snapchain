@@ -4,8 +4,11 @@ mod tests {
     use crate::storage::db;
     use crate::storage::db::RocksDbTransactionBatch;
     use crate::storage::store::account::{
-        delete_gasless_key_record, exists_gasless_key, get_gasless_key_record,
-        make_gasless_key_by_fid_key, put_gasless_key_record, GaslessKeyRecord,
+        decrement_gasless_key_count, delete_gasless_key_owner, delete_gasless_key_record,
+        get_gasless_key_count, get_gasless_key_owner_fid, get_gasless_key_record,
+        increment_gasless_key_count, make_gasless_key_by_fid_key,
+        make_gasless_key_by_public_key_key, make_gasless_key_count_by_fid_key,
+        put_gasless_key_owner, put_gasless_key_record, GaslessKeyRecord,
     };
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -82,39 +85,15 @@ mod tests {
     }
 
     #[test]
-    fn exists_reflects_put_and_delete() {
-        let (db, _dir) = open_db();
-        let mut txn = RocksDbTransactionBatch::new();
-
-        assert!(!exists_gasless_key(&db, &txn, 7, &KEY_A).unwrap());
-
-        put_gasless_key_record(&db, &mut txn, 7, &KEY_A, &sample_record(1, vec![1])).unwrap();
-        assert!(exists_gasless_key(&db, &txn, 7, &KEY_A).unwrap());
-
-        delete_gasless_key_record(&db, &mut txn, 7, &KEY_A).unwrap();
-        assert!(!exists_gasless_key(&db, &txn, 7, &KEY_A).unwrap());
-    }
-
-    #[test]
     fn delete_of_missing_record_is_noop() {
-        // Matches RocksDB's tolerance for deleting nonexistent keys — engine KEY_REMOVE path
-        // shouldn't have to pre-check existence (conflict-resolution already owns that).
+        // RocksDB tolerates deletes of absent keys, and `merge_key_remove` relies on that:
+        // the merge path never pre-checks record existence before deleting.
         let (db, _dir) = open_db();
         let mut txn = RocksDbTransactionBatch::new();
         delete_gasless_key_record(&db, &mut txn, 7, &KEY_A).unwrap();
-        assert!(!exists_gasless_key(&db, &txn, 7, &KEY_A).unwrap());
-    }
-
-    #[test]
-    fn exists_sees_uncommitted_writes_in_same_txn() {
-        // The conflict check in `merge_key_add` calls `exists_gasless_key` on the same txn_batch
-        // that a prior KEY_ADD in the same shard commit might have staged — it must see that
-        // staged write, otherwise two KEY_ADDs in one commit could both pass conflict resolution.
-        let (db, _dir) = open_db();
-        let mut txn = RocksDbTransactionBatch::new();
-
-        put_gasless_key_record(&db, &mut txn, 7, &KEY_A, &sample_record(1, vec![1])).unwrap();
-        assert!(exists_gasless_key(&db, &txn, 7, &KEY_A).unwrap());
+        assert!(get_gasless_key_record(&db, &txn, 7, &KEY_A)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -165,6 +144,250 @@ mod tests {
                 .request_fid,
             300
         );
+    }
+
+    // ---- by-public-key owner index ---------------------------------------------------------
+
+    #[test]
+    fn owner_key_layout_varies_only_by_public_key() {
+        let ka = make_gasless_key_by_public_key_key(&KEY_A).unwrap();
+        let kb = make_gasless_key_by_public_key_key(&KEY_B).unwrap();
+        assert_ne!(
+            ka, kb,
+            "different public keys must map to different index keys"
+        );
+        // Stable on repeat — the key material is all we encode, no FID mixing.
+        assert_eq!(ka, make_gasless_key_by_public_key_key(&KEY_A).unwrap());
+        // Size matches the compile-time constant: 1 root prefix + 1 postfix + 32 key.
+        assert_eq!(ka.len(), 1 + 1 + 32);
+    }
+
+    #[test]
+    fn owner_make_key_rejects_wrong_length_public_key() {
+        let err = make_gasless_key_by_public_key_key(&[0xAA; 31]).unwrap_err();
+        assert_eq!(err.code, "bad_request.validation_failure");
+    }
+
+    #[test]
+    fn owner_get_returns_none_for_unclaimed_key() {
+        let (db, _dir) = open_db();
+        let txn = RocksDbTransactionBatch::new();
+        assert!(get_gasless_key_owner_fid(&db, &txn, &KEY_A)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn owner_roundtrips_fid() {
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+
+        put_gasless_key_owner(&db, &mut txn, &KEY_A, 42).unwrap();
+        assert_eq!(
+            get_gasless_key_owner_fid(&db, &txn, &KEY_A).unwrap(),
+            Some(42)
+        );
+
+        // Different key stays unclaimed.
+        assert!(get_gasless_key_owner_fid(&db, &txn, &KEY_B)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn owner_sees_uncommitted_writes_in_same_txn() {
+        // The global-uniqueness check in `merge_key_add` runs against a txn_batch that may
+        // already hold a staged KEY_ADD from earlier in the same commit. The read must see
+        // that staged owner entry, otherwise two KEY_ADDs for the same key in one commit
+        // could both pass the check.
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+
+        put_gasless_key_owner(&db, &mut txn, &KEY_A, 7).unwrap();
+        assert_eq!(
+            get_gasless_key_owner_fid(&db, &txn, &KEY_A).unwrap(),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn owner_persists_across_txns() {
+        let (db, _dir) = open_db();
+
+        let mut txn1 = RocksDbTransactionBatch::new();
+        put_gasless_key_owner(&db, &mut txn1, &KEY_A, 9999).unwrap();
+        db.commit(txn1).unwrap();
+
+        let txn2 = RocksDbTransactionBatch::new();
+        assert_eq!(
+            get_gasless_key_owner_fid(&db, &txn2, &KEY_A).unwrap(),
+            Some(9999)
+        );
+    }
+
+    #[test]
+    fn owner_overwrite_replaces_fid() {
+        // Not a path the merge layer uses (KEY_REMOVE always clears before a re-add), but the
+        // store must behave as a last-writer-wins map — the merge layer relies on delete +
+        // add being idempotent regardless of ordering within a batch.
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+
+        put_gasless_key_owner(&db, &mut txn, &KEY_A, 1).unwrap();
+        put_gasless_key_owner(&db, &mut txn, &KEY_A, 2).unwrap();
+        assert_eq!(
+            get_gasless_key_owner_fid(&db, &txn, &KEY_A).unwrap(),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn owner_delete_clears_claim() {
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+
+        put_gasless_key_owner(&db, &mut txn, &KEY_A, 7).unwrap();
+        delete_gasless_key_owner(&db, &mut txn, &KEY_A).unwrap();
+        assert!(get_gasless_key_owner_fid(&db, &txn, &KEY_A)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn owner_delete_of_missing_entry_is_noop() {
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+        delete_gasless_key_owner(&db, &mut txn, &KEY_A).unwrap();
+        assert!(get_gasless_key_owner_fid(&db, &txn, &KEY_A)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn owner_get_on_corrupt_value_returns_internal_error() {
+        // The owner value is a fixed-width 4-byte FID encoding. Anything else (legacy migration,
+        // disk corruption) surfaces as an internal_error rather than being silently reinterpreted.
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+        let key = make_gasless_key_by_public_key_key(&KEY_A).unwrap();
+        txn.put(key, vec![0x01, 0x02]); // wrong width
+
+        let err = get_gasless_key_owner_fid(&db, &txn, &KEY_A).unwrap_err();
+        assert_eq!(err.code, "internal_error");
+    }
+
+    // ---- per-FID gasless-key counter (NEYN-10579) ----------------------------------------
+
+    #[test]
+    fn count_is_zero_when_no_entry() {
+        let (db, _dir) = open_db();
+        let txn = RocksDbTransactionBatch::new();
+        assert_eq!(get_gasless_key_count(&db, &txn, 7).unwrap(), 0);
+    }
+
+    #[test]
+    fn increment_then_get_returns_one() {
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+
+        increment_gasless_key_count(&db, &mut txn, 7).unwrap();
+        assert_eq!(get_gasless_key_count(&db, &txn, 7).unwrap(), 1);
+    }
+
+    #[test]
+    fn multiple_increments_accumulate() {
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+
+        for _ in 0..5 {
+            increment_gasless_key_count(&db, &mut txn, 7).unwrap();
+        }
+        assert_eq!(get_gasless_key_count(&db, &txn, 7).unwrap(), 5);
+    }
+
+    #[test]
+    fn decrement_saturates_at_zero() {
+        // Decrementing an unset counter must not underflow. `saturating_sub` keeps us at 0.
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+
+        decrement_gasless_key_count(&db, &mut txn, 7).unwrap();
+        assert_eq!(get_gasless_key_count(&db, &txn, 7).unwrap(), 0);
+    }
+
+    #[test]
+    fn decrement_to_zero_deletes_entry() {
+        // Sparse-index invariant: a zero count is represented by absence, not by an entry holding
+        // four 0x00 bytes. This keeps `get_gasless_key_count` for never-touched FIDs on the
+        // absent-entry fast path.
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+
+        increment_gasless_key_count(&db, &mut txn, 7).unwrap();
+        decrement_gasless_key_count(&db, &mut txn, 7).unwrap();
+
+        // Verify the entry is truly absent rather than stored as zero: the raw index key must not
+        // round-trip through get_from_db_or_txn to a Some(_).
+        let raw_key = make_gasless_key_count_by_fid_key(7);
+        assert!(
+            crate::storage::store::account::get_from_db_or_txn(&db, &txn, &raw_key)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn count_is_scoped_per_fid() {
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+
+        increment_gasless_key_count(&db, &mut txn, 7).unwrap();
+        increment_gasless_key_count(&db, &mut txn, 7).unwrap();
+        increment_gasless_key_count(&db, &mut txn, 8).unwrap();
+
+        assert_eq!(get_gasless_key_count(&db, &txn, 7).unwrap(), 2);
+        assert_eq!(get_gasless_key_count(&db, &txn, 8).unwrap(), 1);
+        assert_eq!(get_gasless_key_count(&db, &txn, 9).unwrap(), 0);
+    }
+
+    #[test]
+    fn count_visible_in_same_txn_batch() {
+        // The cap check in `merge_key_add` reads the counter through the in-flight txn batch;
+        // this test locks in that a just-staged increment is visible to a subsequent read in the
+        // same batch without commit.
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+
+        increment_gasless_key_count(&db, &mut txn, 42).unwrap();
+        increment_gasless_key_count(&db, &mut txn, 42).unwrap();
+        assert_eq!(get_gasless_key_count(&db, &txn, 42).unwrap(), 2);
+    }
+
+    #[test]
+    fn count_persists_across_commit() {
+        let (db, _dir) = open_db();
+
+        let mut txn1 = RocksDbTransactionBatch::new();
+        increment_gasless_key_count(&db, &mut txn1, 7).unwrap();
+        increment_gasless_key_count(&db, &mut txn1, 7).unwrap();
+        increment_gasless_key_count(&db, &mut txn1, 7).unwrap();
+        db.commit(txn1).unwrap();
+
+        let txn2 = RocksDbTransactionBatch::new();
+        assert_eq!(get_gasless_key_count(&db, &txn2, 7).unwrap(), 3);
+    }
+
+    #[test]
+    fn corrupt_count_value_returns_internal_error() {
+        // The count value is a fixed-width 4-byte u32 encoding. Any other width (disk corruption,
+        // botched migration) surfaces as internal_error rather than being silently reinterpreted.
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+        let key = make_gasless_key_count_by_fid_key(7);
+        txn.put(key, vec![0x01, 0x02, 0x03]); // wrong width
+
+        let err = get_gasless_key_count(&db, &txn, 7).unwrap_err();
+        assert_eq!(err.code, "internal_error");
     }
 
     #[test]

@@ -35,11 +35,6 @@ jobs:
           components: llvm-tools-preview
           override: true
 
-      - uses: actions/checkout@v6
-        with:
-          repository: CassOnMars/eth-signature-verifier
-          path: ./eth-signature-verifier
-
       - uses: actions/setup-node@v6
         with:
           node-version: 22
@@ -90,7 +85,7 @@ jobs:
       - working-directory: ./snapchain
         env:
           RUSTFLAGS: "-Dwarnings -A mismatched_lifetime_syntaxes"
-        run: cargo build --bins
+        run: cargo check --bins
 
       - working-directory: ./snapchain
         env:

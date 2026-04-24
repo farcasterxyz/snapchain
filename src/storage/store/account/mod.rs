@@ -1,3 +1,4 @@
+pub use self::active_key::*;
 pub use self::block_event_store::*;
 pub use self::cast_store::*;
 pub use self::event::*;
@@ -23,6 +24,7 @@ mod message;
 mod onchain_event_store;
 mod store;
 
+mod active_key;
 mod block_event_store;
 mod gasless_key_merge;
 mod key_add_store;
@@ -38,13 +40,15 @@ mod verification_store;
 #[cfg(test)]
 mod cast_store_test;
 #[cfg(test)]
+mod gasless_key_merge_test;
+#[cfg(test)]
 mod key_add_store_test;
 #[cfg(test)]
 mod key_last_used_at_store_test;
 #[cfg(test)]
 mod key_nonce_store_test;
 #[cfg(test)]
-mod on_chain_event_store_tests;
+mod onchain_event_store_test;
 #[cfg(test)]
 mod reaction_store_test;
 #[cfg(test)]
