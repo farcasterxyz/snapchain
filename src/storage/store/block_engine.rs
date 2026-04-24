@@ -283,6 +283,7 @@ impl BlockEngine {
         // here. This bypass also subsumes the self-revocation `KEY_REMOVE` scope carve-out
         // (see matching comment in `ShardEngine::validate_user_message`).
         let msg_type = MessageType::try_from(message_data.r#type).unwrap_or(MessageType::None);
+        let mut gasless_ttl_for_bump: Option<u32> = None;
         if msg_type != MessageType::KeyAdd && msg_type != MessageType::KeyRemove {
             let active_key = crate::storage::store::account::get_active_key(
                 &self.stores.onchain_event_store,
@@ -298,6 +299,17 @@ impl BlockEngine {
                 return Err(MessageValidationError::GaslessKeyOutOfScope {
                     msg_type: message_data.r#type,
                 });
+            }
+
+            // Capture gasless ttl for the sliding-expiry bump below. Matches
+            // `ShardEngine::validate_user_message` — the `ttl > 0` guard is defense in depth
+            // since `validate_key_add_body` rejects `ttl == 0` for gasless keys.
+            if let crate::storage::store::account::ActiveKey::Gasless { ttl_seconds, .. } =
+                active_key
+            {
+                if ttl_seconds > 0 {
+                    gasless_ttl_for_bump = Some(ttl_seconds);
+                }
             }
         }
 
@@ -338,6 +350,23 @@ impl BlockEngine {
             crate::proto::message_data::Body::KeyAddBody(_)
             | crate::proto::message_data::Body::KeyRemoveBody(_) => {}
             _ => return Err(MessageValidationError::InvalidMessageType),
+        }
+
+        // 3. Sliding-TTL enforcement for gasless keys (NEYN-10576). Mirrors
+        // `ShardEngine::validate_user_message`. See the long-form comment there for the
+        // `current_block_timestamp` unit / error-handling rationale.
+        if let Some(ttl) = gasless_ttl_for_bump {
+            let current_block_timestamp = timestamp.to_u64();
+            crate::storage::store::account::check_and_bump_last_used_at(
+                &self.stores.db,
+                txn_batch,
+                message_data.fid,
+                &message.signer,
+                ttl,
+                message_data.timestamp,
+                current_block_timestamp,
+            )
+            .map_err(MessageValidationError::HubError)?;
         }
 
         Ok(())

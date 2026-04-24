@@ -155,7 +155,7 @@ pub fn check_and_bump_last_used_at(
     public_key: &[u8],
     ttl: u32,
     message_timestamp: u32,
-    current_block_timestamp: u32,
+    current_block_timestamp: u64,
 ) -> Result<(), HubError> {
     let key = make_last_used_at_key(fid, public_key)?;
     let stored = match get_from_db_or_txn(db, txn, &key)? {
@@ -172,7 +172,7 @@ pub fn check_and_bump_last_used_at(
             }
             let mut buf = [0u8; LAST_USED_AT_VALUE_BYTES];
             buf.copy_from_slice(&bytes);
-            u32::from_be_bytes(buf)
+            u32::from_be_bytes(buf) as u64
         }
         None => {
             // Missing entry means the key was never initialized via `init_last_used_at` — either
@@ -192,7 +192,7 @@ pub fn check_and_bump_last_used_at(
     // `stored + ttl` cannot overflow u32: `ttl` is capped at `MAX_KEY_TTL_SECONDS` by
     // `validate_key_add_body` and `stored` is a farcaster-epoch second count well below
     // u32 saturation for any realistic block. See the module docstring for the full invariant.
-    if stored + ttl < current_block_timestamp {
+    if stored + (ttl as u64) < current_block_timestamp {
         return Err(HubError {
             code: "bad_request.validation_failure".to_string(),
             message: format!(
