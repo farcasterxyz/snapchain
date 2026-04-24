@@ -817,7 +817,10 @@ impl HubService for MyHubService {
                 } else {
                     match shard_store.as_ref() {
                         None => Err(Status::from_error(Box::new(
-                            HubError::invalid_internal_state("Missing shard store"),
+                            HubError::invalid_internal_state(&format!(
+                                "Shard store not found for shard_id: {}",
+                                shard_id
+                            )),
                         ))),
                         Some(shard_store) => get_shard_chunks_in_range(
                             &shard_store.db,
@@ -835,16 +838,14 @@ impl HubService for MyHubService {
                                         timestamp: header.timestamp,
                                         version: protocol_version,
                                         chain_id: network as i32,
-                                        shard_witnesses_hash: vec![],
                                         parent_hash: header.parent_hash,
                                         state_root: header.shard_root,
-                                        events_hash: vec![],
+                                        ..proto::BlockHeader::default()
                                     }),
                                     hash: shard_chunk.hash,
-                                    shard_witness: None,
                                     commits: shard_chunk.commits,
                                     transactions: shard_chunk.transactions,
-                                    events: vec![],
+                                    ..Block::default()
                                 })
                                 .collect();
                             (blocks, shard_page.next_page_token)
