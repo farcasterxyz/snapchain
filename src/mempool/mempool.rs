@@ -123,6 +123,58 @@ impl RateLimits {
     }
 }
 
+// -------------------------------------------------------------------------------------------
+// KEY_ADD rate limiter (NEYN-10579)
+// -------------------------------------------------------------------------------------------
+//
+// Separate from the storage-quota-derived `RateLimits` above: this is a fixed, FIP-required
+// safety guardrail at 1/min per FID for KEY_ADD messages specifically. `KEY_REMOVE` is
+// intentionally never rate-limited — revocation of a compromised key must never be blockable.
+// Gating in the mempool covers both RPC-submitted and gossip-forwarded KEY_ADD messages: a
+// rejection in `message_is_valid` both keeps the message out of the pool and suppresses
+// downstream gossip (since `insert_into_shard` only gossips on the success branch).
+//
+// Always-on (not gated by `Config::enable_rate_limits`) because this is a safety guardrail,
+// not a tunable throughput knob.
+pub struct KeyAddRateLimits {
+    rate_limits_by_fid: Cache<u64, Arc<DirectRateLimiter>>,
+    statsd_client: StatsdClientWrapper,
+}
+
+impl KeyAddRateLimits {
+    pub fn new(statsd_client: StatsdClientWrapper) -> Self {
+        Self {
+            rate_limits_by_fid: CacheBuilder::new(1_000_000)
+                // 2× the 60s quota window: keeps idle entries around long enough to still block
+                // a follow-up burst, and lets LRU reclaim entries that haven't sent a KEY_ADD
+                // in a while without leaking memory per distinct FID observed.
+                .time_to_idle(Duration::from_secs(120))
+                .eviction_policy(EvictionPolicy::lru())
+                .build(),
+            statsd_client,
+        }
+    }
+
+    /// Returns `true` if the caller is under-limit (may proceed), `false` if rate-limited.
+    /// Mirrors the `RateLimits::consume_for_fid` shape so the caller sites remain symmetric.
+    pub fn consume_for_fid(&self, fid: u64) -> bool {
+        let limiter = self.rate_limits_by_fid.get_with(fid, || {
+            // 1 KEY_ADD per minute per FID (FIP, NEYN-10579). The quota value is fixed — this
+            // guardrail is not negotiable per-FID because a malicious or misbehaving client
+            // could otherwise spray KEY_ADDs and force the merge path to do expensive crypto.
+            Arc::new(RateLimiter::direct(Quota::per_minute(
+                NonZeroU32::new(1).unwrap(),
+            )))
+        });
+        self.statsd_client.gauge(
+            "mempool.key_add_rate_limiter_entries",
+            self.rate_limits_by_fid.entry_count(),
+            vec![],
+        );
+        limiter.check().is_ok()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub queue_size: u32,
@@ -480,6 +532,16 @@ impl ReadNodeMempool {
     }
 }
 
+/// True iff the message body is a `KeyAddBody`. Defensive to missing `data` — a malformed
+/// message without `data` cannot be a KEY_ADD and therefore shouldn't trip the KEY_ADD limiter;
+/// it will fail later validation on its own.
+fn is_key_add(message: &proto::Message) -> bool {
+    match &message.data {
+        Some(data) => matches!(data.body, Some(proto::message_data::Body::KeyAddBody(_))),
+        None => false,
+    }
+}
+
 pub struct Mempool {
     config: Config,
     messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
@@ -489,6 +551,9 @@ pub struct Mempool {
     statsd_client: StatsdClientWrapper,
     read_node_mempool: ReadNodeMempool,
     rate_limits: Option<RateLimits>,
+    // Always present (not `Option`) — KEY_ADD rate limiting is a FIP-required safety
+    // guardrail, not a configurable throughput knob. See `KeyAddRateLimits`.
+    key_add_rate_limits: KeyAddRateLimits,
 }
 
 impl Mempool {
@@ -520,6 +585,7 @@ impl Mempool {
             } else {
                 None
             },
+            key_add_rate_limits: KeyAddRateLimits::new(statsd_client.clone()),
             config,
             read_node_mempool: ReadNodeMempool::new(
                 mempool_rx,
@@ -536,9 +602,26 @@ impl Mempool {
 
     fn message_exceeds_rate_limits(&mut self, message: &MempoolMessage) -> bool {
         match message {
-            MempoolMessage::UserMessage(message) => {
+            MempoolMessage::UserMessage(user_msg) => {
+                let fid = user_msg.fid();
+
+                // KEY_ADD-specific 1/min limit (NEYN-10579). Gated in the mempool — not at RPC —
+                // so both RPC-submitted and gossip-forwarded KEY_ADDs are dropped without
+                // re-propagation when over limit. KEY_REMOVE is intentionally NEVER rate-limited:
+                // revocation of a compromised key must not be blockable. Non-key user messages
+                // fall through to the storage-quota limiter below.
+                // TODO(#10): this is also the hook for lazy `registration_tx_hash` replacement
+                // eviction — wire in once the pending-FID flow lands.
+                if is_key_add(user_msg) {
+                    if !self.key_add_rate_limits.consume_for_fid(fid) {
+                        self.statsd_client
+                            .count("mempool.key_add_rate_limit_hit", 1, vec![]);
+                        return true;
+                    }
+                }
+
                 if let Some(rate_limits) = &mut self.rate_limits {
-                    !rate_limits.consume_for_fid(message.fid())
+                    !rate_limits.consume_for_fid(fid)
                 } else {
                     false
                 }

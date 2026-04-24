@@ -4,8 +4,10 @@ mod tests {
     use crate::storage::db;
     use crate::storage::db::RocksDbTransactionBatch;
     use crate::storage::store::account::{
-        delete_gasless_key_owner, delete_gasless_key_record, get_gasless_key_owner_fid,
-        get_gasless_key_record, make_gasless_key_by_fid_key, make_gasless_key_by_public_key_key,
+        decrement_gasless_key_count, delete_gasless_key_owner, delete_gasless_key_record,
+        get_gasless_key_count, get_gasless_key_owner_fid, get_gasless_key_record,
+        increment_gasless_key_count, make_gasless_key_by_fid_key,
+        make_gasless_key_by_public_key_key, make_gasless_key_count_by_fid_key,
         put_gasless_key_owner, put_gasless_key_record, GaslessKeyRecord,
     };
     use std::sync::Arc;
@@ -271,6 +273,120 @@ mod tests {
         txn.put(key, vec![0x01, 0x02]); // wrong width
 
         let err = get_gasless_key_owner_fid(&db, &txn, &KEY_A).unwrap_err();
+        assert_eq!(err.code, "internal_error");
+    }
+
+    // ---- per-FID gasless-key counter (NEYN-10579) ----------------------------------------
+
+    #[test]
+    fn count_is_zero_when_no_entry() {
+        let (db, _dir) = open_db();
+        let txn = RocksDbTransactionBatch::new();
+        assert_eq!(get_gasless_key_count(&db, &txn, 7).unwrap(), 0);
+    }
+
+    #[test]
+    fn increment_then_get_returns_one() {
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+
+        increment_gasless_key_count(&db, &mut txn, 7).unwrap();
+        assert_eq!(get_gasless_key_count(&db, &txn, 7).unwrap(), 1);
+    }
+
+    #[test]
+    fn multiple_increments_accumulate() {
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+
+        for _ in 0..5 {
+            increment_gasless_key_count(&db, &mut txn, 7).unwrap();
+        }
+        assert_eq!(get_gasless_key_count(&db, &txn, 7).unwrap(), 5);
+    }
+
+    #[test]
+    fn decrement_saturates_at_zero() {
+        // Decrementing an unset counter must not underflow. `saturating_sub` keeps us at 0.
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+
+        decrement_gasless_key_count(&db, &mut txn, 7).unwrap();
+        assert_eq!(get_gasless_key_count(&db, &txn, 7).unwrap(), 0);
+    }
+
+    #[test]
+    fn decrement_to_zero_deletes_entry() {
+        // Sparse-index invariant: a zero count is represented by absence, not by an entry holding
+        // four 0x00 bytes. This keeps `get_gasless_key_count` for never-touched FIDs on the
+        // absent-entry fast path.
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+
+        increment_gasless_key_count(&db, &mut txn, 7).unwrap();
+        decrement_gasless_key_count(&db, &mut txn, 7).unwrap();
+
+        // Verify the entry is truly absent rather than stored as zero: the raw index key must not
+        // round-trip through get_from_db_or_txn to a Some(_).
+        let raw_key = make_gasless_key_count_by_fid_key(7);
+        assert!(
+            crate::storage::store::account::get_from_db_or_txn(&db, &txn, &raw_key)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn count_is_scoped_per_fid() {
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+
+        increment_gasless_key_count(&db, &mut txn, 7).unwrap();
+        increment_gasless_key_count(&db, &mut txn, 7).unwrap();
+        increment_gasless_key_count(&db, &mut txn, 8).unwrap();
+
+        assert_eq!(get_gasless_key_count(&db, &txn, 7).unwrap(), 2);
+        assert_eq!(get_gasless_key_count(&db, &txn, 8).unwrap(), 1);
+        assert_eq!(get_gasless_key_count(&db, &txn, 9).unwrap(), 0);
+    }
+
+    #[test]
+    fn count_visible_in_same_txn_batch() {
+        // The cap check in `merge_key_add` reads the counter through the in-flight txn batch;
+        // this test locks in that a just-staged increment is visible to a subsequent read in the
+        // same batch without commit.
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+
+        increment_gasless_key_count(&db, &mut txn, 42).unwrap();
+        increment_gasless_key_count(&db, &mut txn, 42).unwrap();
+        assert_eq!(get_gasless_key_count(&db, &txn, 42).unwrap(), 2);
+    }
+
+    #[test]
+    fn count_persists_across_commit() {
+        let (db, _dir) = open_db();
+
+        let mut txn1 = RocksDbTransactionBatch::new();
+        increment_gasless_key_count(&db, &mut txn1, 7).unwrap();
+        increment_gasless_key_count(&db, &mut txn1, 7).unwrap();
+        increment_gasless_key_count(&db, &mut txn1, 7).unwrap();
+        db.commit(txn1).unwrap();
+
+        let txn2 = RocksDbTransactionBatch::new();
+        assert_eq!(get_gasless_key_count(&db, &txn2, 7).unwrap(), 3);
+    }
+
+    #[test]
+    fn corrupt_count_value_returns_internal_error() {
+        // The count value is a fixed-width 4-byte u32 encoding. Any other width (disk corruption,
+        // botched migration) surfaces as internal_error rather than being silently reinterpreted.
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+        let key = make_gasless_key_count_by_fid_key(7);
+        txn.put(key, vec![0x01, 0x02, 0x03]); // wrong width
+
+        let err = get_gasless_key_count(&db, &txn, 7).unwrap_err();
         assert_eq!(err.code, "internal_error");
     }
 
