@@ -1,6 +1,7 @@
 pub use self::block_event_store::*;
 pub use self::cast_store::*;
 pub use self::event::*;
+pub use self::gasless_key_merge::*;
 pub use self::key_add_store::*;
 pub use self::key_last_used_at_store::*;
 pub use self::key_nonce_store::*;
@@ -23,6 +24,7 @@ mod onchain_event_store;
 mod store;
 
 mod block_event_store;
+mod gasless_key_merge;
 mod key_add_store;
 mod key_last_used_at_store;
 mod key_nonce_store;

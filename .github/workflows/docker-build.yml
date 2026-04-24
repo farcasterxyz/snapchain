@@ -44,7 +44,7 @@ jobs:
     uses: ./.github/workflows/docker-build-impl.yml
     secrets: inherit
 
-  required:
+  docker-build-required:
     needs: [changes, build]
     if: always()
     runs-on: ubuntu-latest
@@ -56,16 +56,16 @@ jobs:
           BUILD_RESULT: ${{ needs.build.result }}
         run: |
           if [[ "$CHANGES_RESULT" != "success" ]]; then
-            echo "Docker Build required check failing: changes job did not succeed (result: $CHANGES_RESULT)"
+            echo "docker-build-required failing: changes job did not succeed (result: $CHANGES_RESULT)"
             exit 1
           fi
           if [[ "$BUILD_RESULT" == "success" ]]; then
-            echo "Docker Build required check passing: build succeeded"
+            echo "docker-build-required passing: build succeeded"
             exit 0
           fi
           if [[ "$BUILD_RESULT" == "skipped" && "$CODE_CHANGED" != "true" ]]; then
-            echo "Docker Build required check passing: build intentionally skipped (no code changes)"
+            echo "docker-build-required passing: build intentionally skipped (no code changes)"
             exit 0
           fi
-          echo "Docker Build required check failing (build job: $BUILD_RESULT, code changed: $CODE_CHANGED)"
+          echo "docker-build-required failing (build job: $BUILD_RESULT, code changed: $CODE_CHANGED)"
           exit 1

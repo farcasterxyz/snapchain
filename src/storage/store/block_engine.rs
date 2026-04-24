@@ -72,6 +72,26 @@ pub enum MessageValidationError {
     MessageValidationError(#[from] validations::error::ValidationError),
 }
 
+// `merge_key_add` / `merge_key_remove` in `account::gasless_key_merge` return the
+// ShardEngine-flavored `engine::MessageValidationError` (their historical home). Translate
+// into the block-engine variant so callers here can use `?` on them. The merge helpers only
+// ever produce the subset of variants mapped explicitly below; anything else falls through
+// to `HubError` with the source's formatted message so the information isn't lost.
+impl From<crate::storage::store::engine::MessageValidationError> for MessageValidationError {
+    fn from(err: crate::storage::store::engine::MessageValidationError) -> Self {
+        use crate::storage::store::engine::MessageValidationError as E;
+        match err {
+            E::NoMessageData => Self::NoMessageData,
+            E::MissingFid => Self::MissingFid,
+            E::MissingSigner => Self::MissingSigner,
+            E::MessageValidationError(v) => Self::MessageValidationError(v),
+            E::InvalidMessageType(_) => Self::InvalidMessageType,
+            E::StoreError(h) => Self::HubError(h),
+            other => Self::HubError(HubError::internal_db_error(&other.to_string())),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct BlockStores {
     pub block_store: BlockStore,
@@ -248,12 +268,22 @@ impl BlockEngine {
             .map_err(|_| MessageValidationError::MissingFid)?
             .ok_or(MessageValidationError::MissingFid)?;
 
-        // 2. Check that the user has a valid signer
-        self.stores
-            .onchain_event_store
-            .get_active_signer(message_data.fid, message.signer.clone(), Some(txn_batch))
-            .map_err(|_| MessageValidationError::MissingSigner)?
-            .ok_or(MessageValidationError::MissingSigner)?;
+        // 2. Check that the user has a valid signer.
+        //
+        // KEY_ADD / KEY_REMOVE are special: they authenticate via a custody EIP-712 signature
+        // (and, for self-revocation KEY_REMOVE, via the Ed25519 key being revoked signing
+        // itself). The outer `message.signer` on these messages is the Ed25519 key being
+        // added or removed — by definition either not yet in the signer store (KEY_ADD) or
+        // about to leave it (KEY_REMOVE). Their real authentication happens in the merge
+        // path (see `merge_key_add` / `merge_key_remove`), so skip the active-signer check here.
+        let msg_type = MessageType::try_from(message_data.r#type).unwrap_or(MessageType::None);
+        if msg_type != MessageType::KeyAdd && msg_type != MessageType::KeyRemove {
+            self.stores
+                .onchain_event_store
+                .get_active_signer(message_data.fid, message.signer.clone(), Some(txn_batch))
+                .map_err(|_| MessageValidationError::MissingSigner)?
+                .ok_or(MessageValidationError::MissingSigner)?;
+        }
 
         match message_data
             .body
@@ -285,6 +315,12 @@ impl BlockEngine {
                     return Err(MessageValidationError::InsufficientStorage);
                 }
             }
+            // KEY_ADD / KEY_REMOVE have no per-body pre-merge validation to do at the block-
+            // engine level: static body validation (key length, scopes, ttl bound, etc.) ran
+            // upstream in `validate_message`, and state-dependent checks (nonce CAS, custody
+            // recovery, conflict resolution) live in the merge helpers themselves.
+            crate::proto::message_data::Body::KeyAddBody(_)
+            | crate::proto::message_data::Body::KeyRemoveBody(_) => {}
             _ => return Err(MessageValidationError::InvalidMessageType),
         }
 
@@ -302,6 +338,18 @@ impl BlockEngine {
                 message,
                 txn_batch,
             )?),
+            MessageType::KeyAdd => Ok(vec![crate::storage::store::account::merge_key_add(
+                &self.stores.db,
+                &self.stores.onchain_event_store,
+                message,
+                txn_batch,
+            )?]),
+            MessageType::KeyRemove => Ok(vec![crate::storage::store::account::merge_key_remove(
+                &self.stores.db,
+                &self.stores.onchain_event_store,
+                message,
+                txn_batch,
+            )?]),
             _ => return Err(MessageValidationError::InvalidMessageType),
         }
     }
@@ -393,6 +441,14 @@ impl BlockEngine {
                             }
                         }
                     }
+                    MessageType::KeyAdd | MessageType::KeyRemove => {
+                        // No storage-slot accounting needed — gasless keys don't consume
+                        // storage units. Emitted MergeMessageBody propagates to shards via
+                        // BlockEvent so their local DBs can replay the same merge.
+                        if let Ok(events) = self.merge_message(message, txn_batch) {
+                            hub_events.extend(events);
+                        }
+                    }
                     _ => {}
                 },
                 Err(err) => {
@@ -451,7 +507,16 @@ impl BlockEngine {
                 proto::hub_event::Body::MergeMessageBody(merge_message_body) => {
                     if let Some(message) = merge_message_body.message {
                         match message.msg_type() {
-                            MessageType::LendStorage => {
+                            MessageType::LendStorage
+                            | MessageType::KeyAdd
+                            | MessageType::KeyRemove => {
+                                // All shard-0-hosted user messages propagate the same way:
+                                // wrap the original message in a MergeMessageEvent so shards
+                                // 1..N can replay the merge into their local DBs via
+                                // ShardEngine::handle_block_event. For KEY_ADD / KEY_REMOVE
+                                // this is what makes gasless-key records visible on every
+                                // shard for scope enforcement, TTL checks, and last_used_at
+                                // bumps (NEYN-10575, NEYN-10576).
                                 max_block_event_seqnum += 1;
                                 let data = BlockEventData {
                                     seqnum: max_block_event_seqnum,
@@ -946,6 +1011,96 @@ impl BlockEngine {
             return Err(errors[0].clone());
         } else {
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod error_conversion_tests {
+    //! Lock down `From<engine::MessageValidationError> for block_engine::MessageValidationError`.
+    //!
+    //! The merge helpers in `account::gasless_key_merge` return the ShardEngine-flavored error
+    //! (their historical home). Callers in `BlockEngine::merge_message` use `?` against the
+    //! block-engine-flavored error, which relies on this conversion. These tests enumerate every
+    //! variant the helpers can realistically produce so the mapping doesn't silently drop
+    //! information if future merge-helper changes start emitting new variants.
+
+    use super::MessageValidationError;
+    use crate::core::error::HubError;
+    use crate::core::validations::error::ValidationError;
+    use crate::storage::store::engine::MessageValidationError as EngineErr;
+
+    #[test]
+    fn maps_no_message_data() {
+        let out: MessageValidationError = EngineErr::NoMessageData.into();
+        assert!(matches!(out, MessageValidationError::NoMessageData));
+    }
+
+    #[test]
+    fn maps_missing_fid() {
+        let out: MessageValidationError = EngineErr::MissingFid.into();
+        assert!(matches!(out, MessageValidationError::MissingFid));
+    }
+
+    #[test]
+    fn maps_missing_signer() {
+        let out: MessageValidationError = EngineErr::MissingSigner.into();
+        assert!(matches!(out, MessageValidationError::MissingSigner));
+    }
+
+    #[test]
+    fn maps_validation_error_transparently() {
+        // ValidationError passes through unchanged. Pick a specific variant the merge helpers
+        // actually emit (`KeyNotRegistered` from merge_key_remove) so a future widening of the
+        // `ValidationError` enum is caught here.
+        let out: MessageValidationError =
+            EngineErr::MessageValidationError(ValidationError::KeyNotRegistered).into();
+        assert!(matches!(
+            out,
+            MessageValidationError::MessageValidationError(ValidationError::KeyNotRegistered)
+        ));
+    }
+
+    #[test]
+    fn maps_invalid_message_type_drops_payload() {
+        // The engine variant carries an `i32` discriminant; block-engine's variant has no
+        // payload. We intentionally drop the i32 — block-engine callers don't need to
+        // distinguish which message type got rejected because they're the originator.
+        let out: MessageValidationError = EngineErr::InvalidMessageType(42).into();
+        assert!(matches!(out, MessageValidationError::InvalidMessageType));
+    }
+
+    #[test]
+    fn maps_store_error_to_hub_error() {
+        // engine::StoreError wraps a HubError. The mapping should preserve the HubError
+        // payload so logs/telemetry still carry the original code + message.
+        let source = HubError::internal_db_error("corrupt record");
+        let out: MessageValidationError = EngineErr::StoreError(source.clone()).into();
+        match out {
+            MessageValidationError::HubError(h) => {
+                assert_eq!(h.code, source.code);
+                assert_eq!(h.message, source.message);
+            }
+            other => panic!("expected HubError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unmapped_variants_fall_through_to_hub_error_with_source_message() {
+        // Variants the merge helpers don't emit today (e.g., MissingFname, InvalidEthereumAddress)
+        // fall through to HubError. We format the source `Display` into the HubError message so
+        // the telemetry trail isn't lost. Regression guard: if the explicit mapping is ever
+        // expanded to cover these, the assertion below will fail loudly and prompt updating.
+        let out: MessageValidationError = EngineErr::MissingFname.into();
+        match out {
+            MessageValidationError::HubError(h) => {
+                assert!(
+                    h.message.contains("fname"),
+                    "expected source message to carry 'fname', got: {}",
+                    h.message
+                );
+            }
+            other => panic!("expected HubError fallthrough, got {other:?}"),
         }
     }
 }
