@@ -862,7 +862,7 @@ impl HubService for MyHubService {
                     }
                     Ok((blocks, page_token)) => {
                         for block in blocks {
-                            if let Err(_) = server_tx.send(Ok(block)).await {
+                            if server_tx.send(Ok(block)).await.is_err() {
                                 break;
                             }
                         }
