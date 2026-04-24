@@ -44,7 +44,7 @@ jobs:
     uses: ./.github/workflows/verify-impl.yml
     secrets: inherit
 
-  required:
+  verify-required:
     needs: [changes, test]
     if: always()
     runs-on: ubuntu-latest
@@ -56,16 +56,16 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
         run: |
           if [[ "$CHANGES_RESULT" != "success" ]]; then
-            echo "Verify required check failing: changes job did not succeed (result: $CHANGES_RESULT)"
+            echo "verify-required failing: changes job did not succeed (result: $CHANGES_RESULT)"
             exit 1
           fi
           if [[ "$TEST_RESULT" == "success" ]]; then
-            echo "Verify required check passing: test succeeded"
+            echo "verify-required passing: test succeeded"
             exit 0
           fi
           if [[ "$TEST_RESULT" == "skipped" && "$CODE_CHANGED" != "true" ]]; then
-            echo "Verify required check passing: test intentionally skipped (no code changes)"
+            echo "verify-required passing: test intentionally skipped (no code changes)"
             exit 0
           fi
-          echo "Verify required check failing (test job: $TEST_RESULT, code changed: $CODE_CHANGED)"
+          echo "verify-required failing (test job: $TEST_RESULT, code changed: $CODE_CHANGED)"
           exit 1
