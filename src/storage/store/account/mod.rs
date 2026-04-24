@@ -48,7 +48,7 @@ mod key_last_used_at_store_test;
 #[cfg(test)]
 mod key_nonce_store_test;
 #[cfg(test)]
-mod on_chain_event_store_tests;
+mod onchain_event_store_test;
 #[cfg(test)]
 mod reaction_store_test;
 #[cfg(test)]
