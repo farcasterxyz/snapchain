@@ -602,6 +602,20 @@ impl MyHubService {
     }
 }
 
+/// Helper function to serialize page tokens only if at least one shard has more data.
+/// Returns None if all shards have finished pagination (all tokens are None).
+fn serialize_page_token_if_not_empty(
+    next_page_tokens: Vec<Option<Vec<u8>>>,
+) -> Result<Option<Vec<u8>>, Status> {
+    if next_page_tokens.iter().any(|token| token.is_some()) {
+        let new_page_token = serde_json::to_vec(&next_page_tokens)
+            .map_err(|e| Status::internal(format!("Failed to serialize next_page_token: {}", e)))?;
+        Ok(Some(new_page_token))
+    } else {
+        Ok(None)
+    }
+}
+
 #[tonic::async_trait]
 impl HubService for MyHubService {
     async fn submit_message(
@@ -1241,11 +1255,11 @@ impl HubService for MyHubService {
             pages.iter().flat_map(|page| page.events.clone()).collect();
         let next_page_tokens: Vec<Option<Vec<u8>>> =
             pages.into_iter().map(|page| page.next_page_token).collect();
-        let new_page_token = serde_json::to_vec(&next_page_tokens)
-            .map_err(|e| Status::internal(format!("Failed to serialize next_page_token: {}", e)))?;
+        let next_page_token = serialize_page_token_if_not_empty(next_page_tokens)?;
+
         let response = EventsResponse {
             events: combined_events,
-            next_page_token: Some(new_page_token),
+            next_page_token,
         };
 
         Ok(Response::new(response))
@@ -1574,11 +1588,11 @@ impl HubService for MyHubService {
             .collect();
         let next_page_tokens: Vec<Option<Vec<u8>>> =
             pages.into_iter().map(|page| page.next_page_token).collect();
-        let new_page_token = serde_json::to_vec(&next_page_tokens)
-            .map_err(|e| Status::internal(format!("Failed to serialize next_page_token: {}", e)))?;
+        let next_page_token = serialize_page_token_if_not_empty(next_page_tokens)?;
+
         let response = MessagesResponse {
             messages: combined_messages,
-            next_page_token: Some(new_page_token),
+            next_page_token,
         };
 
         Ok(Response::new(response))
@@ -1633,13 +1647,11 @@ impl HubService for MyHubService {
 
         let next_page_tokens: Vec<Option<Vec<u8>>> =
             pages.into_iter().map(|page| page.next_page_token).collect();
-
-        let new_page_token = serde_json::to_vec(&next_page_tokens)
-            .map_err(|e| Status::internal(format!("Failed to serialize next_page_token: {}", e)))?;
+        let next_page_token = serialize_page_token_if_not_empty(next_page_tokens)?;
 
         let response = MessagesResponse {
             messages: combined_messages,
-            next_page_token: Some(new_page_token),
+            next_page_token,
         };
 
         Ok(Response::new(response))
@@ -1711,13 +1723,11 @@ impl HubService for MyHubService {
 
         let next_page_tokens: Vec<Option<Vec<u8>>> =
             pages.into_iter().map(|page| page.next_page_token).collect();
-
-        let new_page_token = serde_json::to_vec(&next_page_tokens)
-            .map_err(|e| Status::internal(format!("Failed to serialize next_page_token: {}", e)))?;
+        let next_page_token = serialize_page_token_if_not_empty(next_page_tokens)?;
 
         let response = MessagesResponse {
             messages: combined_messages,
-            next_page_token: Some(new_page_token),
+            next_page_token,
         };
 
         Ok(Response::new(response))
@@ -2220,13 +2230,11 @@ impl HubService for MyHubService {
 
         let next_page_tokens: Vec<Option<Vec<u8>>> =
             pages.into_iter().map(|page| page.next_page_token).collect();
-
-        let new_page_token = serde_json::to_vec(&next_page_tokens)
-            .map_err(|e| Status::internal(format!("Failed to serialize next_page_token: {}", e)))?;
+        let next_page_token = serialize_page_token_if_not_empty(next_page_tokens)?;
 
         let response = MessagesResponse {
             messages: combined_messages,
-            next_page_token: Some(new_page_token),
+            next_page_token,
         };
 
         Ok(Response::new(response))
