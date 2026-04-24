@@ -2271,7 +2271,6 @@ mod prune_arm_tests {
     //!
     //! Placed inline (rather than in engine_tests.rs) because `prune_messages` is a private
     //! method on `ShardEngine` and testing it directly avoids inventing a public hook.
-    use super::*;
     use crate::proto::MessageType;
     use crate::storage::db::RocksDbTransactionBatch;
     use crate::storage::store::test_helper;
