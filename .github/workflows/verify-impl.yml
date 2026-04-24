@@ -1,0 +1,114 @@
+name: Verify (impl)
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  MALACHITE_GIT_REF: "13bca14cd209d985c3adf101a02924acde8723a5"
+
+jobs:
+  test:
+    timeout-minutes: 20
+    runs-on:
+      - runs-on=${{ github.run_id }}
+      - runner=64cpu-linux-arm64
+      - volume=80gb
+    steps:
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v3
+
+      - uses: actions/checkout@v4
+        with:
+          repository: informalsystems/malachite
+          ref: ${{ env.MALACHITE_GIT_REF }}
+          path: ./malachite
+
+      - name: Install Rust 1.89.0
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.89.0
+          profile: default
+          components: llvm-tools-preview
+          override: true
+
+      - uses: actions/checkout@v4
+        with:
+          repository: CassOnMars/eth-signature-verifier
+          path: ./eth-signature-verifier
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/checkout@v4
+        with:
+          path: ./snapchain
+          fetch-depth: 0
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - working-directory: ./snapchain
+        env:
+          RUSTFLAGS: "-Dwarnings -A mismatched_lifetime_syntaxes"
+        run: |
+          cargo llvm-cov --workspace --lcov --output-path lcov.info --ignore-filename-regex 'proto/'
+          cargo llvm-cov report --html --output-dir coverage --ignore-filename-regex 'proto/'
+
+      - name: Set up Python
+        if: github.event_name == 'pull_request'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install diff-cover
+        if: github.event_name == 'pull_request'
+        run: pip install diff-cover==9.2.0
+
+      - name: Generate diff coverage report
+        if: github.event_name == 'pull_request'
+        working-directory: ./snapchain
+        run: |
+          diff-cover lcov.info \
+            --compare-branch=origin/${{ github.base_ref }} \
+            --markdown-report=diff-coverage.md \
+            --fail-under=0
+
+      - name: Post diff coverage comment
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: coverage
+          path: ./snapchain/diff-coverage.md
+
+      - working-directory: ./snapchain
+        env:
+          RUSTFLAGS: "-Dwarnings -A mismatched_lifetime_syntaxes"
+        run: cargo build --bins
+
+      - working-directory: ./snapchain
+        env:
+          RUSTFLAGS: "-Dwarnings -A mismatched_lifetime_syntaxes"
+        run: cargo fmt --all --check
+
+      - working-directory: ./snapchain/tests/client_parity_tests
+        run: |
+          npx node-gyp@12.2.0 install
+          yarn install
+
+      - working-directory: ./snapchain/tests/client_parity_tests
+        run: yarn test
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: ./snapchain/coverage/
+          retention-days: 14
