@@ -21,3 +21,4 @@ Procfile
 /.idea
 node_modules
 grafana/data
+.claude/settings.json
