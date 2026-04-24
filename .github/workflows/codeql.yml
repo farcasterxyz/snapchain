@@ -57,10 +57,10 @@ jobs:
 
     # Warm the target dir + fetch all deps so the buildless extractor (rust-analyzer)
     # has a fully resolvable workspace when it runs `cargo metadata`.
+    # No -Dwarnings here: path-dep crates like eth-signature-verifier emit warnings
+    # that would fail the check but are irrelevant to CodeQL extraction.
     - name: cargo check
       working-directory: ./snapchain
-      env:
-        RUSTFLAGS: "-Dwarnings -A mismatched_lifetime_syntaxes"
       run: cargo check --workspace --all-targets --locked
 
     - name: Initialize CodeQL
