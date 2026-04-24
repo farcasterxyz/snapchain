@@ -59,6 +59,9 @@ pub enum MessageValidationError {
     #[error("invalid signer")]
     MissingSigner,
 
+    #[error("message type {msg_type} is not in the scope of the gasless signer")]
+    GaslessKeyOutOfScope { msg_type: i32 },
+
     #[error("invalid message type")]
     InvalidMessageType,
 
@@ -84,6 +87,7 @@ impl From<crate::storage::store::engine::MessageValidationError> for MessageVali
             E::NoMessageData => Self::NoMessageData,
             E::MissingFid => Self::MissingFid,
             E::MissingSigner => Self::MissingSigner,
+            E::GaslessKeyOutOfScope { msg_type } => Self::GaslessKeyOutOfScope { msg_type },
             E::MessageValidationError(v) => Self::MessageValidationError(v),
             E::InvalidMessageType(_) => Self::InvalidMessageType,
             E::StoreError(h) => Self::HubError(h),
@@ -275,14 +279,38 @@ impl BlockEngine {
         // itself). The outer `message.signer` on these messages is the Ed25519 key being
         // added or removed — by definition either not yet in the signer store (KEY_ADD) or
         // about to leave it (KEY_REMOVE). Their real authentication happens in the merge
-        // path (see `merge_key_add` / `merge_key_remove`), so skip the active-signer check here.
+        // path (see `merge_key_add` / `merge_key_remove`), so skip the active-signer check
+        // here. This bypass also subsumes the self-revocation `KEY_REMOVE` scope carve-out
+        // (see matching comment in `ShardEngine::validate_user_message`).
         let msg_type = MessageType::try_from(message_data.r#type).unwrap_or(MessageType::None);
+        let mut gasless_ttl_for_bump: Option<u32> = None;
         if msg_type != MessageType::KeyAdd && msg_type != MessageType::KeyRemove {
-            self.stores
-                .onchain_event_store
-                .get_active_signer(message_data.fid, message.signer.clone(), Some(txn_batch))
-                .map_err(|_| MessageValidationError::MissingSigner)?
-                .ok_or(MessageValidationError::MissingSigner)?;
+            let active_key = crate::storage::store::account::get_active_key(
+                &self.stores.onchain_event_store,
+                &self.stores.db,
+                txn_batch,
+                message_data.fid,
+                &message.signer,
+            )
+            .map_err(|_| MessageValidationError::MissingSigner)?
+            .ok_or(MessageValidationError::MissingSigner)?;
+
+            if !active_key.admits(msg_type) {
+                return Err(MessageValidationError::GaslessKeyOutOfScope {
+                    msg_type: message_data.r#type,
+                });
+            }
+
+            // Capture gasless ttl for the sliding-expiry bump below. Matches
+            // `ShardEngine::validate_user_message` — the `ttl > 0` guard is defense in depth
+            // since `validate_key_add_body` rejects `ttl == 0` for gasless keys.
+            if let crate::storage::store::account::ActiveKey::Gasless { ttl_seconds, .. } =
+                active_key
+            {
+                if ttl_seconds > 0 {
+                    gasless_ttl_for_bump = Some(ttl_seconds);
+                }
+            }
         }
 
         match message_data
@@ -322,6 +350,23 @@ impl BlockEngine {
             crate::proto::message_data::Body::KeyAddBody(_)
             | crate::proto::message_data::Body::KeyRemoveBody(_) => {}
             _ => return Err(MessageValidationError::InvalidMessageType),
+        }
+
+        // 3. Sliding-TTL enforcement for gasless keys (NEYN-10576). Mirrors
+        // `ShardEngine::validate_user_message`. See the long-form comment there for the
+        // `current_block_timestamp` unit / error-handling rationale.
+        if let Some(ttl) = gasless_ttl_for_bump {
+            let current_block_timestamp = timestamp.to_u64();
+            crate::storage::store::account::check_and_bump_last_used_at(
+                &self.stores.db,
+                txn_batch,
+                message_data.fid,
+                &message.signer,
+                ttl,
+                message_data.timestamp,
+                current_block_timestamp,
+            )
+            .map_err(MessageValidationError::HubError)?;
         }
 
         Ok(())
@@ -1082,6 +1127,19 @@ mod error_conversion_tests {
                 assert_eq!(h.message, source.message);
             }
             other => panic!("expected HubError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_gasless_key_out_of_scope_preserves_msg_type() {
+        // Scope violations surface from the shared validation path (called from either engine).
+        // Preserving the `msg_type` field across the conversion keeps the telemetry signal intact
+        // — callers that format this variant want the numeric type for a later lookup, not the
+        // flattened Display string.
+        let out: MessageValidationError = EngineErr::GaslessKeyOutOfScope { msg_type: 3 }.into();
+        match out {
+            MessageValidationError::GaslessKeyOutOfScope { msg_type } => assert_eq!(msg_type, 3),
+            other => panic!("expected GaslessKeyOutOfScope, got {other:?}"),
         }
     }
 
