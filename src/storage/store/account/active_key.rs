@@ -4,7 +4,7 @@
 //! list of allowed `MessageType` values ("scopes"), and every user message signed by that key
 //! must fall within that list. This module centralizes the lookup that answers
 //!
-//!     "Is `signer` an active key for `fid`, and if so, what (if any) constraints apply?"
+//! > Is `signer` an active key for `fid`, and if so, what (if any) constraints apply?
 //!
 //! so validation sites in both `ShardEngine` and `BlockEngine` can call one function and
 //! pattern-match on the result.

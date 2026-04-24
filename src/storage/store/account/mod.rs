@@ -40,6 +40,8 @@ mod verification_store;
 #[cfg(test)]
 mod cast_store_test;
 #[cfg(test)]
+mod gasless_key_merge_test;
+#[cfg(test)]
 mod key_add_store_test;
 #[cfg(test)]
 mod key_last_used_at_store_test;

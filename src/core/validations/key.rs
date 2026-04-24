@@ -265,7 +265,7 @@ fn signed_key_request_types() -> Value {
     })
 }
 
-fn signed_key_request_typed_data(
+pub(crate) fn signed_key_request_typed_data(
     request_fid: u64,
     key: &[u8],
     deadline: u64,
