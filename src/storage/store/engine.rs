@@ -672,6 +672,18 @@ impl ShardEngine {
                     .message
                     .as_ref()
                     .ok_or(MessageValidationError::BlockEventMissingBody)?;
+                // Rollback safety: if a validator running a pre-V16 schedule receives a
+                // BlockEvent wrapping KeyAdd/KeyRemove (produced while V16 was active),
+                // skip the replay rather than attempting to merge into a pre-feature shard.
+                let msg_type = message.msg_type();
+                if matches!(msg_type, MessageType::KeyAdd | MessageType::KeyRemove) {
+                    let block_ts = block_event.block_timestamp();
+                    let version =
+                        EngineVersion::version_for(&FarcasterTime::new(block_ts), self.network);
+                    if !version.is_enabled(ProtocolFeature::GaslessSigners) {
+                        return Ok(vec![]);
+                    }
+                }
                 let hub_events = self.merge_message(&message, txn_batch)?;
                 for event in &hub_events {
                     self.update_trie(trie_ctx, event, txn_batch)?;
@@ -1188,6 +1200,10 @@ impl ShardEngine {
         let mt = MessageType::try_from(data.r#type)
             .or(Err(MessageValidationError::InvalidMessageType(data.r#type)))?;
 
+        let version =
+            EngineVersion::version_for(&FarcasterTime::new(data.timestamp as u64), self.network);
+        let gasless_enabled = version.is_enabled(ProtocolFeature::GaslessSigners);
+
         let event = match mt {
             MessageType::CastAdd | MessageType::CastRemove => vec![self
                 .stores
@@ -1227,18 +1243,22 @@ impl ShardEngine {
                 StorageLendStore::merge(store, msg, txn_batch)
                     .map_err(|e| MessageValidationError::StoreError(e))?
             }
-            MessageType::KeyAdd => vec![crate::storage::store::account::merge_key_add(
-                &self.db,
-                &self.stores.onchain_event_store,
-                msg,
-                txn_batch,
-            )?],
-            MessageType::KeyRemove => vec![crate::storage::store::account::merge_key_remove(
-                &self.db,
-                &self.stores.onchain_event_store,
-                msg,
-                txn_batch,
-            )?],
+            MessageType::KeyAdd if gasless_enabled => {
+                vec![crate::storage::store::account::merge_key_add(
+                    &self.db,
+                    &self.stores.onchain_event_store,
+                    msg,
+                    txn_batch,
+                )?]
+            }
+            MessageType::KeyRemove if gasless_enabled => {
+                vec![crate::storage::store::account::merge_key_remove(
+                    &self.db,
+                    &self.stores.onchain_event_store,
+                    msg,
+                    txn_batch,
+                )?]
+            }
             unhandled_type => {
                 return Err(MessageValidationError::InvalidMessageType(
                     unhandled_type as i32,
@@ -1410,7 +1430,13 @@ impl ShardEngine {
         // viable for a compromised scoped key.
         let msg_type = MessageType::try_from(message_data.r#type).unwrap_or(MessageType::None);
         let mut gasless_ttl_for_bump: Option<u32> = None;
-        if msg_type != MessageType::KeyAdd && msg_type != MessageType::KeyRemove {
+        let is_key_message = msg_type == MessageType::KeyAdd || msg_type == MessageType::KeyRemove;
+        if is_key_message && !version.is_enabled(ProtocolFeature::GaslessSigners) {
+            return Err(MessageValidationError::InvalidMessageType(
+                message_data.r#type,
+            ));
+        }
+        if !is_key_message {
             let active_key = crate::storage::store::account::get_active_key(
                 &self.stores.onchain_event_store,
                 &self.stores.db,
