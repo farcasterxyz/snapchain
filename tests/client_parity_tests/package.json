@@ -8,14 +8,14 @@
     "generate-messages": "ts-node generate-messages.ts"
   },
   "dependencies": {
-    "@farcaster/core": "0.18.5",
+    "@farcaster/core": "0.18.10",
     "@noble/curves": "^1.0.0"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",
     "@types/node": "^20.0.0",
     "jest": "^30.3.0",
-    "ts-jest": "^29.0.0",
+    "ts-jest": "^29.4.9",
     "typescript": "^5.9.3",
     "ts-node": "^10.0.0"
   },
