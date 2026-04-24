@@ -367,7 +367,7 @@ impl LinkStore {
         fid: u64,
         ts_hash: Option<&[u8; TS_HASH_LENGTH]>,
     ) -> Result<Vec<u8>, HubError> {
-        if fid != 0 && (ts_hash.is_none() || ts_hash.is_some_and(|tsh| tsh.is_empty())) {
+        if fid != 0 && ts_hash.is_none() {
             return Err(HubError::validation_failure(
                 "fid provided without timestamp hash",
             ));
