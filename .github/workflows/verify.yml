@@ -48,14 +48,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Evaluate verify result
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CODE_CHANGED: ${{ needs.changes.outputs.code }}
+          TEST_RESULT: ${{ needs.test.result }}
         run: |
-          result="${{ needs.test.result }}"
-          case "$result" in
-            success|skipped)
-              echo "Verify required check passing (test job: $result)"
-              ;;
-            *)
-              echo "Verify required check failing (test job: $result)"
-              exit 1
-              ;;
-          esac
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "Verify required check failing: changes job did not succeed (result: $CHANGES_RESULT)"
+            exit 1
+          fi
+          if [[ "$TEST_RESULT" == "success" ]]; then
+            echo "Verify required check passing: test succeeded"
+            exit 0
+          fi
+          if [[ "$TEST_RESULT" == "skipped" && "$CODE_CHANGED" != "true" ]]; then
+            echo "Verify required check passing: test intentionally skipped (no code changes)"
+            exit 0
+          fi
+          echo "Verify required check failing (test job: $TEST_RESULT, code changed: $CODE_CHANGED)"
+          exit 1

@@ -48,14 +48,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Evaluate docker build result
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CODE_CHANGED: ${{ needs.changes.outputs.code }}
+          BUILD_RESULT: ${{ needs.build.result }}
         run: |
-          result="${{ needs.build.result }}"
-          case "$result" in
-            success|skipped)
-              echo "Docker Build required check passing (build job: $result)"
-              ;;
-            *)
-              echo "Docker Build required check failing (build job: $result)"
-              exit 1
-              ;;
-          esac
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "Docker Build required check failing: changes job did not succeed (result: $CHANGES_RESULT)"
+            exit 1
+          fi
+          if [[ "$BUILD_RESULT" == "success" ]]; then
+            echo "Docker Build required check passing: build succeeded"
+            exit 0
+          fi
+          if [[ "$BUILD_RESULT" == "skipped" && "$CODE_CHANGED" != "true" ]]; then
+            echo "Docker Build required check passing: build intentionally skipped (no code changes)"
+            exit 0
+          fi
+          echo "Docker Build required check failing (build job: $BUILD_RESULT, code changed: $CODE_CHANGED)"
+          exit 1
