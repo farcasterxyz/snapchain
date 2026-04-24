@@ -13,8 +13,8 @@ use alloy_primitives::hex::FromHex;
 use alloy_primitives::Address;
 use ed25519_dalek::{Signature, VerifyingKey};
 use fancy_regex::Regex;
-use once_cell::sync::Lazy;
 use prost::Message;
+use std::sync::LazyLock;
 
 const MAX_DATA_BYTES: usize = 2048;
 const MAX_DATA_BYTES_FOR_10K_CAST: usize = 16_384;
@@ -25,11 +25,13 @@ const TWITTER_USERNAME_REGEX: &str = "^[a-z0-9_]{0,15}$";
 const FNAME_REGEX: &str = "^[a-z0-9][a-z0-9-]{0,15}$";
 const GITHUB_USERNAME_REGEX: &str = "^[a-zA-Z\\d](?:[a-zA-Z\\d]|-(?!-)){0,38}$";
 
-static FNAME_RE: Lazy<Regex> = Lazy::new(|| Regex::new(FNAME_REGEX).unwrap());
-static TWITTER_USERNAME_RE: Lazy<Regex> = Lazy::new(|| Regex::new(TWITTER_USERNAME_REGEX).unwrap());
-static GITHUB_USERNAME_RE: Lazy<Regex> = Lazy::new(|| Regex::new(GITHUB_USERNAME_REGEX).unwrap());
-static GEO_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^geo:(-?\d{1,2}\.\d{2}),(-?\d{1,3}\.\d{2})$").unwrap());
+static FNAME_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(FNAME_REGEX).unwrap());
+static TWITTER_USERNAME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(TWITTER_USERNAME_REGEX).unwrap());
+static GITHUB_USERNAME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(GITHUB_USERNAME_REGEX).unwrap());
+static GEO_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^geo:(-?\d{1,2}\.\d{2}),(-?\d{1,3}\.\d{2})$").unwrap());
 /** Number of seconds (10 minutes) that is appropriate for clock skew */
 const ALLOWED_CLOCK_SKEW_SECONDS: u64 = 10 * 60;
 
