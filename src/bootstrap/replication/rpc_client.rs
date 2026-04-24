@@ -382,7 +382,6 @@ impl RpcClientsManager {
         let mut client = HubServiceClient::connect(peer_address).await?;
 
         let request = proto::BlocksRequest {
-            shard_id: 0,
             start_block_number: start_height,
             stop_block_number: None, // all blocks up to the latest
         };

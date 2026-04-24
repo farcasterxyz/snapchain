@@ -83,7 +83,6 @@ pub async fn follow_blocks(
 
     loop {
         let msg = proto::BlocksRequest {
-            shard_id: 0,
             start_block_number: i,
             stop_block_number: Some(i + FETCH_SIZE),
         };
