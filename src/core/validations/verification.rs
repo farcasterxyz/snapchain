@@ -549,3 +549,75 @@ pub fn validate_remove_address(
         _ => Err(ValidationError::InvalidData),
     }
 }
+
+#[cfg(test)]
+mod contract_signature_tests {
+    //! Exercises `validate_verification_contract_signature` — the one call site
+    //! of `erc6492::verify_signature`. Uses the in-process `MockTransport` from
+    //! `erc6492::test_support` so the whole EIP-712 hash + `verify_signature`
+    //! dispatch path is covered without a network or anvil.
+
+    use super::*;
+    use crate::core::validations::erc6492::test_support::*;
+
+    fn body_with(signature: Vec<u8>) -> proto::VerificationAddAddressBody {
+        proto::VerificationAddAddressBody {
+            address: vec![0x11u8; 20],
+            claim_signature: signature,
+            block_hash: vec![0x22u8; 32],
+            verification_type: 1, // contract signature
+            chain_id: 1,
+            protocol: proto::Protocol::Ethereum as i32,
+        }
+    }
+
+    fn claim() -> VerificationAddressClaim {
+        make_verification_address_claim(
+            1234,
+            &vec![0x11u8; 20],
+            FarcasterNetwork::Mainnet,
+            &vec![0x22u8; 32],
+            proto::Protocol::Ethereum,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn contract_signature_valid_returns_ok() {
+        // EOA path (address has no code); deploy-call returns the SUCCESS byte.
+        let provider = mock_provider(MockReply::Ok("0x"), MockReply::Ok(SUCCESS_WORD));
+        let r = validate_verification_contract_signature(
+            provider,
+            claim(),
+            &body_with(vec![0xaau8; 65]),
+        )
+        .await;
+        assert!(r.is_ok(), "expected Ok(()), got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn contract_signature_invalid_return_byte_maps_to_invalid_claim_signature() {
+        let provider = mock_provider(MockReply::Ok("0x"), MockReply::Ok(FAILURE_WORD));
+        let r = validate_verification_contract_signature(
+            provider,
+            claim(),
+            &body_with(vec![0xaau8; 65]),
+        )
+        .await;
+        assert!(matches!(r, Err(ValidationError::InvalidClaimSignature)));
+    }
+
+    #[tokio::test]
+    async fn contract_signature_rpc_error_maps_to_invalid_claim_signature() {
+        // Non-revert transport errors are collapsed to InvalidClaimSignature at
+        // this layer (see the `Err(_)` arm in `validate_verification_contract_signature`).
+        let provider = mock_provider(MockReply::Ok("0x"), MockReply::Err("internal server error"));
+        let r = validate_verification_contract_signature(
+            provider,
+            claim(),
+            &body_with(vec![0xaau8; 65]),
+        )
+        .await;
+        assert!(matches!(r, Err(ValidationError::InvalidClaimSignature)));
+    }
+}

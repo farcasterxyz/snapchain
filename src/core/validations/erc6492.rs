@@ -134,6 +134,142 @@ where
     }
 }
 
+/// Test-only helpers shared across this module's own tests and
+/// `verification.rs` tests. Not part of the public API.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::SignatureRpcError;
+    use alloy_json_rpc::{ErrorPayload, RequestPacket, Response, ResponsePacket, ResponsePayload};
+    use alloy_primitives::Bytes;
+    use alloy_provider::RootProvider;
+    use alloy_rpc_client::RpcClient;
+    use alloy_transport::{RpcError, TransportError};
+    use serde_json::value::RawValue;
+    use std::borrow::Cow;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
+    use tower::Service;
+
+    /// A canned reply for a single JSON-RPC call.
+    #[derive(Clone, Debug)]
+    pub enum MockReply {
+        /// Return a JSON-RPC success whose `result` field is this hex string
+        /// (e.g. `"0x"`, `"0x60806040"`, or a 32-byte word).
+        Ok(&'static str),
+        /// Return a JSON-RPC error whose `message` starts with this string.
+        Err(&'static str),
+    }
+
+    /// In-process `tower::Service` transport. Handles exactly the JSON-RPC
+    /// methods that `verify_signature` issues (`eth_getCode`, `eth_call`) with
+    /// one canned response per method.
+    #[derive(Clone)]
+    pub struct MockTransport {
+        get_code: Arc<Mutex<Option<MockReply>>>,
+        call: Arc<Mutex<Option<MockReply>>>,
+    }
+
+    impl MockTransport {
+        pub fn new(get_code: MockReply, call: MockReply) -> Self {
+            Self {
+                get_code: Arc::new(Mutex::new(Some(get_code))),
+                call: Arc::new(Mutex::new(Some(call))),
+            }
+        }
+
+        fn handle_one(&self, req: &alloy_json_rpc::SerializedRequest) -> Response {
+            let id = req.id().clone();
+            let slot = match req.method() {
+                "eth_getCode" => &self.get_code,
+                "eth_call" => &self.call,
+                other => panic!("unexpected JSON-RPC method in mock: {other}"),
+            };
+            let reply = slot
+                .lock()
+                .unwrap()
+                .take()
+                .expect("mock transport called more times than configured");
+            match reply {
+                MockReply::Ok(hex) => {
+                    let json = serde_json::to_string(hex).unwrap();
+                    let raw = RawValue::from_string(json).unwrap();
+                    Response {
+                        id,
+                        payload: ResponsePayload::Success(raw),
+                    }
+                }
+                MockReply::Err(msg) => Response {
+                    id,
+                    payload: ResponsePayload::Failure(ErrorPayload {
+                        code: 3,
+                        message: Cow::Borrowed(msg),
+                        data: None,
+                    }),
+                },
+            }
+        }
+    }
+
+    impl Service<RequestPacket> for MockTransport {
+        type Response = ResponsePacket;
+        type Error = TransportError;
+        type Future = Pin<Box<dyn Future<Output = Result<ResponsePacket, TransportError>> + Send>>;
+
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: RequestPacket) -> Self::Future {
+            let this = self.clone();
+            Box::pin(async move {
+                match req {
+                    RequestPacket::Single(req) => Ok(ResponsePacket::Single(this.handle_one(&req))),
+                    RequestPacket::Batch(_) => {
+                        unreachable!("verify_signature never issues batched requests")
+                    }
+                }
+            })
+        }
+    }
+
+    pub fn mock_provider(get_code: MockReply, call: MockReply) -> RootProvider<MockTransport> {
+        let transport = MockTransport::new(get_code, call);
+        let client = RpcClient::new(transport, true);
+        RootProvider::<MockTransport>::new(client)
+    }
+
+    /// Construct a JSON-RPC error response with `code=3` for unit-testing
+    /// `reverts_mean_invalid` without a provider.
+    pub fn err_resp(message: &str) -> SignatureRpcError {
+        RpcError::ErrorResp(ErrorPayload {
+            code: 3,
+            message: Cow::Owned(message.to_owned()),
+            data: None,
+        })
+    }
+
+    /// Signature bytes used by the integration tests; the mock transport never
+    /// interprets them.
+    pub fn dummy_sig() -> Bytes {
+        Bytes::from(vec![0xccu8; 65])
+    }
+
+    /// 32-byte word whose first byte is `SUCCESS_RESULT` (0x01).
+    pub const SUCCESS_WORD: &str =
+        "0x0100000000000000000000000000000000000000000000000000000000000000";
+    /// 32-byte word of zeros — `ValidateSigOffchain`'s "invalid" return.
+    pub const FAILURE_WORD: &str =
+        "0x0000000000000000000000000000000000000000000000000000000000000000";
+    /// ERC-1271 magic value (0x1626ba7e) right-padded to 32 bytes.
+    pub const MAGIC_WORD: &str =
+        "0x1626ba7e00000000000000000000000000000000000000000000000000000000";
+    /// Non-magic bytes4 right-padded to 32 bytes.
+    pub const BAD_MAGIC_WORD: &str =
+        "0xdeadbeef00000000000000000000000000000000000000000000000000000000";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +391,108 @@ mod tests {
     fn verification_is_valid_predicate() {
         assert!(Verification::Valid.is_valid());
         assert!(!Verification::Invalid.is_valid());
+    }
+
+    // ----------------------------------------------------------------------
+    // `reverts_mean_invalid` unit tests — exercise the RPC-error mapping with
+    // hand-constructed `ErrorPayload`s, no provider involved.
+    // ----------------------------------------------------------------------
+
+    use super::test_support::*;
+
+    #[test]
+    fn reverts_mean_invalid_maps_plain_revert() {
+        let r = reverts_mean_invalid(err_resp("execution reverted"));
+        assert_eq!(r.unwrap(), Verification::Invalid);
+    }
+
+    #[test]
+    fn reverts_mean_invalid_matches_revert_with_details() {
+        // Providers often append reason strings after "execution reverted".
+        let r = reverts_mean_invalid(err_resp(
+            "execution reverted: SignatureValidator#recoverSigner: invalid signature length",
+        ));
+        assert_eq!(r.unwrap(), Verification::Invalid);
+    }
+
+    #[test]
+    fn reverts_mean_invalid_preserves_non_revert_errors() {
+        // Non-revert errors should continue to propagate.
+        let r = reverts_mean_invalid(err_resp("insufficient funds"));
+        assert!(r.is_err());
+    }
+
+    // ----------------------------------------------------------------------
+    // `verify_signature` integration tests via an in-process MockTransport
+    // (defined in `test_support`). No network, no anvil. Each test exercises
+    // exactly the two JSON-RPC calls `verify_signature` issues:
+    // `eth_getCode` and `eth_call`.
+    // ----------------------------------------------------------------------
+
+    fn dummy_inputs() -> (Bytes, Address, FixedBytes<32>) {
+        (
+            dummy_sig(),
+            Address::from([0u8; 20]),
+            FixedBytes::<32>::from([0u8; 32]),
+        )
+    }
+
+    #[tokio::test]
+    async fn verify_signature_no_code_valid_is_valid() {
+        let (sig, addr, hash) = dummy_inputs();
+        let p = mock_provider(MockReply::Ok("0x"), MockReply::Ok(SUCCESS_WORD));
+        let r = verify_signature(sig, addr, hash, p).await.unwrap();
+        assert_eq!(r, Verification::Valid);
+    }
+
+    #[tokio::test]
+    async fn verify_signature_no_code_failure_byte_is_invalid() {
+        let (sig, addr, hash) = dummy_inputs();
+        let p = mock_provider(MockReply::Ok("0x"), MockReply::Ok(FAILURE_WORD));
+        let r = verify_signature(sig, addr, hash, p).await.unwrap();
+        assert_eq!(r, Verification::Invalid);
+    }
+
+    #[tokio::test]
+    async fn verify_signature_no_code_revert_is_invalid() {
+        let (sig, addr, hash) = dummy_inputs();
+        let p = mock_provider(MockReply::Ok("0x"), MockReply::Err("execution reverted"));
+        let r = verify_signature(sig, addr, hash, p).await.unwrap();
+        assert_eq!(r, Verification::Invalid);
+    }
+
+    #[tokio::test]
+    async fn verify_signature_has_code_magic_value_is_valid() {
+        let (sig, addr, hash) = dummy_inputs();
+        let p = mock_provider(MockReply::Ok("0x60806040"), MockReply::Ok(MAGIC_WORD));
+        let r = verify_signature(sig, addr, hash, p).await.unwrap();
+        assert_eq!(r, Verification::Valid);
+    }
+
+    #[tokio::test]
+    async fn verify_signature_has_code_wrong_magic_is_invalid() {
+        let (sig, addr, hash) = dummy_inputs();
+        let p = mock_provider(MockReply::Ok("0x60806040"), MockReply::Ok(BAD_MAGIC_WORD));
+        let r = verify_signature(sig, addr, hash, p).await.unwrap();
+        assert_eq!(r, Verification::Invalid);
+    }
+
+    #[tokio::test]
+    async fn verify_signature_has_code_revert_is_invalid() {
+        let (sig, addr, hash) = dummy_inputs();
+        let p = mock_provider(
+            MockReply::Ok("0x60806040"),
+            MockReply::Err("execution reverted"),
+        );
+        let r = verify_signature(sig, addr, hash, p).await.unwrap();
+        assert_eq!(r, Verification::Invalid);
+    }
+
+    #[tokio::test]
+    async fn verify_signature_non_revert_error_propagates() {
+        let (sig, addr, hash) = dummy_inputs();
+        let p = mock_provider(MockReply::Ok("0x"), MockReply::Err("internal server error"));
+        let r = verify_signature(sig, addr, hash, p).await;
+        assert!(r.is_err(), "non-revert RPC errors must not be swallowed");
     }
 }
