@@ -34,6 +34,14 @@ const LAST_USED_AT_KEY_BYTES: usize =
 // Value is a single big-endian u32 timestamp.
 const LAST_USED_AT_VALUE_BYTES: usize = 4;
 
+/// Sliding-TTL throttle window for `check_and_bump_last_used_at`. A valid-use bump that would
+/// advance the stored timestamp by this many seconds or less is skipped (the stored value is
+/// left unchanged). The *expiry* check still runs every call — throttling only suppresses the
+/// `txn.put`, so a heavy sender on a valid key no longer amplifies RocksDB writes 1:1 with
+/// message volume. The threshold is a constant so the decision is deterministic across nodes
+/// replaying the same block.
+pub const SLIDING_TTL_THROTTLE_SECONDS: u64 = 300;
+
 fn validate_key_len(public_key: &[u8]) -> Result<(), HubError> {
     if public_key.len() != ED25519_PUBLIC_KEY_LEN {
         return Err(HubError {
@@ -201,6 +209,16 @@ pub fn check_and_bump_last_used_at(
             ),
         });
     }
-    txn.put(key, message_timestamp.to_be_bytes().to_vec());
+
+    // Sliding-TTL throttle (NEYN-10579): skip the put unless the bump would advance `stored` by
+    // strictly more than SLIDING_TTL_THROTTLE_SECONDS. The key is still valid (expiry check above
+    // already accepted it); we just leave the counter alone to cut write amplification. Strict
+    // `>` also implicitly blocks any non-increasing `message_timestamp`: if
+    // `message_ts > stored + 300` holds then `message_ts > stored` trivially — out-of-order
+    // messages (which would only arise from a caller contract violation) can never overwrite.
+    let message_ts_u64 = message_timestamp as u64;
+    if message_ts_u64 > stored + SLIDING_TTL_THROTTLE_SECONDS {
+        txn.put(key, message_timestamp.to_be_bytes().to_vec());
+    }
     Ok(())
 }

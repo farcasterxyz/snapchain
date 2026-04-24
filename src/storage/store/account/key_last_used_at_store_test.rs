@@ -150,4 +150,79 @@ mod tests {
         // Rejection must leave the stored value untouched.
         assert_eq!(get_last_used_at(&db, &txn, 7, &KEY_A).unwrap(), Some(1_000));
     }
+
+    // -- sliding-TTL throttle (NEYN-10579) ------------------------------------------------------
+    //
+    // The bump is suppressed when it would move `stored` forward by at most
+    // SLIDING_TTL_THROTTLE_SECONDS. These tests pin the contract: acceptance still happens (no
+    // error), but the stored timestamp is left unchanged.
+
+    #[test]
+    fn check_and_bump_within_throttle_window_does_not_write() {
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+        init_last_used_at(&db, &mut txn, 7, &KEY_A, 1_000).unwrap();
+
+        // stored=1000, message_ts=1100 → delta=100 < 300 throttle window → acceptance w/o write.
+        check_and_bump_last_used_at(&db, &mut txn, 7, &KEY_A, 3_600, 1_100, 1_100).unwrap();
+        assert_eq!(get_last_used_at(&db, &txn, 7, &KEY_A).unwrap(), Some(1_000));
+    }
+
+    #[test]
+    fn check_and_bump_at_exact_throttle_boundary_does_not_write() {
+        // delta == 300 is at-the-boundary-and-does-not-write (strict `>` on "past window").
+        // Rationale: strict `>` makes the non-increasing-timestamp guard fall out for free — see
+        // the comment on the predicate in `check_and_bump_last_used_at`.
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+        init_last_used_at(&db, &mut txn, 7, &KEY_A, 1_000).unwrap();
+
+        check_and_bump_last_used_at(&db, &mut txn, 7, &KEY_A, 3_600, 1_300, 1_300).unwrap();
+        assert_eq!(get_last_used_at(&db, &txn, 7, &KEY_A).unwrap(), Some(1_000));
+    }
+
+    #[test]
+    fn check_and_bump_one_past_throttle_boundary_writes() {
+        // delta == 301 is the smallest delta that writes.
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+        init_last_used_at(&db, &mut txn, 7, &KEY_A, 1_000).unwrap();
+
+        check_and_bump_last_used_at(&db, &mut txn, 7, &KEY_A, 3_600, 1_301, 1_301).unwrap();
+        assert_eq!(get_last_used_at(&db, &txn, 7, &KEY_A).unwrap(), Some(1_301));
+    }
+
+    #[test]
+    fn check_and_bump_past_throttle_window_writes() {
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+        init_last_used_at(&db, &mut txn, 7, &KEY_A, 1_000).unwrap();
+
+        // delta=500 > 300, normal bump.
+        check_and_bump_last_used_at(&db, &mut txn, 7, &KEY_A, 3_600, 1_500, 1_500).unwrap();
+        assert_eq!(get_last_used_at(&db, &txn, 7, &KEY_A).unwrap(), Some(1_500));
+    }
+
+    #[test]
+    fn check_and_bump_non_increasing_timestamp_does_not_write() {
+        // Out-of-order message_ts (< stored) must never overwrite a higher stored value, even
+        // when the key is still inside its TTL window.
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+        init_last_used_at(&db, &mut txn, 7, &KEY_A, 2_000).unwrap();
+
+        check_and_bump_last_used_at(&db, &mut txn, 7, &KEY_A, 3_600, 1_500, 2_000).unwrap();
+        assert_eq!(get_last_used_at(&db, &txn, 7, &KEY_A).unwrap(), Some(2_000));
+    }
+
+    #[test]
+    fn check_and_bump_equal_timestamp_does_not_write() {
+        // message_ts == stored is trivially not-a-bump; also falls on the strict `>` guard.
+        let (db, _dir) = open_db();
+        let mut txn = RocksDbTransactionBatch::new();
+        init_last_used_at(&db, &mut txn, 7, &KEY_A, 2_000).unwrap();
+
+        check_and_bump_last_used_at(&db, &mut txn, 7, &KEY_A, 3_600, 2_000, 2_000).unwrap();
+        assert_eq!(get_last_used_at(&db, &txn, 7, &KEY_A).unwrap(), Some(2_000));
+    }
 }
