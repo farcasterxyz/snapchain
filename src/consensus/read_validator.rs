@@ -150,6 +150,7 @@ impl ReadValidator {
     }
 
     pub async fn process_decided_value(&mut self, value: DecidedValue) -> u64 {
+        info!("Processing decided value {:#?}", value);
         let height = Self::get_decided_value_height(&value);
         let verified = self.verify_signatures(&value);
         if !verified {
