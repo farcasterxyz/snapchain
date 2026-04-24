@@ -855,7 +855,9 @@ impl HubService for MyHubService {
 
                 match blocks {
                     Err(err) => {
-                        _ = server_tx.send(Err(err)).await;
+                        if server_tx.send(Err(err)).await.is_err() {
+                            break;
+                        }
                         break;
                     }
                     Ok((blocks, page_token)) => {
