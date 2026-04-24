@@ -8,6 +8,8 @@ import "onchain_event.proto";
 
 
 message BlocksRequest {
+  reserved 1;
+  reserved "shard_id";
   uint64 start_block_number = 2;
   optional uint64 stop_block_number = 3;
 }
