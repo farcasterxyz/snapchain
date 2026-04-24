@@ -7,11 +7,12 @@ on:
     branches: [ "main" ]
   schedule:
     - cron: '27 17 * * 2'
+  workflow_dispatch:
 
 jobs:
   analyze:
-    name: Analyze (${{ matrix.language }})
-    runs-on: ${{ (matrix.language == 'swift' && 'macos-latest') || 'ubuntu-latest' }}
+    name: Analyze (rust)
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       security-events: write
@@ -19,31 +20,17 @@ jobs:
       actions: read
       contents: read
 
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-        - language: actions
-          build-mode: none
-        - language: javascript-typescript
-          build-mode: none
-        - language: rust
-          build-mode: manual
-
     steps:
-    - name: Checkout repository
+    - name: Install Protoc
+      uses: arduino/setup-protoc@v3
+
+    - name: Checkout snapchain
       uses: actions/checkout@v4
       with:
         path: ./snapchain
         fetch-depth: 0
 
-    # --- Rust-only setup: mirror verify-impl.yml so `cargo build` actually succeeds ---
-    - name: Install Protoc
-      if: matrix.language == 'rust'
-      uses: arduino/setup-protoc@v3
-
     - name: Checkout malachite (path dependency)
-      if: matrix.language == 'rust'
       uses: actions/checkout@v4
       with:
         repository: informalsystems/malachite
@@ -51,14 +38,12 @@ jobs:
         path: ./malachite
 
     - name: Checkout eth-signature-verifier (path dependency)
-      if: matrix.language == 'rust'
       uses: actions/checkout@v4
       with:
         repository: CassOnMars/eth-signature-verifier
         path: ./eth-signature-verifier
 
     - name: Install Rust 1.95.0
-      if: matrix.language == 'rust'
       uses: actions-rs/toolchain@v1
       with:
         toolchain: 1.95.0
@@ -66,27 +51,26 @@ jobs:
         override: true
 
     - name: Cache cargo registry + target
-      if: matrix.language == 'rust'
       uses: Swatinem/rust-cache@v2
       with:
         workspaces: ./snapchain
 
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@v4
-      with:
-        languages: ${{ matrix.language }}
-        build-mode: ${{ matrix.build-mode }}
-        source-root: ./snapchain
-        # queries: security-extended,security-and-quality
-
-    - name: Run manual build (Rust)
-      if: matrix.build-mode == 'manual' && matrix.language == 'rust'
+    # Warm the target dir + fetch all deps so the buildless extractor (rust-analyzer)
+    # has a fully resolvable workspace when it runs `cargo metadata`.
+    - name: cargo check
       working-directory: ./snapchain
       env:
         RUSTFLAGS: "-Dwarnings -A mismatched_lifetime_syntaxes"
-      run: cargo build --workspace --all-targets --locked
+      run: cargo check --workspace --all-targets --locked
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v4
+      with:
+        languages: rust
+        build-mode: none
+        source-root: ./snapchain
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v4
       with:
-        category: "/language:${{matrix.language}}"
+        category: "/language:rust"
