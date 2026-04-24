@@ -116,7 +116,8 @@ services:
 
         [snapshot]
         endpoint_url = "https://e1f9f185c6e63471dd39f96abd3413c4.r2.cloudflarestorage.com"
-        load_db_from_snapshot=true
+        bootstrap_method = "Replicate"
+        load_db_from_snapshot=false
         EOF
         exec $0 $@ # Now run the original command
     command: [ "./snapchain", "--config-path", "config.toml" ]
