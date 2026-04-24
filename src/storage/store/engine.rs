@@ -85,6 +85,9 @@ pub enum MessageValidationError {
     #[error("invalid signer")]
     MissingSigner,
 
+    #[error("message type {msg_type} is not in the scope of the gasless signer")]
+    GaslessKeyOutOfScope { msg_type: i32 },
+
     #[error(transparent)]
     MessageValidationError(#[from] validations::error::ValidationError),
 
@@ -1391,14 +1394,31 @@ impl ShardEngine {
         // itself). The outer `message.signer` on these messages is the Ed25519 key being
         // added or removed — by definition either not yet in the signer store (KEY_ADD) or
         // about to leave it (KEY_REMOVE). Their real authentication happens in the merge
-        // path (see `merge_key_add` / `merge_key_remove`), so skip the active-signer check here.
+        // path (see `merge_key_add` / `merge_key_remove`), so skip the active-signer check
+        // here. This bypass also subsumes the self-revocation `KEY_REMOVE` scope carve-out:
+        // `KEY_REMOVE` is explicitly rejected as a scope value (see
+        // `validations::key::validate_key_add_scopes`), so a gasless key signing a
+        // `KEY_REMOVE` would always fail a scope check — the bypass keeps self-revocation
+        // viable for a compromised scoped key.
         let msg_type = MessageType::try_from(message_data.r#type).unwrap_or(MessageType::None);
         if msg_type != MessageType::KeyAdd && msg_type != MessageType::KeyRemove {
-            self.stores
-                .onchain_event_store
-                .get_active_signer(message_data.fid, message.signer.clone(), Some(txn_batch))
-                .map_err(|_| MessageValidationError::MissingSigner)?
-                .ok_or(MessageValidationError::MissingSigner)?;
+            let active_key = crate::storage::store::account::get_active_key(
+                &self.stores.onchain_event_store,
+                &self.stores.db,
+                txn_batch,
+                message_data.fid,
+                &message.signer,
+            )
+            .map_err(|_| MessageValidationError::MissingSigner)?
+            .ok_or(MessageValidationError::MissingSigner)?;
+
+            // On-chain signers are grandfathered (scope-free). Gasless signers must have
+            // `msg_type` in their declared scope bitmask — O(1) bitwise AND.
+            if !active_key.admits(msg_type) {
+                return Err(MessageValidationError::GaslessKeyOutOfScope {
+                    msg_type: message_data.r#type,
+                });
+            }
         }
 
         // Don't allow storage lends to be merged directly without going through shard 0

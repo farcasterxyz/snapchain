@@ -1,3 +1,4 @@
+pub use self::active_key::*;
 pub use self::block_event_store::*;
 pub use self::cast_store::*;
 pub use self::event::*;
@@ -23,6 +24,7 @@ mod message;
 mod onchain_event_store;
 mod store;
 
+mod active_key;
 mod block_event_store;
 mod gasless_key_merge;
 mod key_add_store;
