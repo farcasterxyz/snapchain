@@ -507,7 +507,16 @@ impl BlockEngine {
                 proto::hub_event::Body::MergeMessageBody(merge_message_body) => {
                     if let Some(message) = merge_message_body.message {
                         match message.msg_type() {
-                            MessageType::LendStorage => {
+                            MessageType::LendStorage
+                            | MessageType::KeyAdd
+                            | MessageType::KeyRemove => {
+                                // All shard-0-hosted user messages propagate the same way:
+                                // wrap the original message in a MergeMessageEvent so shards
+                                // 1..N can replay the merge into their local DBs via
+                                // ShardEngine::handle_block_event. For KEY_ADD / KEY_REMOVE
+                                // this is what makes gasless-key records visible on every
+                                // shard for scope enforcement, TTL checks, and last_used_at
+                                // bumps (NEYN-10575, NEYN-10576).
                                 max_block_event_seqnum += 1;
                                 let data = BlockEventData {
                                     seqnum: max_block_event_seqnum,
