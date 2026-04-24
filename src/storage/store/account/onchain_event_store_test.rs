@@ -225,9 +225,12 @@ mod tests {
         );
 
         // Get timestamp for a date in Sep 2025
-        let sep_1_2025 = 1756710000;
-        let valid_2025_rent_event =
-            factory::events_factory::create_rent_event_with_timestamp(12, 1, sep_1_2025);
+        let september_first_2025_timestamp = 1756710000;
+        let valid_2025_rent_event = factory::events_factory::create_rent_event_with_timestamp(
+            12,
+            1,
+            september_first_2025_timestamp,
+        );
 
         let mut txn = RocksDbTransactionBatch::new();
         for event in vec![
