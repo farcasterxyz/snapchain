@@ -14,7 +14,7 @@ use tokio::time::Instant;
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
 use crate::mempool::routing;
-use crate::proto::{Block, FarcasterNetwork, Height, OnChainEventType, Transaction};
+use crate::proto::{Block, FarcasterNetwork, Height, MessageType, OnChainEventType, Transaction};
 use crate::storage::store::block_engine::BlockStores;
 use crate::{
     core::types::SnapchainValidatorContext,
@@ -668,6 +668,21 @@ impl Mempool {
         shard: u32,
         message: &MempoolMessage,
     ) -> Result<(), HubError> {
+        // Pre-feature admission gate for KEY_ADD / KEY_REMOVE. Provisional until
+        // NEYN-10619 consolidates feature-gating into a single validate_user_message
+        // hook at mempool admission.
+        if let MempoolMessage::UserMessage(user_msg) = message {
+            let msg_type = user_msg.msg_type();
+            if matches!(msg_type, MessageType::KeyAdd | MessageType::KeyRemove) {
+                let version = EngineVersion::current(self.read_node_mempool.network);
+                if !version.is_enabled(ProtocolFeature::GaslessSigners) {
+                    return Err(HubError::validation_failure(
+                        "gasless signers not yet active",
+                    ));
+                }
+            }
+        }
+
         // Check for block events that have already been merged
         if let MempoolMessage::BlockEvent { message, for_shard } = message {
             if *for_shard == 0 {
