@@ -799,6 +799,7 @@ impl HubService for MyHubService {
             .get(&shard_id)
             .map(|stores| stores.shard_store.clone());
         let network = self.network;
+        let protocol_version = EngineVersion::current(self.network).protocol_version();
 
         tokio::spawn(async move {
             let mut next_page_token = None;
@@ -832,7 +833,7 @@ impl HubService for MyHubService {
                                     header: shard_chunk.header.map(|header| proto::BlockHeader {
                                         height: header.height,
                                         timestamp: header.timestamp,
-                                        version: 0,
+                                        version: protocol_version,
                                         chain_id: network as i32,
                                         shard_witnesses_hash: vec![],
                                         parent_hash: header.parent_hash,
