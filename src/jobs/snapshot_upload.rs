@@ -22,13 +22,11 @@ async fn backup_and_upload(
     statsd_client: StatsdClientWrapper,
 ) -> Result<(), SnapshotError> {
     info!(shard_id, "Starting backup for shard");
-    statsd_client.emit_jemalloc_stats();
 
     let backup_dir = snapshot_config.backup_dir.clone();
     let tar_gz_path = storage::db::backup::backup_db(db, &backup_dir, shard_id, now)?;
 
     info!(shard_id, "Backup complete, starting upload for shard");
-    statsd_client.emit_jemalloc_stats();
 
     storage::db::snapshot::upload_to_s3(
         fc_network,
@@ -41,7 +39,6 @@ async fn backup_and_upload(
     clear_old_snapshots(fc_network, &snapshot_config, shard_id).await?;
 
     info!(shard_id, "Upload complete for shard");
-    statsd_client.emit_jemalloc_stats();
 
     Ok(())
 }
@@ -165,10 +162,145 @@ pub async fn upload_snapshot(
         }
     }
 
-    info!("Snapshot upload complete, emitting jemalloc stats after cleanup");
-    statsd_client.emit_jemalloc_stats();
+    info!("Snapshot upload complete");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::FarcasterNetwork;
+    use crate::storage::db::snapshot::{Config, SnapshotError};
+    use crate::storage::db::RocksDB;
+    use crate::storage::store::block_engine::BlockStores;
+    use crate::storage::store::test_helper;
+    use crate::storage::trie::merkle_trie::MerkleTrie;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn make_block_stores(tmpdir: &TempDir) -> BlockStores {
+        let db = Arc::new(RocksDB::new(tmpdir.path().join("db").to_str().unwrap()));
+        db.open().unwrap();
+        BlockStores::new(db, MerkleTrie::new().unwrap(), FarcasterNetwork::Devnet)
+    }
+
+    fn config_with_backup_dir(dir: &std::path::Path) -> Config {
+        Config {
+            backup_dir: dir.to_str().unwrap().to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_returns_in_progress_when_backup_dir_has_recent_contents() {
+        let tmpdir = TempDir::new().unwrap();
+        let backup_dir = tmpdir.path().join("backup");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        std::fs::write(backup_dir.join("existing.tar.gz"), b"data").unwrap();
+
+        let config = config_with_backup_dir(&backup_dir);
+        let block_stores = make_block_stores(&tmpdir);
+        let statsd = test_helper::statsd_client();
+
+        let result = upload_snapshot(
+            config,
+            FarcasterNetwork::Devnet,
+            block_stores,
+            HashMap::new(),
+            statsd,
+            None,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(SnapshotError::UploadAlreadyInProgress)),
+            "expected UploadAlreadyInProgress, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_empty_shard_filter_skips_all_backups() {
+        let tmpdir = TempDir::new().unwrap();
+        let backup_dir = tmpdir.path().join("backup");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+
+        let config = config_with_backup_dir(&backup_dir);
+        let block_stores = make_block_stores(&tmpdir);
+        let statsd = test_helper::statsd_client();
+
+        let result = upload_snapshot(
+            config,
+            FarcasterNetwork::Devnet,
+            block_stores,
+            HashMap::new(),
+            statsd,
+            Some(HashSet::new()),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "expected Ok when shard filter excludes all shards, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stale_backup_contents_are_removed() {
+        let tmpdir = TempDir::new().unwrap();
+        let backup_dir = tmpdir.path().join("backup");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        let stale_file = backup_dir.join("stale.tar.gz");
+        std::fs::write(&stale_file, b"old content").unwrap();
+
+        // Set mtime to 13 hours ago (past 12h STALE_BACKUP_THRESHOLD)
+        let stale_time = filetime::FileTime::from_unix_time(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+                - 13 * 3600,
+            0,
+        );
+        filetime::set_file_mtime(&backup_dir, stale_time).unwrap();
+
+        let config = config_with_backup_dir(&backup_dir);
+        let block_stores = make_block_stores(&tmpdir);
+        let statsd = test_helper::statsd_client();
+
+        // Call with empty shard filter so no actual backup is attempted after cleanup
+        let result = upload_snapshot(
+            config,
+            FarcasterNetwork::Devnet,
+            block_stores,
+            HashMap::new(),
+            statsd,
+            Some(HashSet::new()),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "expected Ok after stale cleanup, got {:?}",
+            result
+        );
+        assert!(
+            !stale_file.exists(),
+            "stale file should have been removed before upload"
+        );
+    }
+
+    #[test]
+    fn test_stale_backup_threshold_is_12_hours() {
+        assert_eq!(
+            STALE_BACKUP_THRESHOLD.as_secs(),
+            12 * 60 * 60,
+            "stale backup threshold should be exactly 12 hours"
+        );
+    }
 }
 
 pub fn snapshot_upload_job(

@@ -171,7 +171,7 @@ pub fn validate_fname_transfer(
 }
 
 pub fn validate_eth_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationError> {
-    if address.len() == 0 {
+    if address.is_empty() {
         return Err(ValidationError::EthAddressMissing);
     }
 
@@ -183,7 +183,7 @@ pub fn validate_eth_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationErr
 }
 
 fn validate_eth_block_hash(block_hash: &Vec<u8>) -> Result<&Vec<u8>, ValidationError> {
-    if block_hash.len() == 0 {
+    if block_hash.is_empty() {
         return Err(ValidationError::BlockHashMissing);
     }
 
@@ -195,7 +195,7 @@ fn validate_eth_block_hash(block_hash: &Vec<u8>) -> Result<&Vec<u8>, ValidationE
 }
 
 pub fn validate_sol_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationError> {
-    if address.len() == 0 {
+    if address.is_empty() {
         return Err(ValidationError::SolAddressMissing);
     }
 
@@ -207,7 +207,7 @@ pub fn validate_sol_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationErr
 }
 
 fn validate_sol_block_hash(block_hash: &Vec<u8>) -> Result<&Vec<u8>, ValidationError> {
-    if block_hash.len() == 0 {
+    if block_hash.is_empty() {
         return Err(ValidationError::BlockHashMissing);
     }
 

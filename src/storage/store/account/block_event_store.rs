@@ -80,7 +80,7 @@ fn get_block_page_by_prefix(
     )
     .map_err(|_| BlockEventStorageError::TooManyBlocksInResult)?; // TODO: Return the right error
 
-    let next_page_token = if last_key.len() > 0 {
+    let next_page_token = if !last_key.is_empty() {
         Some(last_key)
     } else {
         None
