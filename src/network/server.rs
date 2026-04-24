@@ -41,6 +41,7 @@ use crate::storage::store::account::{EventsPage, HubEventIdGenerator};
 use crate::storage::store::block_engine::{self, BlockStores};
 use crate::storage::store::engine::{self, Senders, ShardEngine};
 use crate::storage::store::mempool_poller::MempoolMessage;
+use crate::storage::store::shard::get_shard_chunks_in_range;
 use crate::storage::store::stores::Stores;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::{EngineVersion, ProtocolFeature};
@@ -784,42 +785,89 @@ impl HubService for MyHubService {
         &self,
         request: Request<BlocksRequest>,
     ) -> Result<Response<Self::GetBlocksStream>, Status> {
+        let shard_id = request.get_ref().shard_id;
         let start_block_number = request.get_ref().start_block_number;
         let stop_block_number = request.get_ref().stop_block_number;
         // TODO(aditi): Rethink the channel size
         let (server_tx, client_rx) = mpsc::channel::<Result<Block, Status>>(100);
 
-        info!( {start_block_number, stop_block_number}, "Received call to [get_blocks] RPC");
+        info!( {shard_id, start_block_number, stop_block_number}, "Received call to [get_blocks] RPC");
 
         let block_store = self.block_stores.block_store.clone();
+        let shard_store = self
+            .shard_stores
+            .get(&shard_id)
+            .map(|stores| stores.shard_store.clone());
+        let network = self.network;
 
         tokio::spawn(async move {
             let mut next_page_token = None;
             loop {
-                match block_store.get_blocks(
-                    start_block_number,
-                    stop_block_number,
-                    &PageOptions {
-                        page_size: Some(100),
-                        page_token: next_page_token,
-                        reverse: false,
-                    },
-                ) {
+                let page_options = PageOptions {
+                    page_size: Some(100),
+                    page_token: next_page_token,
+                    reverse: false,
+                };
+                let blocks = if shard_id == 0 {
+                    block_store
+                        .get_blocks(start_block_number, stop_block_number, &page_options)
+                        .map(|block_page| (block_page.blocks, block_page.next_page_token))
+                        .map_err(|err| Status::from_error(Box::new(err)))
+                } else {
+                    match shard_store.as_ref() {
+                        None => Err(Status::from_error(Box::new(
+                            HubError::invalid_internal_state("Missing shard store"),
+                        ))),
+                        Some(shard_store) => get_shard_chunks_in_range(
+                            &shard_store.db,
+                            &page_options,
+                            start_block_number,
+                            stop_block_number,
+                        )
+                        .map(|shard_page| {
+                            let blocks = shard_page
+                                .shard_chunks
+                                .into_iter()
+                                .map(|shard_chunk| Block {
+                                    header: shard_chunk.header.map(|header| proto::BlockHeader {
+                                        height: header.height,
+                                        timestamp: header.timestamp,
+                                        version: 0,
+                                        chain_id: network as i32,
+                                        shard_witnesses_hash: vec![],
+                                        parent_hash: header.parent_hash,
+                                        state_root: header.shard_root,
+                                        events_hash: vec![],
+                                    }),
+                                    hash: shard_chunk.hash,
+                                    shard_witness: None,
+                                    commits: shard_chunk.commits,
+                                    transactions: shard_chunk.transactions,
+                                    events: vec![],
+                                })
+                                .collect();
+                            (blocks, shard_page.next_page_token)
+                        })
+                        .map_err(|err| Status::from_error(Box::new(err))),
+                    }
+                };
+
+                match blocks {
                     Err(err) => {
-                        _ = server_tx.send(Err(Status::from_error(Box::new(err)))).await;
+                        _ = server_tx.send(Err(err)).await;
                         break;
                     }
-                    Ok(block_page) => {
-                        for block in block_page.blocks {
+                    Ok((blocks, page_token)) => {
+                        for block in blocks {
                             if let Err(_) = server_tx.send(Ok(block)).await {
                                 break;
                             }
                         }
 
-                        if block_page.next_page_token.is_none() {
+                        if page_token.is_none() {
                             break;
                         } else {
-                            next_page_token = block_page.next_page_token;
+                            next_page_token = page_token;
                         }
                     }
                 }

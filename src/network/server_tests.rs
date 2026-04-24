@@ -426,6 +426,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_blocks_respects_shard_id() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+
+        let mut shard0_block = block_engine_test_helpers::default_block();
+        shard0_block.header.as_mut().unwrap().height = Some(proto::Height {
+            shard_index: 0,
+            block_number: 1,
+        });
+        shard0_block.hash = vec![1; 32];
+        block_engine
+            .stores()
+            .block_store
+            .put_block(&shard0_block)
+            .unwrap();
+
+        let mut shard2_chunk = test_helper::default_shard_chunk();
+        shard2_chunk.header.as_mut().unwrap().height = Some(proto::Height {
+            shard_index: 2,
+            block_number: 1,
+        });
+        shard2_chunk.hash = vec![2; 32];
+        stores
+            .get(&2u32)
+            .unwrap()
+            .shard_store
+            .put_shard_chunk(&shard2_chunk)
+            .unwrap();
+
+        let request = Request::new(proto::BlocksRequest {
+            shard_id: 2,
+            start_block_number: 1,
+            stop_block_number: Some(2),
+        });
+
+        let mut response = service.get_blocks(request).await.unwrap().into_inner();
+        let block = response.next().await.unwrap().unwrap();
+        let header = block.header.unwrap();
+        let height = header.height.unwrap();
+
+        assert_eq!(height.shard_index, 2);
+        assert_eq!(height.block_number, 1);
+        assert_eq!(block.hash, shard2_chunk.hash);
+        assert!(response.next().await.is_none());
+    }
+
+    #[tokio::test]
     async fn test_get_event_success() {
         let (
             stores,
