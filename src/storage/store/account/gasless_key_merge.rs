@@ -13,9 +13,10 @@
 use std::sync::Arc;
 
 use super::{
-    check_and_set_app_nonce, check_and_set_user_nonce, delete_gasless_key_record,
-    delete_last_used_at, exists_gasless_key, get_gasless_key_record, init_last_used_at,
-    put_gasless_key_record, GaslessKeyRecord, OnchainEventStore,
+    check_and_set_app_nonce, check_and_set_user_nonce, delete_gasless_key_owner,
+    delete_gasless_key_record, delete_last_used_at, get_gasless_key_owner_fid,
+    get_gasless_key_record, init_last_used_at, put_gasless_key_owner, put_gasless_key_record,
+    GaslessKeyRecord, OnchainEventStore,
 };
 use crate::core::message::HubEventExt;
 use crate::core::validations::error::ValidationError;
@@ -123,11 +124,17 @@ pub fn merge_key_add(
         return Err(ValidationError::InvalidSignature.into());
     }
 
-    // Step 8 (conflict resolution). Gasless-first per design — writes go to the gasless
-    // store first, so reads match the write order for any future invariant checks. Both
-    // branches return the same typed variant; callers don't need to distinguish which
-    // index rejected them — "you can't add this key again" is the actionable signal.
-    if exists_gasless_key(db, txn_batch, fid, &key_add_body.key)? {
+    // Step 8 (conflict resolution). The gasless by-public-key index is authoritative for
+    // "is this key already registered as a gasless signer?" — it's written and deleted in
+    // lock-step with the primary by-FID record (NEYN-10623), so any hit here — same FID
+    // (replay of a prior KEY_ADD) or different FID (cross-user collision) — is a reason
+    // to reject. Both cases surface as `KeyAlreadyRegistered`; the caller-actionable signal
+    // is just "you can't add this key again."
+    //
+    // Scope is gasless-only: this check does not consider on-chain signers, so a key that
+    // is an on-chain signer for a different FID does not block a gasless KEY_ADD here. The
+    // same-FID on-chain collision is caught by the `get_active_signer` check below.
+    if get_gasless_key_owner_fid(db, txn_batch, &key_add_body.key)?.is_some() {
         return Err(ValidationError::KeyAlreadyRegistered.into());
     }
     let existing_onchain = onchain_event_store
@@ -150,6 +157,7 @@ pub fn merge_key_add(
         request_fid: verified.request_fid,
     };
     put_gasless_key_record(db, txn_batch, fid, &key_add_body.key, &record)?;
+    put_gasless_key_owner(db, txn_batch, &key_add_body.key, fid)?;
     init_last_used_at(
         db,
         txn_batch,
@@ -267,10 +275,13 @@ pub fn merge_key_remove(
         }
     }
 
-    // State writes. Order: record first (the authoritative existence signal), then
-    // last_used_at (cleanup of the sibling store). Both are per-(fid, key) so no cross-key
-    // interleaving concerns.
+    // State writes. Order: record first (the authoritative existence signal), then the
+    // gasless by-public-key owner entry (releases the gasless-namespace uniqueness claim),
+    // then last_used_at (cleanup of the sibling store). Clearing record first matches the
+    // existing read-order convention; clearing the owner entry releases the gasless claim
+    // so a subsequent gasless KEY_ADD from any FID can succeed.
     delete_gasless_key_record(db, txn_batch, fid, &key_remove_body.key)?;
+    delete_gasless_key_owner(db, txn_batch, &key_remove_body.key)?;
     delete_last_used_at(db, txn_batch, fid, &key_remove_body.key)?;
 
     Ok(HubEvent::new_event(
