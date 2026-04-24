@@ -6,9 +6,9 @@ If your goal is to get started as quickly as possible, consider a managed servic
 
 ## Requirements
 
-- 16 GB of RAM
+- 64 GB of RAM
 - 4 CPU cores or vCPUs
-- 2 TB of free storage
+- 1000 GB of free NVMe SSD storage (or equivalent high-performance SSD volume)
 - A public IP address with ports 3381 - 3383 exposed
 
 ## Sync a node
@@ -20,22 +20,17 @@ The easiest way to run Snapchain is using [Docker](https://www.docker.com/get-st
 curl -sSL https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/scripts/snapchain-bootstrap.sh | bash
 ```
 
-Check the the docker logs to ensure that the snapshot is being downloaded. 
+Check the docker logs to ensure that replication bootstrap has started. New installs now resync from peers by default instead of assuming a fresh published snapshot is available.
 
 ```bash
 ./snapchain.sh logs
 
-2025-04-16T02:40:11.265909Z  INFO snapchain: Downloading snapshots
-2025-04-16T02:40:11.266021Z  INFO snapchain::storage::db::snapshot: Retrieving metadata from https://pub-d352dd8819104a778e20d08888c5a661.r2.dev/FARCASTER_NETWORK_MAINNET/1/latest.json
-2025-04-16T02:40:11.637368Z  INFO snapchain::storage::db::snapshot: Downloading zipped snapshot chunk chunk_0001.bin
-2025-04-16T02:40:12.952768Z  INFO snapchain::storage::db::snapshot: Downloading zipped snapshot chunk chunk_0002.bin
-2025-04-16T02:40:15.305951Z  INFO snapchain::storage::db::snapshot: Downloading zipped snapshot chunk chunk_0003.bin
-2025-04-16T02:40:17.742041Z  INFO snapchain::storage::db::snapshot: Downloading zipped snapshot chunk chunk_0004.bin
-2025-04-16T02:40:20.720477Z  INFO snapchain::storage::db::snapshot: Downloading zipped snapshot chunk chunk_0005.bin
-....
+2025-04-24T02:40:11.265909Z  INFO snapchain: Starting node with replication bootstrap
+2025-04-24T02:40:15.305951Z  INFO snapchain::bootstrap::replication::service: Starting replication-based bootstrap with dynamic peer discovery. Initial Peers: ["http://3.214.190.11:3383", ...]
+2025-04-24T05:17:42.742041Z  INFO snapchain: Bootstrap using replication was successful. Will start snapchain now...
 ```
 
-Snapshots are about 200 GB in size and may take a few hours to sync and decompress. Once complete, you should see logs like this: 
+Replication bootstrap can take several hours on a fresh node. If you need to resync from scratch, stop the node, remove `.rocks` and `.rocks.snapshot`, and start it again with `./snapchain.sh up` or `./snapchain.sh upgrade`. Once bootstrap is complete, you should see logs like this: 
 
 ```
 2025-04-16T08:20:01.749980Z  INFO node{name=Block}:sync{height.tip=[0] 1875918 height.sync=[0] 1875919}: informalsystems_malachitebft_sync::handle: Requesting sync value from peer height.sync=[0] 1875920 peer=12D3KooWCc28TYrrXFivwUshyZ8R5HqPMgx4f7AP54iCDLYr7kFR

@@ -27,9 +27,9 @@ Snapchain is in the migration phase. Please check the [release docs](https://www
 
 A snapchain node lets you read and write messages to the network. You will need a machine with the following system requirements to get started: 
 
-- 32 GB of RAM
+- 64 GB of RAM
 - 4 CPU cores or vCPUs
-- 1.5TB of free storage
+- 1000 GB of free NVMe SSD storage (or equivalent high-performance SSD volume)
 - A public IP address
 - Ports 3381 - 3383 exposed on both TCP and UDP. 
 
@@ -39,7 +39,7 @@ You can start a new node or upgrade an existing node with the following command:
 curl -sSL https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/scripts/snapchain-bootstrap.sh | bash
 ```
 You can manage your node using the snapchain.sh script. It uses docker compose to run the node in a container. The script provides commands to start, stop, and check the logs of your node.
-A brand new node will download historical snapshots to catchup to the latest state before it begins sync. This can take up to 2 hours. Check the node's status by running `curl http://localhost:3381/v1/info`. You should see `maxHeight` increasing and `blockDelay` decreasing until it approaches zero. 
+A brand new node will bootstrap by replicating historical state from peers before it begins sync. Legacy snapshots may still exist, but operators should not rely on them being current. If you need to resync from scratch, stop the node, remove `.rocks` and `.rocks.snapshot`, and start it again with `./snapchain.sh up` or `./snapchain.sh upgrade`. Check the node's status by running `curl http://localhost:3381/v1/info`. You should see `maxHeight` increasing and `blockDelay` decreasing until it approaches zero. 
 
 ## Upgrade
 
