@@ -29,7 +29,7 @@ jobs:
       - name: Install Protoc
         uses: arduino/setup-protoc@v3
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           repository: informalsystems/malachite
           ref: ${{ env.MALACHITE_GIT_REF }}
@@ -43,7 +43,7 @@ jobs:
           components: llvm-tools-preview
           override: true
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           repository: CassOnMars/eth-signature-verifier
           path: ./eth-signature-verifier
@@ -52,7 +52,7 @@ jobs:
         with:
           node-version: 22 
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           path: ./snapchain
           fetch-depth: 0
