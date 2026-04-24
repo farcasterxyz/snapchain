@@ -22,11 +22,13 @@ async fn backup_and_upload(
     statsd_client: StatsdClientWrapper,
 ) -> Result<(), SnapshotError> {
     info!(shard_id, "Starting backup for shard");
+    statsd_client.emit_jemalloc_stats();
 
     let backup_dir = snapshot_config.backup_dir.clone();
     let tar_gz_path = storage::db::backup::backup_db(db, &backup_dir, shard_id, now)?;
 
     info!(shard_id, "Backup complete, starting upload for shard");
+    statsd_client.emit_jemalloc_stats();
 
     storage::db::snapshot::upload_to_s3(
         fc_network,
@@ -39,6 +41,7 @@ async fn backup_and_upload(
     clear_old_snapshots(fc_network, &snapshot_config, shard_id).await?;
 
     info!(shard_id, "Upload complete for shard");
+    statsd_client.emit_jemalloc_stats();
 
     Ok(())
 }
@@ -162,7 +165,8 @@ pub async fn upload_snapshot(
         }
     }
 
-    info!("Snapshot upload complete");
+    info!("Snapshot upload complete, emitting jemalloc stats after cleanup");
+    statsd_client.emit_jemalloc_stats();
 
     Ok(())
 }
