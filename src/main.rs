@@ -168,7 +168,6 @@ async fn start_servers(
         http_shutdown_tx.send(()).await.ok();
     });
 
-    // Start gossip last
     tokio::spawn(async move {
         info!("Starting gossip");
         gossip.start().await;
@@ -291,7 +290,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(app_config.logging.build_env_filter())
+    });
     match app_config.log_format.as_str() {
         "text" => tracing_subscriber::fmt().with_env_filter(env_filter).init(),
         "json" => tracing_subscriber::fmt()
@@ -321,7 +322,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     if app_config.statsd.prefix == "" {
-        // TODO: consider removing this check
         return Err("statsd prefix must be specified in config".into());
     }
 
@@ -345,8 +345,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         cadence::StatsdClient::builder(app_config.statsd.prefix.as_str(), sink).build();
     let statsd_client = StatsdClientWrapper::new(statsd_client, app_config.statsd.use_tags);
 
-    // We only use snapshots if the db directory doesn't exist or is empty.
-    // If the user sets [force_load_db_from_snapshot], load the snapshot without checking directory contents.
     let db_is_empty = !fs::exists(app_config.rocksdb_dir.clone()).unwrap()
         || is_dir_empty(&app_config.rocksdb_dir).unwrap();
 
@@ -359,7 +357,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 };
                 use tokio::time::{sleep, Duration};
 
-                // Initialize SSL for rustls
                 crypto::CryptoProvider::install_default(ring::default_provider())
                     .expect("Failed to install rustls crypto provider");
 
@@ -368,10 +365,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 match replicator.bootstrap_using_replication().await {
                     Ok(r) => {
-                        // Check for the specific success response
                         if r == WorkUnitResponse::Finished {
                             info!("Bootstrap using replication was successful. Will start snapchain now...");
-                            // Sleep for 5 seconds to allow any pending logs to be flushed and the gossip to shutdown and free the port
                             sleep(Duration::from_secs(5)).await;
                         } else {
                             error!(
@@ -394,7 +389,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     info!("Downloading snapshots (legacy method)");
                     let mut shard_ids = app_config.consensus.shard_ids.clone();
                     shard_ids.push(0);
-                    // Raise if the download fails. If there's a persistent issue, disable snapshot download.
                     download_snapshots(
                         app_config.fc_network,
                         &app_config.snapshot,
@@ -407,7 +401,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     } else if app_config.snapshot.force_load_db_from_snapshot {
-        // Force snapshot load even if DB exists
         info!("Force downloading snapshots");
         let mut shard_ids = app_config.consensus.shard_ids.clone();
         shard_ids.push(0);
@@ -460,7 +453,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
     let registry = SharedRegistry::global();
-    // Use the new non-global metrics registry when we upgrade to newer version of malachite
     let _ = Metrics::register(registry);
     let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
 
@@ -479,9 +471,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let local_state_store = LocalStateStore::new(global_db);
 
     if app_config.read_node {
-        // Setup post-commit channel if replication is enabled
         let (engine_post_commit_tx, engine_post_commit_rx) = if app_config.replication.enable {
-            // TODO: consider increasing the buffer size to prevent blocking across multiple shards
             let (tx, rx) = mpsc::channel::<PostCommitMessage>(1);
             (Some(tx), Some(rx))
         } else {
@@ -523,7 +513,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         );
         tokio::spawn(async move { mempool.run().await });
 
-        // Setup replication if enabled
         let replicator: Option<Arc<replication::Replicator>> = if app_config.replication.enable {
             let replicator = create_replicator(
                 &app_config,
@@ -587,13 +576,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         SystemMessage::ReadNodeFinishedInitialSync {shard_id} => {
                             info!({shard_id}, "Initial sync completed for shard");
                             shards_finished_syncing.insert(shard_id);
-                            // [num_shards] doesn't account for the block shard, so account for it manually
                             if shards_finished_syncing.len() as u32 == app_config.consensus.num_shards + 1 {
                                 info!("Initial sync completed for all shards");
 
                                 if let Err(err) = sync_complete_tx.send(true)
                                 {
-                                    // This happens if there's no block retention threshold configured
                                     info!("Could not send sync complete message to jobs: {}", err.to_string());
                                 }
 
@@ -605,10 +592,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                         SystemMessage::BlockRequest {block_event_seqnum: _ , block_tx: _ } => {},
                         SystemMessage::MalachiteNetwork(shard, event) => {
-                            // Forward to appropriate consensus actors
+                           
                             node.dispatch_network_event(shard, event);
                         },
-                        SystemMessage::Mempool(_) => {},// No need to store mempool messages from other nodes in read nodes
+                        SystemMessage::Mempool(_) => {},
                         SystemMessage::DecidedValueForReadNode(decided_value) => {
                             node.dispatch_decided_value(decided_value);
                         }
@@ -626,9 +613,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         let (block_tx, block_rx) = broadcast::channel(1000);
 
-        // Setup post-commit channel if replication is enabled
+
         let (engine_post_commit_tx, engine_post_commit_rx) = if app_config.replication.enable {
-            // TODO: consider increasing the buffer size to prevent blocking across multiple shards
             let (tx, rx) = mpsc::channel::<PostCommitMessage>(1);
             (Some(tx), Some(rx))
         } else {
@@ -733,7 +719,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             });
         }
 
-        // Setup replication if enabled
         let replicator: Option<Arc<replication::Replicator>> = if app_config.replication.enable {
             let replicator = create_replicator(
                 &app_config,
@@ -796,7 +781,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .await;
 
-        // TODO(aditi): We may want to reconsider this code when we upload snapshots on a schedule.
         if app_config.snapshot.backup_on_startup {
             let shard_ids = app_config.consensus.shard_ids.clone();
             let block_stores = node.block_stores.clone();
@@ -825,7 +809,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             });
         }
 
-        // Kick it off
+
         loop {
             select! {
                 _ = ctrl_c() => {
