@@ -370,7 +370,7 @@ impl SnapchainGossip {
         fc_network: FarcasterNetwork,
         config: &Config,
     ) -> Result<String, reqwest::Error> {
-        if config.announce_rpc_address.len() > 0 {
+        if !config.announce_rpc_address.is_empty() {
             return Ok(config.announce_rpc_address.clone());
         }
 
@@ -387,7 +387,7 @@ impl SnapchainGossip {
     }
 
     async fn get_announce_gossip_address(fc_network: FarcasterNetwork, config: &Config) -> String {
-        if config.announce_address.len() > 0 {
+        if !config.announce_address.is_empty() {
             return config.announce_address.clone();
         }
 

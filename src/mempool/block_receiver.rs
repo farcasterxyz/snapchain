@@ -54,7 +54,7 @@ pub struct BlockReceiver {
 
 impl BlockReceiver {
     fn validate_block_events(&self, block: &Block) -> bool {
-        if block.events.len() == 0 {
+        if block.events.is_empty() {
             return true;
         }
 
@@ -188,7 +188,7 @@ impl BlockReceiver {
                 height = block.header.as_ref().unwrap().height.unwrap().block_number,
                 "Received block"
             );
-            if block.events.len() == 0 {
+            if block.events.is_empty() {
                 continue;
             }
             // The db is the source of truth, it's possible to read this out of the events_rx channel but delivery over that channel is not reliable (it's a broadcast channel) we may not have the most up to date state.

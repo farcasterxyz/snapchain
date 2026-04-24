@@ -5,6 +5,7 @@ use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch, RocksdbE
 use prost::Message;
 use std::sync::Arc;
 use thiserror::Error;
+use tracing::error;
 
 #[derive(Error, Debug)]
 pub enum BlockEventStorageError {
@@ -79,7 +80,7 @@ fn get_block_page_by_prefix(
     )
     .map_err(|_| BlockEventStorageError::TooManyBlocksInResult)?; // TODO: Return the right error
 
-    let next_page_token = if last_key.len() > 0 {
+    let next_page_token = if !last_key.is_empty() {
         Some(last_key)
     } else {
         None

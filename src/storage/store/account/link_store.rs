@@ -177,7 +177,7 @@ impl LinkStore {
         )?;
 
         let messages = get_many_messages(store.db().borrow(), message_keys)?;
-        let next_page_token = if last_key.len() > 0 {
+        let next_page_token = if !last_key.is_empty() {
             Some(last_key.to_vec())
         } else {
             None
@@ -244,17 +244,13 @@ impl LinkStore {
     /// * `link_body` - body of link that contains type of link created and target ID of the object
     ///                 being reacted to
     fn link_add_key(fid: u64, link_body: &LinkBody) -> Result<Vec<u8>, HubError> {
-        if link_body.target.is_some()
-            && (link_body.r#type.is_empty() || link_body.r#type.len() == 0)
-        {
+        if link_body.target.is_some() && link_body.r#type.is_empty() {
             return Err(HubError::validation_failure(
                 "targetId provided without type",
             ));
         }
 
-        if !link_body.r#type.is_empty()
-            && (link_body.r#type.len() > Self::LINK_TYPE_BYTE_SIZE || link_body.r#type.len() == 0)
-        {
+        if !link_body.r#type.is_empty() && link_body.r#type.len() > Self::LINK_TYPE_BYTE_SIZE {
             return Err(HubError::validation_failure(
                 "link type invalid - non-empty link type found with invalid length",
             ));
@@ -291,17 +287,13 @@ impl LinkStore {
     /// * `link_body` - body of link that contains type of link created and target ID of the object
     ///                 being reacted to
     fn link_remove_key(fid: u64, link_body: &LinkBody) -> Result<Vec<u8>, HubError> {
-        if link_body.target.is_some()
-            && (link_body.r#type.is_empty() || link_body.r#type.len() == 0)
-        {
+        if link_body.target.is_some() && link_body.r#type.is_empty() {
             return Err(HubError::validation_failure(
                 "targetID provided without type",
             ));
         }
 
-        if !link_body.r#type.is_empty()
-            && (link_body.r#type.len() > Self::LINK_TYPE_BYTE_SIZE || link_body.r#type.len() == 0)
-        {
+        if !link_body.r#type.is_empty() && link_body.r#type.len() > Self::LINK_TYPE_BYTE_SIZE {
             return Err(HubError::validation_failure(
                 "link type invalid - non-empty link type found with invalid length",
             ));
@@ -375,7 +367,7 @@ impl LinkStore {
         fid: u64,
         ts_hash: Option<&[u8; TS_HASH_LENGTH]>,
     ) -> Result<Vec<u8>, HubError> {
-        if fid != 0 && (ts_hash.is_none() || ts_hash.is_some_and(|tsh| tsh.len() == 0)) {
+        if fid != 0 && ts_hash.is_none() {
             return Err(HubError::validation_failure(
                 "fid provided without timestamp hash",
             ));
