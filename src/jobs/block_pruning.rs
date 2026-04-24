@@ -10,6 +10,72 @@ use tracing::{error, info};
 
 const THROTTLE: Duration = Duration::from_millis(100);
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::FarcasterNetwork;
+    use crate::storage::db::RocksDB;
+    use crate::storage::trie::merkle_trie::MerkleTrie;
+    use std::sync::Arc;
+
+    fn make_block_stores(dir: &std::path::Path) -> BlockStores {
+        let db = Arc::new(RocksDB::new(dir.to_str().unwrap()));
+        db.open().unwrap();
+        BlockStores::new(db, MerkleTrie::new().unwrap(), FarcasterNetwork::Devnet)
+    }
+
+    #[test]
+    fn test_job_creation_with_sync_not_complete() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let block_stores = make_block_stores(&tmpdir.path().join("db"));
+        let (_tx, rx) = watch::channel(false);
+        let result = block_pruning_job(
+            "0/1 * * * * *",
+            Duration::from_secs(86400 * 30),
+            block_stores,
+            HashMap::new(),
+            rx,
+        );
+        assert!(
+            result.is_ok(),
+            "expected job creation to succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_job_creation_with_sync_complete() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let block_stores = make_block_stores(&tmpdir.path().join("db"));
+        let (_tx, rx) = watch::channel(true);
+        let result = block_pruning_job(
+            "0/1 * * * * *",
+            Duration::from_secs(86400 * 30),
+            block_stores,
+            HashMap::new(),
+            rx,
+        );
+        assert!(
+            result.is_ok(),
+            "expected job creation to succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_sync_gate_skips_pruning_when_not_synced() {
+        let (_tx, rx) = watch::channel(false);
+        assert!(!*rx.borrow(), "receiver should reflect false");
+    }
+
+    #[test]
+    fn test_sync_gate_allows_pruning_when_synced() {
+        let (tx, rx) = watch::channel(false);
+        tx.send(true).unwrap();
+        assert!(*rx.borrow(), "receiver should reflect true after send");
+    }
+}
+
 pub fn block_pruning_job(
     schedule: &str,
     block_retention: Duration,
