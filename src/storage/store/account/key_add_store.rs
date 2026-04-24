@@ -10,11 +10,21 @@
 //! ```text
 //! [RootPrefix::GaslessKey (1B)] [UserPostfix::GaslessKeyByFid (1B)] [FID (4B, BE)] [PublicKey (32B)]
 //!     -> prost-encoded GaslessKeyRecord
+//!
+//! [RootPrefix::GaslessKey (1B)] [UserPostfix::GaslessKeyByPublicKey (1B)] [PublicKey (32B)]
+//!     -> FID (4B, BE)
 //! ```
+//!
+//! The by-public-key index enforces global uniqueness *within the gasless-signer namespace*:
+//! a given Ed25519 key may hold a gasless registration for at most one FID at a time.
+//! On-chain signers are explicitly out of scope — they are not indexed here and their
+//! uniqueness (or non-uniqueness) is unaffected. The index is written and cleared alongside
+//! the primary record by `merge_key_add` / `merge_key_remove` so both gasless indices stay
+//! in lock-step.
 
 use prost::Message;
 
-use super::{get_from_db_or_txn, make_fid_key, FID_BYTES};
+use super::{get_from_db_or_txn, make_fid_key, read_fid_key, FID_BYTES};
 use crate::core::error::HubError;
 use crate::core::validations::key::ED25519_PUBLIC_KEY_LEN;
 use crate::proto;
@@ -87,6 +97,8 @@ const ROOT_PREFIX_BYTES: usize = 1;
 const USER_POSTFIX_BYTES: usize = 1;
 const GASLESS_KEY_BY_FID_KEY_BYTES: usize =
     ROOT_PREFIX_BYTES + USER_POSTFIX_BYTES + FID_BYTES + ED25519_PUBLIC_KEY_LEN;
+const GASLESS_KEY_BY_PUBLIC_KEY_KEY_BYTES: usize =
+    ROOT_PREFIX_BYTES + USER_POSTFIX_BYTES + ED25519_PUBLIC_KEY_LEN;
 
 fn validate_key_len(public_key: &[u8]) -> Result<(), HubError> {
     if public_key.len() != ED25519_PUBLIC_KEY_LEN {
@@ -130,18 +142,6 @@ pub fn get_gasless_key_record(
     }
 }
 
-/// Returns true iff a gasless-key record exists for `(fid, public_key)` in either the committed
-/// DB or the in-flight txn batch. Used for conflict resolution on KEY_ADD.
-pub fn exists_gasless_key(
-    db: &RocksDB,
-    txn: &RocksDbTransactionBatch,
-    fid: u64,
-    public_key: &[u8],
-) -> Result<bool, HubError> {
-    let key = make_gasless_key_by_fid_key(fid, public_key)?;
-    Ok(get_from_db_or_txn(db, txn, &key)?.is_some())
-}
-
 pub fn put_gasless_key_record(
     db: &RocksDB,
     txn: &mut RocksDbTransactionBatch,
@@ -163,6 +163,71 @@ pub fn delete_gasless_key_record(
 ) -> Result<(), HubError> {
     let _ = db;
     let key = make_gasless_key_by_fid_key(fid, public_key)?;
+    txn.delete(key);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// By-public-key index (global-uniqueness owner map)
+// ---------------------------------------------------------------------------
+
+pub fn make_gasless_key_by_public_key_key(public_key: &[u8]) -> Result<Vec<u8>, HubError> {
+    validate_key_len(public_key)?;
+    let mut key = Vec::with_capacity(GASLESS_KEY_BY_PUBLIC_KEY_KEY_BYTES);
+    key.push(RootPrefix::GaslessKey as u8);
+    key.push(UserPostfix::GaslessKeyByPublicKey as u8);
+    key.extend_from_slice(public_key);
+    Ok(key)
+}
+
+/// Returns the FID currently claiming `public_key` as a gasless signer, or `None` if the key
+/// has no gasless registration. Scope is gasless-only — this returns `None` even if the key is
+/// an active on-chain signer for some FID, by design. Reads through the in-flight txn batch so
+/// conflict checks within the same commit see writes staged earlier in the batch; this is
+/// what lets two KEY_ADDs for the same key in one shard commit be mutually exclusive.
+pub fn get_gasless_key_owner_fid(
+    db: &RocksDB,
+    txn: &RocksDbTransactionBatch,
+    public_key: &[u8],
+) -> Result<Option<u64>, HubError> {
+    let key = make_gasless_key_by_public_key_key(public_key)?;
+    match get_from_db_or_txn(db, txn, &key)? {
+        None => Ok(None),
+        Some(bytes) => {
+            if bytes.len() != FID_BYTES {
+                return Err(HubError {
+                    code: "internal_error".to_string(),
+                    message: format!(
+                        "corrupt gasless-key owner entry: expected {} bytes, got {}",
+                        FID_BYTES,
+                        bytes.len()
+                    ),
+                });
+            }
+            Ok(Some(read_fid_key(&bytes, 0)))
+        }
+    }
+}
+
+pub fn put_gasless_key_owner(
+    db: &RocksDB,
+    txn: &mut RocksDbTransactionBatch,
+    public_key: &[u8],
+    fid: u64,
+) -> Result<(), HubError> {
+    let _ = db;
+    let key = make_gasless_key_by_public_key_key(public_key)?;
+    txn.put(key, make_fid_key(fid));
+    Ok(())
+}
+
+pub fn delete_gasless_key_owner(
+    db: &RocksDB,
+    txn: &mut RocksDbTransactionBatch,
+    public_key: &[u8],
+) -> Result<(), HubError> {
+    let _ = db;
+    let key = make_gasless_key_by_public_key_key(public_key)?;
     txn.delete(key);
     Ok(())
 }
