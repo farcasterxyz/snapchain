@@ -25,13 +25,13 @@ jobs:
       uses: arduino/setup-protoc@v3
 
     - name: Checkout snapchain
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         path: ./snapchain
         fetch-depth: 0
 
     - name: Checkout malachite (path dependency)
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         repository: informalsystems/malachite
         ref: 13bca14cd209d985c3adf101a02924acde8723a5
@@ -80,7 +80,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v4
