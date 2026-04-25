@@ -174,14 +174,9 @@ pub async fn upload_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::FarcasterNetwork;
-    use crate::storage::db::snapshot::{Config, SnapshotError};
-    use crate::storage::db::RocksDB;
-    use crate::storage::store::block_engine::BlockStores;
+    use crate::storage::db::snapshot::Config;
     use crate::storage::store::test_helper;
     use crate::storage::trie::merkle_trie::MerkleTrie;
-    use std::collections::HashSet;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn make_block_stores(tmpdir: &TempDir) -> BlockStores {

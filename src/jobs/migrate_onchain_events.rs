@@ -187,12 +187,9 @@ async fn migrate_shard_onchain_events_batch(
 mod tests {
     use super::*;
     use crate::proto::FarcasterNetwork;
-    use crate::storage::db::RocksDB;
-    use crate::storage::store::node_local_state::LocalStateStore;
-    use crate::storage::store::stores::{StoreLimits, Stores};
+    use crate::storage::store::stores::StoreLimits;
     use crate::storage::store::test_helper;
     use crate::storage::trie::merkle_trie::MerkleTrie;
-    use tokio::sync::mpsc;
 
     async fn make_stores(path: &std::path::Path) -> Stores {
         let db = Arc::new(RocksDB::new(path.to_str().unwrap()));
