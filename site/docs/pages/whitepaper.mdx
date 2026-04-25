@@ -85,7 +85,7 @@ Snapchain can be sharded into N segments using N+1 tendermint chains to improve 
 
 <img width="525" alt="Screenshot 2024-12-05 at 5 43 53 PM" src="https://github.com/user-attachments/assets/f3bf802a-64a7-4281-b43d-c7a0b0fb8200" />
 
- A shard chain must have at least three validators and store all relevant account state. Validators may be automatically or manually rotated between shards through a validator schedule in the epoch block. Erasure coding is used to distribute account state from one shard across validators in other shards so that the data is still available even if all validators within a shard fail. 
+ A shard chain must have at least four validators and store all relevant account state. Validators may be automatically or manually rotated between shards through a validator schedule in the epoch block. Erasure coding is used to distribute account state from one shard across validators in other shards so that the data is still available even if all validators within a shard fail. 
 
 Block production is triggered when the previous block is finalized. Each shard chain bundles transactions into a block and computes a shard root, which is like the global root but limited to accounts in a shard. The 0th shard chain waits for the N shards to be produced and then performs another tendermint step bundling them into a single block and computes a global state root across the shard roots.
 
