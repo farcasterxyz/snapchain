@@ -28,12 +28,9 @@ jobs:
           path: ./malachite
 
       - name: Install Rust 1.95.0
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
-          toolchain: 1.95.0
-          profile: default
           components: llvm-tools-preview
-          override: true
 
       - uses: actions/setup-node@v6
         with:

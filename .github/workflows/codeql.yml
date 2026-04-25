@@ -38,11 +38,7 @@ jobs:
         path: ./malachite
 
     - name: Install Rust 1.95.0
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: 1.95.0
-        profile: default
-        override: true
+      uses: dtolnay/rust-toolchain@1.95.0
 
     - name: Cache cargo registry + target
       uses: Swatinem/rust-cache@v2
