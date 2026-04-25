@@ -2197,8 +2197,8 @@ mod tests {
             result
                 .unwrap_err()
                 .message
-                .contains("targetID provided without type"),
-            "expected targetID-without-type error"
+                .contains("targetId provided without type"),
+            "expected targetId-without-type error"
         );
     }
 

@@ -289,7 +289,7 @@ impl LinkStore {
     fn link_remove_key(fid: u64, link_body: &LinkBody) -> Result<Vec<u8>, HubError> {
         if link_body.target.is_some() && link_body.r#type.is_empty() {
             return Err(HubError::validation_failure(
-                "targetID provided without type",
+                "targetId provided without type",
             ));
         }
 
