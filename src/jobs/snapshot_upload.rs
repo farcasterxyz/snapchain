@@ -120,8 +120,8 @@ pub async fn upload_snapshot(
         {
             error!(
                 shard = 0,
-                "Unable to upload snapshot for shard {}",
-                err.to_string()
+                error = %err,
+                "Unable to upload snapshot for shard"
             )
         }
     }
@@ -143,8 +143,8 @@ pub async fn upload_snapshot(
             {
                 error!(
                     shard,
-                    "Unable to upload snapshot for shard {}",
-                    err.to_string()
+                    error = %err,
+                    "Unable to upload snapshot for shard"
                 );
             }
         }
@@ -326,7 +326,7 @@ pub fn snapshot_upload_job(
             )
             .await
             {
-                error!("Error uploading snapshots {}", err.to_string());
+                error!("Error uploading snapshots {}", err);
             }
         })
     })
