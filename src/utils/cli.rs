@@ -90,7 +90,7 @@ pub async fn follow_blocks(
         let request = tonic::Request::new(msg);
         let mut response = client.get_blocks(request).await?.into_inner();
         while let Ok(Some(block)) = response.message().await {
-            block_tx.send(block.clone()).await?;
+            block_tx.send(block.clone()).await.unwrap();
             next_block_number += 1;
         }
 
