@@ -19,7 +19,9 @@ jobs:
       - volume=80gb
     steps:
       - name: Install Protoc
-        uses: arduino/setup-protoc@v3
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc
 
       - uses: actions/checkout@v6
         with:
@@ -55,7 +57,7 @@ jobs:
 
       - name: Set up Python
         if: github.event_name == 'pull_request'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -74,7 +76,7 @@ jobs:
 
       - name: Post diff coverage comment
         if: github.event_name == 'pull_request'
-        uses: marocchino/sticky-pull-request-comment@v2
+        uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: coverage
           path: ./snapchain/diff-coverage.md
