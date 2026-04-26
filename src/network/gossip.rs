@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io;
 use tokio::sync::mpsc::Sender;
@@ -202,6 +203,10 @@ pub struct SnapchainGossip {
     bootstrap_reconnect_interval: Duration,
     statsd_client: StatsdClientWrapper,
     peers: BTreeMap<PeerId, ContactInfoBody>,
+    /// Optional set of peers whose inbound gossip messages will be silently
+    /// dropped. Empty in production. Tests inject peer ids here to simulate a
+    /// network partition without tearing down libp2p connections.
+    peer_blocklist: Arc<Mutex<HashSet<PeerId>>>,
 }
 
 impl SnapchainGossip {
@@ -363,7 +368,16 @@ impl SnapchainGossip {
             connected_bootstrap_addrs: HashSet::new(),
             enable_autodiscovery: config.enable_autodiscovery,
             peers: BTreeMap::new(),
+            peer_blocklist: Arc::new(Mutex::new(HashSet::new())),
         })
+    }
+
+    /// Shared handle to the peer blocklist. Tests use this to simulate network
+    /// partitions: any peer whose `PeerId` is in the set has its inbound gossip
+    /// messages dropped. The lock is held only briefly (HashSet read), and the
+    /// production code path leaves the set empty.
+    pub fn peer_blocklist_handle(&self) -> Arc<Mutex<HashSet<PeerId>>> {
+        self.peer_blocklist.clone()
     }
 
     async fn get_announce_rpc_address(
@@ -550,6 +564,17 @@ impl SnapchainGossip {
                             message_id: _id,
                             message,
                         })) => {
+                            // Test-only partition simulation: drop messages whose
+                            // immediate sender is on the local blocklist. Production
+                            // leaves the set empty so this is a HashSet contains check.
+                            if self
+                                .peer_blocklist
+                                .lock()
+                                .map(|set| set.contains(&peer_id))
+                                .unwrap_or(false)
+                            {
+                                continue;
+                            }
                             // Take an owned sender if present to avoid holding an immutable borrow during mutable self call
                             let maybe_sender = self.system_tx.as_ref().cloned();
                             if let Some(system_tx) = maybe_sender {
