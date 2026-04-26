@@ -21,6 +21,6 @@ Procfile
 /.idea
 node_modules
 grafana/data
-.claude/
+.claude/settings.json
 /.target_local
 .claude/scheduled_tasks.lock
