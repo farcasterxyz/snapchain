@@ -30,7 +30,7 @@ jobs:
       - name: Install Rust 1.95.0
         uses: dtolnay/rust-toolchain@1.95.0
         with:
-          components: llvm-tools-preview
+          components: rustfmt, llvm-tools-preview
 
       - uses: actions/setup-node@v6
         with:
