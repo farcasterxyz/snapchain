@@ -2144,4 +2144,118 @@ mod tests {
         .unwrap();
         assert_eq!(result3, add3);
     }
+
+    // Regression tests for link_add_key / link_remove_key error branches.
+    // These cover the paths simplified when `.len() == 0 || .is_empty()` duplication was removed.
+
+    fn make_link_add_with(fid: u64, link_type: &str, target: Option<Target>) -> message::Message {
+        let mut msg = messages_factory::links::create_link_add(fid, link_type, 0, None, None);
+        if let Some(data) = msg.data.as_mut() {
+            if let Some(message::message_data::Body::LinkBody(body)) = data.body.as_mut() {
+                body.r#type = link_type.to_string();
+                body.target = target;
+            }
+        }
+        msg
+    }
+
+    fn make_link_remove_with(
+        fid: u64,
+        link_type: &str,
+        target: Option<Target>,
+    ) -> message::Message {
+        let mut msg = messages_factory::links::create_link_remove(fid, link_type, 0, None, None);
+        if let Some(data) = msg.data.as_mut() {
+            if let Some(message::message_data::Body::LinkBody(body)) = data.body.as_mut() {
+                body.r#type = link_type.to_string();
+                body.target = target;
+            }
+        }
+        msg
+    }
+
+    #[test]
+    fn test_make_add_key_rejects_empty_type_with_target() {
+        let msg = make_link_add_with(FID_FOR_TEST, "", Some(Target::TargetFid(TARGET_FID)));
+        let result = LinkStore::make_add_key(&msg);
+        assert!(result.is_err(), "empty type with target should be rejected");
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("targetId provided without type"),
+            "expected targetId-without-type error"
+        );
+    }
+
+    #[test]
+    fn test_make_remove_key_rejects_empty_type_with_target() {
+        let msg = make_link_remove_with(FID_FOR_TEST, "", Some(Target::TargetFid(TARGET_FID)));
+        let result = LinkStore::make_remove_key(&msg);
+        assert!(result.is_err(), "empty type with target should be rejected");
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("targetId provided without type"),
+            "expected targetId-without-type error"
+        );
+    }
+
+    #[test]
+    fn test_make_add_key_rejects_overlong_type() {
+        // LINK_TYPE_BYTE_SIZE is 8; "xxxxxxxxx" is 9 bytes
+        let msg = make_link_add_with(
+            FID_FOR_TEST,
+            "xxxxxxxxx",
+            Some(Target::TargetFid(TARGET_FID)),
+        );
+        let result = LinkStore::make_add_key(&msg);
+        assert!(
+            result.is_err(),
+            "type longer than 8 bytes should be rejected"
+        );
+        assert!(
+            result.unwrap_err().message.contains("link type invalid"),
+            "expected link-type-invalid error"
+        );
+    }
+
+    #[test]
+    fn test_make_remove_key_rejects_overlong_type() {
+        let msg = make_link_remove_with(
+            FID_FOR_TEST,
+            "xxxxxxxxx",
+            Some(Target::TargetFid(TARGET_FID)),
+        );
+        let result = LinkStore::make_remove_key(&msg);
+        assert!(
+            result.is_err(),
+            "type longer than 8 bytes should be rejected"
+        );
+        assert!(
+            result.unwrap_err().message.contains("link type invalid"),
+            "expected link-type-invalid error"
+        );
+    }
+
+    #[test]
+    fn test_make_add_key_accepts_valid_type() {
+        let msg = make_link_add_with(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            Some(Target::TargetFid(TARGET_FID)),
+        );
+        assert!(LinkStore::make_add_key(&msg).is_ok());
+    }
+
+    #[test]
+    fn test_make_remove_key_accepts_valid_type() {
+        let msg = make_link_remove_with(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            Some(Target::TargetFid(TARGET_FID)),
+        );
+        assert!(LinkStore::make_remove_key(&msg).is_ok());
+    }
 }

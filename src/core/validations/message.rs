@@ -36,7 +36,7 @@ fn validate_bytes_as_string(
     max_length: u64,
     required: bool,
 ) -> Result<(), ValidationError> {
-    if required && byte_array.len() == 0 {
+    if required && byte_array.is_empty() {
         return Err(ValidationError::MissingString);
     }
     if byte_array.len() as u64 > max_length {
@@ -95,7 +95,7 @@ pub fn validate_message(
     let message_data;
     if message.data_bytes.is_some() {
         data_bytes = message.data_bytes.as_ref().unwrap().clone();
-        if data_bytes.len() == 0 {
+        if data_bytes.is_empty() {
             return Err(ValidationError::MissingData);
         }
         match MessageData::decode(message.data_bytes.as_ref().unwrap().as_slice()) {
@@ -255,7 +255,7 @@ fn validate_signature(
         return Err(ValidationError::InvalidSignatureScheme);
     }
 
-    if signature.len() == 0 {
+    if signature.is_empty() {
         return Err(ValidationError::MissingSignature);
     }
 
@@ -279,7 +279,7 @@ pub fn validate_message_hash(
         return Err(ValidationError::InvalidHashScheme);
     }
 
-    if data_bytes.len() == 0 {
+    if data_bytes.is_empty() {
         return Err(ValidationError::MissingData);
     }
 
@@ -291,7 +291,7 @@ pub fn validate_message_hash(
 }
 
 pub fn validate_fname(input: &String) -> Result<(), ValidationError> {
-    if input.len() == 0 {
+    if input.is_empty() {
         return Err(ValidationError::FnameIsMissing);
     }
 
