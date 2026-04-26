@@ -10,13 +10,13 @@
 # with the appropriate effective_at height so the full history is preserved.
 #
 # Validator public key => operator mapping:
-#   29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970  - Farcaster (validator 1)
+#   29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970  - Neynar (validator 1)
 #   6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72  - Neynar (validator 2)
 #   81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8  - Merkle (validator 3)
-#   2c0f58a364b7959c85e49b5a50d14d220c16f8bd7879b0d5d3f68b32de83ecb8  - Farcaster (validator 4, replaced by validator 6 at height 26_386_684)
-#   67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102  - Farcaster (validator 5)
-#   db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081  - Farcaster (validator 6, replaced validator 4 at height 26_386_684)
-#   80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860  - Farcaster (validator 7, added at height 28_415_000)
+#   2c0f58a364b7959c85e49b5a50d14d220c16f8bd7879b0d5d3f68b32de83ecb8  - Neynar (validator 4, replaced by validator 6 at height 26_386_684)
+#   67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102  - Neynar (validator 5)
+#   db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081  - Neynar (validator 6, replaced validator 4 at height 26_386_684)
+#   80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860  - Uno (validator 7, added at height 28_415_000)
 
 # Initial validator set — effective at genesis (height 0), all shards (block + message)
 [[consensus.validator_sets]]
