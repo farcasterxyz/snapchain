@@ -22,7 +22,9 @@ jobs:
 
     steps:
     - name: Install Protoc
-      uses: arduino/setup-protoc@v3
+      uses: taiki-e/install-action@v2
+      with:
+        tool: protoc
 
     - name: Checkout snapchain
       uses: actions/checkout@v6
