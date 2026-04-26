@@ -43,11 +43,21 @@ const HOST_FOR_TEST: &str = "127.0.0.1";
 const BASE_PORT_FOR_TEST: u32 = 9482;
 
 fn get_available_port() -> u32 {
-    let mut port = BASE_PORT_FOR_TEST + (rand::random::<u32>() % 1000);
+    // Probe BOTH TCP and UDP because gossip binds UDP/QUIC while gRPC binds
+    // TCP, and a port can be free on one protocol while in-use on the other.
+    // The 10_000 range is wide enough that 5+ validators in one test still
+    // pick distinct ports under random starts.
+    let mut port = BASE_PORT_FOR_TEST + (rand::random::<u32>() % 10_000);
     loop {
-        if let Ok(listener) = std::net::TcpListener::bind(format!("{}:{}", HOST_FOR_TEST, port)) {
-            listener.set_nonblocking(true).unwrap();
-            return port;
+        let addr = format!("{}:{}", HOST_FOR_TEST, port);
+        if let Ok(tcp) = std::net::TcpListener::bind(&addr) {
+            if let Ok(udp) = std::net::UdpSocket::bind(&addr) {
+                tcp.set_nonblocking(true).unwrap();
+                udp.set_nonblocking(true).unwrap();
+                drop(tcp);
+                drop(udp);
+                return port;
+            }
         }
         port += 1;
     }
