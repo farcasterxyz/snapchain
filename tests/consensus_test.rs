@@ -1756,9 +1756,19 @@ async fn test_validator_crash_and_recovery() {
         .expect("restarted validator did not catch up");
 
     // Both casts should now be visible everywhere (the second one was missed
-    // during downtime and is recovered through sync).
-    assert_network_has_cast(&network, 1000, cast1.hash.clone());
-    assert_network_has_cast(&network, 1000, cast2.hash.clone());
+    // during downtime and is recovered through sync). `wait_for_cast` polls
+    // until ALL live nodes — including the freshly restarted validator 0 —
+    // surface the cast: catching up the chain header and replaying user
+    // messages into the cast store can lag the height assertion above by a
+    // few hundred ms, so we use a poll instead of an immediate assertion.
+    network
+        .wait_for_cast(1000, cast1.hash.clone())
+        .await
+        .expect("restarted validator did not surface cast1 (pre-crash)");
+    network
+        .wait_for_cast(1000, cast2.hash.clone())
+        .await
+        .expect("restarted validator did not surface cast2 (during outage)");
     assert_blocks_match_across_validators(&network);
 }
 
@@ -1769,7 +1779,10 @@ async fn test_validator_crash_and_recovery() {
 #[serial]
 async fn test_warm_restart() {
     let num_shards = 1;
-    let mut network = TestNetwork::create(3, num_shards).await;
+    // 4 validators so that pausing one leaves 3 surviving (75%, comfortably
+    // above 2/3). 3-validator network with one paused only has 2/3 *exactly*,
+    // which is below Tendermint's strict-majority threshold and stalls.
+    let mut network = TestNetwork::create(4, num_shards).await;
     network.start_validators().await;
 
     network.register_and_wait_for_fid(1000).await.unwrap();
@@ -1781,7 +1794,7 @@ async fn test_warm_restart() {
     let messages_before = network.first_live_node().total_messages();
 
     // Pause validator 1 with `keep_db_on_drop: true` so RocksDB survives the
-    // drop. The remaining two validators (2/3 supermajority) keep producing.
+    // drop. The remaining three validators (3/4 = 75%) keep producing.
     let (global_dir, shards_dir) = network.pause_validator_node(1).await;
 
     let cast2 = network
@@ -1803,8 +1816,14 @@ async fn test_warm_restart() {
         .await
         .expect("resumed validator did not catch up");
 
-    assert_network_has_cast(&network, 1000, cast1.hash.clone());
-    assert_network_has_cast(&network, 1000, cast2.hash.clone());
+    network
+        .wait_for_cast(1000, cast1.hash.clone())
+        .await
+        .expect("resumed validator did not surface cast1");
+    network
+        .wait_for_cast(1000, cast2.hash.clone())
+        .await
+        .expect("resumed validator did not surface cast2");
 
     let resumed = network.nodes[1].as_ref().unwrap();
     assert!(
@@ -1965,16 +1984,20 @@ async fn test_validator_set_rotation() {
     let num_shards = 1;
     let rotation_height: u64 = 5;
 
+    // Both configs must include shard 0 in their `shard_ids` so block-level
+    // consensus (which runs on shard 0) actually picks up the rotation. The
+    // harness defaults `shard_ids: vec![]` to `(1..=num_shards)`, which would
+    // omit shard 0 and leave the block-level set frozen at the genesis config.
     let validator_sets = vec![
         ValidatorSetConfig {
             effective_at: 0,
             validator_public_keys: vec!["idx:0".into(), "idx:1".into(), "idx:2".into()],
-            shard_ids: vec![],
+            shard_ids: vec![0, 1],
         },
         ValidatorSetConfig {
             effective_at: rotation_height,
             validator_public_keys: vec!["idx:0".into(), "idx:1".into(), "idx:3".into()],
-            shard_ids: vec![],
+            shard_ids: vec![0, 1],
         },
     ];
 
@@ -2041,8 +2064,8 @@ async fn test_validator_set_rotation() {
 }
 
 /// HTTP server end-to-end: stand up the production HTTP layer (axum/hyper +
-/// `start_http_server` helper) on top of a 1-validator network, then drive it
-/// with `reqwest`. Exercises the Tokio `TcpListener` path that the in-process
+/// `start_http_server` helper) on top of a small validator network, then drive
+/// it with `reqwest`. Exercises the Tokio `TcpListener` path that the in-process
 /// `http_server_test.rs` unit tests skip.
 #[tokio::test]
 #[serial]
@@ -2052,7 +2075,10 @@ async fn test_http_server_smoke() {
     };
 
     let num_shards = 1;
-    let mut network = TestNetwork::create(1, num_shards).await;
+    // 3 validators — single-validator + single-shard runs sometimes commit a
+    // block before any shard chunk is ready, which trips the harness's
+    // `chunks_count == num_shards` invariant in the block-validation spawn.
+    let mut network = TestNetwork::create(3, num_shards).await;
     network.start_validators().await;
 
     network.register_and_wait_for_fid(2000).await.unwrap();
@@ -2084,10 +2110,12 @@ async fn test_http_server_smoke() {
         .expect("GET /v1/info failed");
     assert_eq!(info.status(), reqwest::StatusCode::OK, "/v1/info status");
     let info_json: serde_json::Value = info.json().await.expect("/v1/info json");
+    // The HTTP layer serializes responses with camelCase, so `num_shards` from
+    // the underlying `InfoResponse` lands as `numShards` in JSON.
     assert_eq!(
-        info_json["num_shards"].as_u64(),
+        info_json["numShards"].as_u64(),
         Some(num_shards as u64),
-        "/v1/info num_shards mismatch: {info_json}"
+        "/v1/info numShards mismatch: {info_json}"
     );
 
     // /v1/castById — pull back the cast we previously submitted via gRPC. Hash
@@ -2113,10 +2141,13 @@ async fn test_http_server_smoke() {
     );
 }
 
-/// Partition a 5-validator network into A=[0,1,2] (3/5 voting power = supermajority)
-/// and B=[3,4] (2/5, below 2/3). A side must keep advancing and accept new
-/// casts; B side must NOT make progress on its own. Healing the partition
-/// restores convergence across all 5 validators.
+/// Partition a 5-validator network into A=[0,1,2,3] (4/5 = 80%, > 2/3
+/// supermajority) and B=[4] (1/5, far below). A side must keep advancing and
+/// accept new casts; B side must NOT make progress on its own. Healing the
+/// partition restores convergence across all 5 validators.
+///
+/// 3-of-5 (60%) is *not* a supermajority — Tendermint requires strictly more
+/// than 2/3 of voting power, i.e. at least 4 of 5 here.
 #[tokio::test]
 #[serial]
 async fn test_network_partition() {
@@ -2134,11 +2165,11 @@ async fn test_network_partition() {
     let baseline_height = network.max_block_height();
 
     // Drop gossip across the partition boundary on both sides — symmetric block.
-    network.partition_validators(&[0, 1, 2], &[3, 4]);
+    network.partition_validators(&[0, 1, 2, 3], &[4]);
 
-    // Side A (3 validators, 60% voting power, ≥ 2/3) must keep producing blocks
-    // and accept submissions. We submit on node 0 (an A-side member) and
-    // verify the A nodes each see the cast.
+    // Side A (4 validators, 80% voting power, > 2/3) must keep producing blocks
+    // and accept submissions. We submit on node 0 (an A-side member) and verify
+    // the A nodes each see the cast.
     let signer = network.test_fids.get(&1003).unwrap().0.clone();
     let cast_a = messages_factory::casts::create_cast_add(1003, "a-side", None, Some(&signer));
     network.nodes[0]
@@ -2150,18 +2181,18 @@ async fn test_network_partition() {
 
     network
         .wait_for_cast_on_subset(
-            &[0, 1, 2],
+            &[0, 1, 2, 3],
             1003,
             cast_a.hash.clone(),
-            tokio::time::Duration::from_secs(30),
+            tokio::time::Duration::from_secs(45),
         )
         .await
         .expect("A-side did not converge on its own cast");
 
-    // Snapshot B's height — it must remain stuck (only 2/5 voting power).
-    let b_height_before = network.block_height_at(3).max(network.block_height_at(4));
+    // Snapshot B's height — alone with 1/5 voting power, it cannot reach quorum.
+    let b_height_before = network.block_height_at(4);
     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-    let b_height_after = network.block_height_at(3).max(network.block_height_at(4));
+    let b_height_after = network.block_height_at(4);
     assert!(
         b_height_after <= b_height_before + 1,
         "B side should not advance more than the in-flight commit (before={b_height_before}, after={b_height_after})"
@@ -2177,6 +2208,9 @@ async fn test_network_partition() {
         .await
         .expect("network did not converge after healing partition");
 
-    assert_network_has_cast(&network, 1003, cast_a.hash.clone());
+    network
+        .wait_for_cast(1003, cast_a.hash.clone())
+        .await
+        .expect("partition heal did not propagate the A-side cast to B");
     assert_blocks_match_across_validators(&network);
 }
