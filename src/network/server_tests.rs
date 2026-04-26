@@ -679,20 +679,14 @@ mod tests {
     }
 
     #[tokio::test]
-    fn generate_test_password() -> String {
-        format!(
-            "pw-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        )
-    }
-
     async fn test_authentication() {
-        let pass1 = generate_test_password();
-        let pass2 = generate_test_password();
-        let auth_config = format!("user1:{},user2:{}", pass1, pass2);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let user1_pass = format!("pw1-{now}");
+        let user2_pass = format!("pw2-{now}");
+        let auth_config = format!("user1:{user1_pass},user2:{user2_pass}");
 
         let (
             _stores,
@@ -712,7 +706,7 @@ mod tests {
         assert_eq!(response.message(), "missing authorization header");
 
         let mut invalid_creds_request = Request::new(message.clone());
-        add_auth_header(&mut invalid_creds_request, "user3", &pass1);
+        add_auth_header(&mut invalid_creds_request, "user3", &user1_pass);
         let response = service
             .submit_message(invalid_creds_request)
             .await
@@ -721,7 +715,7 @@ mod tests {
         assert_eq!(response.message(), "invalid username or password");
 
         let mut valid_creds_request = Request::new(message.clone());
-        add_auth_header(&mut valid_creds_request, "user2", &pass2);
+        add_auth_header(&mut valid_creds_request, "user2", &user2_pass);
         let response = service
             .submit_message(valid_creds_request)
             .await
