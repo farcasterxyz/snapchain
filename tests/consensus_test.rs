@@ -1937,12 +1937,20 @@ async fn test_mempool_invalid_message_isolation() {
     let target = network.first_live_node();
 
     // Submit invalid first to make sure the spam doesn't starve valid traffic.
+    // Assert on the gRPC `Code` (not just `is_err`) so a transport / timeout
+    // failure won't silently masquerade as a validation rejection.
     for msg in &invalid_casts {
         let result = target.submit_message_via_grpc(msg.clone()).await;
-        assert!(
-            result.is_err(),
+        let status = result.expect_err(&format!(
             "invalid cast was accepted by submit_message: hash={}",
             hex::encode(&msg.hash)
+        ));
+        assert_eq!(
+            status.code(),
+            tonic::Code::InvalidArgument,
+            "invalid cast should fail with InvalidArgument, got {:?}: {}",
+            status.code(),
+            status.message()
         );
     }
 
@@ -2139,6 +2147,23 @@ async fn test_http_server_smoke() {
         Some(hash_hex.as_str()),
         "/v1/castById returned a different hash: {cast_json}"
     );
+
+    // Drive the per-connection error branch in `spawn_http_server`: connect a
+    // raw TCP socket, write a partial HTTP request line, and close the
+    // connection. Hyper's `serve_connection` returns Err on the unexpected
+    // EOF, which exercises the `error!("Error serving connection: ...")`
+    // log path that's otherwise unreachable from the happy-path requests
+    // above. (Diff-coverage was flagging this branch as missing.)
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut stream = tokio::net::TcpStream::connect(format!("{HOST_FOR_TEST}:{http_port}"))
+            .await
+            .expect("connect raw socket");
+        let _ = stream.write_all(b"GET ").await;
+        drop(stream);
+        // Give the spawned per-connection task a moment to log the error.
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
 }
 
 /// Partition a 5-validator network into A=[0,1,2,3] (4/5 = 80%, > 2/3
