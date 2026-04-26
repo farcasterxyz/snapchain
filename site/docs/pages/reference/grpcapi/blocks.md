@@ -6,14 +6,13 @@ Used to retrieve blocks and shard chunks from the chain.
 
 | Method Name     | Request Type         | Response Type        | Description                                     |
 | --------------- | -------------------- | -------------------- | ----------------------------------------------- |
-| GetBlocks       | BlocksRequest        | stream Block         | Returns a stream of blocks for a given shard    |
+| GetBlocks       | BlocksRequest        | stream Block         | Returns a stream of blocks                      |
 | GetShardChunks  | ShardChunksRequest   | ShardChunksResponse  | Returns chunks of serialized block data         |
 
 ## BlocksRequest
 
 | Field              | Type              | Label    | Description                              |
 | ------------------ | ----------------- | -------- | ---------------------------------------- |
-| shard_id           | [uint32](#uint32) |          | ID of the shard to get blocks from       |
 | start_block_number | [uint64](#uint64) |          | Block number to start from (inclusive)   |
 | stop_block_number  | [uint64](#uint64) | optional | Block number to stop at (inclusive)      |
 

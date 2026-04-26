@@ -1,0 +1,10 @@
+[profile.default]
+src = "."
+out = "out"
+solc = "0.8.28"
+optimizer = false
+evm_version = "cancun"
+# Strip the embedded metadata hash so the compiled bytecode is bit-exact
+# reproducible across machines and solc patch releases.
+bytecode_hash = "none"
+cbor_metadata = false

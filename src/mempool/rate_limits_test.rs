@@ -5,7 +5,7 @@ mod tests {
     use ractor::concurrency::sleep;
 
     use crate::{
-        mempool::mempool::{RateLimits, RateLimitsConfig},
+        mempool::mempool::{KeyAddRateLimits, RateLimits, RateLimitsConfig},
         storage::store::{
             engine::ShardEngine,
             stores::{Limits, StoreLimits, Stores},
@@ -219,5 +219,39 @@ mod tests {
 
         // If allowance is 0, don't allow any messages. This more realistically happens when the user has no storage.
         assert!(!rate_limits.consume_for_fid(FID_FOR_TEST))
+    }
+
+    // ---- KeyAddRateLimits (NEYN-10579) ----------------------------------------------------
+    //
+    // These tests exercise the 1-KEY_ADD-per-minute-per-FID guardrail in isolation, without
+    // going through the full Mempool path. End-to-end coverage (mempool drop + no-gossip) lives
+    // in the mempool test module; here we pin the quota/per-FID/isolation semantics.
+
+    #[tokio::test]
+    async fn key_add_first_call_passes_second_within_window_fails() {
+        let limits = KeyAddRateLimits::new(statsd_client());
+        assert!(limits.consume_for_fid(FID_FOR_TEST));
+        // Second call within the 60s window is rate-limited.
+        assert!(!limits.consume_for_fid(FID_FOR_TEST));
+    }
+
+    #[tokio::test]
+    async fn key_add_rate_limit_is_scoped_per_fid() {
+        // The limiter is keyed by FID; one FID consuming its quota must not affect another.
+        let limits = KeyAddRateLimits::new(statsd_client());
+        assert!(limits.consume_for_fid(FID_FOR_TEST));
+        assert!(!limits.consume_for_fid(FID_FOR_TEST));
+        // Different FID has its own bucket.
+        assert!(limits.consume_for_fid(FID_FOR_TEST + 1));
+    }
+
+    #[tokio::test]
+    async fn key_add_rate_limit_does_not_require_storage() {
+        // Unlike the storage-quota limiter, this guardrail is storage-agnostic: a freshly-created
+        // FID with zero storage must still be able to submit its first KEY_ADD. We never build
+        // a `Stores` here — if the implementation ever started reading storage, this test
+        // wouldn't have a store to read from.
+        let limits = KeyAddRateLimits::new(statsd_client());
+        assert!(limits.consume_for_fid(999_999));
     }
 }

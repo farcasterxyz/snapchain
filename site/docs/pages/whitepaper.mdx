@@ -19,7 +19,7 @@ As the network grew to thousands of nodes, some of them get out of sync due to g
 
 Snapchain introduces transaction ordering and blockchain-like semantics to Farcaster. A block production step is added which groups and orders user transactions. Syncing is much simpler since a node only needs to find and download missing blocks. Snapchain, like the deltagraph before it, relies on an external blockchain to handle account creation and fee collection.  
 
-Snapchain is different from most blockchains because its transactions are not turing complete, are account independent and pruned often. A transaction is a "post", "like" or other social operation which only affects a single account. This is important for scaling since it prevents the network from being used for non-social purposes and makes sharding by account easy. Older transactions are pruned to clear data from inactive users or negating transactions, such as when a user likes and unlikes the something. 
+Snapchain is different from most blockchains because its transactions are not turing complete, are account independent and pruned often. A transaction is a "post", "like" or other social operation which only affects a single account. This is important for scaling since it prevents the network from being used for non-social purposes and makes sharding by account easy. Older transactions are pruned to clear data from inactive users or negating transactions, such as when a user likes and unlikes something. 
 
 The initial release of snapchain should support a TPS of [> 9000](https://youtu.be/-p_SWPZ1_ew?si=peDiLXEZ1csgFGPc&t=98) which would support 2 million daily users. 
 
@@ -49,11 +49,11 @@ A *snapchain transaction* is a social action like making a new post. Alice says 
 
 An account comes into existence when a blockchain transaction is made to create a new account in the registry. It's state is simply the set of blockchain and snapchain transactions that it generates. A deterministic state root can be computed by putting all the transaction ids into a merkle trie. Transactions made by one account cannot affect the state of another account. Enforcing this restriction makes Snapchain more scalable since account-level sharding becomes trivial to implement. 
 
-When a new transaction is accepted, it may be added to the state or it may replace a previous transaction in the state or it may delete a previous transaction entirely.In the example below, we see Alice’s account state changing as she creates an account, adds a post and then deletes it.
+When a new transaction is accepted, it may be added to the state or it may replace a previous transaction in the state or it may delete a previous transaction entirely. In the example below, we see Alice’s account state changing as she creates an account, adds a post and then deletes it.
 
 <img width="620" alt="Screenshot 2024-12-05 at 4 38 42 PM" src="https://github.com/user-attachments/assets/17086c82-0fbc-453c-84e5-184ad8f084c9" />
 
-*Formal definition:  There exists a state (S) for an account (A) made up of transactions. S is a subset of all transactions made by a user (S ⊆ Ta).  A merge function M accepts an S and t and returns a new state S’ (* M:S×t→S′)*. Each T is idempotent but not associative or commutative.*
+*Formal definition: There exists a state (S) for an account (A) made up of transactions. S is a subset of all transactions made by a user (S ⊆ Ta).  A merge function M accepts an S and t and returns a new state S’ (* M:S×t→S′)*. Each T is idempotent but not associative or commutative.*
 
 ### 4. Blocks
 
@@ -85,7 +85,7 @@ Snapchain can be sharded into N segments using N+1 tendermint chains to improve 
 
 <img width="525" alt="Screenshot 2024-12-05 at 5 43 53 PM" src="https://github.com/user-attachments/assets/f3bf802a-64a7-4281-b43d-c7a0b0fb8200" />
 
- A shard chain must have at least three validators and store all relevant account state. Validators may be automatically or manually rotated between shards through a validator schedule in the epoch block. Erasure coding is used to distribute account state from one shard across validators in other shards so that the data is still available even if all validators within a shard fail. 
+ A shard chain must have at least four validators and store all relevant account state. Validators may be automatically or manually rotated between shards through a validator schedule in the epoch block. Erasure coding is used to distribute account state from one shard across validators in other shards so that the data is still available even if all validators within a shard fail. 
 
 Block production is triggered when the previous block is finalized. Each shard chain bundles transactions into a block and computes a shard root, which is like the global root but limited to accounts in a shard. The 0th shard chain waits for the N shards to be produced and then performs another tendermint step bundling them into a single block and computes a global state root across the shard roots.
 
@@ -107,11 +107,11 @@ Validators can fail in a variety of ways and we must define how the network beha
 If nodes are behaving maliciously, there are more attack scenarios that are possible: 
  
 * Block leader excludes shards or halts production — mitigated by rotating leaders, but governance action is needed to evict them permanently and solve the issue.  
-* Shard leader excludes a user’s transactions — mitigated by rotating shard leaders, but governance action is needed to evict them * permanently and solve the issue.  
+* Shard leader excludes a user’s transactions — mitigated by rotating shard leaders, but governance action is needed to evict them permanently and solve the issue.  
 * Shard validator majority excludes a user’s transactions — if more than 2/3rd of a validators shards collude they can censor a user, and governance action is needed to resolve. 
 * Block validator majority excludes a shard — if more than 2/3rd of block validators collude they can censor a shard, and governance action is needed to resolve. 
-* Shard validator majority can reissue a shard before block finality —  TBD are malicious, they can reissue a shard for a block before it gets finalized. 
-* If > 2/3 majority of block validators and > 2/3 majority of one shard validators collude, they can reissue a block which would cause a network fork.  Requires a refork and restart of the network, 
+* Shard validator majority can reissue a shard before block finality — if shard validators are malicious, they can reissue a shard for a block before it gets finalized. 
+* If > 2/3 majority of block validators and > 2/3 majority of one shard validators collude, they can reissue a block which would cause a network fork. Requires a refork and restart of the network. 
 
 ### 9. Upgrade process
 

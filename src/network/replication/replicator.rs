@@ -358,7 +358,12 @@ impl Replicator {
 
         // Handle each store type directly
         let messages = match user_message_type {
-            proto::MessageType::FrameAction | proto::MessageType::None => {
+            // TODO(NEYN-10568): wire KeyAdd/KeyRemove into replication once shard 0 routing
+            // and the signer store land (NEYN-10580, NEYN-10573, NEYN-10574).
+            proto::MessageType::FrameAction
+            | proto::MessageType::KeyAdd
+            | proto::MessageType::KeyRemove
+            | proto::MessageType::None => {
                 return Err(ReplicationError::InvalidMessage(format!(
                     "Invalid message type for FID {}: {:?}",
                     fid, user_message_type

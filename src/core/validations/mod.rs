@@ -3,7 +3,9 @@ use error::ValidationError;
 use crate::proto::CastId;
 
 pub mod cast;
+pub mod contract_signature;
 pub mod error;
+pub mod key;
 pub mod link;
 pub mod message;
 pub mod reaction;
