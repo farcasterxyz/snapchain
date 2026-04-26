@@ -19,7 +19,9 @@ jobs:
       - volume=80gb
     steps:
       - name: Install Protoc
-        uses: arduino/setup-protoc@v3
+        uses: taiki-e/install-action@v2
+        with:
+          tool: protoc
 
       - uses: actions/checkout@v6
         with:
