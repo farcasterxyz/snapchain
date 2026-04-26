@@ -26,13 +26,14 @@ use libp2p::{
     gossipsub, noise, swarm::NetworkBehaviour, swarm::SwarmEvent, tcp, yamux, PeerId, Swarm,
 };
 use libp2p_connection_limits::ConnectionLimits;
+use parking_lot::Mutex;
 use prost::Message;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io;
 use tokio::sync::mpsc::Sender;
@@ -566,13 +567,10 @@ impl SnapchainGossip {
                         })) => {
                             // Test-only partition simulation: drop messages whose
                             // immediate sender is on the local blocklist. Production
-                            // leaves the set empty so this is a HashSet contains check.
-                            if self
-                                .peer_blocklist
-                                .lock()
-                                .map(|set| set.contains(&peer_id))
-                                .unwrap_or(false)
-                            {
+                            // leaves the set empty so this is a HashSet contains check
+                            // under an uncontended `parking_lot::Mutex` (no poisoning,
+                            // no thread parking, won't block the tokio executor).
+                            if self.peer_blocklist.lock().contains(&peer_id) {
                                 continue;
                             }
                             // Take an owned sender if present to avoid holding an immutable borrow during mutable self call

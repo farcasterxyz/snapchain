@@ -3,6 +3,7 @@ use hex;
 use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
 use libp2p::PeerId;
+use parking_lot::Mutex;
 use serial_test::serial;
 use snapchain::connectors::onchain_events::ChainClients;
 use snapchain::consensus::consensus::{SystemMessage, ValidatorSetConfig};
@@ -31,7 +32,7 @@ use snapchain::utils::factory::{self, messages_factory};
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time;
 use tonic::transport::{Channel, Server};
@@ -657,14 +658,14 @@ impl NodeForTest {
     /// any inbound gossip whose immediate sender matches will be dropped.
     /// Used by partition tests; production leaves the set empty.
     pub fn block_peers(&self, peers: &[PeerId]) {
-        let mut set = self.peer_blocklist.lock().unwrap();
+        let mut set = self.peer_blocklist.lock();
         for p in peers {
             set.insert(*p);
         }
     }
 
     pub fn clear_blocklist(&self) {
-        self.peer_blocklist.lock().unwrap().clear();
+        self.peer_blocklist.lock().clear();
     }
 }
 
@@ -727,8 +728,17 @@ impl TestNetwork {
                     .iter()
                     .map(|key| {
                         if let Some(rest) = key.strip_prefix("idx:") {
-                            let idx: usize = rest.parse().expect("idx:<n> must parse");
-                            validator_addresses[idx].clone()
+                            let idx: usize = rest.parse().unwrap_or_else(|_| {
+                                panic!(
+                                    "validator key {key:?}: expected `idx:<integer>`",
+                                )
+                            });
+                            validator_addresses.get(idx).cloned().unwrap_or_else(|| {
+                                panic!(
+                                    "validator key {key:?}: idx {idx} out of range (only {} validators were generated)",
+                                    validator_addresses.len()
+                                )
+                            })
                         } else {
                             key.clone()
                         }
@@ -807,13 +817,20 @@ impl TestNetwork {
     /// DB (catching up via consensus sync) or `resume_validator_node` to bring it
     /// back against the original DB (after a `pause_validator_node`).
     pub async fn stop_validator_node(&mut self, index: usize) {
-        if let Some(node) = self.nodes.get_mut(index).and_then(|s| s.take()) {
-            // Drop runs cleanup synchronously: stops the node, aborts handles, destroys DBs
-            // (because `keep_db_on_drop` was false for the default code path).
-            drop(node);
-            // Give the OS a moment to release the gossip + gRPC ports.
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
+        let slot_count = self.nodes.len();
+        let slot = self.nodes.get_mut(index).unwrap_or_else(|| {
+            panic!(
+                "stop_validator_node({index}): index out of range (have {slot_count} validator slots)"
+            )
+        });
+        let node = slot
+            .take()
+            .unwrap_or_else(|| panic!("stop_validator_node({index}): slot is already vacant"));
+        // Drop runs cleanup synchronously: stops the node, aborts handles, destroys DBs
+        // (because `keep_db_on_drop` was false for the default code path).
+        drop(node);
+        // Give the OS a moment to release the gossip + gRPC ports.
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
 
     /// Brings a stopped validator back online with a fresh tempdir DB. The
