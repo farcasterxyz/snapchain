@@ -1,0 +1,106 @@
+# Snapchain Mainnet Validator Sets
+#
+# This file contains the list of validators participating in Snapchain consensus.
+# Each validator_set entry specifies:
+#   - effective_at: the block height at which this validator set becomes active
+#   - shard_ids:    the shard(s) this validator set governs (0 = block shard, 1/2 = message shards)
+#   - validator_public_keys: hex-encoded Ed25519 public keys of the validators
+#
+# When a new validator is added or removed, a new [[consensus.validator_sets]] entry is appended
+# with the appropriate effective_at height so the full history is preserved.
+#
+# Validator public key => operator mapping:
+#   29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970  - Farcaster (validator 1)
+#   6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72  - Neynar (validator 2)
+#   81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8  - Merkle (validator 3)
+#   2c0f58a364b7959c85e49b5a50d14d220c16f8bd7879b0d5d3f68b32de83ecb8  - Farcaster (validator 4, replaced by validator 6 at height 26_386_684)
+#   67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102  - Farcaster (validator 5)
+#   db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081  - Farcaster (validator 6, replaced validator 4 at height 26_386_684)
+#   80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860  - Farcaster (validator 7, added at height 28_415_000)
+
+# Initial validator set — effective at genesis (height 0), all shards (block + message)
+[[consensus.validator_sets]]
+effective_at = 0
+shard_ids = [ 0, 1, 2 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "2c0f58a364b7959c85e49b5a50d14d220c16f8bd7879b0d5d3f68b32de83ecb8",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+]
+
+# Replaced validator 4 (2c0f58...) with validator 6 (db6576...) on the block shard
+[[consensus.validator_sets]]
+effective_at = 26_386_684
+shard_ids = [ 0 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+]
+
+# Replaced validator 4 (2c0f58...) with validator 6 (db6576...) on message shard 1
+[[consensus.validator_sets]]
+effective_at = 26_701_296
+shard_ids = [ 1 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+]
+
+# Replaced validator 4 (2c0f58...) with validator 6 (db6576...) on message shard 2
+[[consensus.validator_sets]]
+effective_at = 26_556_206
+shard_ids = [ 2 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+]
+
+# Added validator 7 (80d780...) on the block shard
+[[consensus.validator_sets]]
+effective_at = 28_415_000
+shard_ids = [ 0 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+  "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860",
+]
+
+# Added validator 7 (80d780...) on message shard 1
+[[consensus.validator_sets]]
+effective_at = 28_852_000
+shard_ids = [ 1 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+  "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860",
+]
+
+# Added validator 7 (80d780...) on message shard 2
+[[consensus.validator_sets]]
+effective_at = 28_706_000
+shard_ids = [ 2 ]
+validator_public_keys = [
+  "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970",
+  "6bc2d8901443de856d2670b0c2ea12b6727132fa830f9030d3a44ac5da9b1a72",
+  "81032ecefa4260e5a63424f5a4b8b18b52d717a52583b3ffe22c4a7b084911b8",
+  "db65769be751f402fe9ea2fdf21679a870ea0e088454bbc47e02c4cc6c258081",
+  "67474a42e0c6507198b73373b0558dfc94616b976ecfdf5c45fae11e2bee7102",
+  "80d7800b45db3ec6d6e4be4d278db1aea1c7a77206941ec976a8680ecbe56860",
+]
