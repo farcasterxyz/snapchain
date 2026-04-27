@@ -4,7 +4,7 @@ pub mod rpc_client;
 pub mod service;
 
 #[cfg(test)]
-mod client_test;
+mod client_tests;
 
 #[cfg(test)]
 pub mod test_utils;

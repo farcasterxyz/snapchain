@@ -6,7 +6,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .type_attribute("ShardHash", "#[derive(Eq, PartialOrd, Ord)]")
         .type_attribute("Height", "#[derive(Copy, Eq, PartialOrd, Ord)]")
         // TODO: this generates a lot of code, perhaps choose specific structures
-        .type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]");
+        .type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]")
+        // Used by `core::validations::key::MAX_KEY_ADD_SCOPES` to size the scopes cap against the
+        // MessageType enum's actual variant count at build time.
+        .enum_attribute("MessageType", "#[derive(variant_count::VariantCount)]");
 
     // TODO: auto-discover proto files
     builder.compile(

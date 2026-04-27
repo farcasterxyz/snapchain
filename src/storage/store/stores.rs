@@ -141,6 +141,10 @@ impl Limits {
             MessageType::UsernameProof => StoreType::UsernameProofs,
             MessageType::FrameAction => StoreType::None,
             MessageType::LendStorage => StoreType::StorageLends,
+            // TODO(NEYN-10568): map KEY_ADD/KEY_REMOVE to their shard 0 signer store once
+            // NEYN-10580 (shard routing) and NEYN-10573/10574 (engine handling) land.
+            MessageType::KeyAdd => StoreType::None,
+            MessageType::KeyRemove => StoreType::None,
             MessageType::None => StoreType::None,
         }
     }

@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.3] - 2026-01-20
+
+### 🐛 Bug Fixes
+
+- Skip committed block if commit certificate is empty (#747)
+- Provide correct validator sets to block receiver (#748)
+
 ## [0.11.2] - 2026-01-08
 
 ### 🐛 Bug Fixes

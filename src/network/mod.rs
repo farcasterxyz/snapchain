@@ -6,9 +6,9 @@ pub mod rpc_extensions;
 pub mod server;
 
 #[cfg(test)]
-mod gossip_test;
+mod gossip_tests;
 #[cfg(test)]
 mod server_tests;
 
 #[cfg(test)]
-pub mod http_server_test;
+pub mod http_server_tests;

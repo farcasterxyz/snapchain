@@ -26,12 +26,14 @@ use libp2p::{
     gossipsub, noise, swarm::NetworkBehaviour, swarm::SwarmEvent, tcp, yamux, PeerId, Swarm,
 };
 use libp2p_connection_limits::ConnectionLimits;
+use parking_lot::Mutex;
 use prost::Message;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io;
 use tokio::sync::mpsc::Sender;
@@ -202,6 +204,10 @@ pub struct SnapchainGossip {
     bootstrap_reconnect_interval: Duration,
     statsd_client: StatsdClientWrapper,
     peers: BTreeMap<PeerId, ContactInfoBody>,
+    /// Optional set of peers whose inbound gossip messages will be silently
+    /// dropped. Empty in production. Tests inject peer ids here to simulate a
+    /// network partition without tearing down libp2p connections.
+    peer_blocklist: Arc<Mutex<HashSet<PeerId>>>,
 }
 
 impl SnapchainGossip {
@@ -363,14 +369,23 @@ impl SnapchainGossip {
             connected_bootstrap_addrs: HashSet::new(),
             enable_autodiscovery: config.enable_autodiscovery,
             peers: BTreeMap::new(),
+            peer_blocklist: Arc::new(Mutex::new(HashSet::new())),
         })
+    }
+
+    /// Shared handle to the peer blocklist. Tests use this to simulate network
+    /// partitions: any peer whose `PeerId` is in the set has its inbound gossip
+    /// messages dropped. The lock is held only briefly (HashSet read), and the
+    /// production code path leaves the set empty.
+    pub fn peer_blocklist_handle(&self) -> Arc<Mutex<HashSet<PeerId>>> {
+        self.peer_blocklist.clone()
     }
 
     async fn get_announce_rpc_address(
         fc_network: FarcasterNetwork,
         config: &Config,
     ) -> Result<String, reqwest::Error> {
-        if config.announce_rpc_address.len() > 0 {
+        if !config.announce_rpc_address.is_empty() {
             return Ok(config.announce_rpc_address.clone());
         }
 
@@ -387,7 +402,7 @@ impl SnapchainGossip {
     }
 
     async fn get_announce_gossip_address(fc_network: FarcasterNetwork, config: &Config) -> String {
-        if config.announce_address.len() > 0 {
+        if !config.announce_address.is_empty() {
             return config.announce_address.clone();
         }
 
@@ -487,6 +502,7 @@ impl SnapchainGossip {
                 _ = reconnect_timer.tick() => {
                     self.check_and_reconnect_to_bootstrap_peers().await;
                     self.statsd_client.gauge("gossip.connected_peers", self.swarm.connected_peers().count() as u64, vec![]);
+                    self.statsd_client.gauge("gossip.sync_channels", self.sync_channels.len() as u64, vec![]);
                 },
                 _ = publish_contact_info_timer.tick() => {
                     if self.read_node {
@@ -549,6 +565,14 @@ impl SnapchainGossip {
                             message_id: _id,
                             message,
                         })) => {
+                            // Test-only partition simulation: drop messages whose
+                            // immediate sender is on the local blocklist. Production
+                            // leaves the set empty so this is a HashSet contains check
+                            // under an uncontended `parking_lot::Mutex` (no poisoning,
+                            // no thread parking, won't block the tokio executor).
+                            if self.peer_blocklist.lock().contains(&peer_id) {
+                                continue;
+                            }
                             // Take an owned sender if present to avoid holding an immutable borrow during mutable self call
                             let maybe_sender = self.system_tx.as_ref().cloned();
                             if let Some(system_tx) = maybe_sender {
@@ -607,7 +631,8 @@ impl SnapchainGossip {
                                 sync::Event::OutboundFailure {peer, connection_id: _, error, request_id: _} => {
                                     warn!("Failed to send RPC request to peer: {:?} due to: {:?}", peer, error);
                                 }
-                                sync::Event::InboundFailure {peer, connection_id: _, error, request_id: _} => {
+                                sync::Event::InboundFailure {peer, connection_id: _, error, request_id} => {
+                                    self.sync_channels.remove(&request_id);
                                     warn!("Failed to send RPC response to peer: {:?} due to: {:?}", peer, error);
                                 }
                                 _ => {}

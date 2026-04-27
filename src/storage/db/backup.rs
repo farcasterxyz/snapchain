@@ -82,6 +82,15 @@ pub fn backup_db(
     backup_db_options.set_compression_type(rocksdb::DBCompressionType::Lz4);
     backup_db_options.create_if_missing(true);
 
+    // Bound the backup DB's block cache to prevent unbounded index/filter block growth.
+    // The backup DB is write-only so a small cache is sufficient.
+    let backup_cache = rocksdb::Cache::new_lru_cache(32 * 1024 * 1024);
+    let mut backup_block_opts = rocksdb::BlockBasedOptions::default();
+    backup_block_opts.set_block_cache(&backup_cache);
+    backup_block_opts.set_cache_index_and_filter_blocks(true);
+    backup_block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+    backup_db_options.set_block_based_table_factory(&backup_block_opts);
+
     let backup_db = rocksdb::DB::open(&backup_db_options, &backup_path)
         .map_err(|e| RocksdbError::InternalError(e))?;
     let mut write_options = rocksdb::WriteOptions::default();

@@ -79,20 +79,19 @@ pub async fn follow_blocks(
 ) -> Result<(), Box<dyn Error>> {
     let mut client = proto::hub_service_client::HubServiceClient::connect(addr).await?;
 
-    let mut i = 1;
+    let mut next_block_number = 1;
 
     loop {
         let msg = proto::BlocksRequest {
-            shard_id: 0,
-            start_block_number: i,
-            stop_block_number: Some(i + FETCH_SIZE),
+            start_block_number: next_block_number,
+            stop_block_number: Some(next_block_number + FETCH_SIZE),
         };
 
         let request = tonic::Request::new(msg);
         let mut response = client.get_blocks(request).await?.into_inner();
         while let Ok(Some(block)) = response.message().await {
             block_tx.send(block.clone()).await.unwrap();
-            i += 1;
+            next_block_number += 1;
         }
 
         time::sleep(time::Duration::from_millis(10)).await;

@@ -67,6 +67,8 @@ sol!(
 sol! {
     /// SignedKeyRequest metadata structure as defined in the Farcaster contracts.
     /// See: https://github.com/farcasterxyz/contracts/blob/main/src/validators/SignedKeyRequestValidator.sol
+    // Also declared in `src/core/validations/key.rs` for off-chain KEY_ADD validation (NEYN-10570).
+    // TODO: extract a shared module that both sides depend on so this lives in exactly one place.
     struct SignedKeyRequestMetadata {
         uint256 requestFid;
         address requestSigner;

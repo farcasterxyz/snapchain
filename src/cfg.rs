@@ -47,6 +47,12 @@ pub struct PruningConfig {
     pub block_retention: Option<Duration>,
     #[serde(with = "humantime_serde")]
     pub event_retention: Duration,
+    // 6-field cron syntax (sec min hour day month dow), e.g. "0 15 0 * * *"
+    // for 00:15 UTC daily. When unset, defaults to "0 0 0 * * *" (00:00 UTC).
+    // Operators can set a per-validator offset so that pruning is not
+    // synchronized across the cluster.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub event_pruning_schedule: Option<String>,
 }
 
 impl Default for PruningConfig {
@@ -54,6 +60,7 @@ impl Default for PruningConfig {
         Self {
             block_retention: None,
             event_retention: Duration::from_secs(60 * 60 * 24 * 3), // 3 days
+            event_pruning_schedule: None,
         }
     }
 }

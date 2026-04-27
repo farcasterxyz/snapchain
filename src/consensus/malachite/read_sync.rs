@@ -116,7 +116,7 @@ impl State {
             return false;
         }
 
-        if self.sync.peers.len() == 0 {
+        if self.sync.peers.is_empty() {
             return false;
         }
 

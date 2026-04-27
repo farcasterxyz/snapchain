@@ -1,0 +1,59 @@
+# To get started with Dependabot version updates, you'll need to specify which
+# package ecosystems to update and where the package manifests are located.
+# Please see the documentation for all configuration options:
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  # Rust crates
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      rust-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # GitHub Actions workflows
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Dockerfile base images
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Docs site (vocs)
+  - package-ecosystem: "npm"
+    directory: "/site"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      site-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Client parity tests
+  - package-ecosystem: "npm"
+    directory: "/tests/client_parity_tests"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      client-parity-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"

@@ -27,7 +27,7 @@ Snapchain is in the migration phase. Please check the [release docs](https://www
 
 A snapchain node lets you read and write messages to the network. You will need a machine with the following system requirements to get started: 
 
-- 16 GB of RAM
+- 32 GB of RAM
 - 4 CPU cores or vCPUs
 - 1.5TB of free storage
 - A public IP address
@@ -72,10 +72,6 @@ Before you begin, ensure you have the following installed:
 
 Clone the snapchain and dependent repos and build snapchain:
 ```
-git clone git@github.com:CassOnMars/eth-signature-verifier.git
-cd eth-signature-verifier
-git checkout 8deb4a091982c345949dc66bf8684489d9f11889
-cd ..
 git clone git@github.com:informalsystems/malachite.git
 cd malachite
 git checkout 13bca14cd209d985c3adf101a02924acde8723a5

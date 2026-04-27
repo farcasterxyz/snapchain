@@ -182,3 +182,101 @@ async fn migrate_shard_onchain_events_batch(
     }
     Ok(events_page.next_page_token)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::FarcasterNetwork;
+    use crate::storage::store::stores::StoreLimits;
+    use crate::storage::store::test_helper;
+    use crate::storage::trie::merkle_trie::MerkleTrie;
+
+    async fn make_stores(path: &std::path::Path) -> Stores {
+        let db = Arc::new(RocksDB::new(path.to_str().unwrap()));
+        db.open().unwrap();
+        let limits = StoreLimits::new(
+            crate::storage::store::stores::Limits::default(),
+            crate::storage::store::stores::Limits::default(),
+            crate::storage::store::stores::Limits::default(),
+        );
+        Stores::new(
+            db,
+            1,
+            MerkleTrie::new().unwrap(),
+            limits,
+            FarcasterNetwork::Devnet,
+            test_helper::statsd_client(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_empty_store_migration_completes_immediately() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let shard_stores = make_stores(&tmpdir.path().join("shard_db")).await;
+
+        let block_db = Arc::new(RocksDB::new(
+            tmpdir.path().join("block_db").to_str().unwrap(),
+        ));
+        block_db.open().unwrap();
+
+        let local_state_db = Arc::new(RocksDB::new(
+            tmpdir.path().join("local_state_db").to_str().unwrap(),
+        ));
+        local_state_db.open().unwrap();
+        let local_state_store = LocalStateStore::new(local_state_db);
+
+        // Channel is never consumed from in this test because migration exits before
+        // wait_for_mempool_to_clear is called (empty store → first batch returns None page token)
+        let (mempool_tx, _mempool_rx) = mpsc::channel(10);
+
+        let statsd = test_helper::statsd_client();
+
+        // Should complete immediately with empty stores (no onchain events to migrate)
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            migrate_onchain_events(
+                shard_stores,
+                block_db,
+                mempool_tx,
+                local_state_store,
+                statsd,
+            ),
+        )
+        .await
+        .expect("migration should complete within 5 seconds with empty stores");
+    }
+
+    #[tokio::test]
+    async fn test_mempool_backpressure_blocks_until_size_drops() {
+        let (mempool_tx, mut mempool_rx) = mpsc::channel::<MempoolRequest>(10);
+
+        // Spawn a task that responds to GetSize: first returns large size, then small
+        tokio::spawn(async move {
+            let mut call_count = 0u32;
+            while let Some(req) = mempool_rx.recv().await {
+                if let MempoolRequest::GetSize(reply) = req {
+                    call_count += 1;
+                    let mut sizes = std::collections::HashMap::new();
+                    // First 2 calls: over threshold; 3rd call: under threshold
+                    let size = if call_count < 3 {
+                        MAX_MEMPOOL_SIZE + 1
+                    } else {
+                        0
+                    };
+                    sizes.insert(0u32, size);
+                    let _ = reply.send(sizes);
+                }
+            }
+        });
+
+        // wait_for_mempool_to_clear is private; test its contract via the public behavior:
+        // the channel responder above will eventually return a small size, so the call must complete.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            wait_for_mempool_to_clear(&mempool_tx),
+        )
+        .await
+        .expect("wait should complete once mempool size drops")
+        .expect("wait_for_mempool_to_clear should return Ok");
+    }
+}

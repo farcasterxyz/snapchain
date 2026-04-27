@@ -1,6 +1,3 @@
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper_util::rt::TokioIo;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::fname::FnameRequest;
 use snapchain::connectors::onchain_events::{ChainClients, OnchainEventsRequest};
@@ -73,6 +70,17 @@ async fn start_servers(
         local_state_store,
     );
 
+    let fname_lookup: Option<Arc<dyn snapchain::connectors::fname::FnameTransferLookup>> =
+        if app_config.fnames.disable {
+            None
+        } else {
+            Some(Arc::new(
+                snapchain::connectors::fname::HttpFnameTransferLookup::new(
+                    app_config.fnames.url.clone(),
+                ),
+            ))
+        };
+
     let service = Arc::new(MyHubService::new(
         app_config.rpc_auth.clone(),
         block_stores.clone(),
@@ -87,6 +95,7 @@ async fn start_servers(
         chain_clients,
         VERSION.unwrap_or("unknown").to_string(),
         gossip.swarm.local_peer_id().to_string(),
+        fname_lookup,
     ));
 
     let replication_service = if let Some(replicator) = replicator {
@@ -132,39 +141,19 @@ async fn start_servers(
 
     let http_shutdown_tx = shutdown_tx.clone();
     let http_server_config = app_config.http_server.clone();
+    let http_service = HubHttpServiceImpl {
+        service: service.clone(),
+    };
     tokio::spawn(async move {
         let listener = TcpListener::bind(http_socket_addr).await.unwrap();
         info!(http_addr = http_addr, "HttpService listening",);
-
-        let http_service = HubHttpServiceImpl {
-            service: service.clone(),
-        };
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    let io = TokioIo::new(stream);
-                    let http_server_config = http_server_config.clone();
-                    let service_clone = http_service.clone();
-                    tokio::spawn(async move {
-                        let router = snapchain::network::http_server::Router::new(service_clone);
-                        if let Err(err) = http1::Builder::new()
-                            .serve_connection(
-                                io,
-                                service_fn(|r| router.handle(r, &http_server_config)),
-                            )
-                            .await
-                        {
-                            error!("Error serving connection: {}", err);
-                        }
-                    });
-                }
-                Err(e) => {
-                    error!("Error accepting connection: {}", e);
-                    break;
-                }
-            }
-        }
-
+        let accept_handle = snapchain::network::http_server::spawn_http_server(
+            listener,
+            http_service,
+            http_server_config,
+        );
+        // Match the previous behaviour: when the accept loop exits, signal shutdown.
+        let _ = accept_handle.await;
         http_shutdown_tx.send(()).await.ok();
     });
 
@@ -200,12 +189,22 @@ async fn schedule_background_jobs(
         }
     }
 
+    let event_pruning_schedule = app_config
+        .pruning
+        .event_pruning_schedule
+        .as_deref()
+        .unwrap_or("0 0 0 * * *"); // default: midnight UTC every day
     let event_pruning_job = snapchain::jobs::event_pruning::event_pruning_job(
-        "0 0 0 * * *", // midnight UTC every day
+        event_pruning_schedule,
         app_config.pruning.event_retention,
         shard_stores.clone(),
     )
-    .unwrap();
+    .unwrap_or_else(|e| {
+        panic!(
+            "invalid pruning.event_pruning_schedule {:?} (expected 6-field cron 'sec min hour day month dow'): {:?}",
+            event_pruning_schedule, e
+        )
+    });
     jobs.push(event_pruning_job);
 
     if app_config.snapshot.snapshot_upload_enabled() {
@@ -461,7 +460,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (onchain_events_request_tx, onchain_events_request_rx) = broadcast::channel(100);
     let (fname_request_tx, fname_request_rx) = broadcast::channel(100);
 
-    let global_db = RocksDB::open_global_db(&app_config.rocksdb_dir);
+    let shared_block_cache = rocksdb::Cache::new_lru_cache(512 * 1024 * 1024);
+    let global_db = RocksDB::open_global_db_with_cache(
+        &app_config.rocksdb_dir,
+        Some(shared_block_cache.clone()),
+    );
     let local_state_store = LocalStateStore::new(global_db);
 
     if app_config.read_node {
@@ -485,6 +488,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_config.fc_network,
             registry,
             engine_post_commit_tx,
+            Some(shared_block_cache.clone()),
         )
         .await;
 
@@ -634,6 +638,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_config.fc_network,
             registry,
             engine_post_commit_tx,
+            Some(shared_block_cache.clone()),
         )
         .await;
 
@@ -756,7 +761,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     mempool_tx: mempool_tx.clone(),
                     system_tx: system_tx.clone(),
                     event_rx: senders.events_tx.subscribe(),
-                    validator_sets: app_config.consensus.to_stored_validator_sets(*shard_id),
+                    validator_sets: app_config.consensus.to_stored_validator_sets(0), // We care about the validator sets for shard 0 blocks only
                     config: app_config.block_receiver.clone(),
                 };
                 tokio::spawn(async move { block_receiver.run().await });

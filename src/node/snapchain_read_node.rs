@@ -42,6 +42,7 @@ impl SnapchainReadNode {
         farcaster_network: proto::FarcasterNetwork,
         registry: &SharedRegistry,
         engine_post_commit_tx: Option<mpsc::Sender<PostCommitMessage>>,
+        block_cache: Option<rocksdb::Cache>,
     ) -> Self {
         let validator_address = Address(keypair.public().to_bytes());
 
@@ -50,7 +51,8 @@ impl SnapchainReadNode {
 
         // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
         let trie = MerkleTrie::new().unwrap();
-        let block_db = RocksDB::open_shard_db(rocksdb_dir.as_str(), 0);
+        let block_db =
+            RocksDB::open_shard_db_with_cache(rocksdb_dir.as_str(), 0, block_cache.clone());
         let engine = BlockEngine::new(
             trie,
             statsd_client.clone(),
@@ -80,7 +82,11 @@ impl SnapchainReadNode {
 
             let ctx = SnapchainValidatorContext::new(keypair.clone());
 
-            let db = RocksDB::open_shard_db(rocksdb_dir.clone().as_str(), shard_id);
+            let db = RocksDB::open_shard_db_with_cache(
+                rocksdb_dir.clone().as_str(),
+                shard_id,
+                block_cache.clone(),
+            );
             let trie = merkle_trie::MerkleTrie::new().unwrap(); //TODO: don't unwrap()
             let engine = match ShardEngine::new(
                 db.clone(),

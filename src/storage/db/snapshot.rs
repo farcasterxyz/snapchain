@@ -543,7 +543,6 @@ pub async fn upload_to_s3(
     let start_date = chrono::DateTime::from_timestamp_millis(start_timetamp)
         .ok_or(SnapshotError::DateError)?
         .date_naive();
-    let mut s3_client = create_s3_client(&snapshot_config).await;
     let upload_dir = format!(
         "{}/snapshot-{}-{}.tar.gz",
         snapshot_directory(network, shard_id),
@@ -565,33 +564,37 @@ pub async fn upload_to_s3(
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer).await?;
 
-        let result = s3_client
-            .put_object()
-            .bucket(snapshot_config.s3_bucket.clone())
-            .key(key.clone())
-            .body(ByteStream::from(buffer.clone()))
-            .send()
-            .await;
+        let retry_strategy = tokio_retry2::strategy::FixedInterval::from_millis(10_000).take(5);
+        Retry::spawn(retry_strategy, || {
+            let buffer = buffer.clone();
+            let key = key.clone();
+            let bucket = snapshot_config.s3_bucket.clone();
+            let config = snapshot_config.clone();
+            async move {
+                let client = create_s3_client(&config).await;
+                let result = client
+                    .put_object()
+                    .bucket(bucket.clone())
+                    .key(key.clone())
+                    .body(ByteStream::from(buffer))
+                    .send()
+                    .await;
+                match result {
+                    Ok(_) => Ok(()),
+                    Err(err) => {
+                        warn!(
+                            "Failed to upload chunk to s3: {}, key: {}, bucket: {}",
+                            DisplayErrorContext(&err),
+                            key,
+                            bucket
+                        );
+                        RetryError::to_transient(SnapshotError::from(err))
+                    }
+                }
+            }
+        })
+        .await?;
 
-        if let Err(err) = &result {
-            error!(
-                "Error uploading snapshot to s3: {}, key: {}, bucket: {}",
-                DisplayErrorContext(err),
-                key,
-                snapshot_config.s3_bucket
-            );
-
-            // The sdk retries by default, but certain errors are not retriable like credentials
-            // expiring, so retry manually once with a fresh client.
-            s3_client = create_s3_client(&snapshot_config).await;
-            s3_client
-                .put_object()
-                .bucket(snapshot_config.s3_bucket.clone())
-                .key(key.clone())
-                .body(ByteStream::from(buffer))
-                .send()
-                .await?;
-        }
         info!(key, "Finished uploading snapshot to s3");
         statsd_client.count_with_shard(shard_id, "snapshots.successful_upload", 1, vec![]);
 
@@ -606,23 +609,36 @@ pub async fn upload_to_s3(
 
     let metadata_json = serde_json::to_string(&metadata)?;
     let metadata_key = metadata_path(network, shard_id);
-    let upload_result = s3_client
-        .put_object()
-        .bucket(snapshot_config.s3_bucket.clone())
-        .key(metadata_key.clone())
-        .body(ByteStream::from(metadata_json.as_bytes().to_vec()))
-        .content_type("application/json")
-        .send()
-        .await;
-
-    if let Err(err) = &upload_result {
-        error!(
-            "Error uploading metadata to s3: {}, key: {}, bucket: {}",
-            DisplayErrorContext(err),
-            metadata_key,
-            snapshot_config.s3_bucket
-        );
-    }
-    upload_result?;
+    let retry_strategy = tokio_retry2::strategy::FixedInterval::from_millis(10_000).take(5);
+    Retry::spawn(retry_strategy, || {
+        let body = metadata_json.as_bytes().to_vec();
+        let key = metadata_key.clone();
+        let bucket = snapshot_config.s3_bucket.clone();
+        let config = snapshot_config.clone();
+        async move {
+            let client = create_s3_client(&config).await;
+            let result = client
+                .put_object()
+                .bucket(bucket.clone())
+                .key(key.clone())
+                .body(ByteStream::from(body))
+                .content_type("application/json")
+                .send()
+                .await;
+            match result {
+                Ok(_) => Ok(()),
+                Err(err) => {
+                    warn!(
+                        "Failed to upload metadata to s3: {}, key: {}, bucket: {}",
+                        DisplayErrorContext(&err),
+                        key,
+                        bucket
+                    );
+                    RetryError::to_transient(SnapshotError::from(err))
+                }
+            }
+        }
+    })
+    .await?;
     Ok(())
 }

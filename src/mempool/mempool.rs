@@ -14,7 +14,7 @@ use tokio::time::Instant;
 use crate::core::error::HubError;
 use crate::core::util::FarcasterTime;
 use crate::mempool::routing;
-use crate::proto::{Block, FarcasterNetwork, Height, OnChainEventType, Transaction};
+use crate::proto::{Block, FarcasterNetwork, Height, MessageType, OnChainEventType, Transaction};
 use crate::storage::store::block_engine::BlockStores;
 use crate::{
     core::types::SnapchainValidatorContext,
@@ -120,6 +120,58 @@ impl RateLimits {
             Some(rate_limiter) => rate_limiter.check().is_ok(),
             None => false,
         }
+    }
+}
+
+// -------------------------------------------------------------------------------------------
+// KEY_ADD rate limiter (NEYN-10579)
+// -------------------------------------------------------------------------------------------
+//
+// Separate from the storage-quota-derived `RateLimits` above: this is a fixed, FIP-required
+// safety guardrail at 1/min per FID for KEY_ADD messages specifically. `KEY_REMOVE` is
+// intentionally never rate-limited — revocation of a compromised key must never be blockable.
+// Gating in the mempool covers both RPC-submitted and gossip-forwarded KEY_ADD messages: a
+// rejection in `message_is_valid` both keeps the message out of the pool and suppresses
+// downstream gossip (since `insert_into_shard` only gossips on the success branch).
+//
+// Always-on (not gated by `Config::enable_rate_limits`) because this is a safety guardrail,
+// not a tunable throughput knob.
+pub struct KeyAddRateLimits {
+    rate_limits_by_fid: Cache<u64, Arc<DirectRateLimiter>>,
+    statsd_client: StatsdClientWrapper,
+}
+
+impl KeyAddRateLimits {
+    pub fn new(statsd_client: StatsdClientWrapper) -> Self {
+        Self {
+            rate_limits_by_fid: CacheBuilder::new(1_000_000)
+                // 2× the 60s quota window: keeps idle entries around long enough to still block
+                // a follow-up burst, and lets LRU reclaim entries that haven't sent a KEY_ADD
+                // in a while without leaking memory per distinct FID observed.
+                .time_to_idle(Duration::from_secs(120))
+                .eviction_policy(EvictionPolicy::lru())
+                .build(),
+            statsd_client,
+        }
+    }
+
+    /// Returns `true` if the caller is under-limit (may proceed), `false` if rate-limited.
+    /// Mirrors the `RateLimits::consume_for_fid` shape so the caller sites remain symmetric.
+    pub fn consume_for_fid(&self, fid: u64) -> bool {
+        let limiter = self.rate_limits_by_fid.get_with(fid, || {
+            // 1 KEY_ADD per minute per FID (FIP, NEYN-10579). The quota value is fixed — this
+            // guardrail is not negotiable per-FID because a malicious or misbehaving client
+            // could otherwise spray KEY_ADDs and force the merge path to do expensive crypto.
+            Arc::new(RateLimiter::direct(Quota::per_minute(
+                NonZeroU32::new(1).unwrap(),
+            )))
+        });
+        self.statsd_client.gauge(
+            "mempool.key_add_rate_limiter_entries",
+            self.rate_limits_by_fid.entry_count(),
+            vec![],
+        );
+        limiter.check().is_ok()
     }
 }
 
@@ -480,6 +532,16 @@ impl ReadNodeMempool {
     }
 }
 
+/// True iff the message body is a `KeyAddBody`. Defensive to missing `data` — a malformed
+/// message without `data` cannot be a KEY_ADD and therefore shouldn't trip the KEY_ADD limiter;
+/// it will fail later validation on its own.
+fn is_key_add(message: &proto::Message) -> bool {
+    match &message.data {
+        Some(data) => matches!(data.body, Some(proto::message_data::Body::KeyAddBody(_))),
+        None => false,
+    }
+}
+
 pub struct Mempool {
     config: Config,
     messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
@@ -489,6 +551,9 @@ pub struct Mempool {
     statsd_client: StatsdClientWrapper,
     read_node_mempool: ReadNodeMempool,
     rate_limits: Option<RateLimits>,
+    // Always present (not `Option`) — KEY_ADD rate limiting is a FIP-required safety
+    // guardrail, not a configurable throughput knob. See `KeyAddRateLimits`.
+    key_add_rate_limits: KeyAddRateLimits,
 }
 
 impl Mempool {
@@ -520,6 +585,7 @@ impl Mempool {
             } else {
                 None
             },
+            key_add_rate_limits: KeyAddRateLimits::new(statsd_client.clone()),
             config,
             read_node_mempool: ReadNodeMempool::new(
                 mempool_rx,
@@ -536,9 +602,26 @@ impl Mempool {
 
     fn message_exceeds_rate_limits(&mut self, message: &MempoolMessage) -> bool {
         match message {
-            MempoolMessage::UserMessage(message) => {
+            MempoolMessage::UserMessage(user_msg) => {
+                let fid = user_msg.fid();
+
+                // KEY_ADD-specific 1/min limit (NEYN-10579). Gated in the mempool — not at RPC —
+                // so both RPC-submitted and gossip-forwarded KEY_ADDs are dropped without
+                // re-propagation when over limit. KEY_REMOVE is intentionally NEVER rate-limited:
+                // revocation of a compromised key must not be blockable. Non-key user messages
+                // fall through to the storage-quota limiter below.
+                // TODO(#10): this is also the hook for lazy `registration_tx_hash` replacement
+                // eviction — wire in once the pending-FID flow lands.
+                if is_key_add(user_msg) {
+                    if !self.key_add_rate_limits.consume_for_fid(fid) {
+                        self.statsd_client
+                            .count("mempool.key_add_rate_limit_hit", 1, vec![]);
+                        return true;
+                    }
+                }
+
                 if let Some(rate_limits) = &mut self.rate_limits {
-                    !rate_limits.consume_for_fid(message.fid())
+                    !rate_limits.consume_for_fid(fid)
                 } else {
                     false
                 }
@@ -585,6 +668,21 @@ impl Mempool {
         shard: u32,
         message: &MempoolMessage,
     ) -> Result<(), HubError> {
+        // Pre-feature admission gate for KEY_ADD / KEY_REMOVE. Provisional until
+        // NEYN-10619 consolidates feature-gating into a single validate_user_message
+        // hook at mempool admission.
+        if let MempoolMessage::UserMessage(user_msg) = message {
+            let msg_type = user_msg.msg_type();
+            if matches!(msg_type, MessageType::KeyAdd | MessageType::KeyRemove) {
+                let version = EngineVersion::current(self.read_node_mempool.network);
+                if !version.is_enabled(ProtocolFeature::GaslessSigners) {
+                    return Err(HubError::validation_failure(
+                        "gasless signers not yet active",
+                    ));
+                }
+            }
+        }
+
         // Check for block events that have already been merged
         if let MempoolMessage::BlockEvent { message, for_shard } = message {
             if *for_shard == 0 {
@@ -775,8 +873,10 @@ impl Mempool {
                     self.statsd_client.time("mempool.inbound_message_poll_interval_ms", now.duration_since(last_inbound_message_poll_time).as_millis() as u64);
                     last_inbound_message_poll_time = now;
                     // We want to pull in multiple messages per poll so that throughput is not blocked on the polling frequency. The number of messages we pull should be fixed and relatively small so that the mempool isn't always stuck here.
+                    let total_messages: u64 = self.messages.values().map(|m| m.len() as u64).sum();
+                    self.statsd_client.gauge("mempool.total_messages", total_messages, vec![]);
                     for _ in 0..256 {
-                        if self.config.allow_unlimited_mempool_size || (self.messages.len() as u64) < self.config.capacity_per_shard {
+                        if self.config.allow_unlimited_mempool_size || total_messages < self.config.capacity_per_shard {
                             match self.read_node_mempool.mempool_rx.try_recv() {
                                 Ok(MempoolRequest::AddMessage(message, source, reply_to)) => {
                                     let result = self.insert(message, source).await;
@@ -804,6 +904,7 @@ impl Mempool {
 
                             }
                         } else {
+                            self.statsd_client.count("mempool.capacity_limited", 1, vec![]);
                             break;
                         }
                     }

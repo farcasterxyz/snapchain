@@ -2,16 +2,21 @@ use base64::prelude::*;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::header::HeaderValue;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
 use hyper::{body::Bytes, Method};
 use hyper::{HeaderMap, Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
 use libp2p::PeerId;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::convert::Infallible;
 use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::net::TcpListener;
 use tonic::async_trait;
 use tonic::metadata::MetadataValue;
+use tracing::error;
 
 use crate::proto::{
     self, embed, hub_service_server::HubService, link_body::Target, message_data::Body, CastType,
@@ -71,7 +76,7 @@ mod serdebase64opt {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
         let base64 = String::deserialize(d)?.replace(" ", "+");
-        if base64.len() == 0 {
+        if base64.is_empty() {
             Ok(None)
         } else {
             let decoded = BASE64_STANDARD
@@ -1925,6 +1930,11 @@ fn map_proto_message_data_to_json_message_data(
                 lend_storage_body: Some(result),
             });
         }
+        // TODO(NEYN-10568): map KeyAdd/KeyRemove bodies to JSON once downstream tickets land.
+        Some(Body::KeyAddBody(_)) | Some(Body::KeyRemoveBody(_)) => Err(ErrorResponse {
+            error: "KEY_ADD/KEY_REMOVE JSON mapping not yet implemented".to_string(),
+            error_detail: None,
+        }),
         None => Err(ErrorResponse {
             error: "No message data".to_string(),
             error_detail: None,
@@ -3509,4 +3519,41 @@ where
                 .unwrap()),
         }
     }
+}
+
+/// Spawns the HTTP accept loop against an already-bound `TcpListener`. Identical
+/// in behaviour to the inline server in `start_servers` (`src/main.rs`); extracted
+/// so integration tests can boot the same code path without duplicating it.
+pub fn spawn_http_server<S>(
+    listener: TcpListener,
+    http_service: HubHttpServiceImpl<S>,
+    config: Config,
+) -> tokio::task::JoinHandle<()>
+where
+    S: HubService + 'static,
+{
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let io = TokioIo::new(stream);
+                    let config = config.clone();
+                    let service_clone = http_service.clone();
+                    tokio::spawn(async move {
+                        let router = Router::new(service_clone);
+                        if let Err(err) = http1::Builder::new()
+                            .serve_connection(io, service_fn(|r| router.handle(r, &config)))
+                            .await
+                        {
+                            error!("Error serving connection: {}", err);
+                        }
+                    });
+                }
+                Err(e) => {
+                    error!("Error accepting connection: {}", e);
+                    break;
+                }
+            }
+        }
+    })
 }
