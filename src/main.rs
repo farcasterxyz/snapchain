@@ -1,6 +1,3 @@
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper_util::rt::TokioIo;
 use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::fname::FnameRequest;
 use snapchain::connectors::onchain_events::{ChainClients, OnchainEventsRequest};
@@ -144,39 +141,19 @@ async fn start_servers(
 
     let http_shutdown_tx = shutdown_tx.clone();
     let http_server_config = app_config.http_server.clone();
+    let http_service = HubHttpServiceImpl {
+        service: service.clone(),
+    };
     tokio::spawn(async move {
         let listener = TcpListener::bind(http_socket_addr).await.unwrap();
         info!(http_addr = http_addr, "HttpService listening",);
-
-        let http_service = HubHttpServiceImpl {
-            service: service.clone(),
-        };
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    let io = TokioIo::new(stream);
-                    let http_server_config = http_server_config.clone();
-                    let service_clone = http_service.clone();
-                    tokio::spawn(async move {
-                        let router = snapchain::network::http_server::Router::new(service_clone);
-                        if let Err(err) = http1::Builder::new()
-                            .serve_connection(
-                                io,
-                                service_fn(|r| router.handle(r, &http_server_config)),
-                            )
-                            .await
-                        {
-                            error!("Error serving connection: {}", err);
-                        }
-                    });
-                }
-                Err(e) => {
-                    error!("Error accepting connection: {}", e);
-                    break;
-                }
-            }
-        }
-
+        let accept_handle = snapchain::network::http_server::spawn_http_server(
+            listener,
+            http_service,
+            http_server_config,
+        );
+        // Match the previous behaviour: when the accept loop exits, signal shutdown.
+        let _ = accept_handle.await;
         http_shutdown_tx.send(()).await.ok();
     });
 
