@@ -2107,10 +2107,37 @@ mod tests {
             page_token: response.get_ref().next_page_token.clone(),
             reverse: None,
         });
-        let response = service.get_on_chain_signers_by_fid(request).await.unwrap();
-        let events = response.get_ref().events.clone();
+        let paginated_response = service.get_on_chain_signers_by_fid(request).await.unwrap();
+        let events = paginated_response.get_ref().events.clone();
         // only 2 keys total, non-signer key is not returned, removed key is not returned
-        assert_eq!(events.len(), 1);
+        if events.len() != 1 {
+            // Re-query without pagination to distinguish "store missing the second add" from
+            // "pagination dropped it" — this test has flaked here historically.
+            let all_response = service
+                .get_on_chain_signers_by_fid(Request::new(FidRequest {
+                    fid,
+                    page_size: None,
+                    page_token: None,
+                    reverse: None,
+                }))
+                .await
+                .unwrap();
+            let all_events = &all_response.get_ref().events;
+            panic!(
+                "expected 1 paginated event for fid={fid}, got {}. \
+                 Paginated types={:?}, block_numbers={:?}. \
+                 Full set has {} events: types={:?}, block_numbers={:?}",
+                events.len(),
+                events.iter().map(|e| e.r#type()).collect::<Vec<_>>(),
+                events.iter().map(|e| e.block_number).collect::<Vec<_>>(),
+                all_events.len(),
+                all_events.iter().map(|e| e.r#type()).collect::<Vec<_>>(),
+                all_events
+                    .iter()
+                    .map(|e| e.block_number)
+                    .collect::<Vec<_>>(),
+            );
+        }
         assert!(events
             .iter()
             .all(|event| event.r#type() == OnChainEventType::EventTypeSigner));
