@@ -8,43 +8,19 @@
 mod tests {
     use std::sync::Arc;
 
-    use alloy_primitives::{Bytes, U256};
-    use alloy_signer::SignerSync;
     use alloy_signer_local::PrivateKeySigner;
-    use alloy_sol_types::{sol, SolValue};
+    use ed25519_dalek::SigningKey;
     use tempfile::TempDir;
 
     use crate::core::validations::error::ValidationError;
-    use crate::core::validations::key::{
-        key_add_typed_data, signed_key_request_typed_data, KeyAddPayload, ETH_MAINNET_CHAIN_ID,
-        METADATA_TYPE_SIGNED_KEY_REQUEST,
-    };
-    use crate::proto::{
-        self, message_data::Body, FarcasterNetwork, IdRegisterEventType, KeyAddBody, MessageData,
-        MessageType,
-    };
+    use crate::proto::{self, message_data::Body, IdRegisterEventType, MessageType};
     use crate::storage::db::{self, RocksDbTransactionBatch};
     use crate::storage::store::account::{
         get_gasless_key_owner_fid, get_gasless_key_record, get_last_used_at, merge_key_add,
         OnchainEventStore, StoreEventHandler,
     };
     use crate::storage::store::engine::MessageValidationError;
-    use crate::utils::factory::{events_factory, signers};
-
-    // Mirror of the on-chain `SignedKeyRequestValidator.SignedKeyRequestMetadata` layout. The
-    // production code declares this twice already (see `src/core/validations/key.rs` and
-    // `src/connectors/onchain_events/mod.rs`); redeclaring a test-local copy keeps the test
-    // module self-contained without pulling `pub` surface on the production `sol!` type.
-    sol! {
-        struct SignedKeyRequestMetadataForTest {
-            uint256 requestFid;
-            address requestSigner;
-            bytes signature;
-            uint256 deadline;
-        }
-    }
-
-    const CHAIN_ID: u32 = ETH_MAINNET_CHAIN_ID;
+    use crate::utils::factory::{events_factory, messages_factory, signers};
 
     /// Returns the 20-byte Ethereum address for a `PrivateKeySigner`, encoded as the custody
     /// address form expected by `IdRegisterEventBody.to`.
@@ -52,37 +28,16 @@ mod tests {
         signer.address().as_slice().to_vec()
     }
 
-    /// Builds an ABI-encoded `SignedKeyRequestMetadata` signed by `app_custody` for `(request_fid,
-    /// key, deadline)`. The custody address on file for `request_fid` must match
-    /// `app_custody.address()` for `merge_key_add` to accept it.
-    fn build_signed_metadata_bytes(
-        app_custody: &PrivateKeySigner,
-        request_fid: u64,
-        key: &[u8],
-        deadline: u64,
-    ) -> Vec<u8> {
-        let typed_data =
-            signed_key_request_typed_data(request_fid, key, deadline, CHAIN_ID).unwrap();
-        let prehash = typed_data.eip712_signing_hash().unwrap();
-        let sig: Vec<u8> = app_custody.sign_hash_sync(&prehash).unwrap().into();
-        let metadata = SignedKeyRequestMetadataForTest {
-            requestFid: U256::from(request_fid),
-            requestSigner: app_custody.address(),
-            signature: Bytes::from(sig),
-            deadline: U256::from(deadline),
-        };
-        metadata.abi_encode()
-    }
-
-    /// Scratch-pad fixture containing every ingredient `merge_key_add` inspects. Callers tweak
-    /// individual fields (scopes, ttl, nonce) before producing the final `proto::Message` via
-    /// [`Fixture::build`], which re-signs the custody payload so tampering with one field does
-    /// not silently invalidate the EIP-712 signature.
+    /// Test scratch-pad: every ingredient `merge_key_add` inspects, in one mutable place. Callers
+    /// tweak fields (scopes, ttl, nonce) and call [`Fixture::build`], which delegates to
+    /// `messages_factory::keys::create_key_add` so the EIP-712 + envelope signing logic lives in
+    /// exactly one place.
     struct Fixture {
         fid: u64,
         fid_custody: PrivateKeySigner,
         request_fid: u64,
         app_custody: PrivateKeySigner,
+        envelope_signer: SigningKey,
         envelope_signer_pubkey: [u8; 32],
         scopes: Vec<i32>,
         ttl: u32,
@@ -93,54 +48,23 @@ mod tests {
 
     impl Fixture {
         fn build(&self) -> proto::Message {
-            let payload = KeyAddPayload {
-                fid: self.fid,
-                key: &self.envelope_signer_pubkey,
-                key_type: 1,
-                scopes: &self.scopes,
-                ttl: self.ttl,
-                nonce: self.nonce,
-                deadline: self.deadline,
-            };
-            let typed_data = key_add_typed_data(&payload, CHAIN_ID).unwrap();
-            let prehash = typed_data.eip712_signing_hash().unwrap();
-            let custody_sig: Vec<u8> = self.fid_custody.sign_hash_sync(&prehash).unwrap().into();
-
-            let metadata = build_signed_metadata_bytes(
-                &self.app_custody,
+            let scopes: Vec<MessageType> = self
+                .scopes
+                .iter()
+                .map(|s| MessageType::try_from(*s).unwrap())
+                .collect();
+            messages_factory::keys::create_key_add(
+                self.fid,
+                &self.fid_custody,
                 self.request_fid,
-                &self.envelope_signer_pubkey,
-                self.deadline as u64,
-            );
-
-            let body = KeyAddBody {
-                key: self.envelope_signer_pubkey.to_vec(),
-                key_type: 1,
-                custody_signature: custody_sig,
-                deadline: self.deadline,
-                nonce: self.nonce,
-                metadata,
-                metadata_type: METADATA_TYPE_SIGNED_KEY_REQUEST,
-                registration_tx_hash: vec![],
-                scopes: self.scopes.clone(),
-                ttl: self.ttl,
-            };
-
-            proto::Message {
-                data: Some(MessageData {
-                    r#type: MessageType::KeyAdd as i32,
-                    fid: self.fid,
-                    timestamp: self.timestamp,
-                    network: FarcasterNetwork::Mainnet as i32,
-                    body: Some(Body::KeyAddBody(body)),
-                }),
-                hash: vec![],
-                hash_scheme: 0,
-                signature: vec![],
-                signature_scheme: 0,
-                signer: self.envelope_signer_pubkey.to_vec(),
-                data_bytes: None,
-            }
+                &self.app_custody,
+                &self.envelope_signer,
+                scopes,
+                self.ttl,
+                self.nonce,
+                self.deadline,
+                Some(self.timestamp),
+            )
         }
     }
 
@@ -187,6 +111,7 @@ mod tests {
             fid_custody: PrivateKeySigner::random(),
             request_fid,
             app_custody: PrivateKeySigner::random(),
+            envelope_signer: envelope,
             envelope_signer_pubkey: pubkey,
             scopes: vec![MessageType::CastAdd as i32],
             ttl: 3600,
@@ -400,17 +325,14 @@ mod tests {
         let fid_b_custody = PrivateKeySigner::random();
         register_custody(&world, fid_b, &fid_b_custody);
 
-        let f_b = Fixture {
-            fid: fid_b,
-            fid_custody: fid_b_custody,
-            nonce: 1,
-            timestamp: 1_000_000_500,
-            // Reuse the same envelope key + app from `f`.
-            ..fresh_fixture(fid_b, f.request_fid)
-        };
-        // Override the random envelope key + app_custody so this attempt targets the existing
+        // Reuse the same envelope key + app from `f` so this attempt targets the existing
         // owner's key and passes metadata verification.
-        let mut f_b = f_b;
+        let mut f_b = fresh_fixture(fid_b, f.request_fid);
+        f_b.fid = fid_b;
+        f_b.fid_custody = fid_b_custody;
+        f_b.nonce = 1;
+        f_b.timestamp = 1_000_000_500;
+        f_b.envelope_signer = f.envelope_signer.clone();
         f_b.envelope_signer_pubkey = f.envelope_signer_pubkey;
         f_b.app_custody = f.app_custody.clone();
 

@@ -596,6 +596,204 @@ pub mod messages_factory {
         }
     }
 
+    pub mod keys {
+        //! Factories for KEY_ADD / KEY_REMOVE messages with real EIP-712 signatures and a real
+        //! Ed25519 envelope. Used by engine-level integration tests; the store-level merge tests
+        //! also lean on `create_key_add` so signing logic lives in exactly one place.
+        use super::*;
+        use crate::core::validations::key::{
+            key_add_typed_data, key_remove_typed_data, signed_key_request_typed_data,
+            KeyAddPayload, KeyRemovePayload, ETH_MAINNET_CHAIN_ID,
+            METADATA_TYPE_SIGNED_KEY_REQUEST,
+        };
+        use crate::proto::{KeyAddBody, KeyRemoveBody};
+        use alloy_primitives::{Bytes, U256};
+        use alloy_signer_local::PrivateKeySigner;
+        use alloy_sol_types::{sol, SolValue};
+
+        // Mirror of the on-chain `SignedKeyRequestValidator.SignedKeyRequestMetadata` ABI struct.
+        // The production type lives in `core::validations::key` (and is also redeclared in
+        // `connectors::onchain_events`); redeclaring a factory-local copy avoids exporting an
+        // ABI-bearing `pub` surface from the validations module just for tests.
+        sol! {
+            struct SignedKeyRequestMetadata {
+                uint256 requestFid;
+                address requestSigner;
+                bytes signature;
+                uint256 deadline;
+            }
+        }
+
+        const KEY_TYPE_ED25519: u32 = 1;
+
+        /// Builds an ABI-encoded `SignedKeyRequestMetadata` signed by `app_custody` for
+        /// `(request_fid, key, deadline)`. The custody address on file for `request_fid` must
+        /// match `app_custody.address()` for `merge_key_add` to accept it.
+        fn build_signed_metadata_bytes(
+            app_custody: &PrivateKeySigner,
+            request_fid: u64,
+            key: &[u8],
+            deadline: u64,
+        ) -> Vec<u8> {
+            let typed_data =
+                signed_key_request_typed_data(request_fid, key, deadline, ETH_MAINNET_CHAIN_ID)
+                    .expect("typed data construction is infallible for valid inputs");
+            let prehash = typed_data
+                .eip712_signing_hash()
+                .expect("eip712 prehash is infallible");
+            let sig: Vec<u8> = app_custody
+                .sign_hash_sync(&prehash)
+                .expect("PrivateKeySigner sign cannot fail")
+                .into();
+            SignedKeyRequestMetadata {
+                requestFid: U256::from(request_fid),
+                requestSigner: app_custody.address(),
+                signature: Bytes::from(sig),
+                deadline: U256::from(deadline),
+            }
+            .abi_encode()
+        }
+
+        /// Constructs a wire-valid KEY_ADD message: real EIP-712 metadata signature, real EIP-712
+        /// custody signature on the inner `KeyAdd` payload, and a real Ed25519 envelope signed by
+        /// `envelope_signer` (which must be the new key being added — `body.key`).
+        ///
+        /// `fid_custody` must be the `IdRegister.to` address recorded for `fid`, and `app_custody`
+        /// must be the same for `request_fid`. The factory does not register custody addresses on
+        /// any store; callers must do that separately (e.g. via `register_user_with_custody`).
+        pub fn create_key_add(
+            fid: u64,
+            fid_custody: &PrivateKeySigner,
+            request_fid: u64,
+            app_custody: &PrivateKeySigner,
+            envelope_signer: &SigningKey,
+            scopes: Vec<MessageType>,
+            ttl: u32,
+            nonce: u32,
+            deadline: u32,
+            timestamp: Option<u32>,
+        ) -> message::Message {
+            let key_bytes: [u8; 32] = envelope_signer.verifying_key().to_bytes();
+            let scopes_i32: Vec<i32> = scopes.iter().map(|s| *s as i32).collect();
+
+            let payload = KeyAddPayload {
+                fid,
+                key: &key_bytes,
+                key_type: KEY_TYPE_ED25519,
+                scopes: &scopes_i32,
+                ttl,
+                nonce,
+                deadline,
+            };
+            let typed_data = key_add_typed_data(&payload, ETH_MAINNET_CHAIN_ID)
+                .expect("typed data construction is infallible for valid inputs");
+            let prehash = typed_data
+                .eip712_signing_hash()
+                .expect("eip712 prehash is infallible");
+            let custody_sig: Vec<u8> = fid_custody
+                .sign_hash_sync(&prehash)
+                .expect("PrivateKeySigner sign cannot fail")
+                .into();
+
+            let metadata =
+                build_signed_metadata_bytes(app_custody, request_fid, &key_bytes, deadline as u64);
+
+            let body = KeyAddBody {
+                key: key_bytes.to_vec(),
+                key_type: KEY_TYPE_ED25519,
+                custody_signature: custody_sig,
+                deadline,
+                nonce,
+                metadata,
+                metadata_type: METADATA_TYPE_SIGNED_KEY_REQUEST,
+                registration_tx_hash: vec![],
+                scopes: scopes_i32,
+                ttl,
+            };
+
+            create_message_with_data(
+                fid,
+                MessageType::KeyAdd,
+                message::message_data::Body::KeyAddBody(body),
+                timestamp,
+                Some(envelope_signer),
+            )
+        }
+
+        /// KEY_REMOVE with `signature_type = Custody` (EIP-712 by `fid_custody`). The envelope
+        /// `Message` is signed by `envelope_signer`, which must be any active Ed25519 key on
+        /// `fid` (the engine-level active-signer bypass exists for KEY_REMOVE too — see
+        /// NEYN-10580).
+        pub fn create_key_remove_custody(
+            fid: u64,
+            fid_custody: &PrivateKeySigner,
+            envelope_signer: &SigningKey,
+            target_key: &[u8; 32],
+            nonce: u32,
+            deadline: u32,
+            timestamp: Option<u32>,
+        ) -> message::Message {
+            let payload = KeyRemovePayload {
+                fid,
+                key: target_key,
+                nonce,
+                deadline,
+            };
+            let typed_data = key_remove_typed_data(&payload, ETH_MAINNET_CHAIN_ID)
+                .expect("typed data construction is infallible for valid inputs");
+            let prehash = typed_data
+                .eip712_signing_hash()
+                .expect("eip712 prehash is infallible");
+            let custody_sig: Vec<u8> = fid_custody
+                .sign_hash_sync(&prehash)
+                .expect("PrivateKeySigner sign cannot fail")
+                .into();
+
+            let body = KeyRemoveBody {
+                key: target_key.to_vec(),
+                signature: custody_sig,
+                signature_type: 1, // Custody
+                deadline,
+                nonce,
+            };
+
+            create_message_with_data(
+                fid,
+                MessageType::KeyRemove,
+                message::message_data::Body::KeyRemoveBody(body),
+                timestamp,
+                Some(envelope_signer),
+            )
+        }
+
+        /// KEY_REMOVE with `signature_type = SelfRevoke`. The `envelope_signer` IS the key being
+        /// revoked — the envelope's Ed25519 signature stands in for the inner signature, and the
+        /// merge code asserts `msg.signer == body.key`. `body.signature` is left empty.
+        pub fn create_key_remove_self_revoke(
+            fid: u64,
+            envelope_signer: &SigningKey,
+            nonce: u32,
+            deadline: u32,
+            timestamp: Option<u32>,
+        ) -> message::Message {
+            let key_bytes: [u8; 32] = envelope_signer.verifying_key().to_bytes();
+            let body = KeyRemoveBody {
+                key: key_bytes.to_vec(),
+                signature: vec![],
+                signature_type: 2, // SelfRevoke
+                deadline,
+                nonce,
+            };
+            create_message_with_data(
+                fid,
+                MessageType::KeyRemove,
+                message::message_data::Body::KeyRemoveBody(body),
+                timestamp,
+                Some(envelope_signer),
+            )
+        }
+    }
+
     pub mod verifications {
         use message::{VerificationAddAddressBody, VerificationRemoveBody};
 
