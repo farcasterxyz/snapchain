@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
@@ -76,7 +77,7 @@ struct Transfer {
 }
 
 #[derive(Error, Debug)]
-enum FetchError {
+pub enum FetchError {
     #[error("non-sequential IDs found")]
     NonSequentialIds { position: u64, id: u64 },
 
@@ -88,6 +89,70 @@ enum FetchError {
 
     #[error("invalid format")]
     InvalidFormat,
+}
+
+fn transfer_to_fname_transfer(t: &Transfer) -> Result<FnameTransfer, FetchError> {
+    if t.owner.len() < 2 || t.server_signature.len() < 2 {
+        return Err(FetchError::InvalidFormat);
+    }
+    let owner = hex::decode(&t.owner[2..]).map_err(|_| FetchError::InvalidFormat)?;
+    let signature = hex::decode(&t.server_signature[2..]).map_err(|_| FetchError::InvalidFormat)?;
+    Ok(FnameTransfer {
+        id: t.id,
+        from_fid: t.from,
+        proof: Some(UserNameProof {
+            timestamp: t.timestamp,
+            name: t.username.clone().into_bytes(),
+            owner,
+            signature,
+            fid: t.to,
+            r#type: UserNameType::UsernameTypeFname as i32,
+        }),
+    })
+}
+
+/// Synchronously fetch all transfers for a given fname from the fname registry.
+///
+/// Used by both the background `Fetcher` retry path and the gRPC server's on-demand
+/// recovery path when a `UserDataAdd` for a username arrives before the registry
+/// poll has produced the corresponding proof.
+pub async fn fetch_transfers_for_fname(
+    base_url: &str,
+    fname: &str,
+) -> Result<Vec<FnameTransfer>, FetchError> {
+    let url = format!("{}?fname={}", base_url, fname);
+    let response = reqwest::get(&url).await?.json::<TransfersData>().await?;
+    response
+        .transfers
+        .iter()
+        .map(transfer_to_fname_transfer)
+        .collect()
+}
+
+/// Lookup transfers for a single fname from an fname registry.
+///
+/// Implemented by [`HttpFnameTransferLookup`] in production; tests inject a mock to
+/// drive the gRPC server's on-demand recovery flow without spinning up an HTTP server.
+#[async_trait]
+pub trait FnameTransferLookup: Send + Sync {
+    async fn lookup_fname(&self, fname: &str) -> Result<Vec<FnameTransfer>, FetchError>;
+}
+
+pub struct HttpFnameTransferLookup {
+    base_url: String,
+}
+
+impl HttpFnameTransferLookup {
+    pub fn new(base_url: String) -> Self {
+        Self { base_url }
+    }
+}
+
+#[async_trait]
+impl FnameTransferLookup for HttpFnameTransferLookup {
+    async fn lookup_fname(&self, fname: &str) -> Result<Vec<FnameTransfer>, FetchError> {
+        fetch_transfers_for_fname(&self.base_url, fname).await
+    }
 }
 
 pub struct Fetcher {
@@ -201,30 +266,12 @@ impl Fetcher {
     }
 
     async fn submit_transfer(&mut self, t: &Transfer) -> Result<(), FetchError> {
-        let owner = hex::decode(t.owner[2..].to_string());
-        let signature = hex::decode(t.server_signature[2..].to_string());
-
-        if owner.is_err() || signature.is_err() {
-            return Err(FetchError::InvalidFormat);
-        }
-
-        let username_proof = UserNameProof {
-            timestamp: t.timestamp,
-            name: t.username.clone().into_bytes(),
-            owner: owner.unwrap(),
-            signature: signature.unwrap(),
-            fid: t.to,
-            r#type: UserNameType::UsernameTypeFname as i32,
-        };
+        let fname_transfer = transfer_to_fname_transfer(t)?;
         self.count("num_transfers", 1);
         if let Err(err) = self
             .mempool_tx
             .send(MempoolRequest::AddMessage(
-                MempoolMessage::FnameTransfer(FnameTransfer {
-                    id: t.id,
-                    from_fid: t.from,
-                    proof: Some(username_proof),
-                }),
+                MempoolMessage::FnameTransfer(fname_transfer),
                 MempoolSource::Local,
                 None,
             ))

@@ -73,6 +73,17 @@ async fn start_servers(
         local_state_store,
     );
 
+    let fname_lookup: Option<Arc<dyn snapchain::connectors::fname::FnameTransferLookup>> =
+        if app_config.fnames.disable {
+            None
+        } else {
+            Some(Arc::new(
+                snapchain::connectors::fname::HttpFnameTransferLookup::new(
+                    app_config.fnames.url.clone(),
+                ),
+            ))
+        };
+
     let service = Arc::new(MyHubService::new(
         app_config.rpc_auth.clone(),
         block_stores.clone(),
@@ -87,6 +98,7 @@ async fn start_servers(
         chain_clients,
         VERSION.unwrap_or("unknown").to_string(),
         gossip.swarm.local_peer_id().to_string(),
+        fname_lookup,
     ));
 
     let replication_service = if let Some(replicator) = replicator {
