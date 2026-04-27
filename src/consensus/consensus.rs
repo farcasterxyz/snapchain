@@ -100,12 +100,12 @@ impl Config {
 
     pub fn get_validator_set_config(&self, shard_id: u32) -> Vec<ValidatorSetConfig> {
         if let Some(sets) = &self.validator_sets {
-            assert!(sets.len() > 0);
+            assert!(!sets.is_empty());
             return sets.to_vec();
         }
 
         if let Some(addresses) = &self.validator_addresses {
-            assert!(addresses.len() > 0);
+            assert!(!addresses.is_empty());
             return vec![ValidatorSetConfig {
                 effective_at: 0,
                 validator_public_keys: addresses.clone(),

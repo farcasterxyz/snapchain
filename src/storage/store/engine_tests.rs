@@ -1082,7 +1082,7 @@ mod tests {
             .unwrap();
         let updated_shard_root = engine.get_stores().trie.root_hash().unwrap();
         // Account root is not empty after a message is committed
-        assert_eq!(updated_account_root.len() > 0, true);
+        assert!(!updated_account_root.is_empty());
         assert_ne!(updated_shard_root, shard_root);
 
         let another_fid_event = events_factory::create_onchain_event(FID_FOR_TEST + 1);
@@ -1100,7 +1100,7 @@ mod tests {
             .unwrap();
         let latest_shard_root = engine.get_stores().trie.root_hash().unwrap();
         // Only the account root for the new fid and the shard root is updated, original fid account root remains the same
-        assert_eq!(account_root_another_fid.len() > 0, true);
+        assert!(!account_root_another_fid.is_empty());
         assert_eq!(account_root_original_fid, updated_account_root);
         assert_ne!(latest_shard_root, updated_shard_root);
     }
@@ -1316,7 +1316,7 @@ mod tests {
         let result = engine.simulate_bulk_messages(&messages_batch);
 
         assert!(
-            result.len() == 0,
+            result.is_empty(),
             "Simulating an empty batch should succeed"
         );
 
