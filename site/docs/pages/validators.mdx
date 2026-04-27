@@ -1,0 +1,26 @@
+# Mainnet Validators
+
+Snapchain uses a set of trusted validators to reach consensus on the state of the network.
+The full, authoritative list of validator sets is maintained in [`validators.toml`](https://github.com/farcasterxyz/snapchain/blob/main/validators.toml) at the root of the repository.
+
+## What are validator sets?
+
+Each `validator_set` entry in `validators.toml` specifies:
+- **`effective_at`** – the block height at which this validator set becomes active.
+- **`shard_ids`** – the shard(s) governed by this set (`0` = block shard, `1`/`2` = message shards).
+- **`validator_public_keys`** – hex-encoded Ed25519 public keys of the validators in the set.
+
+When a validator is added or removed, a new entry is appended with the appropriate `effective_at` height so the complete history is preserved.
+
+## Current validators
+
+| Public Key | Operator |
+|---|---|
+| `29696eb4...090970` | Neynar |
+| `6bc2d890...b1a72`  | Neynar |
+| `81032ece...911b8`  | Neynar |
+| `db65769b...58081`  | Neynar |
+| `67474a42...7102`   | Neynar |
+| `80d7800b...6860`   | Uno |
+
+For the full list of validator set history with exact public keys and effective heights, see [`validators.toml`](https://github.com/farcasterxyz/snapchain/blob/main/validators.toml).

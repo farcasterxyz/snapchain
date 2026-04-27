@@ -76,7 +76,7 @@ mod serdebase64opt {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
         let base64 = String::deserialize(d)?.replace(" ", "+");
-        if base64.len() == 0 {
+        if base64.is_empty() {
             Ok(None)
         } else {
             let decoded = BASE64_STANDARD
