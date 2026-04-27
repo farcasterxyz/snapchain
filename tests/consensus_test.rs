@@ -507,6 +507,7 @@ impl NodeForTest {
             },
             "".to_string(),
             "".to_string(),
+            None,
         ));
 
         let grpc_service = hub_service.clone();
