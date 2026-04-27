@@ -32,7 +32,7 @@ use snapchain::utils::factory::{self, messages_factory};
 use snapchain::utils::statsd_wrapper::StatsdClientWrapper;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::{broadcast, mpsc};
 use tokio::time;
 use tonic::transport::{Channel, Server};
@@ -43,24 +43,28 @@ use tracing::{error, info};
 const HOST_FOR_TEST: &str = "127.0.0.1";
 const BASE_PORT_FOR_TEST: u32 = 9482;
 
+// Tracks ports already handed out by `get_available_port` within this test
+// process. Without it, two validators in the same test can rand-pick the
+// same port between this helper's drop-then-bind probe and the caller's
+// own bind, racing on AddrInUse.
+static CLAIMED_PORTS: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
 fn get_available_port() -> u32 {
     // Probe BOTH TCP and UDP because gossip binds UDP/QUIC while gRPC binds
     // TCP, and a port can be free on one protocol while in-use on the other.
-    // The 10_000 range is wide enough that 5+ validators in one test still
-    // pick distinct ports under random starts.
-    let mut port = BASE_PORT_FOR_TEST + (rand::random::<u32>() % 10_000);
+    let mut claimed = CLAIMED_PORTS.lock();
     loop {
-        let addr = format!("{}:{}", HOST_FOR_TEST, port);
-        if let Ok(tcp) = std::net::TcpListener::bind(&addr) {
-            if let Ok(udp) = std::net::UdpSocket::bind(&addr) {
-                tcp.set_nonblocking(true).unwrap();
-                udp.set_nonblocking(true).unwrap();
-                drop(tcp);
-                drop(udp);
-                return port;
-            }
+        let port = BASE_PORT_FOR_TEST + (rand::random::<u32>() % 10_000);
+        if !claimed.insert(port) {
+            continue;
         }
-        port += 1;
+        let addr = format!("{}:{}", HOST_FOR_TEST, port);
+        let tcp = std::net::TcpListener::bind(&addr);
+        let udp = std::net::UdpSocket::bind(&addr);
+        if tcp.is_ok() && udp.is_ok() {
+            return port;
+        }
+        claimed.remove(&port);
     }
 }
 
