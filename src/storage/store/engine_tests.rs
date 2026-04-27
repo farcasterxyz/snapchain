@@ -4068,6 +4068,53 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn test_shard_engine_skips_pre_feature_block_event_replay() {
+            // Rollback safety: a validator running on Mainnet (where V16 / GaslessSigners is
+            // not yet active) that receives a BlockEvent wrapping a KEY_ADD must reject the
+            // replay rather than merging into a pre-feature shard. The gate inside
+            // `handle_block_event` matches the analogous live-admission gate in
+            // `validate_user_message`, returning `InvalidMessageType` so the caller's `warn!`
+            // surfaces the unusual replay attempt rather than silently no-op'ing.
+            let (mut engine, _temp_dir) = test_helper::new_engine_with_options(EngineOptions {
+                network: Some(FarcasterNetwork::Mainnet),
+                ..Default::default()
+            })
+            .await;
+            let fid_custody = PrivateKeySigner::random();
+            let app_custody = PrivateKeySigner::random();
+            let envelope = generate_signer();
+            let envelope_pubkey = envelope.verifying_key().to_bytes();
+
+            register_eth(&mut engine, FID_FOR_TEST, &fid_custody, generate_signer()).await;
+            register_eth(&mut engine, REQUEST_FID, &app_custody, generate_signer()).await;
+
+            let timestamp = messages_factory::farcaster_time();
+            let key_add = build_key_add(
+                &fid_custody,
+                &app_custody,
+                &envelope,
+                vec![proto::MessageType::CastAdd],
+                3600,
+                1,
+                timestamp,
+            );
+            // BlockEvent default block_timestamp=0 → version_for(0, Mainnet) is pre-V16, so
+            // GaslessSigners is disabled and the gate inside handle_block_event must fire.
+            let block_event = create_merge_message_event(key_add, 1);
+            commit_block_events(&mut engine, vec![&block_event]).await;
+
+            // No gasless record materializes — the merge was short-circuited before any state
+            // writes happened.
+            let stores = engine.get_stores();
+            let txn = RocksDbTransactionBatch::new();
+            assert!(
+                get_gasless_key_record(&stores.db, &txn, FID_FOR_TEST, &envelope_pubkey)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        #[tokio::test]
         async fn test_shard_engine_replays_key_remove_block_event() {
             let (mut engine, _temp_dir) = test_helper::new_engine().await;
             let fid_custody = PrivateKeySigner::random();
