@@ -2125,10 +2125,13 @@ mod tests {
             let all_events = &all_response.get_ref().events;
             panic!(
                 "expected 1 paginated event for fid={fid}, got {}. \
+                 Paginated types={:?}, block_numbers={:?}. \
                  Full set has {} events: types={:?}, block_numbers={:?}",
                 events.len(),
+                events.iter().map(|e| e.r#type()).collect::<Vec<_>>(),
+                events.iter().map(|e| e.block_number).collect::<Vec<_>>(),
                 all_events.len(),
-                all_events.iter().map(|e| e.r#type).collect::<Vec<_>>(),
+                all_events.iter().map(|e| e.r#type()).collect::<Vec<_>>(),
                 all_events
                     .iter()
                     .map(|e| e.block_number)
