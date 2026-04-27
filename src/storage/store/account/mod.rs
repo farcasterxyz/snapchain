@@ -38,25 +38,25 @@ mod username_proof_store;
 mod verification_store;
 
 #[cfg(test)]
-mod cast_store_test;
+mod cast_store_tests;
 #[cfg(test)]
-mod gasless_key_merge_test;
+mod gasless_key_merge_tests;
 #[cfg(test)]
-mod key_add_store_test;
+mod key_add_store_tests;
 #[cfg(test)]
-mod key_last_used_at_store_test;
+mod key_last_used_at_store_tests;
 #[cfg(test)]
-mod key_nonce_store_test;
+mod key_nonce_store_tests;
 #[cfg(test)]
-mod onchain_event_store_test;
+mod onchain_event_store_tests;
 #[cfg(test)]
-mod reaction_store_test;
+mod reaction_store_tests;
 #[cfg(test)]
-mod user_data_store_test;
+mod user_data_store_tests;
 #[cfg(test)]
-mod verification_store_test;
+mod verification_store_tests;
 
 #[cfg(test)]
-mod link_store_test;
+mod link_store_tests;
 #[cfg(test)]
-mod username_proof_store_test;
+mod username_proof_store_tests;

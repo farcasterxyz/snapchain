@@ -5,6 +5,6 @@ pub mod read_validator;
 pub mod validator;
 
 #[cfg(test)]
-mod proposed_values_test;
+mod proposed_values_tests;
 #[cfg(test)]
-mod read_validator_test;
+mod read_validator_tests;
