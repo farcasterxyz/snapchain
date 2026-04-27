@@ -53,7 +53,7 @@ When a new transaction is accepted, it may be added to the state or it may repla
 
 <img width="620" alt="Screenshot 2024-12-05 at 4 38 42 PM" src="https://github.com/user-attachments/assets/17086c82-0fbc-453c-84e5-184ad8f084c9" />
 
-*Formal definition: There exists a state (S) for an account (A) made up of transactions. S is a subset of all transactions made by a user (S ⊆ Ta).  A merge function M accepts an S and t and returns a new state S’ (* M:S×t→S′)*. Each T is idempotent but not associative or commutative.*
+*Formal definition: There exists a state (S) for an account (A) made up of transactions. S is a subset of all transactions made by a user (S ⊆ Ta).  A merge function M accepts an S and t and returns a new state S’ *M:S×t→S′*. Each T is idempotent but not associative or commutative.*
 
 ### 4. Blocks
 
@@ -102,7 +102,7 @@ Validators can fail in a variety of ways and we must define how the network beha
 
 * Shard leader fails to produce a shard — after 1 second, consensus changes leadership according to the rotation. We can tolerate the failure of up to 1/3 of the validators. 
 * A shard is not produced in time for the block —  block production continues. If they fail to produce a shard for an entire epoch, the chain is halted. 
-* A block is not produced — after 1 seconds, consensus changes leadership according to the rotation. We can tolerate the failure of up to 1/3 of the block leaders.  
+* A block is not produced — after 1 second, consensus changes leadership according to the rotation. We can tolerate the failure of up to 1/3 of the block leaders.  
 
 If nodes are behaving maliciously, there are more attack scenarios that are possible: 
  
@@ -129,7 +129,7 @@ Each block contains a version number for the protocol in its header. When a cons
 
 **Accidental breaking changes**
 
-It's also possible a bug or non-deterministic behaviour causes a breaking changes. E.g. a consensus breaking change is made without a corresponding protocol version bump. In this case, the nodes will proceed as normal until they encounter a blocks with the breaking change. At which point, the merkle roots will not match and the nodes that are not upgraded will halt. If this happens to validators, then block production will halt until a new version is released with a fix.
+It's also possible a bug or non-deterministic behaviour causes a breaking change. E.g. a consensus breaking change is made without a corresponding protocol version bump. In this case, the nodes will proceed as normal until they encounter a block with the breaking change. At which point, the merkle roots will not match and the nodes that are not upgraded will halt. If this happens to validators, then block production will halt until a new version is released with a fix.
 
 
 ## Frequently Asked Questions
