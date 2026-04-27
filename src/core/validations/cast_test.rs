@@ -112,12 +112,21 @@ mod tests {
                             })
                         }),
                     };
-                    assert!(
-                        // Assume pro user is true to avoid failures on casts with 10k characters or 4 embeds.
-                        validations::cast::validate_cast_add_body(&cast, true, true).is_ok(),
-                        "Failed to validate cast {:?}",
-                        serde_json::to_string(&cast)
-                    );
+                    // Assume pro user is true to avoid failures on casts with 10k characters or 4 embeds.
+                    if let Err(err) = validations::cast::validate_cast_add_body(&cast, true, true) {
+                        panic!(
+                            "Failed to validate cast for fid={}: {:?} \
+                             (text_len={}, embeds={}, embeds_deprecated={}, mentions={}, type={}, has_parent={})",
+                            n,
+                            err,
+                            cast.text.len(),
+                            cast.embeds.len(),
+                            cast.embeds_deprecated.len(),
+                            cast.mentions.len(),
+                            cast.r#type,
+                            cast.parent.is_some(),
+                        );
+                    }
                 }
                 None => {}
             }
