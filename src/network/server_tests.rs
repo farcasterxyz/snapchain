@@ -1120,7 +1120,7 @@ mod tests {
                 owner: owner.clone(),
                 signature: hex::decode("ebd1b040a4961c5ea751e8ec867d4af6fdbf80ade6775d33dad94ab1c0423dc64a2f684d0e48b89f2958a2385b91743647161ade04e6628a166b5bd1579d86ff1b").unwrap(),
                 fid,
-                r#type: 1,
+                r#type: UserNameType::UsernameTypeFname as i32,
             }),
         };
 

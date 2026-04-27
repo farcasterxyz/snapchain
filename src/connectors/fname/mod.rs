@@ -92,7 +92,14 @@ pub enum FetchError {
 }
 
 fn transfer_to_fname_transfer(t: &Transfer) -> Result<FnameTransfer, FetchError> {
-    if t.owner.len() < 2 || t.server_signature.len() < 2 {
+    // The fname registry currently emits hex strings prefixed with `0x`. Be
+    // explicit about that contract — silently slicing the first two chars off
+    // an unprefixed value would decode different bytes rather than fail loudly.
+    if !t.owner.starts_with("0x")
+        || t.owner.len() <= 2
+        || !t.server_signature.starts_with("0x")
+        || t.server_signature.len() <= 2
+    {
         return Err(FetchError::InvalidFormat);
     }
     let owner = hex::decode(&t.owner[2..]).map_err(|_| FetchError::InvalidFormat)?;
@@ -120,8 +127,13 @@ pub async fn fetch_transfers_for_fname(
     base_url: &str,
     fname: &str,
 ) -> Result<Vec<FnameTransfer>, FetchError> {
-    let url = format!("{}?fname={}", base_url, fname);
-    let response = reqwest::get(&url).await?.json::<TransfersData>().await?;
+    // Build the URL via `query_pairs_mut` so that fname values containing `&`,
+    // `=`, or other reserved characters can't be smuggled into adjacent
+    // parameters (`fname=foo&from_id=0`-style injection). Untrusted fnames flow
+    // here from the gRPC recovery path.
+    let mut url = reqwest::Url::parse(base_url).map_err(|_| FetchError::InvalidFormat)?;
+    url.query_pairs_mut().append_pair("fname", fname);
+    let response = reqwest::get(url).await?.json::<TransfersData>().await?;
     response
         .transfers
         .iter()

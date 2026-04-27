@@ -69,6 +69,9 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
 // original error to the client.
 const MISSING_FNAME_RECOVERY_BUDGET: Duration = Duration::from_secs(8);
 const MISSING_FNAME_POLL_INTERVAL: Duration = Duration::from_millis(250);
+// Cap the synchronous fname-registry lookup so a slow/hung registry can't stall
+// the gRPC request beyond the recovery budget.
+const MISSING_FNAME_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Convert a typed engine validation error back into the HubError shape that the
 /// gRPC layer expects. `StoreError` is forwarded as-is so we don't double-wrap;
@@ -242,12 +245,45 @@ impl MyHubService {
             vec![],
         );
 
-        let transfers = lookup.lookup_fname(fname).await.map_err(|err| {
-            HubError::validation_failure(&format!(
-                "fname registry lookup failed for {}: {}",
-                fname, err
-            ))
-        })?;
+        // Bound the registry call: if it stalls or fails, surface the original
+        // `MissingFname` error to the client rather than a new "registry
+        // unavailable" failure mode. Recovery is best-effort — a broken registry
+        // shouldn't change the error contract for clients that already handle
+        // `MissingFname` retries.
+        let transfers =
+            match timeout(MISSING_FNAME_LOOKUP_TIMEOUT, lookup.lookup_fname(fname)).await {
+                Ok(Ok(transfers)) => transfers,
+                Ok(Err(err)) => {
+                    error!(
+                        fid,
+                        fname,
+                        err = err.to_string(),
+                        "fname registry lookup failed during missing-fname recovery"
+                    );
+                    self.statsd_client.count(
+                        "rpc.submit_message.missing_fname_recovery_lookup_error",
+                        1,
+                        vec![],
+                    );
+                    return Err(HubError::validation_failure(
+                        &engine::MessageValidationError::MissingFname.to_string(),
+                    ));
+                }
+                Err(_) => {
+                    error!(
+                        fid,
+                        fname, "fname registry lookup timed out during missing-fname recovery"
+                    );
+                    self.statsd_client.count(
+                        "rpc.submit_message.missing_fname_recovery_lookup_timeout",
+                        1,
+                        vec![],
+                    );
+                    return Err(HubError::validation_failure(
+                        &engine::MessageValidationError::MissingFname.to_string(),
+                    ));
+                }
+            };
 
         // Only forward transfers whose latest target matches the requesting fid —
         // otherwise the proof we land won't satisfy the pending UserDataAdd anyway.
@@ -298,10 +334,12 @@ impl MyHubService {
         // Poll for the fname transfer to reach the persisted store. Re-run the
         // engine simulation on each tick — this is the same check the real
         // validation will perform, so it implicitly covers the proof-store lookup
-        // and any other state-dependent prerequisites.
+        // and any other state-dependent prerequisites. We simulate once up-front
+        // before sleeping so we don't add a needless poll-interval of latency
+        // when the proof has already landed (e.g. via a concurrent recovery or
+        // the background fetcher catching up while we awaited the lookup).
         let deadline = std::time::Instant::now() + MISSING_FNAME_RECOVERY_BUDGET;
         loop {
-            sleep(MISSING_FNAME_POLL_INTERVAL).await;
             match self
                 .simulate_message_for_shard_typed(message, dst_shard)
                 .await
@@ -325,6 +363,7 @@ impl MyHubService {
                             &engine::MessageValidationError::MissingFname.to_string(),
                         ));
                     }
+                    sleep(MISSING_FNAME_POLL_INTERVAL).await;
                 }
                 Err(err) => return Err(simulate_error_to_hub_error(err)),
             }
