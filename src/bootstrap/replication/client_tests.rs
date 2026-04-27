@@ -9,7 +9,7 @@ mod tests {
         },
         cfg::Config,
         network::{
-            http_server_test::tests::MockHubService,
+            http_server_tests::tests::MockHubService,
             replication::{replicator, ReplicationServer},
         },
         proto::{

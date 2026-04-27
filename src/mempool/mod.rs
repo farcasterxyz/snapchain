@@ -3,10 +3,10 @@ pub mod mempool;
 pub mod routing;
 
 #[cfg(test)]
-mod mempool_test;
+mod mempool_tests;
 
 #[cfg(test)]
-mod rate_limits_test;
+mod rate_limits_tests;
 
 #[cfg(test)]
-mod block_receiver_test;
+mod block_receiver_tests;

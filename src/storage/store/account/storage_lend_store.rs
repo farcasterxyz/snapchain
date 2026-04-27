@@ -389,5 +389,5 @@ impl StorageLendStore {
 }
 
 #[cfg(test)]
-#[path = "storage_lend_store_test.rs"]
-mod storage_lend_store_test;
+#[path = "storage_lend_store_tests.rs"]
+mod storage_lend_store_tests;
