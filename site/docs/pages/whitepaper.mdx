@@ -129,7 +129,7 @@ Each block contains a version number for the protocol in its header. When a cons
 
 **Accidental breaking changes**
 
-It's also possible a bug or non-deterministic behaviour causes a breaking changes. E.g. a consensus breaking change is made without a corresponding protocol version bump. In this case, the nodes will proceed as normal until they encounter a blocks with the breaking change. At which point, the merkle roots will not match and the nodes that are not upgraded will halt. If this happens to validators, then block production will halt until a new version is released with a fix.
+It's also possible a bug or non-deterministic behaviour causes a breaking change. E.g. a consensus breaking change is made without a corresponding protocol version bump. In this case, the nodes will proceed as normal until they encounter a block with the breaking change. At which point, the merkle roots will not match and the nodes that are not upgraded will halt. If this happens to validators, then block production will halt until a new version is released with a fix.
 
 
 ## Frequently Asked Questions
