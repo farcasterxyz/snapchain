@@ -102,7 +102,7 @@ Validators can fail in a variety of ways and we must define how the network beha
 
 * Shard leader fails to produce a shard — after 1 second, consensus changes leadership according to the rotation. We can tolerate the failure of up to 1/3 of the validators. 
 * A shard is not produced in time for the block —  block production continues. If they fail to produce a shard for an entire epoch, the chain is halted. 
-* A block is not produced — after 1 seconds, consensus changes leadership according to the rotation. We can tolerate the failure of up to 1/3 of the block leaders.  
+* A block is not produced — after 1 second, consensus changes leadership according to the rotation. We can tolerate the failure of up to 1/3 of the block leaders.  
 
 If nodes are behaving maliciously, there are more attack scenarios that are possible: 
  
