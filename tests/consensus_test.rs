@@ -52,10 +52,12 @@ static CLAIMED_PORTS: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(|| Mutex::ne
 fn get_available_port() -> u32 {
     // Probe BOTH TCP and UDP because gossip binds UDP/QUIC while gRPC binds
     // TCP, and a port can be free on one protocol while in-use on the other.
-    let mut claimed = CLAIMED_PORTS.lock();
-    loop {
+    // Cap attempts so the helper fails loudly if the claimed-set ever fills
+    // the range, instead of spinning forever.
+    const MAX_ATTEMPTS: usize = 1000;
+    for _ in 0..MAX_ATTEMPTS {
         let port = BASE_PORT_FOR_TEST + (rand::random::<u32>() % 10_000);
-        if !claimed.insert(port) {
+        if !CLAIMED_PORTS.lock().insert(port) {
             continue;
         }
         let addr = format!("{}:{}", HOST_FOR_TEST, port);
@@ -64,8 +66,12 @@ fn get_available_port() -> u32 {
         if tcp.is_ok() && udp.is_ok() {
             return port;
         }
-        claimed.remove(&port);
+        CLAIMED_PORTS.lock().remove(&port);
     }
+    panic!(
+        "get_available_port: exhausted {MAX_ATTEMPTS} attempts; {} ports claimed in this process",
+        CLAIMED_PORTS.lock().len(),
+    );
 }
 
 fn make_tmp_path() -> String {
