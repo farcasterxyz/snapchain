@@ -20,7 +20,9 @@ use snapchain::node::snapchain_read_node::SnapchainReadNode;
 use snapchain::proto::hub_service_client::HubServiceClient;
 use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::proto::{self, CastId, Height, HubEventType, StorageUnitType, SubscribeRequest};
-use snapchain::proto::{Block, FarcasterNetwork, IdRegisterEventType, MessageType, SignerEventType};
+use snapchain::proto::{
+    Block, FarcasterNetwork, IdRegisterEventType, MessageType, SignerEventType,
+};
 use snapchain::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use snapchain::storage::store::account::{
     get_gasless_key_record, CastStore, OnchainEventStore, UserDataStore,

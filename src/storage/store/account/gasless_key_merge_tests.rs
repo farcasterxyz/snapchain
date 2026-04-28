@@ -337,7 +337,8 @@ mod tests {
         f_b.app_custody = f.app_custody.clone();
 
         let mut txn = RocksDbTransactionBatch::new();
-        let err = merge_key_add(&world.db, &world.store, &f_b.build(), &mut txn, false).unwrap_err();
+        let err =
+            merge_key_add(&world.db, &world.store, &f_b.build(), &mut txn, false).unwrap_err();
         match err {
             MessageValidationError::MessageValidationError(
                 ValidationError::KeyClaimedByDifferentFid,
