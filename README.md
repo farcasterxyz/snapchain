@@ -1,6 +1,6 @@
 # Snapchain
 
-The open-source, canonical implementation of Farcaster's [Snapchain](https://github.com/farcasterxyz/protocol/discussions/207) network. 
+The open-source, canonical implementation of Farcaster's [Snapchain](https://github.com/farcasterxyz/protocol/discussions/207) network.
 
 ![snapchain](https://github.com/user-attachments/assets/e5a041db-e3ae-4250-ad6b-7043ad648d34)
 
@@ -13,33 +13,33 @@ Snapchain is a data storage layer for the Farcaster social protocol. It is a blo
 
 The main goals of this implementation are:
 
-1. **High Throughput**: Written in Rust and will process at least 10,000 transactions per second. 
+1. **High Throughput**: Written in Rust and will process at least 10,000 transactions per second.
 
-2. **Data Availability**: Can be run for < $1,000/month and provide real-time access to user data. 
+2. **Data Availability**: Can be run for < $1,000/month and provide real-time access to user data.
 
-3. **Canonical Implementation**: Is the most accurate reference for how Snapchain and Farcaster should work. 
+3. **Canonical Implementation**: Is the most accurate reference for how Snapchain and Farcaster should work.
 
-## Status 
+## Status
 
-Snapchain is in the migration phase. Please check the [release docs](https://www.notion.so/warpcast/Snapchain-Mainnet-Public-1b96a6c0c101809493cfda3998a65c7a) for more details on timelines. 
+Snapchain is in the migration phase. Please check the [release docs](https://www.notion.so/warpcast/Snapchain-Mainnet-Public-1b96a6c0c101809493cfda3998a65c7a) for more details on timelines.
 
 ## Running a Node
 
-A snapchain node lets you read and write messages to the network. You will need a machine with the following system requirements to get started: 
+A snapchain node lets you read and write messages to the network. You will need a machine with the following system requirements to get started:
 
-- 32 GB of RAM
+- 16 GB of RAM
 - 4 CPU cores or vCPUs
 - 1.5TB of free storage
 - A public IP address
-- Ports 3381 - 3383 exposed on both TCP and UDP. 
+- Ports 3381 - 3383 exposed on both TCP and UDP.
 
-You can start a new node or upgrade an existing node with the following command: 
+You can start a new node or upgrade an existing node with the following command:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/main/scripts/snapchain-bootstrap.sh | bash
 ```
 You can manage your node using the snapchain.sh script. It uses docker compose to run the node in a container. The script provides commands to start, stop, and check the logs of your node.
-A brand new node will download historical snapshots to catchup to the latest state before it begins sync. This can take up to 2 hours. Check the node's status by running `curl http://localhost:3381/v1/info`. You should see `maxHeight` increasing and `blockDelay` decreasing until it approaches zero. 
+A brand new node will download historical snapshots to catchup to the latest state before it begins sync. This can take up to 2 hours. Check the node's status by running `curl http://localhost:3381/v1/info`. You should see `maxHeight` increasing and `blockDelay` decreasing until it approaches zero.
 
 ## Upgrade
 
@@ -52,11 +52,11 @@ cd snapchain
 
 This ensures your node is always running the latest available version.
 
-## Contributing 
+## Contributing
 
-We welcome contributions from developers of all skill levels. Please look for issues labeled with "help wanted" to find good tickets to work on. If you are working on something that is not explicitly a ticket, we may or may not accept it. We encourage checking with someone on the team before spending a lot of time on something. 
+We welcome contributions from developers of all skill levels. Please look for issues labeled with "help wanted" to find good tickets to work on. If you are working on something that is not explicitly a ticket, we may or may not accept it. We encourage checking with someone on the team before spending a lot of time on something.
 
-We will ban and report accounts that appear to engage in reputating farming by using LLMs or automated tools to generate PRs. 
+We will ban and report accounts that appear to engage in reputating farming by using LLMs or automated tools to generate PRs.
 
 ## Installation
 
@@ -66,7 +66,7 @@ Before you begin, ensure you have the following installed:
 - Rust (latest stable version)
 - Cargo (comes with Rust)
 - Protocol Buffers compiler (`brew install protobuf`)
-- cmake (`brew install cmake`) 
+- cmake (`brew install cmake`)
 
 ### Installation
 
