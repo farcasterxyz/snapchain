@@ -61,9 +61,15 @@ fn get_available_port() -> u32 {
             continue;
         }
         let addr = format!("{}:{}", HOST_FOR_TEST, port);
-        let tcp = std::net::TcpListener::bind(&addr);
-        let udp = std::net::UdpSocket::bind(&addr);
-        if tcp.is_ok() && udp.is_ok() {
+        // Scope the probe sockets so they drop before we either return or release
+        // the claim — otherwise on a partial-bind failure another caller can take
+        // the port while our half-bound probe is still holding the address.
+        let bound_both = {
+            let tcp = std::net::TcpListener::bind(&addr);
+            let udp = std::net::UdpSocket::bind(&addr);
+            tcp.is_ok() && udp.is_ok()
+        };
+        if bound_both {
             return port;
         }
         CLAIMED_PORTS.lock().remove(&port);
