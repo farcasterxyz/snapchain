@@ -168,10 +168,10 @@ mod tests {
         )
         .await;
         let cast = create_cast_add(1234, "hello", None, None);
-        let valid = mempool.message_is_valid(1, &MempoolMessage::UserMessage(cast.clone()));
+        let valid = mempool.message_is_valid(1, &MempoolMessage::UserMessage(cast.clone()), true);
         assert!(valid.is_ok());
         test_helper::commit_message(&mut engine, &cast).await;
-        let valid = mempool.message_is_valid(1, &MempoolMessage::UserMessage(cast.clone()));
+        let valid = mempool.message_is_valid(1, &MempoolMessage::UserMessage(cast.clone()), true);
         assert!(!valid.is_ok())
     }
 
@@ -186,6 +186,7 @@ mod tests {
                 for_shard: 1,
                 message: block_event.clone(),
             },
+            true,
         );
         assert!(valid.is_ok());
 
@@ -196,6 +197,7 @@ mod tests {
                 for_shard: 1,
                 message: block_event.clone(),
             },
+            true,
         );
         assert!(!valid.is_ok())
     }
@@ -211,12 +213,18 @@ mod tests {
             false,
             proto::FarcasterNetwork::Devnet,
         );
-        let valid =
-            mempool.message_is_valid(1, &MempoolMessage::OnchainEvent(onchain_event.clone()));
+        let valid = mempool.message_is_valid(
+            1,
+            &MempoolMessage::OnchainEvent(onchain_event.clone()),
+            true,
+        );
         assert!(valid.is_ok());
         test_helper::commit_event(&mut engine, &onchain_event).await;
-        let valid =
-            mempool.message_is_valid(1, &MempoolMessage::OnchainEvent(onchain_event.clone()));
+        let valid = mempool.message_is_valid(
+            1,
+            &MempoolMessage::OnchainEvent(onchain_event.clone()),
+            true,
+        );
         // Mempool allows duplicate on-chain events
         assert!(valid.is_ok())
     }
@@ -235,15 +243,19 @@ mod tests {
         let signer = alloy_signer_local::PrivateKeySigner::random();
         let fname_transfer =
             username_factory::create_transfer(1, "farcaster", None, None, None, signer.clone());
-        let valid =
-            mempool.message_is_valid(1, &MempoolMessage::FnameTransfer(fname_transfer.clone()));
+        let valid = mempool.message_is_valid(
+            1,
+            &MempoolMessage::FnameTransfer(fname_transfer.clone()),
+            true,
+        );
         assert!(valid.is_ok());
         test_helper::commit_fname_transfer(&mut engine, &fname_transfer).await;
 
         // Transferring the same fname again should be valid
         let fname_transfer =
             username_factory::create_transfer(2, "farcaster", None, Some(1), None, signer);
-        let valid = mempool.message_is_valid(1, &MempoolMessage::FnameTransfer(fname_transfer));
+        let valid =
+            mempool.message_is_valid(1, &MempoolMessage::FnameTransfer(fname_transfer), true);
         assert!(valid.is_ok())
     }
 
@@ -269,14 +281,62 @@ mod tests {
         commit_event(&mut engine, &signer_event).await;
 
         let cast = create_cast_add(FID_FOR_TEST, "hello", None, None);
-        let valid = mempool.message_is_valid(1, &MempoolMessage::UserMessage(cast));
+        let valid = mempool.message_is_valid(1, &MempoolMessage::UserMessage(cast), true);
         assert!(!valid.is_ok());
 
         commit_event(&mut engine, &default_storage_event(FID_FOR_TEST)).await;
 
         let cast = create_cast_add(FID_FOR_TEST, "hello", None, None);
-        let valid = mempool.message_is_valid(1, &MempoolMessage::UserMessage(cast));
+        let valid = mempool.message_is_valid(1, &MempoolMessage::UserMessage(cast), true);
         assert!(valid.is_ok());
+    }
+
+    /// Pull-time `message_is_valid` (`at_admission = false`) must not invoke the
+    /// rate limiter — the token was already consumed at admission, and re-running
+    /// the check would double-charge the bucket and silently drop accepted messages
+    /// before they ever reach the engine. Same fixture as `test_rate_limits_applied`
+    /// (FID registered with no storage rent → admission rejects on rate-limit), but
+    /// flipping the flag to `false` must turn the rate-limit branch into a no-op
+    /// and leave the message admissible by all other criteria.
+    #[tokio::test]
+    async fn test_rate_limits_skipped_at_pull_time() {
+        let (mut engines, _, _, mut mempool, _, _, _, _, _) = setup(None, true, 1).await;
+        let mut engine = engines.get_mut(&1).unwrap();
+
+        let id_register_event = events_factory::create_id_register_event(
+            FID_FOR_TEST,
+            proto::IdRegisterEventType::Register,
+            default_custody_address(),
+            None,
+        );
+        commit_event(&mut engine, &id_register_event).await;
+        let signer_event = events_factory::create_signer_event(
+            FID_FOR_TEST,
+            default_signer(),
+            proto::SignerEventType::Add,
+            None,
+            None,
+        );
+        commit_event(&mut engine, &signer_event).await;
+
+        // Sanity: at admission, an FID with no storage rent fails the rate limit.
+        let cast = create_cast_add(FID_FOR_TEST, "hello", None, None);
+        let admission_result =
+            mempool.message_is_valid(1, &MempoolMessage::UserMessage(cast.clone()), true);
+        assert!(
+            admission_result.is_err(),
+            "without storage rent the admission-time rate limit must reject"
+        );
+
+        // At pull time the same fixture must be admissible — the rate limiter is
+        // gated off and only the cheap idempotent checks (feature gate, BlockEvent
+        // shard, post-merge dedup) run.
+        let pull_result = mempool.message_is_valid(1, &MempoolMessage::UserMessage(cast), false);
+        assert!(
+            pull_result.is_ok(),
+            "at_admission=false must skip the rate limiter so already-admitted \
+             messages survive being re-validated on the way out of the buffer"
+        );
     }
 
     #[tokio::test]

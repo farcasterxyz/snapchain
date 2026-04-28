@@ -78,6 +78,7 @@ pub fn merge_key_add(
     onchain_event_store: &OnchainEventStore,
     msg: &proto::Message,
     txn_batch: &mut RocksDbTransactionBatch,
+    is_replay: bool,
 ) -> Result<HubEvent, MessageValidationError> {
     let message_data = msg
         .data
@@ -99,10 +100,17 @@ pub fn merge_key_add(
     let current_timestamp = message_data.timestamp as u64;
     let chain_id = ETH_MAINNET_CHAIN_ID;
 
-    // Step 3 (SignedKeyRequest metadata validation): verify the ABI-encoded metadata blob,
-    // then compare the recovered `requestSigner` against the custody address on file for
-    // `requestFid`. The first is pure crypto; the second is a storage lookup and lives
-    // here — keeping `core::validations` free of storage deps (see NEYN-10570 note).
+    // Step 3 (SignedKeyRequest metadata validation): verify the ABI-encoded metadata blob.
+    // The recovered `verified.request_fid` is needed below to embed in the gasless record
+    // regardless of replay status, so the crypto verification always runs.
+    //
+    // The follow-up storage lookup (`request_fid` IdRegister + custody match) is the
+    // expensive state-dependent half. On the replay path it's also impossible to honour
+    // soundly: mempool routing only seeds OnchainEvents to `[shard 0, fid_shard]`, so a
+    // ShardEngine replaying a KEY_ADD whose `request_fid` is on a different user shard has
+    // no way to find the IdRegister locally. The check would falsely reject the BlockEvent
+    // even though shard 0 has already validated it. Skip it on replay; shard 0 is the
+    // authority.
     let verified = verify_signed_key_request_metadata(
         key_add_body.metadata_type,
         &key_add_body.metadata,
@@ -111,16 +119,18 @@ pub fn merge_key_add(
         chain_id,
     )?;
 
-    let request_fid_event = onchain_event_store
-        .get_id_register_event_by_fid(verified.request_fid, Some(txn_batch))
-        .map_err(|_| MessageValidationError::MissingFid)?
-        .ok_or(ValidationError::InvalidSignedKeyRequest)?;
-    let request_fid_custody = match request_fid_event.body {
-        Some(proto::on_chain_event::Body::IdRegisterEventBody(b)) => b,
-        _ => return Err(ValidationError::InvalidSignedKeyRequest.into()),
-    };
-    if request_fid_custody.to.as_slice() != verified.request_signer.as_slice() {
-        return Err(ValidationError::SignedKeyRequestCustodyMismatch.into());
+    if !is_replay {
+        let request_fid_event = onchain_event_store
+            .get_id_register_event_by_fid(verified.request_fid, Some(txn_batch))
+            .map_err(|_| MessageValidationError::MissingFid)?
+            .ok_or(ValidationError::InvalidSignedKeyRequest)?;
+        let request_fid_custody = match request_fid_event.body {
+            Some(proto::on_chain_event::Body::IdRegisterEventBody(b)) => b,
+            _ => return Err(ValidationError::InvalidSignedKeyRequest.into()),
+        };
+        if request_fid_custody.to.as_slice() != verified.request_signer.as_slice() {
+            return Err(ValidationError::SignedKeyRequestCustodyMismatch.into());
+        }
     }
 
     // Step 5 (EIP-712 custody recovery for this FID's KeyAdd payload). The recovered
