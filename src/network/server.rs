@@ -830,7 +830,7 @@ impl MyHubService {
 
 /// Helper function to serialize page tokens only if at least one shard has more data.
 /// Returns None if all shards have finished pagination (all tokens are None).
-fn serialize_page_token_if_not_empty(
+fn serialize_page_token_if_any_shard_has_next(
     next_page_tokens: Vec<Option<Vec<u8>>>,
 ) -> Result<Option<Vec<u8>>, Status> {
     if next_page_tokens.iter().any(|token| token.is_some()) {
@@ -1481,7 +1481,7 @@ impl HubService for MyHubService {
             pages.iter().flat_map(|page| page.events.clone()).collect();
         let next_page_tokens: Vec<Option<Vec<u8>>> =
             pages.into_iter().map(|page| page.next_page_token).collect();
-        let next_page_token = serialize_page_token_if_not_empty(next_page_tokens)?;
+        let next_page_token = serialize_page_token_if_any_shard_has_next(next_page_tokens)?;
 
         let response = EventsResponse {
             events: combined_events,
@@ -1814,7 +1814,7 @@ impl HubService for MyHubService {
             .collect();
         let next_page_tokens: Vec<Option<Vec<u8>>> =
             pages.into_iter().map(|page| page.next_page_token).collect();
-        let next_page_token = serialize_page_token_if_not_empty(next_page_tokens)?;
+        let next_page_token = serialize_page_token_if_any_shard_has_next(next_page_tokens)?;
 
         let response = MessagesResponse {
             messages: combined_messages,
@@ -1873,7 +1873,7 @@ impl HubService for MyHubService {
 
         let next_page_tokens: Vec<Option<Vec<u8>>> =
             pages.into_iter().map(|page| page.next_page_token).collect();
-        let next_page_token = serialize_page_token_if_not_empty(next_page_tokens)?;
+        let next_page_token = serialize_page_token_if_any_shard_has_next(next_page_tokens)?;
 
         let response = MessagesResponse {
             messages: combined_messages,
@@ -1949,7 +1949,7 @@ impl HubService for MyHubService {
 
         let next_page_tokens: Vec<Option<Vec<u8>>> =
             pages.into_iter().map(|page| page.next_page_token).collect();
-        let next_page_token = serialize_page_token_if_not_empty(next_page_tokens)?;
+        let next_page_token = serialize_page_token_if_any_shard_has_next(next_page_tokens)?;
 
         let response = MessagesResponse {
             messages: combined_messages,
@@ -2456,7 +2456,7 @@ impl HubService for MyHubService {
 
         let next_page_tokens: Vec<Option<Vec<u8>>> =
             pages.into_iter().map(|page| page.next_page_token).collect();
-        let next_page_token = serialize_page_token_if_not_empty(next_page_tokens)?;
+        let next_page_token = serialize_page_token_if_any_shard_has_next(next_page_tokens)?;
 
         let response = MessagesResponse {
             messages: combined_messages,

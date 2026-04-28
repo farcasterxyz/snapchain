@@ -1665,6 +1665,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_events_returns_none_token_when_exhausted() {
+        // Same regression as test_get_casts_by_parent_returns_none_token_when_exhausted
+        // but exercises the get_events code path so we cover a second call site
+        // of the shared helper.
+        let (
+            stores,
+            _senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+
+        write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 3).await;
+
+        let response = service
+            .get_events(Request::new(proto::EventsRequest {
+                start_id: 0,
+                shard_index: None,
+                stop_id: None,
+                page_size: Some(100),
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap();
+        let response = response.get_ref();
+        assert_eq!(response.events.len(), 3);
+        assert!(
+            response.next_page_token.is_none(),
+            "next_page_token should be None when all shards are exhausted, got {:?}",
+            response.next_page_token,
+        );
+    }
+
+    #[tokio::test]
     async fn test_storage_limits() {
         // Works with no storage
         let (

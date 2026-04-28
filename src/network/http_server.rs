@@ -3556,3 +3556,38 @@ where
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paged_response_omits_next_page_token_when_proto_token_is_none() {
+        let response = proto::MessagesResponse {
+            messages: vec![],
+            next_page_token: None,
+        };
+        let mapped = map_proto_messages_response_to_json_paged_response(response).unwrap();
+        let json = serde_json::to_value(&mapped).unwrap();
+        assert!(
+            json.get("nextPageToken").is_none(),
+            "expected nextPageToken to be omitted, got {json}",
+        );
+    }
+
+    #[test]
+    fn paged_response_base64_encodes_next_page_token_when_present() {
+        let token = vec![0u8, 1, 2, 253, 254, 255];
+        let expected = BASE64_STANDARD.encode(&token);
+        let response = proto::MessagesResponse {
+            messages: vec![],
+            next_page_token: Some(token),
+        };
+        let mapped = map_proto_messages_response_to_json_paged_response(response).unwrap();
+        let json = serde_json::to_value(&mapped).unwrap();
+        assert_eq!(
+            json.get("nextPageToken").and_then(|v| v.as_str()),
+            Some(expected.as_str()),
+        );
+    }
+}
