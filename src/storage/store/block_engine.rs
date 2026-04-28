@@ -401,11 +401,14 @@ impl BlockEngine {
                 txn_batch,
             )?),
             MessageType::KeyAdd if gasless_enabled => {
+                // BlockEngine is the admission path — full validation, including the
+                // request_fid IdRegister + custody match.
                 Ok(vec![crate::storage::store::account::merge_key_add(
                     &self.stores.db,
                     &self.stores.onchain_event_store,
                     message,
                     txn_batch,
+                    false,
                 )?])
             }
             MessageType::KeyRemove if gasless_enabled => {

@@ -123,7 +123,7 @@ mod tests {
 
     fn commit_merge(world: &World, msg: &proto::Message) {
         let mut txn = RocksDbTransactionBatch::new();
-        merge_key_add(&world.db, &world.store, msg, &mut txn).unwrap();
+        merge_key_add(&world.db, &world.store, msg, &mut txn, false).unwrap();
         world.db.commit(txn).unwrap();
     }
 
@@ -216,7 +216,7 @@ mod tests {
         let second = f.build();
 
         let mut txn = RocksDbTransactionBatch::new();
-        let event = merge_key_add(&world.db, &world.store, &second, &mut txn).unwrap();
+        let event = merge_key_add(&world.db, &world.store, &second, &mut txn, false).unwrap();
 
         let body = match event.body.as_ref().unwrap() {
             proto::hub_event::Body::MergeMessageBody(b) => b,
@@ -272,7 +272,7 @@ mod tests {
         f.scopes = vec![MessageType::LinkAdd as i32];
         f.timestamp = 1_000_000_500;
         let mut txn = RocksDbTransactionBatch::new();
-        let err = merge_key_add(&world.db, &world.store, &f.build(), &mut txn).unwrap_err();
+        let err = merge_key_add(&world.db, &world.store, &f.build(), &mut txn, false).unwrap_err();
         assert!(
             matches!(err, MessageValidationError::StoreError(_)),
             "expected StoreError from nonce CAS, got {err:?}",
@@ -300,7 +300,7 @@ mod tests {
         f.nonce = 2;
         f.timestamp = 1_000_000_500;
         let mut txn = RocksDbTransactionBatch::new();
-        let err = merge_key_add(&world.db, &world.store, &f.build(), &mut txn).unwrap_err();
+        let err = merge_key_add(&world.db, &world.store, &f.build(), &mut txn, false).unwrap_err();
         match err {
             MessageValidationError::MessageValidationError(
                 ValidationError::KeyRegisteredByDifferentRequestingFid,
@@ -337,7 +337,8 @@ mod tests {
         f_b.app_custody = f.app_custody.clone();
 
         let mut txn = RocksDbTransactionBatch::new();
-        let err = merge_key_add(&world.db, &world.store, &f_b.build(), &mut txn).unwrap_err();
+        let err =
+            merge_key_add(&world.db, &world.store, &f_b.build(), &mut txn, false).unwrap_err();
         match err {
             MessageValidationError::MessageValidationError(
                 ValidationError::KeyClaimedByDifferentFid,

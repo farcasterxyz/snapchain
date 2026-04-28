@@ -648,7 +648,12 @@ impl Mempool {
                     match shard_messages.pop_first() {
                         None => break,
                         Some((_, next_message)) => {
-                            let result = self.message_is_valid(request.shard_id, &next_message);
+                            // `at_admission = false`: keeps the feature-gate, BlockEvent-shard,
+                            // and post-merge duplicate checks but skips the token-consuming
+                            // rate limiter. The token was already consumed at insertion; a
+                            // second check would always fail and permanently drop the message.
+                            let result =
+                                self.message_is_valid(request.shard_id, &next_message, false);
                             if result.is_ok() {
                                 messages.push(next_message);
                             }
@@ -667,6 +672,7 @@ impl Mempool {
         &mut self,
         shard: u32,
         message: &MempoolMessage,
+        at_admission: bool,
     ) -> Result<(), HubError> {
         // Pre-feature admission gate for KEY_ADD / KEY_REMOVE. Provisional until
         // NEYN-10619 consolidates feature-gating into a single validate_user_message
@@ -701,7 +707,12 @@ impl Mempool {
         if self.message_already_exists(shard, message) {
             return Err(HubError::duplicate("message has already been merged"));
         }
-        if self.message_exceeds_rate_limits(message) {
+        // Rate-limit checks are token-consuming (the KEY_ADD limiter uses
+        // `governor::RateLimiter::check`, which decrements the bucket). They must run
+        // exactly once, at admission. Re-running them at pull time would double-charge
+        // the 1/min KEY_ADD quota and silently drop every accepted message before it
+        // ever reached the engine.
+        if at_admission && self.message_exceeds_rate_limits(message) {
             self.statsd_client
                 .count_with_shard(shard, "mempool.rate_limit_hit", 1, vec![]);
             return Err(HubError::rate_limited(&format!(
@@ -758,8 +769,14 @@ impl Mempool {
             None => {}
         }
 
-        // TODO(aditi): Maybe we don't need to run validations here?
-        let result = self.message_is_valid(shard_id, &message);
+        // TODO(topocount): Maybe we don't need to run validations here? Related: rate-limit
+        // checks (the only token-consuming part of `message_is_valid`) should ideally be
+        // pulled out of `message_is_valid` entirely and run once, inline at this admission
+        // entry point. That would let `pull_messages` drop the `at_admission` flag and call
+        // a pure idempotent `message_is_valid` with no risk of accidentally re-charging the
+        // limiter. The flag exists today as the minimal-surgery fix; the cleaner split is
+        // deferred until the surrounding admission validations are reworked.
+        let result = self.message_is_valid(shard_id, &message, true);
         if result.is_ok() {
             match self.messages.get_mut(&shard_id) {
                 None => {

@@ -1266,11 +1266,19 @@ impl ShardEngine {
                     .map_err(|e| MessageValidationError::StoreError(e))?
             }
             MessageType::KeyAdd if gasless_enabled => {
+                // ShardEngine reaches `merge_message` for KEY_ADD only via
+                // `handle_block_event` (BlockEvent replay) — KEY_ADD always routes to
+                // shard 0, so a non-shard-0 ShardEngine never admits one as a user
+                // message. Pass `is_replay = true` so `merge_key_add` skips the
+                // request_fid IdRegister lookup that's redundant here (shard 0 already
+                // validated it) and impossible to honour when request_fid lives on a
+                // different user shard than this one.
                 vec![crate::storage::store::account::merge_key_add(
                     &self.db,
                     &self.stores.onchain_event_store,
                     msg,
                     txn_batch,
+                    true,
                 )?]
             }
             MessageType::KeyRemove if gasless_enabled => {

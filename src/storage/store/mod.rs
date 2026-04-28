@@ -18,6 +18,8 @@ pub mod test_helper;
 #[cfg(test)]
 mod block_engine_tests;
 #[cfg(test)]
+mod cross_shard_gasless_test;
+#[cfg(test)]
 mod engine_tests;
 #[cfg(test)]
 mod node_local_state_tests;

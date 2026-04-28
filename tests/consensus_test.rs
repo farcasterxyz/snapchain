@@ -20,9 +20,13 @@ use snapchain::node::snapchain_read_node::SnapchainReadNode;
 use snapchain::proto::hub_service_client::HubServiceClient;
 use snapchain::proto::hub_service_server::HubServiceServer;
 use snapchain::proto::{self, CastId, Height, HubEventType, StorageUnitType, SubscribeRequest};
-use snapchain::proto::{Block, FarcasterNetwork, IdRegisterEventType, SignerEventType};
+use snapchain::proto::{
+    Block, FarcasterNetwork, IdRegisterEventType, MessageType, SignerEventType,
+};
 use snapchain::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
-use snapchain::storage::store::account::{CastStore, OnchainEventStore, UserDataStore};
+use snapchain::storage::store::account::{
+    get_gasless_key_record, CastStore, OnchainEventStore, UserDataStore,
+};
 use snapchain::storage::store::block_engine::BlockStores;
 use snapchain::storage::store::mempool_poller::MempoolMessage;
 use snapchain::storage::store::node_local_state::LocalStateStore;
@@ -1159,6 +1163,118 @@ impl TestNetwork {
         message
     }
 
+    /// Like `register_fid`, but binds the FID's on-chain custody to a real
+    /// Ethereum signer so KEY_ADD's EIP-712 recovery (which checks the
+    /// recovered address against the on-chain custody) succeeds. Returns the
+    /// generated Ed25519 signer so callers that need to sign non-gasless
+    /// messages keep working.
+    pub async fn register_fid_with_eth_custody(
+        &mut self,
+        fid: u64,
+        custody: &alloy_signer_local::PrivateKeySigner,
+    ) -> SigningKey {
+        let signer = factory::signers::generate_signer();
+        let address = custody.address().as_slice().to_vec();
+
+        let on_chain_events = vec![
+            factory::events_factory::create_rent_event(
+                fid,
+                100,
+                StorageUnitType::UnitType2025,
+                false,
+                FarcasterNetwork::Devnet,
+            ),
+            factory::events_factory::create_signer_event(
+                fid,
+                signer.clone(),
+                SignerEventType::Add,
+                None,
+                None,
+            ),
+            factory::events_factory::create_id_register_event(
+                fid,
+                IdRegisterEventType::Register,
+                address.clone(),
+                None,
+            ),
+        ];
+
+        for event in on_chain_events {
+            let result = self
+                .first_live_node()
+                .add_message(
+                    MempoolMessage::OnchainEvent(event),
+                    MempoolSource::Local,
+                    None,
+                )
+                .await;
+            assert!(
+                result.is_ok(),
+                "Failed to register FID {} with eth custody: {:?}",
+                fid,
+                result.err()
+            );
+        }
+
+        self.test_fids.insert(fid, (signer.clone(), address));
+        signer
+    }
+
+    /// Polls until every validator's `shard_id` shard has the gasless key
+    /// record for `(fid, pubkey)`. Used to wait out shard 0's BlockEvent
+    /// reaching the rest of the shards via the BlockReceiver replay path.
+    pub async fn wait_for_gasless_key_on_shard(
+        &self,
+        fid: u64,
+        pubkey: &[u8; 32],
+        shard_id: u32,
+    ) -> Option<()> {
+        let pubkey = *pubkey;
+        wait_for(
+            || {
+                for node in self.live_nodes() {
+                    let stores = node.shard_stores().get(&shard_id)?;
+                    let txn = RocksDbTransactionBatch::new();
+                    match get_gasless_key_record(&stores.db, &txn, fid, &pubkey) {
+                        Ok(Some(_)) => continue,
+                        _ => return None,
+                    }
+                }
+                Some(())
+            },
+            tokio::time::Duration::from_secs(30),
+            tokio::time::Duration::from_millis(100),
+        )
+        .await
+    }
+
+    /// Waits until every validator's shard 0 (BlockEngine) has merged the
+    /// IdRegister event for `fid`. The existing `wait_for_fid` only checks
+    /// user-shard `OnchainEventStore`s; KEY_ADD validation needs the
+    /// BlockEngine's store (custody address recovery). This helper closes
+    /// that gap.
+    pub async fn wait_for_fid_on_block_engine(&self, fid: u64) -> Option<()> {
+        wait_for(
+            || {
+                for node in self.live_nodes() {
+                    let block_stores = node.block_stores();
+                    match OnchainEventStore::get_id_register_event_by_fid(
+                        &block_stores.onchain_event_store,
+                        fid,
+                        None,
+                    ) {
+                        Ok(Some(_)) => continue,
+                        _ => return None,
+                    }
+                }
+                Some(())
+            },
+            tokio::time::Duration::from_secs(30),
+            tokio::time::Duration::from_millis(100),
+        )
+        .await
+    }
+
     pub async fn wait_for_cast(&self, fid: u64, hash: Vec<u8>) -> Option<proto::Message> {
         wait_for(
             || {
@@ -2266,4 +2382,183 @@ async fn test_network_partition() {
         .await
         .expect("partition heal did not propagate the A-side cast to B");
     assert_blocks_match_across_validators(&network);
+}
+
+// NEYN-10626 — full-consensus smoke tests for the gasless-key cross-shard
+// propagation model. The pure multi-engine variant lives in
+// `src/storage/store/cross_shard_gasless_test.rs`; these versions prove the
+// same flow survives mempool routing, consensus, and the production
+// BlockReceiver replay path on a real validator network. The two cases:
+//   * `test_gasless_key_add_propagates_through_consensus_same_shard` — both
+//     FIDs hash to the same user shard; cast validates via the replayed
+//     gasless record.
+//   * `test_gasless_key_add_propagates_through_consensus_cross_shard` — the
+//     even-fid-registered-by-odd-fid scenario. Locks in `merge_key_add`'s
+//     `is_replay = true` short-circuit (skips the request_fid IdRegister
+//     lookup that's the BlockEngine's job) so the gasless record still
+//     materializes on the user's home shard.
+//
+// Both tests run with `TestNetwork::create(1, 2)` — a single validator and
+// two user shards. We cranked the validator count down from 3 to 1 to shave
+// test time (~10s → ~6s for the pair); these tests exercise routing and
+// replay, not consensus dynamics, so a quorum buys nothing. Confirmed
+// locally that they also pass with the full 3-validator BFT setup, so
+// raising it back is safe if anything regresses on the single-node path.
+//
+// TODO: if more cross-shard integration tests land here, extract `TestNetwork`
+// (and the gasless-specific helpers `register_fid_with_eth_custody`,
+// `wait_for_fid_on_block_engine`, `wait_for_gasless_key_on_shard`) into a
+// shared `tests/common/` module and move the gasless e2e tests into their
+// own file (e.g. `tests/cross_shard_e2e_test.rs`). They're not consensus
+// tests — they run on a single validator and exercise routing + replay —
+// so they don't really belong alongside `test_basic_consensus`,
+// `test_basic_sync`, etc. Worth doing once the count grows past ~3.
+
+async fn run_gasless_key_consensus_smoke(
+    network: &mut TestNetwork,
+    num_shards: u32,
+    fid: u64,
+    request_fid: u64,
+) -> (Vec<u8>, [u8; 32], proto::Message) {
+    let fid_custody = alloy_signer_local::PrivateKeySigner::random();
+    // If fid == request_fid we must use the same on-chain custody so the
+    // KEY_ADD's recovered request-signer matches.
+    let app_custody = if fid == request_fid {
+        fid_custody.clone()
+    } else {
+        alloy_signer_local::PrivateKeySigner::random()
+    };
+    let gasless = factory::signers::generate_signer();
+    let gasless_pubkey: [u8; 32] = gasless.verifying_key().to_bytes();
+
+    network
+        .register_fid_with_eth_custody(fid, &fid_custody)
+        .await;
+    network.wait_for_fid(fid).await.unwrap();
+    network
+        .wait_for_fid_on_block_engine(fid)
+        .await
+        .expect("FID custody must reach shard 0 before KEY_ADD validation");
+    if request_fid != fid {
+        network
+            .register_fid_with_eth_custody(request_fid, &app_custody)
+            .await;
+        network.wait_for_fid(request_fid).await.unwrap();
+        network
+            .wait_for_fid_on_block_engine(request_fid)
+            .await
+            .expect("REQUEST_FID custody must reach shard 0 before KEY_ADD validation");
+    }
+
+    let timestamp = messages_factory::farcaster_time();
+    let key_add = messages_factory::keys::create_key_add(
+        fid,
+        &fid_custody,
+        request_fid,
+        &app_custody,
+        &gasless,
+        vec![MessageType::CastAdd],
+        3600,
+        1,
+        timestamp + 1_000_000,
+        Some(timestamp),
+    );
+
+    // KEY_ADD always routes to shard 0 via `routing::route_message`. Push to
+    // every node's mempool so whichever validator wins the proposer slot
+    // already has the message.
+    for node in network.live_nodes() {
+        node.add_message(
+            MempoolMessage::UserMessage(key_add.clone()),
+            MempoolSource::Local,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    let router = routing::ShardRouter {};
+    let cast_shard = router.route_fid(fid, num_shards);
+    network
+        .wait_for_gasless_key_on_shard(fid, &gasless_pubkey, cast_shard)
+        .await
+        .expect("gasless record must propagate to FID's home shard via real BlockEvent");
+
+    let cast = messages_factory::casts::create_cast_add(
+        fid,
+        "hello from full-consensus gasless",
+        Some(timestamp + 2),
+        Some(&gasless),
+    );
+    for node in network.live_nodes() {
+        node.add_message(
+            MempoolMessage::UserMessage(cast.clone()),
+            MempoolSource::Local,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    network
+        .wait_for_cast(fid, cast.hash.clone())
+        .await
+        .expect("cast signed by gasless key must merge once shard sees the key");
+
+    let cast_hash = cast.hash.clone();
+    (cast_hash, gasless_pubkey, cast)
+}
+
+#[tokio::test]
+#[serial]
+async fn test_gasless_key_add_propagates_through_consensus_same_shard() {
+    // To debug, uncomment:
+    // let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+    //     .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    // let _ = tracing_subscriber::fmt().with_env_filter(env_filter).try_init();
+
+    let num_shards = 2;
+    let mut network = TestNetwork::create(1, num_shards).await;
+    network.start_validators().await;
+
+    // ShardRouter (sha256 of the FID-as-u32, see `routing.rs` and the
+    // `FidOnDisk = u32` alias in `core::types`) on num_shards=2 sends FID
+    // 1001 to shard 1. Reusing the same FID for `request_fid` keeps both
+    // IdRegister lookups on the same shard.
+    let fid: u64 = 1001;
+    let (cast_hash, _, _) =
+        run_gasless_key_consensus_smoke(&mut network, num_shards, fid, fid).await;
+    assert_network_has_cast(&network, fid, cast_hash);
+}
+
+// Cross-shard KEY_ADD: the user's FID and the SignedKeyRequest's
+// `request_fid` hash to different user shards via `ShardRouter`
+// (`FidOnDisk = u32`):
+//   * even FID 1000 → shard 1
+//   * odd  FID 1003 → shard 2
+//
+// The KEY_ADD merges on shard 0 because the BlockEngine has both FIDs'
+// IdRegister events (mempool routes OnchainEvents to `vec![0, fid_shard]`).
+// The emitted BlockEvent then replays on shards 1 and 2. On the user's home
+// shard (1), `merge_key_add` is called with `is_replay = true`
+// (`storage::store::account::gasless_key_merge.rs`), which skips the
+// `request_fid` IdRegister lookup. That lookup is the BlockEngine's job;
+// re-running it on every shard would falsely reject the BlockEvent whenever
+// `request_fid` lives on a different user shard than the user's FID.
+#[tokio::test]
+#[serial]
+async fn test_gasless_key_add_propagates_through_consensus_cross_shard() {
+    // To debug, uncomment:
+    // let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+    //     .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    // let _ = tracing_subscriber::fmt().with_env_filter(env_filter).try_init();
+
+    let num_shards = 2;
+    let mut network = TestNetwork::create(1, num_shards).await;
+    network.start_validators().await;
+
+    let fid: u64 = 1000;
+    let request_fid: u64 = 1003;
+    let (cast_hash, _, _) =
+        run_gasless_key_consensus_smoke(&mut network, num_shards, fid, request_fid).await;
+    assert_network_has_cast(&network, fid, cast_hash);
 }
