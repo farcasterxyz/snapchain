@@ -507,10 +507,10 @@ mod version_test {
         let time = FarcasterTime::from_unix_seconds(1765386000);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
-            Some(1778605200)
+            Some(1778616000)
         );
 
-        let time = FarcasterTime::from_unix_seconds(1778605200);
+        let time = FarcasterTime::from_unix_seconds(1778616000);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
             None
