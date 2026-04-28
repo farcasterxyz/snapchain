@@ -119,7 +119,7 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
         version: EngineVersion::V15,
     },
     VersionSchedule {
-        active_at: 1778605200, // 2026-05-12 5PM UTC (12:00 CDT)
+        active_at: 1778616000, // 2026-05-12 8PM UTC (3:00 PM CDT)
         version: EngineVersion::V16,
     },
 ]
@@ -175,7 +175,7 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
         version: EngineVersion::V15,
     },
     VersionSchedule {
-        active_at: 1777395600, // 2026-04-28 5PM UTC (12:00 CDT)
+        active_at: 1777406400, // 2026-04-28 8PM UTC (3:00 PM CDT)
         version: EngineVersion::V16,
     },
 ]
@@ -418,8 +418,8 @@ mod version_test {
 
     #[test]
     fn test_gasless_signers_activation_schedule() {
-        // Testnet: V16 at 2026-04-28 17:00 UTC; pre-activation returns V15.
-        let testnet_active = 1777395600;
+        // Testnet: V16 at 2026-04-28 20:00 UTC (3:00 PM CDT); pre-activation returns V15.
+        let testnet_active = 1777406400;
         assert_eq!(
             EngineVersion::version_for(
                 &FarcasterTime::from_unix_seconds(testnet_active - 1),
@@ -435,8 +435,8 @@ mod version_test {
             EngineVersion::V16
         );
 
-        // Mainnet: V16 at 2026-05-12 17:00 UTC; pre-activation returns V15.
-        let mainnet_active = 1778605200;
+        // Mainnet: V16 at 2026-05-12 20:00 UTC (3:00 PM CDT); pre-activation returns V15.
+        let mainnet_active = 1778616000;
         assert_eq!(
             EngineVersion::version_for(
                 &FarcasterTime::from_unix_seconds(mainnet_active - 1),
@@ -507,10 +507,10 @@ mod version_test {
         let time = FarcasterTime::from_unix_seconds(1765386000);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
-            Some(1778605200)
+            Some(1778616000)
         );
 
-        let time = FarcasterTime::from_unix_seconds(1778605200);
+        let time = FarcasterTime::from_unix_seconds(1778616000);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
             None
