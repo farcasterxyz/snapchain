@@ -3,26 +3,28 @@ use error::ValidationError;
 use crate::proto::CastId;
 
 pub mod cast;
+pub mod contract_signature;
 pub mod error;
+pub mod key;
 pub mod link;
 pub mod message;
 pub mod reaction;
 pub mod verification;
 
 #[cfg(test)]
-mod message_test;
+mod message_tests;
 
 #[cfg(test)]
-mod validations_test;
+mod validations_tests;
 
 #[cfg(test)]
-mod cast_test;
+mod cast_tests;
 
 #[cfg(test)]
-mod reaction_test;
+mod reaction_tests;
 
 #[cfg(test)]
-mod link_test;
+mod link_tests;
 
 pub fn validate_fid(fid: u64) -> Result<(), ValidationError> {
     match fid {

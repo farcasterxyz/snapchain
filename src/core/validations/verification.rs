@@ -1,9 +1,9 @@
+use crate::core::validations::contract_signature::{self, Verification};
 use crate::core::validations::error::ValidationError;
 use crate::proto::{self, FarcasterNetwork, VerificationAddAddressBody};
 use alloy_dyn_abi::TypedData;
 use alloy_provider::Provider;
 use alloy_transport::Transport;
-use eth_signature_verifier::Verification;
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -171,7 +171,7 @@ pub fn validate_fname_transfer(
 }
 
 pub fn validate_eth_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationError> {
-    if address.len() == 0 {
+    if address.is_empty() {
         return Err(ValidationError::EthAddressMissing);
     }
 
@@ -183,7 +183,7 @@ pub fn validate_eth_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationErr
 }
 
 fn validate_eth_block_hash(block_hash: &Vec<u8>) -> Result<&Vec<u8>, ValidationError> {
-    if block_hash.len() == 0 {
+    if block_hash.is_empty() {
         return Err(ValidationError::BlockHashMissing);
     }
 
@@ -195,7 +195,7 @@ fn validate_eth_block_hash(block_hash: &Vec<u8>) -> Result<&Vec<u8>, ValidationE
 }
 
 pub fn validate_sol_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationError> {
-    if address.len() == 0 {
+    if address.is_empty() {
         return Err(ValidationError::SolAddressMissing);
     }
 
@@ -207,7 +207,7 @@ pub fn validate_sol_address(address: &Vec<u8>) -> Result<&Vec<u8>, ValidationErr
 }
 
 fn validate_sol_block_hash(block_hash: &Vec<u8>) -> Result<&Vec<u8>, ValidationError> {
-    if block_hash.len() == 0 {
+    if block_hash.is_empty() {
         return Err(ValidationError::BlockHashMissing);
     }
 
@@ -303,9 +303,14 @@ where
 
     let hash = prehash.unwrap();
 
-    match eth_signature_verifier::verify_signature(
+    let address_bytes: [u8; 20] = match body.address.clone().try_into() {
+        Ok(bytes) => bytes,
+        Err(_) => return Err(ValidationError::InvalidData),
+    };
+
+    match contract_signature::verify_signature(
         alloy_primitives::Bytes::from(body.claim_signature.clone()),
-        alloy_primitives::Address::from(&body.address.clone().try_into().unwrap()),
+        alloy_primitives::Address::from(&address_bytes),
         hash,
         &provider,
     )
@@ -547,5 +552,78 @@ pub fn validate_remove_address(
         x if x == proto::Protocol::Ethereum as i32 => validate_remove_eth_address(body),
         x if x == proto::Protocol::Solana as i32 => validate_remove_sol_address(body),
         _ => Err(ValidationError::InvalidData),
+    }
+}
+
+#[cfg(test)]
+mod contract_signature_tests {
+    //! Exercises `validate_verification_contract_signature` — the one call site
+    //! of `contract_signature::verify_signature`. Uses the in-process
+    //! `MockTransport` from `contract_signature::test_support` so the whole
+    //! EIP-712 hash + `verify_signature` dispatch path is covered without a
+    //! network or anvil.
+
+    use super::*;
+    use crate::core::validations::contract_signature::test_support::*;
+
+    fn body_with(signature: Vec<u8>) -> proto::VerificationAddAddressBody {
+        proto::VerificationAddAddressBody {
+            address: vec![0x11u8; 20],
+            claim_signature: signature,
+            block_hash: vec![0x22u8; 32],
+            verification_type: 1, // contract signature
+            chain_id: 1,
+            protocol: proto::Protocol::Ethereum as i32,
+        }
+    }
+
+    fn claim() -> VerificationAddressClaim {
+        make_verification_address_claim(
+            1234,
+            &vec![0x11u8; 20],
+            FarcasterNetwork::Mainnet,
+            &vec![0x22u8; 32],
+            proto::Protocol::Ethereum,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn contract_signature_valid_returns_ok() {
+        // EOA path (address has no code); deploy-call returns the SUCCESS byte.
+        let provider = mock_provider(MockReply::Ok("0x"), MockReply::Ok(SUCCESS_WORD));
+        let r = validate_verification_contract_signature(
+            provider,
+            claim(),
+            &body_with(vec![0xaau8; 65]),
+        )
+        .await;
+        assert!(r.is_ok(), "expected Ok(()), got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn contract_signature_invalid_return_byte_maps_to_invalid_claim_signature() {
+        let provider = mock_provider(MockReply::Ok("0x"), MockReply::Ok(FAILURE_WORD));
+        let r = validate_verification_contract_signature(
+            provider,
+            claim(),
+            &body_with(vec![0xaau8; 65]),
+        )
+        .await;
+        assert!(matches!(r, Err(ValidationError::InvalidClaimSignature)));
+    }
+
+    #[tokio::test]
+    async fn contract_signature_rpc_error_maps_to_invalid_claim_signature() {
+        // Non-revert transport errors are collapsed to InvalidClaimSignature at
+        // this layer (see the `Err(_)` arm in `validate_verification_contract_signature`).
+        let provider = mock_provider(MockReply::Ok("0x"), MockReply::Err("internal server error"));
+        let r = validate_verification_contract_signature(
+            provider,
+            claim(),
+            &body_with(vec![0xaau8; 65]),
+        )
+        .await;
+        assert!(matches!(r, Err(ValidationError::InvalidClaimSignature)));
     }
 }

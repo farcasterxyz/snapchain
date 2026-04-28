@@ -8,6 +8,7 @@ use crate::proto::DbTrieNode;
 use prost::Message as _;
 use std::collections::HashMap;
 use std::sync::atomic;
+use std::time::Instant;
 use tracing::error;
 
 // This represents 6 bytes (1 byte for virtual shard id, 4 for fid and 1 for message type).
@@ -56,12 +57,25 @@ impl<'a> Drop for Context<'a> {
 
 /// Represents a node in a MerkleTrie. Automatically updates the hashes when items are added,
 /// and keeps track of the number of items in the subtree.
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct TrieNode {
     items: usize,
     children: HashMap<u8, TrieNodeType>,
     child_hashes: HashMap<u8, Vec<u8>>,
     key: Option<Vec<u8>>,
+    last_accessed: Instant,
+}
+
+impl Default for TrieNode {
+    fn default() -> Self {
+        TrieNode {
+            items: 0,
+            children: HashMap::new(),
+            child_hashes: HashMap::new(),
+            key: None,
+            last_accessed: Instant::now(),
+        }
+    }
 }
 
 // An empty struct that represents a serialized trie node. It does not contain any data, but it is used to indicate that
@@ -89,6 +103,7 @@ impl TrieNode {
             children: HashMap::new(),
             child_hashes: HashMap::new(),
             key: None,
+            last_accessed: Instant::now(),
         }
     }
 
@@ -145,6 +160,7 @@ impl TrieNode {
             } else {
                 Some(db_trie_node.key)
             },
+            last_accessed: Instant::now(),
         })
     }
 }
@@ -258,7 +274,7 @@ impl TrieNode {
         mut keys: Vec<Vec<u8>>,
         current_index: usize,
     ) -> Result<Vec<bool>, TrieError> {
-        if keys.len() == 0 {
+        if keys.is_empty() {
             return Err(TrieError::NoKeysToInsert);
         }
 
@@ -601,7 +617,10 @@ impl TrieNode {
                     }
                 }
                 match entry.into_mut() {
-                    TrieNodeType::Node(node) => Ok(node),
+                    TrieNodeType::Node(node) => {
+                        node.last_accessed = Instant::now();
+                        Ok(node)
+                    }
                     _ => Err(TrieError::InvalidChildNode { child_char: char }),
                 }
             }
@@ -617,7 +636,7 @@ impl TrieNode {
         child_hashes: &mut HashMap<u8, Vec<u8>>,
         prefix: &[u8],
     ) -> Result<(), TrieError> {
-        if prefix.len() > 0 {
+        if !prefix.is_empty() {
             let char = prefix[prefix.len() - 1];
             let hash = self.hash();
 

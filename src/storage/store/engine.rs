@@ -1,7 +1,9 @@
 use super::account::{IntoU8, OnchainEventStorageError, UserDataStore, UsernameProofStore};
+use crate::connectors::onchain_events;
 use crate::consensus::proposer::ProposalSource;
 use crate::core::{
-    error::HubError, types::Height, util::FarcasterTime, validations, validations::verification,
+    error::HubError, message::HubEventExt, types::Height, util::FarcasterTime, validations,
+    validations::verification,
 };
 use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::message_data::Body;
@@ -83,6 +85,9 @@ pub enum MessageValidationError {
     #[error("invalid signer")]
     MissingSigner,
 
+    #[error("message type {msg_type} is not in the scope of the gasless signer")]
+    GaslessKeyOutOfScope { msg_type: i32 },
+
     #[error(transparent)]
     MessageValidationError(#[from] validations::error::ValidationError),
 
@@ -113,7 +118,7 @@ pub enum MessageValidationError {
 
 pub struct MergedReplicatorMessage {
     pub fid: u64,
-    pub trie_key: Vec<u8>,
+    pub trie_keys: Vec<Vec<u8>>,
     pub hub_event: HubEvent,
 }
 
@@ -153,6 +158,7 @@ struct CachedTransaction {
     shard_root: Vec<u8>,
     events: Vec<HubEvent>,
     max_block_event_seqnum: u64,
+    block_events_hash: Vec<u8>,
     txn: RocksDbTransactionBatch,
 }
 
@@ -416,11 +422,15 @@ impl ShardEngine {
 
         // TODO: this should probably operate automatically via drop trait
         self.stores.trie.reload(&self.db).unwrap();
+
+        let block_events_hash = Self::compute_block_events_hash(&result.transactions);
+
         self.pending_txn = Some(CachedTransaction {
             shard_root: result.new_state_root.clone(),
             events: result.events.clone(),
             txn,
             max_block_event_seqnum: result.max_block_event_seqnum,
+            block_events_hash,
         });
 
         let proposal_duration = now.elapsed();
@@ -439,8 +449,8 @@ impl ShardEngine {
             let msg_type = message.msg_type().as_str_name();
             let message_summary = format!(
                 "message_type: {}, msg_hash: {}\n",
-                hex::encode(&message.hash),
-                msg_type
+                msg_type,
+                hex::encode(&message.hash)
             );
             summary += message_summary.as_str()
         }
@@ -623,13 +633,6 @@ impl ShardEngine {
 
         let (inserts, deletes) = TrieKey::for_hub_event(&hub_event);
 
-        if inserts.len() != 1 {
-            return Err(EngineError::ReplicatorError(format!(
-                "Message generated incorrect number of inserts. Message:{:?}\nHubEvent {:?}",
-                trie_message, hub_event
-            )));
-        }
-
         if !deletes.is_empty() {
             warn!(
                 "Message generated deletes, ignoring them. Message {:?}\nHubEvent {:?}",
@@ -639,7 +642,7 @@ impl ShardEngine {
 
         Ok(MergedReplicatorMessage {
             fid,
-            trie_key: inserts[0].clone(),
+            trie_keys: inserts,
             hub_event,
         })
     }
@@ -669,6 +672,39 @@ impl ShardEngine {
                     .message
                     .as_ref()
                     .ok_or(MessageValidationError::BlockEventMissingBody)?;
+                let msg_type = message.msg_type();
+                // Per-msg-type feature gating for shard-0-hosted user messages. Any future
+                // shard-0 feature whose merges propagate via a `MergeMessage` BlockEvent
+                // should add its gate here, not at the call site — the call site
+                // unconditionally invokes `handle_block_event` so this match is the single
+                // place that knows which feature owns which message type. Returning
+                // `InvalidMessageType` mirrors `validate_user_message`'s response to the
+                // analogous live-admission case, so a pre-feature replay surfaces a `warn!`
+                // through the caller's error arm and a downgraded validator never silently
+                // merges into a store the rest of the code can't reason about.
+                let feature_gate = match msg_type {
+                    MessageType::LendStorage => Some(ProtocolFeature::StorageLending),
+                    MessageType::KeyAdd | MessageType::KeyRemove => {
+                        Some(ProtocolFeature::GaslessSigners)
+                    }
+                    _ => None,
+                };
+                if let Some(feature) = feature_gate {
+                    let block_ts = block_event.block_timestamp();
+                    let version =
+                        EngineVersion::version_for(&FarcasterTime::new(block_ts), self.network);
+                    if !version.is_enabled(feature) {
+                        warn!(
+                            msg_type = msg_type.into_u8(),
+                            seqnum = block_event.seqnum(),
+                            block_timestamp = block_ts,
+                            "Skipping BlockEvent replay: feature not yet active for block timestamp"
+                        );
+                        return Err(
+                            MessageValidationError::InvalidMessageType(msg_type as i32).into()
+                        );
+                    }
+                }
                 let hub_events = self.merge_message(&message, txn_batch)?;
                 for event in &hub_events {
                     self.update_trie(trie_ctx, event, txn_batch)?;
@@ -844,27 +880,36 @@ impl ShardEngine {
 
             if let Some(block_event) = &msg.block_event {
                 // TODO(aditi): Validate hash and insert into any other relevant stores and trie if the message is relevant
-                if version.is_enabled(ProtocolFeature::ReadDataFromShardZero)
-                    && block_event.seqnum() == last_block_event_seqnum + 1
-                {
-                    if let Err(err) = self
-                        .stores
-                        .block_event_store
-                        .put_block_event(block_event, txn_batch)
-                    {
-                        error!(
-                            seqnum = block_event.seqnum().to_string(),
-                            "error merging block event: {}",
-                            err.to_string()
-                        );
-                    } else {
-                        last_block_event_seqnum += 1;
-                    }
+                if version.is_enabled(ProtocolFeature::ReadDataFromShardZero) {
+                    if block_event.seqnum() == last_block_event_seqnum + 1 {
+                        if let Err(err) = self
+                            .stores
+                            .block_event_store
+                            .put_block_event(block_event, txn_batch)
+                        {
+                            error!(
+                                seqnum = block_event.seqnum().to_string(),
+                                "Error merging block event: {}",
+                                err.to_string()
+                            );
+                        } else {
+                            last_block_event_seqnum += 1;
+                        }
 
-                    if version.is_enabled(ProtocolFeature::StorageLending) {
-                        // process storage lend messages from block events
+                        // Per-feature gating lives inside `handle_block_event` (one match arm
+                        // per shard-0-hosted user-message type). The call site stays
+                        // feature-agnostic — adding a new shard-0 feature only edits the
+                        // dispatch function, not this site.
                         match self.handle_block_event(trie_ctx, block_event, txn_batch) {
-                            Ok(hub_events) => events.extend(hub_events),
+                            Ok(hub_events) => {
+                                info!(
+                                    num_hub_events = hub_events.len(),
+                                    seqnum = block_event.seqnum(),
+                                    fid = snapchain_txn.fid,
+                                    "Merged block event"
+                                );
+                                events.extend(hub_events)
+                            }
                             Err(err) => {
                                 warn!(
                                     fid = snapchain_txn.fid,
@@ -873,6 +918,13 @@ impl ShardEngine {
                                 );
                             }
                         }
+                    } else {
+                        warn!(
+                            seqnum = block_event.seqnum(),
+                            last_block_event_seqnum,
+                            fid = snapchain_txn.fid,
+                            "Error merging block event because it's not next"
+                        )
                     }
                 }
             }
@@ -1170,6 +1222,10 @@ impl ShardEngine {
         let mt = MessageType::try_from(data.r#type)
             .or(Err(MessageValidationError::InvalidMessageType(data.r#type)))?;
 
+        let version =
+            EngineVersion::version_for(&FarcasterTime::new(data.timestamp as u64), self.network);
+        let gasless_enabled = version.is_enabled(ProtocolFeature::GaslessSigners);
+
         let event = match mt {
             MessageType::CastAdd | MessageType::CastRemove => vec![self
                 .stores
@@ -1208,6 +1264,30 @@ impl ShardEngine {
                 let store = &self.stores.storage_lend_store;
                 StorageLendStore::merge(store, msg, txn_batch)
                     .map_err(|e| MessageValidationError::StoreError(e))?
+            }
+            MessageType::KeyAdd if gasless_enabled => {
+                // ShardEngine reaches `merge_message` for KEY_ADD only via
+                // `handle_block_event` (BlockEvent replay) — KEY_ADD always routes to
+                // shard 0, so a non-shard-0 ShardEngine never admits one as a user
+                // message. Pass `is_replay = true` so `merge_key_add` skips the
+                // request_fid IdRegister lookup that's redundant here (shard 0 already
+                // validated it) and impossible to honour when request_fid lives on a
+                // different user shard than this one.
+                vec![crate::storage::store::account::merge_key_add(
+                    &self.db,
+                    &self.stores.onchain_event_store,
+                    msg,
+                    txn_batch,
+                    true,
+                )?]
+            }
+            MessageType::KeyRemove if gasless_enabled => {
+                vec![crate::storage::store::account::merge_key_remove(
+                    &self.db,
+                    &self.stores.onchain_event_store,
+                    msg,
+                    txn_batch,
+                )?]
             }
             unhandled_type => {
                 return Err(MessageValidationError::InvalidMessageType(
@@ -1274,6 +1354,14 @@ impl ShardEngine {
                 // Pruning not supported for storage lend messages
                 Ok(vec![])
             }
+            MessageType::KeyAdd | MessageType::KeyRemove => {
+                // Gasless keys are never pruned — they live on shard 0 alongside signer events
+                // and must remain available for validation across all shards. Post-NEYN-10580
+                // they are not routed to shards 1..N as user messages, but `handle_block_event`
+                // replays them onto shard-local DBs, so this arm guards against a future prune
+                // path ever being pointed at the replicated records.
+                Ok(vec![])
+            }
             unhandled_type => {
                 return Err(EngineError::UnsupportedMessageType(unhandled_type));
             }
@@ -1313,15 +1401,23 @@ impl ShardEngine {
         message: &proto::Message,
         timestamp: &FarcasterTime,
         version: EngineVersion,
-        txn_batch: &RocksDbTransactionBatch,
+        txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<(), MessageValidationError> {
         let now = std::time::Instant::now();
 
-        let txn_batch = if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
-            txn_batch
-        } else {
-            &RocksDbTransactionBatch::new()
-        };
+        // Read-view of the transaction batch. When `DependentMessagesInBulkSubmit` is enabled,
+        // validation reads see the caller's in-flight writes (needed for bulk submits where
+        // later messages depend on earlier ones). When disabled, reads are isolated against an
+        // empty throwaway batch. Writes — specifically the gasless-key `last_used_at` bump
+        // below — always land on the real `txn_batch` regardless of this flag: write
+        // persistence follows txn commit, not read visibility.
+        let empty_txn = RocksDbTransactionBatch::new();
+        let read_txn: &RocksDbTransactionBatch =
+            if version.is_enabled(ProtocolFeature::DependentMessagesInBulkSubmit) {
+                &*txn_batch
+            } else {
+                &empty_txn
+            };
 
         // Ensure message data is present
         let message_data = message
@@ -1345,16 +1441,63 @@ impl ShardEngine {
         // If not in the temp cache, fall back to the DB
         self.stores
             .onchain_event_store
-            .get_id_register_event_by_fid(message_data.fid, Some(txn_batch))
+            .get_id_register_event_by_fid(message_data.fid, Some(read_txn))
             .map_err(|_| MessageValidationError::MissingFid)?
             .ok_or(MessageValidationError::MissingFid)?;
 
-        // 2. Check that the user has a valid signer
-        self.stores
-            .onchain_event_store
-            .get_active_signer(message_data.fid, message.signer.clone(), Some(txn_batch))
+        // 2. Check that the user has a valid signer.
+        //
+        // KEY_ADD / KEY_REMOVE are special: they authenticate via a custody EIP-712 signature
+        // (and, for self-revocation KEY_REMOVE, via the Ed25519 key being revoked signing
+        // itself). The outer `message.signer` on these messages is the Ed25519 key being
+        // added or removed — by definition either not yet in the signer store (KEY_ADD) or
+        // about to leave it (KEY_REMOVE). Their real authentication happens in the merge
+        // path (see `merge_key_add` / `merge_key_remove`), so skip the active-signer check
+        // here. This bypass also subsumes the self-revocation `KEY_REMOVE` scope carve-out:
+        // `KEY_REMOVE` is explicitly rejected as a scope value (see
+        // `validations::key::validate_key_add_scopes`), so a gasless key signing a
+        // `KEY_REMOVE` would always fail a scope check — the bypass keeps self-revocation
+        // viable for a compromised scoped key.
+        let msg_type = MessageType::try_from(message_data.r#type).unwrap_or(MessageType::None);
+        let mut gasless_ttl_for_bump: Option<u32> = None;
+        let is_key_message = msg_type == MessageType::KeyAdd || msg_type == MessageType::KeyRemove;
+        if is_key_message && !version.is_enabled(ProtocolFeature::GaslessSigners) {
+            return Err(MessageValidationError::InvalidMessageType(
+                message_data.r#type,
+            ));
+        }
+        if !is_key_message {
+            let active_key = crate::storage::store::account::get_active_key(
+                &self.stores.onchain_event_store,
+                &self.stores.db,
+                read_txn,
+                message_data.fid,
+                &message.signer,
+            )
             .map_err(|_| MessageValidationError::MissingSigner)?
             .ok_or(MessageValidationError::MissingSigner)?;
+
+            // On-chain signers are grandfathered (scope-free). Gasless signers must have
+            // `msg_type` in their declared scope bitmask — O(1) bitwise AND.
+            if !active_key.admits(msg_type) {
+                return Err(MessageValidationError::GaslessKeyOutOfScope {
+                    msg_type: message_data.r#type,
+                });
+            }
+
+            // Capture the gasless ttl for the sliding-expiry bump that runs after all
+            // read-side validation has completed (see step 3 below).
+            if let crate::storage::store::account::ActiveKey::Gasless { ttl_seconds, .. } =
+                active_key
+            {
+                // KEY_ADD validation rejects `ttl == 0` for gasless keys
+                // (`validate_key_add_body`), so any Gasless variant here has ttl > 0. The
+                // explicit guard is defense in depth.
+                if ttl_seconds > 0 {
+                    gasless_ttl_for_bump = Some(ttl_seconds);
+                }
+            }
+        }
 
         // Don't allow storage lends to be merged directly without going through shard 0
         if message_data.r#type() == MessageType::LendStorage {
@@ -1367,24 +1510,48 @@ impl ShardEngine {
         match &message_data.body {
             Some(proto::message_data::Body::UserDataBody(user_data)) => {
                 if user_data.r#type == proto::UserDataType::Username as i32 {
-                    self.validate_username(message_data.fid, &user_data.value, txn_batch)?;
+                    self.validate_username(message_data.fid, &user_data.value, read_txn)?;
                 }
                 if user_data.r#type == proto::UserDataType::UserDataPrimaryAddressEthereum as i32 {
                     self.validate_ethereum_address_ownership(
                         message_data.fid,
                         &user_data.value,
-                        txn_batch,
+                        read_txn,
                     )?;
                 }
                 if user_data.r#type == proto::UserDataType::UserDataPrimaryAddressSolana as i32 {
                     self.validate_solana_address_ownership(
                         message_data.fid,
                         &user_data.value,
-                        txn_batch,
+                        read_txn,
                     )?;
                 }
             }
             _ => {}
+        }
+
+        // 3. Sliding-TTL enforcement for gasless keys (NEYN-10576).
+        //
+        // Read the stored `last_used_at`, reject if `stored + ttl < current_block_timestamp`,
+        // else bump `last_used_at = message_data.timestamp`. A missing entry is a contract
+        // violation — `merge_key_add` initializes it on every KEY_ADD — and surfaces as an
+        // `internal_error` HubError rather than a user-facing rejection.
+        //
+        // `message_data.timestamp` is a `u32` (farcaster-epoch seconds, the wire format),
+        // and the store widens it to `u64` internally for the comparison. The block clock
+        // (`timestamp.to_u64()`) is already farcaster-epoch `u64` — matches the store's
+        // `current_block_timestamp: u64` parameter with no cast.
+        if let Some(ttl) = gasless_ttl_for_bump {
+            let current_block_timestamp = timestamp.to_u64();
+            crate::storage::store::account::check_and_bump_last_used_at(
+                &self.stores.db,
+                txn_batch,
+                message_data.fid,
+                &message.signer,
+                ttl,
+                message_data.timestamp,
+                current_block_timestamp,
+            )?;
         }
 
         let elapsed = now.elapsed();
@@ -1548,11 +1715,15 @@ impl ShardEngine {
                 result = false;
             }
             Ok((events, max_block_event_seqnum)) => {
+                let block_events_hash =
+                    Self::compute_block_events_hash(&shard_state_change.transactions);
+
                 self.pending_txn = Some(CachedTransaction {
                     shard_root: shard_root.clone(),
                     txn,
                     events,
                     max_block_event_seqnum,
+                    block_events_hash,
                 });
             }
         }
@@ -1592,7 +1763,7 @@ impl ShardEngine {
         let height = header.height.as_ref().unwrap();
         let mut event_counts_by_type = Self::compute_event_counts_by_type(&events);
         event_counts_by_type.insert(HubEventType::BlockConfirmed as i32, 1);
-        let mut block_confirmed = HubEvent::from(
+        let mut block_confirmed = HubEvent::new_event(
             proto::HubEventType::BlockConfirmed,
             proto::hub_event::Body::BlockConfirmedBody(proto::BlockConfirmedBody {
                 block_number: height.block_number,
@@ -1675,10 +1846,35 @@ impl ShardEngine {
                 match &event.body {
                     Some(hub_event::Body::MergeMessageBody(body)) => {
                         if let Some(message) = &body.message {
+                            let mut tags =
+                                vec![("message_type", (message.msg_type() as i32).to_string())];
+
+                            // Try to get the request_fid from the signer metadata
+                            if let Ok(Some(signer_event)) = self
+                                .stores
+                                .onchain_event_store
+                                .get_active_signer(message.fid(), message.signer.clone(), None)
+                            {
+                                if let Some(proto::on_chain_event::Body::SignerEventBody(
+                                    signer_body,
+                                )) = &signer_event.body
+                                {
+                                    if let Some(request_fid) =
+                                        onchain_events::get_request_fid_from_signer_event(
+                                            &signer_body,
+                                        )
+                                    {
+                                        let signer_name =
+                                            onchain_events::map_signer_fid_to_name(request_fid);
+                                        tags.push(("signer_app", signer_name.to_string()));
+                                    }
+                                }
+                            }
+
                             self.metrics.count(
                                 "commit.merged_message",
                                 1,
-                                vec![("message_type", &(message.msg_type() as i32).to_string())],
+                                tags.iter().map(|(k, v)| (*k, v.as_str())).collect(),
                             )
                         }
                     }
@@ -1729,6 +1925,67 @@ impl ShardEngine {
         }
     }
 
+    fn compute_block_events_hash(transactions: &[Transaction]) -> Vec<u8> {
+        let block_events: Vec<_> = transactions
+            .iter()
+            .flat_map(|txn| &txn.system_messages)
+            .filter_map(|msg| msg.block_event.as_ref())
+            .collect();
+
+        if block_events.is_empty() {
+            vec![]
+        } else {
+            let mut events_hasher = blake3::Hasher::new();
+            for event in block_events.iter() {
+                events_hasher.update(&event.hash);
+            }
+            events_hasher.finalize().as_bytes().to_vec()
+        }
+    }
+
+    fn is_cached_txn_valid(
+        &self,
+        cached_txn: &CachedTransaction,
+        shard_root: &[u8],
+        transactions: &[Transaction],
+    ) -> bool {
+        // Check if shard roots match
+        if &cached_txn.shard_root != shard_root {
+            error!(
+                shard_id = self.shard_id,
+                cached_shard_root = hex::encode(&cached_txn.shard_root),
+                commit_shard_root = hex::encode(shard_root),
+                "Cached shard root mismatch"
+            );
+            self.metrics.count(
+                "commit.cache_miss",
+                1,
+                vec![("reason", "shard_root_mismatch")],
+            );
+            return false;
+        }
+
+        // TODO(aditi): Ideally we would handle this by putting max block event seqnum in the block header but this requires a protocol upgrade.
+        // Compute block events hash from transactions and compare with cached hash
+        let computed_hash = Self::compute_block_events_hash(transactions);
+        if computed_hash != cached_txn.block_events_hash {
+            error!(
+                shard_id = self.shard_id,
+                cached_block_events_hash = hex::encode(&cached_txn.block_events_hash),
+                computed_block_events_hash = hex::encode(&computed_hash),
+                "Cached block events hash mismatch"
+            );
+            self.metrics.count(
+                "commit.cache_miss",
+                1,
+                vec![("reason", "block_events_hash_mismatch")],
+            );
+            return false;
+        }
+
+        true
+    }
+
     pub async fn commit_shard_chunk(&mut self, shard_chunk: &ShardChunk) {
         let mut txn = RocksDbTransactionBatch::new();
 
@@ -1737,8 +1994,9 @@ impl ShardEngine {
 
         let mut applied_cached_txn = false;
         if let Some(cached_txn) = self.pending_txn.clone() {
-            if &cached_txn.shard_root == shard_root {
+            if self.is_cached_txn_valid(&cached_txn, shard_root, transactions) {
                 applied_cached_txn = true;
+                self.metrics.count("commit.cache_hit", 1, vec![]);
                 self.commit_and_emit_events(
                     shard_chunk,
                     cached_txn.events,
@@ -1746,14 +2004,15 @@ impl ShardEngine {
                     cached_txn.txn,
                 )
                 .await;
-            } else {
-                error!(
-                    shard_id = self.shard_id,
-                    cached_shard_root = hex::encode(&cached_txn.shard_root),
-                    commit_shard_root = hex::encode(shard_root),
-                    "Cached shard root mismatch"
-                );
             }
+        } else {
+            // is_cached_txn_valid emits its own miss metric when pending_txn
+            // exists but doesn't match. This branch covers the other case:
+            // there was never a prevalidated proposal for this value on this
+            // node (e.g. this node wasn't the proposer and didn't see the
+            // propose round that decided).
+            self.metrics
+                .count("commit.cache_miss", 1, vec![("reason", "no_pending_txn")]);
         }
 
         if !applied_cached_txn {
@@ -2121,5 +2380,63 @@ impl ShardEngine {
             return false;
         }
         signer_event.event_type == proto::SignerEventType::Remove as i32
+    }
+}
+
+#[cfg(test)]
+mod prune_arm_tests {
+    //! Locks down the `KeyAdd | KeyRemove => Ok(vec![])` arm in `prune_messages` added by
+    //! NEYN-10580. These messages live on shard 0 post-routing-change, so direct pruning on
+    //! shards 1..N should never happen — but if a future code path ever points pruning at a
+    //! replicated gasless-key record, we want it to return empty rather than hit the
+    //! `unhandled_type` panic path. This test is the regression rail for that.
+    //!
+    //! Placed inline (rather than in engine_tests.rs) because `prune_messages` is a private
+    //! method on `ShardEngine` and testing it directly avoids inventing a public hook.
+    use crate::proto::MessageType;
+    use crate::storage::db::RocksDbTransactionBatch;
+    use crate::storage::store::test_helper;
+    use crate::version::version::EngineVersion;
+
+    #[tokio::test]
+    async fn prune_key_add_returns_empty_events() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        let version = EngineVersion::latest();
+
+        let result = engine.prune_messages(
+            /* fid = */ 1234,
+            MessageType::KeyAdd,
+            &mut txn_batch,
+            &version,
+        );
+
+        let events = result.expect("KeyAdd prune arm must return Ok");
+        assert!(
+            events.is_empty(),
+            "gasless keys are never pruned — expected empty event list, got {} events",
+            events.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_key_remove_returns_empty_events() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        let version = EngineVersion::latest();
+
+        let result = engine.prune_messages(
+            /* fid = */ 1234,
+            MessageType::KeyRemove,
+            &mut txn_batch,
+            &version,
+        );
+
+        let events = result.expect("KeyRemove prune arm must return Ok");
+        assert!(
+            events.is_empty(),
+            "gasless-key revocations are never pruned — expected empty event list, got {} events",
+            events.len()
+        );
     }
 }

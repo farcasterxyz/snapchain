@@ -7,6 +7,7 @@ use super::{
     store::{Store, StoreDef},
     MessagesPage, StoreEventHandler,
 };
+use crate::core::message::HubEventExt;
 use crate::{
     core::error::HubError,
     proto::{
@@ -297,7 +298,7 @@ impl UserDataStore {
             put_username_proof_transaction(txn, username_proof, existing_fid);
         }
 
-        let mut hub_event = HubEvent::from(
+        let mut hub_event = HubEvent::new_event(
             HubEventType::MergeUsernameProof,
             proto::hub_event::Body::MergeUsernameProofBody(MergeUserNameProofBody {
                 username_proof: Some(username_proof.clone()),

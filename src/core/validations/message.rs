@@ -7,21 +7,32 @@ use crate::proto::{
 };
 use crate::storage::util::{blake3_20, bytes_compare};
 
-use super::{cast, link, reaction, verification};
+use super::{cast, key, link, reaction, verification};
 use crate::version::version::{EngineVersion, ProtocolFeature};
 use alloy_primitives::hex::FromHex;
 use alloy_primitives::Address;
 use ed25519_dalek::{Signature, VerifyingKey};
 use fancy_regex::Regex;
 use prost::Message;
+use std::sync::LazyLock;
 
 const MAX_DATA_BYTES: usize = 2048;
 const MAX_DATA_BYTES_FOR_10K_CAST: usize = 16_384;
 const MAX_DATA_BYTES_FOR_LINK_COMPACT: usize = 65536;
+const MAX_DATA_BYTES_FOR_USERNAME_PROOF: usize = 16_384;
 const EMBEDS_V1_CUTOFF: u32 = 73612800;
 const TWITTER_USERNAME_REGEX: &str = "^[a-z0-9_]{0,15}$";
 const FNAME_REGEX: &str = "^[a-z0-9][a-z0-9-]{0,15}$";
 const GITHUB_USERNAME_REGEX: &str = "^[a-zA-Z\\d](?:[a-zA-Z\\d]|-(?!-)){0,38}$";
+
+static FNAME_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(FNAME_REGEX).unwrap());
+static TWITTER_USERNAME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(TWITTER_USERNAME_REGEX).unwrap());
+static GITHUB_USERNAME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(GITHUB_USERNAME_REGEX).unwrap());
+static GEO_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^geo:(-?\d{1,2}\.\d{2}),(-?\d{1,3}\.\d{2})$").unwrap());
+
 /** Number of seconds (10 minutes) that is appropriate for clock skew */
 const ALLOWED_CLOCK_SKEW_SECONDS: u64 = 10 * 60;
 
@@ -35,7 +46,7 @@ fn validate_bytes_as_string(
     max_length: u64,
     required: bool,
 ) -> Result<(), ValidationError> {
-    if required && byte_array.len() == 0 {
+    if required && byte_array.is_empty() {
         return Err(ValidationError::MissingString);
     }
     if byte_array.len() as u64 > max_length {
@@ -94,7 +105,7 @@ pub fn validate_message(
     let message_data;
     if message.data_bytes.is_some() {
         data_bytes = message.data_bytes.as_ref().unwrap().clone();
-        if data_bytes.len() == 0 {
+        if data_bytes.is_empty() {
             return Err(ValidationError::MissingData);
         }
         match MessageData::decode(message.data_bytes.as_ref().unwrap().as_slice()) {
@@ -119,6 +130,10 @@ pub fn validate_message(
                 MAX_DATA_BYTES_FOR_LINK_COMPACT
             } else if is_pro_user && message_data.r#type() == MessageType::CastAdd {
                 MAX_DATA_BYTES_FOR_10K_CAST
+            } else if message_data.r#type() == MessageType::UsernameProof
+                && version.is_enabled(ProtocolFeature::IncreaseUsernameProofSizeLimit)
+            {
+                MAX_DATA_BYTES_FOR_USERNAME_PROOF
             } else {
                 MAX_DATA_BYTES
             }
@@ -214,6 +229,12 @@ pub fn validate_message(
             }
             validate_lend_storage_body(&lend_storage_body)?;
         }
+        Some(proto::message_data::Body::KeyAddBody(key_add_body)) => {
+            key::validate_key_add_body(&key_add_body)?;
+        }
+        Some(proto::message_data::Body::KeyRemoveBody(key_remove_body)) => {
+            key::validate_key_remove_body(&key_remove_body)?;
+        }
         None => {}
     }
 
@@ -244,7 +265,7 @@ fn validate_signature(
         return Err(ValidationError::InvalidSignatureScheme);
     }
 
-    if signature.len() == 0 {
+    if signature.is_empty() {
         return Err(ValidationError::MissingSignature);
     }
 
@@ -268,7 +289,7 @@ pub fn validate_message_hash(
         return Err(ValidationError::InvalidHashScheme);
     }
 
-    if data_bytes.len() == 0 {
+    if data_bytes.is_empty() {
         return Err(ValidationError::MissingData);
     }
 
@@ -280,7 +301,7 @@ pub fn validate_message_hash(
 }
 
 pub fn validate_fname(input: &String) -> Result<(), ValidationError> {
-    if input.len() == 0 {
+    if input.is_empty() {
         return Err(ValidationError::FnameIsMissing);
     }
 
@@ -289,8 +310,7 @@ pub fn validate_fname(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::FnameExceedsLength(input.clone()));
     }
 
-    if !Regex::new(FNAME_REGEX)
-        .unwrap()
+    if !FNAME_RE
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
     {
@@ -325,8 +345,7 @@ pub fn validate_ens_name(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::EnsNameExceedsLength(input.clone()));
     }
 
-    if !Regex::new(FNAME_REGEX)
-        .unwrap()
+    if !FNAME_RE
         .is_match(name_parts[0])
         .map_err(|_| ValidationError::InvalidData)?
     {
@@ -357,8 +376,7 @@ pub fn validate_base_name(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::EnsNameExceedsLength(input.clone()));
     }
 
-    if !Regex::new(FNAME_REGEX)
-        .unwrap()
+    if !FNAME_RE
         .is_match(&name_parts[0])
         .map_err(|_| ValidationError::InvalidData)?
     {
@@ -376,8 +394,7 @@ pub fn validate_twitter_username(input: &String) -> Result<(), ValidationError> 
         return Err(ValidationError::UsernameExceedsLength(input.clone(), 15));
     }
 
-    if !Regex::new(TWITTER_USERNAME_REGEX)
-        .unwrap()
+    if !TWITTER_USERNAME_RE
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
     {
@@ -395,8 +412,7 @@ pub fn validate_github_username(input: &String) -> Result<(), ValidationError> {
         return Err(ValidationError::UsernameExceedsLength(input.clone(), 38));
     }
 
-    if !Regex::new(GITHUB_USERNAME_REGEX)
-        .unwrap()
+    if !GITHUB_USERNAME_RE
         .is_match(&input)
         .map_err(|_| ValidationError::InvalidData)?
     {
@@ -524,8 +540,7 @@ pub fn validate_user_location(location: &str) -> Result<(), ValidationError> {
         return Ok(());
     }
 
-    let captures = Regex::new(r"^geo:(-?\d{1,2}\.\d{2}),(-?\d{1,3}\.\d{2})$")
-        .unwrap()
+    let captures = GEO_RE
         .captures(location)
         .map_err(|_| ValidationError::InvalidLocationString)?;
 

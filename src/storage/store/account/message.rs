@@ -273,7 +273,7 @@ where
         },
     )?;
 
-    let next_page_token = if last_key.len() > 0 {
+    let next_page_token = if !last_key.is_empty() {
         Some(last_key.to_vec())
     } else {
         None
@@ -287,7 +287,7 @@ where
 
 #[inline]
 pub fn message_encode(message: &MessageProto) -> Vec<u8> {
-    if message.data_bytes.is_some() && message.data_bytes.as_ref().unwrap().len() > 0 {
+    if message.data_bytes.as_ref().is_some_and(|b| !b.is_empty()) {
         // Clone the message
         let mut cloned = message.clone();
         cloned.data = None;
@@ -300,7 +300,7 @@ pub fn message_encode(message: &MessageProto) -> Vec<u8> {
 
 #[inline]
 pub fn message_bytes_decode(msg: &mut MessageProto) {
-    if msg.data_bytes.is_some() && msg.data_bytes.as_ref().unwrap().len() > 0 {
+    if msg.data_bytes.as_ref().is_some_and(|b| !b.is_empty()) {
         if let Ok(msg_data) = MessageData::decode(msg.data_bytes.as_ref().unwrap().as_slice()) {
             msg.data = Some(msg_data);
         } else {

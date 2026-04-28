@@ -8,7 +8,10 @@ use crate::{
     storage::{
         db::{PageOptions, RocksDbTransactionBatch},
         store::{
-            account::{LinkStore, UserDataStore, UsernameProofStore, VerificationStore, FID_BYTES},
+            account::{
+                LinkStore, StorageLendStore, UserDataStore, UsernameProofStore, VerificationStore,
+                FID_BYTES,
+            },
             engine::PostCommitMessage,
             stores::Stores,
         },
@@ -355,7 +358,12 @@ impl Replicator {
 
         // Handle each store type directly
         let messages = match user_message_type {
-            proto::MessageType::FrameAction | proto::MessageType::None => {
+            // TODO(NEYN-10568): wire KeyAdd/KeyRemove into replication once shard 0 routing
+            // and the signer store land (NEYN-10580, NEYN-10573, NEYN-10574).
+            proto::MessageType::FrameAction
+            | proto::MessageType::KeyAdd
+            | proto::MessageType::KeyRemove
+            | proto::MessageType::None => {
                 return Err(ReplicationError::InvalidMessage(format!(
                     "Invalid message type for FID {}: {:?}",
                     fid, user_message_type
@@ -436,10 +444,18 @@ impl Replicator {
                 .messages
             }
             proto::MessageType::LendStorage => {
-                stores
+                let mut messages = stores
                     .storage_lend_store
                     .get_adds_by_fid(fid, &page_options, filter)?
-                    .messages
+                    .messages;
+
+                let borrows = StorageLendStore::get_messages_by_borrower_fid(
+                    &stores.storage_lend_store,
+                    fid,
+                )?;
+
+                messages.extend(borrows);
+                messages
             }
         };
 
@@ -613,10 +629,10 @@ impl Replicator {
 
                     let cache_entry = cache.get(&hash).cloned();
                     if cache_entry.is_none() {
-                        let error_msg = format!(
-                            "User message not found in cache for FID {} and message_type {}: {:?}",
-                            fid, message_type, hash
-                        );
+                        let error_msg =
+                            format!(
+                            "User message not found in cache for FID {} and message_type {}: 0x{}",
+                            fid, message_type, hex::encode(hash));
                         error!(error_msg);
                         return Err(ReplicationError::InternalError(error_msg));
                     }
@@ -733,7 +749,11 @@ impl Replicator {
             .close_aged_snapshots(msg.shard_id, oldest_valid_timestamp);
 
         // Check if we can take a snapshot of this block
-        if block_number > 0 && block_number % self.snapshot_options.interval != 0 {
+        // Take a snapshot if none exist because there aren't many read nodes running and we may have to wait a long time for the scheduled snapshot after restart. This snapshot won't be at the same height across all nodes, but will be the first one pruned.
+        if block_number > 0
+            && block_number % self.snapshot_options.interval != 0
+            && self.stores.max_height_for_shard(msg.shard_id).is_some()
+        {
             return Ok(());
         }
 

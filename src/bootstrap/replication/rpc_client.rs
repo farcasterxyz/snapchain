@@ -72,10 +72,10 @@ impl RpcClientsManager {
     pub fn get_initial_peers(network: crate::proto::FarcasterNetwork) -> Vec<String> {
         match network {
             crate::proto::FarcasterNetwork::Mainnet => {
-                vec!["https://rho.farcaster.xyz:3381".to_string()]
+                vec!["https://rho.farcaster.xyz:3383".to_string()]
             }
             crate::proto::FarcasterNetwork::Testnet => {
-                vec!["https://tau.farcaster.xyz:3381".to_string()]
+                vec!["https://tau.farcaster.xyz:3383".to_string()]
             }
             _ => vec![],
         }
@@ -382,7 +382,6 @@ impl RpcClientsManager {
         let mut client = HubServiceClient::connect(peer_address).await?;
 
         let request = proto::BlocksRequest {
-            shard_id: 0,
             start_block_number: start_height,
             stop_block_number: None, // all blocks up to the latest
         };

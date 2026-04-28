@@ -1,0 +1,71 @@
+name: Docker Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'src/**'
+              - 'proto/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain*'
+              - 'Dockerfile'
+              - '.dockerignore'
+              - '.github/workflows/docker-build.yml'
+              - '.github/workflows/docker-build-impl.yml'
+
+  build:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    uses: ./.github/workflows/docker-build-impl.yml
+    secrets: inherit
+
+  docker-build-required:
+    needs: [changes, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate docker build result
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CODE_CHANGED: ${{ needs.changes.outputs.code }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "docker-build-required failing: changes job did not succeed (result: $CHANGES_RESULT)"
+            exit 1
+          fi
+          if [[ "$BUILD_RESULT" == "success" ]]; then
+            echo "docker-build-required passing: build succeeded"
+            exit 0
+          fi
+          if [[ "$BUILD_RESULT" == "skipped" && "$CODE_CHANGED" != "true" ]]; then
+            echo "docker-build-required passing: build intentionally skipped (no code changes)"
+            exit 0
+          fi
+          echo "docker-build-required failing (build job: $BUILD_RESULT, code changed: $CODE_CHANGED)"
+          exit 1

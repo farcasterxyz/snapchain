@@ -6,7 +6,7 @@ mod tests {
     use crate::proto::{self as message, hub_event, CastType, HubEvent, HubEventType};
     use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{
-        CastStore, CastStoreDef, Store, StoreEventHandler, StoreOptions,
+        CastStore, CastStoreDef, HubEventStorageExt, Store, StoreEventHandler, StoreOptions,
     };
     use crate::utils::factory::{messages_factory, time};
     use std::sync::Arc;

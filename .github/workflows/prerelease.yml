@@ -1,0 +1,133 @@
+name: Prerelease Snapchain
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag, or SHA to build from"
+        required: true
+        type: string
+      tag_suffix:
+        description: "Custom tag suffix (default: short SHA of resolved ref)"
+        required: false
+        type: string
+        default: ""
+
+concurrency:
+  group: snapchain-prerelease-${{ inputs.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write # OIDC
+  packages: write
+
+jobs:
+  build:
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_WRITE_PASSWORD }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v7
+        id: build
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=farcasterxyz/snapchain,push-by-digest=true,name-canonical=true,push=true
+          cache-from: |
+            type=gha,scope=build-${{ matrix.arch }}
+            type=registry,ref=ghcr.io/farcasterxyz/snapchain/cache:${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=build-${{ matrix.arch }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.build.outputs.digest }}" > /tmp/digests/${{ matrix.arch }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/${{ matrix.arch }}
+
+  create-manifest:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Compute prerelease tag
+        id: tag
+        run: |
+          short_sha=$(git rev-parse --short=7 HEAD)
+          ref_slug=$(echo "${{ inputs.ref }}" | tr '/' '-' | tr -c 'A-Za-z0-9._-' '-' | sed 's/-\+$//')
+          if [ -n "${{ inputs.tag_suffix }}" ]; then
+            tag="pre-${ref_slug}-${{ inputs.tag_suffix }}"
+          else
+            tag="pre-${ref_slug}-${short_sha}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "Prerelease tag: ${tag}"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_WRITE_PASSWORD }}
+
+      - name: Create and push multi-arch prerelease manifest
+        run: |
+          AMD64_DIGEST=$(cat /tmp/digests/amd64)
+          ARM64_DIGEST=$(cat /tmp/digests/arm64)
+          TAG=${{ steps.tag.outputs.tag }}
+
+          docker buildx imagetools create \
+            -t farcasterxyz/snapchain:${TAG} \
+            farcasterxyz/snapchain@${AMD64_DIGEST} \
+            farcasterxyz/snapchain@${ARM64_DIGEST}
+
+      - name: Summarize
+        run: |
+          echo "### Prerelease published" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Image: \`farcasterxyz/snapchain:${{ steps.tag.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Pull with:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "docker pull farcasterxyz/snapchain:${{ steps.tag.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

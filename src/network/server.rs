@@ -1,4 +1,8 @@
-use super::rpc_extensions::{authenticate_request, AsMessagesResponse, AsSingleMessageResponse};
+use super::rpc_extensions::{
+    authenticate_request, AsMessagesResponse, AsSingleMessageResponse, FidRequestExt,
+    FidTimestampRequestExt, LinksByFidRequestExt, ReactionsByFidRequestExt,
+};
+use crate::connectors::fname::FnameTransferLookup;
 use crate::connectors::onchain_events::{Chain, ChainClients};
 use crate::core::error::HubError;
 use crate::core::types::SnapchainValidatorContext;
@@ -46,9 +50,10 @@ use moka::policy::EvictionPolicy;
 use moka::sync::{Cache, CacheBuilder};
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::{Request, Response, Status};
@@ -56,6 +61,46 @@ use tracing::{debug, error, info};
 
 pub const MEMPOOL_ADD_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
+
+// Time budget for recovering from a `MissingFname` validation failure on UserDataAdd
+// Username messages: fetch the transfer from the fname registry, push it to the
+// mempool, then poll for the proof to land in the local store. Block production cycles
+// in seconds, so 8s gives ~4 block opportunities before we give up and return the
+// original error to the client.
+const MISSING_FNAME_RECOVERY_BUDGET: Duration = Duration::from_secs(8);
+const MISSING_FNAME_POLL_INTERVAL: Duration = Duration::from_millis(250);
+// Cap the synchronous fname-registry lookup so a slow/hung registry can't stall
+// the gRPC request beyond the recovery budget.
+const MISSING_FNAME_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Convert a typed engine validation error back into the HubError shape that the
+/// gRPC layer expects. `StoreError` is forwarded as-is so we don't double-wrap;
+/// every other variant becomes a generic validation_failure.
+fn simulate_error_to_hub_error(err: engine::MessageValidationError) -> HubError {
+    match err {
+        engine::MessageValidationError::StoreError(hub_error) => hub_error,
+        _ => HubError::validation_failure(&err.to_string()),
+    }
+}
+
+/// Returns the fname that should be looked up against the fname registry to
+/// recover from a `MissingFname` validation failure, or `None` if the message
+/// isn't an fname-eligible UserDataAdd Username (.eth/empty values are out of
+/// scope — they go through ENS / are valid no-ops).
+fn username_for_fname_recovery(message: &proto::Message) -> Option<String> {
+    let data = message.data.as_ref()?;
+    let user_data = match data.body.as_ref()? {
+        proto::message_data::Body::UserDataBody(body) => body,
+        _ => return None,
+    };
+    if user_data.r#type() != proto::UserDataType::Username {
+        return None;
+    }
+    if user_data.value.is_empty() || user_data.value.ends_with(".eth") {
+        return None;
+    }
+    Some(user_data.value.clone())
+}
 
 pub struct MyHubService {
     allowed_users: HashMap<String, String>,
@@ -72,6 +117,11 @@ pub struct MyHubService {
     version: String,
     peer_id: String,
     id_registry_cache: Cache<Vec<u8>, OnChainEvent>,
+    // Synchronous lookup against the fname registry. Used to recover from the
+    // race condition where a client submits a UserDataAdd for a username before
+    // the background fname connector has polled the corresponding transfer. None
+    // disables on-demand recovery (e.g. when fnames are configured off).
+    fname_lookup: Option<Arc<dyn FnameTransferLookup>>,
 }
 
 impl MyHubService {
@@ -89,6 +139,7 @@ impl MyHubService {
         chain_clients: ChainClients,
         version: String,
         peer_id: String,
+        fname_lookup: Option<Arc<dyn FnameTransferLookup>>,
     ) -> Self {
         let mut allowed_users = HashMap::new();
         for auth in rpc_auth.split(",") {
@@ -124,8 +175,14 @@ impl MyHubService {
             version,
             peer_id,
             id_registry_cache,
+            fname_lookup,
         };
         service
+    }
+
+    #[cfg(test)]
+    pub fn set_fname_lookup_for_test(&mut self, lookup: Arc<dyn FnameTransferLookup>) {
+        self.fname_lookup = Some(lookup);
     }
 
     async fn submit_message_internal(
@@ -139,10 +196,178 @@ impl MyHubService {
 
         let dst_shard = routing::route_message(&self.message_router, &message, self.num_shards);
 
-        self.simulate_message_for_shard(&message, dst_shard).await?;
+        match self
+            .simulate_message_for_shard_typed(&message, dst_shard)
+            .await
+        {
+            Ok(()) => {}
+            Err(engine::MessageValidationError::MissingFname) => {
+                if let Some(fname) = username_for_fname_recovery(&message) {
+                    self.recover_missing_fname(fid, &fname, &message, dst_shard)
+                        .await?;
+                } else {
+                    return Err(HubError::validation_failure(
+                        &engine::MessageValidationError::MissingFname.to_string(),
+                    ));
+                }
+            }
+            Err(err) => return Err(simulate_error_to_hub_error(err)),
+        }
 
         // Process the submitted message
         self.submit_message_to_mempool(message).await
+    }
+
+    /// On-demand recovery for the fname-not-yet-propagated race (issue #456): query
+    /// the fname registry directly, push any matching transfer through the mempool,
+    /// then poll for the proof to land in our local store before re-running
+    /// validation. If the registry has no transfer for `fid`, or the transfer fails
+    /// to land within the budget, we surface the original `MissingFname` error.
+    async fn recover_missing_fname(
+        &self,
+        fid: u64,
+        fname: &str,
+        message: &proto::Message,
+        dst_shard: u32,
+    ) -> Result<(), HubError> {
+        let lookup = match &self.fname_lookup {
+            Some(lookup) => lookup,
+            None => {
+                return Err(HubError::validation_failure(
+                    &engine::MessageValidationError::MissingFname.to_string(),
+                ));
+            }
+        };
+
+        self.statsd_client.count(
+            "rpc.submit_message.missing_fname_recovery_attempted",
+            1,
+            vec![],
+        );
+
+        // Bound the registry call: if it stalls or fails, surface the original
+        // `MissingFname` error to the client rather than a new "registry
+        // unavailable" failure mode. Recovery is best-effort — a broken registry
+        // shouldn't change the error contract for clients that already handle
+        // `MissingFname` retries.
+        let transfers =
+            match timeout(MISSING_FNAME_LOOKUP_TIMEOUT, lookup.lookup_fname(fname)).await {
+                Ok(Ok(transfers)) => transfers,
+                Ok(Err(err)) => {
+                    error!(
+                        fid,
+                        fname,
+                        err = err.to_string(),
+                        "fname registry lookup failed during missing-fname recovery"
+                    );
+                    self.statsd_client.count(
+                        "rpc.submit_message.missing_fname_recovery_lookup_error",
+                        1,
+                        vec![],
+                    );
+                    return Err(HubError::validation_failure(
+                        &engine::MessageValidationError::MissingFname.to_string(),
+                    ));
+                }
+                Err(_) => {
+                    error!(
+                        fid,
+                        fname, "fname registry lookup timed out during missing-fname recovery"
+                    );
+                    self.statsd_client.count(
+                        "rpc.submit_message.missing_fname_recovery_lookup_timeout",
+                        1,
+                        vec![],
+                    );
+                    return Err(HubError::validation_failure(
+                        &engine::MessageValidationError::MissingFname.to_string(),
+                    ));
+                }
+            };
+
+        // Only forward transfers whose latest target matches the requesting fid —
+        // otherwise the proof we land won't satisfy the pending UserDataAdd anyway.
+        let mut submitted_any = false;
+        for transfer in transfers {
+            let target_fid = transfer.proof.as_ref().map(|p| p.fid).unwrap_or(0);
+            if target_fid != fid {
+                continue;
+            }
+            let (tx, rx) = oneshot::channel();
+            if let Err(err) = self.mempool_tx.try_send(MempoolRequest::AddMessage(
+                MempoolMessage::FnameTransfer(transfer),
+                MempoolSource::RPC,
+                Some(tx),
+            )) {
+                error!(
+                    fid,
+                    fname,
+                    err = err.to_string(),
+                    "failed to enqueue fname transfer for missing-fname recovery"
+                );
+                continue;
+            }
+            // Mempool ack means "queued for inclusion", not "applied". The
+            // simulate-poll loop below is what blocks on the proof actually landing.
+            // A duplicate-message ack is benign — the transfer is already in flight.
+            match timeout(MEMPOOL_ADD_REQUEST_TIMEOUT, rx).await {
+                Ok(Ok(Ok(()))) | Ok(Ok(Err(_))) => submitted_any = true,
+                Ok(Err(_)) | Err(_) => {
+                    // Channel closed or timed out — keep going; the proof might
+                    // already be in flight from a concurrent path.
+                    submitted_any = true;
+                }
+            }
+        }
+
+        if !submitted_any {
+            self.statsd_client.count(
+                "rpc.submit_message.missing_fname_recovery_no_transfer",
+                1,
+                vec![],
+            );
+            return Err(HubError::validation_failure(
+                &engine::MessageValidationError::MissingFname.to_string(),
+            ));
+        }
+
+        // Poll for the fname transfer to reach the persisted store. Re-run the
+        // engine simulation on each tick — this is the same check the real
+        // validation will perform, so it implicitly covers the proof-store lookup
+        // and any other state-dependent prerequisites. We simulate once up-front
+        // before sleeping so we don't add a needless poll-interval of latency
+        // when the proof has already landed (e.g. via a concurrent recovery or
+        // the background fetcher catching up while we awaited the lookup).
+        let deadline = std::time::Instant::now() + MISSING_FNAME_RECOVERY_BUDGET;
+        loop {
+            match self
+                .simulate_message_for_shard_typed(message, dst_shard)
+                .await
+            {
+                Ok(()) => {
+                    self.statsd_client.count(
+                        "rpc.submit_message.missing_fname_recovery_success",
+                        1,
+                        vec![],
+                    );
+                    return Ok(());
+                }
+                Err(engine::MessageValidationError::MissingFname) => {
+                    if std::time::Instant::now() >= deadline {
+                        self.statsd_client.count(
+                            "rpc.submit_message.missing_fname_recovery_timeout",
+                            1,
+                            vec![],
+                        );
+                        return Err(HubError::validation_failure(
+                            &engine::MessageValidationError::MissingFname.to_string(),
+                        ));
+                    }
+                    sleep(MISSING_FNAME_POLL_INTERVAL).await;
+                }
+                Err(err) => return Err(simulate_error_to_hub_error(err)),
+            }
+        }
     }
 
     async fn submit_message_to_mempool(
@@ -204,12 +429,13 @@ impl MyHubService {
             Some(tx),
         )) {
             Ok(_) => {
-                self.statsd_client.count("rpc.submit_message.success", 1);
+                self.statsd_client
+                    .count("rpc.submit_message.success", 1, vec![]);
                 debug!("successfully submitted message");
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.statsd_client
-                    .count("rpc.submit_message.channel_full", 1);
+                    .count("rpc.submit_message.channel_full", 1, vec![]);
                 return Err(HubError::unavailable("mempool channel is full"));
             }
             Err(e) => {
@@ -224,7 +450,8 @@ impl MyHubService {
         let result = match timeout(MEMPOOL_ADD_REQUEST_TIMEOUT, rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(err)) => {
-                self.statsd_client.count("rpc.mempool_submit_error", 1);
+                self.statsd_client
+                    .count("rpc.mempool_submit_error", 1, vec![]);
                 error!(
                     "Error receiving message from mempool channel: {:?}",
                     err.to_string()
@@ -232,7 +459,8 @@ impl MyHubService {
                 return Err(HubError::unavailable("Error adding to mempool"));
             }
             Err(_) => {
-                self.statsd_client.count("rpc.mempool_submit_timeout", 1);
+                self.statsd_client
+                    .count("rpc.mempool_submit_timeout", 1, vec![]);
                 error!("Timeout receiving message from mempool channel",);
                 return Err(HubError::unavailable("Error adding to mempool"));
             }
@@ -258,11 +486,14 @@ impl MyHubService {
         self.get_stores_for_shard(shard_id)
     }
 
-    async fn simulate_message_for_shard(
+    /// Replays `message` against a read-only engine for `shard_id` and returns the
+    /// typed [`engine::MessageValidationError`] so callers can branch on specific
+    /// variants — for example, the `MissingFname` recovery path.
+    async fn simulate_message_for_shard_typed(
         &self,
         message: &proto::Message,
         shard_id: u32,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), engine::MessageValidationError> {
         if shard_id == 0 {
             // Handle shard 0 (block engine) specially
             let mut block_engine = block_engine::BlockEngine::new(
@@ -275,13 +506,21 @@ impl MyHubService {
             );
 
             block_engine.simulate_message(message).map_err(|e| match e {
-                block_engine::MessageValidationError::HubError(hub_error) => hub_error,
-                _ => HubError::validation_failure(&e.to_string()),
+                block_engine::MessageValidationError::HubError(hub_error) => {
+                    engine::MessageValidationError::StoreError(hub_error)
+                }
+                other => engine::MessageValidationError::StoreError(HubError::validation_failure(
+                    &other.to_string(),
+                )),
             })
         } else {
             let stores = match self.shard_stores.get(&shard_id) {
                 Some(store) => store,
-                None => return Err(HubError::invalid_parameter("shard not found for fid")),
+                None => {
+                    return Err(engine::MessageValidationError::StoreError(
+                        HubError::invalid_parameter("shard not found for fid"),
+                    ));
+                }
             };
 
             // TODO: This is a hack to get around the fact that self cannot be made mutable
@@ -297,17 +536,10 @@ impl MyHubService {
                 None,
                 None,
             )
-            .await?;
+            .await
+            .map_err(engine::MessageValidationError::StoreError)?;
 
-            readonly_engine
-                .simulate_message(message)
-                .map_err(|err| match err {
-                    engine::MessageValidationError::StoreError(hub_error) => {
-                        // Forward hub errors as is, otherwise we end up wrapping them
-                        hub_error
-                    }
-                    _ => HubError::validation_failure(&err.to_string()),
-                })
+            readonly_engine.simulate_message(message)
         }
     }
 
@@ -616,11 +848,13 @@ impl HubService for MyHubService {
         &self,
         request: Request<proto::Message>,
     ) -> Result<Response<proto::Message>, Status> {
-        self.statsd_client.count("rpc.submit_message_in_flight", 1);
+        self.statsd_client
+            .count("rpc.submit_message_in_flight", 1, vec![]);
         let start_time = std::time::Instant::now();
 
         authenticate_request(&request, &self.allowed_users).map_err(|err| {
-            self.statsd_client.count("rpc.submit_message_in_flight", -1);
+            self.statsd_client
+                .count("rpc.submit_message_in_flight", -1, vec![]);
             err
         })?;
 
@@ -640,12 +874,15 @@ impl HubService for MyHubService {
 
         match result {
             Ok(message) => {
-                self.statsd_client.count("rpc.submit_message.success", 1);
-                self.statsd_client.count("rpc.submit_message_in_flight", -1);
+                self.statsd_client
+                    .count("rpc.submit_message.success", 1, vec![]);
+                self.statsd_client
+                    .count("rpc.submit_message_in_flight", -1, vec![]);
                 Ok(Response::new(message))
             }
             Err(err) => {
-                self.statsd_client.count("rpc.submit_message.failure", 1);
+                self.statsd_client
+                    .count("rpc.submit_message.failure", 1, vec![]);
                 info!(
                     hash = hash,
                     fid = fid,
@@ -669,7 +906,8 @@ impl HubService for MyHubService {
                 if let Ok(err_str) = AsciiMetadataValue::from_str(&err_code) {
                     status.metadata_mut().insert("x-err-code", err_str);
                 }
-                self.statsd_client.count("rpc.submit_message_in_flight", -1);
+                self.statsd_client
+                    .count("rpc.submit_message_in_flight", -1, vec![]);
                 Err(status)
             }
         }
@@ -726,7 +964,7 @@ impl HubService for MyHubService {
         // 2. Process each shard's batch transactionally for validation
         for (shard_id, batch) in messages_by_shard {
             self.statsd_client
-                .count("rpc.submit_message_in_flight", batch.len() as i64);
+                .count("rpc.submit_message_in_flight", batch.len() as i64, vec![]);
 
             // 3. Simulate the entire batch for the shard using our helper
             let sim_results = self
@@ -742,8 +980,13 @@ impl HubService for MyHubService {
                         let result = self.submit_message_to_mempool(msg).await;
                         results.push(match result {
                             Ok(message) => {
-                                self.statsd_client.count("rpc.submit_message.success", 1);
-                                self.statsd_client.count("rpc.submit_message_in_flight", -1);
+                                self.statsd_client
+                                    .count("rpc.submit_message.success", 1, vec![]);
+                                self.statsd_client.count(
+                                    "rpc.submit_message_in_flight",
+                                    -1,
+                                    vec![],
+                                );
                                 proto::BulkMessageResponse {
                                     response: Some(
                                         proto::bulk_message_response::Response::Message(message),
@@ -751,8 +994,13 @@ impl HubService for MyHubService {
                                 }
                             }
                             Err(err) => {
-                                self.statsd_client.count("rpc.submit_message.failure", 1);
-                                self.statsd_client.count("rpc.submit_message_in_flight", -1);
+                                self.statsd_client
+                                    .count("rpc.submit_message.failure", 1, vec![]);
+                                self.statsd_client.count(
+                                    "rpc.submit_message_in_flight",
+                                    -1,
+                                    vec![],
+                                );
                                 create_error_response(message_hash_for_error, err)
                             }
                         });

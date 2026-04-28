@@ -9,9 +9,9 @@ mod tests {
     use crate::proto::{FnameTransfer, ShardChunk, UserNameProof};
     use crate::proto::{OnChainEvent, OnChainEventType};
     use crate::storage::db::{PageOptions, RocksDbTransactionBatch};
-    use crate::storage::store::account::{HubEventIdGenerator, UserDataStore};
-    use crate::storage::store::engine::{MessageValidationError, ShardEngine};
-    use crate::storage::store::mempool_poller::MempoolMessage;
+    use crate::storage::store::account::{HubEventIdGenerator, HubEventStorageExt, UserDataStore};
+    use crate::storage::store::engine::{MessageValidationError, ShardEngine, ShardStateChange};
+    use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller};
     use crate::storage::store::stores::StoreLimits;
     use crate::storage::store::test_helper::{
         self, assert_block_confirmed_event, block_event_exists, commit_block_events, commit_event,
@@ -1082,7 +1082,7 @@ mod tests {
             .unwrap();
         let updated_shard_root = engine.get_stores().trie.root_hash().unwrap();
         // Account root is not empty after a message is committed
-        assert_eq!(updated_account_root.len() > 0, true);
+        assert!(!updated_account_root.is_empty());
         assert_ne!(updated_shard_root, shard_root);
 
         let another_fid_event = events_factory::create_onchain_event(FID_FOR_TEST + 1);
@@ -1100,7 +1100,7 @@ mod tests {
             .unwrap();
         let latest_shard_root = engine.get_stores().trie.root_hash().unwrap();
         // Only the account root for the new fid and the shard root is updated, original fid account root remains the same
-        assert_eq!(account_root_another_fid.len() > 0, true);
+        assert!(!account_root_another_fid.is_empty());
         assert_eq!(account_root_original_fid, updated_account_root);
         assert_ne!(latest_shard_root, updated_shard_root);
     }
@@ -1316,7 +1316,7 @@ mod tests {
         let result = engine.simulate_bulk_messages(&messages_batch);
 
         assert!(
-            result.len() == 0,
+            result.is_empty(),
             "Simulating an empty batch should succeed"
         );
 
@@ -3798,6 +3798,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_cached_txn_validation_with_extra_block_event() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let mut event_rx = engine.get_senders().events_tx.subscribe();
+
+        // Create a heartbeat block event
+        let block_event1 = events_factory::create_heartbeat_event(1);
+
+        // Propose a state change with the block event
+        let state_change = engine.propose_state_change(
+            1,
+            vec![MempoolMessage::BlockEvent {
+                for_shard: 1,
+                message: block_event1.clone(),
+            }],
+            None,
+        );
+
+        // Validate the proposal
+        let height = engine.get_confirmed_height();
+        engine.start_round(height.increment(), Round::Nil);
+        let valid = engine.validate_state_change(&state_change, height.increment());
+        assert!(valid);
+
+        // Create empty shard chunk
+        let new_state_change = ShardStateChange {
+            shard_id: 1,
+            timestamp: state_change.timestamp,
+            new_state_root: state_change.new_state_root,
+            events: vec![],
+            transactions: vec![],
+            version: state_change.version,
+            max_block_event_seqnum: 0,
+        };
+        let chunk =
+            test_helper::state_change_to_shard_chunk(1, height.block_number + 1, &new_state_change);
+        engine.commit_shard_chunk(&chunk).await;
+
+        assert!(!block_event_exists(&engine, &block_event1));
+        let block_confirmed = assert_block_confirmed_event(event_rx.recv().await.unwrap());
+        assert_eq!(block_confirmed.max_block_event_seqnum, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cached_txn_validation_with_missing_block_event() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let mut event_rx = engine.get_senders().events_tx.subscribe();
+
+        // Propose a state change with no block event
+        let state_change = engine.propose_state_change(1, vec![], None);
+
+        // Validate the proposal
+        let height = engine.get_confirmed_height();
+        engine.start_round(height.increment(), Round::Nil);
+        let valid = engine.validate_state_change(&state_change, height.increment());
+        assert!(valid);
+
+        let block_event1 = events_factory::create_heartbeat_event(1);
+        // Create shard chunk with heartbeat event
+        let new_state_change = ShardStateChange {
+            shard_id: 1,
+            timestamp: state_change.timestamp,
+            new_state_root: state_change.new_state_root,
+            events: vec![],
+            transactions: MempoolPoller::create_transactions_from_mempool(vec![
+                MempoolMessage::BlockEvent {
+                    for_shard: 1,
+                    message: block_event1.clone(),
+                },
+            ])
+            .unwrap(),
+            version: state_change.version,
+            max_block_event_seqnum: 1,
+        };
+        let chunk =
+            test_helper::state_change_to_shard_chunk(1, height.block_number + 1, &new_state_change);
+        engine.commit_shard_chunk(&chunk).await;
+
+        assert!(block_event_exists(&engine, &block_event1));
+        let block_confirmed = assert_block_confirmed_event(event_rx.recv().await.unwrap());
+        assert_eq!(block_confirmed.max_block_event_seqnum, 1);
+    }
+
+    #[tokio::test]
     async fn test_storage_lending() {
         let (mut engine, _temp_dir) = test_helper::new_engine().await;
 
@@ -3882,5 +3965,435 @@ mod tests {
             1
         );
         assert!(!message_exists_in_trie(&mut engine, &lend_message))
+    }
+
+    // ----------------------------------------------------------------------------------------
+    // KEY_ADD / KEY_REMOVE BlockEvent replay + downstream-message validation (NEYN-10618 +
+    // NEYN-10626 in-process slice).
+    //
+    // These tests model how a non-shard-0 ShardEngine learns about gasless keys: shard 0
+    // (BlockEngine) merges KEY_ADD / KEY_REMOVE and emits a `MergeMessageEventBody`; shards
+    // 1..N receive those BlockEvents through `propose_state_change`, which dispatches them via
+    // `handle_block_event` → `merge_message`. The replay path bypasses `validate_user_message`
+    // by design — the BlockEvent itself is the authority — but the underlying merge code
+    // still reads on-chain id_register events from the shard's local store, so both FIDs must
+    // already be registered locally.
+    // ----------------------------------------------------------------------------------------
+    mod gasless_key_replay_tests {
+        use super::*;
+        use crate::storage::store::account::{
+            get_active_key, get_gasless_key_owner_fid, get_gasless_key_record, get_last_used_at,
+            ActiveKey,
+        };
+        use alloy_signer_local::PrivateKeySigner;
+
+        const REQUEST_FID: u64 = FID_FOR_TEST + 100;
+
+        fn address_bytes(signer: &PrivateKeySigner) -> Vec<u8> {
+            signer.address().as_slice().to_vec()
+        }
+
+        async fn register_eth(
+            engine: &mut ShardEngine,
+            fid: u64,
+            custody: &PrivateKeySigner,
+            signer: ed25519_dalek::SigningKey,
+        ) {
+            register_user(fid, signer, address_bytes(custody), engine).await;
+        }
+
+        fn build_key_add(
+            fid_custody: &PrivateKeySigner,
+            app_custody: &PrivateKeySigner,
+            envelope: &ed25519_dalek::SigningKey,
+            scopes: Vec<proto::MessageType>,
+            ttl: u32,
+            nonce: u32,
+            timestamp: u32,
+        ) -> proto::Message {
+            messages_factory::keys::create_key_add(
+                FID_FOR_TEST,
+                fid_custody,
+                REQUEST_FID,
+                app_custody,
+                envelope,
+                scopes,
+                ttl,
+                nonce,
+                timestamp + 1_000_000,
+                Some(timestamp),
+            )
+        }
+
+        // -- replay-path tests ------------------------------------------------------------
+
+        #[tokio::test]
+        async fn test_shard_engine_replays_key_add_block_event() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let fid_custody = PrivateKeySigner::random();
+            let app_custody = PrivateKeySigner::random();
+            let envelope = generate_signer();
+            let envelope_pubkey = envelope.verifying_key().to_bytes();
+
+            register_eth(&mut engine, FID_FOR_TEST, &fid_custody, generate_signer()).await;
+            register_eth(&mut engine, REQUEST_FID, &app_custody, generate_signer()).await;
+
+            let timestamp = messages_factory::farcaster_time();
+            let key_add = build_key_add(
+                &fid_custody,
+                &app_custody,
+                &envelope,
+                vec![proto::MessageType::CastAdd],
+                3600,
+                1,
+                timestamp,
+            );
+            let block_event = create_merge_message_event(key_add.clone(), 1);
+            commit_block_events(&mut engine, vec![&block_event]).await;
+
+            let stores = engine.get_stores();
+            let txn = RocksDbTransactionBatch::new();
+            let record = get_gasless_key_record(&stores.db, &txn, FID_FOR_TEST, &envelope_pubkey)
+                .unwrap()
+                .expect("gasless record must materialize on the shard via replay");
+            assert_eq!(record.request_fid, REQUEST_FID);
+            assert_eq!(
+                get_gasless_key_owner_fid(&stores.db, &txn, &envelope_pubkey).unwrap(),
+                Some(FID_FOR_TEST),
+            );
+            assert_eq!(
+                get_last_used_at(&stores.db, &txn, FID_FOR_TEST, &envelope_pubkey).unwrap(),
+                Some(timestamp),
+            );
+        }
+
+        #[tokio::test]
+        async fn test_shard_engine_skips_pre_feature_block_event_replay() {
+            // Rollback safety: a validator running on Mainnet (where V16 / GaslessSigners is
+            // not yet active) that receives a BlockEvent wrapping a KEY_ADD must reject the
+            // replay rather than merging into a pre-feature shard. The gate inside
+            // `handle_block_event` matches the analogous live-admission gate in
+            // `validate_user_message`, returning `InvalidMessageType` so the caller's `warn!`
+            // surfaces the unusual replay attempt rather than silently no-op'ing.
+            let (mut engine, _temp_dir) = test_helper::new_engine_with_options(EngineOptions {
+                network: Some(FarcasterNetwork::Mainnet),
+                ..Default::default()
+            })
+            .await;
+            let fid_custody = PrivateKeySigner::random();
+            let app_custody = PrivateKeySigner::random();
+            let envelope = generate_signer();
+            let envelope_pubkey = envelope.verifying_key().to_bytes();
+
+            register_eth(&mut engine, FID_FOR_TEST, &fid_custody, generate_signer()).await;
+            register_eth(&mut engine, REQUEST_FID, &app_custody, generate_signer()).await;
+
+            let timestamp = messages_factory::farcaster_time();
+            let key_add = build_key_add(
+                &fid_custody,
+                &app_custody,
+                &envelope,
+                vec![proto::MessageType::CastAdd],
+                3600,
+                1,
+                timestamp,
+            );
+            // BlockEvent default block_timestamp=0 → version_for(0, Mainnet) is pre-V16, so
+            // GaslessSigners is disabled and the gate inside handle_block_event must fire.
+            let block_event = create_merge_message_event(key_add, 1);
+            commit_block_events(&mut engine, vec![&block_event]).await;
+
+            // No gasless record materializes — the merge was short-circuited before any state
+            // writes happened.
+            let stores = engine.get_stores();
+            let txn = RocksDbTransactionBatch::new();
+            assert!(
+                get_gasless_key_record(&stores.db, &txn, FID_FOR_TEST, &envelope_pubkey)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        #[tokio::test]
+        async fn test_shard_engine_replays_key_remove_block_event() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let fid_custody = PrivateKeySigner::random();
+            let app_custody = PrivateKeySigner::random();
+            let envelope = generate_signer();
+            let envelope_pubkey: [u8; 32] = envelope.verifying_key().to_bytes();
+
+            register_eth(&mut engine, FID_FOR_TEST, &fid_custody, generate_signer()).await;
+            register_eth(&mut engine, REQUEST_FID, &app_custody, generate_signer()).await;
+
+            let timestamp = messages_factory::farcaster_time();
+            let key_add = build_key_add(
+                &fid_custody,
+                &app_custody,
+                &envelope,
+                vec![proto::MessageType::CastAdd],
+                3600,
+                1,
+                timestamp,
+            );
+            let add_block_event = create_merge_message_event(key_add, 1);
+            commit_block_events(&mut engine, vec![&add_block_event]).await;
+
+            let key_remove = messages_factory::keys::create_key_remove_custody(
+                FID_FOR_TEST,
+                &fid_custody,
+                &test_helper::default_signer(),
+                &envelope_pubkey,
+                2,
+                timestamp + 1_000_000,
+                Some(timestamp + 1),
+            );
+            let remove_block_event = create_merge_message_event(key_remove, 2);
+            commit_block_events(&mut engine, vec![&remove_block_event]).await;
+
+            let stores = engine.get_stores();
+            let txn = RocksDbTransactionBatch::new();
+            assert!(
+                get_gasless_key_record(&stores.db, &txn, FID_FOR_TEST, &envelope_pubkey)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                get_gasless_key_owner_fid(&stores.db, &txn, &envelope_pubkey)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                get_last_used_at(&stores.db, &txn, FID_FOR_TEST, &envelope_pubkey).unwrap(),
+                None,
+            );
+        }
+
+        // -- downstream message e2e (cast signed by gasless key after replay) -------------
+
+        #[tokio::test]
+        async fn test_cast_signed_by_gasless_key_validates_after_replay() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let fid_custody = PrivateKeySigner::random();
+            let app_custody = PrivateKeySigner::random();
+            let gasless = generate_signer();
+
+            register_eth(&mut engine, FID_FOR_TEST, &fid_custody, generate_signer()).await;
+            register_eth(&mut engine, REQUEST_FID, &app_custody, generate_signer()).await;
+
+            let timestamp = messages_factory::farcaster_time();
+            let key_add = build_key_add(
+                &fid_custody,
+                &app_custody,
+                &gasless,
+                vec![proto::MessageType::CastAdd],
+                3600,
+                1,
+                timestamp,
+            );
+            commit_block_events(&mut engine, vec![&create_merge_message_event(key_add, 1)]).await;
+
+            // Cast signed by the gasless key validates and merges. Active-key lookup must
+            // surface the gasless record (NEYN-10580 wired this).
+            let cast = messages_factory::casts::create_cast_add(
+                FID_FOR_TEST,
+                "hello from gasless",
+                Some(timestamp + 2),
+                Some(&gasless),
+            );
+            commit_message(&mut engine, &cast).await;
+            assert!(message_exists_in_trie(&mut engine, &cast));
+
+            // Sanity check: active-key resolution returns Gasless, not OnChain.
+            let txn = RocksDbTransactionBatch::new();
+            let stores = engine.get_stores();
+            let pubkey = gasless.verifying_key().to_bytes();
+            let active = get_active_key(
+                &stores.onchain_event_store,
+                &stores.db,
+                &txn,
+                FID_FOR_TEST,
+                &pubkey,
+            )
+            .unwrap()
+            .expect("active key must resolve");
+            assert!(matches!(active, ActiveKey::Gasless { .. }));
+        }
+
+        #[tokio::test]
+        async fn test_cast_with_unscoped_message_type_rejected() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let fid_custody = PrivateKeySigner::random();
+            let app_custody = PrivateKeySigner::random();
+            let gasless = generate_signer();
+
+            register_eth(&mut engine, FID_FOR_TEST, &fid_custody, generate_signer()).await;
+            register_eth(&mut engine, REQUEST_FID, &app_custody, generate_signer()).await;
+
+            let timestamp = messages_factory::farcaster_time();
+            // Scope KEY_ADD to CastAdd only.
+            let key_add = build_key_add(
+                &fid_custody,
+                &app_custody,
+                &gasless,
+                vec![proto::MessageType::CastAdd],
+                3600,
+                1,
+                timestamp,
+            );
+            commit_block_events(&mut engine, vec![&create_merge_message_event(key_add, 1)]).await;
+
+            // Reaction signed by the same gasless key is out-of-scope → admit check rejects.
+            let reaction = messages_factory::reactions::create_reaction_add(
+                FID_FOR_TEST,
+                ReactionType::Like,
+                Target::TargetCastId(CastId {
+                    fid: FID2_FOR_TEST,
+                    hash: vec![1; 20],
+                }),
+                Some(timestamp + 2),
+                Some(&gasless),
+            );
+            let state_change = engine.propose_state_change(
+                engine.shard_id(),
+                vec![MempoolMessage::UserMessage(reaction.clone())],
+                None,
+            );
+            // The reaction must not produce a successful merge.
+            assert!(!message_exists_in_trie_after(&mut engine, &state_change, &reaction).await);
+        }
+
+        #[tokio::test]
+        async fn test_cast_after_key_remove_rejected() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let fid_custody = PrivateKeySigner::random();
+            let app_custody = PrivateKeySigner::random();
+            let gasless = generate_signer();
+            let pubkey: [u8; 32] = gasless.verifying_key().to_bytes();
+
+            register_eth(&mut engine, FID_FOR_TEST, &fid_custody, generate_signer()).await;
+            register_eth(&mut engine, REQUEST_FID, &app_custody, generate_signer()).await;
+
+            let timestamp = messages_factory::farcaster_time();
+            let key_add = build_key_add(
+                &fid_custody,
+                &app_custody,
+                &gasless,
+                vec![proto::MessageType::CastAdd],
+                3600,
+                1,
+                timestamp,
+            );
+            commit_block_events(&mut engine, vec![&create_merge_message_event(key_add, 1)]).await;
+
+            // First cast accepted while key is live.
+            let cast1 = messages_factory::casts::create_cast_add(
+                FID_FOR_TEST,
+                "before revoke",
+                Some(timestamp + 1),
+                Some(&gasless),
+            );
+            commit_message(&mut engine, &cast1).await;
+            assert!(message_exists_in_trie(&mut engine, &cast1));
+
+            // KEY_REMOVE replays.
+            let key_remove = messages_factory::keys::create_key_remove_custody(
+                FID_FOR_TEST,
+                &fid_custody,
+                &test_helper::default_signer(),
+                &pubkey,
+                2,
+                timestamp + 1_000_000,
+                Some(timestamp + 2),
+            );
+            commit_block_events(
+                &mut engine,
+                vec![&create_merge_message_event(key_remove, 2)],
+            )
+            .await;
+
+            // Subsequent cast signed by the (now-revoked) gasless key must be rejected.
+            let cast2 = messages_factory::casts::create_cast_add(
+                FID_FOR_TEST,
+                "after revoke",
+                Some(timestamp + 3),
+                Some(&gasless),
+            );
+            let state_change = engine.propose_state_change(
+                engine.shard_id(),
+                vec![MempoolMessage::UserMessage(cast2.clone())],
+                None,
+            );
+            assert!(!message_exists_in_trie_after(&mut engine, &state_change, &cast2).await);
+        }
+
+        #[tokio::test]
+        async fn test_cast_after_ttl_expiry_rejected() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let fid_custody = PrivateKeySigner::random();
+            let app_custody = PrivateKeySigner::random();
+            let gasless = generate_signer();
+
+            register_eth(&mut engine, FID_FOR_TEST, &fid_custody, generate_signer()).await;
+            register_eth(&mut engine, REQUEST_FID, &app_custody, generate_signer()).await;
+
+            // Anchor in the past so the "1000-seconds-later" expired-cast block timestamp
+            // is still ≤ FarcasterTime::current() at commit time. ShardEngine commit metrics
+            // panic on a future block timestamp (block_delay underflows).
+            let timestamp = messages_factory::farcaster_time() - 2000;
+            // Short TTL of 10 seconds — sliding window starts at message.timestamp.
+            let key_add = build_key_add(
+                &fid_custody,
+                &app_custody,
+                &gasless,
+                vec![proto::MessageType::CastAdd],
+                10,
+                1,
+                timestamp,
+            );
+            commit_block_events(&mut engine, vec![&create_merge_message_event(key_add, 1)]).await;
+
+            // Cast at timestamp+5 (within TTL) — accepted, bumps last_used_at to now.
+            let cast_ok = messages_factory::casts::create_cast_add(
+                FID_FOR_TEST,
+                "within ttl",
+                Some(timestamp + 5),
+                Some(&gasless),
+            );
+            commit_message_at(
+                &mut engine,
+                &cast_ok,
+                &FarcasterTime::new((timestamp + 5) as u64),
+            )
+            .await;
+            assert!(message_exists_in_trie(&mut engine, &cast_ok));
+
+            // Cast well past last_used_at + ttl — sliding-TTL bump rejects.
+            let cast_expired = messages_factory::casts::create_cast_add(
+                FID_FOR_TEST,
+                "past ttl",
+                Some(timestamp + 1000),
+                Some(&gasless),
+            );
+            let state_change = engine.propose_state_change(
+                engine.shard_id(),
+                vec![MempoolMessage::UserMessage(cast_expired.clone())],
+                Some(FarcasterTime::new((timestamp + 1000) as u64)),
+            );
+            assert!(!message_exists_in_trie_after(&mut engine, &state_change, &cast_expired).await);
+        }
+
+        /// Helper: validate + commit an already-built state_change and report whether `msg`
+        /// landed in the trie. Used by failure tests where we don't want a panic on rejection
+        /// (which `commit_message` does).
+        async fn message_exists_in_trie_after(
+            engine: &mut ShardEngine,
+            state_change: &ShardStateChange,
+            msg: &proto::Message,
+        ) -> bool {
+            test_helper::validate_and_commit_state_change(engine, state_change).await;
+            TrieKey::for_message(msg)
+                .iter()
+                .all(|key| engine.trie_key_exists(trie_ctx(), key))
+        }
     }
 }

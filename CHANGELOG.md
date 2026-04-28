@@ -2,6 +2,54 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.3] - 2026-01-20
+
+### 🐛 Bug Fixes
+
+- Skip committed block if commit certificate is empty (#747)
+- Provide correct validator sets to block receiver (#748)
+
+## [0.11.2] - 2026-01-08
+
+### 🐛 Bug Fixes
+
+- Recompute cached transaction if block events don't match (#741)
+- Bump default ulimits for snapchain nodes (#743)
+
+## [0.11.1] - 2026-01-05
+
+### 🚀 Features
+
+- Separate proto files into standalone crate (#729)
+
+### 🐛 Bug Fixes
+
+- Forward date the activation time in testnet for protocol v10 (#728)
+- Support storage lends in replication (#731)
+- Replication client checks to account for storage lend messages (#735)
+- Enable manually triggering reingest for a heartbeat event (#737)
+
+### ⚙️ Miscellaneous Tasks
+
+- Add signer fid tag to metrics (#733)
+- Take a replication snapshot if there are none (#734)
+
+## [0.11.0] - 2025-12-03
+
+### 🚀 Features
+
+- Increase message size limit for username proofs (#722)
+
+### 🐛 Bug Fixes
+
+- Set correct ports for replication peer addresses (#724)
+
+### ⚙️ Miscellaneous Tasks
+
+- Add more information about lent and borrowed units to rpc (#717)
+- Add more metrics to mempool (#718)
+- Activate decentralized sync entrypoint (#723)
+
 ## [0.10.0] - 2025-10-22
 
 ### 🚀 Features

@@ -692,4 +692,32 @@ mod tests {
 
         assert_validation_error(&msg, ValidationError::TimestampTooFarInThePast);
     }
+
+    #[test]
+    fn test_username_proof_max_message_size() {
+        let long_name = "a".repeat(20000); // Much larger than MAX_DATA_BYTES_FOR_USERNAME_PROOF (16384)
+        let proof_message = messages_factory::username_proof::create_username_proof(
+            123,
+            UserNameType::UsernameTypeEnsL1,
+            long_name,
+            hex::decode("849151d7D0bF1F34b70d5caD5149D28CC2308bf1").unwrap(),
+            "signature".to_string(),
+            messages_factory::farcaster_time() as u64,
+            None,
+        );
+        assert_validation_error(&proof_message, ValidationError::DataBytesTooLong(16384));
+
+        // Create a valid username proof that's within the limit
+        let valid_name = "valid.eth".to_string();
+        let valid_proof_message = messages_factory::username_proof::create_username_proof(
+            123,
+            UserNameType::UsernameTypeEnsL1,
+            valid_name,
+            hex::decode("849151d7D0bF1F34b70d5caD5149D28CC2308bf1").unwrap(),
+            "signature".to_string(),
+            messages_factory::farcaster_time() as u64,
+            None,
+        );
+        assert_valid(&valid_proof_message);
+    }
 }

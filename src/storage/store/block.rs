@@ -96,7 +96,7 @@ fn get_block_page_by_prefix(
     )
     .map_err(|_| BlockStorageError::TooManyBlocksInResult)?; // TODO: Return the right error
 
-    let next_page_token = if last_key.len() > 0 {
+    let next_page_token = if !last_key.is_empty() {
         Some(last_key)
     } else {
         None
@@ -320,6 +320,7 @@ impl BlockStore {
                 Some(|total_pruned: u32| {
                     info!("Pruning blocks... pruned: {}", total_pruned);
                 }),
+                false, // skip_cache
             )
             .await
             .map_err(|_| BlockStorageError::TooManyBlocksInResult)?; // TODO: Return the right error

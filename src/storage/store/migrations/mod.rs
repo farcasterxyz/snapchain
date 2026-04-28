@@ -5,7 +5,7 @@ use crate::{core::error::HubError, storage::constants::RootPrefix};
 use async_trait::async_trait;
 use std::sync::Arc;
 use thiserror::Error;
-use tracing::{error, info};
+use tracing::info;
 
 mod m1_fix_fname_index;
 

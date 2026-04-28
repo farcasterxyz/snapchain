@@ -50,8 +50,16 @@ impl StatsdClientWrapper {
         }
     }
 
-    pub fn count(&self, key: &str, value: i64) {
-        _ = self.client.count(key, value)
+    pub fn count(&self, key: &str, value: i64, extra_tags: Vec<(&str, &str)>) {
+        if self.use_tags {
+            let mut metric = self.client.count_with_tags(key, value);
+            for (key, value) in extra_tags {
+                metric = metric.with_tag(key, value);
+            }
+            metric.send();
+        } else {
+            _ = self.client.count(key, value)
+        }
     }
 
     pub fn gauge_with_shard(&self, shard_id: u32, key: &str, value: u64) {
@@ -92,5 +100,26 @@ impl StatsdClientWrapper {
 
     pub fn time(&self, key: &str, value: u64) {
         _ = self.client.time(key, value)
+    }
+
+    pub fn emit_jemalloc_stats(&self) {
+        #[cfg(not(target_env = "msvc"))]
+        {
+            use tikv_jemalloc_ctl::stats;
+            if tikv_jemalloc_ctl::epoch::advance().is_ok() {
+                if let Ok(allocated) = stats::allocated::read() {
+                    self.gauge("jemalloc.allocated", allocated as u64, vec![]);
+                }
+                if let Ok(active) = stats::active::read() {
+                    self.gauge("jemalloc.active", active as u64, vec![]);
+                }
+                if let Ok(resident) = stats::resident::read() {
+                    self.gauge("jemalloc.resident", resident as u64, vec![]);
+                }
+                if let Ok(retained) = stats::retained::read() {
+                    self.gauge("jemalloc.retained", retained as u64, vec![]);
+                }
+            }
+        }
     }
 }

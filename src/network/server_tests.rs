@@ -9,6 +9,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use tokio::time::{sleep, timeout};
 
+    use crate::connectors::fname::{FetchError, FnameTransferLookup};
     use crate::connectors::onchain_events::{Chain, ChainAPI, ChainClients};
     use crate::core::validations::{self, verification::VerificationAddressClaim};
     use crate::mempool::mempool::{self, Mempool};
@@ -17,14 +18,14 @@ mod tests {
     use crate::network::server::MyHubService;
     use crate::proto::hub_service_server::HubService;
     use crate::proto::{
-        self, Block, EventRequest, EventsRequest, FarcasterNetwork, HubEvent, HubEventType,
-        OnChainEventType, ShardChunk, StorageUnitType, SubmitBulkMessagesRequest,
+        self, Block, EventRequest, EventsRequest, FarcasterNetwork, FnameTransfer, HubEvent,
+        HubEventType, OnChainEventType, ShardChunk, StorageUnitType, SubmitBulkMessagesRequest,
         SubmitBulkMessagesResponse, UserDataType, UserNameProof, UserNameType,
         UsernameProofRequest, VerificationAddAddressBody,
     };
     use crate::proto::{FidRequest, SubscribeRequest};
     use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
-    use crate::storage::store::account::{HubEventIdGenerator, SEQUENCE_BITS};
+    use crate::storage::store::account::{HubEventIdGenerator, HubEventStorageExt, SEQUENCE_BITS};
     use crate::storage::store::block_engine::BlockEngine;
     use crate::storage::store::block_engine_test_helpers::{BlockEngineOptions, Validity};
     use crate::storage::store::engine::{Senders, ShardEngine};
@@ -46,15 +47,13 @@ mod tests {
     const USER_NAME: &str = "user";
     const PASSWORD: &str = "password";
 
-    impl FidRequest {
-        fn for_fid(fid: u64) -> Request<Self> {
-            Request::new(FidRequest {
-                fid,
-                page_size: None,
-                page_token: None,
-                reverse: None,
-            })
-        }
+    fn fid_request(fid: u64) -> Request<FidRequest> {
+        Request::new(FidRequest {
+            fid,
+            page_size: None,
+            page_token: None,
+            reverse: None,
+        })
     }
 
     struct MockL1Client {}
@@ -300,6 +299,7 @@ mod tests {
                 chain_clients,
                 "0.1.2".to_string(),
                 "asddef".to_string(),
+                None,
             ),
             shard_decision_tx,
             block_decision_tx,
@@ -682,6 +682,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_authentication() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let user1_pass = format!("pw1-{now}");
+        let user2_pass = format!("pw2-{now}");
+        let auth_config = format!("user1:{user1_pass},user2:{user2_pass}");
+
         let (
             _stores,
             _senders,
@@ -690,7 +698,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(Some("user1:pass1,user2:pass2".to_string())).await;
+        ) = make_server(Some(auth_config)).await;
         let message = messages_factory::casts::create_cast_add(123, "test", None, None);
 
         let no_auth_request = Request::new(message.clone());
@@ -700,7 +708,7 @@ mod tests {
         assert_eq!(response.message(), "missing authorization header");
 
         let mut invalid_creds_request = Request::new(message.clone());
-        add_auth_header(&mut invalid_creds_request, "user3", "pass1");
+        add_auth_header(&mut invalid_creds_request, "user3", &user1_pass);
         let response = service
             .submit_message(invalid_creds_request)
             .await
@@ -709,7 +717,7 @@ mod tests {
         assert_eq!(response.message(), "invalid username or password");
 
         let mut valid_creds_request = Request::new(message.clone());
-        add_auth_header(&mut valid_creds_request, "user2", "pass2");
+        add_auth_header(&mut valid_creds_request, "user2", &user2_pass);
         let response = service
             .submit_message(valid_creds_request)
             .await
@@ -1061,6 +1069,105 @@ mod tests {
         // Now the user data add should succeed
         let result = submit_message(&service, user_data_add.clone()).await;
         assert_eq!(result.unwrap().into_inner(), user_data_add);
+    }
+
+    // Mock fname registry that simulates the side-effect of a real registry
+    // poll: the lookup itself commits the transfer to the engine, mirroring the
+    // consensus path (mempool -> block -> engine merge) that the unit test
+    // fixture doesn't run. The recovery path under test still pushes the
+    // transfer through the mempool; the commit-on-lookup is what ensures the
+    // poll loop eventually sees the proof in the store.
+    struct MockFnameLookup {
+        engine: Arc<tokio::sync::Mutex<ShardEngine>>,
+        transfer: FnameTransfer,
+    }
+
+    #[async_trait]
+    impl FnameTransferLookup for MockFnameLookup {
+        async fn lookup_fname(&self, _fname: &str) -> Result<Vec<FnameTransfer>, FetchError> {
+            let mut engine = self.engine.lock().await;
+            test_helper::commit_fname_transfer(&mut *engine, &self.transfer).await;
+            Ok(vec![self.transfer.clone()])
+        }
+    }
+
+    #[tokio::test]
+    async fn test_user_data_add_username_recovers_when_fname_transfer_pending() {
+        let (
+            _stores,
+            _senders,
+            [_engine1, engine2],
+            _block_engine,
+            mut service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+
+        // FID_FOR_TEST is 1234 — even, so EvenOddRouterForTest routes it to shard 2,
+        // which is backed by engine2's RocksDB.
+        let fid = test_helper::FID_FOR_TEST;
+        let fname = "acp".to_string();
+        let owner = hex::decode("711aa8ec273dae42e51732fe1be2b15ee53b00a4").unwrap();
+
+        // Hardcoded fname transfer signed by the default fname signer, lifted
+        // from test_merge_fname so we don't have to spin up a custom signer.
+        let target_transfer = FnameTransfer {
+            id: 1234,
+            from_fid: 0,
+            proof: Some(UserNameProof {
+                timestamp: 1660233642,
+                name: fname.as_bytes().to_vec(),
+                owner: owner.clone(),
+                signature: hex::decode("ebd1b040a4961c5ea751e8ec867d4af6fdbf80ade6775d33dad94ab1c0423dc64a2f684d0e48b89f2958a2385b91743647161ade04e6628a166b5bd1579d86ff1b").unwrap(),
+                fid,
+                r#type: UserNameType::UsernameTypeFname as i32,
+            }),
+        };
+
+        let engine2 = Arc::new(tokio::sync::Mutex::new(engine2));
+        {
+            let mut engine = engine2.lock().await;
+            test_helper::register_user(
+                fid,
+                test_helper::default_signer(),
+                owner.clone(),
+                &mut *engine,
+            )
+            .await;
+        }
+
+        let user_data_add = messages_factory::user_data::create_user_data_add(
+            fid,
+            UserDataType::Username,
+            &fname,
+            None,
+            None,
+        );
+
+        // Without recovery wired, submit_message fails because the fname proof
+        // hasn't been ingested yet — the race condition this fix targets.
+        let err = submit_message(&service, user_data_add.clone())
+            .await
+            .expect_err("expected MissingFname error");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(
+            err.message().contains("fname is not registered"),
+            "unexpected error message: {}",
+            err.message()
+        );
+
+        // Wire up the mock lookup. The next submit_message should detect
+        // MissingFname, drive the lookup (which lands the proof), and succeed
+        // on retry within the recovery budget.
+        service.set_fname_lookup_for_test(Arc::new(MockFnameLookup {
+            engine: engine2.clone(),
+            transfer: target_transfer.clone(),
+        }));
+
+        let response = submit_message(&service, user_data_add.clone())
+            .await
+            .expect("submit_message should succeed after MissingFname recovery");
+        assert_eq!(response.into_inner(), user_data_add);
     }
 
     #[tokio::test]
@@ -1571,7 +1678,7 @@ mod tests {
         ) = make_server(None).await;
 
         let response = service
-            .get_current_storage_limits_by_fid(FidRequest::for_fid(SHARD1_FID))
+            .get_current_storage_limits_by_fid(fid_request(SHARD1_FID))
             .await
             .unwrap();
         assert_eq!(response.get_ref().units, 0);
@@ -1639,7 +1746,7 @@ mod tests {
         .await;
 
         let response = service
-            .get_current_storage_limits_by_fid(FidRequest::for_fid(SHARD1_FID))
+            .get_current_storage_limits_by_fid(fid_request(SHARD1_FID))
             .await
             .unwrap();
         assert_eq!(response.get_ref().units, 3);
@@ -2076,10 +2183,37 @@ mod tests {
             page_token: response.get_ref().next_page_token.clone(),
             reverse: None,
         });
-        let response = service.get_on_chain_signers_by_fid(request).await.unwrap();
-        let events = response.get_ref().events.clone();
+        let paginated_response = service.get_on_chain_signers_by_fid(request).await.unwrap();
+        let events = paginated_response.get_ref().events.clone();
         // only 2 keys total, non-signer key is not returned, removed key is not returned
-        assert_eq!(events.len(), 1);
+        if events.len() != 1 {
+            // Re-query without pagination to distinguish "store missing the second add" from
+            // "pagination dropped it" — this test has flaked here historically.
+            let all_response = service
+                .get_on_chain_signers_by_fid(Request::new(FidRequest {
+                    fid,
+                    page_size: None,
+                    page_token: None,
+                    reverse: None,
+                }))
+                .await
+                .unwrap();
+            let all_events = &all_response.get_ref().events;
+            panic!(
+                "expected 1 paginated event for fid={fid}, got {}. \
+                 Paginated types={:?}, block_numbers={:?}. \
+                 Full set has {} events: types={:?}, block_numbers={:?}",
+                events.len(),
+                events.iter().map(|e| e.r#type()).collect::<Vec<_>>(),
+                events.iter().map(|e| e.block_number).collect::<Vec<_>>(),
+                all_events.len(),
+                all_events.iter().map(|e| e.r#type()).collect::<Vec<_>>(),
+                all_events
+                    .iter()
+                    .map(|e| e.block_number)
+                    .collect::<Vec<_>>(),
+            );
+        }
         assert!(events
             .iter()
             .all(|event| event.r#type() == OnChainEventType::EventTypeSigner));
