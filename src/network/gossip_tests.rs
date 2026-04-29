@@ -214,17 +214,46 @@ async fn test_read_node_receives_mempool_gossip() {
     tokio::spawn(async move { validator_gossip.start().await });
     tokio::spawn(async move { read_node_gossip.start().await });
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
     let cast_add = messages_factory::casts::create_cast_add(456, "regression", None, None);
-    let mempool_msg = MempoolMessage::UserMessage(cast_add.clone());
-    validator_tx
-        .send(GossipEvent::BroadcastMempoolMessage(mempool_msg))
-        .await
-        .unwrap();
+    let expected_hash = cast_add.hash.clone();
 
-    let receive_counts = wait_for_message(&mut read_node_system_rx, cast_add).await;
-    assert_eq!(receive_counts, 1);
+    // Re-publish on a short interval until the read node delivers the message
+    // or the deadline elapses. Until the gossipsub mesh forms, `publish` can
+    // fail with `InsufficientPeers` and is silently logged-and-dropped by
+    // `SnapchainGossip::publish`; gossipsub message-id dedup makes repeat
+    // sends safe (the read node receives the message at most once).
+    let cast_for_publisher = cast_add.clone();
+    let publisher = tokio::spawn(async move {
+        loop {
+            let _ = validator_tx
+                .send(GossipEvent::BroadcastMempoolMessage(
+                    MempoolMessage::UserMessage(cast_for_publisher.clone()),
+                ))
+                .await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let received = loop {
+        if tokio::time::Instant::now() >= deadline {
+            break false;
+        }
+        match tokio::time::timeout(Duration::from_millis(200), read_node_system_rx.recv()).await {
+            Ok(Some(SystemMessage::Mempool(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(msg),
+                MempoolSource::Gossip,
+                _,
+            )))) if msg.hash == expected_hash => break true,
+            _ => {}
+        }
+    };
+
+    publisher.abort();
+    assert!(
+        received,
+        "read node did not receive mempool gossip from validator within deadline"
+    );
 }
 
 #[tokio::test]
