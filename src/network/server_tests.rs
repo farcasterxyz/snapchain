@@ -1589,6 +1589,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_casts_by_parent_returns_none_token_when_exhausted() {
+        // Regression test for the cross-shard pagination bug: when every shard
+        // has finished paginating, the per-shard tokens are all None, but the
+        // server was serializing `[null, null]` and returning it as a page
+        // token. Clients then re-sent it and received the same results again,
+        // looping forever. The token should be None when nothing is left.
+        let (
+            _stores,
+            _senders,
+            [mut engine1, mut engine2],
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        test_helper::register_user(
+            SHARD1_FID,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine1,
+        )
+        .await;
+        test_helper::register_user(
+            SHARD2_FID,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine2,
+        )
+        .await;
+        let original_cast =
+            messages_factory::casts::create_cast_add(SHARD1_FID, "test", None, None);
+        let timestamp = original_cast.data.as_ref().unwrap().timestamp;
+        let reply_shard1 = messages_factory::casts::create_cast_with_parent(
+            SHARD1_FID,
+            "reply shard1",
+            SHARD1_FID,
+            &original_cast.hash,
+            Some(timestamp + 1),
+            None,
+        );
+        let reply_shard2 = messages_factory::casts::create_cast_with_parent(
+            SHARD2_FID,
+            "reply shard2",
+            SHARD1_FID,
+            &original_cast.hash,
+            Some(timestamp + 2),
+            None,
+        );
+        test_helper::commit_message(&mut engine1, &original_cast).await;
+        test_helper::commit_message(&mut engine1, &reply_shard1).await;
+        test_helper::commit_message(&mut engine2, &reply_shard2).await;
+
+        // page_size large enough to drain both shards in one call.
+        let response = service
+            .get_casts_by_parent(Request::new(proto::CastsByParentRequest {
+                parent: Some(proto::casts_by_parent_request::Parent::ParentCastId(
+                    proto::CastId {
+                        fid: SHARD1_FID,
+                        hash: original_cast.hash.clone(),
+                    },
+                )),
+                page_size: Some(10),
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap();
+        test_helper::assert_contains_all_messages(&response, &[&reply_shard1, &reply_shard2]);
+        assert!(
+            response.get_ref().next_page_token.is_none(),
+            "next_page_token should be None when all shards are exhausted, got {:?}",
+            response.get_ref().next_page_token,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_events_returns_none_token_when_exhausted() {
+        // Same regression as test_get_casts_by_parent_returns_none_token_when_exhausted
+        // but exercises the get_events code path so we cover a second call site
+        // of the shared helper.
+        let (
+            stores,
+            _senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+
+        write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 3).await;
+
+        let response = service
+            .get_events(Request::new(proto::EventsRequest {
+                start_id: 0,
+                shard_index: None,
+                stop_id: None,
+                page_size: Some(100),
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap();
+        let response = response.get_ref();
+        assert_eq!(response.events.len(), 3);
+        assert!(
+            response.next_page_token.is_none(),
+            "next_page_token should be None when all shards are exhausted, got {:?}",
+            response.next_page_token,
+        );
+    }
+
+    #[tokio::test]
     async fn test_storage_limits() {
         // Works with no storage
         let (

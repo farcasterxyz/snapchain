@@ -1143,9 +1143,8 @@ pub struct HubEvent {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EventsResponse {
     pub events: Vec<HubEvent>,
-    // TODO: What's the best way to support next page token with multiple shards?
-    // #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
-    // pub next_page_token: Option<String>,
+    #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
 }
 
 #[allow(non_snake_case)]
@@ -1983,12 +1982,9 @@ fn map_proto_messages_response_to_json_paged_response(
             .iter()
             .map(|m| map_proto_message_to_json_message(m.clone()).unwrap())
             .collect(),
-        next_page_token: Some(
-            messages_response
-                .next_page_token
-                .map(|t| BASE64_STANDARD.encode(t))
-                .unwrap_or_else(|| "".to_string()),
-        ),
+        next_page_token: messages_response
+            .next_page_token
+            .map(|t| BASE64_STANDARD.encode(t)),
     })
 }
 
@@ -2968,6 +2964,9 @@ where
                 .iter()
                 .map(|e| map_proto_hub_event_to_json_hub_event(e.clone()).unwrap())
                 .collect(),
+            next_page_token: events_response
+                .next_page_token
+                .map(|t| BASE64_STANDARD.encode(t)),
         })
     }
 
@@ -3556,4 +3555,39 @@ where
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paged_response_omits_next_page_token_when_proto_token_is_none() {
+        let response = proto::MessagesResponse {
+            messages: vec![],
+            next_page_token: None,
+        };
+        let mapped = map_proto_messages_response_to_json_paged_response(response).unwrap();
+        let json = serde_json::to_value(&mapped).unwrap();
+        assert!(
+            json.get("nextPageToken").is_none(),
+            "expected nextPageToken to be omitted, got {json}",
+        );
+    }
+
+    #[test]
+    fn paged_response_base64_encodes_next_page_token_when_present() {
+        let token = vec![0u8, 1, 2, 253, 254, 255];
+        let expected = BASE64_STANDARD.encode(&token);
+        let response = proto::MessagesResponse {
+            messages: vec![],
+            next_page_token: Some(token),
+        };
+        let mapped = map_proto_messages_response_to_json_paged_response(response).unwrap();
+        let json = serde_json::to_value(&mapped).unwrap();
+        assert_eq!(
+            json.get("nextPageToken").and_then(|v| v.as_str()),
+            Some(expected.as_str()),
+        );
+    }
 }
