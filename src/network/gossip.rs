@@ -309,21 +309,24 @@ impl SnapchainGossip {
                 return Err(Box::new(e));
             }
         } else {
-            // Create a Gossipsub topic
             let topic = gossipsub::IdentTopic::new(CONSENSUS_TOPIC);
-            // subscribes to our topic
             let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
             if let Err(e) = result {
                 warn!("Failed to subscribe to topic: {:?}", e);
                 return Err(Box::new(e));
             }
+        }
 
-            let topic = gossipsub::IdentTopic::new(MEMPOOL_TOPIC);
-            let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
-            if let Err(e) = result {
-                warn!("Failed to subscribe to topic: {:?}", e);
-                return Err(Box::new(e));
-            }
+        // Both validators and read nodes join the mempool mesh: validators
+        // consume mempool messages for inclusion in blocks; read nodes accept
+        // client-submitted messages via RPC and need to be useful relays for
+        // them. A node that publishes to a topic without subscribing falls
+        // back to fanout (best-effort, TTL'd, not in the mesh).
+        let topic = gossipsub::IdentTopic::new(MEMPOOL_TOPIC);
+        let result = swarm.behaviour_mut().gossipsub.subscribe(&topic);
+        if let Err(e) = result {
+            warn!("Failed to subscribe to topic: {:?}", e);
+            return Err(Box::new(e));
         }
 
         let topic = gossipsub::IdentTopic::new(CONTACT_INFO);
