@@ -74,7 +74,7 @@ jobs:
         id: version
         run: echo "version=$(awk -F '"' '/^version =/ {print $2}' Cargo.toml)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
           pattern: digest-*
