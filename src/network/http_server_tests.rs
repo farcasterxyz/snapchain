@@ -253,6 +253,20 @@ pub mod tests {
             Ok(Response::new(response))
         }
 
+        async fn get_signer(
+            &self,
+            _request: Request<SignerRequest>,
+        ) -> Result<Response<SignerResponse>, Status> {
+            Ok(Response::new(SignerResponse::default()))
+        }
+
+        async fn get_signers_by_fid(
+            &self,
+            _request: Request<FidRequest>,
+        ) -> Result<Response<SignersByFidResponse>, Status> {
+            Ok(Response::new(SignersByFidResponse::default()))
+        }
+
         async fn get_on_chain_events(
             &self,
             _request: Request<OnChainEventRequest>,

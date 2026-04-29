@@ -968,6 +968,86 @@ pub struct OnChainEventResponse {
     pub next_page_token: Option<String>,
 }
 
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum SignerSource {
+    SIGNER_SOURCE_NONE = 0,
+    SIGNER_SOURCE_ONCHAIN = 1,
+    SIGNER_SOURCE_OFFCHAIN = 2,
+}
+
+/// Unified signer record returned by `/v1/signer` and `/v1/signersByFid`.
+/// Off-chain–only and on-chain–only fields are populated only when the
+/// underlying record carries them; consumers should treat absent fields as
+/// "not applicable for this source" rather than zero/empty.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Signer {
+    pub source: SignerSource,
+    #[serde(with = "serdehex")]
+    pub key: Vec<u8>,
+    #[serde(rename = "keyType")]
+    pub key_type: u32,
+    pub fid: u64,
+
+    #[serde(rename = "addedAt", skip_serializing_if = "Option::is_none")]
+    pub added_at: Option<u64>,
+    #[serde(rename = "lastUsedAt", skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<u32>,
+    #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+
+    /// MessageType variant names (e.g. "MESSAGE_TYPE_CAST_ADD"). Empty for
+    /// on-chain signers.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    #[serde(rename = "requestFid", skip_serializing_if = "Option::is_none")]
+    pub request_fid: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<u32>,
+
+    #[serde(rename = "onChainEvent", skip_serializing_if = "Option::is_none")]
+    pub onchain_event: Option<OnChainEvent>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SignerResponse {
+    pub signer: Signer,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SignersByFidResponse {
+    pub signers: Vec<Signer>,
+    #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
+    /// Total active gasless (off-chain) keys for this FID. Read from the O(1)
+    /// per-FID counter, so it stays accurate regardless of pagination.
+    #[serde(rename = "gaslessSignerCount")]
+    pub gasless_signer_count: u32,
+    /// Per-FID cap on active gasless keys (NEYN-10579). Surfaced so clients
+    /// can render "X/Y" without duplicating the constant.
+    #[serde(rename = "gaslessSignerLimit")]
+    pub gasless_signer_limit: u32,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SignerHttpRequest {
+    pub fid: u64,
+    #[serde(with = "serdehex")]
+    pub signer: Vec<u8>,
+}
+
+impl SignerHttpRequest {
+    pub fn to_proto(self) -> proto::SignerRequest {
+        proto::SignerRequest {
+            fid: self.fid,
+            signer: self.signer,
+        }
+    }
+}
+
 #[allow(non_snake_case)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FidAddressTypeRequest {
@@ -2078,6 +2158,48 @@ fn map_proto_on_chain_event_to_json_on_chain_event(
     })
 }
 
+fn map_proto_signer_to_json_signer(proto_signer: proto::Signer) -> Result<Signer, ErrorResponse> {
+    // Scopes go over the wire as raw `MessageType` ints (mirrors
+    // KeyAddBody.scopes); the HTTP layer expands them into named-variant
+    // strings so JSON consumers don't need a parallel enum table. Unknown
+    // ints are dropped rather than rejected — the engine validates scope
+    // values at KEY_ADD-merge time, so by the time a signer reaches this
+    // mapper any unknown int would have to be a future protobuf addition.
+    let scopes: Vec<String> = proto_signer
+        .scopes
+        .iter()
+        .filter_map(|i| {
+            MessageType::try_from(*i)
+                .ok()
+                .map(|t| t.as_str_name().to_string())
+        })
+        .collect();
+
+    let onchain_event = match proto_signer.onchain_event {
+        Some(event) => Some(map_proto_on_chain_event_to_json_on_chain_event(event)?),
+        None => None,
+    };
+
+    Ok(Signer {
+        source: match proto_signer.source {
+            1 => SignerSource::SIGNER_SOURCE_ONCHAIN,
+            2 => SignerSource::SIGNER_SOURCE_OFFCHAIN,
+            _ => SignerSource::SIGNER_SOURCE_NONE,
+        },
+        key: proto_signer.key,
+        key_type: proto_signer.key_type,
+        fid: proto_signer.fid,
+        added_at: proto_signer.added_at,
+        last_used_at: proto_signer.last_used_at,
+        ttl: proto_signer.ttl,
+        expires_at: proto_signer.expires_at,
+        scopes,
+        request_fid: proto_signer.request_fid,
+        nonce: proto_signer.nonce,
+        onchain_event,
+    })
+}
+
 fn map_proto_hub_event_to_json_hub_event(
     hub_event: proto::HubEvent,
 ) -> Result<HubEvent, ErrorResponse> {
@@ -2252,6 +2374,11 @@ pub trait HubHttpService {
         &self,
         req: FidRequest,
     ) -> Result<OnChainEventResponse, ErrorResponse>;
+    async fn get_signer(&self, req: SignerHttpRequest) -> Result<SignerResponse, ErrorResponse>;
+    async fn get_signers_by_fid(
+        &self,
+        req: FidRequest,
+    ) -> Result<SignersByFidResponse, ErrorResponse>;
     async fn get_on_chain_events_by_fid(
         &self,
         req: OnChainEventRequest,
@@ -2923,6 +3050,55 @@ where
         })
     }
 
+    /// GET /v1/signer
+    async fn get_signer(&self, req: SignerHttpRequest) -> Result<SignerResponse, ErrorResponse> {
+        let grpc_req = tonic::Request::new(req.to_proto());
+        let response = self
+            .service
+            .get_signer(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get signer".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+        let inner = response.into_inner();
+        let signer = inner.signer.ok_or_else(|| ErrorResponse {
+            error: "Signer not found".to_string(),
+            error_detail: None,
+        })?;
+        Ok(SignerResponse {
+            signer: map_proto_signer_to_json_signer(signer)?,
+        })
+    }
+
+    /// GET /v1/signersByFid
+    async fn get_signers_by_fid(
+        &self,
+        req: FidRequest,
+    ) -> Result<SignersByFidResponse, ErrorResponse> {
+        let grpc_req = tonic::Request::new(req.to_proto());
+        let response = self
+            .service
+            .get_signers_by_fid(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get signers by fid".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+        let inner = response.into_inner();
+        let signers = inner
+            .signers
+            .into_iter()
+            .map(map_proto_signer_to_json_signer)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(SignersByFidResponse {
+            signers,
+            next_page_token: inner.next_page_token.map(|t| BASE64_STANDARD.encode(t)),
+            gasless_signer_count: inner.gasless_signer_count,
+            gasless_signer_limit: inner.gasless_signer_limit,
+        })
+    }
+
     /// GET /v1/onChainEventsByFid
     async fn get_on_chain_events_by_fid(
         &self,
@@ -3215,6 +3391,18 @@ where
             (&Method::GET, "/v1/onChainSignersByFid") => {
                 self.handle_request::<FidRequest, OnChainEventResponse, _>(req, |service, req| {
                     Box::pin(async move { service.get_on_chain_signers_by_fid(req).await })
+                })
+                .await
+            }
+            (&Method::GET, "/v1/signer") => {
+                self.handle_request::<SignerHttpRequest, SignerResponse, _>(req, |service, req| {
+                    Box::pin(async move { service.get_signer(req).await })
+                })
+                .await
+            }
+            (&Method::GET, "/v1/signersByFid") => {
+                self.handle_request::<FidRequest, SignersByFidResponse, _>(req, |service, req| {
+                    Box::pin(async move { service.get_signers_by_fid(req).await })
                 })
                 .await
             }

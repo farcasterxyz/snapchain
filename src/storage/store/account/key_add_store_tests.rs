@@ -2,11 +2,12 @@
 mod tests {
     use crate::proto;
     use crate::storage::db;
+    use crate::storage::db::PageOptions;
     use crate::storage::db::RocksDbTransactionBatch;
     use crate::storage::store::account::{
         decrement_gasless_key_count, delete_gasless_key_owner, delete_gasless_key_record,
         get_gasless_key_count, get_gasless_key_owner_fid, get_gasless_key_record,
-        increment_gasless_key_count, make_gasless_key_by_fid_key,
+        increment_gasless_key_count, list_gasless_keys_by_fid, make_gasless_key_by_fid_key,
         make_gasless_key_by_public_key_key, make_gasless_key_count_by_fid_key,
         put_gasless_key_owner, put_gasless_key_record, GaslessKeyRecord,
     };
@@ -402,5 +403,79 @@ mod tests {
 
         let err = get_gasless_key_record(&db, &txn, 7, &KEY_A).unwrap_err();
         assert_eq!(err.code, "internal_error");
+    }
+
+    // ---- list_gasless_keys_by_fid (NEYN-10578) -------------------------------------------
+
+    fn write_record(db: &Arc<db::RocksDB>, fid: u64, key: &[u8; 32], request_fid: u64) {
+        let mut txn = RocksDbTransactionBatch::new();
+        put_gasless_key_record(db, &mut txn, fid, key, &sample_record(request_fid, vec![1]))
+            .unwrap();
+        db.commit(txn).unwrap();
+    }
+
+    #[test]
+    fn list_returns_empty_for_fid_with_no_records() {
+        let (db, _dir) = open_db();
+        let page = list_gasless_keys_by_fid(&db, 7, &PageOptions::default()).unwrap();
+        assert!(page.records.is_empty());
+        assert!(page.next_page_token.is_none());
+    }
+
+    #[test]
+    fn list_returns_records_only_for_requested_fid() {
+        let (db, _dir) = open_db();
+        write_record(&db, 7, &KEY_A, 100);
+        write_record(&db, 7, &KEY_B, 200);
+        write_record(&db, 8, &KEY_A, 300);
+
+        let page = list_gasless_keys_by_fid(&db, 7, &PageOptions::default()).unwrap();
+        assert_eq!(page.records.len(), 2);
+        let request_fids: Vec<u64> = page.records.iter().map(|(_, r)| r.request_fid).collect();
+        assert!(request_fids.contains(&100));
+        assert!(request_fids.contains(&200));
+        assert!(page.next_page_token.is_none());
+    }
+
+    #[test]
+    fn list_paginates_with_resumable_cursor() {
+        let (db, _dir) = open_db();
+        write_record(&db, 7, &KEY_A, 100);
+        write_record(&db, 7, &KEY_B, 200);
+
+        let first = list_gasless_keys_by_fid(
+            &db,
+            7,
+            &PageOptions {
+                page_size: Some(1),
+                page_token: None,
+                reverse: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(first.records.len(), 1);
+        assert!(first.next_page_token.is_some());
+
+        let second = list_gasless_keys_by_fid(
+            &db,
+            7,
+            &PageOptions {
+                page_size: Some(1),
+                page_token: first.next_page_token.clone(),
+                reverse: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(second.records.len(), 1);
+        // The two pages should expose distinct keys.
+        assert_ne!(first.records[0].0, second.records[0].0);
+    }
+
+    #[test]
+    fn list_surfaces_public_key_in_row_tuple() {
+        let (db, _dir) = open_db();
+        write_record(&db, 7, &KEY_A, 100);
+        let page = list_gasless_keys_by_fid(&db, 7, &PageOptions::default()).unwrap();
+        assert_eq!(page.records[0].0, KEY_A.to_vec());
     }
 }

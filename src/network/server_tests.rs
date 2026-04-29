@@ -2143,6 +2143,244 @@ mod tests {
             .all(|event| event.r#type() == OnChainEventType::EventTypeSigner));
     }
 
+    // NEYN-10578 — unified GetSigner / GetSignersByFid surface.
+    //
+    // The gasless-key paths are exercised by writing records directly to the shard's
+    // DB via `put_gasless_key_record` + `put_gasless_key_owner`, mirroring the seam
+    // used by `key_add_store_tests`. This bypasses `merge_key_add` (which requires
+    // a fully-signed EIP-712 KEY_ADD); the merge path itself is covered separately
+    // by `gasless_key_merge_tests`. What we want here is to assert the RPC surface
+    // joins the two stores correctly and shapes the response per the proto.
+    #[tokio::test]
+    async fn test_get_signer_returns_onchain_record() {
+        let (
+            stores,
+            _senders,
+            [mut engine1, _engine2],
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let fid = SHARD1_FID;
+        let signer_key = test_helper::default_signer();
+        let signer_pubkey = signer_key.verifying_key().as_bytes().to_vec();
+        register_user(
+            fid,
+            signer_key,
+            test_helper::default_custody_address(),
+            &mut engine1,
+        )
+        .await;
+        let _ = stores;
+
+        let request = Request::new(proto::SignerRequest {
+            fid,
+            signer: signer_pubkey.clone(),
+        });
+        let response = service.get_signer(request).await.unwrap();
+        let signer = response.into_inner().signer.expect("signer present");
+        assert_eq!(signer.source, proto::SignerSource::Onchain as i32);
+        assert_eq!(signer.key, signer_pubkey);
+        assert_eq!(signer.fid, fid);
+        assert!(signer.added_at.is_some(), "added_at should be populated");
+        assert!(signer.last_used_at.is_none());
+        assert!(signer.scopes.is_empty());
+        assert!(signer.onchain_event.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_get_signer_returns_gasless_record() {
+        use crate::proto::{message_data::Body, KeyAddBody, MessageData, MessageType};
+        use crate::storage::store::account::{
+            put_gasless_key_owner, put_gasless_key_record, GaslessKeyRecord,
+        };
+
+        let (
+            stores,
+            _senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let fid = SHARD1_FID;
+        let envelope = generate_signer();
+        let pubkey: Vec<u8> = envelope.verifying_key().as_bytes().to_vec();
+
+        let key_add = KeyAddBody {
+            key: pubkey.clone(),
+            key_type: 1,
+            custody_signature: vec![0u8; 65],
+            deadline: 1_700_000_000,
+            nonce: 4,
+            metadata: vec![],
+            metadata_type: 1,
+            registration_tx_hash: vec![],
+            scopes: vec![MessageType::CastAdd as i32, MessageType::ReactionAdd as i32],
+            ttl: 86_400,
+        };
+        let message = proto::Message {
+            data: Some(MessageData {
+                r#type: MessageType::KeyAdd as i32,
+                fid,
+                timestamp: 100_000,
+                network: proto::FarcasterNetwork::Devnet as i32,
+                body: Some(Body::KeyAddBody(key_add)),
+            }),
+            hash: vec![0xAB; 20],
+            hash_scheme: 1,
+            signature: vec![0u8; 64],
+            signature_scheme: 2,
+            signer: pubkey.clone(),
+            data_bytes: None,
+        };
+        let record = GaslessKeyRecord {
+            message: Some(message),
+            request_fid: 9152,
+        };
+
+        let shard_stores = stores.get(&1).expect("shard 1 stores");
+        let mut txn = RocksDbTransactionBatch::new();
+        put_gasless_key_record(&shard_stores.db, &mut txn, fid, &pubkey, &record).unwrap();
+        put_gasless_key_owner(&shard_stores.db, &mut txn, &pubkey, fid).unwrap();
+        shard_stores.db.commit(txn).unwrap();
+
+        let response = service
+            .get_signer(Request::new(proto::SignerRequest {
+                fid,
+                signer: pubkey.clone(),
+            }))
+            .await
+            .unwrap();
+        let signer = response.into_inner().signer.expect("signer present");
+        assert_eq!(signer.source, proto::SignerSource::Offchain as i32);
+        assert_eq!(signer.key, pubkey);
+        assert_eq!(signer.ttl, Some(86_400));
+        assert_eq!(signer.nonce, Some(4));
+        assert_eq!(signer.request_fid, Some(9152));
+        // `added_at` is reported as Unix epoch seconds. The KEY_ADD message was
+        // stamped at Farcaster-time second 100_000, so the unified Signer
+        // surfaces FARCASTER_EPOCH/1000 + 100_000.
+        assert_eq!(
+            signer.added_at,
+            Some(100_000 + crate::core::types::FARCASTER_EPOCH / 1000)
+        );
+        assert_eq!(
+            signer.scopes,
+            vec![MessageType::CastAdd as i32, MessageType::ReactionAdd as i32,]
+        );
+        // No CAST has been merged through this key, so last_used_at and the
+        // computed expires_at should both be absent.
+        assert!(signer.last_used_at.is_none());
+        assert!(signer.expires_at.is_none());
+        assert!(signer.onchain_event.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_signers_by_fid_unions_onchain_and_gasless() {
+        use crate::proto::{message_data::Body, KeyAddBody, MessageData, MessageType};
+        use crate::storage::store::account::{
+            increment_gasless_key_count, put_gasless_key_owner, put_gasless_key_record,
+            GaslessKeyRecord,
+        };
+
+        let (
+            stores,
+            _senders,
+            [mut engine1, _engine2],
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let fid = SHARD1_FID;
+
+        let onchain_key = test_helper::default_signer();
+        let onchain_pubkey = onchain_key.verifying_key().as_bytes().to_vec();
+        register_user(
+            fid,
+            onchain_key,
+            test_helper::default_custody_address(),
+            &mut engine1,
+        )
+        .await;
+
+        let gasless_envelope = generate_signer();
+        let gasless_pubkey: Vec<u8> = gasless_envelope.verifying_key().as_bytes().to_vec();
+        let key_add = KeyAddBody {
+            key: gasless_pubkey.clone(),
+            key_type: 1,
+            custody_signature: vec![0u8; 65],
+            deadline: 1_700_000_000,
+            nonce: 1,
+            metadata: vec![],
+            metadata_type: 1,
+            registration_tx_hash: vec![],
+            scopes: vec![MessageType::CastAdd as i32],
+            ttl: 3_600,
+        };
+        let record = GaslessKeyRecord {
+            message: Some(proto::Message {
+                data: Some(MessageData {
+                    r#type: MessageType::KeyAdd as i32,
+                    fid,
+                    timestamp: 50_000,
+                    network: proto::FarcasterNetwork::Devnet as i32,
+                    body: Some(Body::KeyAddBody(key_add)),
+                }),
+                hash: vec![0xCD; 20],
+                hash_scheme: 1,
+                signature: vec![0u8; 64],
+                signature_scheme: 2,
+                signer: gasless_pubkey.clone(),
+                data_bytes: None,
+            }),
+            request_fid: 7777,
+        };
+        let shard_stores = stores.get(&1).expect("shard 1 stores");
+        let mut txn = RocksDbTransactionBatch::new();
+        put_gasless_key_record(&shard_stores.db, &mut txn, fid, &gasless_pubkey, &record).unwrap();
+        put_gasless_key_owner(&shard_stores.db, &mut txn, &gasless_pubkey, fid).unwrap();
+        // Bump the per-FID gasless counter to mirror what `merge_key_add` would do —
+        // the RPC reads it directly and exposes it as `gasless_signer_count`.
+        increment_gasless_key_count(&shard_stores.db, &mut txn, fid).unwrap();
+        shard_stores.db.commit(txn).unwrap();
+
+        let response = service
+            .get_signers_by_fid(Request::new(FidRequest {
+                fid,
+                page_size: None,
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap();
+        let body = response.into_inner();
+        let signers = &body.signers;
+        assert_eq!(body.gasless_signer_count, 1);
+        assert_eq!(
+            body.gasless_signer_limit,
+            crate::core::validations::key::MAX_GASLESS_KEYS_PER_FID
+        );
+
+        // Expect at least the on-chain signer + the gasless key. Other on-chain
+        // events written by `register_user` (e.g. storage rent) are filtered out
+        // upstream by `get_signers`, so the on-chain side carries exactly one
+        // entry — the registered signer.
+        assert!(signers
+            .iter()
+            .any(|s| s.source == proto::SignerSource::Onchain as i32 && s.key == onchain_pubkey));
+        let gasless = signers
+            .iter()
+            .find(|s| s.source == proto::SignerSource::Offchain as i32 && s.key == gasless_pubkey)
+            .expect("gasless signer in unified response");
+        assert_eq!(gasless.ttl, Some(3_600));
+        assert_eq!(gasless.scopes, vec![MessageType::CastAdd as i32]);
+        assert_eq!(gasless.request_fid, Some(7_777));
+    }
+
     #[tokio::test]
     async fn test_submit_storage_lending_message() {
         let (

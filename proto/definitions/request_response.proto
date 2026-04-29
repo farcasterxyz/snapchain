@@ -218,6 +218,57 @@ message SignerRequest {
   bytes signer = 2;
 }
 
+// Source of a signer record returned by GetSigner / GetSignersByFid.
+enum SignerSource {
+  SIGNER_SOURCE_NONE = 0;
+  SIGNER_SOURCE_ONCHAIN = 1;
+  SIGNER_SOURCE_OFFCHAIN = 2; // gasless / KEY_ADD
+}
+
+// Unified per-key record. Optional fields are populated only when carried by
+// the underlying source (on-chain signer event vs. gasless KEY_ADD record).
+message Signer {
+  SignerSource source = 1;
+  bytes key = 2;          // 32-byte Ed25519 public key
+  uint32 key_type = 3;    // 1 = Ed25519
+  uint64 fid = 4;
+
+  // Common metadata. All timestamps are Unix epoch seconds regardless of
+  // source; off-chain values that natively live in Farcaster time
+  // (MessageData.timestamp, gasless last-used tracking) are converted at the
+  // RPC boundary so clients can compare/compute across sources without an
+  // epoch table.
+  optional uint64 added_at = 5;       // Unix epoch seconds
+  optional uint64 last_used_at = 6;   // Unix epoch seconds; off-chain only
+  optional uint32 ttl = 7;            // duration in seconds; off-chain only
+  optional uint64 expires_at = 8;     // Unix epoch seconds; computed as last_used_at + ttl when ttl > 0
+
+  // Off-chain–only fields
+  repeated int32 scopes = 9;          // mirrors KeyAddBody.scopes (raw MessageType ints)
+  optional uint64 request_fid = 10;   // verified requestFid from SignedKeyRequestMetadata
+  optional uint32 nonce = 11;         // user nonce on the originating KEY_ADD
+
+  // On-chain–only payload — original event for callers that need raw fields
+  // (block_hash, transaction_hash, log_index, metadata bytes, etc.).
+  optional OnChainEvent onchain_event = 12;
+}
+
+message SignerResponse {
+  Signer signer = 1;
+}
+
+message SignersByFidResponse {
+  repeated Signer signers = 1;
+  optional bytes next_page_token = 2;
+  // Total count of currently-active gasless (off-chain) keys for this FID.
+  // Populated from the O(1) per-FID counter maintained alongside the gasless
+  // key store, so it stays cheap regardless of the page size.
+  uint32 gasless_signer_count = 3;
+  // Per-FID cap on active gasless keys (NEYN-10579). Lets clients show
+  // "X/Y delegations" without hardcoding the limit on their side.
+  uint32 gasless_signer_limit = 4;
+}
+
 message LinkRequest {
   uint64 fid = 1;
   string link_type = 2;
