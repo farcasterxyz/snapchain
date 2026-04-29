@@ -29,9 +29,17 @@ use crate::core::error::HubError;
 use crate::core::validations::key::ED25519_PUBLIC_KEY_LEN;
 use crate::proto;
 use crate::storage::{
-    constants::{RootPrefix, UserPostfix},
-    db::{RocksDB, RocksDbTransactionBatch},
+    constants::{RootPrefix, UserPostfix, PAGE_SIZE_MAX},
+    db::{PageOptions, RocksDB, RocksDbTransactionBatch},
+    util::increment_vec_u8,
 };
+
+/// A page of gasless-key records for a single FID. Mirrors the shape of
+/// `OnchainEventsPage` so the RPC layer can merge cursors uniformly.
+pub struct GaslessKeysPage {
+    pub records: Vec<(Vec<u8>, GaslessKeyRecord)>,
+    pub next_page_token: Option<Vec<u8>>,
+}
 
 /// On-disk record for an active off-chain Ed25519 key.
 ///
@@ -317,4 +325,83 @@ pub fn decrement_gasless_key_count(
         txn.put(key, next.to_be_bytes().to_vec());
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Per-FID listing (NEYN-10578 RPC surface)
+// ---------------------------------------------------------------------------
+
+/// Build the prefix-scan range covering every gasless-key record for `fid`. Layout is
+/// `[GaslessKey][GaslessKeyByFid][FID(4B BE)][PublicKey(32B)]`, so the start prefix is
+/// the four-byte tuple before the per-key suffix, and the stop prefix is the next byte
+/// boundary (mirrors `make_onchain_event_prefix` / `increment_vec_u8` pattern in
+/// `onchain_event_store.rs`).
+fn make_gasless_key_by_fid_prefix(fid: u64) -> Vec<u8> {
+    let mut prefix = Vec::with_capacity(ROOT_PREFIX_BYTES + USER_POSTFIX_BYTES + FID_BYTES);
+    prefix.push(RootPrefix::GaslessKey as u8);
+    prefix.push(UserPostfix::GaslessKeyByFid as u8);
+    prefix.extend_from_slice(&make_fid_key(fid));
+    prefix
+}
+
+/// Page through every active gasless key for `fid`, decoding each `GaslessKeyRecord`
+/// and returning the page-cursor in the same shape as `OnchainEventsPage`. Pagination
+/// uses the full row key (the per-key index entry) so callers can resume across calls
+/// without ambiguity.
+///
+/// This is a read-only DB scan — the in-flight `txn_batch` is intentionally NOT
+/// consulted because all gRPC reads run from the committed snapshot. Reads that need
+/// to see uncommitted writes (e.g., conflict checks inside `merge_key_add`) use the
+/// per-key getters in this module instead.
+pub fn list_gasless_keys_by_fid(
+    db: &RocksDB,
+    fid: u64,
+    page_options: &PageOptions,
+) -> Result<GaslessKeysPage, HubError> {
+    let start_prefix = make_gasless_key_by_fid_prefix(fid);
+    let stop_prefix = increment_vec_u8(&start_prefix);
+
+    let mut records: Vec<(Vec<u8>, GaslessKeyRecord)> = Vec::new();
+    let mut last_key: Vec<u8> = Vec::new();
+    let page_size = page_options.page_size.unwrap_or(PAGE_SIZE_MAX);
+
+    db.for_each_iterator_by_prefix_paged(
+        Some(start_prefix),
+        Some(stop_prefix),
+        page_options,
+        |key, value| {
+            let record = GaslessKeyRecord::decode(value).map_err(|e| HubError {
+                code: "internal_error".to_string(),
+                message: format!("corrupt GaslessKeyRecord at fid={}: {}", fid, e),
+            })?;
+            // Pull the 32-byte public key out of the row key tail. The layout is
+            // fixed-width, so a slice is sufficient.
+            let pubkey_offset = ROOT_PREFIX_BYTES + USER_POSTFIX_BYTES + FID_BYTES;
+            let public_key = key
+                .get(pubkey_offset..pubkey_offset + ED25519_PUBLIC_KEY_LEN)
+                .ok_or_else(|| HubError {
+                    code: "internal_error".to_string(),
+                    message: format!("gasless-key index row too short: got {} bytes", key.len()),
+                })?
+                .to_vec();
+            records.push((public_key, record));
+
+            if records.len() >= page_size {
+                last_key = key.to_vec();
+                return Ok(true);
+            }
+            Ok(false)
+        },
+    )?;
+
+    let next_page_token = if last_key.is_empty() {
+        None
+    } else {
+        Some(last_key)
+    };
+
+    Ok(GaslessKeysPage {
+        records,
+        next_page_token,
+    })
 }

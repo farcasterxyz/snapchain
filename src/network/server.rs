@@ -23,10 +23,10 @@ use crate::proto::{
     LinksByFidRequest, LinksByTargetRequest, Message, MessageType, MessagesResponse, OnChainEvent,
     OnChainEventRequest, OnChainEventResponse, ReactionRequest, ReactionType,
     ReactionsByFidRequest, ReactionsByTargetRequest, ShardChunk, ShardChunksRequest,
-    ShardChunksResponse, SignerEventType, SignerRequest, StorageLimitsResponse, SubscribeRequest,
-    TrieNodeMetadataRequest, TrieNodeMetadataResponse, UserDataRequest, UserNameProof,
-    UserNameType, UsernameProofRequest, UsernameProofsResponse, ValidationResponse,
-    VerificationAddAddressBody, VerificationRequest,
+    ShardChunksResponse, Signer, SignerEventType, SignerRequest, SignerResponse, SignerSource,
+    SignersByFidResponse, StorageLimitsResponse, SubscribeRequest, TrieNodeMetadataRequest,
+    TrieNodeMetadataResponse, UserDataRequest, UserNameProof, UserNameType, UsernameProofRequest,
+    UsernameProofsResponse, ValidationResponse, VerificationAddAddressBody, VerificationRequest,
 };
 use crate::storage::constants::OnChainEventPostfix;
 use crate::storage::constants::RootPrefix;
@@ -34,10 +34,11 @@ use crate::storage::db::PageOptions;
 use crate::storage::db::RocksDbTransactionBatch;
 use crate::storage::store::account::MessagesPage;
 use crate::storage::store::account::UsernameProofStore;
-use crate::storage::store::account::{message_bytes_decode, IntoI32};
 use crate::storage::store::account::{
-    CastStore, LinkStore, ReactionStore, UserDataStore, VerificationStore,
+    get_gasless_key_count, get_gasless_key_record, get_last_used_at, list_gasless_keys_by_fid,
+    CastStore, GaslessKeyRecord, LinkStore, ReactionStore, UserDataStore, VerificationStore,
 };
+use crate::storage::store::account::{message_bytes_decode, IntoI32};
 use crate::storage::store::account::{EventsPage, HubEventIdGenerator};
 use crate::storage::store::block_engine::{self, BlockStores};
 use crate::storage::store::engine::{self, Senders, ShardEngine};
@@ -100,6 +101,192 @@ fn username_for_fname_recovery(message: &proto::Message) -> Option<String> {
         return None;
     }
     Some(user_data.value.clone())
+}
+
+/// Build a unified `Signer` record from an on-chain `OnChainEvent` whose body is a
+/// `SignerEventBody`. Off-chain–only fields (scopes, ttl, last_used_at, expires_at,
+/// nonce, request_fid) are intentionally left at their proto defaults; the
+/// originating event is attached so callers that need raw on-chain payload still
+/// get it. `added_at` is the block timestamp (epoch seconds).
+fn signer_from_onchain_event(event: &OnChainEvent) -> Signer {
+    let (key, key_type) = match &event.body {
+        Some(Body::SignerEventBody(body)) => (body.key.clone(), body.key_type),
+        _ => (Vec::new(), 0),
+    };
+    Signer {
+        source: SignerSource::Onchain as i32,
+        key,
+        key_type,
+        fid: event.fid,
+        added_at: Some(event.block_timestamp),
+        last_used_at: None,
+        ttl: None,
+        expires_at: None,
+        scopes: Vec::new(),
+        request_fid: None,
+        nonce: None,
+        onchain_event: Some(event.clone()),
+    }
+}
+
+/// Build a unified `Signer` record from a stored `GaslessKeyRecord`, joining in
+/// `last_used_at` from the sibling store. Returns `None` if the embedded
+/// KEY_ADD message is malformed (missing `data.body.key_add_body`) — by
+/// construction this can't happen for records that successfully merged, but
+/// guarding here keeps the RPC path defensive against future schema changes.
+fn signer_from_gasless_record(
+    record: &GaslessKeyRecord,
+    public_key: &[u8],
+    fid: u64,
+    last_used_at: Option<u64>,
+) -> Option<Signer> {
+    let message = record.message.as_ref()?;
+    let data = message.data.as_ref()?;
+    let key_add = match data.body.as_ref()? {
+        message_data::Body::KeyAddBody(body) => body,
+        _ => return None,
+    };
+    let ttl = key_add.ttl;
+    let expires_at = match (last_used_at, ttl) {
+        (Some(used), t) if t > 0 => Some(used + t as u64),
+        _ => None,
+    };
+    Some(Signer {
+        source: SignerSource::Offchain as i32,
+        key: public_key.to_vec(),
+        key_type: key_add.key_type,
+        fid,
+        added_at: Some(data.timestamp as u64),
+        last_used_at,
+        ttl: Some(ttl),
+        expires_at,
+        scopes: key_add.scopes.clone(),
+        request_fid: Some(record.request_fid),
+        nonce: Some(key_add.nonce),
+        onchain_event: None,
+    })
+}
+
+/// Look up `(fid, signer)` across both signer indexes, on-chain first then off-chain,
+/// matching the read order in `active_key::get_active_key`. Returns `None` if the
+/// key is not active on either side.
+fn resolve_signer(stores: &Stores, fid: u64, public_key: &[u8]) -> Result<Option<Signer>, Status> {
+    if let Some(event) = stores
+        .onchain_event_store
+        .get_active_signer(fid, public_key.to_vec(), None)
+        .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?
+    {
+        return Ok(Some(signer_from_onchain_event(&event)));
+    }
+
+    let txn = RocksDbTransactionBatch::new();
+    let Some(record) = get_gasless_key_record(&stores.db, &txn, fid, public_key)
+        .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?
+    else {
+        return Ok(None);
+    };
+
+    let last_used_at = get_last_used_at(&stores.db, &txn, fid, public_key)
+        .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?
+        .map(|t| t as u64);
+
+    Ok(signer_from_gasless_record(
+        &record,
+        public_key,
+        fid,
+        last_used_at,
+    ))
+}
+
+/// Result of merging on-chain + off-chain signer pages for a single FID.
+struct UnifiedSignersPage {
+    signers: Vec<Signer>,
+    next_page_token: Option<Vec<u8>>,
+    /// Total active gasless (off-chain) keys for the FID, sourced from the O(1)
+    /// per-FID counter. Populated regardless of pagination state so callers
+    /// always see the FID-wide total.
+    gasless_signer_count: u32,
+}
+
+/// Composite cursor for `list_signers_for_fid`. Carries one cursor per underlying
+/// store so each side can advance independently. Encoded as JSON for parity with
+/// the existing per-shard composite tokens used in `get_reactions_by_target`.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct UnifiedSignerPageToken {
+    onchain: Option<Vec<u8>>,
+    gasless: Option<Vec<u8>>,
+}
+
+/// Drain both signer indexes for `fid` and return the merged page. Pagination
+/// preserves per-store cursors via a JSON composite token; ordering between the
+/// two sides is "on-chain first, then gasless," matching the lookup priority in
+/// `active_key::get_active_key`.
+fn list_signers_for_fid(
+    stores: &Stores,
+    fid: u64,
+    page_options: &PageOptions,
+) -> Result<UnifiedSignersPage, Status> {
+    let cursor: UnifiedSignerPageToken = match &page_options.page_token {
+        None => UnifiedSignerPageToken::default(),
+        Some(bytes) => serde_json::from_slice(bytes)
+            .map_err(|e| Status::invalid_argument(format!("invalid signers page token: {}", e)))?,
+    };
+
+    let onchain_options = PageOptions {
+        page_size: page_options.page_size,
+        page_token: cursor.onchain,
+        reverse: page_options.reverse,
+    };
+    let onchain_page = stores
+        .onchain_event_store
+        .get_signers(Some(fid), &onchain_options)
+        .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
+
+    let gasless_options = PageOptions {
+        page_size: page_options.page_size,
+        page_token: cursor.gasless,
+        reverse: page_options.reverse,
+    };
+    let gasless_page = list_gasless_keys_by_fid(&stores.db, fid, &gasless_options)
+        .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
+
+    let mut signers: Vec<Signer> = onchain_page
+        .onchain_events
+        .iter()
+        .map(signer_from_onchain_event)
+        .collect();
+
+    let txn = RocksDbTransactionBatch::new();
+    for (public_key, record) in &gasless_page.records {
+        let last_used_at = get_last_used_at(&stores.db, &txn, fid, public_key)
+            .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?
+            .map(|t| t as u64);
+        if let Some(s) = signer_from_gasless_record(record, public_key, fid, last_used_at) {
+            signers.push(s);
+        }
+    }
+
+    let next_page_token =
+        if onchain_page.next_page_token.is_some() || gasless_page.next_page_token.is_some() {
+            let token = UnifiedSignerPageToken {
+                onchain: onchain_page.next_page_token,
+                gasless: gasless_page.next_page_token,
+            };
+            Some(serde_json::to_vec(&token).map_err(|e| {
+                Status::internal(format!("failed to serialize signers page token: {}", e))
+            })?)
+        } else {
+            None
+        };
+
+    let gasless_signer_count = get_gasless_key_count(&stores.db, &txn, fid)
+        .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
+
+    Ok(UnifiedSignersPage {
+        signers,
+        next_page_token,
+        gasless_signer_count,
+    })
 }
 
 pub struct MyHubService {
@@ -2223,6 +2410,45 @@ impl HubService for MyHubService {
             next_page_token: events_page.next_page_token,
         };
         Ok(Response::new(response))
+    }
+
+    async fn get_signer(
+        &self,
+        request: Request<SignerRequest>,
+    ) -> Result<Response<SignerResponse>, Status> {
+        let req = request.into_inner();
+        let fid = req.fid;
+        let stores = self.get_stores_for(fid)?;
+
+        let resolved = resolve_signer(stores, fid, &req.signer)?
+            .ok_or_else(|| Status::not_found("Active signer not found".to_string()))?;
+
+        Ok(Response::new(SignerResponse {
+            signer: Some(resolved),
+        }))
+    }
+
+    async fn get_signers_by_fid(
+        &self,
+        request: Request<FidRequest>,
+    ) -> Result<Response<SignersByFidResponse>, Status> {
+        let req = request.into_inner();
+        let fid = req.fid;
+        let stores = self.get_stores_for(fid)?;
+
+        let page_options = PageOptions {
+            page_size: req.page_size.map(|s| s as usize),
+            page_token: req.page_token.clone(),
+            reverse: req.reverse.unwrap_or(false),
+        };
+        let page = list_signers_for_fid(stores, fid, &page_options)?;
+
+        Ok(Response::new(SignersByFidResponse {
+            signers: page.signers,
+            next_page_token: page.next_page_token,
+            gasless_signer_count: page.gasless_signer_count,
+            gasless_signer_limit: crate::core::validations::key::MAX_GASLESS_KEYS_PER_FID,
+        }))
     }
 
     async fn get_on_chain_events(

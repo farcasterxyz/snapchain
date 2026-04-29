@@ -54,8 +54,17 @@ service HubService {
   rpc GetVerificationsByFid(FidRequest) returns (MessagesResponse);
 
   // OnChain Events
+  // DEPRECATED in favor of GetSigner (unified). Returns on-chain signer events
+  // only — gasless / off-chain keys are not surfaced through this RPC.
   rpc GetOnChainSigner(SignerRequest) returns (OnChainEvent);
+  // DEPRECATED in favor of GetSignersByFid (unified). Returns on-chain signer
+  // events only — gasless / off-chain keys are not surfaced through this RPC.
   rpc GetOnChainSignersByFid(FidRequest) returns (OnChainEventResponse);
+
+  // Unified signer surface — returns both on-chain and off-chain (gasless) keys.
+  rpc GetSigner(SignerRequest) returns (SignerResponse);
+  rpc GetSignersByFid(FidRequest) returns (SignersByFidResponse);
+
   rpc GetOnChainEvents(OnChainEventRequest) returns (OnChainEventResponse);
   rpc GetIdRegistryOnChainEvent(FidRequest) returns (OnChainEvent);
   rpc GetIdRegistryOnChainEventByAddress(IdRegistryEventByAddressRequest) returns (OnChainEvent);
