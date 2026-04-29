@@ -27,7 +27,7 @@ jobs:
     env:
       EXPECTED_SHA256: 7929acc3c7f14ff8fcfe6b7752a6b0327811da4697ce7b3bb438bf7b237ab410
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Foundry
         # Pinned so a future forge release can't silently change the build behavior;
