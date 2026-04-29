@@ -159,6 +159,10 @@ pub struct MessageData {
     pub link_compact_state_body: Option<LinkCompactStateBody>,
     #[serde(rename = "lendStorageBody", skip_serializing_if = "Option::is_none")]
     pub lend_storage_body: Option<LendStorageBody>,
+    #[serde(rename = "keyAddBody", skip_serializing_if = "Option::is_none")]
+    pub key_add_body: Option<KeyAddBody>,
+    #[serde(rename = "keyRemoveBody", skip_serializing_if = "Option::is_none")]
+    pub key_remove_body: Option<KeyRemoveBody>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -296,6 +300,38 @@ pub struct LendStorageBody {
     pub num_units: u64,
     #[serde(rename = "unitType")]
     pub unit_type: StorageUnitType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyAddBody {
+    #[serde(with = "serdehex")]
+    pub key: Vec<u8>,
+    #[serde(rename = "keyType")]
+    pub key_type: u32,
+    #[serde(with = "serdehex", rename = "custodySignature")]
+    pub custody_signature: Vec<u8>,
+    pub deadline: u32,
+    pub nonce: u32,
+    #[serde(with = "serdehex")]
+    pub metadata: Vec<u8>,
+    #[serde(rename = "metadataType")]
+    pub metadata_type: u32,
+    #[serde(with = "serdehex", rename = "registrationTxHash")]
+    pub registration_tx_hash: Vec<u8>,
+    pub scopes: Vec<String>,
+    pub ttl: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyRemoveBody {
+    #[serde(with = "serdehex")]
+    pub key: Vec<u8>,
+    #[serde(with = "serdehex")]
+    pub signature: Vec<u8>,
+    #[serde(rename = "signatureType")]
+    pub signature_type: u32,
+    pub deadline: u32,
+    pub nonce: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1639,6 +1675,47 @@ fn map_proto_lend_storage_body_to_json_lend_storage_body(
     })
 }
 
+fn map_proto_key_add_body_to_json_key_add_body(
+    key_add_body: proto::KeyAddBody,
+) -> Result<KeyAddBody, ErrorResponse> {
+    // Mirror the Signer mapper: scopes are raw `MessageType` ints over the wire;
+    // expand to variant names and drop unknown ints (validation rejects unknown
+    // scopes at merge time, so anything reaching here is a known variant).
+    let scopes: Vec<String> = key_add_body
+        .scopes
+        .iter()
+        .filter_map(|i| {
+            MessageType::try_from(*i)
+                .ok()
+                .map(|t| t.as_str_name().to_string())
+        })
+        .collect();
+    Ok(KeyAddBody {
+        key: key_add_body.key,
+        key_type: key_add_body.key_type,
+        custody_signature: key_add_body.custody_signature,
+        deadline: key_add_body.deadline,
+        nonce: key_add_body.nonce,
+        metadata: key_add_body.metadata,
+        metadata_type: key_add_body.metadata_type,
+        registration_tx_hash: key_add_body.registration_tx_hash,
+        scopes,
+        ttl: key_add_body.ttl,
+    })
+}
+
+fn map_proto_key_remove_body_to_json_key_remove_body(
+    key_remove_body: proto::KeyRemoveBody,
+) -> Result<KeyRemoveBody, ErrorResponse> {
+    Ok(KeyRemoveBody {
+        key: key_remove_body.key,
+        signature: key_remove_body.signature,
+        signature_type: key_remove_body.signature_type,
+        deadline: key_remove_body.deadline,
+        nonce: key_remove_body.nonce,
+    })
+}
+
 fn map_proto_message_data_to_json_message_data(
     message_data: proto::MessageData,
 ) -> Result<MessageData, ErrorResponse> {
@@ -1673,6 +1750,8 @@ fn map_proto_message_data_to_json_message_data(
                 frame_action_body: None,
                 link_compact_state_body: None,
                 lend_storage_body: None,
+                key_add_body: None,
+                key_remove_body: None,
             })
         }
         Some(Body::CastRemoveBody(cast_remove_body)) => Ok(MessageData {
@@ -1705,6 +1784,8 @@ fn map_proto_message_data_to_json_message_data(
             frame_action_body: None,
             link_compact_state_body: None,
             lend_storage_body: None,
+            key_add_body: None,
+            key_remove_body: None,
         }),
         Some(Body::FrameActionBody(frame_action_body)) => {
             return Ok(MessageData {
@@ -1746,6 +1827,8 @@ fn map_proto_message_data_to_json_message_data(
                 }),
                 link_compact_state_body: None,
                 lend_storage_body: None,
+                key_add_body: None,
+                key_remove_body: None,
             });
         }
         Some(Body::LinkBody(link_body)) => {
@@ -1778,6 +1861,8 @@ fn map_proto_message_data_to_json_message_data(
                 frame_action_body: None,
                 link_compact_state_body: None,
                 lend_storage_body: None,
+                key_add_body: None,
+                key_remove_body: None,
             });
         }
         Some(Body::LinkCompactStateBody(link_compact_state_body)) => {
@@ -1811,6 +1896,8 @@ fn map_proto_message_data_to_json_message_data(
                 frame_action_body: None,
                 lend_storage_body: None,
                 link_compact_state_body: Some(result),
+                key_add_body: None,
+                key_remove_body: None,
             });
         }
         Some(Body::ReactionBody(reaction_body)) => {
@@ -1843,6 +1930,8 @@ fn map_proto_message_data_to_json_message_data(
                 frame_action_body: None,
                 link_compact_state_body: None,
                 lend_storage_body: None,
+                key_add_body: None,
+                key_remove_body: None,
             });
         }
         Some(Body::UserDataBody(user_data_body)) => {
@@ -1875,6 +1964,8 @@ fn map_proto_message_data_to_json_message_data(
                 frame_action_body: None,
                 link_compact_state_body: None,
                 lend_storage_body: None,
+                key_add_body: None,
+                key_remove_body: None,
             });
         }
         Some(Body::UsernameProofBody(username_proof_body)) => {
@@ -1908,6 +1999,8 @@ fn map_proto_message_data_to_json_message_data(
                 frame_action_body: None,
                 link_compact_state_body: None,
                 lend_storage_body: None,
+                key_add_body: None,
+                key_remove_body: None,
             });
         }
         Some(Body::VerificationAddAddressBody(verification_add_address_body)) => {
@@ -1942,6 +2035,8 @@ fn map_proto_message_data_to_json_message_data(
                 frame_action_body: None,
                 link_compact_state_body: None,
                 lend_storage_body: None,
+                key_add_body: None,
+                key_remove_body: None,
             });
         }
         Some(Body::VerificationRemoveBody(verification_remove_body)) => {
@@ -1976,6 +2071,8 @@ fn map_proto_message_data_to_json_message_data(
                 frame_action_body: None,
                 link_compact_state_body: None,
                 lend_storage_body: None,
+                key_add_body: None,
+                key_remove_body: None,
             });
         }
         Some(Body::LendStorageBody(lend_storage_body)) => {
@@ -2008,13 +2105,78 @@ fn map_proto_message_data_to_json_message_data(
                 frame_action_body: None,
                 link_compact_state_body: None,
                 lend_storage_body: Some(result),
+                key_add_body: None,
+                key_remove_body: None,
             });
         }
-        // TODO(NEYN-10568): map KeyAdd/KeyRemove bodies to JSON once downstream tickets land.
-        Some(Body::KeyAddBody(_)) | Some(Body::KeyRemoveBody(_)) => Err(ErrorResponse {
-            error: "KEY_ADD/KEY_REMOVE JSON mapping not yet implemented".to_string(),
-            error_detail: None,
-        }),
+        Some(Body::KeyAddBody(key_add_body)) => {
+            let result = map_proto_key_add_body_to_json_key_add_body(key_add_body)?;
+            return Ok(MessageData {
+                message_type: MessageType::try_from(message_data.r#type)
+                    .map_err(|_| ErrorResponse {
+                        error: "Invalid message type".to_string(),
+                        error_detail: None,
+                    })?
+                    .as_str_name()
+                    .to_owned(),
+                fid: message_data.fid,
+                network: FarcasterNetwork::try_from(message_data.network)
+                    .map_err(|_| ErrorResponse {
+                        error: "Invalid network".to_string(),
+                        error_detail: None,
+                    })?
+                    .as_str_name()
+                    .to_owned(),
+                timestamp: message_data.timestamp,
+                cast_add_body: None,
+                cast_remove_body: None,
+                reaction_body: None,
+                verification_add_address_body: None,
+                verification_remove_body: None,
+                user_data_body: None,
+                link_body: None,
+                username_proof_body: None,
+                frame_action_body: None,
+                link_compact_state_body: None,
+                lend_storage_body: None,
+                key_add_body: Some(result),
+                key_remove_body: None,
+            });
+        }
+        Some(Body::KeyRemoveBody(key_remove_body)) => {
+            let result = map_proto_key_remove_body_to_json_key_remove_body(key_remove_body)?;
+            return Ok(MessageData {
+                message_type: MessageType::try_from(message_data.r#type)
+                    .map_err(|_| ErrorResponse {
+                        error: "Invalid message type".to_string(),
+                        error_detail: None,
+                    })?
+                    .as_str_name()
+                    .to_owned(),
+                fid: message_data.fid,
+                network: FarcasterNetwork::try_from(message_data.network)
+                    .map_err(|_| ErrorResponse {
+                        error: "Invalid network".to_string(),
+                        error_detail: None,
+                    })?
+                    .as_str_name()
+                    .to_owned(),
+                timestamp: message_data.timestamp,
+                cast_add_body: None,
+                cast_remove_body: None,
+                reaction_body: None,
+                verification_add_address_body: None,
+                verification_remove_body: None,
+                user_data_body: None,
+                link_body: None,
+                username_proof_body: None,
+                frame_action_body: None,
+                link_compact_state_body: None,
+                lend_storage_body: None,
+                key_add_body: None,
+                key_remove_body: Some(result),
+            });
+        }
         None => Err(ErrorResponse {
             error: "No message data".to_string(),
             error_detail: None,
@@ -3744,4 +3906,136 @@ where
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::{self, message_data::Body, MessageData, MessageType};
+
+    fn sample_message_data(body: Body) -> proto::MessageData {
+        let r#type = match &body {
+            Body::KeyAddBody(_) => MessageType::KeyAdd as i32,
+            Body::KeyRemoveBody(_) => MessageType::KeyRemove as i32,
+            _ => MessageType::None as i32,
+        };
+        MessageData {
+            r#type,
+            fid: 1108653,
+            timestamp: 100_000,
+            network: proto::FarcasterNetwork::Testnet as i32,
+            body: Some(body),
+        }
+    }
+
+    #[test]
+    fn key_add_body_round_trips_to_json_message_data() {
+        let proto_body = proto::KeyAddBody {
+            key: vec![0x11; 32],
+            key_type: 1,
+            custody_signature: vec![0x22; 65],
+            deadline: 1_700_000_000,
+            nonce: 4,
+            metadata: vec![0x33, 0x44, 0x55],
+            metadata_type: 1,
+            registration_tx_hash: vec![0x66; 32],
+            scopes: vec![MessageType::CastAdd as i32, MessageType::ReactionAdd as i32],
+            ttl: 86_400,
+        };
+        let json = map_proto_message_data_to_json_message_data(sample_message_data(
+            Body::KeyAddBody(proto_body),
+        ))
+        .expect("KEY_ADD body must map cleanly");
+
+        assert_eq!(json.message_type, "MESSAGE_TYPE_KEY_ADD");
+        assert!(json.key_remove_body.is_none());
+        let key_add = json.key_add_body.clone().expect("key_add_body present");
+        assert_eq!(key_add.key, vec![0x11; 32]);
+        assert_eq!(key_add.key_type, 1);
+        assert_eq!(key_add.custody_signature, vec![0x22; 65]);
+        assert_eq!(key_add.deadline, 1_700_000_000);
+        assert_eq!(key_add.nonce, 4);
+        assert_eq!(key_add.metadata, vec![0x33, 0x44, 0x55]);
+        assert_eq!(key_add.metadata_type, 1);
+        assert_eq!(key_add.registration_tx_hash, vec![0x66; 32]);
+        assert_eq!(
+            key_add.scopes,
+            vec![
+                "MESSAGE_TYPE_CAST_ADD".to_string(),
+                "MESSAGE_TYPE_REACTION_ADD".to_string(),
+            ]
+        );
+        assert_eq!(key_add.ttl, 86_400);
+
+        // Confirm wire shape: bytes are emitted as 0x-prefixed hex and the
+        // `keyAddBody` wrapper is present at the top level of the JSON object.
+        let serialized = serde_json::to_value(&json).expect("serialize MessageData");
+        let body = &serialized["keyAddBody"];
+        assert_eq!(body["key"], format!("0x{}", "11".repeat(32)));
+        assert_eq!(body["custodySignature"], format!("0x{}", "22".repeat(65)));
+        assert_eq!(body["metadata"], "0x334455");
+        assert_eq!(body["registrationTxHash"], format!("0x{}", "66".repeat(32)));
+        assert_eq!(body["keyType"], 1);
+        assert_eq!(body["metadataType"], 1);
+        assert_eq!(body["ttl"], 86_400);
+    }
+
+    #[test]
+    fn key_remove_body_round_trips_to_json_message_data() {
+        let proto_body = proto::KeyRemoveBody {
+            key: vec![0xAA; 32],
+            signature: vec![0xBB; 65],
+            signature_type: 2,
+            deadline: 1_700_000_500,
+            nonce: 7,
+        };
+        let json = map_proto_message_data_to_json_message_data(sample_message_data(
+            Body::KeyRemoveBody(proto_body),
+        ))
+        .expect("KEY_REMOVE body must map cleanly");
+
+        assert_eq!(json.message_type, "MESSAGE_TYPE_KEY_REMOVE");
+        assert!(json.key_add_body.is_none());
+        let key_remove = json
+            .key_remove_body
+            .clone()
+            .expect("key_remove_body present");
+        assert_eq!(key_remove.key, vec![0xAA; 32]);
+        assert_eq!(key_remove.signature, vec![0xBB; 65]);
+        assert_eq!(key_remove.signature_type, 2);
+        assert_eq!(key_remove.deadline, 1_700_000_500);
+        assert_eq!(key_remove.nonce, 7);
+
+        let serialized = serde_json::to_value(&json).expect("serialize MessageData");
+        let body = &serialized["keyRemoveBody"];
+        assert_eq!(body["key"], format!("0x{}", "aa".repeat(32)));
+        assert_eq!(body["signature"], format!("0x{}", "bb".repeat(65)));
+        assert_eq!(body["signatureType"], 2);
+        assert_eq!(body["nonce"], 7);
+    }
+
+    #[test]
+    fn key_add_body_drops_unknown_scope_ints() {
+        // Forward-compat: if a future protobuf adds a MessageType variant, the
+        // mapper should silently drop the unknown int rather than failing the
+        // whole response. Validation rejects unknown scopes at merge time.
+        let proto_body = proto::KeyAddBody {
+            key: vec![0x01; 32],
+            key_type: 1,
+            custody_signature: vec![],
+            deadline: 0,
+            nonce: 0,
+            metadata: vec![],
+            metadata_type: 1,
+            registration_tx_hash: vec![],
+            scopes: vec![MessageType::CastAdd as i32, 9999],
+            ttl: 1,
+        };
+        let json = map_proto_message_data_to_json_message_data(sample_message_data(
+            Body::KeyAddBody(proto_body),
+        ))
+        .unwrap();
+        let scopes = json.key_add_body.unwrap().scopes;
+        assert_eq!(scopes, vec!["MESSAGE_TYPE_CAST_ADD".to_string()]);
+    }
 }
