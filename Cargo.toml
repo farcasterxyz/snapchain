@@ -62,7 +62,7 @@ alloy-rpc-types = "0.8.0"
 alloy-primitives = "0.8.14"
 alloy-contract = "0.8.0"
 alloy-signer = "0.8.0"
-alloy-signer-local = "0.8.0"
+alloy-signer-local = { version = "0.8.0", features = ["mnemonic"] }
 ed25519-dalek = { version = "2.1.1", features = ["batch"] }
 pre-commit = "0.5.2"
 rocksdb = {git = "https://github.com/rust-rocksdb/rust-rocksdb.git", rev="a4f178d0ca668c4b48d993ab8aef6f4004780f23", features=["multi-threaded-cf", "jemalloc"]}
