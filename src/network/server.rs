@@ -103,11 +103,24 @@ fn username_for_fname_recovery(message: &proto::Message) -> Option<String> {
     Some(user_data.value.clone())
 }
 
+/// Translate a HubError raised by the gasless / signer stores into a gRPC
+/// `Status`. `bad_request.*` codes (validation_failure, invalid_param, …) come
+/// from caller-supplied input — typically a malformed public key — so they
+/// surface as `invalid_argument` rather than 500. Everything else is a true
+/// storage failure and stays as `internal`.
+fn signer_store_error_to_status(err: HubError) -> Status {
+    if err.code.starts_with("bad_request") {
+        Status::invalid_argument(err.to_string())
+    } else {
+        Status::internal(format!("Store error: {:?}", err))
+    }
+}
+
 /// Build a unified `Signer` record from an on-chain `OnChainEvent` whose body is a
 /// `SignerEventBody`. Off-chain–only fields (scopes, ttl, last_used_at, expires_at,
 /// nonce, request_fid) are intentionally left at their proto defaults; the
 /// originating event is attached so callers that need raw on-chain payload still
-/// get it. `added_at` is the block timestamp (epoch seconds).
+/// get it. `added_at` is the block timestamp (Unix epoch seconds).
 fn signer_from_onchain_event(event: &OnChainEvent) -> Signer {
     let (key, key_type) = match &event.body {
         Some(Body::SignerEventBody(body)) => (body.key.clone(), body.key_type),
@@ -147,7 +160,12 @@ fn signer_from_gasless_record(
         _ => return None,
     };
     let ttl = key_add.ttl;
-    let expires_at = match (last_used_at, ttl) {
+    // Both `data.timestamp` and the gasless last-used store are Farcaster-time
+    // seconds; the unified API normalizes everything to Unix seconds so a single
+    // time base flows out across on-chain and off-chain sources.
+    let added_at_unix = FarcasterTime::new(data.timestamp as u64).to_unix_seconds();
+    let last_used_at_unix = last_used_at.map(|t| FarcasterTime::new(t).to_unix_seconds());
+    let expires_at = match (last_used_at_unix, ttl) {
         (Some(used), t) if t > 0 => Some(used + t as u64),
         _ => None,
     };
@@ -156,8 +174,8 @@ fn signer_from_gasless_record(
         key: public_key.to_vec(),
         key_type: key_add.key_type,
         fid,
-        added_at: Some(data.timestamp as u64),
-        last_used_at,
+        added_at: Some(added_at_unix),
+        last_used_at: last_used_at_unix,
         ttl: Some(ttl),
         expires_at,
         scopes: key_add.scopes.clone(),
@@ -181,13 +199,13 @@ fn resolve_signer(stores: &Stores, fid: u64, public_key: &[u8]) -> Result<Option
 
     let txn = RocksDbTransactionBatch::new();
     let Some(record) = get_gasless_key_record(&stores.db, &txn, fid, public_key)
-        .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?
+        .map_err(signer_store_error_to_status)?
     else {
         return Ok(None);
     };
 
     let last_used_at = get_last_used_at(&stores.db, &txn, fid, public_key)
-        .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?
+        .map_err(signer_store_error_to_status)?
         .map(|t| t as u64);
 
     Ok(signer_from_gasless_record(
@@ -208,19 +226,34 @@ struct UnifiedSignersPage {
     gasless_signer_count: u32,
 }
 
-/// Composite cursor for `list_signers_for_fid`. Carries one cursor per underlying
-/// store so each side can advance independently. Encoded as JSON for parity with
-/// the existing per-shard composite tokens used in `get_reactions_by_target`.
+/// Composite cursor for `list_signers_for_fid`. Carries one cursor per
+/// underlying store so each side can advance independently, plus an explicit
+/// `*_exhausted` flag per side. The flags are necessary because a `None`
+/// cursor is ambiguous: it could mean "start from the beginning" *or* "this
+/// side has been fully drained." Without the flag, a request that drains
+/// gasless before on-chain would re-scan gasless on every subsequent page and
+/// duplicate every gasless row in the response. Encoded as JSON for parity
+/// with the existing per-shard composite tokens used in
+/// `get_reactions_by_target`.
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct UnifiedSignerPageToken {
     onchain: Option<Vec<u8>>,
     gasless: Option<Vec<u8>>,
+    #[serde(default)]
+    onchain_exhausted: bool,
+    #[serde(default)]
+    gasless_exhausted: bool,
 }
 
 /// Drain both signer indexes for `fid` and return the merged page. Pagination
 /// preserves per-store cursors via a JSON composite token; ordering between the
 /// two sides is "on-chain first, then gasless," matching the lookup priority in
 /// `active_key::get_active_key`.
+///
+/// `page_options.page_size` is treated as a **global** cap on the merged
+/// response — on-chain rows are drained first up to the cap, then gasless rows
+/// fill any remaining slots. This keeps response sizes predictable for
+/// callers and consistent with the rest of the RPC surface.
 fn list_signers_for_fid(
     stores: &Stores,
     fid: u64,
@@ -232,55 +265,82 @@ fn list_signers_for_fid(
             .map_err(|e| Status::invalid_argument(format!("invalid signers page token: {}", e)))?,
     };
 
-    let onchain_options = PageOptions {
-        page_size: page_options.page_size,
-        page_token: cursor.onchain,
-        reverse: page_options.reverse,
-    };
-    let onchain_page = stores
-        .onchain_event_store
-        .get_signers(Some(fid), &onchain_options)
-        .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
+    // None means "no client cap" — defer to the underlying store defaults.
+    let global_limit = page_options.page_size;
 
-    let gasless_options = PageOptions {
-        page_size: page_options.page_size,
-        page_token: cursor.gasless,
-        reverse: page_options.reverse,
-    };
-    let gasless_page = list_gasless_keys_by_fid(&stores.db, fid, &gasless_options)
-        .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
+    let mut signers: Vec<Signer> = Vec::new();
+    let mut next_onchain_token: Option<Vec<u8>> = None;
+    let mut next_gasless_token: Option<Vec<u8>> = None;
+    let mut onchain_exhausted = cursor.onchain_exhausted;
+    let mut gasless_exhausted = cursor.gasless_exhausted;
 
-    let mut signers: Vec<Signer> = onchain_page
-        .onchain_events
-        .iter()
-        .map(signer_from_onchain_event)
-        .collect();
-
-    let txn = RocksDbTransactionBatch::new();
-    for (public_key, record) in &gasless_page.records {
-        let last_used_at = get_last_used_at(&stores.db, &txn, fid, public_key)
-            .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?
-            .map(|t| t as u64);
-        if let Some(s) = signer_from_gasless_record(record, public_key, fid, last_used_at) {
-            signers.push(s);
+    if !cursor.onchain_exhausted {
+        let onchain_options = PageOptions {
+            page_size: global_limit,
+            page_token: cursor.onchain,
+            reverse: page_options.reverse,
+        };
+        let onchain_page = stores
+            .onchain_event_store
+            .get_signers(Some(fid), &onchain_options)
+            .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
+        signers.extend(
+            onchain_page
+                .onchain_events
+                .iter()
+                .map(signer_from_onchain_event),
+        );
+        if onchain_page.next_page_token.is_none() {
+            onchain_exhausted = true;
+        } else {
+            next_onchain_token = onchain_page.next_page_token;
         }
     }
 
-    let next_page_token =
-        if onchain_page.next_page_token.is_some() || gasless_page.next_page_token.is_some() {
-            let token = UnifiedSignerPageToken {
-                onchain: onchain_page.next_page_token,
-                gasless: gasless_page.next_page_token,
-            };
-            Some(serde_json::to_vec(&token).map_err(|e| {
-                Status::internal(format!("failed to serialize signers page token: {}", e))
-            })?)
-        } else {
-            None
-        };
+    let remaining = global_limit.map(|cap| cap.saturating_sub(signers.len()));
+    let should_scan_gasless = !cursor.gasless_exhausted && remaining.map_or(true, |r| r > 0);
 
-    let gasless_signer_count = get_gasless_key_count(&stores.db, &txn, fid)
-        .map_err(|e| Status::internal(format!("Store error: {:?}", e)))?;
+    let txn = RocksDbTransactionBatch::new();
+
+    if should_scan_gasless {
+        let gasless_options = PageOptions {
+            page_size: remaining,
+            page_token: cursor.gasless,
+            reverse: page_options.reverse,
+        };
+        let gasless_page = list_gasless_keys_by_fid(&stores.db, fid, &gasless_options)
+            .map_err(signer_store_error_to_status)?;
+        for (public_key, record) in &gasless_page.records {
+            let last_used_at = get_last_used_at(&stores.db, &txn, fid, public_key)
+                .map_err(signer_store_error_to_status)?
+                .map(|t| t as u64);
+            if let Some(s) = signer_from_gasless_record(record, public_key, fid, last_used_at) {
+                signers.push(s);
+            }
+        }
+        if gasless_page.next_page_token.is_none() {
+            gasless_exhausted = true;
+        } else {
+            next_gasless_token = gasless_page.next_page_token;
+        }
+    }
+
+    let next_page_token = if onchain_exhausted && gasless_exhausted {
+        None
+    } else {
+        let token = UnifiedSignerPageToken {
+            onchain: next_onchain_token,
+            gasless: next_gasless_token,
+            onchain_exhausted,
+            gasless_exhausted,
+        };
+        Some(serde_json::to_vec(&token).map_err(|e| {
+            Status::internal(format!("failed to serialize signers page token: {}", e))
+        })?)
+    };
+
+    let gasless_signer_count =
+        get_gasless_key_count(&stores.db, &txn, fid).map_err(signer_store_error_to_status)?;
 
     Ok(UnifiedSignersPage {
         signers,
@@ -2436,11 +2496,7 @@ impl HubService for MyHubService {
         let fid = req.fid;
         let stores = self.get_stores_for(fid)?;
 
-        let page_options = PageOptions {
-            page_size: req.page_size.map(|s| s as usize),
-            page_token: req.page_token.clone(),
-            reverse: req.reverse.unwrap_or(false),
-        };
+        let page_options = req.page_options();
         let page = list_signers_for_fid(stores, fid, &page_options)?;
 
         Ok(Response::new(SignersByFidResponse {

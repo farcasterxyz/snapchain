@@ -233,11 +233,15 @@ message Signer {
   uint32 key_type = 3;    // 1 = Ed25519
   uint64 fid = 4;
 
-  // Common metadata
-  optional uint64 added_at = 5;       // epoch seconds: onchain.block_timestamp OR KEY_ADD message timestamp
-  optional uint64 last_used_at = 6;   // epoch seconds; off-chain only
-  optional uint32 ttl = 7;            // seconds; off-chain only
-  optional uint64 expires_at = 8;     // computed: last_used_at + ttl when ttl > 0
+  // Common metadata. All timestamps are Unix epoch seconds regardless of
+  // source; off-chain values that natively live in Farcaster time
+  // (MessageData.timestamp, gasless last-used tracking) are converted at the
+  // RPC boundary so clients can compare/compute across sources without an
+  // epoch table.
+  optional uint64 added_at = 5;       // Unix epoch seconds
+  optional uint64 last_used_at = 6;   // Unix epoch seconds; off-chain only
+  optional uint32 ttl = 7;            // duration in seconds; off-chain only
+  optional uint64 expires_at = 8;     // Unix epoch seconds; computed as last_used_at + ttl when ttl > 0
 
   // Off-chain–only fields
   repeated int32 scopes = 9;          // mirrors KeyAddBody.scopes (raw MessageType ints)

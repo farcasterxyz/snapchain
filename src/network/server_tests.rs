@@ -2260,7 +2260,13 @@ mod tests {
         assert_eq!(signer.ttl, Some(86_400));
         assert_eq!(signer.nonce, Some(4));
         assert_eq!(signer.request_fid, Some(9152));
-        assert_eq!(signer.added_at, Some(100_000));
+        // `added_at` is reported as Unix epoch seconds. The KEY_ADD message was
+        // stamped at Farcaster-time second 100_000, so the unified Signer
+        // surfaces FARCASTER_EPOCH/1000 + 100_000.
+        assert_eq!(
+            signer.added_at,
+            Some(100_000 + crate::core::types::FARCASTER_EPOCH / 1000)
+        );
         assert_eq!(
             signer.scopes,
             vec![MessageType::CastAdd as i32, MessageType::ReactionAdd as i32,]
