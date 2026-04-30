@@ -104,7 +104,12 @@ mod tests {
                             .iter()
                             .map(|p| *p as u32)
                             .collect(),
-                        r#type: if body.cast_type == "CAST" { 0 } else { 1 },
+                        r#type: match body.cast_type.as_str() {
+                            "CAST" => 0,
+                            "LONG_CAST" => 1,
+                            "TEN_K_CAST" => 2,
+                            other => panic!("unknown cast type from API: {}", other),
+                        },
                         parent: body.parent_cast_id.map(|p| {
                             cast_add_body::Parent::ParentCastId(crate::proto::CastId {
                                 fid: p.fid,
