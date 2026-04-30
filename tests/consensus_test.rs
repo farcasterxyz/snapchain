@@ -10,7 +10,7 @@ use snapchain::consensus::consensus::{SystemMessage, ValidatorSetConfig};
 use snapchain::consensus::proposer::GENESIS_MESSAGE;
 use snapchain::mempool::block_receiver::{self, BlockReceiver};
 use snapchain::mempool::mempool::{
-    self, Mempool, MempoolMessagesRequest, MempoolRequest, MempoolSource,
+    self, Mempool, MempoolMessagesRequest, MempoolRequest, MempoolSource, ReadNodeMempool,
 };
 use snapchain::mempool::routing::{self, MessageRouter, ShardRouter};
 use snapchain::network::gossip::SnapchainGossip;
@@ -234,6 +234,7 @@ struct ReadNodeForTest {
     handles: Vec<tokio::task::JoinHandle<()>>,
     node: SnapchainReadNode,
     db: Arc<RocksDB>,
+    mempool_tx: mpsc::Sender<MempoolRequest>,
     _messages_request_rx: mpsc::Receiver<MempoolMessagesRequest>,
 }
 
@@ -281,11 +282,15 @@ impl ReadNodeForTest {
         let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(100);
 
         let fc_network = FarcasterNetwork::Devnet;
+        // `read_node=true` so this gossip handle subscribes to the same topics
+        // a real read node would (notably MEMPOOL_TOPIC, post-#865) and joins
+        // the corresponding meshes — without that, end-to-end tests of the
+        // submit-to-read-node path can't exercise the mempool gossip leg.
         let mut gossip = SnapchainGossip::create(
             keypair.clone(),
             &config,
             Some(system_tx.clone()),
-            false,
+            true,
             fc_network,
             statsd_client.clone(),
         )
@@ -322,13 +327,37 @@ impl ReadNodeForTest {
         });
         join_handles.push(handle);
 
+        // Wire up a ReadNodeMempool so RPC-submitted messages hit the same
+        // ingress path the production read node uses: validate against local
+        // shard stores, then re-broadcast over gossip for validators to pick
+        // up. The `mempool_tx` is exposed via `submit_message_via_mempool`.
+        let (mempool_tx, mempool_rx) = mpsc::channel(100);
+        let mut mempool = ReadNodeMempool::new(
+            mempool_rx,
+            num_shards,
+            node.shard_stores.clone(),
+            node.block_stores.clone(),
+            gossip_tx.clone(),
+            statsd_client.clone(),
+            fc_network,
+        );
+        let handle = tokio::spawn(async move { mempool.run().await });
+        join_handles.push(handle);
+
         let node_for_dispatch = node.clone();
+        let mempool_tx_for_router = mempool_tx.clone();
         let handle = tokio::spawn(async move {
             loop {
                 if let Some(system_event) = system_rx.recv().await {
                     match system_event {
                         SystemMessage::MalachiteNetwork(event_shard, event) => {
                             node_for_dispatch.dispatch_network_event(event_shard, event);
+                        }
+                        SystemMessage::Mempool(req) => {
+                            // Inbound mempool gossip on this read node — forward
+                            // to the local ReadNodeMempool. It will short-circuit
+                            // re-broadcasting because the source is `Gossip`.
+                            let _ = mempool_tx_for_router.send(req).await;
                         }
                         _ => {
                             // noop
@@ -343,8 +372,29 @@ impl ReadNodeForTest {
             handles: join_handles,
             node,
             db: db.clone(),
+            mempool_tx,
             _messages_request_rx: messages_request_rx,
         }
+    }
+
+    /// Submits `message` to this read node's mempool with `MempoolSource::RPC`,
+    /// matching what `MyHubService::submit_message` does for client gRPC calls.
+    /// On success the read node validates against its local shard stores and
+    /// re-broadcasts via gossip for validators to pick up.
+    pub async fn submit_message_via_mempool(
+        &self,
+        message: proto::Message,
+    ) -> Result<(), snapchain::core::error::HubError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(message),
+                MempoolSource::RPC,
+                Some(tx),
+            ))
+            .await
+            .expect("read node mempool channel closed");
+        rx.await.expect("read node mempool dropped reply channel")
     }
 }
 
@@ -571,12 +621,22 @@ impl NodeForTest {
         }
 
         let node_for_dispatch = node.clone();
+        let mempool_tx_for_router = mempool_tx.clone();
         let handle = tokio::spawn(async move {
             loop {
                 if let Some(system_event) = system_rx.recv().await {
                     match system_event {
                         SystemMessage::MalachiteNetwork(event_shard, event) => {
                             node_for_dispatch.dispatch(event_shard, event);
+                        }
+                        SystemMessage::Mempool(req) => {
+                            // Mirror main.rs: forward gossip-received mempool
+                            // messages into the local mempool. Without this,
+                            // mempool-gossip propagation between validators is
+                            // not actually exercised by the test harness — the
+                            // cast still propagates via consensus, masking
+                            // bugs in the gossip ingress path.
+                            let _ = mempool_tx_for_router.try_send(req);
                         }
                         SystemMessage::BlockRequest {
                             block_event_seqnum,
@@ -1703,6 +1763,94 @@ async fn test_read_node() {
 
     // Assert that all nodes have the cast message
     assert_network_has_cast(&network, 1000, cast.hash.clone());
+}
+
+/// End-to-end regression test for #865: a cast submitted to a read node's
+/// mempool with `MempoolSource::RPC` (the same path `MyHubService::submit_message`
+/// uses for client gRPC calls) must reach validators via mempool gossip and
+/// land in a committed block. Before the fix, read nodes never subscribed to
+/// MEMPOOL_TOPIC, so the read node's `gossip_message` re-broadcast was
+/// publishing onto a topic it hadn't joined: validators could only receive
+/// the message via libp2p-gossipsub fanout, and only if the read node had a
+/// directly-connected mesh peer for the topic — neither guaranteed in
+/// production deployments.
+#[tokio::test]
+#[serial]
+async fn test_read_node_relays_rpc_submission_to_validators() {
+    let num_shards = 2;
+    let mut network = TestNetwork::create(3, num_shards).await;
+    network.start_validators().await;
+
+    let fid = 1042;
+    network.register_and_wait_for_fid(fid).await.unwrap();
+    network.wait_for_next_block_on_all_shards().await;
+
+    network.start_read_node().await;
+
+    // Make sure the read node has caught up to the validators before we submit
+    // — otherwise the mempool's local-store duplicate check has nothing to
+    // compare against, but more importantly we want to assert the post-sync
+    // ingress path that real read-node clients actually use.
+    let target_height = network.max_block_height();
+    assert!(
+        network.read_wait_for_block(target_height).await.is_some(),
+        "read node did not catch up to validators before RPC submission"
+    );
+
+    let (signer, _) = network
+        .test_fids
+        .get(&fid)
+        .expect("test fid was registered above")
+        .clone();
+    let cast = messages_factory::casts::create_cast_add(
+        fid,
+        "submitted via read node",
+        None,
+        Some(&signer),
+    );
+
+    let read_node = network.read_nodes.first().expect("read node started above");
+
+    // Retry submission until validators commit the cast or the deadline
+    // elapses. This tolerates the case where the read node's first publishes
+    // happen before the gossipsub mesh with validators has fully formed —
+    // those publishes are warn-logged and dropped by `SnapchainGossip::publish`
+    // and never reach validators. Resubmissions are safe: both the read
+    // node's `message_already_exists` check and the validator's own mempool
+    // dedup short-circuit duplicates.
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+    let received = loop {
+        if tokio::time::Instant::now() >= deadline {
+            break false;
+        }
+        let _ = read_node.submit_message_via_mempool(cast.clone()).await;
+
+        if tokio::time::timeout(
+            tokio::time::Duration::from_millis(500),
+            network.wait_for_cast(fid, cast.hash.clone()),
+        )
+        .await
+        .ok()
+        .and_then(|r| r)
+        .is_some()
+        {
+            break true;
+        }
+    };
+    assert!(
+        received,
+        "cast submitted to read node was not committed by validators"
+    );
+
+    // Let read nodes catch up to the post-commit block height so the
+    // network-wide assertion below covers them too.
+    let target_height = network.max_block_height();
+    network
+        .read_wait_for_block(target_height)
+        .await
+        .expect("read nodes did not catch up after RPC-via-read-node commit");
+
+    assert_network_has_cast(&network, fid, cast.hash);
 }
 
 #[tokio::test]
