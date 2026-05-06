@@ -5,6 +5,7 @@
 //!   key-remove   — submit KEY_REMOVE (custody-signed by default; --mode self-revoke for self-revoke)
 //!   cast-add     — submit CAST_ADD signed by an existing Ed25519 key
 //!   cast-remove  — submit CAST_REMOVE signed by an existing Ed25519 key
+//!   subscribe    — stream HubEvents from a snapchain gRPC node and log them to stdout
 //!
 //! `messages_factory::create_message_with_data` hardcodes `FarcasterNetwork::Mainnet`,
 //! so every message is re-tagged via `retarget_network` before submission.
@@ -16,7 +17,8 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use snapchain::core::util::calculate_message_hash;
 use snapchain::core::validations::key::MAX_KEY_TTL_SECONDS;
-use snapchain::proto::{self, FarcasterNetwork, MessageType};
+use snapchain::network::http_server::map_proto_hub_event_to_json_hub_event;
+use snapchain::proto::{self, FarcasterNetwork, HubEventType, MessageType, SubscribeRequest};
 use snapchain::utils::factory::messages_factory;
 use std::error::Error;
 
@@ -50,6 +52,8 @@ enum Cmd {
     CastAdd(CastAddArgs),
     /// Submit a CAST_REMOVE signed by an existing Ed25519 key.
     CastRemove(CastRemoveArgs),
+    /// Stream HubEvents from a snapchain gRPC node and log them to stdout.
+    Subscribe(SubscribeArgs),
 }
 
 #[derive(clap::Args)]
@@ -157,6 +161,62 @@ struct CastRemoveArgs {
     /// Hex Ed25519 secret of the signing key.
     #[arg(long, env = "SIGNER_SECRET")]
     signer_secret: String,
+}
+
+#[derive(clap::Args)]
+struct SubscribeArgs {
+    /// Shard index to subscribe to (mandatory).
+    #[arg(long)]
+    shard: u32,
+
+    /// gRPC endpoint of the snapchain node. Distinct from --node (which is HTTP).
+    #[arg(long, default_value = "https://iris.farcaster.xyz:3383")]
+    grpc_node: String,
+
+    /// Replay events starting from this event id. If omitted, only live events are streamed.
+    #[arg(long)]
+    from_id: Option<u64>,
+
+    /// Event types to subscribe to (comma-separated). Defaults to all types.
+    #[arg(long, value_delimiter = ',', value_enum)]
+    event_types: Option<Vec<EventTypeArg>>,
+}
+
+#[derive(ValueEnum, Clone, Copy)]
+enum EventTypeArg {
+    MergeMessage,
+    PruneMessage,
+    RevokeMessage,
+    MergeUsernameProof,
+    MergeOnChainEvent,
+    MergeFailure,
+    BlockConfirmed,
+}
+
+impl EventTypeArg {
+    fn as_proto(self) -> HubEventType {
+        match self {
+            EventTypeArg::MergeMessage => HubEventType::MergeMessage,
+            EventTypeArg::PruneMessage => HubEventType::PruneMessage,
+            EventTypeArg::RevokeMessage => HubEventType::RevokeMessage,
+            EventTypeArg::MergeUsernameProof => HubEventType::MergeUsernameProof,
+            EventTypeArg::MergeOnChainEvent => HubEventType::MergeOnChainEvent,
+            EventTypeArg::MergeFailure => HubEventType::MergeFailure,
+            EventTypeArg::BlockConfirmed => HubEventType::BlockConfirmed,
+        }
+    }
+}
+
+fn default_event_types() -> Vec<HubEventType> {
+    vec![
+        HubEventType::MergeMessage,
+        HubEventType::PruneMessage,
+        HubEventType::RevokeMessage,
+        HubEventType::MergeUsernameProof,
+        HubEventType::MergeOnChainEvent,
+        HubEventType::MergeFailure,
+        HubEventType::BlockConfirmed,
+    ]
 }
 
 #[derive(ValueEnum, Clone, Copy)]
@@ -459,6 +519,74 @@ async fn run_cast_remove(
     submit(node, &msg, "CAST_REMOVE").await
 }
 
+async fn run_subscribe(args: SubscribeArgs) -> Result<(), BoxedError> {
+    // tonic's TLS support uses rustls, which requires a process-wide CryptoProvider.
+    // Ignore the result — re-running fc_tool in tests can install twice.
+    let _ =
+        rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
+
+    let event_types: Vec<i32> = args
+        .event_types
+        .map(|v| v.into_iter().map(EventTypeArg::as_proto).collect())
+        .unwrap_or_else(default_event_types)
+        .into_iter()
+        .map(|t| t as i32)
+        .collect();
+
+    let req = SubscribeRequest {
+        event_types,
+        from_id: args.from_id,
+        shard_index: Some(args.shard),
+    };
+
+    eprintln!(
+        "Subscribing to {} (shard {}, from_id {:?})",
+        args.grpc_node, args.shard, args.from_id
+    );
+
+    let connect_start = std::time::Instant::now();
+    let mut client =
+        proto::hub_service_client::HubServiceClient::connect(args.grpc_node.clone()).await?;
+    eprintln!(
+        "gRPC handshake (connect + TLS) completed in {:.3}s",
+        connect_start.elapsed().as_secs_f64()
+    );
+
+    let subscribe_start = std::time::Instant::now();
+    let mut stream = client.subscribe(req).await?.into_inner();
+    eprintln!(
+        "Subscribe RPC opened in {:.3}s",
+        subscribe_start.elapsed().as_secs_f64()
+    );
+
+    let stream_start = std::time::Instant::now();
+    let mut first_event_logged = false;
+    let mut last_event_at: Option<std::time::Instant> = None;
+    while let Some(event) = stream.message().await? {
+        let now = std::time::Instant::now();
+        if !first_event_logged {
+            eprintln!(
+                "First event received {:.3}s after subscribe RPC returned",
+                stream_start.elapsed().as_secs_f64()
+            );
+            first_event_logged = true;
+        } else if let Some(prev) = last_event_at {
+            eprintln!("Δ since previous event: {:.3}s", (now - prev).as_secs_f64());
+        }
+        last_event_at = Some(now);
+
+        match map_proto_hub_event_to_json_hub_event(event) {
+            Ok(json_event) => match serde_json::to_string(&json_event) {
+                Ok(line) => println!("{}", line),
+                Err(err) => eprintln!("warn: failed to serialize event as JSON: {}", err),
+            },
+            Err(err) => eprintln!("warn: failed to map event to JSON shape: {:?}", err),
+        }
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), BoxedError> {
     let cli = Cli::parse();
@@ -468,5 +596,6 @@ async fn main() -> Result<(), BoxedError> {
         Cmd::KeyRemove(a) => run_key_remove(a, &cli.node, network).await,
         Cmd::CastAdd(a) => run_cast_add(a, &cli.node, network).await,
         Cmd::CastRemove(a) => run_cast_remove(a, &cli.node, network).await,
+        Cmd::Subscribe(a) => run_subscribe(a).await,
     }
 }
