@@ -257,6 +257,22 @@ message SignerResponse {
   Signer signer = 1;
 }
 
+// Request for GetSignersByFid. Mirrors `FidRequest` but adds an optional list
+// of `requester_fids` so callers can fetch the current app-nonce for one or
+// more requesters alongside the signer list. Used in lieu of `FidRequest` so
+// the shared message stays lean.
+message SignersByFidRequest {
+  uint64 fid = 1;
+  optional uint32 page_size = 2;
+  optional bytes page_token = 3;
+  optional bool reverse = 4;
+  // FIDs (verified `requestFid` from SignedKeyRequestMetadata) whose current
+  // app-nonce should be included in the response. The response's
+  // `requester_fid_nonces` list carries one entry per FID supplied here, in
+  // the same order. Empty list ⇒ no app nonces in the response.
+  repeated uint64 requester_fids = 5;
+}
+
 message SignersByFidResponse {
   repeated Signer signers = 1;
   optional bytes next_page_token = 2;
@@ -267,6 +283,18 @@ message SignersByFidResponse {
   // Per-FID cap on active gasless keys (NEYN-10579). Lets clients show
   // "X/Y delegations" without hardcoding the limit on their side.
   uint32 gasless_signer_limit = 4;
+  // Current value of the user-nonce counter for this FID, i.e. the highest
+  // nonce ever accepted on KEY_ADD or custody-signed KEY_REMOVE for the user.
+  // The next valid user-nonce is strictly greater than this value. Returns
+  // 0 when no gasless activity has occurred for this FID yet, matching the
+  // merge-time validation rule that treats a missing counter as 0.
+  uint32 current_user_nonce = 5;
+  // Current app-nonce counter, keyed by requester FID. Contains one entry
+  // per FID supplied in `request.requester_fids`; missing counters are
+  // surfaced as 0 so clients can read the map directly without falling back
+  // to defaults. The next valid self-revocation nonce for a given requester
+  // is strictly greater than the value here.
+  map<uint64, uint32> requester_fid_nonces = 6;
 }
 
 message LinkRequest {

@@ -23,7 +23,7 @@ mod tests {
         SubmitBulkMessagesResponse, UserDataType, UserNameProof, UserNameType,
         UsernameProofRequest, VerificationAddAddressBody,
     };
-    use crate::proto::{FidRequest, SubscribeRequest};
+    use crate::proto::{FidRequest, SignersByFidRequest, SubscribeRequest};
     use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{HubEventIdGenerator, HubEventStorageExt, SEQUENCE_BITS};
     use crate::storage::store::block_engine::BlockEngine;
@@ -2349,11 +2349,12 @@ mod tests {
         shard_stores.db.commit(txn).unwrap();
 
         let response = service
-            .get_signers_by_fid(Request::new(FidRequest {
+            .get_signers_by_fid(Request::new(SignersByFidRequest {
                 fid,
                 page_size: None,
                 page_token: None,
                 reverse: None,
+                requester_fids: vec![],
             }))
             .await
             .unwrap();
@@ -2379,6 +2380,122 @@ mod tests {
         assert_eq!(gasless.ttl, Some(3_600));
         assert_eq!(gasless.scopes, vec![MessageType::CastAdd as i32]);
         assert_eq!(gasless.request_fid, Some(7_777));
+
+        // Counter store wasn't touched by the direct put above, so both
+        // namespaces are absent and the API surfaces 0 / empty.
+        assert_eq!(body.current_user_nonce, 0);
+        assert!(body.requester_fid_nonces.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_signers_by_fid_surfaces_nonces() {
+        use crate::storage::store::account::{check_and_set_app_nonce, check_and_set_user_nonce};
+
+        let (
+            stores,
+            _senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let fid = SHARD1_FID;
+        let requester_fid: u64 = 7_777;
+        let shard_stores = stores.get(&1).expect("shard 1 stores");
+
+        // No counter activity yet — `current_user_nonce` defaults to 0 and
+        // `requester_fid_nonces` stays empty unless the request opts in.
+        let response = service
+            .get_signers_by_fid(Request::new(SignersByFidRequest {
+                fid,
+                page_size: None,
+                page_token: None,
+                reverse: None,
+                requester_fids: vec![],
+            }))
+            .await
+            .unwrap();
+        let body = response.into_inner();
+        assert_eq!(body.current_user_nonce, 0);
+        assert!(body.requester_fid_nonces.is_empty());
+
+        // Opting in with a requester_fid still returns 0 when the app-nonce
+        // counter has no entry for that requester. The response carries one
+        // entry naming the requested fid.
+        let response = service
+            .get_signers_by_fid(Request::new(SignersByFidRequest {
+                fid,
+                page_size: None,
+                page_token: None,
+                reverse: None,
+                requester_fids: vec![requester_fid],
+            }))
+            .await
+            .unwrap();
+        let body = response.into_inner();
+        assert_eq!(body.current_user_nonce, 0);
+        assert_eq!(body.requester_fid_nonces.len(), 1);
+        assert_eq!(body.requester_fid_nonces.get(&requester_fid), Some(&0));
+
+        // Advance both counters to simulate prior KEY_ADD / self-revoke
+        // activity. Reading them back through the RPC should reflect the
+        // exact stored values, including across a subsequent revocation
+        // (the counter persists even when the per-key record is gone).
+        let mut txn = RocksDbTransactionBatch::new();
+        check_and_set_user_nonce(&shard_stores.db, &mut txn, fid, 3).unwrap();
+        check_and_set_app_nonce(&shard_stores.db, &mut txn, requester_fid, 9).unwrap();
+        shard_stores.db.commit(txn).unwrap();
+
+        let response = service
+            .get_signers_by_fid(Request::new(SignersByFidRequest {
+                fid,
+                page_size: None,
+                page_token: None,
+                reverse: None,
+                requester_fids: vec![requester_fid],
+            }))
+            .await
+            .unwrap();
+        let body = response.into_inner();
+        assert_eq!(body.current_user_nonce, 3);
+        assert_eq!(body.requester_fid_nonces.len(), 1);
+        assert_eq!(body.requester_fid_nonces.get(&requester_fid), Some(&9));
+
+        // Omitting `requester_fids` on the next call still surfaces the
+        // user-nonce, but suppresses the per-requester list.
+        let response = service
+            .get_signers_by_fid(Request::new(SignersByFidRequest {
+                fid,
+                page_size: None,
+                page_token: None,
+                reverse: None,
+                requester_fids: vec![],
+            }))
+            .await
+            .unwrap();
+        let body = response.into_inner();
+        assert_eq!(body.current_user_nonce, 3);
+        assert!(body.requester_fid_nonces.is_empty());
+
+        // Batched lookup: request multiple requester FIDs in one call. The
+        // response carries one entry per supplied FID in the same order, with
+        // unknown counters reported as 0.
+        let other_requester: u64 = 8_888;
+        let response = service
+            .get_signers_by_fid(Request::new(SignersByFidRequest {
+                fid,
+                page_size: None,
+                page_token: None,
+                reverse: None,
+                requester_fids: vec![requester_fid, other_requester],
+            }))
+            .await
+            .unwrap();
+        let body = response.into_inner();
+        assert_eq!(body.requester_fid_nonces.len(), 2);
+        assert_eq!(body.requester_fid_nonces.get(&requester_fid), Some(&9));
+        assert_eq!(body.requester_fid_nonces.get(&other_requester), Some(&0));
     }
 
     #[tokio::test]

@@ -262,7 +262,7 @@ pub mod tests {
 
         async fn get_signers_by_fid(
             &self,
-            _request: Request<FidRequest>,
+            _request: Request<SignersByFidRequest>,
         ) -> Result<Response<SignersByFidResponse>, Status> {
             Ok(Response::new(SignersByFidResponse::default()))
         }
@@ -394,6 +394,42 @@ pub mod tests {
             let response = TrieNodeMetadataResponse::default();
             Ok(Response::new(response))
         }
+    }
+
+    /// Pins the JSON-on-the-wire shape for `SignersByFidResponse`. The proto
+    /// uses `map<uint64, uint32>` for `requester_fid_nonces`; this test
+    /// verifies the HTTP layer serializes that as a JSON object keyed by the
+    /// stringified FID (not an array of `{fid, nonce}` pairs), so clients can
+    /// look up a requester's nonce directly from the parsed body.
+    #[test]
+    fn signers_by_fid_response_json_shape() {
+        use crate::network::http_server::{Signer, SignersByFidResponse};
+        use std::collections::HashMap;
+
+        let mut requester_fid_nonces = HashMap::new();
+        requester_fid_nonces.insert(7_777u64, 9u32);
+        requester_fid_nonces.insert(8_888u64, 0u32);
+
+        let response = SignersByFidResponse {
+            signers: Vec::<Signer>::new(),
+            next_page_token: None,
+            gasless_signer_count: 0,
+            gasless_signer_limit: 1000,
+            current_user_nonce: 3,
+            requester_fid_nonces,
+        };
+
+        let json = serde_json::to_value(&response).expect("serialize");
+        assert_eq!(json["currentUserNonce"], 3);
+        let nonces = json
+            .get("requesterFidNonces")
+            .expect("requesterFidNonces present");
+        // Map shape: a JSON object whose keys are stringified FIDs. If this
+        // ever serialized as an array, `as_object()` would return None.
+        let nonces = nonces.as_object().expect("requesterFidNonces is a map");
+        assert_eq!(nonces.len(), 2);
+        assert_eq!(nonces.get("7777"), Some(&serde_json::json!(9)));
+        assert_eq!(nonces.get("8888"), Some(&serde_json::json!(0)));
     }
 
     #[tokio::test]
