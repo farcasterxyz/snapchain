@@ -63,7 +63,7 @@ service HubService {
 
   // Unified signer surface — returns both on-chain and off-chain (gasless) keys.
   rpc GetSigner(SignerRequest) returns (SignerResponse);
-  rpc GetSignersByFid(FidRequest) returns (SignersByFidResponse);
+  rpc GetSignersByFid(SignersByFidRequest) returns (SignersByFidResponse);
 
   rpc GetOnChainEvents(OnChainEventRequest) returns (OnChainEventResponse);
   rpc GetIdRegistryOnChainEvent(FidRequest) returns (OnChainEvent);

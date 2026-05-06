@@ -9,6 +9,7 @@ use hyper::{HeaderMap, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use libp2p::PeerId;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
 use std::str::FromStr;
@@ -1065,6 +1066,72 @@ pub struct SignersByFidResponse {
     /// can render "X/Y" without duplicating the constant.
     #[serde(rename = "gaslessSignerLimit")]
     pub gasless_signer_limit: u32,
+    /// Current user-nonce for this FID. The next valid KEY_ADD or
+    /// custody-signed KEY_REMOVE nonce is strictly greater than this. Returns
+    /// 0 when no gasless activity has occurred yet, matching merge-time
+    /// validation semantics.
+    #[serde(rename = "currentUserNonce")]
+    pub current_user_nonce: u32,
+    /// Current app-nonce keyed by requester FID. Contains one entry for each
+    /// FID supplied in `requesterFids`; missing counters are reported as 0.
+    /// JSON object keys are stringified FIDs (JSON requires string keys).
+    #[serde(
+        rename = "requesterFidNonces",
+        skip_serializing_if = "HashMap::is_empty"
+    )]
+    pub requester_fid_nonces: HashMap<u64, u32>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SignersByFidHttpRequest {
+    pub fid: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub page_token: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse: Option<bool>,
+    /// FIDs whose current app-nonce should be returned alongside the signer
+    /// list. Repeat the query param (`?requesterFids=1&requesterFids=2`) to
+    /// request multiple. The response carries one entry per supplied FID,
+    /// in request order, in `requesterFidNonces`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requester_fids: Vec<u64>,
+
+    // For backwards compatibility with the camelCase query params accepted by
+    // existing endpoints in this file (see `FidRequest`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageSize: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pageToken: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requesterFids: Vec<u64>,
+}
+
+impl SignersByFidHttpRequest {
+    pub fn to_proto(self) -> proto::SignersByFidRequest {
+        let requester_fids = if self.requester_fids.is_empty() {
+            self.requesterFids
+        } else {
+            self.requester_fids
+        };
+        proto::SignersByFidRequest {
+            fid: self.fid,
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+            reverse: self.reverse,
+            requester_fids,
+        }
+    }
 }
 
 #[allow(non_snake_case)]
@@ -2539,7 +2606,7 @@ pub trait HubHttpService {
     async fn get_signer(&self, req: SignerHttpRequest) -> Result<SignerResponse, ErrorResponse>;
     async fn get_signers_by_fid(
         &self,
-        req: FidRequest,
+        req: SignersByFidHttpRequest,
     ) -> Result<SignersByFidResponse, ErrorResponse>;
     async fn get_on_chain_events_by_fid(
         &self,
@@ -3236,7 +3303,7 @@ where
     /// GET /v1/signersByFid
     async fn get_signers_by_fid(
         &self,
-        req: FidRequest,
+        req: SignersByFidHttpRequest,
     ) -> Result<SignersByFidResponse, ErrorResponse> {
         let grpc_req = tonic::Request::new(req.to_proto());
         let response = self
@@ -3258,6 +3325,8 @@ where
             next_page_token: inner.next_page_token.map(|t| BASE64_STANDARD.encode(t)),
             gasless_signer_count: inner.gasless_signer_count,
             gasless_signer_limit: inner.gasless_signer_limit,
+            current_user_nonce: inner.current_user_nonce,
+            requester_fid_nonces: inner.requester_fid_nonces,
         })
     }
 
@@ -3563,9 +3632,10 @@ where
                 .await
             }
             (&Method::GET, "/v1/signersByFid") => {
-                self.handle_request::<FidRequest, SignersByFidResponse, _>(req, |service, req| {
-                    Box::pin(async move { service.get_signers_by_fid(req).await })
-                })
+                self.handle_request::<SignersByFidHttpRequest, SignersByFidResponse, _>(
+                    req,
+                    |service, req| Box::pin(async move { service.get_signers_by_fid(req).await }),
+                )
                 .await
             }
             (&Method::GET, "/v1/onChainEventsByFid") => {
