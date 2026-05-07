@@ -20,7 +20,7 @@ use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
 use libp2p::PeerId;
 use std::collections::{BTreeMap, HashMap};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tracing::warn;
 
 const MAX_SHARDS: u32 = 64;
@@ -32,6 +32,14 @@ pub struct SnapchainNode {
     pub shard_senders: HashMap<u32, Senders>,
     pub block_stores: BlockStores,
     pub address: Address,
+    /// Set to `true` once node creation has finished spawning all consensus
+    /// actors (and, by extension, the WAL actors they depend on). Consumers
+    /// can `await` `changed()` on a clone to gate consensus-publishing work
+    /// until the node is fully initialized. Today this fires synchronously at
+    /// the end of `create()`; the channel exists so a future change that
+    /// parallelizes shard init via `spawn_blocking` retains a single
+    /// readiness signal.
+    pub wal_replay_complete: watch::Receiver<bool>,
 }
 
 impl SnapchainNode {
@@ -52,6 +60,7 @@ impl SnapchainNode {
         block_cache: Option<rocksdb::Cache>,
     ) -> Self {
         let validator_address = Address(keypair.public().to_bytes());
+        let (wal_replay_complete_tx, wal_replay_complete_rx) = watch::channel(false);
 
         // Now create the block validator
         let block_shard = SnapchainShard::new(0);
@@ -207,12 +216,15 @@ impl SnapchainNode {
         }
         consensus_actors.insert(0, block_consensus_actor.unwrap());
 
+        let _ = wal_replay_complete_tx.send(true);
+
         Self {
             consensus_actors,
             address: validator_address,
             shard_senders,
             shard_stores,
             block_stores,
+            wal_replay_complete: wal_replay_complete_rx,
         }
     }
 

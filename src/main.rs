@@ -2,6 +2,7 @@ use informalsystems_malachitebft_metrics::{Metrics, SharedRegistry};
 use snapchain::connectors::fname::FnameRequest;
 use snapchain::connectors::onchain_events::{ChainClients, OnchainEventsRequest};
 use snapchain::consensus::consensus::SystemMessage;
+use snapchain::core::types::SnapchainValidatorContext;
 use snapchain::mempool::block_receiver::BlockReceiver;
 use snapchain::mempool::mempool::{Mempool, MempoolRequest, ReadNodeMempool};
 use snapchain::mempool::routing;
@@ -41,7 +42,8 @@ const VERSION: Option<&str> = option_env!("CARGO_PKG_VERSION");
 
 async fn start_servers(
     app_config: &snapchain::cfg::Config,
-    mut gossip: SnapchainGossip,
+    local_peer_id_str: String,
+    gossip_tx: mpsc::Sender<GossipEvent<SnapchainValidatorContext>>,
     mempool_tx: mpsc::Sender<MempoolRequest>,
     shutdown_tx: mpsc::Sender<()>,
     onchain_events_request_tx: broadcast::Sender<OnchainEventsRequest>,
@@ -91,10 +93,10 @@ async fn start_servers(
         app_config.fc_network,
         Box::new(routing::ShardRouter {}),
         mempool_tx.clone(),
-        gossip.tx.clone(),
+        gossip_tx,
         chain_clients,
         VERSION.unwrap_or("unknown").to_string(),
-        gossip.swarm.local_peer_id().to_string(),
+        local_peer_id_str,
         fname_lookup,
     ));
 
@@ -155,13 +157,6 @@ async fn start_servers(
         // Match the previous behaviour: when the accept loop exits, signal shutdown.
         let _ = accept_handle.await;
         http_shutdown_tx.send(()).await.ok();
-    });
-
-    // Start gossip last
-    tokio::spawn(async move {
-        info!("Starting gossip");
-        gossip.start().await;
-        info!("Gossip Stopped");
     });
 }
 
@@ -412,7 +407,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let keypair = app_config.consensus.keypair().clone();
 
-    let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(1000);
+    let (system_tx, mut system_rx) = mpsc::channel::<SystemMessage>(16384);
     let (mempool_tx, mempool_rx) = mpsc::channel(app_config.mempool.queue_size as usize);
 
     let gossip_result = SnapchainGossip::create(
@@ -430,7 +425,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let gossip = gossip_result?;
+    let mut gossip = gossip_result?;
     let local_peer_id = gossip.swarm.local_peer_id().clone();
     let read_or_validator = if app_config.read_node {
         "read"
@@ -445,6 +440,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let gossip_tx = gossip.tx.clone();
+    let local_peer_id_str = local_peer_id.to_string();
+
+    // Spawn the libp2p Swarm event loop now, ahead of SnapchainNode::create().
+    // Driving it in parallel with shard DB init lets QUIC keep-alives and
+    // gossipsub control messages flow during the heavy boot window, instead
+    // of being deferred until after all RocksDB stores are open.
+    tokio::spawn(async move {
+        info!("Starting gossip");
+        gossip.start().await;
+        info!("Gossip Stopped");
+    });
 
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
@@ -543,7 +549,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         start_servers(
             &app_config,
-            gossip,
+            local_peer_id_str.clone(),
+            gossip_tx.clone(),
             mempool_tx,
             shutdown_tx,
             onchain_events_request_tx,
@@ -770,7 +777,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         start_servers(
             &app_config,
-            gossip,
+            local_peer_id_str.clone(),
+            gossip_tx.clone(),
             mempool_tx.clone(),
             shutdown_tx.clone(),
             onchain_events_request_tx,
@@ -812,6 +820,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .unwrap();
                 });
             });
+        }
+
+        // Wait for the readiness signal before entering the consensus loop.
+        // Today the signal fires synchronously at the end of
+        // SnapchainNode::create(), so this returns immediately. The gate is in
+        // place so a future change that introduces real concurrency in node
+        // init (e.g., parallel shard DB open via spawn_blocking) can hold
+        // consensus message dispatch until the actors are ready, without
+        // changing the call site here.
+        {
+            let mut wal_replay_complete = node.wal_replay_complete.clone();
+            if !*wal_replay_complete.borrow() {
+                info!("Waiting for WAL replay to complete before consensus participation");
+                let _ = wal_replay_complete.changed().await;
+            }
+            info!("Validator initialization complete; entering consensus loop");
         }
 
         // Kick it off
