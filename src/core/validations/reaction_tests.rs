@@ -64,7 +64,12 @@ mod tests {
                     })
                 }),
             };
-            assert!(validations::reaction::validate_reaction_body(&reaction).is_ok())
+            let result = validations::reaction::validate_reaction_body(&reaction);
+            assert!(
+                result.is_ok(),
+                "validate_reaction_body failed: {:?}",
+                result.unwrap_err()
+            )
         }
     }
 }
