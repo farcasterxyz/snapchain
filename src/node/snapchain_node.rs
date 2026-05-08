@@ -20,8 +20,9 @@ use informalsystems_malachitebft_metrics::SharedRegistry;
 use libp2p::identity::ed25519::Keypair;
 use libp2p::PeerId;
 use std::collections::{BTreeMap, HashMap};
+use std::time::Instant;
 use tokio::sync::{broadcast, mpsc, watch};
-use tracing::warn;
+use tracing::{info, warn};
 
 const MAX_SHARDS: u32 = 64;
 
@@ -67,8 +68,22 @@ impl SnapchainNode {
 
         // We might want to use different keys for the block shard so signatures are different and cannot be accidentally used in the wrong shard
         let trie = MerkleTrie::new().unwrap();
-        let block_db =
-            RocksDB::open_shard_db_with_cache(rocksdb_dir.as_str(), 0, block_cache.clone());
+        let block_db = {
+            let started = Instant::now();
+            let dir = rocksdb_dir.clone();
+            let cache = block_cache.clone();
+            let db = tokio::task::spawn_blocking(move || {
+                RocksDB::open_shard_db_with_cache(dir.as_str(), 0, cache)
+            })
+            .await
+            .expect("RocksDB block-shard open task panicked");
+            info!(
+                shard_id = 0,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "Shard store initialized"
+            );
+            db
+        };
         let engine = BlockEngine::new(
             trie,
             statsd_client.clone(),
@@ -95,11 +110,22 @@ impl SnapchainNode {
             let shard = SnapchainShard::new(shard_id);
             let ctx = SnapchainValidatorContext::new(keypair.clone());
 
-            let db = RocksDB::open_shard_db_with_cache(
-                rocksdb_dir.clone().as_str(),
-                shard_id,
-                block_cache.clone(),
-            );
+            let db = {
+                let started = Instant::now();
+                let dir = rocksdb_dir.clone();
+                let cache = block_cache.clone();
+                let db = tokio::task::spawn_blocking(move || {
+                    RocksDB::open_shard_db_with_cache(dir.as_str(), shard_id, cache)
+                })
+                .await
+                .expect("RocksDB shard open task panicked");
+                info!(
+                    shard_id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "Shard store initialized"
+                );
+                db
+            };
             let trie = merkle_trie::MerkleTrie::new().unwrap(); //TODO: don't unwrap()
             let engine = match ShardEngine::new(
                 db.clone(),
