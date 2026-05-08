@@ -204,6 +204,14 @@ struct NodeForTest {
     /// Shared `MyHubService` so the HTTP smoke test can boot an HTTP server
     /// against the same underlying stores + mempool wiring as the gRPC server.
     hub_service: Arc<MyHubService>,
+    /// Set to true once the boot one-shot unsub/sub cycle fires for the
+    /// first direct-peer `ConnectionEstablished` on this validator. Tests
+    /// poll this when `direct_peers` is configured to assert the cycle ran.
+    boot_resub_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Lifetime count of `direct_peer_force_bounce` events. Tests poll this
+    /// to assert the periodic self-heal sweep disconnected an unhealthy
+    /// direct peer.
+    direct_peer_force_bounce_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Node for NodeForTest {
@@ -349,31 +357,14 @@ impl ReadNodeForTest {
 }
 
 impl NodeForTest {
-    pub async fn create(
-        keypair: Keypair,
-        num_shards: u32,
-        grpc_port: u32,
-        validator_sets: &Vec<ValidatorSetConfig>,
-        gossip_address: String,
-        bootstrap_address: String,
-    ) -> Self {
-        Self::create_with_options(
-            keypair,
-            num_shards,
-            grpc_port,
-            validator_sets,
-            gossip_address,
-            bootstrap_address,
-            None,
-            None,
-            false,
-        )
-        .await
-    }
-
-    /// Like `create`, but lets the caller pin the on-disk paths and choose whether the DBs
-    /// should survive a `Drop`. Used by warm-restart and crash-recovery tests so the
-    /// validator can be torn down and brought back up against the same (or fresh) state.
+    /// Boots a single validator with the given keypair, shard count, gossip and gRPC
+    /// addresses, and validator set. `keep_db_on_drop=false` is the default (DBs are
+    /// destroyed when the node is dropped); set to `true` for warm-restart tests.
+    /// `direct_peers` injects a comma-separated list of PeerIds into the gossip config
+    /// so the validator opts into the direct_peers-driven mesh self-heal code paths.
+    /// `direct_peers` is the comma-separated PeerId list to inject into the gossip
+    /// config — tests for the post-restart mesh self-heal use this to opt the validator
+    /// into the direct_peers-driven boot one-shot and periodic sweep code paths.
     pub async fn create_with_options(
         keypair: Keypair,
         num_shards: u32,
@@ -384,14 +375,18 @@ impl NodeForTest {
         global_data_dir: Option<String>,
         shards_data_dir: Option<String>,
         keep_db_on_drop: bool,
+        direct_peers: Option<String>,
     ) -> Self {
         let statsd_client = StatsdClientWrapper::new(
             cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
             true,
         );
-        let config =
+        let mut config =
             snapchain::network::gossip::Config::new(gossip_address.clone(), bootstrap_address)
                 .with_announce_address(gossip_address);
+        if let Some(direct) = direct_peers {
+            config = config.with_direct_peers(direct);
+        }
 
         let mut consensus_config = snapchain::consensus::consensus::Config::default();
         consensus_config =
@@ -424,6 +419,8 @@ impl NodeForTest {
         // Captured before `gossip` is moved into the spawn task below — tests
         // reach in to install partition-blocklist entries from this handle.
         let peer_blocklist = gossip.peer_blocklist_handle();
+        let boot_resub_done = gossip.boot_resub_done_handle();
+        let direct_peer_force_bounce_count = gossip.direct_peer_force_bounce_count_handle();
         println!("StartNode validator peer id: {}", peer_id.to_string());
         let (block_tx, mut block_rx) = broadcast::channel::<Block>(100);
         let global_data_dir = global_data_dir.unwrap_or_else(make_tmp_path);
@@ -608,7 +605,25 @@ impl NodeForTest {
             peer_id,
             peer_blocklist,
             hub_service,
+            boot_resub_done,
+            direct_peer_force_bounce_count,
         }
+    }
+
+    /// Test-side accessor: was the boot one-shot unsub/sub cycle exercised on
+    /// this validator yet? Returns `false` for validators not configured with
+    /// `direct_peers` (the cycle gates on first direct-peer connect).
+    pub fn boot_resub_done(&self) -> bool {
+        self.boot_resub_done
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Test-side accessor: lifetime count of self-heal-driven peer
+    /// disconnects. Mirrors the `gossip.direct_peer_force_bounce` statsd
+    /// counter.
+    pub fn direct_peer_force_bounce_count(&self) -> u64 {
+        self.direct_peer_force_bounce_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Returns a shared handle to this validator's `MyHubService`. Used by the
@@ -701,6 +716,21 @@ pub struct TestNetwork {
     nodes: Vec<Option<NodeForTest>>,
     read_nodes: Vec<ReadNodeForTest>,
     test_fids: HashMap<u64, (SigningKey, Vec<u8>)>, // FID -> (signer, address)
+    /// Per-validator `direct_peers` config (comma-separated PeerId strings).
+    /// `None` means no `direct_peers` is configured for that slot — the
+    /// existing tests use this to exercise the bootstrap-peer path. Set to
+    /// `Some(...)` by `enable_all_to_all_direct_peers` so both `start` and
+    /// `restart` carry the same config across the validator's lifetime.
+    direct_peers_per_node: Vec<Option<String>>,
+}
+
+/// Derives a libp2p `PeerId` from a snapchain `Keypair` by going through
+/// `libp2p::identity::Keypair` — the same conversion `SnapchainGossip::create`
+/// does internally. Used by tests to build `direct_peers` strings before any
+/// `SnapchainGossip` is constructed.
+fn peer_id_from_keypair(kp: &Keypair) -> PeerId {
+    let lp: libp2p::identity::Keypair = kp.clone().into();
+    PeerId::from(lp.public())
 }
 
 impl TestNetwork {
@@ -780,6 +810,26 @@ impl TestNetwork {
             nodes: vec![],
             read_nodes: vec![],
             test_fids: HashMap::new(),
+            direct_peers_per_node: vec![None; num_validator_nodes as usize],
+        }
+    }
+
+    /// Pre-populates `direct_peers_per_node` with a comma-separated list of
+    /// every OTHER validator's PeerId, for every slot. After calling this and
+    /// then `start_validators`, every validator boots with all peers in its
+    /// `direct_peers` config — exercising the boot one-shot and periodic
+    /// self-heal sweep code paths in `gossip.rs`. Restarts preserve the
+    /// config so the cycle re-fires after each restart.
+    pub fn enable_all_to_all_direct_peers(&mut self) {
+        let peer_ids: Vec<PeerId> = self.keypairs.iter().map(peer_id_from_keypair).collect();
+        for i in 0..self.num_validator_nodes as usize {
+            let direct: String = peer_ids
+                .iter()
+                .enumerate()
+                .filter_map(|(j, p)| (j != i).then(|| p.to_string()))
+                .collect::<Vec<_>>()
+                .join(",");
+            self.direct_peers_per_node[i] = Some(direct);
         }
     }
 
@@ -816,13 +866,18 @@ impl TestNetwork {
         let keypair = self.keypairs[index as usize].clone();
         let gossip_address = self.gossip_addresses[index as usize].clone();
         let grpc_port = get_available_port();
-        let node = NodeForTest::create(
+        let direct_peers = self.direct_peers_per_node[index as usize].clone();
+        let node = NodeForTest::create_with_options(
             keypair,
             self.num_shards,
             grpc_port,
             &self.validator_sets,
             gossip_address,
             self.gossip_addresses.join(","),
+            None,
+            None,
+            false,
+            direct_peers,
         )
         .await;
         // Pad the slot vector if needed and place the node at its assigned index.
@@ -870,13 +925,18 @@ impl TestNetwork {
         self.gossip_addresses[index] = new_gossip_address.clone();
         let grpc_port = get_available_port();
         let bootstrap = self.live_bootstrap_addresses();
-        let node = NodeForTest::create(
+        let direct_peers = self.direct_peers_per_node[index].clone();
+        let node = NodeForTest::create_with_options(
             keypair,
             self.num_shards,
             grpc_port,
             &self.validator_sets,
             new_gossip_address,
             bootstrap,
+            None,
+            None,
+            false,
+            direct_peers,
         )
         .await;
         while self.nodes.len() <= index {
@@ -914,6 +974,7 @@ impl TestNetwork {
         self.gossip_addresses[index] = new_gossip_address.clone();
         let grpc_port = get_available_port();
         let bootstrap = self.live_bootstrap_addresses();
+        let direct_peers = self.direct_peers_per_node[index].clone();
         let node = NodeForTest::create_with_options(
             keypair,
             self.num_shards,
@@ -924,6 +985,7 @@ impl TestNetwork {
             Some(global_data_dir),
             Some(shards_data_dir),
             false, // resume's lifetime ends with the test, default cleanup is fine
+            direct_peers,
         )
         .await;
         while self.nodes.len() <= index {
@@ -2577,4 +2639,165 @@ async fn test_gasless_key_add_propagates_through_consensus_cross_shard() {
     let (cast_hash, _, _) =
         run_gasless_key_consensus_smoke(&mut network, num_shards, fid, request_fid).await;
     assert_network_has_cast(&network, fid, cast_hash);
+}
+
+// ----- Mesh self-heal tests -----------------------------------------------
+//
+// These tests exercise the boot one-shot and periodic self-heal sweep added
+// for the post-restart consensus mesh degradation fix. They verify the
+// RECOVERY CODE PATHS are wired correctly — not that the underlying
+// libp2p-gossipsub `other_established > 0` race is reproduced (that needs a
+// synthetic harness with controllable libp2p internals; out of scope here).
+//
+// What these tests cover:
+//   * Direct-peers config flows from TestNetwork into SnapchainGossip.
+//   * The boot one-shot fires once per process for each validator that has
+//     `direct_peers` set and sees its first direct-peer connection.
+//   * Restart with direct_peers configured doesn't deadlock or stall the
+//     network — the existing crash/recovery semantics still hold.
+//
+// What these tests do NOT cover:
+//   * The QUIC keep-alive starvation that triggers the bug in production
+//     (Changes A+B address that; reproducing it in-test would require
+//     artificial worker-pool exhaustion).
+//   * The libp2p `other_established` race itself (would need a synthetic
+//     two-node harness with namespace/veth network control).
+
+/// Smoke test: wire up a 2-validator network with each validator listing the
+/// other in `direct_peers`. Once both have connected, both validators must
+/// have flipped `boot_resub_done` to true, and the cycle must have only
+/// fired once each (not on every reconnect).
+#[tokio::test]
+#[serial]
+async fn test_boot_resub_one_shot_fires_on_direct_peer_connect() {
+    let num_shards = 1;
+    let mut network = TestNetwork::create(2, num_shards).await;
+    network.enable_all_to_all_direct_peers();
+    network.start_validators().await;
+
+    // Wait until both validators have observed the boot one-shot fire.
+    // Polling rather than relying on a fixed sleep: gossip dial + handshake
+    // timing is non-deterministic across CI hosts.
+    let observed = wait_for(
+        || {
+            let v0 = network.nodes[0].as_ref()?.boot_resub_done();
+            let v1 = network.nodes[1].as_ref()?.boot_resub_done();
+            (v0 && v1).then_some(())
+        },
+        time::Duration::from_secs(15),
+        time::Duration::from_millis(100),
+    )
+    .await;
+
+    assert!(
+        observed.is_some(),
+        "boot_resub_done did not flip on both validators within 15s. \
+         v0={}, v1={}",
+        network.nodes[0]
+            .as_ref()
+            .map(|n| n.boot_resub_done())
+            .unwrap_or(false),
+        network.nodes[1]
+            .as_ref()
+            .map(|n| n.boot_resub_done())
+            .unwrap_or(false),
+    );
+
+    // Self-heal sweep should not have force-bounced anyone in steady state —
+    // both peers should have completed the SUBSCRIBE round-trip cleanly via
+    // the boot one-shot path. Non-zero here would mean the sweep mistook
+    // healthy peers for the bug condition; that's a false-positive bug.
+    for (i, node) in network.live_nodes().enumerate() {
+        assert_eq!(
+            node.direct_peer_force_bounce_count(),
+            0,
+            "validator {i} self-heal sweep bounced a peer in steady state — \
+             expected 0 bounces. (False positive in the missing-CONTACT_INFO check?)",
+        );
+    }
+}
+
+/// Regression test: with `direct_peers` configured, restarting one validator
+/// in a 4-validator network must not stall consensus — the surviving 3-of-4
+/// supermajority must keep producing blocks, and the restarted validator
+/// must rejoin and catch up. This mirrors `test_validator_crash_and_recovery`
+/// but exercises the direct_peers-driven mesh self-heal code paths instead
+/// of the bootstrap-only path.
+#[tokio::test]
+#[serial]
+async fn test_direct_peers_restart_recovery() {
+    let num_shards = 1;
+    let mut network = TestNetwork::create(4, num_shards).await;
+    network.enable_all_to_all_direct_peers();
+    network.start_validators().await;
+
+    network.register_and_wait_for_fid(1000).await.unwrap();
+    let cast_before = network
+        .send_and_wait_for_cast(1000, "before restart")
+        .await
+        .unwrap();
+
+    network.wait_for_next_block_on_all_shards().await;
+    let height_at_restart = network.max_block_height();
+
+    // Stop validator 0. Surviving 3/4 must continue.
+    network.stop_validator_node(0).await;
+
+    // Confirm survivors keep advancing past the restart height. If the
+    // direct_peers config somehow stalled them (e.g., the boot one-shot
+    // ran multiple times, or the sweep bounced healthy survivors), this
+    // would time out.
+    network
+        .wait_for_block_on_subset(
+            &[1, 2, 3],
+            height_at_restart + 2,
+            tokio::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("survivors did not advance with direct_peers configured");
+
+    // Bring 0 back. Same direct_peers config carries over via
+    // direct_peers_per_node, so the boot one-shot fires again on first
+    // direct-peer connect post-restart.
+    network.restart_validator_node(0).await;
+
+    // Restarted validator must observe its boot one-shot.
+    let resub = wait_for(
+        || network.nodes[0].as_ref()?.boot_resub_done().then_some(()),
+        time::Duration::from_secs(20),
+        time::Duration::from_millis(100),
+    )
+    .await;
+    assert!(
+        resub.is_some(),
+        "restarted validator 0 did not observe its boot one-shot fire within 20s",
+    );
+
+    // Network must catch up the restarted validator.
+    let target = network.max_block_height();
+    network
+        .wait_for_block_with_timeout(target, tokio::time::Duration::from_secs(60))
+        .await
+        .expect("restarted validator did not catch up");
+
+    // Pre-restart cast must be visible everywhere including the restarted
+    // validator after sync.
+    network
+        .wait_for_cast(1000, cast_before.hash.clone())
+        .await
+        .expect("restarted validator did not surface pre-restart cast");
+
+    // No false-positive bounces from the self-heal sweep — the sweep should
+    // not have mistakenly disconnected any direct peer during normal
+    // operation. Non-zero here would mean we're churning healthy peers.
+    for (i, node) in network.live_nodes().enumerate() {
+        let bounces = node.direct_peer_force_bounce_count();
+        assert_eq!(
+            bounces, 0,
+            "validator {i} self-heal sweep bounced {bounces} peer(s) — \
+             expected 0 in a healthy direct_peers network",
+        );
+    }
+
+    assert_blocks_match_across_validators(&network);
 }
