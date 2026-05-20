@@ -191,6 +191,8 @@ pub struct LiveAtRateLimits {
 }
 
 impl LiveAtRateLimits {
+    const RATE_LIMIT_PER_STORAGE_UNIT: u32 = 5000;
+
     pub fn new(
         shard_stores: HashMap<u32, Stores>,
         statsd_client: StatsdClientWrapper,
@@ -199,7 +201,9 @@ impl LiveAtRateLimits {
         Self {
             shard_stores,
             rate_limits_by_fid: CacheBuilder::new(1_000_000)
-                .time_to_idle(Duration::from_secs(60 * 2 * 2))
+                // 2× the 1h quota window: prevents idle eviction from refreshing an hourly
+                // bucket early while still allowing LRU cleanup for inactive FIDs.
+                .time_to_idle(Duration::from_secs(60 * 60 * 2))
                 .eviction_policy(EvictionPolicy::lru())
                 .build(),
             statsd_client,
@@ -216,8 +220,11 @@ impl LiveAtRateLimits {
             if storage_limits.units == 0 {
                 None
             } else {
+                let quota = storage_limits
+                    .units
+                    .saturating_mul(Self::RATE_LIMIT_PER_STORAGE_UNIT);
                 Some(Arc::new(RateLimiter::direct(Quota::per_hour(
-                    NonZeroU32::new(5000 * storage_limits.units).unwrap(),
+                    NonZeroU32::new(quota).unwrap(),
                 ))))
             }
         });

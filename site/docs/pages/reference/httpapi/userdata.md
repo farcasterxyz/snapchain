@@ -2,18 +2,21 @@
 
 The UserData API will accept the following values for the `user_data_type` field.
 
-| String                  | Numerical value | Description                   |
-| ----------------------- | --------------- | ----------------------------- |
-| USER_DATA_TYPE_PFP      | 1               | Profile Picture for the user  |
-| USER_DATA_TYPE_DISPLAY  | 2               | Display Name for the user     |
-| USER_DATA_TYPE_BIO      | 3               | Bio for the user              |
-| USER_DATA_TYPE_URL      | 5               | URL of the user               |
-| USER_DATA_TYPE_USERNAME | 6               | Preferred Name for the user   |
-| USER_DATA_TYPE_LOCATION | 7               | Location for the user         |
-| USER_DATA_TYPE_TWITTER  | 8               | Twitter username for the user |
-| USER_DATA_TYPE_GITHUB   | 9               | GitHub username for the user  |
-| USER_DATA_TYPE_BANNER   | 10              | Banner image for the user     |
-| USER_DATA_TYPE_LIVE_AT  | 14              | Live activity URL for the user |
+| String                             | Numerical value | Description                    |
+| ---------------------------------- | --------------- | ------------------------------ |
+| USER_DATA_TYPE_PFP                 | 1               | Profile Picture for the user   |
+| USER_DATA_TYPE_DISPLAY             | 2               | Display Name for the user      |
+| USER_DATA_TYPE_BIO                 | 3               | Bio for the user               |
+| USER_DATA_TYPE_URL                 | 5               | URL of the user                |
+| USER_DATA_TYPE_USERNAME            | 6               | Preferred Name for the user    |
+| USER_DATA_TYPE_LOCATION            | 7               | Location for the user          |
+| USER_DATA_TYPE_TWITTER             | 8               | Twitter username for the user  |
+| USER_DATA_TYPE_GITHUB              | 9               | GitHub username for the user   |
+| USER_DATA_TYPE_BANNER              | 10              | Banner image for the user      |
+| USER_DATA_PRIMARY_ADDRESS_ETHEREUM | 11              | Primary Ethereum address       |
+| USER_DATA_PRIMARY_ADDRESS_SOLANA   | 12              | Primary Solana address         |
+| USER_DATA_TYPE_PROFILE_TOKEN       | 13              | Profile token in CAIP-19 format |
+| USER_DATA_TYPE_LIVE_AT             | 14              | Live activity URL for the user |
 
 See [FIP-196](https://github.com/farcasterxyz/protocol/discussions/196) for more information on Location.
 See [FIP-19](https://github.com/farcasterxyz/protocol/discussions/199) for more information on Twitter/X and Github usernames.
