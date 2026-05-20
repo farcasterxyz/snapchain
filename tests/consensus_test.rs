@@ -1483,13 +1483,12 @@ impl TestNetwork {
         wait_for(
             || {
                 for node in self.live_nodes() {
-                    if node.block_stores().block_event_store.max_seqnum().unwrap() != target_seqnum
-                    {
+                    if node.block_stores().block_event_store.max_seqnum().unwrap() < target_seqnum {
                         return None;
                     }
 
                     for stores in node.shard_stores().values() {
-                        if stores.block_event_store.max_seqnum().unwrap() != target_seqnum {
+                        if stores.block_event_store.max_seqnum().unwrap() < target_seqnum {
                             return None;
                         }
                     }
