@@ -47,6 +47,9 @@ services:
     ports:
       - "50054:50054/udp"
       - "3386:3386/tcp"
+    networks:
+      snapchain-subnet:
+        ipv4_address: 172.100.0.14
     volumes:
       - node4-data:/app/.rocks
 

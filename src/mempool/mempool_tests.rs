@@ -14,12 +14,14 @@ mod tests {
             StorageUnitType, Transaction,
         },
         storage::store::{
+            account::make_ts_hash,
             block_engine::BlockEngine,
             block_engine_test_helpers,
             engine::ShardEngine,
             mempool_poller::MempoolMessage,
             test_helper::{self, commit_event, default_storage_event, FID_FOR_TEST},
         },
+        storage::util::bytes_compare,
         utils::{
             factory::{
                 events_factory,
@@ -38,9 +40,18 @@ mod tests {
     use crate::utils::factory::username_factory;
     use libp2p::identity::ed25519::Keypair;
     use messages_factory::casts::create_cast_add;
+    use messages_factory::user_data::create_user_data_add;
 
     const HOST_FOR_TEST: &str = "127.0.0.1";
     const PORT_FOR_TEST: u32 = 9388;
+
+    fn live_at_lww_compare(a: &proto::Message, b: &proto::Message) -> i8 {
+        let a_data = a.data.as_ref().unwrap();
+        let b_data = b.data.as_ref().unwrap();
+        let a_ts_hash = make_ts_hash(a_data.timestamp, &a.hash).unwrap();
+        let b_ts_hash = make_ts_hash(b_data.timestamp, &b.hash).unwrap();
+        bytes_compare(&a_ts_hash, &b_ts_hash)
+    }
 
     async fn setup(
         config: Option<Config>,
@@ -452,6 +463,428 @@ mod tests {
         let size = res.await.unwrap();
         assert_eq!(size.len(), 1);
         assert_eq!(size[&1], 2);
+    }
+
+    #[tokio::test]
+    async fn test_live_at_mempool_coalesces_newer_messages() {
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let mut engine = engines.get_mut(&1).unwrap();
+        commit_event(&mut engine, &default_storage_event(FID_FOR_TEST)).await;
+
+        let older = create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::LiveAt,
+            &"https://example.com/one".to_string(),
+            Some(10),
+            None,
+        );
+        let newer = create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::LiveAt,
+            &"https://example.com/two".to_string(),
+            Some(11),
+            None,
+        );
+
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(older),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .unwrap();
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(newer.clone()),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (req, res) = oneshot::channel();
+        mempool_tx.send(MempoolRequest::GetSize(req)).await.unwrap();
+        let size = res.await.unwrap();
+        assert_eq!(size[&1], 1);
+        pull_message(
+            &messages_request_tx,
+            1,
+            Some(MempoolMessage::UserMessage(newer)),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_live_at_mempool_rejects_older_message() {
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let mut engine = engines.get_mut(&1).unwrap();
+        commit_event(&mut engine, &default_storage_event(FID_FOR_TEST)).await;
+
+        let newer = create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::LiveAt,
+            &"https://example.com/two".to_string(),
+            Some(11),
+            None,
+        );
+        let older = create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::LiveAt,
+            &"https://example.com/one".to_string(),
+            Some(10),
+            None,
+        );
+
+        let (newer_tx, newer_rx) = oneshot::channel();
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(newer),
+                MempoolSource::Local,
+                Some(newer_tx),
+            ))
+            .await
+            .unwrap();
+        assert!(newer_rx.await.unwrap().is_ok());
+
+        let (older_tx, older_rx) = oneshot::channel();
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(older),
+                MempoolSource::Local,
+                Some(older_tx),
+            ))
+            .await
+            .unwrap();
+        assert!(older_rx.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_live_at_mempool_coalesces_same_second_by_hash() {
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let mut engine = engines.get_mut(&1).unwrap();
+        commit_event(&mut engine, &default_storage_event(FID_FOR_TEST)).await;
+
+        let first = create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::LiveAt,
+            &"https://example.com/one".to_string(),
+            Some(10),
+            None,
+        );
+        let second = create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::LiveAt,
+            &"https://example.com/two".to_string(),
+            Some(10),
+            None,
+        );
+        let (lower, higher) = if live_at_lww_compare(&first, &second) < 0 {
+            (first, second)
+        } else {
+            (second, first)
+        };
+
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(lower),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .unwrap();
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(higher.clone()),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (req, res) = oneshot::channel();
+        mempool_tx.send(MempoolRequest::GetSize(req)).await.unwrap();
+        let size = res.await.unwrap();
+        assert_eq!(size[&1], 1);
+        pull_message(
+            &messages_request_tx,
+            1,
+            Some(MempoolMessage::UserMessage(higher)),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_live_at_mempool_coalesces_repeated_clear_heartbeats() {
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let mut engine = engines.get_mut(&1).unwrap();
+        commit_event(&mut engine, &default_storage_event(FID_FOR_TEST)).await;
+
+        let first_clear = create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::LiveAt,
+            &"".to_string(),
+            Some(10),
+            None,
+        );
+        let second_clear = create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::LiveAt,
+            &"".to_string(),
+            Some(11),
+            None,
+        );
+
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(first_clear),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .unwrap();
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(second_clear.clone()),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (req, res) = oneshot::channel();
+        mempool_tx.send(MempoolRequest::GetSize(req)).await.unwrap();
+        let size = res.await.unwrap();
+        assert_eq!(size[&1], 1);
+        pull_message(
+            &messages_request_tx,
+            1,
+            Some(MempoolMessage::UserMessage(second_clear)),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_live_at_mempool_rejects_fid_without_storage() {
+        let (
+            _,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let live_at = create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::LiveAt,
+            &"https://example.com/live".to_string(),
+            None,
+            None,
+        );
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(live_at),
+                MempoolSource::Local,
+                Some(reply_tx),
+            ))
+            .await
+            .unwrap();
+
+        let result = reply_rx.await.unwrap();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("rate limit exceeded"));
+    }
+
+    #[tokio::test]
+    async fn test_live_at_mempool_removes_index_after_commit() {
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let mut engine = engines.get_mut(&1).unwrap();
+        commit_event(&mut engine, &default_storage_event(FID_FOR_TEST)).await;
+
+        let live_at = create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::LiveAt,
+            &"https://example.com/live".to_string(),
+            None,
+            None,
+        );
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(live_at.clone()),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let chunk = ShardChunk {
+            header: Some(ShardHeader {
+                height: Some(Height {
+                    shard_index: 1,
+                    block_number: 1,
+                }),
+                timestamp: 0,
+                parent_hash: vec![],
+                shard_root: vec![],
+            }),
+            hash: vec![],
+            transactions: vec![Transaction {
+                fid: FID_FOR_TEST,
+                user_messages: vec![live_at],
+                system_messages: vec![],
+                account_root: vec![],
+            }],
+            commits: None,
+        };
+        shard_decision_tx.send(chunk).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        pull_message(&messages_request_tx, 1, None).await;
+    }
+
+    #[tokio::test]
+    async fn test_storage_lend_commit_invalidates_live_at_rate_limiters() {
+        let (
+            _engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, true, 1).await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let storage_lend = create_storage_lend(
+            FID_FOR_TEST,
+            FID_FOR_TEST + 1,
+            1,
+            StorageUnitType::UnitType2025,
+            None,
+            Some(&default_signer()),
+        );
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(storage_lend.clone()),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let chunk = ShardChunk {
+            header: Some(ShardHeader {
+                height: Some(Height {
+                    shard_index: 1,
+                    block_number: 1,
+                }),
+                timestamp: 0,
+                parent_hash: vec![],
+                shard_root: vec![],
+            }),
+            hash: vec![],
+            transactions: vec![Transaction {
+                fid: FID_FOR_TEST,
+                user_messages: vec![storage_lend],
+                system_messages: vec![],
+                account_root: vec![],
+            }],
+            commits: None,
+        };
+        shard_decision_tx.send(chunk).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        pull_message(&messages_request_tx, 1, None).await;
     }
 
     #[tokio::test]
