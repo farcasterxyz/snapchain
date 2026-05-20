@@ -19,7 +19,9 @@ use snapchain::node::snapchain_node::SnapchainNode;
 use snapchain::node::snapchain_read_node::SnapchainReadNode;
 use snapchain::proto::hub_service_client::HubServiceClient;
 use snapchain::proto::hub_service_server::HubServiceServer;
-use snapchain::proto::{self, CastId, Height, HubEventType, StorageUnitType, SubscribeRequest};
+use snapchain::proto::{
+    self, CastId, Height, HubEventType, StorageUnitType, SubscribeRequest, UserDataRequest,
+};
 use snapchain::proto::{
     Block, FarcasterNetwork, IdRegisterEventType, MessageType, SignerEventType,
 };
@@ -686,6 +688,21 @@ impl NodeForTest {
             .map(|r| r.into_inner())
     }
 
+    pub async fn get_user_data_via_grpc(
+        &self,
+        fid: u64,
+        user_data_type: proto::UserDataType,
+    ) -> Result<proto::Message, tonic::Status> {
+        let mut client = self.client().await;
+        client
+            .get_user_data(Request::new(UserDataRequest {
+                fid,
+                user_data_type: user_data_type as i32,
+            }))
+            .await
+            .map(|r| r.into_inner())
+    }
+
     pub fn peer_id(&self) -> PeerId {
         self.peer_id
     }
@@ -1241,6 +1258,36 @@ impl TestNetwork {
         message
     }
 
+    pub async fn send_user_data(
+        &mut self,
+        fid: u64,
+        user_data_type: proto::UserDataType,
+        value: String,
+    ) -> proto::Message {
+        let (signer, _) = self.test_fids.get(&fid).unwrap();
+        let message = messages_factory::user_data::create_user_data_add(
+            fid,
+            user_data_type,
+            &value,
+            None,
+            Some(&signer),
+        );
+
+        let result = self
+            .first_live_node()
+            .submit_message_via_grpc(message.clone())
+            .await;
+        assert!(
+            result.is_ok(),
+            "Failed to submit user data via gRPC (fid: {}, type: {:?}): {:?}",
+            fid,
+            user_data_type,
+            result.err()
+        );
+
+        message
+    }
+
     /// Like `register_fid`, but binds the FID's on-chain custody to a real
     /// Ethereum signer so KEY_ADD's EIP-712 recovery (which checks the
     /// recovered address against the on-chain custody) succeeds. Returns the
@@ -1400,6 +1447,37 @@ impl TestNetwork {
         }
     }
 
+    pub async fn wait_for_user_data_via_grpc(
+        &self,
+        fid: u64,
+        user_data_type: proto::UserDataType,
+        hash: Vec<u8>,
+    ) -> Option<proto::Message> {
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
+        loop {
+            let mut all_ok = true;
+            let mut last_message: Option<proto::Message> = None;
+            for node in self.live_nodes() {
+                match node.get_user_data_via_grpc(fid, user_data_type).await {
+                    Ok(msg) if msg.hash == hash => {
+                        last_message = Some(msg);
+                    }
+                    _ => {
+                        all_ok = false;
+                        break;
+                    }
+                }
+            }
+            if all_ok && last_message.is_some() {
+                return last_message;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+    }
+
     pub async fn wait_for_next_block_event(&self) -> Option<()> {
         let target_seqnum = self.max_block_event_seqnum() + 1;
         wait_for(
@@ -1427,6 +1505,17 @@ impl TestNetwork {
     pub async fn send_and_wait_for_cast(&mut self, fid: u64, text: &str) -> Option<proto::Message> {
         let message = self.send_cast(fid, text).await;
         self.wait_for_cast(fid, message.hash.clone()).await
+    }
+
+    pub async fn send_and_wait_for_user_data(
+        &mut self,
+        fid: u64,
+        user_data_type: proto::UserDataType,
+        value: String,
+    ) -> Option<proto::Message> {
+        let message = self.send_user_data(fid, user_data_type, value).await;
+        self.wait_for_user_data_via_grpc(fid, user_data_type, message.hash.clone())
+            .await
     }
 
     // Waits for all validator nodes to reach at least `height` blocks.
@@ -1684,6 +1773,36 @@ async fn test_basic_consensus() {
     assert_network_has_messages(&network, 1);
     // Assert that all nodes have the cast message
     assert_network_has_cast(&network, 1000, cast.hash.clone());
+    assert_blocks_match_across_validators(&network);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_live_at_consensus() {
+    let num_shards = 2;
+    let mut network = TestNetwork::create(3, num_shards).await;
+    network.start_validators().await;
+
+    network.register_and_wait_for_fid(1000).await.unwrap();
+    let live_at = network
+        .send_and_wait_for_user_data(
+            1000,
+            proto::UserDataType::LiveAt,
+            "https://example.com/live".to_string(),
+        )
+        .await
+        .unwrap();
+
+    network.wait_for_next_block_on_all_shards().await;
+
+    assert_network_has_messages(&network, 1);
+    for node in network.live_nodes() {
+        let message = node
+            .get_user_data_via_grpc(1000, proto::UserDataType::LiveAt)
+            .await
+            .unwrap();
+        assert_eq!(message.hash, live_at.hash);
+    }
     assert_blocks_match_across_validators(&network);
 }
 
