@@ -53,6 +53,14 @@ struct Args {
 
     #[arg(long, default_value = "4")]
     num_nodes: u32,
+
+    /// Generate configs that work inside the Docker Compose bridge network.
+    #[arg(long, default_value = "false")]
+    docker: bool,
+
+    /// Admin RPC basic auth users for local/devnet debugging, as "user:password".
+    #[arg(long, default_value = "")]
+    admin_rpc_auth: String,
 }
 
 fn parse_duration(arg: &str) -> Result<Duration, String> {
@@ -103,15 +111,30 @@ async fn main() {
         }
         let secret_key = hex::encode(&keypairs[i as usize - 1]);
         let rpc_port = base_rpc_port + i;
-        let http_port = base_http_port + i;
+        let http_port = if args.docker {
+            3381
+        } else {
+            base_http_port + i
+        };
         let gossip_port = base_gossip_port + i;
-        let host = format!("127.0.0.1");
+        let host = if args.docker {
+            "0.0.0.0".to_string()
+        } else {
+            "127.0.0.1".to_string()
+        };
         let rpc_address = format!("{host}:{rpc_port}");
         let http_address = format!("{host}:{http_port}");
         let gossip_multi_addr = format!("/ip4/{host}/udp/{gossip_port}/quic-v1");
         let other_nodes_addresses = (1..=num_nodes)
             .filter(|&x| x != id)
-            .map(|x| format!("/ip4/127.0.0.1/udp/{:?}/quic-v1", base_gossip_port + x))
+            .map(|x| {
+                let gossip_host = if args.docker {
+                    format!("172.100.0.{}", 10 + x)
+                } else {
+                    "127.0.0.1".to_string()
+                };
+                format!("/ip4/{gossip_host}/udp/{:?}/quic-v1", base_gossip_port + x)
+            })
             .collect::<Vec<String>>()
             .join(",");
 
@@ -134,6 +157,7 @@ async fn main() {
         let statsd_prefix = format!("{}{}", args.statsd_prefix, id);
         let statsd_addr = args.statsd_addr.clone();
         let statsd_use_tags = args.statsd_use_tags;
+        let admin_rpc_auth = args.admin_rpc_auth.clone();
         let l1_rpc_url = args.l1_rpc_url.clone();
         let op_l2_rpc_url = args.op_l2_rpc_url.clone();
         let base_l2_rpc_url = args.base_l2_rpc_url.clone();
@@ -161,6 +185,7 @@ async fn main() {
             r#"
 rpc_address="{rpc_address}"
 http_address="{http_address}"
+admin_rpc_auth="{admin_rpc_auth}"
 rocksdb_dir="{db_dir}"
 l1_rpc_url="{l1_rpc_url}"
 
