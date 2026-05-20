@@ -19,7 +19,7 @@ mod tests {
             block_engine_test_helpers,
             engine::ShardEngine,
             mempool_poller::MempoolMessage,
-            test_helper::{self, commit_event, default_storage_event, FID_FOR_TEST},
+            test_helper::{self, FID_FOR_TEST, commit_event, default_storage_event},
         },
         storage::util::bytes_compare,
         utils::{
@@ -721,6 +721,170 @@ mod tests {
             Some(MempoolMessage::UserMessage(second_clear)),
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_live_at_mempool_rejects_fid_without_storage() {
+        let (
+            _,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            _messages_request_tx,
+            _shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let live_at = create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::LiveAt,
+            &"https://example.com/live".to_string(),
+            None,
+            None,
+        );
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(live_at),
+                MempoolSource::Local,
+                Some(reply_tx),
+            ))
+            .await
+            .unwrap();
+
+        let result = reply_rx.await.unwrap();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("rate limit exceeded"));
+    }
+
+    #[tokio::test]
+    async fn test_live_at_mempool_removes_index_after_commit() {
+        let (
+            mut engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, false, 1).await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let mut engine = engines.get_mut(&1).unwrap();
+        commit_event(&mut engine, &default_storage_event(FID_FOR_TEST)).await;
+
+        let live_at = create_user_data_add(
+            FID_FOR_TEST,
+            proto::UserDataType::LiveAt,
+            &"https://example.com/live".to_string(),
+            None,
+            None,
+        );
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(live_at.clone()),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let chunk = ShardChunk {
+            header: Some(ShardHeader {
+                height: Some(Height {
+                    shard_index: 1,
+                    block_number: 1,
+                }),
+                timestamp: 0,
+                parent_hash: vec![],
+                shard_root: vec![],
+            }),
+            hash: vec![],
+            transactions: vec![Transaction {
+                fid: FID_FOR_TEST,
+                user_messages: vec![live_at],
+                system_messages: vec![],
+                account_root: vec![],
+            }],
+            commits: None,
+        };
+        shard_decision_tx.send(chunk).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        pull_message(&messages_request_tx, 1, None).await;
+    }
+
+    #[tokio::test]
+    async fn test_storage_lend_commit_invalidates_live_at_rate_limiters() {
+        let (
+            _engines,
+            _,
+            _,
+            mut mempool,
+            mempool_tx,
+            messages_request_tx,
+            shard_decision_tx,
+            _block_decision_tx,
+            _,
+        ) = setup(None, true, 1).await;
+        tokio::spawn(async move {
+            mempool.run().await;
+        });
+
+        let storage_lend = create_storage_lend(
+            FID_FOR_TEST,
+            FID_FOR_TEST + 1,
+            1,
+            StorageUnitType::UnitType2025,
+            None,
+            Some(&default_signer()),
+        );
+        mempool_tx
+            .send(MempoolRequest::AddMessage(
+                MempoolMessage::UserMessage(storage_lend.clone()),
+                MempoolSource::Local,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let chunk = ShardChunk {
+            header: Some(ShardHeader {
+                height: Some(Height {
+                    shard_index: 1,
+                    block_number: 1,
+                }),
+                timestamp: 0,
+                parent_hash: vec![],
+                shard_root: vec![],
+            }),
+            hash: vec![],
+            transactions: vec![Transaction {
+                fid: FID_FOR_TEST,
+                user_messages: vec![storage_lend],
+                system_messages: vec![],
+                account_root: vec![],
+            }],
+            commits: None,
+        };
+        shard_decision_tx.send(chunk).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        pull_message(&messages_request_tx, 1, None).await;
     }
 
     #[tokio::test]
