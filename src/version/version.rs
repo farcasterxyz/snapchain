@@ -125,7 +125,7 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
         version: EngineVersion::V16,
     },
     VersionSchedule {
-        active_at: 1781715600, // 2026-06-17 5PM UTC (12:00 PM CDT)
+        active_at: 1780592400, // 2026-06-04 5PM UTC (12:00 PM CDT)
         version: EngineVersion::V17,
     },
 ]
@@ -185,7 +185,7 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
         version: EngineVersion::V16,
     },
     VersionSchedule {
-        active_at: 1780506000, // 2026-06-03 5PM UTC (12:00 PM CDT)
+        active_at: 1779382800, // 2026-05-21 5PM UTC (12:00 PM CDT)
         version: EngineVersion::V17,
     },
 ]
@@ -480,7 +480,7 @@ mod version_test {
 
     #[test]
     fn test_live_at_activation_schedule() {
-        let testnet_active = 1780506000;
+        let testnet_active = 1779382800;
         assert_eq!(
             EngineVersion::version_for(
                 &FarcasterTime::from_unix_seconds(testnet_active - 1),
@@ -496,7 +496,7 @@ mod version_test {
             EngineVersion::V17
         );
 
-        let mainnet_active = 1781715600;
+        let mainnet_active = 1780592400;
         assert_eq!(
             EngineVersion::version_for(
                 &FarcasterTime::from_unix_seconds(mainnet_active - 1),
@@ -573,10 +573,10 @@ mod version_test {
         let time = FarcasterTime::from_unix_seconds(1778173200);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
-            Some(1781715600)
+            Some(1780592400)
         );
 
-        let time = FarcasterTime::from_unix_seconds(1781715600);
+        let time = FarcasterTime::from_unix_seconds(1780592400);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
             None
