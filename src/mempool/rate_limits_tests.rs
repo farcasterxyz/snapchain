@@ -5,7 +5,7 @@ mod tests {
     use ractor::concurrency::sleep;
 
     use crate::{
-        mempool::mempool::{KeyAddRateLimits, RateLimits, RateLimitsConfig},
+        mempool::mempool::{KeyAddRateLimits, LiveAtRateLimits, RateLimits, RateLimitsConfig},
         storage::store::{
             engine::ShardEngine,
             stores::{Limits, StoreLimits, Stores},
@@ -253,5 +253,56 @@ mod tests {
         // wouldn't have a store to read from.
         let limits = KeyAddRateLimits::new(statsd_client());
         assert!(limits.consume_for_fid(999_999));
+    }
+
+    #[tokio::test]
+    async fn live_at_budget_is_separate_from_general_budget() {
+        let (mut engine, shard_stores) = setup(Limits {
+            casts: 1,
+            links: 1,
+            reactions: 1,
+            user_data: 1,
+            user_name_proofs: 1,
+            verifications: 1,
+            storage_lends: 1,
+        })
+        .await;
+
+        register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let mut general_limits = RateLimits::new(
+            shard_stores.clone(),
+            RateLimitsConfig {
+                time_to_idle: Duration::from_secs(1),
+                max_capacity: 10,
+            },
+            statsd_client(),
+            1,
+        );
+        let live_at_limits = LiveAtRateLimits::new(shard_stores, statsd_client(), 1);
+
+        for _ in 0..100 {
+            assert!(general_limits.consume_for_fid(FID_FOR_TEST));
+        }
+        assert!(!general_limits.consume_for_fid(FID_FOR_TEST));
+
+        for _ in 0..5000 {
+            assert!(live_at_limits.consume_for_fid(FID_FOR_TEST));
+        }
+        assert!(!live_at_limits.consume_for_fid(FID_FOR_TEST));
+    }
+
+    #[tokio::test]
+    async fn live_at_rate_limit_rejects_zero_storage_units() {
+        let (_engine, shard_stores) = setup(limits::zero()).await;
+        let live_at_limits = LiveAtRateLimits::new(shard_stores, statsd_client(), 1);
+
+        assert!(!live_at_limits.consume_for_fid(FID_FOR_TEST));
     }
 }

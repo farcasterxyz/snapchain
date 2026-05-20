@@ -3,7 +3,7 @@ use crate::proto::FarcasterNetwork;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
-const LATEST_PROTOCOL_VERSION: u32 = 11;
+const LATEST_PROTOCOL_VERSION: u32 = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, EnumIter)]
 pub enum EngineVersion {
@@ -24,6 +24,7 @@ pub enum EngineVersion {
     V14 = 14,
     V15 = 15,
     V16 = 16,
+    V17 = 17,
 }
 
 pub enum ProtocolFeature {
@@ -46,6 +47,7 @@ pub enum ProtocolFeature {
     StopRevokingExistingMessages,
     IncreaseUsernameProofSizeLimit,
     GaslessSigners,
+    LiveAt,
 }
 
 pub struct VersionSchedule {
@@ -122,6 +124,10 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
         active_at: 1778173200, // 2026-05-07 5PM UTC (12:00 PM CDT)
         version: EngineVersion::V16,
     },
+    VersionSchedule {
+        active_at: 1781715600, // 2026-06-17 5PM UTC (12:00 PM CDT)
+        version: EngineVersion::V17,
+    },
 ]
 .as_slice();
 
@@ -178,12 +184,16 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
         active_at: 1777406400, // 2026-04-28 8PM UTC (3:00 PM CDT)
         version: EngineVersion::V16,
     },
+    VersionSchedule {
+        active_at: 1780506000, // 2026-06-03 5PM UTC (12:00 PM CDT)
+        version: EngineVersion::V17,
+    },
 ]
 .as_slice();
 
 const ENGINE_VERSION_SCHEDULE_DEVNET: &[VersionSchedule] = [VersionSchedule {
     active_at: 0,
-    version: EngineVersion::V16,
+    version: EngineVersion::V17,
 }]
 .as_slice();
 
@@ -236,6 +246,7 @@ impl EngineVersion {
             ProtocolFeature::StopRevokingExistingMessages => self >= &EngineVersion::V14,
             ProtocolFeature::IncreaseUsernameProofSizeLimit => self >= &EngineVersion::V15,
             ProtocolFeature::GaslessSigners => self >= &EngineVersion::V16,
+            ProtocolFeature::LiveAt => self >= &EngineVersion::V17,
         }
     }
 
@@ -255,7 +266,8 @@ impl EngineVersion {
             EngineVersion::V11 | EngineVersion::V12 | EngineVersion::V13 => 8,
             EngineVersion::V14 => 9,
             EngineVersion::V15 => 10,
-            EngineVersion::V16 => LATEST_PROTOCOL_VERSION,
+            EngineVersion::V16 => 11,
+            EngineVersion::V17 => LATEST_PROTOCOL_VERSION,
         }
     }
 
@@ -417,6 +429,19 @@ mod version_test {
     }
 
     #[test]
+    fn test_live_at_feature_gate() {
+        assert_eq!(
+            EngineVersion::V16.is_enabled(ProtocolFeature::LiveAt),
+            false
+        );
+        assert_eq!(EngineVersion::V17.is_enabled(ProtocolFeature::LiveAt), true);
+        assert_eq!(
+            EngineVersion::latest().is_enabled(ProtocolFeature::LiveAt),
+            true
+        );
+    }
+
+    #[test]
     fn test_gasless_signers_activation_schedule() {
         // Testnet: V16 at 2026-04-28 20:00 UTC (3:00 PM CDT); pre-activation returns V15.
         let testnet_active = 1777406400;
@@ -454,6 +479,41 @@ mod version_test {
     }
 
     #[test]
+    fn test_live_at_activation_schedule() {
+        let testnet_active = 1780506000;
+        assert_eq!(
+            EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(testnet_active - 1),
+                FarcasterNetwork::Testnet,
+            ),
+            EngineVersion::V16
+        );
+        assert_eq!(
+            EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(testnet_active),
+                FarcasterNetwork::Testnet,
+            ),
+            EngineVersion::V17
+        );
+
+        let mainnet_active = 1781715600;
+        assert_eq!(
+            EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(mainnet_active - 1),
+                FarcasterNetwork::Mainnet,
+            ),
+            EngineVersion::V16
+        );
+        assert_eq!(
+            EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(mainnet_active),
+                FarcasterNetwork::Mainnet,
+            ),
+            EngineVersion::V17
+        );
+    }
+
+    #[test]
     fn test_is_enabled_signer_revoke_bug() {
         assert_eq!(
             EngineVersion::V0.is_enabled(ProtocolFeature::SignerRevokeBug),
@@ -479,7 +539,7 @@ mod version_test {
 
     #[test]
     fn test_latest() {
-        assert_eq!(EngineVersion::latest(), EngineVersion::V16);
+        assert_eq!(EngineVersion::latest(), EngineVersion::V17);
         assert_eq!(
             EngineVersion::version_for(&FarcasterTime::current(), FarcasterNetwork::Devnet),
             EngineVersion::latest()
@@ -511,6 +571,12 @@ mod version_test {
         );
 
         let time = FarcasterTime::from_unix_seconds(1778173200);
+        assert_eq!(
+            EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
+            Some(1781715600)
+        );
+
+        let time = FarcasterTime::from_unix_seconds(1781715600);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
             None

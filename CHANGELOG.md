@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### 🚀 Features
+
+- Add FIP-268 LIVE_AT user data support behind protocol version V17.
+
 ## [0.11.3] - 2026-01-20
 
 ### 🐛 Bug Fixes

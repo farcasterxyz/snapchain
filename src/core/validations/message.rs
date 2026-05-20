@@ -599,6 +599,14 @@ pub fn validate_user_data_add_body(
                 return Err(ValidationError::UrlValueTooLong);
             }
         }
+        UserDataType::LiveAt => {
+            if !version.is_enabled(ProtocolFeature::LiveAt) {
+                return Err(ValidationError::UnsupportedFeature);
+            }
+            if value_bytes.len() > 256 {
+                return Err(ValidationError::UrlValueTooLong);
+            }
+        }
         UserDataType::Username => {
             // Users are allowed to set fname = '' to remove their fname
             if !body.value.is_empty() {

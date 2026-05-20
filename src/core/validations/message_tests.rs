@@ -39,6 +39,19 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    fn validate_with_version(
+        msg: &proto::Message,
+        version: EngineVersion,
+    ) -> Result<(), ValidationError> {
+        validate_message(
+            msg,
+            FarcasterNetwork::Testnet,
+            false,
+            &FarcasterTime::current(),
+            version,
+        )
+    }
+
     fn assert_mutated_valid(msg: &mut proto::Message) {
         // Recalculate hash and signature based on the new data
         msg.hash = calculate_message_hash(&msg.data.as_ref().unwrap().encode_to_vec());
@@ -719,5 +732,55 @@ mod tests {
             None,
         );
         assert_valid(&valid_proof_message);
+    }
+
+    #[test]
+    fn test_live_at_user_data_validation() {
+        for value in ["", "x", "http://example.com/live", "opaque-presence-token"] {
+            let msg = create_user_data_add(
+                1234,
+                proto::UserDataType::LiveAt,
+                &value.to_string(),
+                None,
+                None,
+            );
+            assert_valid(&msg);
+        }
+
+        let boundary_value = "a".repeat(256);
+        let msg = create_user_data_add(
+            1234,
+            proto::UserDataType::LiveAt,
+            &boundary_value,
+            None,
+            None,
+        );
+        assert_valid(&msg);
+
+        let too_long_value = "a".repeat(257);
+        let msg = create_user_data_add(
+            1234,
+            proto::UserDataType::LiveAt,
+            &too_long_value,
+            None,
+            None,
+        );
+        assert_validation_error(&msg, ValidationError::UrlValueTooLong);
+    }
+
+    #[test]
+    fn test_live_at_user_data_requires_activation() {
+        let msg = create_user_data_add(
+            1234,
+            proto::UserDataType::LiveAt,
+            &"https://example.com/live".to_string(),
+            None,
+            None,
+        );
+        assert_eq!(
+            validate_with_version(&msg, EngineVersion::V16).unwrap_err(),
+            ValidationError::UnsupportedFeature
+        );
+        assert!(validate_with_version(&msg, EngineVersion::V17).is_ok());
     }
 }

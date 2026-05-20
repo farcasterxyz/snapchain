@@ -12,6 +12,8 @@ The UserData API will accept the following values for the `user_data_type` field
 | USER_DATA_TYPE_LOCATION | 7               | Location for the user         |
 | USER_DATA_TYPE_TWITTER  | 8               | Twitter username for the user |
 | USER_DATA_TYPE_GITHUB   | 9               | GitHub username for the user  |
+| USER_DATA_TYPE_BANNER   | 10              | Banner image for the user     |
+| USER_DATA_TYPE_LIVE_AT  | 14              | Live activity URL for the user |
 
 See [FIP-196](https://github.com/farcasterxyz/protocol/discussions/196) for more information on Location.
 See [FIP-19](https://github.com/farcasterxyz/protocol/discussions/199) for more information on Twitter/X and Github usernames.
