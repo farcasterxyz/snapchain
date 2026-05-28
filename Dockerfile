@@ -20,6 +20,7 @@ EOF
 FROM chef AS planner
 COPY Cargo.lock Cargo.toml ./
 COPY proto ./proto
+COPY cli ./cli
 COPY src ./src
 RUN cargo chef prepare --recipe-path recipe.json
 
@@ -32,10 +33,13 @@ RUN cargo chef cook --release --recipe-path recipe.json
 # Build the actual source (only this layer invalidates on src/ changes)
 COPY Cargo.lock Cargo.toml ./
 COPY proto ./proto
+COPY cli ./cli
 COPY src ./src
 
 ENV RUST_BACKTRACE=full
-RUN cargo build --release --bins
+# `--workspace --bins` picks up bins from `cli/` (the `fc` CLI) in addition to the snapchain
+# package's bins. Without `--workspace`, cargo only builds bins from the root package.
+RUN cargo build --release --workspace --bins
 
 ## Pre-generate some configurations we can use
 # TOOD: consider doing something different here
@@ -68,6 +72,7 @@ COPY --from=builder \
   /usr/src/app/target/release/setup_local_testnet \
   /usr/src/app/target/release/submit_message \
   /usr/src/app/target/release/perftest \
+  /usr/src/app/target/release/fc \
   /app/
 
 ENV RUSTFLAGS="-Awarnings"
