@@ -1,10 +1,16 @@
 //! Sketch tool for submitting test messages against a snapchain HTTP API.
 //!
+//! ⚠️  ALPHA — This binary is a developer sketch, not a stable product. Flags,
+//! subcommand names, output format, and error semantics may change without
+//! notice. Don't depend on it from scripts you care about, and don't point it
+//! at mainnet without reading what each subcommand actually does.
+//!
 //! Subcommands:
 //!   key-add      — submit gasless KEY_ADD (generate fresh signer or reuse one with --signer-secret)
 //!   key-remove   — submit KEY_REMOVE (custody-signed by default; --mode self-revoke for self-revoke)
 //!   cast-add     — submit CAST_ADD signed by an existing Ed25519 key
 //!   cast-remove  — submit CAST_REMOVE signed by an existing Ed25519 key
+//!   live-at      — submit USER_DATA_ADD of type LIVE_AT (FIP-268 presence heartbeat)
 //!   subscribe    — stream HubEvents from a snapchain gRPC node and log them to stdout
 //!
 //! `messages_factory::create_message_with_data` hardcodes `FarcasterNetwork::Mainnet`,
@@ -18,7 +24,9 @@ use rand::RngCore;
 use snapchain::core::util::calculate_message_hash;
 use snapchain::core::validations::key::MAX_KEY_TTL_SECONDS;
 use snapchain::network::http_server::map_proto_hub_event_to_json_hub_event;
-use snapchain::proto::{self, FarcasterNetwork, HubEventType, MessageType, SubscribeRequest};
+use snapchain::proto::{
+    self, FarcasterNetwork, HubEventType, MessageType, SubscribeRequest, UserDataType,
+};
 use snapchain::utils::factory::messages_factory;
 use std::error::Error;
 
@@ -26,8 +34,11 @@ type BoxedError = Box<dyn Error>;
 
 #[derive(Parser)]
 #[command(
-    name = "fc_tool",
-    about = "Submit Farcaster messages against a snapchain HTTP API (testnet sketch)"
+    name = "fc",
+    about = "Submit Farcaster messages against a snapchain HTTP API (testnet sketch)",
+    long_about = "ALPHA — developer sketch for submitting Farcaster messages against a \
+                  snapchain HTTP/gRPC node. Flags, subcommand names, and output format are \
+                  unstable and may change without notice. Defaults target testnet."
 )]
 struct Cli {
     /// HTTP API base URL.
@@ -52,6 +63,9 @@ enum Cmd {
     CastAdd(CastAddArgs),
     /// Submit a CAST_REMOVE signed by an existing Ed25519 key.
     CastRemove(CastRemoveArgs),
+    /// Submit a USER_DATA_ADD of type LIVE_AT (FIP-268 presence heartbeat).
+    // TODO support all user data types
+    LiveAt(LiveAtArgs),
     /// Stream HubEvents from a snapchain gRPC node and log them to stdout.
     Subscribe(SubscribeArgs),
 }
@@ -161,6 +175,39 @@ struct CastRemoveArgs {
     /// Hex Ed25519 secret of the signing key.
     #[arg(long, env = "SIGNER_SECRET")]
     signer_secret: String,
+}
+
+#[derive(clap::Args)]
+struct LiveAtArgs {
+    #[arg(long)]
+    fid: u64,
+
+    /// LIVE_AT value (typically a live-stream URL). If omitted, prompts
+    /// interactively; an empty response sends the "clear heartbeat" form.
+    #[arg(long, conflicts_with = "clear")]
+    value: Option<String>,
+
+    /// Non-interactively send a clear-heartbeat (empty value). Mutually exclusive
+    /// with --value.
+    #[arg(long)]
+    clear: bool,
+
+    /// Hex Ed25519 secret of the signing key.
+    #[arg(long, env = "SIGNER_SECRET")]
+    signer_secret: String,
+
+    /// Override the message timestamp (Farcaster epoch seconds). LIVE_AT uses
+    /// last-write-wins on timestamp, so this is useful for exercising mempool
+    /// coalescing and LWW conflict resolution.
+    #[arg(long)]
+    timestamp: Option<u32>,
+
+    /// Submit this many copies back-to-back. Useful for hitting the per-FID
+    /// LIVE_AT rate limit (default 5000/storage-unit) or driving coalescing.
+    /// If omitted, the tool runs forever, submitting one heartbeat per second
+    /// (ctrl-C to stop).
+    #[arg(long)]
+    count: Option<u32>,
 }
 
 #[derive(clap::Args)]
@@ -327,6 +374,14 @@ fn derive_custody(path: &str) -> Result<PrivateKeySigner, BoxedError> {
         .phrase(phrase.trim())
         .derivation_path(path)?
         .build()?)
+}
+
+fn prompt_value(prompt: &str) -> Result<String, BoxedError> {
+    print!("{}: ", prompt);
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(answer.trim_end_matches(['\n', '\r']).to_string())
 }
 
 fn confirm(prompt: &str, skip: bool) -> Result<(), BoxedError> {
@@ -519,9 +574,91 @@ async fn run_cast_remove(
     submit(node, &msg, "CAST_REMOVE").await
 }
 
+async fn run_live_at(
+    args: LiveAtArgs,
+    node: &str,
+    network: FarcasterNetwork,
+) -> Result<(), BoxedError> {
+    let signer = parse_secret(&args.signer_secret)?;
+    let value = match (args.clear, args.value) {
+        (true, _) => String::new(),
+        (false, Some(v)) => v,
+        (false, None) => prompt_value("LIVE_AT value (empty = clear heartbeat)")?,
+    };
+    // Each iteration needs a unique timestamp; otherwise the mempool sees the
+    // bit-identical message twice and rejects the second as a duplicate. We bump
+    // by 1s per iteration and clamp up to wall-clock so long runs stay within
+    // the 10-min future-timestamp validation window.
+    let mut ts = args
+        .timestamp
+        .unwrap_or_else(messages_factory::farcaster_time);
+    let kind = if value.is_empty() {
+        "LIVE_AT (CLEAR heartbeat)"
+    } else {
+        "LIVE_AT"
+    };
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut i: u32 = 0;
+    let loop_result: Result<(), BoxedError> = loop {
+        if args.count.is_some_and(|n| i >= n) {
+            break Ok(());
+        }
+        // First tick fires immediately, so submit-then-wait pacing comes for free.
+        // Race the tick against ctrl-C so shutdown is responsive even mid-sleep.
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("\n(received ctrl-C, shutting down)");
+                break Ok(());
+            }
+        }
+        if i > 0 {
+            ts = std::cmp::max(ts + 1, messages_factory::farcaster_time());
+        }
+        let mut msg = messages_factory::user_data::create_user_data_add(
+            args.fid,
+            UserDataType::LiveAt,
+            &value,
+            Some(ts),
+            Some(&signer),
+        );
+        retarget_network(&mut msg, network, &signer);
+        let label = match args.count {
+            Some(n) if n > 1 => format!("{} [{}/{}] ts={}", kind, i + 1, n, ts),
+            Some(_) => kind.to_string(),
+            None => format!("{} [{}] ts={}", kind, i + 1, ts),
+        };
+        if let Err(e) = submit(node, &msg, &label).await {
+            break Err(e);
+        }
+        i = i.saturating_add(1);
+    };
+
+    // FIP-268 specifies that going offline should clear the presence. Always send
+    // a final CLEAR on exit (clean completion, ctrl-C, or submit error) unless
+    // the active value was already empty.
+    if !value.is_empty() && i > 0 {
+        let clear_ts = std::cmp::max(ts + 1, messages_factory::farcaster_time());
+        let mut clear_msg = messages_factory::user_data::create_user_data_add(
+            args.fid,
+            UserDataType::LiveAt,
+            &String::new(),
+            Some(clear_ts),
+            Some(&signer),
+        );
+        retarget_network(&mut clear_msg, network, &signer);
+        let label = format!("LIVE_AT (CLEAR heartbeat) [shutdown] ts={}", clear_ts);
+        if let Err(e) = submit(node, &clear_msg, &label).await {
+            eprintln!("warn: shutdown CLEAR submission failed: {}", e);
+        }
+    }
+
+    loop_result
+}
+
 async fn run_subscribe(args: SubscribeArgs) -> Result<(), BoxedError> {
     // tonic's TLS support uses rustls, which requires a process-wide CryptoProvider.
-    // Ignore the result — re-running fc_tool in tests can install twice.
+    // Ignore the result — re-running fc in tests can install twice.
     let _ =
         rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
 
@@ -596,6 +733,7 @@ async fn main() -> Result<(), BoxedError> {
         Cmd::KeyRemove(a) => run_key_remove(a, &cli.node, network).await,
         Cmd::CastAdd(a) => run_cast_add(a, &cli.node, network).await,
         Cmd::CastRemove(a) => run_cast_remove(a, &cli.node, network).await,
+        Cmd::LiveAt(a) => run_live_at(a, &cli.node, network).await,
         Cmd::Subscribe(a) => run_subscribe(a).await,
     }
 }
