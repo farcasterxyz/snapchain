@@ -2429,7 +2429,7 @@ fn map_proto_signer_to_json_signer(proto_signer: proto::Signer) -> Result<Signer
     })
 }
 
-fn map_proto_hub_event_to_json_hub_event(
+pub fn map_proto_hub_event_to_json_hub_event(
     hub_event: proto::HubEvent,
 ) -> Result<HubEvent, ErrorResponse> {
     let mut merge_message_body: Option<MergeMessageBody> = None;
