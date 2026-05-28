@@ -1,5 +1,5 @@
 [workspace]
-members = ["proto"]
+members = ["proto", "cli"]
 resolver = "2"
 
 [package]

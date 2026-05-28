@@ -3031,6 +3031,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "fc-cli"
+version = "0.1.0"
+dependencies = [
+ "alloy-dyn-abi",
+ "alloy-primitives",
+ "alloy-signer",
+ "alloy-signer-local",
+ "alloy-sol-types",
+ "blake3",
+ "clap",
+ "ed25519-dalek",
+ "hex",
+ "prost 0.13.5",
+ "rand 0.8.5",
+ "reqwest",
+ "rustls 0.23.29",
+ "serde",
+ "serde_json",
+ "snapchain-proto",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
 name = "ff"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

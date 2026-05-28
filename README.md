@@ -41,6 +41,12 @@ curl -sSL https://raw.githubusercontent.com/farcasterxyz/snapchain/refs/heads/ma
 You can manage your node using the snapchain.sh script. It uses docker compose to run the node in a container. The script provides commands to start, stop, and check the logs of your node.
 A brand new node will download historical snapshots to catchup to the latest state before it begins sync. This can take up to 2 hours. Check the node's status by running `curl http://localhost:3381/v1/info`. You should see `maxHeight` increasing and `blockDelay` decreasing until it approaches zero.
 
+## `fc` CLI
+
+The snapchain Docker image ships a small CLI, `fc`, for submitting messages and streaming
+HubEvents against a node. See [`cli/README.md`](cli/README.md) for usage. Run it via
+`docker run --rm farcasterxyz/snapchain:<version> fc --help`.
+
 ## Upgrade
 
 To upgrade your Snapchain node to the latest version, follow these steps:

@@ -1,44 +1,57 @@
-//! Sketch tool for submitting test messages against a snapchain HTTP API.
+//! `fc` — command-line client for Farcaster's Snapchain network.
 //!
-//! ⚠️  ALPHA — This binary is a developer sketch, not a stable product. Flags,
-//! subcommand names, output format, and error semantics may change without
-//! notice. Don't depend on it from scripts you care about, and don't point it
-//! at mainnet without reading what each subcommand actually does.
+//! ALPHA — This binary is a developer sketch, not a stable product. Flags, subcommand names,
+//! output format, and error semantics may change without notice. Don't depend on it from scripts
+//! you care about, and don't point it at mainnet without reading what each subcommand actually
+//! does.
 //!
 //! Subcommands:
-//!   key-add      — submit gasless KEY_ADD (generate fresh signer or reuse one with --signer-secret)
-//!   key-remove   — submit KEY_REMOVE (custody-signed by default; --mode self-revoke for self-revoke)
-//!   cast-add     — submit CAST_ADD signed by an existing Ed25519 key
-//!   cast-remove  — submit CAST_REMOVE signed by an existing Ed25519 key
-//!   live-at      — submit USER_DATA_ADD of type LIVE_AT (FIP-268 presence heartbeat)
-//!   subscribe    — stream HubEvents from a snapchain gRPC node and log them to stdout
+//!   key-add      submit a gasless KEY_ADD (generate fresh signer or reuse one with --signer-secret)
+//!   key-remove   submit a KEY_REMOVE (custody-signed by default; --mode self-revoke for self-revoke)
+//!   cast-add     submit a CAST_ADD signed by an existing Ed25519 key
+//!   cast-remove  submit a CAST_REMOVE signed by an existing Ed25519 key
+//!   live-at      submit a USER_DATA_ADD of type LIVE_AT (FIP-268 presence heartbeat)
+//!   subscribe    stream HubEvents from a snapchain gRPC node and log them to stdout
 //!
-//! `messages_factory::create_message_with_data` hardcodes `FarcasterNetwork::Mainnet`,
-//! so every message is re-tagged via `retarget_network` before submission.
+//! `factory::create_message_with_data` hard-codes `FarcasterNetwork::Mainnet`, so every message is
+//! re-tagged via `retarget_network` before submission.
+
+mod eip712;
+mod factory;
+mod helpers;
+
 use alloy_signer_local::{coins_bip39::English, MnemonicBuilder, PrivateKeySigner};
 use clap::{Parser, Subcommand, ValueEnum};
 use ed25519_dalek::{Signer, SigningKey as EdSigningKey};
 use prost::Message as _;
 use rand::rngs::OsRng;
 use rand::RngCore;
-use snapchain::core::util::calculate_message_hash;
-use snapchain::core::validations::key::MAX_KEY_TTL_SECONDS;
-use snapchain::network::http_server::map_proto_hub_event_to_json_hub_event;
-use snapchain::proto::{
-    self, FarcasterNetwork, HubEventType, MessageType, SubscribeRequest, UserDataType,
+use snapchain_proto::{
+    self as proto, FarcasterNetwork, HubEventType, MessageType, SubscribeRequest, UserDataType,
 };
-use snapchain::utils::factory::messages_factory;
 use std::error::Error;
 
+use crate::helpers::{calculate_message_hash, farcaster_time, MAX_KEY_TTL_SECONDS};
+
 type BoxedError = Box<dyn Error>;
+
+/// Long version string: includes the binary's own version and the `snapchain-proto` crate
+/// version baked in at compile time. The proto version is supplied by `build.rs`.
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\nsnapchain-proto ",
+    env!("SNAPCHAIN_PROTO_VERSION"),
+);
 
 #[derive(Parser)]
 #[command(
     name = "fc",
-    about = "Submit Farcaster messages against a snapchain HTTP API (testnet sketch)",
+    about = "Submit Farcaster messages against a snapchain node",
     long_about = "ALPHA — developer sketch for submitting Farcaster messages against a \
                   snapchain HTTP/gRPC node. Flags, subcommand names, and output format are \
-                  unstable and may change without notice. Defaults target testnet."
+                  unstable and may change without notice. Defaults target testnet.",
+    version = env!("CARGO_PKG_VERSION"),
+    long_version = LONG_VERSION,
 )]
 struct Cli {
     /// HTTP API base URL.
@@ -64,9 +77,9 @@ enum Cmd {
     /// Submit a CAST_REMOVE signed by an existing Ed25519 key.
     CastRemove(CastRemoveArgs),
     /// Submit a USER_DATA_ADD of type LIVE_AT (FIP-268 presence heartbeat).
-    // TODO support all user data types
+    // TODO: support all user data types
     LiveAt(LiveAtArgs),
-    /// Stream HubEvents from a snapchain gRPC node and log them to stdout.
+    /// Stream HubEvents from a snapchain gRPC node and log them to stdout as JSON.
     Subscribe(SubscribeArgs),
 }
 
@@ -398,7 +411,7 @@ fn confirm(prompt: &str, skip: bool) -> Result<(), BoxedError> {
     Ok(())
 }
 
-/// Re-tag a message built by the factory (which hardcodes `Mainnet`) for a different
+/// Re-tag a message built by the factory (which hard-codes `Mainnet`) for a different
 /// network. Mutates `network`, recomputes the BLAKE3 hash, and re-signs the envelope.
 fn retarget_network(msg: &mut proto::Message, network: FarcasterNetwork, signer: &EdSigningKey) {
     let data = msg.data.as_mut().expect("factory always sets data");
@@ -485,10 +498,10 @@ async fn run_key_add(
     };
 
     let request_fid = args.request_fid.unwrap_or(args.fid);
-    let now = messages_factory::farcaster_time();
+    let now = farcaster_time();
     let deadline = now + args.deadline_secs;
 
-    let mut msg = messages_factory::keys::create_key_add(
+    let mut msg = factory::keys::create_key_add(
         args.fid,
         &custody,
         request_fid,
@@ -510,7 +523,7 @@ async fn run_key_remove(
     network: FarcasterNetwork,
 ) -> Result<(), BoxedError> {
     let signer = parse_secret(&args.signer_secret)?;
-    let now = messages_factory::farcaster_time();
+    let now = farcaster_time();
     let deadline = now + args.deadline_secs;
 
     let mut msg = match args.mode {
@@ -525,7 +538,7 @@ async fn run_key_remove(
             println!("FID:             {}", args.fid);
             println!("Removing key:    0x{}", hex::encode(target_key));
             confirm("Confirm KEY_REMOVE (custody)?", args.yes)?;
-            messages_factory::keys::create_key_remove_custody(
+            factory::keys::create_key_remove_custody(
                 args.fid,
                 &custody,
                 &signer,
@@ -540,7 +553,7 @@ async fn run_key_remove(
             println!("FID:           {}", args.fid);
             println!("Self-revoking: 0x{}", hex::encode(pk));
             confirm("Confirm KEY_REMOVE (self-revoke)?", args.yes)?;
-            messages_factory::keys::create_key_remove_self_revoke(
+            factory::keys::create_key_remove_self_revoke(
                 args.fid, &signer, args.nonce, deadline, None,
             )
         }
@@ -555,8 +568,7 @@ async fn run_cast_add(
     network: FarcasterNetwork,
 ) -> Result<(), BoxedError> {
     let signer = parse_secret(&args.signer_secret)?;
-    let mut msg =
-        messages_factory::casts::create_cast_add(args.fid, &args.text, None, Some(&signer));
+    let mut msg = factory::casts::create_cast_add(args.fid, &args.text, None, &signer);
     retarget_network(&mut msg, network, &signer);
     submit(node, &msg, "CAST_ADD").await
 }
@@ -568,8 +580,7 @@ async fn run_cast_remove(
 ) -> Result<(), BoxedError> {
     let signer = parse_secret(&args.signer_secret)?;
     let target_hash = parse_hex(&args.target_hash)?;
-    let mut msg =
-        messages_factory::casts::create_cast_remove(args.fid, &target_hash, None, Some(&signer));
+    let mut msg = factory::casts::create_cast_remove(args.fid, &target_hash, None, &signer);
     retarget_network(&mut msg, network, &signer);
     submit(node, &msg, "CAST_REMOVE").await
 }
@@ -589,9 +600,7 @@ async fn run_live_at(
     // bit-identical message twice and rejects the second as a duplicate. We bump
     // by 1s per iteration and clamp up to wall-clock so long runs stay within
     // the 10-min future-timestamp validation window.
-    let mut ts = args
-        .timestamp
-        .unwrap_or_else(messages_factory::farcaster_time);
+    let mut ts = args.timestamp.unwrap_or_else(farcaster_time);
     let kind = if value.is_empty() {
         "LIVE_AT (CLEAR heartbeat)"
     } else {
@@ -613,14 +622,14 @@ async fn run_live_at(
             }
         }
         if i > 0 {
-            ts = std::cmp::max(ts + 1, messages_factory::farcaster_time());
+            ts = std::cmp::max(ts + 1, farcaster_time());
         }
-        let mut msg = messages_factory::user_data::create_user_data_add(
+        let mut msg = factory::user_data::create_user_data_add(
             args.fid,
             UserDataType::LiveAt,
             &value,
             Some(ts),
-            Some(&signer),
+            &signer,
         );
         retarget_network(&mut msg, network, &signer);
         let label = match args.count {
@@ -638,13 +647,13 @@ async fn run_live_at(
     // a final CLEAR on exit (clean completion, ctrl-C, or submit error) unless
     // the active value was already empty.
     if !value.is_empty() && i > 0 {
-        let clear_ts = std::cmp::max(ts + 1, messages_factory::farcaster_time());
-        let mut clear_msg = messages_factory::user_data::create_user_data_add(
+        let clear_ts = std::cmp::max(ts + 1, farcaster_time());
+        let mut clear_msg = factory::user_data::create_user_data_add(
             args.fid,
             UserDataType::LiveAt,
-            &String::new(),
+            "",
             Some(clear_ts),
-            Some(&signer),
+            &signer,
         );
         retarget_network(&mut clear_msg, network, &signer);
         let label = format!("LIVE_AT (CLEAR heartbeat) [shutdown] ts={}", clear_ts);
@@ -712,12 +721,13 @@ async fn run_subscribe(args: SubscribeArgs) -> Result<(), BoxedError> {
         }
         last_event_at = Some(now);
 
-        match map_proto_hub_event_to_json_hub_event(event) {
-            Ok(json_event) => match serde_json::to_string(&json_event) {
-                Ok(line) => println!("{}", line),
-                Err(err) => eprintln!("warn: failed to serialize event as JSON: {}", err),
-            },
-            Err(err) => eprintln!("warn: failed to map event to JSON shape: {:?}", err),
+        // The proto crate derives `serde::Serialize` on every generated type (see
+        // `proto/build.rs`), so we emit the prost-default JSON shape directly. This drops the
+        // custom hub-API camelCase mapping that lived in `snapchain::network::http_server`; the
+        // CLI README calls out the schema difference.
+        match serde_json::to_string(&event) {
+            Ok(line) => println!("{}", line),
+            Err(err) => eprintln!("warn: failed to serialize event as JSON: {}", err),
         }
     }
 
