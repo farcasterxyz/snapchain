@@ -135,6 +135,7 @@ impl BlockStores {
     pub fn get_storage_slot_for_fid(
         &self,
         fid: u64,
+        engine_version: EngineVersion,
         pending_onchain_events: &Vec<OnChainEvent>,
         count_lent_storage: bool,
         count_borrowed_storage: bool,
@@ -155,6 +156,7 @@ impl BlockStores {
             .get_storage_slot_for_fid(
                 fid,
                 self.network,
+                engine_version,
                 pending_onchain_events.as_slice(),
                 &lent_storage,
                 &borrowed_storage,
@@ -325,7 +327,7 @@ impl BlockEngine {
             crate::proto::message_data::Body::LendStorageBody(lend_storage) => {
                 let total_storage_purchased = self
                     .stores
-                    .get_storage_slot_for_fid(message_data.fid, &vec![], false, false)
+                    .get_storage_slot_for_fid(message_data.fid, version, &vec![], false, false)
                     .ok_or(MessageValidationError::InsufficientStorage)?;
 
                 // Restricts who can lend storage to some reasonable set of users. Don't enforce this limit in devnet and testnet so we can test with fewer storage units.
@@ -485,7 +487,7 @@ impl BlockEngine {
         }
 
         let mut storage_slot = self
-            .storage_slot_for_transaction(snapchain_txn, true, false)
+            .storage_slot_for_transaction(snapchain_txn, version, true, false)
             .unwrap();
 
         for message in &snapchain_txn.user_messages {
@@ -662,6 +664,7 @@ impl BlockEngine {
     fn storage_slot_for_transaction(
         &self,
         snapchain_txn: &Transaction,
+        engine_version: EngineVersion,
         count_lent_storage: bool,
         count_borrowed_storage: bool,
     ) -> Option<StorageSlot> {
@@ -673,6 +676,7 @@ impl BlockEngine {
 
         self.stores.get_storage_slot_for_fid(
             snapchain_txn.fid,
+            engine_version,
             &pending_onchain_events,
             count_lent_storage,
             count_borrowed_storage,
@@ -697,7 +701,8 @@ impl BlockEngine {
             .into_iter()
             .filter_map(|mut transaction| {
                 // TODO(aditi): We could share this code with the shard engine but there may be other things we want to add here. For example, it may make sense to exclude validator messages and user messages that aren't intended for shard 0 here so a bug in the mempool won't impact the protocol in a significant way.
-                let storage_slot = self.storage_slot_for_transaction(&transaction, true, true)?;
+                let storage_slot =
+                    self.storage_slot_for_transaction(&transaction, version, true, true)?;
 
                 // Drop events if storage slot is inactive
                 if !storage_slot.is_active() {
