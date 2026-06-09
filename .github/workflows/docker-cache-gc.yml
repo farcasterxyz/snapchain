@@ -1,0 +1,116 @@
+name: Docker Cache GC
+
+# Prunes the GHCR build-cache package (ghcr.io/farcasterxyz/snapchain/cache).
+# Tags are written by docker-build-impl.yml as "${arch}-${branch}" and, for main
+# builds, "${arch}-${commit_sha}". Without pruning these accumulate forever, so
+# this sweep keeps:
+#   - the last 5 main commit-SHA tags (per the most recent 5 commits, both arches)
+#   - "${arch}-main" (always)
+#   - branch tags whose branch still exists
+# and deletes everything else. See NEYN-11876.
+
+on:
+  schedule:
+    - cron: '0 9 * * *' # daily, 09:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'List what would be deleted without deleting'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-cache-gc
+  cancel-in-progress: false
+
+env:
+  ORG: farcasterxyz
+  REPO: snapchain
+  PKG: snapchain%2Fcache # URL-encoded "snapchain/cache"
+  KEEP_COMMITS: 5
+
+jobs:
+  gc:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prune stale cache tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          versions_path="/orgs/${ORG}/packages/container/${PKG}/versions?per_page=100"
+
+          # All package versions (flattened across pages).
+          all=$(gh api --paginate --slurp "$versions_path" | jq 'add')
+
+          # Live branch names, sanitized the same way the build does ("/" -> "-").
+          branches_json=$(
+            gh api --paginate -q '.[].name' "/repos/${ORG}/${REPO}/branches" \
+              | sed 's#/#-#g' | jq -R . | jq -s .
+          )
+          if [[ "$(echo "$branches_json" | jq 'length')" -eq 0 ]]; then
+            echo "Refusing to run: could not enumerate live branches (would risk deleting active branch caches)." >&2
+            exit 1
+          fi
+
+          # The 5 most recent commit SHAs that have a commit-cache tag.
+          keep_shas_json=$(echo "$all" | jq -c --argjson keep "$KEEP_COMMITS" '
+            [ .[] | . as $v | ($v.metadata.container.tags // [])[]
+              | select(test("^(amd64|arm64)-[0-9a-f]{40}$"))
+              | { sha: sub("^(amd64|arm64)-";""), created: $v.created_at } ]
+            | group_by(.sha)
+            | map({ sha: .[0].sha, created: (map(.created) | max) })
+            | sort_by(.created) | reverse | .[0:$keep] | map(.sha)
+          ')
+
+          echo "Keeping commit SHAs: $(echo "$keep_shas_json" | jq -r 'join(", ") // "(none)"')"
+          echo "Live branches: $(echo "$branches_json" | jq -r 'length') tracked"
+
+          # A version is deletable only if it has tags and every tag is prunable
+          # (so we never drop a manifest that also carries a kept tag).
+          to_delete=$(echo "$all" | jq -r \
+            --argjson keep "$keep_shas_json" \
+            --argjson branches "$branches_json" '
+            .[]
+            | . as $v
+            | ($v.metadata.container.tags // []) as $tags
+            | select(($tags | length) > 0)
+            | ($tags | map(
+                if test("^(amd64|arm64)-[0-9a-f]{40}$") then
+                  (sub("^(amd64|arm64)-";"")) as $sha
+                  | if ($keep | index($sha)) then "keep" else "del" end
+                elif test("^(amd64|arm64)-main$") then "keep"
+                elif test("^(amd64|arm64)-.+$") then
+                  (sub("^(amd64|arm64)-";"")) as $br
+                  | if ($branches | index($br)) then "keep" else "del" end
+                else "keep" end
+              )) as $cls
+            | select(($cls | index("del")) and (($cls | index("keep")) | not))
+            | "\($v.id)\t\($tags | join(","))"
+          ')
+
+          if [[ -z "$to_delete" ]]; then
+            echo "Nothing to prune."
+            exit 0
+          fi
+
+          echo "Tags to prune:"
+          echo "$to_delete"
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "Dry run: no deletions performed."
+            exit 0
+          fi
+
+          while IFS=$'\t' read -r id tags; do
+            [[ -z "$id" ]] && continue
+            echo "Deleting version $id ($tags)"
+            gh api --method DELETE \
+              "/orgs/${ORG}/packages/container/${PKG}/versions/${id}"
+          done <<< "$to_delete"
