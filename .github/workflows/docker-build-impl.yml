@@ -31,15 +31,48 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Build the registry cache refs. Tags are keyed on branch (and, for main, the
+      # commit SHA) in addition to arch so concurrent branch builds no longer clobber
+      # a single shared tag, and so snapchain-deployer can pull an exact-match cache
+      # for the specific main commit it deploys. See NEYN-11876.
+      - name: Compute cache refs
+        id: cache
+        env:
+          ARCH: ${{ matrix.arch }}
+          # head_ref is set for pull_request events (source branch); ref_name is the
+          # branch for push events. On push-to-main this resolves to "main".
+          BRANCH_RAW: ${{ github.head_ref || github.ref_name }}
+          IS_MAIN: ${{ github.event_name == 'push' && github.ref_name == 'main' }}
+          SHA: ${{ github.sha }}
+        run: |
+          repo="ghcr.io/farcasterxyz/snapchain/cache"
+          # OCI tags may not contain "/", so sanitize branch names like "kjs/foo".
+          branch="${BRANCH_RAW//\//-}"
+
+          # Read from this branch first, then fall back to main's cache.
+          {
+            echo "from<<EOF"
+            echo "type=registry,ref=${repo}:${ARCH}-${branch}"
+            echo "type=registry,ref=${repo}:${ARCH}-main"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          # Always write the branch tag (on main this is "${ARCH}-main"). On main,
+          # additionally write a commit-SHA tag; the GC workflow keeps the last 5.
+          {
+            echo "to<<EOF"
+            echo "type=registry,mode=max,ref=${repo}:${ARCH}-${branch}"
+            if [[ "$IS_MAIN" == "true" ]]; then
+              echo "type=registry,mode=max,ref=${repo}:${ARCH}-${SHA}"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/${{ matrix.arch }}
           push: false
-          cache-from: |
-            type=gha,scope=build-${{ matrix.arch }}
-            type=registry,ref=ghcr.io/farcasterxyz/snapchain/cache:${{ matrix.arch }}
-          cache-to: |
-            type=gha,mode=max,scope=build-${{ matrix.arch }}
-            type=registry,mode=max,ref=ghcr.io/farcasterxyz/snapchain/cache:${{ matrix.arch }}
+          cache-from: ${{ steps.cache.outputs.from }}
+          cache-to: ${{ steps.cache.outputs.to }}
