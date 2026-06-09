@@ -191,6 +191,32 @@ mod tests {
         );
     }
 
+    // The 2025-cohort cutoff must line up exactly with the StorageExpiryExtension2026 (V18)
+    // activation timestamp for each network: the existing cohort is everything rented before the
+    // extension goes live. These constants live in two different modules, so this test guards
+    // against them silently drifting apart.
+    #[test]
+    fn test_unit_type_2025_cutoff_matches_v18_activation() {
+        for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
+            let cutoff = StorageSlot::unit_type_2025_cutoff(network) as u64;
+
+            // V18 (and thus the extension) is not yet active one second before the cutoff...
+            assert_eq!(
+                EngineVersion::version_for(&FarcasterTime::from_unix_seconds(cutoff - 1), network,),
+                EngineVersion::V17,
+                "{:?}: extension should be inactive just before the 2025 cutoff",
+                network,
+            );
+            // ...and is active exactly at the cutoff.
+            assert_eq!(
+                EngineVersion::version_for(&FarcasterTime::from_unix_seconds(cutoff), network),
+                EngineVersion::V18,
+                "{:?}: extension should activate exactly at the 2025 cutoff",
+                network,
+            );
+        }
+    }
+
     #[test]
     fn test_storage_slot_merge() {
         let current_time = factory::time::current_timestamp();
