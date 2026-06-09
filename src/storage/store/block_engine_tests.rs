@@ -196,7 +196,13 @@ mod tests {
         );
         let storage_slot = block_engine
             .stores()
-            .get_storage_slot_for_fid(FID_FOR_TEST, &vec![], true, true)
+            .get_storage_slot_for_fid(
+                FID_FOR_TEST,
+                crate::version::version::EngineVersion::latest(),
+                &vec![],
+                true,
+                true,
+            )
             .unwrap();
         assert_eq!(storage_slot.units_for(StorageUnitType::UnitType2025), 1);
     }

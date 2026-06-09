@@ -129,7 +129,10 @@ pub mod events_factory {
         match unit_type {
             StorageUnitType::UnitTypeLegacy => {
                 if expired {
-                    timestamp = UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP - (3 * one_year_in_seconds);
+                    // Legacy units are valid for up to 4 years once StorageExpiryExtension2026
+                    // (V18) is enabled, so back-date far enough that the slot is expired under
+                    // both the pre- and post-extension multipliers.
+                    timestamp = UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP - (4 * one_year_in_seconds);
                 } else {
                     timestamp = UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP - 1;
                 }

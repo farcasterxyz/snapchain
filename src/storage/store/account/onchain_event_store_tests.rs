@@ -11,6 +11,7 @@ mod tests {
     };
     use crate::storage::store::test_helper::default_custody_address;
     use crate::utils::factory::{self, events_factory, signers};
+    use crate::version::version::EngineVersion;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -31,6 +32,7 @@ mod tests {
     fn test_storage_slot_from_rent_event() {
         let one_year_in_seconds = 365 * 24 * 60 * 60;
 
+        // Legacy units: 3 years pre-extension (V17), 4 years post-extension (V18).
         let expired_legacy_rent_event = factory::events_factory::create_rent_event(
             10,
             1,
@@ -38,8 +40,12 @@ mod tests {
             true,
             FarcasterNetwork::Mainnet,
         );
-        let slot =
-            StorageSlot::from_event(&expired_legacy_rent_event, FarcasterNetwork::Mainnet).unwrap();
+        let slot = StorageSlot::from_event(
+            &expired_legacy_rent_event,
+            FarcasterNetwork::Mainnet,
+            EngineVersion::V17,
+        )
+        .unwrap();
         assert_eq!(slot.is_active(), false);
         assert_eq!(slot.units_for(StorageUnitType::UnitTypeLegacy), 1);
         assert_eq!(slot.units_for(StorageUnitType::UnitType2024), 0);
@@ -47,6 +53,17 @@ mod tests {
         assert_eq!(
             slot.invalidate_at,
             expired_legacy_rent_event.block_timestamp as u32 + one_year_in_seconds * 3
+        );
+        let slot = StorageSlot::from_event(
+            &expired_legacy_rent_event,
+            FarcasterNetwork::Mainnet,
+            EngineVersion::V18,
+        )
+        .unwrap();
+        assert_eq!(slot.units_for(StorageUnitType::UnitTypeLegacy), 1);
+        assert_eq!(
+            slot.invalidate_at,
+            expired_legacy_rent_event.block_timestamp as u32 + one_year_in_seconds * 4
         );
 
         let valid_legacy_rent_event = factory::events_factory::create_rent_event(
@@ -56,17 +73,32 @@ mod tests {
             false,
             FarcasterNetwork::Mainnet,
         );
-        let slot =
-            StorageSlot::from_event(&valid_legacy_rent_event, FarcasterNetwork::Mainnet).unwrap();
+        let slot = StorageSlot::from_event(
+            &valid_legacy_rent_event,
+            FarcasterNetwork::Mainnet,
+            EngineVersion::V17,
+        )
+        .unwrap();
         assert_eq!(slot.is_active(), true);
         assert_eq!(slot.units_for(StorageUnitType::UnitTypeLegacy), 5);
-        assert_eq!(slot.units_for(StorageUnitType::UnitType2024), 0);
-        assert_eq!(slot.units_for(StorageUnitType::UnitType2025), 0);
         assert_eq!(
             slot.invalidate_at,
             valid_legacy_rent_event.block_timestamp as u32 + one_year_in_seconds * 3
         );
+        let slot = StorageSlot::from_event(
+            &valid_legacy_rent_event,
+            FarcasterNetwork::Mainnet,
+            EngineVersion::V18,
+        )
+        .unwrap();
+        assert_eq!(slot.is_active(), true);
+        assert_eq!(slot.units_for(StorageUnitType::UnitTypeLegacy), 5);
+        assert_eq!(
+            slot.invalidate_at,
+            valid_legacy_rent_event.block_timestamp as u32 + one_year_in_seconds * 4
+        );
 
+        // 2024 units: 2 years pre-extension, 3 years post-extension.
         let valid_2024_rent_event = factory::events_factory::create_rent_event(
             10,
             9,
@@ -74,33 +106,115 @@ mod tests {
             false,
             FarcasterNetwork::Mainnet,
         );
-        let slot =
-            StorageSlot::from_event(&valid_2024_rent_event, FarcasterNetwork::Mainnet).unwrap();
+        let slot = StorageSlot::from_event(
+            &valid_2024_rent_event,
+            FarcasterNetwork::Mainnet,
+            EngineVersion::V17,
+        )
+        .unwrap();
         assert_eq!(slot.is_active(), true);
-        assert_eq!(slot.units_for(StorageUnitType::UnitTypeLegacy), 0);
         assert_eq!(slot.units_for(StorageUnitType::UnitType2024), 9);
-        assert_eq!(slot.units_for(StorageUnitType::UnitType2025), 0);
         assert_eq!(
             slot.invalidate_at,
             valid_2024_rent_event.block_timestamp as u32 + one_year_in_seconds * 2
         );
+        let slot = StorageSlot::from_event(
+            &valid_2024_rent_event,
+            FarcasterNetwork::Mainnet,
+            EngineVersion::V18,
+        )
+        .unwrap();
+        assert_eq!(slot.units_for(StorageUnitType::UnitType2024), 9);
+        assert_eq!(
+            slot.invalidate_at,
+            valid_2024_rent_event.block_timestamp as u32 + one_year_in_seconds * 3
+        );
 
+        // 2025 cohort (rented before the 2025 cutoff): 1 year pre-extension, 2 years post-extension.
         let september_first_2025_timestamp = 1756710000;
         let valid_2025_rent_event = factory::events_factory::create_rent_event_with_timestamp(
             11,
             3,
             september_first_2025_timestamp,
         );
-        let slot =
-            StorageSlot::from_event(&valid_2025_rent_event, FarcasterNetwork::Mainnet).unwrap();
+        let slot = StorageSlot::from_event(
+            &valid_2025_rent_event,
+            FarcasterNetwork::Mainnet,
+            EngineVersion::V17,
+        )
+        .unwrap();
         assert_eq!(slot.is_active(), true);
-        assert_eq!(slot.units_for(StorageUnitType::UnitTypeLegacy), 0);
-        assert_eq!(slot.units_for(StorageUnitType::UnitType2024), 0);
         assert_eq!(slot.units_for(StorageUnitType::UnitType2025), 3);
         assert_eq!(
             slot.invalidate_at,
             valid_2025_rent_event.block_timestamp as u32 + one_year_in_seconds
         );
+        let slot = StorageSlot::from_event(
+            &valid_2025_rent_event,
+            FarcasterNetwork::Mainnet,
+            EngineVersion::V18,
+        )
+        .unwrap();
+        assert_eq!(slot.units_for(StorageUnitType::UnitType2025), 3);
+        assert_eq!(
+            slot.invalidate_at,
+            valid_2025_rent_event.block_timestamp as u32 + one_year_in_seconds * 2
+        );
+
+        // New rentals (rented at/after the 2025 cutoff) keep the standard 1-year validity, even
+        // after the extension activates at V18.
+        let new_rental_timestamp =
+            StorageSlot::unit_type_2025_cutoff(FarcasterNetwork::Mainnet) + 1;
+        let new_rental_rent_event =
+            factory::events_factory::create_rent_event_with_timestamp(13, 4, new_rental_timestamp);
+        let slot = StorageSlot::from_event(
+            &new_rental_rent_event,
+            FarcasterNetwork::Mainnet,
+            EngineVersion::V17,
+        )
+        .unwrap();
+        assert_eq!(slot.units_for(StorageUnitType::UnitType2025), 4);
+        assert_eq!(
+            slot.invalidate_at,
+            new_rental_rent_event.block_timestamp as u32 + one_year_in_seconds
+        );
+        let slot = StorageSlot::from_event(
+            &new_rental_rent_event,
+            FarcasterNetwork::Mainnet,
+            EngineVersion::V18,
+        )
+        .unwrap();
+        assert_eq!(slot.units_for(StorageUnitType::UnitType2025), 4);
+        assert_eq!(
+            slot.invalidate_at,
+            new_rental_rent_event.block_timestamp as u32 + one_year_in_seconds
+        );
+    }
+
+    // The 2025-cohort cutoff must line up exactly with the StorageExpiryExtension2026 (V18)
+    // activation timestamp for each network: the existing cohort is everything rented before the
+    // extension goes live. These constants live in two different modules, so this test guards
+    // against them silently drifting apart.
+    #[test]
+    fn test_unit_type_2025_cutoff_matches_v18_activation() {
+        for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
+            let cutoff = StorageSlot::unit_type_2025_cutoff(network) as u64;
+
+            // V18 (and thus the extension) is not yet active one second before the cutoff...
+            assert_eq!(
+                EngineVersion::version_for(&FarcasterTime::from_unix_seconds(cutoff - 1), network,),
+                EngineVersion::V17,
+                "{:?}: extension should be inactive just before the 2025 cutoff",
+                network,
+            );
+            // ...and is active exactly at the cutoff.
+            assert_eq!(
+                EngineVersion::version_for(&FarcasterTime::from_unix_seconds(cutoff), network),
+                EngineVersion::V18,
+                "{:?}: extension should activate exactly at the 2025 cutoff",
+                network,
+            );
+        }
     }
 
     #[test]
@@ -163,6 +277,7 @@ mod tests {
             .get_storage_slot_for_fid(
                 10,
                 FarcasterNetwork::Mainnet,
+                EngineVersion::V17,
                 &[],
                 &StorageSlot::new(0, 0, 0, 0),
                 &StorageSlot::new(0, 0, 0, 0),
@@ -250,6 +365,7 @@ mod tests {
             .get_storage_slot_for_fid(
                 11,
                 FarcasterNetwork::Mainnet,
+                EngineVersion::V17,
                 &[],
                 &StorageSlot::new(0, 0, 0, 0),
                 &StorageSlot::new(0, 0, 0, 0),
@@ -273,6 +389,7 @@ mod tests {
             .get_storage_slot_for_fid(
                 10,
                 FarcasterNetwork::Mainnet,
+                EngineVersion::V17,
                 &[],
                 &StorageSlot::new(0, 0, 0, 0),
                 &StorageSlot::new(0, 0, 0, 0),
@@ -286,6 +403,7 @@ mod tests {
             .get_storage_slot_for_fid(
                 12,
                 FarcasterNetwork::Mainnet,
+                EngineVersion::V17,
                 &[],
                 &StorageSlot::new(0, 0, 0, 0),
                 &StorageSlot::new(0, 0, 0, 0),

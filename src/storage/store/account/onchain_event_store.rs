@@ -12,6 +12,7 @@ use crate::storage::constants::{OnChainEventPostfix, RootPrefix, PAGE_SIZE_MAX};
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch, RocksdbError};
 use crate::storage::store::account::StoreOptions;
 use crate::storage::util::increment_vec_u8;
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use prost::{DecodeError, Message};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -22,6 +23,12 @@ static PAGE_SIZE: usize = 1000;
 pub const UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP: u32 = 1724889600; // 2024-08-29 Midnight UTC
 const UNIT_TYPE_2024_CUTOFF_TIMESTAMP: u32 = 1752685200; // 2025-07-16 5PM UTC (Engine version 6)
 const UNIT_TYPE_2024_CUTOFF_TIMESTAMP_TESTNET: u32 = 1752426000; // 2025-07-13 5PM UTC (a few days earlier than mainnet)
+
+// Boundary between the existing 2025 cohort (extended +1 year by the 2026 expiry extension) and
+// newly-rented units that keep the standard 1-year validity. Must equal the EngineVersion::V18
+// activation timestamp for each network (see StorageExpiryExtension2026 in version.rs).
+const UNIT_TYPE_2025_CUTOFF_TIMESTAMP: u32 = 1782147600; // 2026-06-22 5PM UTC (Engine version 18)
+const UNIT_TYPE_2025_CUTOFF_TIMESTAMP_TESTNET: u32 = 1781283600; // 2026-06-12 5PM UTC (a few days earlier than mainnet)
 const ONE_YEAR_IN_SECONDS: u32 = 365 * 24 * 60 * 60;
 const SUPPORTED_SIGNER_KEY_TYPE: u32 = 1;
 
@@ -395,6 +402,14 @@ impl StorageSlot {
         }
     }
 
+    pub fn unit_type_2025_cutoff(network: FarcasterNetwork) -> u32 {
+        if network == FarcasterNetwork::Mainnet {
+            UNIT_TYPE_2025_CUTOFF_TIMESTAMP
+        } else {
+            UNIT_TYPE_2025_CUTOFF_TIMESTAMP_TESTNET
+        }
+    }
+
     pub fn from_storage_lend(storage_lend: &LendStorageBody) -> StorageSlot {
         let mut storage_slot = StorageSlot::new(0, 0, 0, u32::MAX);
         match storage_lend.unit_type() {
@@ -415,6 +430,7 @@ impl StorageSlot {
     pub fn from_event(
         onchain_event: &OnChainEvent,
         network: FarcasterNetwork,
+        engine_version: EngineVersion,
     ) -> Result<StorageSlot, OnchainEventStorageError> {
         if let Some(body) = &onchain_event.body {
             return match body {
@@ -422,6 +438,7 @@ impl StorageSlot {
                     let slot;
 
                     let unit_type_2024_cutoff_timestamp = Self::unit_type_2024_cutoff(network);
+                    let unit_type_2025_cutoff_timestamp = Self::unit_type_2025_cutoff(network);
 
                     // NOTE(Jul 2025): We have 3 types of storages units based on when they were rented.
                     // As part of the storage redenomination FIP, we're also extended the expiry of all
@@ -430,13 +447,28 @@ impl StorageSlot {
                     // 2024 units for 2 years (one extension), and 2025 units for 1 year (no extensions).
                     // Original Storage Extension: https://github.com/farcasterxyz/protocol/discussions/191
                     // Storage Redenomination: https://github.com/farcasterxyz/protocol/discussions/229
+                    //
+                    // NOTE(Jun 2026): Once the StorageExpiryExtension2026 feature is enabled (engine
+                    // version V18), we extend the expiry of every already-rented unit by one more year:
+                    // legacy units become valid for 4 years, 2024 units for 3 years, and the existing
+                    // 2025 cohort (rented before UNIT_TYPE_2025_CUTOFF_TIMESTAMP) for 2 years. Units
+                    // rented at/after the 2025 cutoff are "new rentals" and keep the standard 1-year
+                    // validity. The cohort and new rentals are both UnitType2025 (no new unit type);
+                    // only their invalidate_at differs.
+                    let extension =
+                        if engine_version.is_enabled(ProtocolFeature::StorageExpiryExtension2026) {
+                            1
+                        } else {
+                            0
+                        };
 
                     if onchain_event.block_timestamp < UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP as u64 {
                         slot = StorageSlot::new(
                             storage_rent_event.units,
                             0,
                             0,
-                            onchain_event.block_timestamp as u32 + (ONE_YEAR_IN_SECONDS * 3),
+                            onchain_event.block_timestamp as u32
+                                + (ONE_YEAR_IN_SECONDS * (3 + extension)),
                         );
                     } else if onchain_event.block_timestamp < unit_type_2024_cutoff_timestamp as u64
                     {
@@ -444,7 +476,17 @@ impl StorageSlot {
                             0,
                             storage_rent_event.units,
                             0,
-                            onchain_event.block_timestamp as u32 + (ONE_YEAR_IN_SECONDS * 2),
+                            onchain_event.block_timestamp as u32
+                                + (ONE_YEAR_IN_SECONDS * (2 + extension)),
+                        );
+                    } else if onchain_event.block_timestamp < unit_type_2025_cutoff_timestamp as u64
+                    {
+                        slot = StorageSlot::new(
+                            0,
+                            0,
+                            storage_rent_event.units,
+                            onchain_event.block_timestamp as u32
+                                + (ONE_YEAR_IN_SECONDS * (1 + extension)),
                         );
                     } else {
                         slot = StorageSlot::new(
@@ -738,6 +780,7 @@ impl OnchainEventStore {
         &self,
         fid: u64,
         network: FarcasterNetwork,
+        engine_version: EngineVersion,
         pending_events: &[OnChainEvent],
         lent_storage: &StorageSlot,
         borrowed_storage: &StorageSlot,
@@ -746,12 +789,16 @@ impl OnchainEventStore {
             self.get_onchain_events(OnChainEventType::EventTypeStorageRent, Some(fid))?;
         let mut storage_slot = StorageSlot::new(0, 0, 0, 0);
         for rent_event in rent_events {
-            storage_slot.merge(&StorageSlot::from_event(&rent_event, network)?);
+            storage_slot.merge(&StorageSlot::from_event(
+                &rent_event,
+                network,
+                engine_version,
+            )?);
         }
         // Now, virtually merge any pending rent events from the current transaction
         for event in pending_events {
             if event.fid == fid && event.r#type() == OnChainEventType::EventTypeStorageRent {
-                storage_slot.merge(&StorageSlot::from_event(event, network)?);
+                storage_slot.merge(&StorageSlot::from_event(event, network, engine_version)?);
             }
         }
 

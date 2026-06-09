@@ -21,6 +21,7 @@ use crate::storage::store::shard::ShardStore;
 use crate::storage::trie::merkle_trie;
 use crate::storage::trie::merkle_trie::TrieKey;
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use crate::version::version::EngineVersion;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -344,6 +345,7 @@ impl Stores {
     pub fn get_storage_slot_for_fid(
         &self,
         fid: u64,
+        engine_version: EngineVersion,
         count_borrowed_storage: bool,
         pending_events: &[OnChainEvent],
     ) -> Result<StorageSlot, StoresError> {
@@ -367,6 +369,7 @@ impl Stores {
             .get_storage_slot_for_fid(
                 fid,
                 self.network,
+                engine_version,
                 pending_events,
                 &lent_storage,
                 &borrowed_storage,
@@ -385,7 +388,14 @@ impl Stores {
         let store_type = Limits::message_type_to_store_type(message_type);
         let message_count = self.get_usage_by_store_type(fid, store_type, txn_batch)?;
         let count_borrowed_storage = store_type != StoreType::StorageLends;
-        let slot = self.get_storage_slot_for_fid(fid, count_borrowed_storage, &[])?;
+        // RPC/limit-enforcement path: max_messages is independent of invalidate_at, so the
+        // expiry-extension version gate does not affect the result here. Use the current version.
+        let slot = self.get_storage_slot_for_fid(
+            fid,
+            EngineVersion::current(self.network),
+            count_borrowed_storage,
+            &[],
+        )?;
         let max_messages = self.store_limits.max_messages(&slot, store_type);
 
         Ok((message_count, max_messages))
@@ -436,6 +446,7 @@ impl Stores {
             .get_storage_slot_for_fid(
                 fid,
                 self.network,
+                EngineVersion::current(self.network),
                 &[],
                 &StorageSlot::new(0, 0, 0, u32::MAX),
                 &StorageSlot::new(0, 0, 0, u32::MAX),
@@ -455,7 +466,14 @@ impl Stores {
             })?;
         let net_slot = self
             .onchain_event_store
-            .get_storage_slot_for_fid(fid, self.network, &[], &lent_slot, &borrowed_slot)
+            .get_storage_slot_for_fid(
+                fid,
+                self.network,
+                EngineVersion::current(self.network),
+                &[],
+                &lent_slot,
+                &borrowed_slot,
+            )
             .map_err(|e| StoresError::OnchainEventError(e))?;
         for store_type in vec![
             StoreType::Casts,
