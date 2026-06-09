@@ -1,4 +1,4 @@
-# FIP: Testing & Acceptance Criteria for Onboarding New Snapchain Validators
+# FIP: Testing & Acceptance Criteria for Onboarding New Farcaster Validators
 
 > **Note:** This document is written in the snapchain repo for review, but is intended to be posted
 > as an RFC / discussion in [farcasterxyz/protocol Discussions](https://github.com/farcasterxyz/protocol/discussions).
@@ -6,7 +6,7 @@
 
 | Field | Value |
 |-------|-------|
-| **Title** | Testing & Acceptance Criteria for Onboarding New Snapchain Validators |
+| **Title** | Testing & Acceptance Criteria for Onboarding New Farcaster Validators |
 | **Status** | Draft |
 | **Author** | Neynar (manan@neynar.com) |
 | **Created** | 2026-06-09 |
