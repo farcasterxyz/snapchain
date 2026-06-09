@@ -28,7 +28,7 @@ This FIP defines, **before any validator is appended to `validators.toml`**:
    operational/security);
 2. a **layered test taxonomy** — unit → service/multi-node → **full-network integration on a
    production-like testnet** — with explicit pass/fail gates;
-3. a **staged rollout** (read-node → testnet → mainnet, one shard at a time, with rollback); and
+3. a **staged rollout** (read-node → testnet → mainnet, with rollback); and
 4. a **copy-pasteable go/no-go acceptance checklist**.
 
 All of the above is scaled to **three escalating risk tiers** so the bar is proportionate to how
@@ -78,10 +78,10 @@ cumulative** — Tier C must pass everything required for A and B as well.
 
 A reviewer should understand these mechanisms, because the test criteria map directly onto them.
 
-- **Consensus:** Malachite BFT (CometBFT/Tendermint-style), pinned to a specific git ref in CI
-  ([`.github/workflows/verify-impl.yml`](../../.github/workflows/verify-impl.yml)); engine crates in
-  [`Cargo.toml`](../../Cargo.toml). Flow per height: **propose → prevote → precommit → commit**, with
-  2/3+ voting power required at each gate. Round timeouts grow by `step_delta` each round.
+- **Consensus:** Malachite BFT (CometBFT/Tendermint-style), pinned to a specific git ref; engine
+  crates in [`Cargo.toml`](../../Cargo.toml). Flow per height: **propose → prevote → precommit →
+  commit**, with **>2/3 voting power required for a round to proceed**. Round timeouts grow by
+  `step_delta` each round.
 - **Per-shard consensus:** shard 0 is the block shard; shards 1–2 are message shards. Each shard
   runs an **independent** consensus instance with its **own validator set**
   ([`src/consensus/validator.rs`](../../src/consensus/validator.rs),
@@ -224,22 +224,23 @@ These target N1–N6 and O3 specifically:
 
 ## Rollout
 
-Staged, reversible, one shard at a time:
+Staged and reversible:
 
-1. **Pass L0–L2 in CI.** No mainnet scheduling until these are green.
+1. **Pass L0–L2.** No mainnet scheduling until these are green.
 2. **Testnet read-node first.** Candidate joins the public testnet as a **read node** (syncs, does
    not vote). Verify it tracks tip with **zero divergence** over an observation window.
 3. **Testnet validator.** Add the candidate to the **testnet** validator set via a future
    `effective_at`. Observe the L3 gates for an observation window (e.g. several days), including a
    partition drill.
-4. **Mainnet, one shard at a time.** Only then schedule a **mainnet** `effective_at`, **per shard**,
-   mirroring the existing staggered per-shard rollout already visible in
-   [`validators.toml`](../../validators.toml) (block shard first, then message shards, with an
-   observation window between each).
-5. **Rollback plan.** Pre-stage a follow-up validator-set entry that **removes** the candidate, so
-   recovery is a known-good config change rather than an improvised one. Document the height
-   coordination, and note the **"remove is reliable, add is racy"** caveat from
-   `test_validator_set_rotation`.
+4. **Mainnet.** Only then schedule a **mainnet** `effective_at`. Aim to cut the validator into
+   **all shards at around the same time** — staggering the cutover (a gap between each shard's
+   `effective_at`) leaves the validator sets mismatched across shards and introduces cross-shard
+   instability while the gap lasts. The practical difficulty is that `effective_at` is a per-shard
+   block height and shards advance independently, so a near-simultaneous cutover requires estimating
+   target heights per shard; coordinate those estimates with the existing operators.
+5. **Rollback.** Removal uses the same mechanism in reverse — append a validator-set entry that
+   drops the candidate at a future `effective_at`. Make sure operators understand how to execute and
+   observe a removal before scheduling the mainnet add.
 
 ## Acceptance checklist (go / no-go)
 
@@ -259,21 +260,23 @@ parentheses; unmarked items apply to **all** tiers.
 - [ ] Key custody attested (HSM / secret management; no key reuse; equivocation-safe signer).
 - [ ] Monitoring & alerting wired (block height lag, round count, rejection counts, peer/mesh
       health).
-- [ ] Rollback validator-set entry pre-staged and reviewed.
-- [ ] Per-shard `effective_at` schedule agreed with all existing operators.
+- [ ] Rollback (validator removal) procedure understood and agreed with existing operators.
+- [ ] `effective_at` cutover schedule (near-simultaneous across shards) agreed with all existing
+      operators.
 
 ## Risks & open questions
 
-- **Flaky validator-add test.** `test_validator_set_rotation` currently relies on the *remove* path
-  because the *add* path is racy in CI (new-validator discovery timing). Onboarding fundamentally
-  exercises the add path, so hardening it is a prerequisite, not a nicety.
+- **Validator-add test coverage.** Onboarding fundamentally exercises the *add* path of validator-set
+  changes, which today has thinner automated coverage than the *remove* path. Strengthening
+  end-to-end coverage of adding a validator mid-flight is a prerequisite, not a nicety.
 - **No Byzantine / equivocation fault-injection harness** exists today. Should one be **required**
   for Tier C before a from-scratch client can vote on mainnet?
 - **Cross-geo latency vs. timing params.** If a desirable geo can't fit the current budget, do we
   revisit `propose_time` / `prevote_time` / `block_time` — a coordinated, all-node change with its
   own testing burden?
 - **No formal property-based / fuzz testing of the codec.** A fuzz/property suite over the protobuf
-  + signing path would materially strengthen Tier C determinism assurance.
+  + signing path is effectively a prerequisite for Tier C determinism assurance — and is now
+  tractable to author.
 
 ## References (snapchain code)
 
