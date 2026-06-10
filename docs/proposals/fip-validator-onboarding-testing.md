@@ -167,6 +167,10 @@ operator must commit to:
 - **participation in coordinated validator-set changes** (cutovers, rollbacks) on short notice;
 - **good-faith collaboration** with other operators during incidents and post-incident reviews.
 
+Operators are also **added as maintainers of the snapchain repository**, sharing responsibility for
+review, releases, and incident fixes — reinforcing the auditability expectation in R6 and ensuring
+every operator can act during an incident.
+
 The same manual process that admits a validator can **remove** one — for technical drift (R3/R7) or
 for being unresponsive or uncooperative during incidents. These criteria are interim and expected to
 be superseded once native protocol incentives exist.
