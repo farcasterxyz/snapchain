@@ -2,9 +2,28 @@ x-common: &common
   build:
     context: .
     dockerfile: Dockerfile
+  # small shortcut to speed builds up by reusing the same image for all nodes
+  image: snapchain-local:dev
   init: true # Auto-reap zombie processes and forward process signals
   environment:
     RUST_BACKTRACE: "full"
+  # `make dev` runs `docker compose up --watch`. On changes to the paths the Dockerfile
+  # COPYs, rebuild the image and recreate the containers. `rebuild` (not `sync`) is required
+  # because the runtime image is a from-scratch Ubuntu with a compiled binary and no cargo,
+  # so source changes must recompile. cargo-chef layer caching keeps the dependency layer
+  # warm, so a typical edit only reruns the final build + setup_local_testnet layers.
+  develop:
+    watch:
+      - action: rebuild
+        path: ./src
+      - action: rebuild
+        path: ./cli
+      - action: rebuild
+        path: ./proto
+      - action: rebuild
+        path: ./Cargo.toml
+      - action: rebuild
+        path: ./Cargo.lock
 
 services:
   node1:
