@@ -36,6 +36,12 @@ Two things are happening:
 
 There is no written, testable bar today. This FIP provides one, scaled to risk.
 
+**Current phase.** Validator membership is governed **manually** — there are no native protocol
+incentives or permissionless staking yet, so the set is maintained by mutual agreement among
+operators via `validators.toml`. Until that changes, admission and removal are partly a **trust and
+collaboration** decision, not only a technical one (see
+[Operator requirements](#operator-requirements-all-validators)).
+
 ### Risk tiers
 
 | Tier | Candidate | Added requirement over the tier above |
@@ -150,6 +156,21 @@ geo/datacenter, because snapchain's timing budget is tight (`block_time` 1s; `pr
 - **Bootstrap:** node fully synced (snapshot/replication) and tracking tip **before** its
   `effective_at`.
 
+## Operator requirements (all validators)
+
+While the set is manually governed (see [Current phase](#motivation)), recovering from a
+high-priority incident — a stalled shard needing a coordinated validator-set cutover, or a fast
+removal of a misbehaving node — depends on operators coordinating in real time. A prospective
+operator must commit to:
+
+- a **reachable on-call / incident contact** and an agreed escalation path;
+- **participation in coordinated validator-set changes** (cutovers, rollbacks) on short notice;
+- **good-faith collaboration** with other operators during incidents and post-incident reviews.
+
+The same manual process that admits a validator can **remove** one — for technical drift (R3/R7) or
+for being unresponsive or uncooperative during incidents. These criteria are interim and expected to
+be superseded once native protocol incentives exist.
+
 ## Rollout
 
 Staged and reversible:
@@ -183,6 +204,8 @@ Complete before a mainnet `validators.toml` edit. Tier tags in parentheses; unma
       verified.
 - [ ] Testnet read-node ran clean (zero divergence) over the observation window.
 - [ ] Key custody attested; monitoring/alerting wired; client auditable by operators.
+- [ ] Operator committed to incident-response collaboration: on-call contact, escalation path, and
+      participation in coordinated validator-set changes.
 - [ ] Rollback (removal) procedure agreed; near-simultaneous per-shard `effective_at` schedule
       agreed with all operators.
 
