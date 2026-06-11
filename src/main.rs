@@ -441,6 +441,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let gossip_tx = gossip.tx.clone();
     let local_peer_id_str = local_peer_id.to_string();
+    // Grab a handle to the per-peer gossip metrics before the gossip value is
+    // moved into the spawned task, so we can register the counters into the
+    // shared Prometheus registry below.
+    let gossip_metrics = gossip.metrics();
 
     // Spawn the libp2p Swarm event loop now, ahead of SnapchainNode::create().
     // Driving it in parallel with shard DB init lets QUIC keep-alives and
@@ -457,6 +461,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let registry = SharedRegistry::global();
     // Use the new non-global metrics registry when we upgrade to newer version of malachite
     let _ = Metrics::register(registry);
+    // Register per-peer gossip counters alongside the consensus metrics.
+    gossip_metrics.register(registry);
     let (messages_request_tx, messages_request_rx) = mpsc::channel(100);
 
     let chains_clients = ChainClients::new(&app_config);

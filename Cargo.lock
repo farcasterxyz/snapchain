@@ -7763,6 +7763,7 @@ dependencies = [
  "once_cell",
  "parking_lot",
  "pre-commit",
+ "prometheus-client",
  "prost 0.13.5",
  "ractor",
  "rand 0.8.5",

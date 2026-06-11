@@ -44,6 +44,9 @@ informalsystems-malachitebft-config = { path = "../malachite/code/crates/config"
 informalsystems-malachitebft-codec = { path = "../malachite/code/crates/codec" }
 informalsystems-malachitebft-metrics = { path = "../malachite/code/crates/metrics" }
 informalsystems-malachitebft-wal = { path = "../malachite/code/crates/wal" }
+# Same version Malachite's metrics crate uses, so our gossip counters share the
+# in-process `SharedRegistry` instance (types must unify).
+prometheus-client = "0.22"
 blake3 = "1.4.1"
 tracing = "0.1.40"
 thiserror = "1.0.66"

@@ -4,6 +4,7 @@ use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
+use crate::network::mesh::metrics::GossipMetrics;
 use crate::proto::{
     gossip_message, read_node_message, ContactInfo, ContactInfoBody, FarcasterNetwork,
     GossipMessage,
@@ -49,6 +50,16 @@ const MEMPOOL_TOPIC: &str = "mempool";
 const DECIDED_VALUES: &str = "decided-values";
 const READ_NODE_PEER_STATUSES: &str = "read-node-peers";
 const CONTACT_INFO: &str = "contact-info";
+
+/// All gossip topics this node may participate in. Used to bound the per-peer
+/// gossip-metrics sampler/eviction to a known, small set of topic labels.
+const ALL_TOPICS: [&str; 5] = [
+    CONSENSUS_TOPIC,
+    MEMPOOL_TOPIC,
+    DECIDED_VALUES,
+    READ_NODE_PEER_STATUSES,
+    CONTACT_INFO,
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -248,6 +259,11 @@ pub struct SnapchainGossip {
     /// custom statsd recorder. Wrapped in `Arc<AtomicU64>` for the same
     /// reason as `boot_resub_done`.
     direct_peer_force_bounce_count: Arc<AtomicU64>,
+    /// Prometheus-style per-peer/per-topic gossip counters + rate sampler.
+    /// Cumulative counters are the store of record; rates are derived. Cloned
+    /// into `main` for registration into the shared registry. See
+    /// [`GossipMetrics`].
+    metrics: GossipMetrics,
 }
 
 impl SnapchainGossip {
@@ -437,7 +453,16 @@ impl SnapchainGossip {
             last_force_bounce_at: HashMap::new(),
             peer_connected_at: HashMap::new(),
             direct_peer_force_bounce_count: Arc::new(AtomicU64::new(0)),
+            metrics: GossipMetrics::new(),
         })
+    }
+
+    /// Handle to the per-peer gossip metrics. Cloned by `main` so the
+    /// cumulative counters can be registered into the shared Prometheus
+    /// registry after the gossip event loop has been spawned (the `Family`
+    /// values are `Arc`-backed, so the clone shares storage).
+    pub fn metrics(&self) -> GossipMetrics {
+        self.metrics.clone()
     }
 
     /// Shared handle to the peer blocklist. Tests use this to simulate network
@@ -584,6 +609,12 @@ impl SnapchainGossip {
                     self.check_and_reconnect_to_bootstrap_peers().await;
                     self.statsd_client.gauge("gossip.connected_peers", self.swarm.connected_peers().count() as u64, vec![]);
                     self.statsd_client.gauge("gossip.sync_channels", self.sync_channels.len() as u64, vec![]);
+
+                    // Refresh derived per-peer gossip rates from the cumulative
+                    // counters. Collect first so we don't hold a borrow of the
+                    // swarm across the metrics call.
+                    let connected: Vec<PeerId> = self.swarm.connected_peers().cloned().collect();
+                    self.metrics.refresh_rates(connected.iter(), &ALL_TOPICS);
 
                     // Mesh self-heal sweep. Snapshot per-peer topic subscriptions
                     // once per tick; iterate `direct_peers` (small intentional set)
@@ -774,6 +805,11 @@ impl SnapchainGossip {
                             if is_direct && !self.swarm.is_connected(&peer_id) {
                                 self.peer_connected_at.remove(&peer_id);
                             }
+                            // Evict the peer's gossip-metric series once fully
+                            // disconnected, bounding cardinality to connected peers.
+                            if !self.swarm.is_connected(&peer_id) {
+                                self.metrics.remove_peer(&peer_id, &ALL_TOPICS);
+                            }
                             info!(direct = is_direct, "Connection closed with peer: {:?} due to: {:?}", peer_id, cause);
                             if let Some(system_tx) = &self.system_tx {
                                 let event = MalachiteNetworkEvent::PeerDisconnected(MalachitePeerId::from_libp2p(&peer_id));
@@ -820,6 +856,15 @@ impl SnapchainGossip {
                             if self.peer_blocklist.lock().contains(&peer_id) {
                                 continue;
                             }
+                            // Per-peer/per-topic gossip volume. `IdentTopic` uses
+                            // identity hashing, so `topic.as_str()` is the human
+                            // topic name (e.g. "consensus"). Cumulative — rates are
+                            // derived by the sampler on the periodic tick.
+                            self.metrics.record_message(
+                                &peer_id,
+                                message.topic.as_str(),
+                                message.data.len() as u64,
+                            );
                             // Take an owned sender if present to avoid holding an immutable borrow during mutable self call
                             let maybe_sender = self.system_tx.as_ref().cloned();
                             if let Some(system_tx) = maybe_sender {
