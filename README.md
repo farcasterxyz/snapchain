@@ -47,6 +47,58 @@ The snapchain Docker image ships a small CLI, `fc`, for submitting messages and 
 HubEvents against a node. See [`cli/README.md`](cli/README.md) for usage. Run it via
 `docker run --rm farcasterxyz/snapchain:<version> fc --help`.
 
+## Mesh & topology endpoint
+
+Each node exposes an admin-gated view of its gossip mesh at `GET /v1/mesh` on the HTTP port
+(`3381` by default): who it is connected to, whether each peer is in the consensus gossip mesh
+(a missing edge between validators is a consensus-partition risk), and per-peer/per-topic gossip
+rates. Validators are identified cryptographically — a node's libp2p `PeerId` is derived from its
+validator signing key and matched against the validator set at the current height — not by a
+heuristic.
+
+**Admin gate.** The endpoint requires the credentials configured in `admin_rpc_auth`
+(`username:password`), sent as HTTP Basic auth. If `admin_rpc_auth` is empty the endpoint is open
+(convenient for devnet/tests). Requests without valid credentials return `401`.
+
+**View modes** (query parameters):
+
+| Parameter         | Values                | Default | Description                                                        |
+| ----------------- | --------------------- | ------- | ------------------------------------------------------------------ |
+| `format`          | `json`, `ascii`       | `json`  | `ascii` returns a `text/plain` table + consensus-mesh graph        |
+| `validators_only` | `true`, `false` (`0`) | `true`  | When `false`, include non-validator peers (read nodes) in the view |
+
+```bash
+# ASCII table + graph (renders straight to the terminal)
+curl -u user:pass "http://127.0.0.1:3381/v1/mesh?format=ascii"
+
+# Structured JSON (default)
+curl -u user:pass "http://127.0.0.1:3381/v1/mesh"
+
+# Include non-validator peers
+curl -u user:pass "http://127.0.0.1:3381/v1/mesh?validators_only=false"
+```
+
+Example ASCII output:
+
+```
+MESH VIEW  self=…VqKVdVa  validator  height 9781  net=DEVNET  consensus-mesh 3
+PEERS (3 shown, 3 validators)
+PEER         TYPE          DIR  C-MESH  CONTACT    msgs/s(consensus)
+…3eiqEAm     validator     no   yes     derived    30.4
+…ENUTSN2     validator     no   yes     derived    29.7
+…hYFimKg     validator     no   yes     derived    29.3
+GRAPH (consensus mesh)
+  …VqKVdVa ── …3eiqEAm
+  …VqKVdVa ── …ENUTSN2
+  …VqKVdVa ── …hYFimKg
+```
+
+Validators do not publish contact info to their peers, so contact data for them is `derived`
+(the live, observed connection address) rather than `collected` (peer-attested contact info). The
+two are tracked separately and never conflated. The related `GET /v1/currentPeers` endpoint now
+also surfaces these derived peers, tagged accordingly. See the
+[Admin API reference](site/docs/pages/reference/httpapi/admin.md) for the full schema.
+
 ## Upgrade
 
 To upgrade your Snapchain node to the latest version, follow these steps:
