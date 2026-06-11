@@ -508,6 +508,8 @@ impl NodeForTest {
 
         let hub_service = Arc::new(MyHubService::new(
             "".to_string(),
+            "".to_string(),
+            vec![],
             node.block_stores.clone(),
             node.shard_stores.clone(),
             node.shard_senders.clone(),

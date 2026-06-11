@@ -83,8 +83,19 @@ async fn start_servers(
             ))
         };
 
+    // Validator public keys (hex) from the configured validator set(s), used to
+    // classify peers in the mesh view by deriving each validator's PeerId.
+    let validator_hex_keys: Vec<String> = app_config
+        .consensus
+        .get_validator_set_config(app_config.consensus.shard_ids.first().copied().unwrap_or(1))
+        .into_iter()
+        .flat_map(|s| s.validator_public_keys)
+        .collect();
+
     let service = Arc::new(MyHubService::new(
         app_config.rpc_auth.clone(),
+        app_config.admin_rpc_auth.clone(),
+        validator_hex_keys,
         block_stores.clone(),
         shard_stores.clone(),
         shard_senders,

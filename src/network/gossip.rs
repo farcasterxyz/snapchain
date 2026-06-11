@@ -24,7 +24,8 @@ use libp2p::identity::ed25519::Keypair;
 use libp2p::request_response::{InboundRequestId, OutboundRequestId};
 use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::{
-    gossipsub, noise, swarm::NetworkBehaviour, swarm::SwarmEvent, tcp, yamux, PeerId, Swarm,
+    gossipsub, noise, swarm::NetworkBehaviour, swarm::SwarmEvent, tcp, yamux, Multiaddr, PeerId,
+    Swarm,
 };
 use libp2p_connection_limits::ConnectionLimits;
 use parking_lot::Mutex;
@@ -187,7 +188,13 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
     SyncReply(InboundRequestId, sync::Response<SnapchainValidatorContext>),
     BroadcastDecidedValue(proto::DecidedValue),
     SubscribeToDecidedValuesTopic(),
-    GetConnectedPeers(oneshot::Sender<Vec<ContactInfoBody>>),
+    /// Source-tagged connected peers: COLLECTED (peer-attested `ContactInfoBody`)
+    /// and DERIVED (PeerId + observed address) entries, the latter so connected
+    /// peers we have no contact info for (e.g. validators) are still surfaced.
+    GetConnectedPeers(oneshot::Sender<Vec<proto::ConnectedPeer>>),
+    /// This node's local mesh view (peer facts only — validator classification
+    /// is applied by the RPC layer, which holds the validator set + height).
+    GetMeshView(oneshot::Sender<proto::MeshView>),
 }
 
 pub enum GossipTopic {
@@ -264,6 +271,12 @@ pub struct SnapchainGossip {
     /// into `main` for registration into the shared registry. See
     /// [`GossipMetrics`].
     metrics: GossipMetrics,
+    /// Authoritative, conflict-free per-peer address: the remote address of the
+    /// live libp2p connection (`ConnectionEstablished` endpoint), independent of
+    /// any self-announced/self-detected IP. Kept SEPARATE from `peers` (which
+    /// holds only peer-attested `ContactInfoBody`) so derived data is never
+    /// conflated with collected contact info. Cleared on full disconnect.
+    observed_addrs: HashMap<PeerId, Multiaddr>,
 }
 
 impl SnapchainGossip {
@@ -454,6 +467,7 @@ impl SnapchainGossip {
             peer_connected_at: HashMap::new(),
             direct_peer_force_bounce_count: Arc::new(AtomicU64::new(0)),
             metrics: GossipMetrics::new(),
+            observed_addrs: HashMap::new(),
         })
     }
 
@@ -746,6 +760,10 @@ impl SnapchainGossip {
                             if is_direct {
                                 self.peer_connected_at.entry(peer_id).or_insert_with(Instant::now);
                             }
+                            // Authoritative, conflict-free observed address of the live
+                            // connection (independent of any self-announced IP). Last
+                            // connection wins; used for DERIVED peer entries in the mesh view.
+                            self.observed_addrs.insert(peer_id, endpoint.get_remote_address().clone());
                             info!(total_peers = self.swarm.connected_peers().count(), direct = is_direct, "Connection established with peer: {peer_id}");
                             if let Some(system_tx) = &self.system_tx {
                                 let event = MalachiteNetworkEvent::PeerConnected(MalachitePeerId::from_libp2p(&peer_id));
@@ -805,10 +823,12 @@ impl SnapchainGossip {
                             if is_direct && !self.swarm.is_connected(&peer_id) {
                                 self.peer_connected_at.remove(&peer_id);
                             }
-                            // Evict the peer's gossip-metric series once fully
-                            // disconnected, bounding cardinality to connected peers.
+                            // Evict the peer's gossip-metric series and observed
+                            // address once fully disconnected, bounding cardinality
+                            // to connected peers.
                             if !self.swarm.is_connected(&peer_id) {
                                 self.metrics.remove_peer(&peer_id, &ALL_TOPICS);
+                                self.observed_addrs.remove(&peer_id);
                             }
                             info!(direct = is_direct, "Connection closed with peer: {:?} due to: {:?}", peer_id, cause);
                             if let Some(system_tx) = &self.system_tx {
@@ -1330,21 +1350,168 @@ impl SnapchainGossip {
 
                 None
             }
+            Some(GossipEvent::GetMeshView(channel)) => {
+                let view = self.get_mesh_view();
+                let _ = channel.send(view);
+
+                None
+            }
             None => None,
         }
     }
 
-    fn get_connected_peers(&self) -> Vec<ContactInfoBody> {
-        let connected_peers = self.swarm.connected_peers();
-
-        connected_peers
-            .filter_map(|peer| {
-                let info = self.peers.get(peer);
-                match info {
-                    Some(contact) => Some(contact.to_owned()),
-                    None => None,
+    /// Source-tagged view of every connected peer. Peers with peer-attested
+    /// `ContactInfoBody` are `COLLECTED`; peers we have none for (e.g.
+    /// validators, which never publish contact info) are `DERIVED` from the live
+    /// connection's observed address. `self.peers` is never mutated here — the
+    /// derived data is assembled at the response boundary only.
+    fn get_connected_peers(&self) -> Vec<proto::ConnectedPeer> {
+        self.swarm
+            .connected_peers()
+            .map(|peer| {
+                let observed_address = self
+                    .observed_addrs
+                    .get(peer)
+                    .map(|a| a.to_string())
+                    .unwrap_or_default();
+                match self.peers.get(peer) {
+                    Some(contact) => proto::ConnectedPeer {
+                        source: proto::ContactSource::Collected as i32,
+                        contact_info: Some(contact.clone()),
+                        peer_id: peer.to_bytes(),
+                        observed_address,
+                    },
+                    None => proto::ConnectedPeer {
+                        source: proto::ContactSource::Derived as i32,
+                        contact_info: None,
+                        peer_id: peer.to_bytes(),
+                        observed_address,
+                    },
                 }
             })
             .collect()
+    }
+
+    /// Build this node's local mesh view: connected peers with per-topic
+    /// gossipsub mesh membership, gossip rates, and source-tagged contact info.
+    /// Validator classification (`node_type`, `consensus_public_key`,
+    /// `is_validator`, `current_height`) is left unset here and filled by the
+    /// RPC layer, which holds the validator set and block height.
+    fn get_mesh_view(&self) -> proto::MeshView {
+        let gossipsub = &self.swarm.behaviour().gossipsub;
+
+        // Snapshot per-peer topic subscriptions once.
+        let peer_topics: HashMap<PeerId, HashSet<gossipsub::TopicHash>> = gossipsub
+            .all_peers()
+            .map(|(p, ts)| (*p, ts.into_iter().cloned().collect()))
+            .collect();
+        // Mesh membership per known topic (the set of peers we mesh with).
+        let topic_mesh: HashMap<&str, HashSet<PeerId>> = ALL_TOPICS
+            .iter()
+            .map(|topic| {
+                let hash = gossipsub::IdentTopic::new(*topic).hash();
+                let mesh = gossipsub.mesh_peers(&hash).cloned().collect();
+                (*topic, mesh)
+            })
+            .collect();
+
+        let peers = self
+            .swarm
+            .connected_peers()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|peer| {
+                let subscribed = peer_topics.get(&peer);
+                let topics = ALL_TOPICS
+                    .iter()
+                    .filter_map(|topic| {
+                        let hash = gossipsub::IdentTopic::new(*topic).hash();
+                        let is_subscribed = subscribed.map(|s| s.contains(&hash)).unwrap_or(false);
+                        let in_mesh = topic_mesh
+                            .get(*topic)
+                            .map(|m| m.contains(&peer))
+                            .unwrap_or(false);
+                        // Only surface topics the peer is subscribed to (or that
+                        // we mesh with) to keep the view focused.
+                        if is_subscribed || in_mesh {
+                            Some(proto::TopicMembership {
+                                topic: topic.to_string(),
+                                subscribed: is_subscribed,
+                                in_mesh,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let gossip_rates = self
+                    .metrics
+                    .rates_for(&peer, &ALL_TOPICS)
+                    .into_iter()
+                    .map(|(topic, rate)| proto::GossipRate {
+                        topic,
+                        msgs_per_sec: rate.msgs_per_sec,
+                        bytes_per_sec: rate.bytes_per_sec,
+                        total_msgs: rate.total_msgs,
+                        total_bytes: rate.total_bytes,
+                    })
+                    .collect();
+                let collected = self.peers.get(&peer);
+                proto::MeshPeer {
+                    peer_id: peer.to_bytes(),
+                    node_type: proto::MeshNodeType::Unknown as i32, // filled by RPC layer
+                    consensus_public_key: None,                     // filled by RPC layer
+                    connected: true,
+                    direct_peer: self.direct_peers.contains(&peer),
+                    contact_source: if collected.is_some() {
+                        proto::ContactSource::Collected as i32
+                    } else {
+                        proto::ContactSource::Derived as i32
+                    },
+                    contact_info: collected.cloned(),
+                    observed_address: self
+                        .observed_addrs
+                        .get(&peer)
+                        .map(|a| a.to_string())
+                        .unwrap_or_default(),
+                    topics,
+                    gossip_rates,
+                }
+            })
+            .collect();
+
+        let consensus_mesh_size = topic_mesh
+            .get(CONSENSUS_TOPIC)
+            .map(|m| m.len() as u32)
+            .unwrap_or(0);
+        let current_version = EngineVersion::current(self.fc_network).protocol_version();
+        let local = proto::MeshSelf {
+            peer_id: self.swarm.local_peer_id().to_bytes(),
+            consensus_public_key: vec![], // filled by RPC layer
+            is_validator: false,          // filled by RPC layer
+            gossip_address: self.announce_gossip_address.clone(),
+            rpc_address: self.announce_rpc_address.clone(),
+            snapchain_version: current_version.to_string(),
+            network: self.fc_network as i32,
+            subscribed_topics: self
+                .local_topics
+                .iter()
+                .map(|t| t.hash().to_string())
+                .collect(),
+            consensus_mesh_size,
+            current_height: 0, // filled by RPC layer
+        };
+
+        let generated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        proto::MeshView {
+            local: Some(local),
+            peers,
+            generated_at,
+        }
     }
 }

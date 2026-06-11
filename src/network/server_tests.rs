@@ -287,6 +287,8 @@ mod tests {
             block_engine,
             MyHubService::new(
                 auth,
+                "".to_string(),
+                vec![],
                 block_stores,
                 stores,
                 senders,

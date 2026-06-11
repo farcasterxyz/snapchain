@@ -5,3 +5,5 @@
 //! counters for per-peer/per-topic gossip volume, from which rates are derived.
 
 pub mod metrics;
+pub mod render;
+pub mod view;
