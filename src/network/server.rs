@@ -12,6 +12,7 @@ use crate::core::validations::verification::VerificationAddressClaim;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::mempool::routing;
 use crate::network::gossip::GossipEvent;
+use crate::network::mesh::view::{build_validator_peer_ids, classify_mesh_view, ValidatorPeerIds};
 use crate::proto::hub_service_server::HubService;
 use crate::proto::{
     self, cast_add_body, casts_by_parent_request, link_body, links_by_target_request, message_data,
@@ -19,10 +20,10 @@ use crate::proto::{
     CastsByParentRequest, DbStats, EventRequest, EventsRequest, EventsResponse,
     FidAddressTypeRequest, FidAddressTypeResponse, FidRequest, FidTimestampRequest, FidsRequest,
     FidsResponse, GetConnectedPeersRequest, GetConnectedPeersResponse, GetInfoRequest,
-    GetInfoResponse, Height, HubEvent, IdRegistryEventByAddressRequest, LinkRequest,
-    LinksByFidRequest, LinksByTargetRequest, Message, MessageType, MessagesResponse, OnChainEvent,
-    OnChainEventRequest, OnChainEventResponse, ReactionRequest, ReactionType,
-    ReactionsByFidRequest, ReactionsByTargetRequest, ShardChunk, ShardChunksRequest,
+    GetInfoResponse, GetMeshViewRequest, Height, HubEvent, IdRegistryEventByAddressRequest,
+    LinkRequest, LinksByFidRequest, LinksByTargetRequest, MeshView, Message, MessageType,
+    MessagesResponse, OnChainEvent, OnChainEventRequest, OnChainEventResponse, ReactionRequest,
+    ReactionType, ReactionsByFidRequest, ReactionsByTargetRequest, ShardChunk, ShardChunksRequest,
     ShardChunksResponse, Signer, SignerEventType, SignerRequest, SignerResponse, SignerSource,
     SignersByFidRequest, SignersByFidResponse, StorageLimitsResponse, SubscribeRequest,
     TrieNodeMetadataRequest, TrieNodeMetadataResponse, UserDataRequest, UserNameProof,
@@ -353,6 +354,12 @@ fn list_signers_for_fid(
 
 pub struct MyHubService {
     allowed_users: HashMap<String, String>,
+    /// Admin credentials (from `admin_rpc_auth`) gating diagnostic endpoints
+    /// like the mesh view. Empty ⇒ open (matches admin-server semantics).
+    admin_allowed_users: HashMap<String, String>,
+    /// Validator `PeerId` index, derived from the configured validator set's
+    /// public keys. Used to classify connected peers in the mesh view.
+    validator_peer_ids: ValidatorPeerIds,
     block_stores: BlockStores,
     shard_stores: HashMap<u32, Stores>,
     shard_senders: HashMap<u32, Senders>,
@@ -376,6 +383,8 @@ pub struct MyHubService {
 impl MyHubService {
     pub fn new(
         rpc_auth: String,
+        admin_rpc_auth: String,
+        validator_hex_keys: Vec<String>,
         block_stores: BlockStores,
         shard_stores: HashMap<u32, Stores>,
         shard_senders: HashMap<u32, Senders>,
@@ -390,19 +399,38 @@ impl MyHubService {
         peer_id: String,
         fname_lookup: Option<Arc<dyn FnameTransferLookup>>,
     ) -> Self {
-        let mut allowed_users = HashMap::new();
-        for auth in rpc_auth.split(",") {
-            let parts: Vec<&str> = auth.split(":").collect();
-            if parts.len() == 2 {
-                allowed_users.insert(parts[0].to_string(), parts[1].to_string());
+        let parse_auth = |auth_str: &str| {
+            let mut users = HashMap::new();
+            for auth in auth_str.split(",") {
+                let parts: Vec<&str> = auth.split(":").collect();
+                if parts.len() == 2 {
+                    users.insert(parts[0].to_string(), parts[1].to_string());
+                }
             }
-        }
+            users
+        };
+        let allowed_users = parse_auth(&rpc_auth);
+        let admin_allowed_users = parse_auth(&admin_rpc_auth);
 
         if allowed_users.is_empty() {
             info!("RPC server auth disabled");
         } else {
             info!("RPC server auth enabled with {} users", allowed_users.len());
         }
+        if admin_allowed_users.is_empty() {
+            info!("Admin/diagnostic RPC auth disabled (mesh view is open)");
+        } else {
+            info!(
+                "Admin/diagnostic RPC auth enabled with {} users",
+                admin_allowed_users.len()
+            );
+        }
+
+        let validator_peer_ids = build_validator_peer_ids(validator_hex_keys.iter());
+        info!(
+            "Mesh view: indexed {} validator peer ids",
+            validator_peer_ids.len()
+        );
 
         let id_registry_cache = CacheBuilder::new(2_000_000)
             .time_to_idle(Duration::from_secs(60 * 60))
@@ -411,6 +439,8 @@ impl MyHubService {
 
         let service = Self {
             allowed_users,
+            admin_allowed_users,
+            validator_peer_ids,
             network,
             block_stores,
             shard_senders,
@@ -2812,7 +2842,17 @@ impl HubService for MyHubService {
             });
 
         match timeout(DEFAULT_REQUEST_TIMEOUT, rx).await {
-            Ok(Ok(peers)) => Ok(Response::new(GetConnectedPeersResponse { contacts: peers })),
+            Ok(Ok(peers)) => {
+                // `contacts` stays back-compatible: COLLECTED entries only. The new
+                // `peers` list adds source-tagged DERIVED entries (connected peers
+                // with no collected contact info, e.g. validators).
+                let contacts = peers
+                    .iter()
+                    .filter(|p| p.source == proto::ContactSource::Collected as i32)
+                    .filter_map(|p| p.contact_info.clone())
+                    .collect();
+                Ok(Response::new(GetConnectedPeersResponse { contacts, peers }))
+            }
             Ok(Err(err)) => {
                 error!(
                     { err = err.to_string() },
@@ -2823,6 +2863,58 @@ impl HubService for MyHubService {
             Err(_) => {
                 error!("[get_connected_peers] timeout receiving connected peers response");
                 Err(Status::internal("Unable to retrieve connected peers."))
+            }
+        }
+    }
+
+    async fn get_mesh_view(
+        &self,
+        request: Request<GetMeshViewRequest>,
+    ) -> Result<Response<MeshView>, Status> {
+        // Admin-gated diagnostic endpoint.
+        authenticate_request(&request, &self.admin_allowed_users)?;
+        let validators_only = request.into_inner().validators_only;
+
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .gossip_tx
+            .send(GossipEvent::GetMeshView(tx))
+            .await
+            .map_err(|err| {
+                error!(
+                    { err = err.to_string() },
+                    "[get_mesh_view] error sending mesh view request"
+                );
+            });
+
+        match timeout(DEFAULT_REQUEST_TIMEOUT, rx).await {
+            Ok(Ok(view)) => {
+                // Classify peers against the validator set effective at the current
+                // block height (this is the only place public-key -> validator-set
+                // mapping happens).
+                let current_height = self
+                    .block_stores
+                    .block_store
+                    .max_block_number()
+                    .unwrap_or(0);
+                let view = classify_mesh_view(
+                    view,
+                    &self.validator_peer_ids,
+                    current_height,
+                    validators_only,
+                );
+                Ok(Response::new(view))
+            }
+            Ok(Err(err)) => {
+                error!(
+                    { err = err.to_string() },
+                    "[get_mesh_view] error receiving mesh view response"
+                );
+                Err(Status::internal("Unable to retrieve mesh view."))
+            }
+            Err(_) => {
+                error!("[get_mesh_view] timeout receiving mesh view response");
+                Err(Status::internal("Unable to retrieve mesh view."))
             }
         }
     }
