@@ -116,6 +116,32 @@ impl Config {
         panic!("No validator configuration provided")
     }
 
+    /// Public keys (hex) of the most recent validator set for every shard the
+    /// config governs, unioned. This is the "current + about-to-be" validator
+    /// set across all shards — used to classify validator peers in the mesh view
+    /// and to gate the mesh-diagnostics responder. It needs no block height: the
+    /// last entry for a shard is its highest-`effective_at` (latest) set, and we
+    /// union across shards so a per-shard rotation can't drop a shard's
+    /// validators. Entries are config-ordered ascending by `effective_at`.
+    pub fn latest_validator_public_keys(&self) -> Vec<String> {
+        let entries = self.get_validator_set_config(self.shard_ids.first().copied().unwrap_or(0));
+        let shards: std::collections::BTreeSet<u32> = entries
+            .iter()
+            .flat_map(|s| s.shard_ids.iter().copied())
+            .collect();
+        shards
+            .into_iter()
+            .filter_map(|shard| {
+                entries
+                    .iter()
+                    .filter(|s| s.shard_ids.contains(&shard))
+                    .last()
+                    .map(|s| s.validator_public_keys.clone())
+            })
+            .flatten()
+            .collect()
+    }
+
     pub fn to_stored_validator_sets(&self, shard_id: u32) -> StoredValidatorSets {
         let validator_set_config = self.get_validator_set_config(shard_id);
         let validator_sets = validator_set_config
@@ -146,5 +172,60 @@ impl Default for Config {
             sync_status_update_interval: Duration::from_secs(10),
             reconcile_heartbeat_event: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn vset(effective_at: u64, shard_ids: Vec<u32>, keys: &[&str]) -> ValidatorSetConfig {
+        ValidatorSetConfig {
+            effective_at,
+            validator_public_keys: keys.iter().map(|k| k.to_string()).collect(),
+            shard_ids,
+        }
+    }
+
+    #[test]
+    fn latest_validator_keys_unions_last_entry_per_shard() {
+        // shard 0 rotates at 100 (C -> D), shard 2 rotates at 200 (adds E, drops
+        // A/B/D), shard 1 keeps the genesis set.
+        let config = Config::default().with(
+            vec![0, 1, 2],
+            vec![
+                vset(0, vec![0, 1, 2], &["A", "B", "C"]),
+                vset(100, vec![0], &["A", "B", "D"]),
+                vset(200, vec![2], &["C", "E"]),
+            ],
+        );
+        let keys: HashSet<String> = config.latest_validator_public_keys().into_iter().collect();
+        // shard0 latest [A,B,D] ∪ shard1 [A,B,C] ∪ shard2 [C,E].
+        let expected: HashSet<String> = ["A", "B", "C", "D", "E"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(keys, expected);
+    }
+
+    #[test]
+    fn latest_validator_keys_excludes_removed_validator() {
+        // Single shard so there is no cross-shard survival: C is dropped in the
+        // latest set and must not appear in the result.
+        let config = Config::default().with(
+            vec![0],
+            vec![
+                vset(0, vec![0], &["A", "B", "C"]),
+                vset(100, vec![0], &["A", "B"]),
+            ],
+        );
+        let keys: HashSet<String> = config.latest_validator_public_keys().into_iter().collect();
+        let expected: HashSet<String> = ["A", "B"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(keys, expected);
+        assert!(
+            !keys.contains("C"),
+            "a validator removed in the latest set must be excluded"
+        );
     }
 }

@@ -50,54 +50,74 @@ HubEvents against a node. See [`cli/README.md`](cli/README.md) for usage. Run it
 ## Mesh & topology endpoint
 
 Each node exposes an admin-gated view of its gossip mesh at `GET /v1/mesh` on the HTTP port
-(`3381` by default): who it is connected to, whether each peer is in the consensus gossip mesh
-(a missing edge between validators is a consensus-partition risk), and per-peer/per-topic gossip
-rates. Validators are identified cryptographically — a node's libp2p `PeerId` is derived from its
-validator signing key and matched against the validator set at the current height — not by a
+(`3381` by default): who it is connected to, whether each peer is in the gossip mesh per topic
+(a missing edge between validators on the `consensus` topic is a consensus-partition risk), and
+per-peer/per-topic gossip rates. With `?crawl=true` the node queries every connected validator and
+assembles a **network-wide topology**. Validators are identified cryptographically — a libp2p
+`PeerId` is derived from the validator signing key and matched against the validator set — not by a
 heuristic.
 
 **Admin gate.** The endpoint requires the credentials configured in `admin_rpc_auth`
 (`username:password`), sent as HTTP Basic auth. If `admin_rpc_auth` is empty the endpoint is open
-(convenient for devnet/tests). Requests without valid credentials return `401`.
+(convenient for devnet/tests). Requests without valid credentials return `401`. The crawl talks
+to other nodes over the gossip port (`3382`); a node only answers crawl requests from validator
+peers.
 
-**View modes** (query parameters):
+**Query parameters:**
 
-| Parameter         | Values                | Default | Description                                                        |
-| ----------------- | --------------------- | ------- | ------------------------------------------------------------------ |
-| `format`          | `json`, `ascii`       | `json`  | `ascii` returns a `text/plain` table + consensus-mesh graph        |
-| `validators_only` | `true`, `false` (`0`) | `true`  | When `false`, include non-validator peers (read nodes) in the view |
+| Parameter         | Values                  | Default             | Description                                                                 |
+| ----------------- | ----------------------- | ------------------- | --------------------------------------------------------------------------- |
+| `format`          | `json`, `ascii`         | `json`              | `ascii` returns a `text/plain` table / matrix                               |
+| `crawl`           | `true`, `false`         | `false`             | When `true`, crawl all connected validators into a network-wide topology    |
+| `validators_only` | `true`, `false` (`0`)   | `true`              | When `false`, include non-validator peers (read nodes) in the output        |
+| `topics`          | comma list, or `all`    | `consensus,mempool` | Which topics' gossip mesh to show in `ascii` (validated; `all` = every one) |
 
 ```bash
-# ASCII table + graph (renders straight to the terminal)
+# Local view, ASCII table + graph (renders straight to the terminal)
 curl -u user:pass "http://127.0.0.1:3381/v1/mesh?format=ascii"
 
-# Structured JSON (default)
-curl -u user:pass "http://127.0.0.1:3381/v1/mesh"
+# Network-wide topology crawl
+curl -u user:pass "http://127.0.0.1:3381/v1/mesh?crawl=true&format=ascii"
 
-# Include non-validator peers
-curl -u user:pass "http://127.0.0.1:3381/v1/mesh?validators_only=false"
+# Structured JSON (default), all topics, including read-node peers
+curl -u user:pass "http://127.0.0.1:3381/v1/mesh?validators_only=false&topics=all"
 ```
 
-Example ASCII output:
+Local view (`?format=ascii`) — one mesh column per selected topic (`● in-mesh`, `○ subscribed`, `· none`):
 
 ```
-MESH VIEW  self=…VqKVdVa  validator  height 9781  net=DEVNET  consensus-mesh 3
-PEERS (3 shown, 3 validators)
-PEER         TYPE          DIR  C-MESH  CONTACT    msgs/s(consensus)
-…3eiqEAm     validator     no   yes     derived    30.4
-…ENUTSN2     validator     no   yes     derived    29.7
-…hYFimKg     validator     no   yes     derived    29.3
+MESH VIEW  self=…5Wf6xpR  validator  height 109  net=DEVNET  consensus-mesh 3
+PEERS (3 shown, 3 validators)   MESH per topic: ● in-mesh  ○ sub-only  · none
+PEER         TYPE          DIR  consensus  mempool    CONTACT    msgs/s(consensus)
+…MPByXee     validator     no   ●          ●          derived    27.8
+…PNpJTQk     validator     no   ●          ●          derived    27.4
+…6T9zXCY     validator     no   ●          ●          derived    0.0
 GRAPH (consensus mesh)
-  …VqKVdVa ── …3eiqEAm
-  …VqKVdVa ── …ENUTSN2
-  …VqKVdVa ── …hYFimKg
+  …5Wf6xpR ── …MPByXee
+```
+
+Crawl (`?crawl=true&format=ascii`) — one adjacency matrix per topic. A cell is the row's view of the
+column: `●` both meshed, `·` neither, `>`/`<` a one-way link. Validators that can't be reached are
+listed rather than dropped:
+
+```
+MESH TOPOLOGY  nodes=4  unreachable=0  net=DEVNET
+CONSENSUS MESH (row->col:  ● both  · neither  > row->col only  < col->row only)
+                SfBvi BJAnm RhdRc 7WeXa
+…YvSfBvi (val)  —     ●     ●     ●
+…WQBJAnm (val)  ●     —     ●     ●
+…tfRhdRc (val)  ●     ●     —     ●
+…Pw7WeXa (val)  ●     ●     ●     —
+NODES (mesh size per topic)
+PEER         ROLE        conse mempo VERSION
+…YvSfBvi     validator   3     3     13
+unreachable: (none)
 ```
 
 Validators do not publish contact info to their peers, so contact data for them is `derived`
 (the live, observed connection address) rather than `collected` (peer-attested contact info). The
 two are tracked separately and never conflated. The related `GET /v1/currentPeers` endpoint now
-also surfaces these derived peers, tagged accordingly. See the
-[Admin API reference](site/docs/pages/reference/httpapi/admin.md) for the full schema.
+also surfaces these derived peers, tagged accordingly.
 
 ## Upgrade
 

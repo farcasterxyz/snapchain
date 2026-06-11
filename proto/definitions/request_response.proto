@@ -428,8 +428,8 @@ enum MeshNodeType {
 
 message GetMeshViewRequest {
   bool validators_only = 1; // default true (applied by the handler)
-  // Reserved for the M2 recursive crawl; ignored in M1, kept so the wire
-  // format doesn't break when a propagating crawl is added later.
+  // Reserved for the recursive crawl; ignored by the local view, kept so the
+  // wire format doesn't break when a propagating crawl is added later.
   uint32 ttl = 2;
   repeated bytes visited_peer_ids = 3;
 }
@@ -478,6 +478,23 @@ message MeshView {
   // The responding node. Named `local` (not `self`) to avoid the Rust keyword.
   MeshSelf local = 1;
   repeated MeshPeer peers = 2;
+  uint64 generated_at = 3; // unix millis
+}
+
+// A validator that the crawl could not query directly. The crawl is
+// connected-only: validators the serving node has no live connection to,
+// or that did not respond in time, are surfaced here rather than dropped.
+message UnreachableNode {
+  bytes peer_id = 1;
+  bytes consensus_public_key = 2; // set when the missing node is a known validator
+  string reason = 3;              // "not_connected" | "timeout" | "error: …"
+}
+
+// Network-wide topology assembled by the centralized crawl over the gossip
+// port. `nodes` is one MeshView per responding validator (including self).
+message MeshTopology {
+  repeated MeshView nodes = 1;
+  repeated UnreachableNode unreachable = 2;
   uint64 generated_at = 3; // unix millis
 }
 

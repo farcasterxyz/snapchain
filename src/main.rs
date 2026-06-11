@@ -83,14 +83,10 @@ async fn start_servers(
             ))
         };
 
-    // Validator public keys (hex) from the configured validator set(s), used to
-    // classify peers in the mesh view by deriving each validator's PeerId.
-    let validator_hex_keys: Vec<String> = app_config
-        .consensus
-        .get_validator_set_config(app_config.consensus.shard_ids.first().copied().unwrap_or(1))
-        .into_iter()
-        .flat_map(|s| s.validator_public_keys)
-        .collect();
+    // Validator public keys (hex) used to classify peers in the mesh view by
+    // deriving each validator's PeerId — the latest set per shard, unioned
+    // (same source as the diagnostics gate, so the two stay consistent).
+    let validator_hex_keys: Vec<String> = app_config.consensus.latest_validator_public_keys();
 
     let service = Arc::new(MyHubService::new(
         app_config.rpc_auth.clone(),
@@ -437,6 +433,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut gossip = gossip_result?;
+    // Validator PeerIds permitted to query the mesh-diagnostics behaviour;
+    // the gossip responder answers only these peers (fail-closed otherwise).
+    let validator_peers: HashSet<_> = snapchain::network::mesh::view::build_validator_peer_ids(
+        app_config.consensus.latest_validator_public_keys().iter(),
+    )
+    .into_keys()
+    .collect();
+    gossip.set_validator_peers(validator_peers);
     let local_peer_id = gossip.swarm.local_peer_id().clone();
     let read_or_validator = if app_config.read_node {
         "read"

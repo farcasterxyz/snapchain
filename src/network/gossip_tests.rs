@@ -162,6 +162,122 @@ async fn test_gossip_communication() {
     assert_eq!(receive_counts, 1);
 }
 
+/// The mesh-diagnostics responder serves only validator peers: a request from a
+/// configured validator is answered, one from a non-validator is refused.
+#[tokio::test]
+#[serial]
+async fn test_diagnostics_only_serves_validators() {
+    let keypair1 = Keypair::generate();
+    let keypair2 = Keypair::generate();
+    let keypair3 = Keypair::generate();
+
+    let peer_id = |kp: &Keypair| libp2p::identity::PublicKey::from(kp.public()).to_peer_id();
+    let pid1 = peer_id(&keypair1); // responder
+    let pid2 = peer_id(&keypair2); // validator requester
+
+    let base = BASE_PORT_FOR_TEST + 20;
+    let node1_addr = format!("/ip4/{HOST_FOR_TEST}/udp/{base}/quic-v1");
+    let node2_addr = format!("/ip4/{HOST_FOR_TEST}/udp/{}/quic-v1", base + 1);
+    let node3_addr = format!("/ip4/{HOST_FOR_TEST}/udp/{}/quic-v1", base + 2);
+
+    // node2 and node3 both bootstrap to node1 so both connect to the responder.
+    let config1 = Config::new(node1_addr.clone(), node2_addr.clone());
+    let config2 = Config::new(node2_addr.clone(), node1_addr.clone());
+    let config3 = Config::new(node3_addr.clone(), node1_addr.clone());
+
+    let (system_tx1, _) = mpsc::channel::<SystemMessage>(100);
+    let (system_tx2, _) = mpsc::channel::<SystemMessage>(100);
+    let (system_tx3, _) = mpsc::channel::<SystemMessage>(100);
+
+    let mut gossip1 = SnapchainGossip::create(
+        keypair1.clone(),
+        &config1,
+        Some(system_tx1),
+        false,
+        FarcasterNetwork::Devnet,
+        statsd_client(),
+    )
+    .await
+    .unwrap();
+    let mut gossip2 = SnapchainGossip::create(
+        keypair2.clone(),
+        &config2,
+        Some(system_tx2),
+        false,
+        FarcasterNetwork::Devnet,
+        statsd_client(),
+    )
+    .await
+    .unwrap();
+    let mut gossip3 = SnapchainGossip::create(
+        keypair3.clone(),
+        &config3,
+        Some(system_tx3),
+        false,
+        FarcasterNetwork::Devnet,
+        statsd_client(),
+    )
+    .await
+    .unwrap();
+
+    // node1 serves diagnostics only to node2 (a "validator"), not node3.
+    gossip1.set_validator_peers(std::collections::HashSet::from([pid2]));
+
+    let gossip_tx2 = gossip2.tx.clone();
+    let gossip_tx3 = gossip3.tx.clone();
+
+    tokio::spawn(async move {
+        gossip1.start().await;
+    });
+    tokio::spawn(async move {
+        gossip2.start().await;
+    });
+    tokio::spawn(async move {
+        gossip3.start().await;
+    });
+
+    // Let connections establish.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // node2 is a validator → request is served.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    gossip_tx2
+        .send(GossipEvent::SendMeshViewRequest(
+            pid1,
+            crate::proto::GetMeshViewRequest::default(),
+            tx,
+        ))
+        .await
+        .unwrap();
+    let allowed = time::timeout(Duration::from_secs(4), rx)
+        .await
+        .expect("validator request timed out")
+        .expect("oneshot dropped");
+    assert!(
+        allowed.is_ok(),
+        "validator peer should be served, got {allowed:?}"
+    );
+
+    // node3 is not a validator → request is refused (OutboundFailure → Err).
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    gossip_tx3
+        .send(GossipEvent::SendMeshViewRequest(
+            pid1,
+            crate::proto::GetMeshViewRequest::default(),
+            tx,
+        ))
+        .await
+        .unwrap();
+    let refused = time::timeout(Duration::from_secs(8), rx)
+        .await
+        .expect("non-validator request timed out")
+        .expect("oneshot dropped");
+    assert!(
+        refused.is_err(),
+        "non-validator peer should be refused, got {refused:?}"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_bootstrap_peer_reconnection() {

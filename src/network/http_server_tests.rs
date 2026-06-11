@@ -110,6 +110,13 @@ pub mod tests {
             Ok(Response::new(MeshView::default()))
         }
 
+        async fn get_mesh_topology(
+            &self,
+            _request: Request<GetMeshViewRequest>,
+        ) -> Result<Response<MeshTopology>, Status> {
+            Ok(Response::new(MeshTopology::default()))
+        }
+
         type SubscribeStream = ReceiverStream<Result<HubEvent, Status>>;
         async fn subscribe(
             &self,
