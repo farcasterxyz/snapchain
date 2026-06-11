@@ -4,6 +4,7 @@ use crate::consensus::malachite::network_connector::MalachiteNetworkEvent;
 use crate::consensus::malachite::snapchain_codec::SnapchainCodec;
 use crate::core::types::{proto, SnapchainContext, SnapchainValidatorContext};
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
+use crate::network::mesh::diagnostics;
 use crate::network::mesh::metrics::GossipMetrics;
 use crate::proto::{
     gossip_message, read_node_message, ContactInfo, ContactInfoBody, FarcasterNetwork,
@@ -21,7 +22,7 @@ use informalsystems_malachitebft_network::{Channel, PeerIdExt};
 use informalsystems_malachitebft_network::{MessageId, PeerId as MalachitePeerId};
 use informalsystems_malachitebft_sync::{self as sync};
 use libp2p::identity::ed25519::Keypair;
-use libp2p::request_response::{InboundRequestId, OutboundRequestId};
+use libp2p::request_response::{self, InboundRequestId, OutboundRequestId};
 use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::{
     gossipsub, noise, swarm::NetworkBehaviour, swarm::SwarmEvent, tcp, yamux, Multiaddr, PeerId,
@@ -46,15 +47,16 @@ use tracing::{debug, error, info, warn};
 const DEFAULT_GOSSIP_HOST: &str = "127.0.0.1";
 const MAX_GOSSIP_MESSAGE_SIZE: usize = 1024 * 1024 * 10; // 10 mb
 
-const CONSENSUS_TOPIC: &str = "consensus";
-const MEMPOOL_TOPIC: &str = "mempool";
+pub(crate) const CONSENSUS_TOPIC: &str = "consensus";
+pub(crate) const MEMPOOL_TOPIC: &str = "mempool";
 const DECIDED_VALUES: &str = "decided-values";
 const READ_NODE_PEER_STATUSES: &str = "read-node-peers";
 const CONTACT_INFO: &str = "contact-info";
 
-/// All gossip topics this node may participate in. Used to bound the per-peer
-/// gossip-metrics sampler/eviction to a known, small set of topic labels.
-const ALL_TOPICS: [&str; 5] = [
+/// All gossip topics this node may participate in. The single source of truth
+/// for valid topic names — used to bound the per-peer gossip-metrics
+/// sampler/eviction and to validate the mesh view's `?topics=` selection.
+pub(crate) const ALL_TOPICS: [&str; 5] = [
     CONSENSUS_TOPIC,
     MEMPOOL_TOPIC,
     DECIDED_VALUES,
@@ -195,6 +197,14 @@ pub enum GossipEvent<Ctx: SnapchainContext> {
     /// This node's local mesh view (peer facts only — validator classification
     /// is applied by the RPC layer, which holds the validator set + height).
     GetMeshView(oneshot::Sender<proto::MeshView>),
+    /// Send a mesh-view request to a specific peer over the diagnostics
+    /// request-response behaviour (the crawl) and resolve the oneshot with that
+    /// peer's raw `MeshView` (or an error string on failure/timeout).
+    SendMeshViewRequest(
+        PeerId,
+        proto::GetMeshViewRequest,
+        oneshot::Sender<Result<proto::MeshView, String>>,
+    ),
 }
 
 pub enum GossipTopic {
@@ -210,6 +220,9 @@ pub enum GossipTopic {
 pub struct SnapchainBehavior {
     pub gossipsub: gossipsub::Behaviour,
     pub rpc: sync::Behaviour,
+    /// Mesh diagnostics request-response (the crawl). Sibling to `rpc` so it can
+    /// evolve independently of Malachite's consensus sync protocol.
+    pub diagnostics: diagnostics::Behaviour,
     pub connection_limits: libp2p_connection_limits::Behaviour,
 }
 
@@ -277,6 +290,19 @@ pub struct SnapchainGossip {
     /// holds only peer-attested `ContactInfoBody`) so derived data is never
     /// conflated with collected contact info. Cleared on full disconnect.
     observed_addrs: HashMap<PeerId, Multiaddr>,
+    /// In-flight outbound mesh-diagnostics requests (the crawl): maps the
+    /// `OutboundRequestId` returned by `send_request` to the oneshot the crawler
+    /// is awaiting. Resolved on the matching inbound `Response` or on
+    /// `OutboundFailure`. Mirrors `sync_channels` but for the diagnostics
+    /// behaviour.
+    diagnostics_requests:
+        HashMap<OutboundRequestId, oneshot::Sender<Result<proto::MeshView, String>>>,
+    /// Validator `PeerId`s permitted to query the mesh-diagnostics behaviour.
+    /// The responder answers a diagnostics request only if the requesting peer is
+    /// in this set — for now we only serve other validators. Set once at startup
+    /// from the configured validator set (see [`Self::set_validator_peers`]).
+    /// **Fail-closed:** an empty set answers no one.
+    validator_peers: HashSet<PeerId>,
 }
 
 impl SnapchainGossip {
@@ -352,6 +378,15 @@ impl SnapchainGossip {
                     sync::Config::default().with_request_timeout(Duration::from_secs(5)),
                 );
 
+                let diagnostics = diagnostics::Behaviour::new(
+                    [(
+                        diagnostics::MESH_DIAGNOSTICS_PROTOCOL,
+                        request_response::ProtocolSupport::Full,
+                    )],
+                    request_response::Config::default()
+                        .with_request_timeout(Duration::from_secs(5)),
+                );
+
                 // TODO(aditi): Connection limits are set high so that we don't keep kicking off read nodes for now
                 let connection_limits = libp2p_connection_limits::Behaviour::new(
                     ConnectionLimits::default()
@@ -364,6 +399,7 @@ impl SnapchainGossip {
                 Ok(SnapchainBehavior {
                     gossipsub,
                     rpc,
+                    diagnostics,
                     connection_limits,
                 })
             })?
@@ -468,6 +504,8 @@ impl SnapchainGossip {
             direct_peer_force_bounce_count: Arc::new(AtomicU64::new(0)),
             metrics: GossipMetrics::new(),
             observed_addrs: HashMap::new(),
+            diagnostics_requests: HashMap::new(),
+            validator_peers: HashSet::new(),
         })
     }
 
@@ -477,6 +515,13 @@ impl SnapchainGossip {
     /// values are `Arc`-backed, so the clone shares storage).
     pub fn metrics(&self) -> GossipMetrics {
         self.metrics.clone()
+    }
+
+    /// Set the validator `PeerId`s allowed to query the mesh-diagnostics
+    /// behaviour. Call once at startup (from the configured validator set);
+    /// until set, the responder is fail-closed and answers no one.
+    pub fn set_validator_peers(&mut self, peers: HashSet<PeerId>) {
+        self.validator_peers = peers;
     }
 
     /// Shared handle to the peer blocklist. Tests use this to simulate network
@@ -950,6 +995,50 @@ impl SnapchainGossip {
                                 _ => {}
                             }
                         }
+                        SwarmEvent::Behaviour(SnapchainBehaviorEvent::Diagnostics(diag_event)) => {
+                            match diag_event {
+                                request_response::Event::Message { peer, message, .. } => match message {
+                                    libp2p::request_response::Message::Request { channel, .. } => {
+                                        // Only serve other validators (for now). A non-validator
+                                        // requester is refused by dropping the response channel,
+                                        // which surfaces as an OutboundFailure on their side.
+                                        if !self.validator_peers.contains(&peer) {
+                                            debug!(
+                                                peer = %peer,
+                                                "Ignoring mesh diagnostics request from non-validator"
+                                            );
+                                        } else {
+                                            // Respond with RAW peer facts; the requesting aggregator
+                                            // classifies against its own validator set + height.
+                                            let view = self.get_mesh_view();
+                                            if self
+                                                .swarm
+                                                .behaviour_mut()
+                                                .diagnostics
+                                                .send_response(channel, view)
+                                                .is_err()
+                                            {
+                                                warn!("Failed to send mesh diagnostics response");
+                                            }
+                                        }
+                                    }
+                                    libp2p::request_response::Message::Response {
+                                        request_id,
+                                        response,
+                                    } => {
+                                        if let Some(tx) = self.diagnostics_requests.remove(&request_id) {
+                                            let _ = tx.send(Ok(response));
+                                        }
+                                    }
+                                },
+                                request_response::Event::OutboundFailure { request_id, error, .. } => {
+                                    if let Some(tx) = self.diagnostics_requests.remove(&request_id) {
+                                        let _ = tx.send(Err(format!("{error:?}")));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1354,6 +1443,15 @@ impl SnapchainGossip {
                 let view = self.get_mesh_view();
                 let _ = channel.send(view);
 
+                None
+            }
+            Some(GossipEvent::SendMeshViewRequest(peer, request, channel)) => {
+                let request_id = self
+                    .swarm
+                    .behaviour_mut()
+                    .diagnostics
+                    .send_request(&peer, request);
+                self.diagnostics_requests.insert(request_id, channel);
                 None
             }
             None => None,

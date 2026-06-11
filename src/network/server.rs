@@ -12,6 +12,7 @@ use crate::core::validations::verification::VerificationAddressClaim;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::mempool::routing;
 use crate::network::gossip::GossipEvent;
+use crate::network::mesh::crawl::crawl_mesh;
 use crate::network::mesh::view::{build_validator_peer_ids, classify_mesh_view, ValidatorPeerIds};
 use crate::proto::hub_service_server::HubService;
 use crate::proto::{
@@ -21,13 +22,13 @@ use crate::proto::{
     FidAddressTypeRequest, FidAddressTypeResponse, FidRequest, FidTimestampRequest, FidsRequest,
     FidsResponse, GetConnectedPeersRequest, GetConnectedPeersResponse, GetInfoRequest,
     GetInfoResponse, GetMeshViewRequest, Height, HubEvent, IdRegistryEventByAddressRequest,
-    LinkRequest, LinksByFidRequest, LinksByTargetRequest, MeshView, Message, MessageType,
-    MessagesResponse, OnChainEvent, OnChainEventRequest, OnChainEventResponse, ReactionRequest,
-    ReactionType, ReactionsByFidRequest, ReactionsByTargetRequest, ShardChunk, ShardChunksRequest,
-    ShardChunksResponse, Signer, SignerEventType, SignerRequest, SignerResponse, SignerSource,
-    SignersByFidRequest, SignersByFidResponse, StorageLimitsResponse, SubscribeRequest,
-    TrieNodeMetadataRequest, TrieNodeMetadataResponse, UserDataRequest, UserNameProof,
-    UserNameType, UsernameProofRequest, UsernameProofsResponse, ValidationResponse,
+    LinkRequest, LinksByFidRequest, LinksByTargetRequest, MeshTopology, MeshView, Message,
+    MessageType, MessagesResponse, OnChainEvent, OnChainEventRequest, OnChainEventResponse,
+    ReactionRequest, ReactionType, ReactionsByFidRequest, ReactionsByTargetRequest, ShardChunk,
+    ShardChunksRequest, ShardChunksResponse, Signer, SignerEventType, SignerRequest,
+    SignerResponse, SignerSource, SignersByFidRequest, SignersByFidResponse, StorageLimitsResponse,
+    SubscribeRequest, TrieNodeMetadataRequest, TrieNodeMetadataResponse, UserDataRequest,
+    UserNameProof, UserNameType, UsernameProofRequest, UsernameProofsResponse, ValidationResponse,
     VerificationAddAddressBody, VerificationRequest,
 };
 use crate::storage::constants::OnChainEventPostfix;
@@ -2915,6 +2916,41 @@ impl HubService for MyHubService {
             Err(_) => {
                 error!("[get_mesh_view] timeout receiving mesh view response");
                 Err(Status::internal("Unable to retrieve mesh view."))
+            }
+        }
+    }
+
+    async fn get_mesh_topology(
+        &self,
+        request: Request<GetMeshViewRequest>,
+    ) -> Result<Response<MeshTopology>, Status> {
+        // Admin-gated diagnostic endpoint.
+        authenticate_request(&request, &self.admin_allowed_users)?;
+        let validators_only = request.into_inner().validators_only;
+
+        let current_height = self
+            .block_stores
+            .block_store
+            .max_block_number()
+            .unwrap_or(0);
+        let generated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        match crawl_mesh(
+            &self.gossip_tx,
+            &self.validator_peer_ids,
+            current_height,
+            validators_only,
+            generated_at,
+        )
+        .await
+        {
+            Ok(topology) => Ok(Response::new(topology)),
+            Err(err) => {
+                error!({ err = err }, "[get_mesh_topology] crawl failed");
+                Err(Status::internal("Unable to crawl mesh topology."))
             }
         }
     }

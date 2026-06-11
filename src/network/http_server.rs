@@ -1535,6 +1535,40 @@ pub struct ErrorResponse {
     pub error_detail: Option<String>,
 }
 
+// Shared response builders for the mesh endpoints (local view + crawl topology).
+fn text_plain_ok(body: String) -> Response<BoxBody<Bytes, Infallible>> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/plain; charset=utf-8")
+        .body(Full::new(Bytes::from(body)).boxed())
+        .unwrap()
+}
+
+fn json_ok(json: serde_json::Value) -> Response<BoxBody<Bytes, Infallible>> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Full::new(Bytes::from(serde_json::to_vec(&json).unwrap())).boxed())
+        .unwrap()
+}
+
+fn mesh_error_response(status: tonic::Status) -> Response<BoxBody<Bytes, Infallible>> {
+    let code = if status.code() == tonic::Code::Unauthenticated {
+        StatusCode::UNAUTHORIZED
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    let err = ErrorResponse {
+        error: status.message().to_string(),
+        error_detail: None,
+    };
+    Response::builder()
+        .status(code)
+        .header("content-type", "application/json")
+        .body(Full::new(Bytes::from(serde_json::to_vec(&err).unwrap())).boxed())
+        .unwrap()
+}
+
 // Implementation struct
 pub struct HubHttpServiceImpl<T: HubService> {
     pub service: Arc<T>,
@@ -3832,6 +3866,8 @@ where
         let query = req.uri().query().unwrap_or("").to_string();
         let mut format = "json";
         let mut validators_only = true;
+        let mut crawl = false;
+        let mut topics_param: Option<String> = None;
         for pair in query.split('&') {
             match pair.split_once('=') {
                 Some(("format", v)) => {
@@ -3842,9 +3878,18 @@ where
                 Some(("validators_only", v)) => {
                     validators_only = !(v == "false" || v == "0");
                 }
+                Some(("crawl", v)) => {
+                    crawl = !(v == "false" || v == "0");
+                }
+                Some(("topics", v)) => {
+                    topics_param = Some(v.to_string());
+                }
                 _ => {}
             }
         }
+        // Topics control the ASCII per-topic columns/matrices only (default
+        // consensus,mempool); the JSON always carries every topic.
+        let topics = crate::network::mesh::render::parse_topics(topics_param.as_deref());
 
         let auth = req.headers().get("authorization").cloned();
         let mut grpc_req = tonic::Request::new(proto::GetMeshViewRequest {
@@ -3860,40 +3905,35 @@ where
             }
         }
 
-        match self.service.service.get_mesh_view(grpc_req).await {
-            Ok(resp) => {
-                let view = resp.into_inner();
-                if format == "ascii" {
-                    let body = crate::network::mesh::render::render_mesh_view(&view);
-                    Ok(Response::builder()
-                        .status(StatusCode::OK)
-                        .header("content-type", "text/plain; charset=utf-8")
-                        .body(Full::new(Bytes::from(body)).boxed())
-                        .unwrap())
-                } else {
-                    let json = crate::network::mesh::render::mesh_view_json(&view);
-                    Ok(Response::builder()
-                        .status(StatusCode::OK)
-                        .header("content-type", "application/json")
-                        .body(Full::new(Bytes::from(serde_json::to_vec(&json).unwrap())).boxed())
-                        .unwrap())
+        // `?crawl=true` assembles the network-wide topology over the gossip port;
+        // otherwise return this node's local view.
+        if crawl {
+            match self.service.service.get_mesh_topology(grpc_req).await {
+                Ok(resp) => {
+                    let topo = resp.into_inner();
+                    if format == "ascii" {
+                        let body = crate::network::mesh::render::render_topology(&topo, &topics);
+                        Ok(text_plain_ok(body))
+                    } else {
+                        let json = crate::network::mesh::render::topology_json(&topo);
+                        Ok(json_ok(json))
+                    }
                 }
+                Err(status) => Ok(mesh_error_response(status)),
             }
-            Err(status) => {
-                let code = if status.code() == tonic::Code::Unauthenticated {
-                    StatusCode::UNAUTHORIZED
-                } else {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                };
-                let err = ErrorResponse {
-                    error: status.message().to_string(),
-                    error_detail: None,
-                };
-                Ok(Response::builder()
-                    .status(code)
-                    .header("content-type", "application/json")
-                    .body(Full::new(Bytes::from(serde_json::to_vec(&err).unwrap())).boxed())
-                    .unwrap())
+        } else {
+            match self.service.service.get_mesh_view(grpc_req).await {
+                Ok(resp) => {
+                    let view = resp.into_inner();
+                    if format == "ascii" {
+                        let body = crate::network::mesh::render::render_mesh_view(&view, &topics);
+                        Ok(text_plain_ok(body))
+                    } else {
+                        let json = crate::network::mesh::render::mesh_view_json(&view);
+                        Ok(json_ok(json))
+                    }
+                }
+                Err(status) => Ok(mesh_error_response(status)),
             }
         }
     }
