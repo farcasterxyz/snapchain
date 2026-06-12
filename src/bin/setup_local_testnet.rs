@@ -61,6 +61,12 @@ struct Args {
     /// Admin RPC basic auth users for local/devnet debugging, as "user:password".
     #[arg(long, default_value = "")]
     admin_rpc_auth: String,
+
+    /// Configure every validator as a libp2p direct/explicit peer of the others,
+    /// matching how mainnet/testnet are deployed. When false, nodes instead form
+    /// an emergent gossip mesh (useful for exercising the `●` mesh path locally).
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+    direct_peers: bool,
 }
 
 fn parse_duration(arg: &str) -> Result<Duration, String> {
@@ -92,6 +98,19 @@ async fn main() {
             .collect(),
     )
     .to_string();
+
+    // PeerId for each node, derived from the SAME keypair the node loads as its
+    // `consensus.private_key` (see consensus.rs `keypair()`), so the id we
+    // advertise to peers is exactly the id that node presents at runtime. Indexed
+    // identically to `keypairs` / `all_public_keys`: entry `k` ⟺ node `k + 1`.
+    let all_peer_ids = keypairs
+        .iter()
+        .map(|x| {
+            libp2p::identity::PublicKey::from(Keypair::from(x.clone()).public())
+                .to_peer_id()
+                .to_base58()
+        })
+        .collect::<Vec<String>>();
 
     let base_rpc_port = 3382;
     let base_http_port = 3482;
@@ -137,6 +156,20 @@ async fn main() {
             })
             .collect::<Vec<String>>()
             .join(",");
+
+        // Node `id` loads keypairs[id-1]; its direct peers are every OTHER node,
+        // looked up by the same index (so node x's advertised id == all_peer_ids[x-1]
+        // == the id node x presents at runtime). Empty when --direct-peers=false.
+        let direct_peers_line = if args.direct_peers {
+            let ids = (1..=num_nodes)
+                .filter(|&x| x != id)
+                .map(|x| all_peer_ids[x as usize - 1].clone())
+                .collect::<Vec<String>>()
+                .join(",");
+            format!("direct_peers = \"{ids}\"")
+        } else {
+            String::new()
+        };
 
         let block_time = humantime::format_duration(args.block_time);
         let num_shards = args.num_shards;
@@ -197,6 +230,7 @@ use_tags={statsd_use_tags}
 [gossip]
 address="{gossip_multi_addr}"
 bootstrap_peers = "{other_nodes_addresses}"
+{direct_peers_line}
 
 [consensus]
 private_key = "{secret_key}"

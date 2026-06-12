@@ -8,7 +8,7 @@
 use crate::network::gossip::{ALL_TOPICS, CONSENSUS_TOPIC, MEMPOOL_TOPIC};
 use crate::proto;
 use libp2p::PeerId;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 
 /// Topics shown in the ASCII view when `?topics=` is omitted. Derived from the
@@ -54,20 +54,26 @@ pub fn render_mesh_view(view: &proto::MeshView, topics: &[String]) -> String {
     };
     let height = local.map(|l| l.current_height).unwrap_or(0);
     let net = local.map(|l| network_name(l.network)).unwrap_or("?");
-    let mesh_size = local.map(|l| l.consensus_mesh_size).unwrap_or(0);
     let validators = view
         .peers
         .iter()
         .filter(|p| p.node_type == proto::MeshNodeType::Validator as i32)
         .count();
+    // Effective consensus connectivity counts emergent mesh AND explicit/direct
+    // peers; direct peers are excluded from gossipsub's `mesh_peers()` by design.
+    let consensus_linked = view
+        .peers
+        .iter()
+        .filter(|p| p.node_type == proto::MeshNodeType::Validator as i32 && has_consensus_link(p))
+        .count();
 
     let _ = writeln!(
         out,
-        "MESH VIEW  self={self_id}  {role}  height {height}  net={net}  consensus-mesh {mesh_size}"
+        "MESH VIEW  self={self_id}  {role}  height {height}  net={net}  consensus-mesh {consensus_linked}/{validators}"
     );
     let _ = writeln!(
         out,
-        "PEERS ({} shown, {} validators)   MESH per topic: ● in-mesh  ○ sub-only  · none",
+        "PEERS ({} shown, {} validators)   MESH per topic: ● in-mesh  ◆ direct/explicit  ○ sub-only  · none",
         view.peers.len(),
         validators
     );
@@ -92,8 +98,7 @@ pub fn render_mesh_view(view: &proto::MeshView, topics: &[String]) -> String {
             if p.direct_peer { "yes" } else { "no" },
         );
         for t in topics {
-            let (subscribed, in_mesh) = topic_state(p, t);
-            row.push_str(&format!("{:<11}", mesh_cell(subscribed, in_mesh)));
+            row.push_str(&format!("{:<11}", mesh_cell(link_state(p, t))));
         }
         let rate = rate_for_topic(p, &rate_topic)
             .map(|r| format!("{:.1}", r))
@@ -117,13 +122,19 @@ pub fn render_mesh_view(view: &proto::MeshView, topics: &[String]) -> String {
             }
             any_validator = true;
             let peer = short_peer(&p.peer_id);
-            if in_consensus_mesh(p) {
-                let _ = writeln!(out, "  {self_id} ── {peer}");
-            } else {
-                let _ = writeln!(
-                    out,
-                    "  {self_id} ╳  {peer}   (connected, not meshed) ← consensus-partition risk"
-                );
+            match link_state(p, CONSENSUS_TOPIC) {
+                LinkState::Mesh => {
+                    let _ = writeln!(out, "  {self_id} ── {peer}");
+                }
+                LinkState::Direct => {
+                    let _ = writeln!(out, "  {self_id} ─◆ {peer}   (direct/explicit peer)");
+                }
+                LinkState::SubOnly | LinkState::None => {
+                    let _ = writeln!(
+                        out,
+                        "  {self_id} ╳  {peer}   (connected, not meshed) ← consensus-partition risk"
+                    );
+                }
             }
         }
         if !any_validator {
@@ -245,10 +256,45 @@ fn network_name(network: i32) -> &'static str {
     }
 }
 
-fn in_consensus_mesh(peer: &proto::MeshPeer) -> bool {
-    peer.topics
-        .iter()
-        .any(|t| t.topic == CONSENSUS_TOPIC && t.in_mesh)
+/// Effective per-topic link state between us and a peer.
+///
+/// libp2p gossipsub forwards every published message directly to **explicit
+/// peers** (`add_explicit_peer`, used for snapchain `direct_peers`) but
+/// deliberately keeps them OUT of `mesh_peers()`. So a perfectly healthy direct
+/// peer reports `in_mesh = false`. We treat a subscribed direct peer as a
+/// first-class link (`Direct`) so it is never mistaken for a partition or for a
+/// merely-subscribed peer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LinkState {
+    Mesh,    // in our emergent gossipsub mesh
+    Direct,  // explicit/direct peer, subscribed (excluded from the mesh by design)
+    SubOnly, // subscribed but neither meshed nor an explicit peer
+    None,    // not subscribed and not meshed
+}
+
+fn link_state(peer: &proto::MeshPeer, topic: &str) -> LinkState {
+    let (subscribed, in_mesh) = topic_state(peer, topic);
+    if in_mesh {
+        LinkState::Mesh
+    } else if peer.direct_peer && subscribed {
+        LinkState::Direct
+    } else if subscribed {
+        LinkState::SubOnly
+    } else {
+        LinkState::None
+    }
+}
+
+/// An effective gossip link — either an emergent mesh edge or an explicit/direct
+/// peering. The two are equivalent for message delivery; only `Direct` is hidden
+/// from `mesh_peers()`.
+fn has_link(state: LinkState) -> bool {
+    matches!(state, LinkState::Mesh | LinkState::Direct)
+}
+
+/// Does the peer have an effective consensus link (meshed or explicit/direct)?
+fn has_consensus_link(peer: &proto::MeshPeer) -> bool {
+    has_link(link_state(peer, CONSENSUS_TOPIC))
 }
 
 /// `(subscribed, in_mesh)` for a peer on a given topic. Absent membership entry
@@ -261,14 +307,13 @@ fn topic_state(peer: &proto::MeshPeer, topic: &str) -> (bool, bool) {
         .unwrap_or((false, false))
 }
 
-/// Single-cell gossip-mesh indicator: meshed / subscribed-only / neither.
-fn mesh_cell(subscribed: bool, in_mesh: bool) -> &'static str {
-    if in_mesh {
-        "●"
-    } else if subscribed {
-        "○"
-    } else {
-        "·"
+/// Single-cell gossip indicator: meshed / explicit-direct / subscribed-only / none.
+fn mesh_cell(state: LinkState) -> &'static str {
+    match state {
+        LinkState::Mesh => "●",
+        LinkState::Direct => "◆",
+        LinkState::SubOnly => "○",
+        LinkState::None => "·",
     }
 }
 
@@ -306,23 +351,34 @@ pub fn render_topology(topo: &proto::MeshTopology, topics: &[String]) -> String 
         net
     );
 
-    // Per-topic, per-node sets of peer ids each node reports meshing with.
-    // `mesh_sets[topic_idx][node_idx]`.
-    let mesh_sets: Vec<Vec<HashSet<Vec<u8>>>> = topics
+    // Per-topic, per-node maps of peer id -> effective link state. A node's link
+    // to a peer is either an emergent mesh edge or an explicit/direct peering;
+    // `link_maps[topic_idx][node_idx]`.
+    let link_maps: Vec<Vec<HashMap<Vec<u8>, LinkState>>> = topics
         .iter()
         .map(|topic| {
             entries
                 .iter()
-                .map(|(n, _)| mesh_set_for_topic(n, topic))
+                .map(|(n, _)| {
+                    n.peers
+                        .iter()
+                        .map(|p| (p.peer_id.clone(), link_state(p, topic)))
+                        .collect()
+                })
                 .collect()
         })
         .collect();
+
+    // Effective link from node `i` to peer id `id`: meshed or explicit/direct.
+    let linked = |t: usize, i: usize, id: &Vec<u8>| -> Option<LinkState> {
+        link_maps[t][i].get(id).copied().filter(|s| has_link(*s))
+    };
 
     // One adjacency matrix per topic.
     for (t, topic) in topics.iter().enumerate() {
         let _ = writeln!(
             out,
-            "{} MESH (row->col:  ● both  · neither  > row->col only  < col->row only)",
+            "{} LINKS (row->col:  ● mesh  ◆ direct/explicit  > row->col only  < col->row only  · none)",
             topic.to_uppercase()
         );
         let mut header = format!("{:<16}", "");
@@ -338,13 +394,16 @@ pub fn render_topology(topo: &proto::MeshTopology, topics: &[String]) -> String 
                 let cell = if i == j {
                     "—"
                 } else {
-                    let a = mesh_sets[t][i].contains(*id_j); // row i meshes with col j
-                    let b = mesh_sets[t][j].contains(ids[i]); // col j meshes with row i
+                    let a = linked(t, i, id_j); // row i -> col j
+                    let b = linked(t, j, ids[i]); // col j -> row i
                     match (a, b) {
-                        (true, true) => "●",
-                        (true, false) => ">",
-                        (false, true) => "<",
-                        (false, false) => "·",
+                        // Both linked: ● only when both are emergent mesh edges,
+                        // ◆ when either side is an explicit/direct peering.
+                        (Some(LinkState::Mesh), Some(LinkState::Mesh)) => "●",
+                        (Some(_), Some(_)) => "◆",
+                        (Some(_), None) => ">",
+                        (None, Some(_)) => "<",
+                        (None, None) => "·",
                     }
                 };
                 row.push_str(&format!("{:<6}", cell));
@@ -353,8 +412,8 @@ pub fn render_topology(topo: &proto::MeshTopology, topics: &[String]) -> String 
         }
     }
 
-    // Per-node summary: mesh size per topic.
-    let _ = writeln!(out, "NODES (mesh size per topic)");
+    // Per-node summary: effective link count per topic (mesh + direct).
+    let _ = writeln!(out, "NODES (links per topic: mesh + direct)");
     let mut nhdr = format!("{:<12} {:<11} ", "PEER", "ROLE");
     for topic in topics {
         nhdr.push_str(&format!("{:<6}", topic_tag(topic)));
@@ -372,7 +431,8 @@ pub fn render_topology(topo: &proto::MeshTopology, topics: &[String]) -> String 
             },
         );
         for t in 0..topics.len() {
-            row.push_str(&format!("{:<6}", mesh_sets[t][i].len()));
+            let n_links = link_maps[t][i].values().filter(|s| has_link(**s)).count();
+            row.push_str(&format!("{:<6}", n_links));
         }
         row.push_str(&l.snapchain_version);
         let _ = writeln!(out, "{row}");
@@ -425,15 +485,6 @@ pub fn topology_json(topo: &proto::MeshTopology) -> serde_json::Value {
         })).collect::<Vec<_>>(),
         "generated_at": topo.generated_at,
     })
-}
-
-/// Peer ids a node reports meshing with on `topic`.
-fn mesh_set_for_topic(view: &proto::MeshView, topic: &str) -> HashSet<Vec<u8>> {
-    view.peers
-        .iter()
-        .filter(|p| topic_state(p, topic).1)
-        .map(|p| p.peer_id.clone())
-        .collect()
 }
 
 /// Short fixed-width header tag for a topic in the per-node summary table.
@@ -638,6 +689,83 @@ mod tests {
         assert_eq!(json["unreachable"][0]["reason"], "not_connected");
     }
 
+    #[test]
+    fn direct_peers_render_as_links_not_partitions() {
+        // An explicit/direct peer is held out of gossipsub's mesh (`in_mesh=false`)
+        // but is still an effective consensus link — it must read as a direct link,
+        // not a partition and not merely-subscribed.
+        let a = PeerId::random();
+        let b = PeerId::random();
+        let view = proto::MeshView {
+            local: Some(proto::MeshSelf {
+                peer_id: a.to_bytes(),
+                is_validator: true,
+                network: proto::FarcasterNetwork::Testnet as i32,
+                ..Default::default()
+            }),
+            peers: vec![proto::MeshPeer {
+                peer_id: b.to_bytes(),
+                node_type: proto::MeshNodeType::Validator as i32,
+                direct_peer: true,
+                topics: vec![proto::TopicMembership {
+                    topic: CONSENSUS_TOPIC.to_string(),
+                    subscribed: true,
+                    in_mesh: false,
+                }],
+                ..Default::default()
+            }],
+            generated_at: 0,
+        };
+
+        let out = render_mesh_view(&view, &default_topics());
+        // Rendered as a direct/explicit link, never a partition.
+        assert!(out.contains("◆"), "expected a direct-link glyph:\n{out}");
+        assert!(
+            !out.contains("consensus-partition risk"),
+            "a subscribed direct peer must not read as a partition:\n{out}"
+        );
+        // Counted toward effective consensus connectivity (1 of 1 validators).
+        assert!(out.contains("consensus-mesh 1/1"), "{out}");
+    }
+
+    #[test]
+    fn topology_matrix_shows_reciprocal_direct_links() {
+        // Two validators that peer each other as direct/explicit peers (mesh-excluded)
+        // must render a reciprocal ◆, not a false `·` partition.
+        let a = PeerId::random();
+        let b = PeerId::random();
+        let direct = |self_id: &PeerId, peer: &PeerId| proto::MeshView {
+            local: Some(proto::MeshSelf {
+                peer_id: self_id.to_bytes(),
+                is_validator: true,
+                network: proto::FarcasterNetwork::Testnet as i32,
+                ..Default::default()
+            }),
+            peers: vec![proto::MeshPeer {
+                peer_id: peer.to_bytes(),
+                node_type: proto::MeshNodeType::Validator as i32,
+                direct_peer: true,
+                topics: vec![proto::TopicMembership {
+                    topic: CONSENSUS_TOPIC.to_string(),
+                    subscribed: true,
+                    in_mesh: false,
+                }],
+                ..Default::default()
+            }],
+            generated_at: 0,
+        };
+        let topo = proto::MeshTopology {
+            nodes: vec![direct(&a, &b), direct(&b, &a)],
+            unreachable: vec![],
+            generated_at: 0,
+        };
+        let out = render_topology(&topo, &default_topics());
+        assert!(
+            out.contains("◆"),
+            "expected reciprocal direct-link glyph in matrix:\n{out}"
+        );
+    }
+
     // A peer carrying explicit per-topic membership.
     fn peer_with_topics(pid: &PeerId, topics: &[(&str, bool)]) -> proto::MeshPeer {
         proto::MeshPeer {
@@ -719,10 +847,10 @@ mod tests {
         let topics = vec!["consensus".to_string(), "mempool".to_string()];
         let out = render_topology(&topo, &topics);
         // One matrix per topic.
-        assert!(out.contains("CONSENSUS MESH"));
-        assert!(out.contains("MEMPOOL MESH"));
+        assert!(out.contains("CONSENSUS LINKS"));
+        assert!(out.contains("MEMPOOL LINKS"));
         // The mempool matrix surfaces the one-way link as a directional marker.
-        let mempool = out.split("MEMPOOL MESH").nth(1).unwrap();
+        let mempool = out.split("MEMPOOL LINKS").nth(1).unwrap();
         assert!(
             mempool.contains('>') || mempool.contains('<'),
             "expected mempool asymmetry:\n{out}"

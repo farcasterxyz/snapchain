@@ -50,9 +50,9 @@ HubEvents against a node. See [`cli/README.md`](cli/README.md) for usage. Run it
 ## Mesh & topology endpoint
 
 Each node exposes an admin-gated view of its gossip mesh at `GET /v1/mesh` on the HTTP port
-(`3381` by default): who it is connected to, whether each peer is in the gossip mesh per topic
-(a missing edge between validators on the `consensus` topic is a consensus-partition risk), and
-per-peer/per-topic gossip rates. With `?crawl=true` the node queries every connected validator and
+(`3381` by default): who it is connected to, how each peer is linked per topic — emergent gossip
+mesh or a configured direct/explicit peer (a validator that is *neither* on the `consensus` topic is
+a consensus-partition risk) — and per-peer/per-topic gossip rates. With `?crawl=true` the node queries every connected validator and
 assembles a **network-wide topology**. Validators are identified cryptographically — a libp2p
 `PeerId` is derived from the validator signing key and matched against the validator set — not by a
 heuristic.
@@ -83,36 +83,47 @@ curl -u user:pass "http://127.0.0.1:3381/v1/mesh?crawl=true&format=ascii"
 curl -u user:pass "http://127.0.0.1:3381/v1/mesh?validators_only=false&topics=all"
 ```
 
-Local view (`?format=ascii`) — one mesh column per selected topic (`● in-mesh`, `○ subscribed`, `· none`):
+Local view (`?format=ascii`) — one column per selected topic. A peer is `● in-mesh` (emergent
+gossipsub mesh), `◆ direct/explicit` (a configured `direct_peers` entry — see below), `○ sub-only`
+(subscribed but neither), or `· none`. The header's `consensus-mesh N/M` counts validators with an
+effective consensus link (mesh **or** direct) out of all validator peers:
 
 ```
-MESH VIEW  self=…5Wf6xpR  validator  height 109  net=DEVNET  consensus-mesh 3
-PEERS (3 shown, 3 validators)   MESH per topic: ● in-mesh  ○ sub-only  · none
+MESH VIEW  self=…5Wf6xpR  validator  height 109  net=DEVNET  consensus-mesh 3/3
+PEERS (3 shown, 3 validators)   MESH per topic: ● in-mesh  ◆ direct/explicit  ○ sub-only  · none
 PEER         TYPE          DIR  consensus  mempool    CONTACT    msgs/s(consensus)
-…MPByXee     validator     no   ●          ●          derived    27.8
-…PNpJTQk     validator     no   ●          ●          derived    27.4
-…6T9zXCY     validator     no   ●          ●          derived    0.0
+…MPByXee     validator     yes  ◆          ◆          derived    27.8
+…PNpJTQk     validator     yes  ◆          ◆          derived    27.4
+…6T9zXCY     validator     yes  ◆          ◆          derived    0.0
 GRAPH (consensus mesh)
-  …5Wf6xpR ── …MPByXee
+  …5Wf6xpR ─◆ …MPByXee   (direct/explicit peer)
 ```
 
 Crawl (`?crawl=true&format=ascii`) — one adjacency matrix per topic. A cell is the row's view of the
-column: `●` both meshed, `·` neither, `>`/`<` a one-way link. Validators that can't be reached are
-listed rather than dropped:
+column: `●` both meshed, `◆` linked with at least one side direct/explicit, `·` neither, `>`/`<` a
+one-way link. Validators that can't be reached are listed rather than dropped:
 
 ```
 MESH TOPOLOGY  nodes=4  unreachable=0  net=DEVNET
-CONSENSUS MESH (row->col:  ● both  · neither  > row->col only  < col->row only)
+CONSENSUS LINKS (row->col:  ● mesh  ◆ direct/explicit  > row->col only  < col->row only  · none)
                 SfBvi BJAnm RhdRc 7WeXa
-…YvSfBvi (val)  —     ●     ●     ●
-…WQBJAnm (val)  ●     —     ●     ●
-…tfRhdRc (val)  ●     ●     —     ●
-…Pw7WeXa (val)  ●     ●     ●     —
-NODES (mesh size per topic)
+…YvSfBvi (val)  —     ◆     ◆     ◆
+…WQBJAnm (val)  ◆     —     ◆     ◆
+…tfRhdRc (val)  ◆     ◆     —     ◆
+…Pw7WeXa (val)  ◆     ◆     ◆     —
+NODES (links per topic: mesh + direct)
 PEER         ROLE        conse mempo VERSION
 …YvSfBvi     validator   3     3     13
 unreachable: (none)
 ```
+
+**Direct/explicit peers.** Nodes configured with each other via `direct_peers` are registered as
+libp2p gossipsub *explicit peers*. Gossipsub forwards every published message straight to an explicit
+peer but deliberately keeps it out of `mesh_peers()` — so a perfectly healthy direct peer reports
+`in_mesh = false`. The view treats a subscribed direct peer as a first-class link (`◆`), distinct
+from the emergent mesh (`●`) and never flagged as a partition. A real partition (`╳` / `·` /
+`consensus-partition risk`) is reserved for validators that are connected but neither meshed nor
+explicitly peered.
 
 Validators do not publish contact info to their peers, so contact data for them is `derived`
 (the live, observed connection address) rather than `collected` (peer-attested contact info). The
