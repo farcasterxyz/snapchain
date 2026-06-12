@@ -40,6 +40,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Share the registry-backed cache with the main CI build (docker-build-impl.yml)
+      # and the deployer. A release tag is cut from a main commit, so read that commit's
+      # per-commit tag then fall back to main; write the per-commit tag so the deployer
+      # gets a full hit when it deploys this exact release SHA. See NEYN-11876.
+      - name: Compute cache refs
+        id: cache
+        env:
+          ARCH: ${{ matrix.arch }}
+          SHA: ${{ github.sha }}
+        run: |
+          repo="ghcr.io/farcasterxyz/snapchain/cache"
+          {
+            echo "from<<EOF"
+            echo "type=registry,ref=${repo}:${ARCH}-${SHA}"
+            echo "type=registry,ref=${repo}:${ARCH}-main"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "to<<EOF"
+            echo "type=registry,mode=max,ref=${repo}:${ARCH}-${SHA}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - uses: docker/build-push-action@v7
         id: build
         with:
@@ -47,10 +70,8 @@ jobs:
           file: ./Dockerfile
           platforms: linux/${{ matrix.arch }}
           outputs: type=image,name=farcasterxyz/snapchain,push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=build-${{ matrix.arch }}
-          cache-to: |
-            type=gha,mode=max,scope=build-${{ matrix.arch }}
-            type=registry,mode=max,ref=ghcr.io/farcasterxyz/snapchain/cache:${{ matrix.arch }}
+          cache-from: ${{ steps.cache.outputs.from }}
+          cache-to: ${{ steps.cache.outputs.to }}
 
       - name: Export digest
         run: |
