@@ -52,6 +52,31 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Share the registry-backed cache with the main CI build (docker-build-impl.yml)
+      # and the deployer. Read the prerelease ref's own branch tag, then fall back to
+      # main; write the branch tag so repeat prereleases of the same ref stay warm.
+      # See NEYN-11876.
+      - name: Compute cache refs
+        id: cache
+        env:
+          ARCH: ${{ matrix.arch }}
+          REF_RAW: ${{ inputs.ref }}
+        run: |
+          repo="ghcr.io/farcasterxyz/snapchain/cache"
+          # OCI tags may not contain "/", matching how snapchain CI writes them.
+          branch="${REF_RAW//\//-}"
+          {
+            echo "from<<EOF"
+            echo "type=registry,ref=${repo}:${ARCH}-${branch}"
+            echo "type=registry,ref=${repo}:${ARCH}-main"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "to<<EOF"
+            echo "type=registry,mode=max,ref=${repo}:${ARCH}-${branch}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - uses: docker/build-push-action@v7
         id: build
         with:
@@ -59,10 +84,8 @@ jobs:
           file: ./Dockerfile
           platforms: linux/${{ matrix.arch }}
           outputs: type=image,name=farcasterxyz/snapchain,push-by-digest=true,name-canonical=true,push=true
-          cache-from: |
-            type=gha,scope=build-${{ matrix.arch }}
-            type=registry,ref=ghcr.io/farcasterxyz/snapchain/cache:${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=build-${{ matrix.arch }}
+          cache-from: ${{ steps.cache.outputs.from }}
+          cache-to: ${{ steps.cache.outputs.to }}
 
       - name: Export digest
         run: |
