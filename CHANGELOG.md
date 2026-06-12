@@ -2,7 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.13.0] - 2026-06-12
+
+### 🚀 Features
+
+- Extend storage expiry by one year (#906)
+- *(gossip)* Per-peer/per-topic gossip metrics (prometheus-client) (#926)
+- *(mesh)* Local mesh view endpoint `/v1/mesh` (#927)
+- *(mesh)* Network-wide topology crawl over the gossip port (#928)
+
+### 🐛 Bug Fixes
+
+- *(test)* Flaky test should accomodate 10k char-length casts (#908)
+- Handle direct peers correctly in mesh observability endpoint (#930)
+
+### 📚 Documentation
+
+- Add GitHub release publishing step
+
+### ⚙️ Miscellaneous Tasks
+
+- Update ci caching logic to accomodate branches and 5 commits on main (#907)
 
 ## [0.12.0] - 2026-05-20
 
