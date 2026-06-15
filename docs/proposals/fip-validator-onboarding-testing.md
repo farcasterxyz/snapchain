@@ -9,7 +9,7 @@
 | **Status** | Draft |
 | **Author** | Neynar (manan@neynar.com) |
 | **Created** | 2026-06-09 |
-| **Discussion** | TBD |
+| **Discussion** | [farcasterxyz/protocol#272](https://github.com/farcasterxyz/protocol/discussions/272) |
 
 ## Summary
 
