@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "@farcaster/core": "0.18.10",
-    "@noble/curves": "^2.2.0"
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^1.5.0"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",
@@ -23,10 +24,12 @@
     "preset": "ts-jest",
     "testEnvironment": "node",
     "testMatch": [
-      "**/test.ts"
+      "**/test.ts",
+      "**/*.test.ts"
     ],
     "collectCoverageFrom": [
       "**/test.ts",
+      "**/*.test.ts",
       "!**/node_modules/**"
     ]
   }

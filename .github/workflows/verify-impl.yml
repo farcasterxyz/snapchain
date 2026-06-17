@@ -91,6 +91,18 @@ jobs:
           RUSTFLAGS: "-Dwarnings -A mismatched_lifetime_syntaxes"
         run: cargo fmt --all --check
 
+      # The L0 conformance corpus is checked in and must be reproducible: regenerating it without a
+      # protocol change must produce no diff. A diff here means encoding/hash/signature/state-root
+      # output changed and the committed corpus (and the protocol-repo copy) needs regenerating.
+      - name: Check conformance corpus is up to date
+        working-directory: ./snapchain
+        env:
+          RUSTFLAGS: "-Dwarnings -A mismatched_lifetime_syntaxes"
+        run: |
+          cargo test --test conformance_test generate_corpus -- --ignored --nocapture
+          git diff --exit-code -- tests/conformance/corpus \
+            || (echo "::error::Conformance corpus is stale. Run: cargo test --test conformance_test generate_corpus -- --ignored, then sync farcasterxyz/protocol/vectors/" && exit 1)
+
       - working-directory: ./snapchain/tests/client_parity_tests
         run: |
           npx node-gyp@12.2.0 install
@@ -105,4 +117,14 @@ jobs:
         with:
           name: coverage-report
           path: ./snapchain/coverage/
+          retention-days: 14
+
+      # Publish the L0 conformance corpus as a portable artifact an external client can download
+      # and run against in its own CI.
+      - name: Upload conformance corpus
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: conformance-corpus
+          path: ./snapchain/tests/conformance/
           retention-days: 14
