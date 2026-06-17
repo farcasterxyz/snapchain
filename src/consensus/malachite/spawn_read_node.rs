@@ -30,10 +30,24 @@ pub async fn spawn_read_host(
     config: Config,
 ) -> Result<ReadHostRef, ractor::SpawnErr> {
     let validator_set_config = config.get_validator_set_config(shard_id);
-    let validator_sets = validator_set_config
+    let validator_sets: Vec<StoredValidatorSet> = validator_set_config
         .iter()
         .map(|config| StoredValidatorSet::new(ShardId::new(shard_id), &config))
         .collect();
+
+    tracing::info!(
+        shard_id,
+        validator_sets = ?validator_sets.iter().map(|vs| {
+            format!(
+                "effective_at: {}, validators: {:#?}, shard_ids: {:?}",
+                vs.effective_at,
+                vs.validators.validators.iter().map(|v| hex::encode(v.public_key.to_bytes())).collect::<Vec<_>>(),
+                vs.shard_ids
+            )
+        }).collect::<Vec<_>>(),
+        "Initializing read node with validator sets"
+    );
+
     let state = ReadHostState {
         validator: read_validator::ReadValidator {
             shard_id,
