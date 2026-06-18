@@ -9,6 +9,8 @@ permissions:
 
 env:
   MALACHITE_GIT_REF: "13bca14cd209d985c3adf101a02924acde8723a5"
+  # The default `info` log level is very noisy in CI test output; quiet it to errors only.
+  RUST_LOG: error
 
 jobs:
   test:
