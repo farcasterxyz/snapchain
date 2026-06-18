@@ -1226,7 +1226,9 @@ impl TestNetwork {
 
                 None
             },
-            tokio::time::Duration::from_secs(15),
+            // 30s (not 15s): under `cargo llvm-cov` instrumentation on the slower CI runner,
+            // propagation across a multi-node network can exceed 15s even though it's ~3s locally.
+            tokio::time::Duration::from_secs(30),
             tokio::time::Duration::from_millis(100),
         )
         .await
@@ -1414,7 +1416,8 @@ impl TestNetwork {
 
                 None
             },
-            tokio::time::Duration::from_secs(15),
+            // 30s (not 15s): see wait_for_fid — instrumented CI runs are slower than local.
+            tokio::time::Duration::from_secs(30),
             tokio::time::Duration::from_millis(100),
         )
         .await
