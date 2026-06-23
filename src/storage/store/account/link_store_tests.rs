@@ -1725,6 +1725,223 @@ mod tests {
         assert!(retrieved_add.is_none());
     }
 
+    // ---------------------------------------------------------------------
+    // Block links (FIP: Block Links).
+    //
+    // A "block" is a Link with type="block"; it rides the existing Link CRDT
+    // with no new validation or merge logic. These tests pin that behavior so
+    // it cannot silently regress: round-trip through every read path, isolation
+    // from "follow" links sharing the same (fid, target), and the FIP rule that
+    // a block is active iff the highest-order message is the LINK_ADD.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_block_link_add_round_trips_through_all_read_paths() {
+        let (store, db, _temp_dir) = create_test_store();
+
+        let block_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK,
+            TARGET_FID,
+            None,
+            None,
+        );
+
+        merge_message_success(&store, &db, &block_add);
+
+        // get_link_add (linkById)
+        let by_id = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(by_id, block_add);
+
+        // get_link_adds_by_fid (linksByFid)
+        let by_fid = LinkStore::get_link_adds_by_fid(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK.to_string(),
+            &PageOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(by_fid.messages, vec![block_add.clone()]);
+
+        // get_links_by_target (linksByTargetFid)
+        let by_target = LinkStore::get_links_by_target(
+            &store,
+            &Target::TargetFid(TARGET_FID),
+            LINK_TYPE_BLOCK.to_string(),
+            &PageOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(by_target.messages, vec![block_add.clone()]);
+
+        // get_all_messages_by_fid (GetAllLinkMessagesByFid) — the untyped iterator
+        // over every link message for the fid, with no type filter.
+        let all = store
+            .get_all_messages_by_fid(FID_FOR_TEST, None, None, &PageOptions::default())
+            .unwrap();
+        assert_eq!(all.messages, vec![block_add]);
+    }
+
+    #[test]
+    fn test_block_and_follow_links_coexist_independently() {
+        // The same (fid, target) can be both followed and blocked: link type is
+        // part of the key, so the two are independent and never collide.
+        let (store, db, _temp_dir) = create_test_store();
+
+        let follow_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            None,
+            None,
+        );
+        let block_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK,
+            TARGET_FID,
+            None,
+            None,
+        );
+
+        merge_message_success(&store, &db, &follow_add);
+        merge_message_success(&store, &db, &block_add);
+
+        // Each type filter returns only its own link.
+        let blocks = LinkStore::get_link_adds_by_fid(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK.to_string(),
+            &PageOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(blocks.messages, vec![block_add.clone()]);
+
+        let follows = LinkStore::get_link_adds_by_fid(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            &PageOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(follows.messages, vec![follow_add]);
+
+        // Targeted lookup by type also isolates correctly.
+        let block_by_id = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert_eq!(block_by_id, Some(block_add));
+    }
+
+    #[test]
+    fn test_block_then_unblock_makes_block_inactive() {
+        // FIP rule: a block is active iff the highest-order message is LINK_ADD.
+        // A later LINK_REMOVE (unblock) supersedes the add.
+        let (store, db, _temp_dir) = create_test_store();
+
+        let current_time = 1640995200; // Jan 1, 2022
+
+        let block_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK,
+            TARGET_FID,
+            Some(current_time),
+            None,
+        );
+        let block_remove = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK,
+            TARGET_FID,
+            Some(current_time + 10),
+            None,
+        );
+
+        merge_message_success(&store, &db, &block_add);
+        merge_message_with_conflicts(&store, &db, &block_remove, vec![block_add]);
+
+        // The block is no longer active...
+        let active = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert!(active.is_none(), "unblocked link must not be active");
+
+        // ...and the remove is retrievable, including via get_link_removes_by_fid.
+        let retrieved_remove = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved_remove, block_remove);
+
+        let removes_by_fid = LinkStore::get_link_removes_by_fid(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK.to_string(),
+            &PageOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(removes_by_fid.messages, vec![block_remove]);
+    }
+
+    #[test]
+    fn test_follow_compact_state_does_not_delete_block_links_cross_type() {
+        // FIP block-durability guarantee (V19 / ProtocolFeature::BlockLinks): with
+        // type-scoped compaction enabled, a "follow" LinkCompactState only deletes
+        // follow links, so a user's "block" links survive even when the follow
+        // compaction does not list the block's target. (Pre-V19 the scan is
+        // type-blind and would delete it — see the legacy-regime tests above.)
+        let (store, db, _temp_dir) = create_test_store();
+
+        let block_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK,
+            TARGET_FID,
+            Some(1000),
+            None,
+        );
+        merge_message_success(&store, &db, &block_add);
+
+        // A later "follow" compaction that does not list the block's target.
+        let follow_compact = messages_factory::links::create_link_compact_state(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            vec![TARGET_FID + 5],
+            Some(2000),
+            None,
+        );
+        merge_compact_state_with_scope(&store, &db, &follow_compact, true);
+
+        // The block link is untouched by the follow compaction.
+        let active = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert_eq!(
+            active,
+            Some(block_add),
+            "type-scoped follow compaction must not delete block links"
+        );
+    }
+
     #[test]
     fn test_merge_link_remove_fails_with_an_earlier_timestamp_vs_link_add() {
         let (store, db, _temp_dir) = create_test_store();

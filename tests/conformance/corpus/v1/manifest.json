@@ -155,6 +155,80 @@
       }
     },
     {
+      "id": "link_add_block",
+      "description": "LinkAdd (block) targeting a fixed fid. Per FIP-block-links, a block is a Link with type=\"block\"; it rides the existing Link CRDT with no new validation or merge logic. Same (fid, target) as link_add_follow with a different type, demonstrating link types are independent.",
+      "message_type": "LinkAdd",
+      "fid": 1234,
+      "timestamp": 94608000,
+      "signer_private_key": "1000000000000000000000000000000000000000000000000000000000000000",
+      "input": {
+        "target_fid": 456,
+        "type": "block"
+      },
+      "message_file": "messages/link_add_block.pb",
+      "expected": {
+        "data_bytes": "080510d2091880b58e2d2001720a0a05626c6f636b18c803",
+        "hash": "19bf0e1acf2f4cfafa0a8722e589f0dfe45e47c9",
+        "signature": "c271828c1e27647747f541e77f2812e39d1f41d000b18966e7bb5549ae2d8262c96c1138d5cebd876a1251229172845b4b76cae2d5332b613c934595b8f83900",
+        "signer": "69104ef20c6676aacc9e8c291800d1b7e911e20f85b4066156ea118ace44b8d7",
+        "message_bytes": "0a18080510d2091880b58e2d2001720a0a05626c6f636b18c803121419bf0e1acf2f4cfafa0a8722e589f0dfe45e47c918012240c271828c1e27647747f541e77f2812e39d1f41d000b18966e7bb5549ae2d8262c96c1138d5cebd876a1251229172845b4b76cae2d5332b613c934595b8f839002801322069104ef20c6676aacc9e8c291800d1b7e911e20f85b4066156ea118ace44b8d73a18080510d2091880b58e2d2001720a0a05626c6f636b18c803"
+      },
+      "expected_state": {
+        "shard_id": 1,
+        "post_state_root": "a9dd77438094853bbf8dc7f1a7e4ceeb3abbfbec"
+      }
+    },
+    {
+      "id": "link_remove_block",
+      "description": "LinkRemove (block) targeting a fixed fid. Removes (unblocks) the type=\"block\" link via the same Link remove semantics as follows.",
+      "message_type": "LinkRemove",
+      "fid": 1234,
+      "timestamp": 94608000,
+      "signer_private_key": "1000000000000000000000000000000000000000000000000000000000000000",
+      "input": {
+        "target_fid": 456,
+        "type": "block"
+      },
+      "message_file": "messages/link_remove_block.pb",
+      "expected": {
+        "data_bytes": "080610d2091880b58e2d2001720a0a05626c6f636b18c803",
+        "hash": "6a421224be7f4bfc65f53e702f4caf27ac85888a",
+        "signature": "b3bcaaf934d0e56ab9904d75795ea1a3e12909cb0321813032eb51a63d617c9acfcc4446af79d6038fa6c5227e91222475d06faceabb79ac797894467e770408",
+        "signer": "69104ef20c6676aacc9e8c291800d1b7e911e20f85b4066156ea118ace44b8d7",
+        "message_bytes": "0a18080610d2091880b58e2d2001720a0a05626c6f636b18c80312146a421224be7f4bfc65f53e702f4caf27ac85888a18012240b3bcaaf934d0e56ab9904d75795ea1a3e12909cb0321813032eb51a63d617c9acfcc4446af79d6038fa6c5227e91222475d06faceabb79ac797894467e7704082801322069104ef20c6676aacc9e8c291800d1b7e911e20f85b4066156ea118ace44b8d73a18080610d2091880b58e2d2001720a0a05626c6f636b18c803"
+      },
+      "expected_state": {
+        "shard_id": 1,
+        "post_state_root": "f6aa363fb8386ce0daf6c6317b2f368ff4ccf3e3"
+      }
+    },
+    {
+      "id": "link_compact_state_follow",
+      "description": "LinkCompactState (follow) listing a fixed target fid. Compaction is the mechanism that, under FIP-block-links, must stay type-scoped: a follow compact state only deletes follow links. This vector pins the message encoding cross-client; the type-scoping behavior is exercised by conformance_link_compaction_type_scoped.",
+      "message_type": "LinkCompactState",
+      "fid": 1234,
+      "timestamp": 94608000,
+      "signer_private_key": "1000000000000000000000000000000000000000000000000000000000000000",
+      "input": {
+        "target_fids": [
+          456
+        ],
+        "type": "follow"
+      },
+      "message_file": "messages/link_compact_state_follow.pb",
+      "expected": {
+        "data_bytes": "080e10d2091880b58e2d20018a010c0a06666f6c6c6f771202c803",
+        "hash": "6f6b7d0748c079186da2b91fafbcde7bd6ea0949",
+        "signature": "227c1229c65c15fce22f71c49797f786c9847b0da08082e0d3b67c1dbe3eed4408fa2b49e00c5a430f0f19cf6b1e4cb5321fe5a1a521b325dc3cab1d8fff7b06",
+        "signer": "69104ef20c6676aacc9e8c291800d1b7e911e20f85b4066156ea118ace44b8d7",
+        "message_bytes": "0a1b080e10d2091880b58e2d20018a010c0a06666f6c6c6f771202c80312146f6b7d0748c079186da2b91fafbcde7bd6ea094918012240227c1229c65c15fce22f71c49797f786c9847b0da08082e0d3b67c1dbe3eed4408fa2b49e00c5a430f0f19cf6b1e4cb5321fe5a1a521b325dc3cab1d8fff7b062801322069104ef20c6676aacc9e8c291800d1b7e911e20f85b4066156ea118ace44b8d73a1b080e10d2091880b58e2d20018a010c0a06666f6c6c6f771202c803"
+      },
+      "expected_state": {
+        "shard_id": 1,
+        "post_state_root": "2cd01c9fdb95829e58df1cd3eb3bd62cfdd54493"
+      }
+    },
+    {
       "id": "user_data_add_display",
       "description": "UserDataAdd setting the DISPLAY name.",
       "message_type": "UserDataAdd",

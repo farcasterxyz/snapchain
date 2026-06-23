@@ -52,4 +52,21 @@ mod tests {
             assert!(validations::link::validate_link_body(&link).is_ok())
         }
     }
+
+    // FIP: Block Links. A block is a Link with type="block"; it must pass the
+    // same validation as any other link type (no allowlist, <= 8 bytes).
+    #[test]
+    fn test_validate_link_type_accepts_block() {
+        assert!(validations::link::validate_link_type("block").is_ok());
+    }
+
+    #[test]
+    fn test_validate_link_body_accepts_block() {
+        let block = crate::proto::LinkBody {
+            display_timestamp: None,
+            r#type: "block".to_string(),
+            target: Some(link_body::Target::TargetFid(456)),
+        };
+        assert!(validations::link::validate_link_body(&block).is_ok());
+    }
 }
