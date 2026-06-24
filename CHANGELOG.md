@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.2] - 2026-06-24
+
+### ⚙️ Miscellaneous Tasks
+
+- Add erebor node as bootstrap peer (#942)
+
+## [0.13.1] - 2026-06-24
+
+### ⚙️ Miscellaneous Tasks
+
+- Add Degen Validator (#939)
+
 ## [0.13.0] - 2026-06-12
 
 ### 🚀 Features
