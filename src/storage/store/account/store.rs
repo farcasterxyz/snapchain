@@ -621,13 +621,14 @@ impl<T: StoreDef + Clone> Store<T> {
     fn read_compact_state_details(
         &self,
         message: &Message,
-    ) -> Result<(u64, u32, Vec<u64>), HubError> {
+    ) -> Result<(u64, u32, Vec<u64>, String), HubError> {
         if let Some(data) = &message.data {
             if let Some(Body::LinkCompactStateBody(link_compact_body)) = &data.body {
                 Ok((
                     data.fid,
                     data.timestamp,
                     link_compact_body.target_fids.clone(),
+                    link_compact_body.r#type.clone(),
                 ))
             } else {
                 return Err(HubError {
@@ -678,10 +679,12 @@ impl<T: StoreDef + Clone> Store<T> {
             }
         }
 
-        let (fid, compact_state_timestamp, target_fids) =
+        let (fid, compact_state_timestamp, target_fids, compact_state_type) =
             self.read_compact_state_details(message)?;
 
-        // Go over all the messages for this Fid, that are older than the compact state message and
+        // Go over all the messages for this Fid of the SAME link type as the compact state
+        // (a "follow" compaction must not touch other-typed links, e.g. "block") that are
+        // older than the compact state message and
         // 1. Delete all remove messages
         // 2. Delete all add messages that are not in the target_fids list
         let prefix = &make_message_primary_key(fid, self.store_def.postfix(), None);
@@ -698,12 +701,15 @@ impl<T: StoreDef + Clone> Store<T> {
                     return Ok(true);
                 }
 
-                if self.store_def.is_remove_type(&message) {
-                    merge_conflicts.push(message);
-                } else if self.store_def.is_add_type(&message) {
-                    // Get the link_body fid
-                    if let Some(data) = &message.data {
-                        if let Some(Body::LinkBody(link_body)) = &data.body {
+                // Only compact links of the same type as the compact state message.
+                // A "follow" compaction must not delete other-typed links, e.g. "block".
+                if let Some(Body::LinkBody(link_body)) =
+                    message.data.as_ref().and_then(|data| data.body.as_ref())
+                {
+                    if link_body.r#type == compact_state_type {
+                        if self.store_def.is_remove_type(&message) {
+                            merge_conflicts.push(message);
+                        } else if self.store_def.is_add_type(&message) {
                             if let Some(Target::TargetFid(target_fid)) = link_body.target {
                                 if !target_fids.contains(&target_fid) {
                                     merge_conflicts.push(message);
@@ -750,7 +756,7 @@ impl<T: StoreDef + Clone> Store<T> {
             {
                 let compact_state_message = message_decode(compact_state_message_bytes.as_ref())?;
 
-                let (_, compact_state_timestamp, target_fids) =
+                let (_, compact_state_timestamp, target_fids, _) =
                     self.read_compact_state_details(&compact_state_message)?;
 
                 if let Some(Body::LinkBody(link_body)) = &message.data.as_ref().unwrap().body {
@@ -818,7 +824,7 @@ impl<T: StoreDef + Clone> Store<T> {
             {
                 let compact_state_message = message_decode(compact_state_message_bytes.as_ref())?;
 
-                let (_, compact_state_timestamp, _) =
+                let (_, compact_state_timestamp, _, _) =
                     self.read_compact_state_details(&compact_state_message)?;
 
                 // If the message is older than the compact state message, and the target fid is not in the target_fids list

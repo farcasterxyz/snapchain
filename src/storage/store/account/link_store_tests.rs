@@ -136,6 +136,9 @@ mod tests {
     const TARGET_FID: u64 = FID_FOR_TEST + 1;
     const LINK_TYPE_FOLLOW: &str = "follow";
     const LINK_TYPE_ENDORSE: &str = "endorse";
+    // "block" is not yet a real link type, but it will be; compaction is type-agnostic, so a
+    // not-yet-real type is the strongest proof that a "follow" compaction won't touch it.
+    const LINK_TYPE_BLOCK: &str = "block";
 
     #[test]
     fn test_get_link_add_fails_if_no_link_add_is_present() {
@@ -2257,5 +2260,149 @@ mod tests {
             Some(Target::TargetFid(TARGET_FID)),
         );
         assert!(LinkStore::make_remove_key(&msg).is_ok());
+    }
+
+    #[test]
+    fn test_follow_compaction_does_not_delete_other_link_types() {
+        // A "follow" compact state must only compact "follow" links. Links of other
+        // types (e.g. "block") for the same fid must survive, even when their target
+        // is not included in the compact state's target_fids.
+        let (store, db, _temp_dir) = create_test_store();
+
+        // A block link add, older than the compact state, whose target is NOT in
+        // the follow compact state's target_fids.
+        let block_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK,
+            TARGET_FID,
+            Some(1000),
+            None,
+        );
+        merge_message_success(&store, &db, &block_add);
+
+        // A later follow compact state that does not reference TARGET_FID at all.
+        let follow_compact_state = messages_factory::links::create_link_compact_state(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            vec![],
+            Some(2000),
+            None,
+        );
+        merge_message_success(&store, &db, &follow_compact_state);
+
+        // The block link must still be active, because the follow compaction must
+        // not touch links of a different type.
+        let retrieved = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, block_add);
+    }
+
+    #[test]
+    fn test_follow_compaction_does_not_delete_other_link_type_removes() {
+        // The remove-deletion branch of compaction must also be type-scoped: a "follow"
+        // compact state previously deleted EVERY older remove of ANY type. A "follow"
+        // compaction must leave a "block" REMOVE tombstone intact.
+        let (store, db, _temp_dir) = create_test_store();
+
+        // A block link remove, merged before (and older than) the compact state.
+        let block_remove = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK,
+            TARGET_FID,
+            Some(1000),
+            None,
+        );
+        merge_message_success(&store, &db, &block_remove);
+
+        // A later follow compact state.
+        let follow_compact_state = messages_factory::links::create_link_compact_state(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            vec![],
+            Some(2000),
+            None,
+        );
+        merge_message_success(&store, &db, &follow_compact_state);
+
+        // The block remove tombstone must survive the follow compaction.
+        let retrieved = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, block_remove);
+    }
+
+    #[test]
+    fn test_follow_compaction_still_deletes_non_target_follows() {
+        // The type guard must not over-narrow: a same-type ("follow") add/remove that is
+        // older than the compact state and NOT in its target_fids must still be deleted.
+        // This pins the positive behavior the type scoping must preserve.
+        let (store, db, _temp_dir) = create_test_store();
+
+        // A follow add and a follow remove (to a different target), both older than the
+        // compact state, neither referenced by the compact state's target_fids.
+        let follow_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(1000),
+            None,
+        );
+        merge_message_success(&store, &db, &follow_add);
+
+        let other_target = TARGET_FID + 1;
+        let follow_remove = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            other_target,
+            Some(1000),
+            None,
+        );
+        merge_message_success(&store, &db, &follow_remove);
+
+        // A later follow compact state that references neither target.
+        let follow_compact_state = messages_factory::links::create_link_compact_state(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            vec![],
+            Some(2000),
+            None,
+        );
+        // Merge the compact state directly: it deletes the non-target follows, and we assert
+        // on the resulting store state below rather than on the (scan-order-dependent) list of
+        // deleted messages, which is an implementation detail rather than the contract here.
+        let mut txn = RocksDbTransactionBatch::new();
+        store.merge(&follow_compact_state, &mut txn).unwrap();
+        db.commit(txn).unwrap();
+
+        // The non-target follow add must be deleted by the compaction.
+        let retrieved_add = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert!(retrieved_add.is_none());
+
+        // The non-target follow remove tombstone must also be deleted by the compaction.
+        let retrieved_remove = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(other_target)),
+        )
+        .unwrap();
+        assert!(retrieved_remove.is_none());
     }
 }
