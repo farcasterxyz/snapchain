@@ -30,7 +30,6 @@ services:
         [gossip]
         address="/ip4/0.0.0.0/udp/3382/quic-v1"
         bootstrap_peers = "/ip4/54.236.164.51/udp/3382/quic-v1, /ip4/54.87.204.167/udp/3382/quic-v1, /ip4/44.197.255.20/udp/3382/quic-v1, /ip4/54.157.62.17/udp/3382/quic-v1, /ip4/34.195.157.114/udp/3382/quic-v1, /ip4/107.20.169.236/udp/3382/quic-v1, /ip4/34.4.32.36/udp/3382/quic-v1, /ip4/100.30.67.21/udp/3382/quic-v1"
-        direct_peers = "12D3KooWDHG75L7M8t45d6moKhnhLHgM9BYt1PBTgZfYEgsXXUa9"
 
         [consensus]
         shard_ids = [1,2]
