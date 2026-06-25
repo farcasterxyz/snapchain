@@ -30,7 +30,7 @@ mod tests {
     ) {
         let message = messages_factory::username_proof::create_from_proof(&username_proof, None);
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn).unwrap();
+        let result = store.merge(&message, &mut txn, false).unwrap();
         assert_eq!(result.r#type(), HubEventType::MergeUsernameProof);
         match &result.body {
             Some(hub_event::Body::MergeUsernameProofBody(body)) => {
@@ -52,7 +52,7 @@ mod tests {
     ) {
         let message = messages_factory::username_proof::create_from_proof(&username_proof, None);
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn).unwrap();
+        let result = store.merge(&message, &mut txn, false).unwrap();
         assert_eq!(result.r#type(), HubEventType::MergeUsernameProof);
         match &result.body {
             Some(hub_event::Body::MergeUsernameProofBody(body)) => {
@@ -76,7 +76,7 @@ mod tests {
         err_message: &str,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn);
+        let result = store.merge(&message, &mut txn, false);
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert_eq!(err.code, err_code);

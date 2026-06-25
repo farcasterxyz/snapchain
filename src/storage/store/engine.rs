@@ -1225,39 +1225,40 @@ impl ShardEngine {
         let version =
             EngineVersion::version_for(&FarcasterTime::new(data.timestamp as u64), self.network);
         let gasless_enabled = version.is_enabled(ProtocolFeature::GaslessSigners);
+        let scope_link_compaction = version.is_enabled(ProtocolFeature::BlockLinks);
 
         let event = match mt {
             MessageType::CastAdd | MessageType::CastRemove => vec![self
                 .stores
                 .cast_store
-                .merge(msg, txn_batch)
+                .merge(msg, txn_batch, false)
                 .map_err(|e| MessageValidationError::StoreError(e))?],
             MessageType::LinkAdd | MessageType::LinkRemove | MessageType::LinkCompactState => {
                 vec![self
                     .stores
                     .link_store
-                    .merge(msg, txn_batch)
+                    .merge(msg, txn_batch, scope_link_compaction)
                     .map_err(|e| MessageValidationError::StoreError(e))?]
             }
             MessageType::ReactionAdd | MessageType::ReactionRemove => vec![self
                 .stores
                 .reaction_store
-                .merge(msg, txn_batch)
+                .merge(msg, txn_batch, false)
                 .map_err(|e| MessageValidationError::StoreError(e))?],
             MessageType::UserDataAdd => vec![self
                 .stores
                 .user_data_store
-                .merge(msg, txn_batch)
+                .merge(msg, txn_batch, false)
                 .map_err(|e| MessageValidationError::StoreError(e))?],
             MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => vec![self
                 .stores
                 .verification_store
-                .merge(msg, txn_batch)
+                .merge(msg, txn_batch, false)
                 .map_err(|e| MessageValidationError::StoreError(e))?],
             MessageType::UsernameProof => {
                 let store = &self.stores.username_proof_store;
                 vec![store
-                    .merge(msg, txn_batch)
+                    .merge(msg, txn_batch, false)
                     .map_err(|e| MessageValidationError::StoreError(e))?]
             }
             MessageType::LendStorage => {

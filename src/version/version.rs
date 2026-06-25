@@ -5,6 +5,11 @@ use strum_macros::EnumIter;
 
 const LATEST_PROTOCOL_VERSION: u32 = 13;
 
+// Placeholder V19 (Block Links) activation, far in the future, until the real rollout
+// date is set. Shared by the mainnet/testnet schedules and the schedule test so they
+// can't drift; split into real per-network dates at launch.
+const V19_PLACEHOLDER_ACTIVATION: u64 = 4102444800; // 2100-01-01 UTC
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, EnumIter)]
 pub enum EngineVersion {
     V0 = 0,
@@ -26,6 +31,7 @@ pub enum EngineVersion {
     V16 = 16,
     V17 = 17,
     V18 = 18,
+    V19 = 19,
 }
 
 pub enum ProtocolFeature {
@@ -50,6 +56,7 @@ pub enum ProtocolFeature {
     GaslessSigners,
     LiveAt,
     StorageExpiryExtension2026,
+    BlockLinks,
 }
 
 pub struct VersionSchedule {
@@ -134,6 +141,10 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
         active_at: 1782147600, // 2026-06-22 5PM UTC (12:00 PM CDT)
         version: EngineVersion::V18,
     },
+    VersionSchedule {
+        active_at: V19_PLACEHOLDER_ACTIVATION,
+        version: EngineVersion::V19,
+    },
 ]
 .as_slice();
 
@@ -198,12 +209,16 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
         active_at: 1781283600, // 2026-06-12 5PM UTC
         version: EngineVersion::V18,
     },
+    VersionSchedule {
+        active_at: V19_PLACEHOLDER_ACTIVATION,
+        version: EngineVersion::V19,
+    },
 ]
 .as_slice();
 
 const ENGINE_VERSION_SCHEDULE_DEVNET: &[VersionSchedule] = [VersionSchedule {
     active_at: 0,
-    version: EngineVersion::V18,
+    version: EngineVersion::V19,
 }]
 .as_slice();
 
@@ -258,6 +273,7 @@ impl EngineVersion {
             ProtocolFeature::GaslessSigners => self >= &EngineVersion::V16,
             ProtocolFeature::LiveAt => self >= &EngineVersion::V17,
             ProtocolFeature::StorageExpiryExtension2026 => self >= &EngineVersion::V18,
+            ProtocolFeature::BlockLinks => self >= &EngineVersion::V19,
         }
     }
 
@@ -279,7 +295,7 @@ impl EngineVersion {
             EngineVersion::V15 => 10,
             EngineVersion::V16 => 11,
             EngineVersion::V17 => 12,
-            EngineVersion::V18 => LATEST_PROTOCOL_VERSION,
+            EngineVersion::V18 | EngineVersion::V19 => LATEST_PROTOCOL_VERSION,
         }
     }
 
@@ -580,6 +596,46 @@ mod version_test {
     }
 
     #[test]
+    fn test_block_links_feature_gate() {
+        // Gate closed below V19, open at V19+. This boundary is the source of truth for
+        // pre-V19 replay safety, so pin it explicitly.
+        assert_eq!(
+            EngineVersion::V18.is_enabled(ProtocolFeature::BlockLinks),
+            false
+        );
+        assert_eq!(
+            EngineVersion::V19.is_enabled(ProtocolFeature::BlockLinks),
+            true
+        );
+        assert_eq!(
+            EngineVersion::latest().is_enabled(ProtocolFeature::BlockLinks),
+            true
+        );
+    }
+
+    #[test]
+    fn test_block_links_activation_schedule() {
+        // Mainnet and testnet share the placeholder activation until the real date is set:
+        // pre-activation resolves to V18, at/after resolves to V19.
+        for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
+            assert_eq!(
+                EngineVersion::version_for(
+                    &FarcasterTime::from_unix_seconds(V19_PLACEHOLDER_ACTIVATION - 1),
+                    network,
+                ),
+                EngineVersion::V18
+            );
+            assert_eq!(
+                EngineVersion::version_for(
+                    &FarcasterTime::from_unix_seconds(V19_PLACEHOLDER_ACTIVATION),
+                    network,
+                ),
+                EngineVersion::V19
+            );
+        }
+    }
+
+    #[test]
     fn test_is_enabled_signer_revoke_bug() {
         assert_eq!(
             EngineVersion::V0.is_enabled(ProtocolFeature::SignerRevokeBug),
@@ -605,7 +661,7 @@ mod version_test {
 
     #[test]
     fn test_latest() {
-        assert_eq!(EngineVersion::latest(), EngineVersion::V18);
+        assert_eq!(EngineVersion::latest(), EngineVersion::V19);
         assert_eq!(
             EngineVersion::version_for(&FarcasterTime::current(), FarcasterNetwork::Devnet),
             EngineVersion::latest()
@@ -651,7 +707,7 @@ mod version_test {
         let time = FarcasterTime::from_unix_seconds(1782147600);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
-            None
+            Some(V19_PLACEHOLDER_ACTIVATION)
         );
 
         let time = FarcasterTime::from_unix_seconds(1640995200); // January 1, 2022 UTC

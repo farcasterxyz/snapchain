@@ -564,6 +564,7 @@ impl<T: StoreDef + Clone> Store<T> {
         &self,
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
+        scope_compaction_by_type: bool,
     ) -> Result<HubEvent, HubError> {
         if !self.store_def.is_add_type(message)
             && !(self.store_def.remove_type_supported() && self.store_def.is_remove_type(message))
@@ -579,7 +580,7 @@ impl<T: StoreDef + Clone> Store<T> {
         let ts_hash = make_ts_hash(message.data.as_ref().unwrap().timestamp, &message.hash)?;
 
         if self.store_def().is_compact_state_type(message) {
-            self.merge_compact_state(message, txn)
+            self.merge_compact_state(message, txn, scope_compaction_by_type)
         } else if self.store_def.is_add_type(message) {
             self.merge_add(&ts_hash, message, txn)
         } else {
@@ -649,6 +650,7 @@ impl<T: StoreDef + Clone> Store<T> {
         &self,
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
+        scope_compaction_by_type: bool,
     ) -> Result<HubEvent, HubError> {
         let mut merge_conflicts = vec![];
 
@@ -682,9 +684,8 @@ impl<T: StoreDef + Clone> Store<T> {
         let (fid, compact_state_timestamp, target_fids, compact_state_type) =
             self.read_compact_state_details(message)?;
 
-        // Go over all the messages for this Fid of the SAME link type as the compact state
-        // (a "follow" compaction must not touch other-typed links, e.g. "block") that are
-        // older than the compact state message and
+        // Go over all messages for this Fid older than the compact state (when type-scoped,
+        // only those of the compact state's own link type — see below) and
         // 1. Delete all remove messages
         // 2. Delete all add messages that are not in the target_fids list
         let prefix = &make_message_primary_key(fid, self.store_def.postfix(), None);
@@ -701,12 +702,14 @@ impl<T: StoreDef + Clone> Store<T> {
                     return Ok(true);
                 }
 
-                // Only compact links of the same type as the compact state message.
-                // A "follow" compaction must not delete other-typed links, e.g. "block".
                 if let Some(Body::LinkBody(link_body)) =
                     message.data.as_ref().and_then(|data| data.body.as_ref())
                 {
-                    if link_body.r#type == compact_state_type {
+                    // When scope_compaction_by_type is set, only compact links of the compact
+                    // state's own type (so a "follow" compaction can't delete "block" links);
+                    // otherwise compaction is type-blind. The caller sets this from the engine
+                    // version (ProtocolFeature::BlockLinks).
+                    if !scope_compaction_by_type || link_body.r#type == compact_state_type {
                         if self.store_def.is_remove_type(&message) {
                             merge_conflicts.push(message);
                         } else if self.store_def.is_add_type(&message) {

@@ -31,7 +31,7 @@ mod tests {
         message: &message::Message,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn).unwrap();
+        let result = store.merge(&message, &mut txn, false).unwrap();
         assert_eq!(result.r#type(), HubEventType::MergeMessage);
         match &result.body {
             Some(hub_event::Body::MergeMessageBody(body)) => {
@@ -52,7 +52,7 @@ mod tests {
         deleted_messages: Vec<message::Message>,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn).unwrap();
+        let result = store.merge(&message, &mut txn, false).unwrap();
         assert_eq!(result.r#type(), HubEventType::MergeMessage);
         match &result.body {
             Some(hub_event::Body::MergeMessageBody(body)) => {
@@ -73,7 +73,7 @@ mod tests {
         err_message: &str,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn);
+        let result = store.merge(&message, &mut txn, false);
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert_eq!(error.code, err_code);

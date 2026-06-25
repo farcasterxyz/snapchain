@@ -50,7 +50,7 @@ mod tests {
         message: &message::Message,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn).unwrap();
+        let result = store.merge(&message, &mut txn, false).unwrap();
         assert_eq!(result.r#type(), HubEventType::MergeMessage);
         match &result.body {
             Some(hub_event::Body::MergeMessageBody(body)) => {
@@ -64,6 +64,33 @@ mod tests {
         db.commit(txn).unwrap();
     }
 
+    // Shared fixture for the compaction tests: a follow compact state at ts 2000 that
+    // references neither TARGET_FID nor any block target.
+    fn non_target_follow_compact_state() -> message::Message {
+        messages_factory::links::create_link_compact_state(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            vec![FID_FOR_TEST + 100],
+            Some(2000),
+            None,
+        )
+    }
+
+    // Merge a compact state at the given scope and commit. (merge_message_success can't be
+    // reused: compaction deletes messages, which that helper asserts does not happen.)
+    fn merge_compact_state_with_scope(
+        store: &Store<LinkStore>,
+        db: &Arc<RocksDB>,
+        message: &message::Message,
+        scope_compaction_by_type: bool,
+    ) {
+        let mut txn = RocksDbTransactionBatch::new();
+        store
+            .merge(message, &mut txn, scope_compaction_by_type)
+            .unwrap();
+        db.commit(txn).unwrap();
+    }
+
     fn merge_message_with_conflicts(
         store: &Store<LinkStore>,
         db: &Arc<RocksDB>,
@@ -71,7 +98,7 @@ mod tests {
         deleted_messages: Vec<message::Message>,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn).unwrap();
+        let result = store.merge(&message, &mut txn, false).unwrap();
         assert_eq!(result.r#type(), HubEventType::MergeMessage);
         match &result.body {
             Some(hub_event::Body::MergeMessageBody(body)) => {
@@ -92,7 +119,7 @@ mod tests {
         err_message: &str,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn);
+        let result = store.merge(&message, &mut txn, false);
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert_eq!(err.code, err_code);
@@ -2279,14 +2306,8 @@ mod tests {
         merge_message_success(&store, &db, &block_add);
 
         // A later follow compact state that does not reference TARGET_FID at all.
-        let follow_compact_state = messages_factory::links::create_link_compact_state(
-            FID_FOR_TEST,
-            LINK_TYPE_FOLLOW,
-            vec![FID_FOR_TEST + 100],
-            Some(2000),
-            None,
-        );
-        merge_message_success(&store, &db, &follow_compact_state);
+        let follow_compact_state = non_target_follow_compact_state();
+        merge_compact_state_with_scope(&store, &db, &follow_compact_state, true);
 
         // The block link must still be active, because the follow compaction must
         // not touch links of a different type.
@@ -2319,14 +2340,8 @@ mod tests {
         merge_message_success(&store, &db, &block_remove);
 
         // A later follow compact state.
-        let follow_compact_state = messages_factory::links::create_link_compact_state(
-            FID_FOR_TEST,
-            LINK_TYPE_FOLLOW,
-            vec![FID_FOR_TEST + 100],
-            Some(2000),
-            None,
-        );
-        merge_message_success(&store, &db, &follow_compact_state);
+        let follow_compact_state = non_target_follow_compact_state();
+        merge_compact_state_with_scope(&store, &db, &follow_compact_state, true);
 
         // The block remove tombstone must survive the follow compaction.
         let retrieved = LinkStore::get_link_remove(
@@ -2338,6 +2353,100 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(retrieved, block_remove);
+    }
+
+    #[test]
+    fn test_legacy_follow_compaction_deletes_other_link_type_adds() {
+        // Pre-V19 (type-blind) behavior: with scope_compaction_by_type = false, a "follow"
+        // compaction deletes a "block" add whose target is not in the compact state. This is
+        // the historical behavior preserved on replay, so a fixed node doesn't fork.
+        let (store, db, _temp_dir) = create_test_store();
+
+        let block_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK,
+            TARGET_FID,
+            Some(1000),
+            None,
+        );
+        merge_message_success(&store, &db, &block_add);
+
+        let follow_compact_state = non_target_follow_compact_state();
+        merge_compact_state_with_scope(&store, &db, &follow_compact_state, false);
+
+        let retrieved = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert!(retrieved.is_none());
+    }
+
+    #[test]
+    fn test_legacy_follow_compaction_deletes_other_link_type_removes() {
+        // Pre-V19 (type-blind) behavior: with scope_compaction_by_type = false, a "follow"
+        // compaction also deletes a "block" remove tombstone.
+        let (store, db, _temp_dir) = create_test_store();
+
+        let block_remove = messages_factory::links::create_link_remove(
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK,
+            TARGET_FID,
+            Some(1000),
+            None,
+        );
+        merge_message_success(&store, &db, &block_remove);
+
+        let follow_compact_state = non_target_follow_compact_state();
+        merge_compact_state_with_scope(&store, &db, &follow_compact_state, false);
+
+        let retrieved = LinkStore::get_link_remove(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap();
+        assert!(retrieved.is_none());
+    }
+
+    #[test]
+    fn test_block_compaction_does_not_delete_follow_links() {
+        // The gate is symmetric: a "block" compact state must only compact "block" links and
+        // leave "follow" links intact (the direction blocks actually ship for).
+        let (store, db, _temp_dir) = create_test_store();
+
+        // A follow add, older than the block compact state, whose target is not listed.
+        let follow_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(1000),
+            None,
+        );
+        merge_message_success(&store, &db, &follow_add);
+
+        let block_compact_state = messages_factory::links::create_link_compact_state(
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK,
+            vec![FID_FOR_TEST + 100],
+            Some(2000),
+            None,
+        );
+        merge_compact_state_with_scope(&store, &db, &block_compact_state, true);
+
+        // The follow link survives: a block compaction must not touch follow links.
+        let retrieved = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, follow_add);
     }
 
     #[test]
@@ -2369,19 +2478,11 @@ mod tests {
         merge_message_success(&store, &db, &follow_remove);
 
         // A later follow compact state that references neither target.
-        let follow_compact_state = messages_factory::links::create_link_compact_state(
-            FID_FOR_TEST,
-            LINK_TYPE_FOLLOW,
-            vec![FID_FOR_TEST + 100],
-            Some(2000),
-            None,
-        );
-        // Merge the compact state directly: it deletes the non-target follows, and we assert
-        // on the resulting store state below rather than on the (scan-order-dependent) list of
-        // deleted messages, which is an implementation detail rather than the contract here.
-        let mut txn = RocksDbTransactionBatch::new();
-        store.merge(&follow_compact_state, &mut txn).unwrap();
-        db.commit(txn).unwrap();
+        let follow_compact_state = non_target_follow_compact_state();
+        // The compaction deletes the non-target follows; we assert on the resulting store
+        // state below rather than on the (scan-order-dependent) list of deleted messages,
+        // which is an implementation detail rather than the contract here.
+        merge_compact_state_with_scope(&store, &db, &follow_compact_state, true);
 
         // The non-target follow add must be deleted by the compaction.
         let retrieved_add = LinkStore::get_link_add(

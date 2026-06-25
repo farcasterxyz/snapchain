@@ -366,7 +366,7 @@ impl StorageLendStore {
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<Vec<HubEvent>, HubError> {
         let mut events = vec![];
-        events.push(store.merge(message, txn)?);
+        events.push(store.merge(message, txn, false)?);
         match message.data.as_ref().unwrap().body.as_ref().unwrap() {
             proto::message_data::Body::LendStorageBody(lend_storage_body) => {
                 // Prune out the lend messages where storage is revoked so they don't consume storage.

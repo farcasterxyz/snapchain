@@ -503,6 +503,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_engine_block_link_survives_follow_compaction_at_v19() {
+        // End-to-end through the engine on devnet (V19): the engine derives
+        // scope_link_compaction = is_enabled(BlockLinks) = true and threads it down, so a
+        // follow compact state compacts only follows and leaves a block link intact.
+        let timestamp = messages_factory::farcaster_time();
+        let target_fid = 15;
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        // A follow add the later compact state will sweep (its target isn't listed), and a
+        // block add to the same target that must survive a follow compaction.
+        let follow_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            "follow",
+            target_fid,
+            Some(timestamp),
+            None,
+        );
+        commit_message(&mut engine, &follow_add).await;
+        let block_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            "block",
+            target_fid,
+            Some(timestamp),
+            None,
+        );
+        commit_message(&mut engine, &block_add).await;
+
+        let follow_compact_state = messages_factory::links::create_link_compact_state(
+            FID_FOR_TEST,
+            "follow",
+            vec![target_fid + 100],
+            Some(timestamp + 1),
+            None,
+        );
+        commit_message(&mut engine, &follow_compact_state).await;
+
+        // Compaction ran (the non-target follow is gone) but was type-scoped (block survives).
+        assert!(!message_exists_in_trie(&mut engine, &follow_add));
+        assert!(message_exists_in_trie(&mut engine, &block_add));
+    }
+
+    #[tokio::test]
+    async fn test_engine_block_link_deleted_by_follow_compaction_pre_v19() {
+        // End-to-end on testnet at a present-day timestamp (pre-V19): the engine derives
+        // scope_link_compaction = false, so a follow compact state compacts type-blind and
+        // deletes the block link too — the legacy behavior preserved for deterministic replay.
+        let timestamp = messages_factory::farcaster_time();
+        let target_fid = 15;
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            network: Some(FarcasterNetwork::Testnet),
+            ..Default::default()
+        })
+        .await;
+        test_helper::register_user(
+            FID_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
+
+        let block_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            "block",
+            target_fid,
+            Some(timestamp),
+            None,
+        );
+        commit_message(&mut engine, &block_add).await;
+
+        let follow_compact_state = messages_factory::links::create_link_compact_state(
+            FID_FOR_TEST,
+            "follow",
+            vec![target_fid + 100],
+            Some(timestamp + 1),
+            None,
+        );
+        commit_message(&mut engine, &follow_compact_state).await;
+
+        // Pre-V19, compaction is type-blind: the follow compact state deletes the block too.
+        assert!(!message_exists_in_trie(&mut engine, &block_add));
+    }
+
+    #[tokio::test]
     async fn test_commit_reaction_messages() {
         let timestamp = messages_factory::farcaster_time();
         let target_url = "exampleurl".to_string();
