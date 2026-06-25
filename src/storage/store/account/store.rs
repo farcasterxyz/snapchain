@@ -684,8 +684,9 @@ impl<T: StoreDef + Clone> Store<T> {
         let (fid, compact_state_timestamp, target_fids, compact_state_type) =
             self.read_compact_state_details(message)?;
 
-        // Go over all messages for this Fid older than the compact state (when type-scoped,
-        // only those of the compact state's own link type — see below) and
+        // Go over all messages for this Fid not newer than the compact state (timestamp <= the
+        // compact state's; when type-scoped, only those of the compact state's own link type —
+        // see below) and
         // 1. Delete all remove messages
         // 2. Delete all add messages that are not in the target_fids list
         let prefix = &make_message_primary_key(fid, self.store_def.postfix(), None);
