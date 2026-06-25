@@ -2,7 +2,7 @@
   "corpus_version": 1,
   "protocol": {
     "network": "Devnet",
-    "engine_version": "V18"
+    "engine_version": "V19"
   },
   "vectors": [
     {
