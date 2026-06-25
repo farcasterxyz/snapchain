@@ -136,8 +136,6 @@ mod tests {
     const TARGET_FID: u64 = FID_FOR_TEST + 1;
     const LINK_TYPE_FOLLOW: &str = "follow";
     const LINK_TYPE_ENDORSE: &str = "endorse";
-    // "block" is not yet a real link type, but it will be; compaction is type-agnostic, so a
-    // not-yet-real type is the strongest proof that a "follow" compaction won't touch it.
     const LINK_TYPE_BLOCK: &str = "block";
 
     #[test]
