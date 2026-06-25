@@ -2284,7 +2284,7 @@ mod tests {
         let follow_compact_state = messages_factory::links::create_link_compact_state(
             FID_FOR_TEST,
             LINK_TYPE_FOLLOW,
-            vec![],
+            vec![FID_FOR_TEST + 100],
             Some(2000),
             None,
         );
@@ -2324,7 +2324,7 @@ mod tests {
         let follow_compact_state = messages_factory::links::create_link_compact_state(
             FID_FOR_TEST,
             LINK_TYPE_FOLLOW,
-            vec![],
+            vec![FID_FOR_TEST + 100],
             Some(2000),
             None,
         );
@@ -2374,7 +2374,7 @@ mod tests {
         let follow_compact_state = messages_factory::links::create_link_compact_state(
             FID_FOR_TEST,
             LINK_TYPE_FOLLOW,
-            vec![],
+            vec![FID_FOR_TEST + 100],
             Some(2000),
             None,
         );
