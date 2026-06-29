@@ -53,8 +53,8 @@ mod tests {
         }
     }
 
-    // FIP: Block Links. A block is a Link with type="block"; it must pass the
-    // same validation as any other link type (no allowlist, <= 8 bytes).
+    // FIP-263: "block" is valid by absence of restriction, not special-casing —
+    // validate_link_type has no allowlist and accepts any 1-8 byte string.
     #[test]
     fn test_validate_link_type_accepts_block() {
         assert!(validations::link::validate_link_type("block").is_ok());

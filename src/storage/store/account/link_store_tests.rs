@@ -64,8 +64,6 @@ mod tests {
         db.commit(txn).unwrap();
     }
 
-    // Shared fixture for the compaction tests: a follow compact state at ts 2000 that
-    // references neither TARGET_FID nor any block target.
     fn non_target_follow_compact_state() -> message::Message {
         messages_factory::links::create_link_compact_state(
             FID_FOR_TEST,
@@ -76,8 +74,8 @@ mod tests {
         )
     }
 
-    // Merge a compact state at the given scope and commit. (merge_message_success can't be
-    // reused: compaction deletes messages, which that helper asserts does not happen.)
+    // Can't reuse merge_message_success here: compaction deletes messages, which that
+    // helper asserts does not happen.
     fn merge_compact_state_with_scope(
         store: &Store<LinkStore>,
         db: &Arc<RocksDB>,
@@ -1725,15 +1723,9 @@ mod tests {
         assert!(retrieved_add.is_none());
     }
 
-    // ---------------------------------------------------------------------
-    // Block links (FIP: Block Links).
-    //
-    // A "block" is a Link with type="block"; it rides the existing Link CRDT
-    // with no new validation or merge logic. These tests pin that behavior so
-    // it cannot silently regress: round-trip through every read path, isolation
-    // from "follow" links sharing the same (fid, target), and the FIP rule that
-    // a block is active iff the highest-order message is the LINK_ADD.
-    // ---------------------------------------------------------------------
+    // Block links (FIP-263): a "block" is a Link with type="block" that rides the
+    // existing Link CRDT with no new validation or merge logic. These tests pin that
+    // behavior so it cannot silently regress.
 
     #[test]
     fn test_block_link_add_round_trips_through_all_read_paths() {
@@ -1780,8 +1772,7 @@ mod tests {
         .unwrap();
         assert_eq!(by_target.messages, vec![block_add.clone()]);
 
-        // get_all_messages_by_fid (GetAllLinkMessagesByFid) — the untyped iterator
-        // over every link message for the fid, with no type filter.
+        // get_all_messages_by_fid (GetAllLinkMessagesByFid) — untyped, no type filter
         let all = store
             .get_all_messages_by_fid(FID_FOR_TEST, None, None, &PageOptions::default())
             .unwrap();
@@ -1812,7 +1803,6 @@ mod tests {
         merge_message_success(&store, &db, &follow_add);
         merge_message_success(&store, &db, &block_add);
 
-        // Each type filter returns only its own link.
         let blocks = LinkStore::get_link_adds_by_fid(
             &store,
             FID_FOR_TEST,
@@ -1831,7 +1821,6 @@ mod tests {
         .unwrap();
         assert_eq!(follows.messages, vec![follow_add]);
 
-        // Targeted lookup by type also isolates correctly.
         let block_by_id = LinkStore::get_link_add(
             &store,
             FID_FOR_TEST,
@@ -1844,8 +1833,8 @@ mod tests {
 
     #[test]
     fn test_block_then_unblock_makes_block_inactive() {
-        // FIP rule: a block is active iff the highest-order message is LINK_ADD.
-        // A later LINK_REMOVE (unblock) supersedes the add.
+        // FIP rule: a block is active only when the highest-order message is LINK_ADD;
+        // a later LINK_REMOVE (unblock) supersedes the add.
         let (store, db, _temp_dir) = create_test_store();
 
         let current_time = 1640995200; // Jan 1, 2022
@@ -1868,7 +1857,6 @@ mod tests {
         merge_message_success(&store, &db, &block_add);
         merge_message_with_conflicts(&store, &db, &block_remove, vec![block_add]);
 
-        // The block is no longer active...
         let active = LinkStore::get_link_add(
             &store,
             FID_FOR_TEST,
@@ -1878,7 +1866,6 @@ mod tests {
         .unwrap();
         assert!(active.is_none(), "unblocked link must not be active");
 
-        // ...and the remove is retrievable, including via get_link_removes_by_fid.
         let retrieved_remove = LinkStore::get_link_remove(
             &store,
             FID_FOR_TEST,
@@ -1897,49 +1884,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(removes_by_fid.messages, vec![block_remove]);
-    }
-
-    #[test]
-    fn test_follow_compact_state_does_not_delete_block_links_cross_type() {
-        // FIP block-durability guarantee (V19 / ProtocolFeature::BlockLinks): with
-        // type-scoped compaction enabled, a "follow" LinkCompactState only deletes
-        // follow links, so a user's "block" links survive even when the follow
-        // compaction does not list the block's target. (Pre-V19 the scan is
-        // type-blind and would delete it — see the legacy-regime tests above.)
-        let (store, db, _temp_dir) = create_test_store();
-
-        let block_add = messages_factory::links::create_link_add(
-            FID_FOR_TEST,
-            LINK_TYPE_BLOCK,
-            TARGET_FID,
-            Some(1000),
-            None,
-        );
-        merge_message_success(&store, &db, &block_add);
-
-        // A later "follow" compaction that does not list the block's target.
-        let follow_compact = messages_factory::links::create_link_compact_state(
-            FID_FOR_TEST,
-            LINK_TYPE_FOLLOW,
-            vec![TARGET_FID + 5],
-            Some(2000),
-            None,
-        );
-        merge_compact_state_with_scope(&store, &db, &follow_compact, true);
-
-        // The block link is untouched by the follow compaction.
-        let active = LinkStore::get_link_add(
-            &store,
-            FID_FOR_TEST,
-            LINK_TYPE_BLOCK.to_string(),
-            Some(Target::TargetFid(TARGET_FID)),
-        )
-        .unwrap();
-        assert_eq!(
-            active,
-            Some(block_add),
-            "type-scoped follow compaction must not delete block links"
-        );
     }
 
     #[test]
@@ -2506,13 +2450,13 @@ mod tests {
 
     #[test]
     fn test_follow_compaction_does_not_delete_other_link_types() {
-        // A "follow" compact state must only compact "follow" links. Links of other
-        // types (e.g. "block") for the same fid must survive, even when their target
-        // is not included in the compact state's target_fids.
+        // FIP block-durability guarantee (V19 / ProtocolFeature::BlockLinks): with
+        // type-scoped compaction enabled, a "follow" LinkCompactState only deletes
+        // follow links, so a user's "block" links survive even when the follow
+        // compaction does not list the block's target. (Pre-V19 the scan is
+        // type-blind and would delete it — see the legacy-regime tests below.)
         let (store, db, _temp_dir) = create_test_store();
 
-        // A block link add, older than the compact state, whose target is NOT in
-        // the follow compact state's target_fids.
         let block_add = messages_factory::links::create_link_add(
             FID_FOR_TEST,
             LINK_TYPE_BLOCK,
@@ -2522,12 +2466,9 @@ mod tests {
         );
         merge_message_success(&store, &db, &block_add);
 
-        // A later follow compact state that does not reference TARGET_FID at all.
         let follow_compact_state = non_target_follow_compact_state();
         merge_compact_state_with_scope(&store, &db, &follow_compact_state, true);
 
-        // The block link must still be active, because the follow compaction must
-        // not touch links of a different type.
         let retrieved = LinkStore::get_link_add(
             &store,
             FID_FOR_TEST,
@@ -2546,7 +2487,6 @@ mod tests {
         // compaction must leave a "block" REMOVE tombstone intact.
         let (store, db, _temp_dir) = create_test_store();
 
-        // A block link remove, merged before (and older than) the compact state.
         let block_remove = messages_factory::links::create_link_remove(
             FID_FOR_TEST,
             LINK_TYPE_BLOCK,
@@ -2556,11 +2496,9 @@ mod tests {
         );
         merge_message_success(&store, &db, &block_remove);
 
-        // A later follow compact state.
         let follow_compact_state = non_target_follow_compact_state();
         merge_compact_state_with_scope(&store, &db, &follow_compact_state, true);
 
-        // The block remove tombstone must survive the follow compaction.
         let retrieved = LinkStore::get_link_remove(
             &store,
             FID_FOR_TEST,
@@ -2635,7 +2573,6 @@ mod tests {
         // leave "follow" links intact (the direction blocks actually ship for).
         let (store, db, _temp_dir) = create_test_store();
 
-        // A follow add, older than the block compact state, whose target is not listed.
         let follow_add = messages_factory::links::create_link_add(
             FID_FOR_TEST,
             LINK_TYPE_FOLLOW,
@@ -2654,7 +2591,6 @@ mod tests {
         );
         merge_compact_state_with_scope(&store, &db, &block_compact_state, true);
 
-        // The follow link survives: a block compaction must not touch follow links.
         let retrieved = LinkStore::get_link_add(
             &store,
             FID_FOR_TEST,
@@ -2673,8 +2609,6 @@ mod tests {
         // This pins the positive behavior the type scoping must preserve.
         let (store, db, _temp_dir) = create_test_store();
 
-        // A follow add and a follow remove (to a different target), both older than the
-        // compact state, neither referenced by the compact state's target_fids.
         let follow_add = messages_factory::links::create_link_add(
             FID_FOR_TEST,
             LINK_TYPE_FOLLOW,
@@ -2694,14 +2628,11 @@ mod tests {
         );
         merge_message_success(&store, &db, &follow_remove);
 
-        // A later follow compact state that references neither target.
         let follow_compact_state = non_target_follow_compact_state();
-        // The compaction deletes the non-target follows; we assert on the resulting store
-        // state below rather than on the (scan-order-dependent) list of deleted messages,
-        // which is an implementation detail rather than the contract here.
+        // Assert on the resulting store state rather than the (scan-order-dependent) list of
+        // deleted messages, which is an implementation detail rather than the contract here.
         merge_compact_state_with_scope(&store, &db, &follow_compact_state, true);
 
-        // The non-target follow add must be deleted by the compaction.
         let retrieved_add = LinkStore::get_link_add(
             &store,
             FID_FOR_TEST,
@@ -2711,7 +2642,6 @@ mod tests {
         .unwrap();
         assert!(retrieved_add.is_none());
 
-        // The non-target follow remove tombstone must also be deleted by the compaction.
         let retrieved_remove = LinkStore::get_link_remove(
             &store,
             FID_FOR_TEST,
