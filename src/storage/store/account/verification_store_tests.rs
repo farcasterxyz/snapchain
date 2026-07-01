@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use super::super::super::test_helper::FID_FOR_TEST;
+    use super::super::super::test_helper::{default_merge_ctx, FID_FOR_TEST};
     use crate::proto::{self as message, hub_event, HubEventType, ReactionType};
     use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{
@@ -30,7 +30,9 @@ mod tests {
         message: &message::Message,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn).unwrap();
+        let result = store
+            .merge(&message, &mut txn, &default_merge_ctx())
+            .unwrap();
         assert_eq!(result.r#type(), HubEventType::MergeMessage);
         match &result.body {
             Some(hub_event::Body::MergeMessageBody(body)) => {
@@ -51,7 +53,9 @@ mod tests {
         deleted_messages: Vec<message::Message>,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn).unwrap();
+        let result = store
+            .merge(&message, &mut txn, &default_merge_ctx())
+            .unwrap();
         assert_eq!(result.r#type(), HubEventType::MergeMessage);
         match &result.body {
             Some(hub_event::Body::MergeMessageBody(body)) => {
@@ -72,7 +76,7 @@ mod tests {
         err_message: &str,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn);
+        let result = store.merge(&message, &mut txn, &default_merge_ctx());
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert_eq!(error.code, err_code);

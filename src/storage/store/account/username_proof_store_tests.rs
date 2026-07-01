@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use super::super::super::test_helper::FID_FOR_TEST;
+    use super::super::super::test_helper::{default_merge_ctx, FID_FOR_TEST};
     use crate::proto::{self as message, hub_event, HubEventType, UserNameProof, UserNameType};
     use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{
@@ -30,7 +30,9 @@ mod tests {
     ) {
         let message = messages_factory::username_proof::create_from_proof(&username_proof, None);
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn).unwrap();
+        let result = store
+            .merge(&message, &mut txn, &default_merge_ctx())
+            .unwrap();
         assert_eq!(result.r#type(), HubEventType::MergeUsernameProof);
         match &result.body {
             Some(hub_event::Body::MergeUsernameProofBody(body)) => {
@@ -52,7 +54,9 @@ mod tests {
     ) {
         let message = messages_factory::username_proof::create_from_proof(&username_proof, None);
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn).unwrap();
+        let result = store
+            .merge(&message, &mut txn, &default_merge_ctx())
+            .unwrap();
         assert_eq!(result.r#type(), HubEventType::MergeUsernameProof);
         match &result.body {
             Some(hub_event::Body::MergeUsernameProofBody(body)) => {
@@ -76,7 +80,7 @@ mod tests {
         err_message: &str,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn);
+        let result = store.merge(&message, &mut txn, &default_merge_ctx());
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert_eq!(err.code, err_code);

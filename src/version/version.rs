@@ -26,6 +26,7 @@ pub enum EngineVersion {
     V16 = 16,
     V17 = 17,
     V18 = 18,
+    V19 = 19,
 }
 
 pub enum ProtocolFeature {
@@ -50,6 +51,7 @@ pub enum ProtocolFeature {
     GaslessSigners,
     LiveAt,
     StorageExpiryExtension2026,
+    BlockLinks,
 }
 
 pub struct VersionSchedule {
@@ -203,7 +205,7 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
 
 const ENGINE_VERSION_SCHEDULE_DEVNET: &[VersionSchedule] = [VersionSchedule {
     active_at: 0,
-    version: EngineVersion::V18,
+    version: EngineVersion::V19,
 }]
 .as_slice();
 
@@ -258,6 +260,7 @@ impl EngineVersion {
             ProtocolFeature::GaslessSigners => self >= &EngineVersion::V16,
             ProtocolFeature::LiveAt => self >= &EngineVersion::V17,
             ProtocolFeature::StorageExpiryExtension2026 => self >= &EngineVersion::V18,
+            ProtocolFeature::BlockLinks => self >= &EngineVersion::V19,
         }
     }
 
@@ -279,7 +282,7 @@ impl EngineVersion {
             EngineVersion::V15 => 10,
             EngineVersion::V16 => 11,
             EngineVersion::V17 => 12,
-            EngineVersion::V18 => LATEST_PROTOCOL_VERSION,
+            EngineVersion::V18 | EngineVersion::V19 => LATEST_PROTOCOL_VERSION,
         }
     }
 
@@ -580,6 +583,40 @@ mod version_test {
     }
 
     #[test]
+    fn test_block_links_feature_gate() {
+        // Gate closed below V19, open at V19+. This boundary is the source of truth for
+        // pre-V19 replay safety, so pin it explicitly.
+        assert_eq!(
+            EngineVersion::V18.is_enabled(ProtocolFeature::BlockLinks),
+            false
+        );
+        assert_eq!(
+            EngineVersion::V19.is_enabled(ProtocolFeature::BlockLinks),
+            true
+        );
+        assert_eq!(
+            EngineVersion::latest().is_enabled(ProtocolFeature::BlockLinks),
+            true
+        );
+    }
+
+    #[test]
+    fn test_block_links_activation_schedule() {
+        // V19 is devnet-only for now, so mainnet/testnet stay on V18 even far in the future.
+        let far_future = FarcasterTime::from_unix_seconds(4102444800); // 2100-01-01 UTC
+        for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
+            assert_eq!(
+                EngineVersion::version_for(&far_future, network),
+                EngineVersion::V18
+            );
+        }
+        assert_eq!(
+            EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet),
+            EngineVersion::V19
+        );
+    }
+
+    #[test]
     fn test_is_enabled_signer_revoke_bug() {
         assert_eq!(
             EngineVersion::V0.is_enabled(ProtocolFeature::SignerRevokeBug),
@@ -605,7 +642,7 @@ mod version_test {
 
     #[test]
     fn test_latest() {
-        assert_eq!(EngineVersion::latest(), EngineVersion::V18);
+        assert_eq!(EngineVersion::latest(), EngineVersion::V19);
         assert_eq!(
             EngineVersion::version_for(&FarcasterTime::current(), FarcasterNetwork::Devnet),
             EngineVersion::latest()
