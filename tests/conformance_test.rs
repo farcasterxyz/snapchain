@@ -416,8 +416,12 @@ fn build_message(spec: &VectorSpec, key: &SigningKey) -> proto::Message {
 }
 
 async fn new_engine() -> (ShardEngine, tempfile::TempDir) {
+    new_engine_on(CORPUS_NETWORK).await
+}
+
+async fn new_engine_on(network: proto::FarcasterNetwork) -> (ShardEngine, tempfile::TempDir) {
     let options = test_helper::EngineOptions {
-        network: Some(CORPUS_NETWORK),
+        network: Some(network),
         shard_id: 1,
         ..Default::default()
     };
@@ -960,6 +964,88 @@ async fn conformance_link_compaction_type_scoped() {
         assert!(
             active_hashes.contains(&block_add.hash),
             "block link must survive a type-scoped follow compaction at V19"
+        );
+    }
+}
+
+/// Pre-cutover mirror of `conformance_link_compaction_type_scoped`: before V19/BlockLinks a
+/// follow compaction is type-BLIND and sweeps every older link regardless of type, including
+/// blocks. This pins the historical behavior that must be preserved byte-identically on replay
+/// (a fixed node replaying pre-cutover history must delete the same messages, or its shard root
+/// diverges and it forks). We reach V18 without any test-only version override by running on
+/// testnet at a timestamp in the V18 window (V19 is not scheduled on testnet), exercising the
+/// real `version_for` path. Together with the V19 test above, this pins both sides of the
+/// cutover — each deterministic and cross-node-agreeing — which is what a node crossing the
+/// real activation relies on (the version is a pure function of each message's own timestamp,
+/// so pre- and post-cutover messages never re-version each other).
+#[tokio::test]
+async fn conformance_link_compaction_type_blind_pre_v19() {
+    const TARGET_FID: u64 = 456;
+    // Farcaster-epoch seconds resolving to unix 1_781_400_000 (2026-06-13): just past the testnet
+    // V18 activation (unix 1_781_283_600, 2026-06-12) so it resolves to V18, and safely in the past
+    // vs wall clock (block commit computes `now - block_timestamp`, which must not underflow).
+    // V19 is unscheduled on testnet, so this stays V18 as the clock advances.
+    const PRE_V19_TS: u32 = 171_940_800;
+
+    let key = signer();
+    // Same shape as the V19 test: a follow + a block to the same target, and a later follow
+    // compact state listing neither target. Type-blind compaction deletes BOTH.
+    let follow_add = with_canonical_data_bytes(messages_factory::links::create_link_add(
+        VECTOR_FID,
+        "follow",
+        TARGET_FID,
+        Some(PRE_V19_TS),
+        Some(&key),
+    ));
+    let block_add = with_canonical_data_bytes(messages_factory::links::create_link_add(
+        VECTOR_FID,
+        "block",
+        TARGET_FID,
+        Some(PRE_V19_TS),
+        Some(&key),
+    ));
+    let follow_compact =
+        with_canonical_data_bytes(messages_factory::links::create_link_compact_state(
+            VECTOR_FID,
+            "follow",
+            vec![TARGET_FID + 100],
+            Some(PRE_V19_TS + 1),
+            Some(&key),
+        ));
+
+    let (mut node_a, _a) = new_engine_on(proto::FarcasterNetwork::Testnet).await;
+    let (mut node_b, _b) = new_engine_on(proto::FarcasterNetwork::Testnet).await;
+    register_user_deterministic(&mut node_a, VECTOR_FID).await;
+    register_user_deterministic(&mut node_b, VECTOR_FID).await;
+
+    for msg in [&follow_add, &block_add, &follow_compact] {
+        let ts = FarcasterTime::new(msg.data.as_ref().unwrap().timestamp as u64);
+        let root_a = test_helper::commit_message_at(&mut node_a, msg, &ts).await;
+        let root_b = test_helper::commit_message_at(&mut node_b, msg, &ts).await;
+        assert_eq!(
+            root_a.header.as_ref().unwrap().shard_root,
+            root_b.header.as_ref().unwrap().shard_root,
+            "cross-node state root diverged after merging a {:?} message",
+            msg.msg_type()
+        );
+    }
+
+    // Type-blind compaction: BOTH the follow and the block are swept, identically on both nodes.
+    for node in [&node_a, &node_b] {
+        let active_hashes: Vec<Vec<u8>> = node
+            .get_links_by_fid(VECTOR_FID)
+            .expect("get_links_by_fid")
+            .messages
+            .iter()
+            .map(|m| m.hash.clone())
+            .collect();
+        assert!(
+            !active_hashes.contains(&follow_add.hash),
+            "follow link should be swept by the follow compaction"
+        );
+        assert!(
+            !active_hashes.contains(&block_add.hash),
+            "block link must ALSO be swept pre-V19 (type-blind compaction)"
         );
     }
 }
