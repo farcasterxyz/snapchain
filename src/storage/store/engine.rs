@@ -16,7 +16,7 @@ use crate::proto::{
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
-    BlockEventStorageError, CastStore, MessagesPage, StorageLendStore, StoreOptions,
+    BlockEventStorageError, CastStore, MergeContext, MessagesPage, StorageLendStore, StoreOptions,
     VerificationStore,
 };
 use crate::storage::store::engine_metrics::Metrics;
@@ -1225,45 +1225,47 @@ impl ShardEngine {
         let version =
             EngineVersion::version_for(&FarcasterTime::new(data.timestamp as u64), self.network);
         let gasless_enabled = version.is_enabled(ProtocolFeature::GaslessSigners);
-        let scope_link_compaction = version.is_enabled(ProtocolFeature::BlockLinks);
+        // Version-gated merge decisions (e.g. type-scoped link compaction under
+        // ProtocolFeature::BlockLinks) are made inside each store's StoreDef from this context.
+        let ctx = MergeContext { version };
 
         let event = match mt {
             MessageType::CastAdd | MessageType::CastRemove => vec![self
                 .stores
                 .cast_store
-                .merge(msg, txn_batch, false)
+                .merge(msg, txn_batch, &ctx)
                 .map_err(|e| MessageValidationError::StoreError(e))?],
             MessageType::LinkAdd | MessageType::LinkRemove | MessageType::LinkCompactState => {
                 vec![self
                     .stores
                     .link_store
-                    .merge(msg, txn_batch, scope_link_compaction)
+                    .merge(msg, txn_batch, &ctx)
                     .map_err(|e| MessageValidationError::StoreError(e))?]
             }
             MessageType::ReactionAdd | MessageType::ReactionRemove => vec![self
                 .stores
                 .reaction_store
-                .merge(msg, txn_batch, false)
+                .merge(msg, txn_batch, &ctx)
                 .map_err(|e| MessageValidationError::StoreError(e))?],
             MessageType::UserDataAdd => vec![self
                 .stores
                 .user_data_store
-                .merge(msg, txn_batch, false)
+                .merge(msg, txn_batch, &ctx)
                 .map_err(|e| MessageValidationError::StoreError(e))?],
             MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => vec![self
                 .stores
                 .verification_store
-                .merge(msg, txn_batch, false)
+                .merge(msg, txn_batch, &ctx)
                 .map_err(|e| MessageValidationError::StoreError(e))?],
             MessageType::UsernameProof => {
                 let store = &self.stores.username_proof_store;
                 vec![store
-                    .merge(msg, txn_batch, false)
+                    .merge(msg, txn_batch, &ctx)
                     .map_err(|e| MessageValidationError::StoreError(e))?]
             }
             MessageType::LendStorage => {
                 let store = &self.stores.storage_lend_store;
-                StorageLendStore::merge(store, msg, txn_batch)
+                StorageLendStore::merge(store, msg, txn_batch, &ctx)
                     .map_err(|e| MessageValidationError::StoreError(e))?
             }
             MessageType::KeyAdd if gasless_enabled => {

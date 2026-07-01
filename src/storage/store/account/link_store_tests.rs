@@ -4,11 +4,24 @@ mod tests {
     use crate::proto::link_body::Target;
     use crate::proto::{self as message, hub_event, HubEventType};
     use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
-    use crate::storage::store::account::{LinkStore, Store, StoreEventHandler, StoreOptions};
+    use crate::storage::store::account::{
+        LinkStore, MergeContext, Store, StoreEventHandler, StoreOptions,
+    };
     use crate::storage::util::{decrement_vec_u8, increment_vec_u8};
     use crate::utils::factory::messages_factory;
+    use crate::version::version::EngineVersion;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    // Pre-BlockLinks engine version: link compaction is type-blind. Used by the generic
+    // add/remove helpers (where the version is immaterial) and the legacy-regime tests.
+    const TYPE_BLIND_CTX: MergeContext = MergeContext {
+        version: EngineVersion::V18,
+    };
+    // BlockLinks-active engine version: link compaction is type-scoped.
+    const TYPE_SCOPED_CTX: MergeContext = MergeContext {
+        version: EngineVersion::V19,
+    };
 
     fn create_test_store() -> (Store<LinkStore>, Arc<RocksDB>, TempDir) {
         let temp_dir = tempfile::TempDir::new().unwrap();
@@ -50,7 +63,7 @@ mod tests {
         message: &message::Message,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn, false).unwrap();
+        let result = store.merge(&message, &mut txn, &TYPE_BLIND_CTX).unwrap();
         assert_eq!(result.r#type(), HubEventType::MergeMessage);
         match &result.body {
             Some(hub_event::Body::MergeMessageBody(body)) => {
@@ -82,10 +95,15 @@ mod tests {
         message: &message::Message,
         scope_compaction_by_type: bool,
     ) {
+        // Map the legacy scope flag onto the engine version that gates it: BlockLinks-active
+        // (V19) scopes compaction by type; the pre-BlockLinks regime (V18) is type-blind.
+        let ctx = if scope_compaction_by_type {
+            TYPE_SCOPED_CTX
+        } else {
+            TYPE_BLIND_CTX
+        };
         let mut txn = RocksDbTransactionBatch::new();
-        store
-            .merge(message, &mut txn, scope_compaction_by_type)
-            .unwrap();
+        store.merge(message, &mut txn, &ctx).unwrap();
         db.commit(txn).unwrap();
     }
 
@@ -96,7 +114,7 @@ mod tests {
         deleted_messages: Vec<message::Message>,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn, false).unwrap();
+        let result = store.merge(&message, &mut txn, &TYPE_BLIND_CTX).unwrap();
         assert_eq!(result.r#type(), HubEventType::MergeMessage);
         match &result.body {
             Some(hub_event::Body::MergeMessageBody(body)) => {
@@ -117,7 +135,7 @@ mod tests {
         err_message: &str,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn, false);
+        let result = store.merge(&message, &mut txn, &TYPE_BLIND_CTX);
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert_eq!(err.code, err_code);

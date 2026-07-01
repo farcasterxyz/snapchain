@@ -5,7 +5,7 @@ mod tests {
     use crate::storage::store::account::{
         StorageLendStore, StorageLendStoreDef, Store, StoreEventHandler,
     };
-    use crate::storage::store::test_helper::FID_FOR_TEST;
+    use crate::storage::store::test_helper::{default_merge_ctx, FID_FOR_TEST};
     use crate::utils::factory::messages_factory;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -29,7 +29,9 @@ mod tests {
         message: &message::Message,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn, false).unwrap();
+        let result = store
+            .merge(&message, &mut txn, &default_merge_ctx())
+            .unwrap();
         assert_eq!(result.r#type(), HubEventType::MergeMessage);
         match &result.body {
             Some(hub_event::Body::MergeMessageBody(body)) => {
@@ -50,7 +52,9 @@ mod tests {
         deleted_messages: Vec<message::Message>,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn, false).unwrap();
+        let result = store
+            .merge(&message, &mut txn, &default_merge_ctx())
+            .unwrap();
         assert_eq!(result.r#type(), HubEventType::MergeMessage);
         match &result.body {
             Some(hub_event::Body::MergeMessageBody(body)) => {
@@ -71,7 +75,7 @@ mod tests {
         err_message: &str,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn, false);
+        let result = store.merge(&message, &mut txn, &default_merge_ctx());
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert_eq!(error.code, err_code);

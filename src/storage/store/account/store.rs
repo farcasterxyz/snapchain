@@ -11,8 +11,9 @@ use crate::proto::{
 };
 use crate::storage::db::PageOptions;
 use crate::storage::util::increment_vec_u8;
+use crate::version::version::EngineVersion;
 use crate::{
-    proto::{link_body::Target, message_data::Body, Message, MessageType},
+    proto::{Message, MessageType},
     storage::db::{RocksDB, RocksDbTransactionBatch},
 };
 use std::clone::Clone;
@@ -22,6 +23,29 @@ use tracing::warn;
 
 pub const FID_LOCKS_COUNT: usize = 4;
 pub const PAGE_SIZE_MAX: usize = 10_000;
+
+/// Engine-derived context threaded into `Store::merge`. It carries the resolved
+/// `EngineVersion` (derived once at the engine layer from the message's timestamp) so that
+/// version-gated merge decisions are made by the message-type-aware `StoreDef`, rather than
+/// being pre-computed into an opaque flag at the engine and threaded down. Version derivation
+/// stays engine-side; only the feature *check* (e.g. `ProtocolFeature::BlockLinks`) moves into
+/// the store_def, keeping historical replay byte-identical.
+#[derive(Debug, Clone, Copy)]
+pub struct MergeContext {
+    pub version: EngineVersion,
+}
+
+/// The fields a compact-state message contributes to compaction, parsed by the owning
+/// `StoreDef` (see `StoreDef::read_compact_state_details`). `Store<T>` only reads `fid` and
+/// `timestamp`; any message-type-specific fields (e.g. link `target_fids`/`link_type`) are
+/// consumed solely by that store's `StoreDef` hooks, keeping `Store<T>` free of body parsing.
+#[derive(Debug, Clone)]
+pub struct CompactStateDetails {
+    pub fid: u64,
+    pub timestamp: u32,
+    pub target_fids: Vec<u64>,
+    pub link_type: String,
+}
 
 // #[derive(Debug, Default)]
 // pub struct PageOptions {
@@ -57,6 +81,43 @@ pub trait StoreDef: Send + Sync {
     #[inline]
     fn compact_state_type_supported(&self) -> bool {
         self.compact_state_message_type() != MessageType::None as u8
+    }
+
+    /// Parse a compact-state message into the details compaction needs. Only stores that
+    /// support compact state override this; the default is never reached for other stores
+    /// because callers guard on `compact_state_type_supported()`.
+    fn read_compact_state_details(
+        &self,
+        _message: &Message,
+    ) -> Result<CompactStateDetails, HubError> {
+        Err(HubError {
+            code: "bad_request.validation_failure".to_string(),
+            message: "This store does not support compact state messages".to_string(),
+        })
+    }
+
+    /// During `merge_compact_state`, decide whether `candidate` (already known to be
+    /// not-newer-than the compact state) should be swept into the merge conflicts and
+    /// deleted. Owns all message-body parsing and any version gating (via `ctx`). The
+    /// default keeps nothing, so stores without compact state are unaffected.
+    fn is_compaction_conflict(
+        &self,
+        _candidate: &Message,
+        _details: &CompactStateDetails,
+        _ctx: &MergeContext,
+    ) -> bool {
+        false
+    }
+
+    /// When merging an add while a compact state exists, optionally reject it. Owns the
+    /// message-body parsing that decides whether the add is superseded by the compact
+    /// state. The default never rejects.
+    fn compact_state_add_conflict(
+        &self,
+        _message: &Message,
+        _details: &CompactStateDetails,
+    ) -> Option<HubError> {
+        None
     }
 
     #[inline]
@@ -564,7 +625,7 @@ impl<T: StoreDef + Clone> Store<T> {
         &self,
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
-        scope_compaction_by_type: bool,
+        ctx: &MergeContext,
     ) -> Result<HubEvent, HubError> {
         if !self.store_def.is_add_type(message)
             && !(self.store_def.remove_type_supported() && self.store_def.is_remove_type(message))
@@ -580,7 +641,7 @@ impl<T: StoreDef + Clone> Store<T> {
         let ts_hash = make_ts_hash(message.data.as_ref().unwrap().timestamp, &message.hash)?;
 
         if self.store_def().is_compact_state_type(message) {
-            self.merge_compact_state(message, txn, scope_compaction_by_type)
+            self.merge_compact_state(message, txn, ctx)
         } else if self.store_def.is_add_type(message) {
             self.merge_add(&ts_hash, message, txn)
         } else {
@@ -619,38 +680,11 @@ impl<T: StoreDef + Clone> Store<T> {
         Ok(hub_event)
     }
 
-    fn read_compact_state_details(
-        &self,
-        message: &Message,
-    ) -> Result<(u64, u32, Vec<u64>, String), HubError> {
-        if let Some(data) = &message.data {
-            if let Some(Body::LinkCompactStateBody(link_compact_body)) = &data.body {
-                Ok((
-                    data.fid,
-                    data.timestamp,
-                    link_compact_body.target_fids.clone(),
-                    link_compact_body.r#type.clone(),
-                ))
-            } else {
-                return Err(HubError {
-                    code: "bad_request.validation_failure".to_string(),
-                    message: "Invalid compact state message: No link compact state body"
-                        .to_string(),
-                });
-            }
-        } else {
-            return Err(HubError {
-                code: "bad_request.validation_failure".to_string(),
-                message: "Invalid compact state message: no data".to_string(),
-            });
-        }
-    }
-
     pub fn merge_compact_state(
         &self,
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
-        scope_compaction_by_type: bool,
+        ctx: &MergeContext,
     ) -> Result<HubEvent, HubError> {
         let mut merge_conflicts = vec![];
 
@@ -681,15 +715,13 @@ impl<T: StoreDef + Clone> Store<T> {
             }
         }
 
-        let (fid, compact_state_timestamp, target_fids, compact_state_type) =
-            self.read_compact_state_details(message)?;
+        let details = self.store_def.read_compact_state_details(message)?;
 
         // Go over all messages for this Fid not newer than the compact state (timestamp <= the
-        // compact state's; when type-scoped, only those of the compact state's own link type —
-        // see below) and
-        // 1. Delete all remove messages
-        // 2. Delete all add messages that are not in the target_fids list
-        let prefix = &make_message_primary_key(fid, self.store_def.postfix(), None);
+        // compact state's) and let the store_def decide which ones this compact state supersedes.
+        // The store_def owns the message-body parsing and any version gating (e.g. only compacting
+        // links of the compact state's own type once ProtocolFeature::BlockLinks is active).
+        let prefix = &make_message_primary_key(details.fid, self.store_def.postfix(), None);
         self.db.for_each_iterator_by_prefix(
             Some(prefix.to_vec()),
             Some(increment_vec_u8(prefix)),
@@ -697,30 +729,17 @@ impl<T: StoreDef + Clone> Store<T> {
             |_key, value| {
                 let message = message_decode(value)?;
 
-                // Only if message is older than the compact state message
-                if message.data.as_ref().unwrap().timestamp > compact_state_timestamp {
+                // Only if message is not newer than the compact state message
+                if message.data.as_ref().unwrap().timestamp > details.timestamp {
                     // Finish the iteration since all future messages will have greater timestamp
                     return Ok(true);
                 }
 
-                if let Some(Body::LinkBody(link_body)) =
-                    message.data.as_ref().and_then(|data| data.body.as_ref())
+                if self
+                    .store_def
+                    .is_compaction_conflict(&message, &details, ctx)
                 {
-                    // When scope_compaction_by_type is set, only compact links of the compact
-                    // state's own type (so a "follow" compaction can't delete "block" links);
-                    // otherwise compaction is type-blind. The caller sets this from the engine
-                    // version (ProtocolFeature::BlockLinks).
-                    if !scope_compaction_by_type || link_body.r#type == compact_state_type {
-                        if self.store_def.is_remove_type(&message) {
-                            merge_conflicts.push(message);
-                        } else if self.store_def.is_add_type(&message) {
-                            if let Some(Target::TargetFid(target_fid)) = link_body.target {
-                                if !target_fids.contains(&target_fid) {
-                                    merge_conflicts.push(message);
-                                }
-                            }
-                        }
-                    }
+                    merge_conflicts.push(message);
                 }
 
                 Ok(false) // Continue the iteration
@@ -760,24 +779,12 @@ impl<T: StoreDef + Clone> Store<T> {
             {
                 let compact_state_message = message_decode(compact_state_message_bytes.as_ref())?;
 
-                let (_, compact_state_timestamp, target_fids, _) =
-                    self.read_compact_state_details(&compact_state_message)?;
+                let details = self
+                    .store_def
+                    .read_compact_state_details(&compact_state_message)?;
 
-                if let Some(Body::LinkBody(link_body)) = &message.data.as_ref().unwrap().body {
-                    if let Some(Target::TargetFid(target_fid)) = link_body.target {
-                        // If the message is older than the compact state message, and the target fid is not in the target_fids list
-                        if message.data.as_ref().unwrap().timestamp < compact_state_timestamp
-                            && !target_fids.contains(&target_fid)
-                        {
-                            return Err(HubError {
-                                code: "bad_request.conflict".to_string(),
-                                message: format!(
-                                    "Target fid {} not in the compact state target fids",
-                                    target_fid
-                                ),
-                            });
-                        }
-                    }
+                if let Some(err) = self.store_def.compact_state_add_conflict(message, &details) {
+                    return Err(err);
                 }
             }
         }
@@ -828,11 +835,12 @@ impl<T: StoreDef + Clone> Store<T> {
             {
                 let compact_state_message = message_decode(compact_state_message_bytes.as_ref())?;
 
-                let (_, compact_state_timestamp, _, _) =
-                    self.read_compact_state_details(&compact_state_message)?;
+                let details = self
+                    .store_def
+                    .read_compact_state_details(&compact_state_message)?;
 
-                // If the message is older than the compact state message, and the target fid is not in the target_fids list
-                if message.data.as_ref().unwrap().timestamp < compact_state_timestamp {
+                // If the remove is older than the compact state message it will be immediately pruned
+                if message.data.as_ref().unwrap().timestamp < details.timestamp {
                     return Err(HubError {
                         code: "bad_request.prunable".to_string(),
                         message: format!(

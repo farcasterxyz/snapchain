@@ -1,9 +1,10 @@
 use super::{
     get_many_messages, make_fid_key, make_message_primary_key, make_user_key, read_fid_key,
     read_ts_hash,
-    store::{Store, StoreDef},
+    store::{CompactStateDetails, MergeContext, Store, StoreDef},
     MessagesPage, StoreEventHandler, PAGE_SIZE_MAX, TS_HASH_LENGTH,
 };
+use crate::version::version::ProtocolFeature;
 use crate::{
     core::error::HubError,
     proto::{link_body::Target, SignatureScheme},
@@ -589,5 +590,89 @@ impl StoreDef for LinkStore {
     #[inline]
     fn get_prune_size_limit(&self) -> u32 {
         self.prune_size_limit
+    }
+
+    fn read_compact_state_details(
+        &self,
+        message: &Message,
+    ) -> Result<CompactStateDetails, HubError> {
+        let Some(data) = &message.data else {
+            return Err(HubError {
+                code: "bad_request.validation_failure".to_string(),
+                message: "Invalid compact state message: no data".to_string(),
+            });
+        };
+        let Some(Body::LinkCompactStateBody(link_compact_body)) = &data.body else {
+            return Err(HubError {
+                code: "bad_request.validation_failure".to_string(),
+                message: "Invalid compact state message: No link compact state body".to_string(),
+            });
+        };
+        Ok(CompactStateDetails {
+            fid: data.fid,
+            timestamp: data.timestamp,
+            target_fids: link_compact_body.target_fids.clone(),
+            link_type: link_compact_body.r#type.clone(),
+        })
+    }
+
+    fn is_compaction_conflict(
+        &self,
+        candidate: &Message,
+        details: &CompactStateDetails,
+        ctx: &MergeContext,
+    ) -> bool {
+        let Some(Body::LinkBody(link_body)) =
+            candidate.data.as_ref().and_then(|data| data.body.as_ref())
+        else {
+            return false;
+        };
+
+        // Once ProtocolFeature::BlockLinks is active, a compact state only compacts links of its
+        // own type (so a "follow" compaction can't delete "block" links). Before then, compaction
+        // is type-blind. The caller derives the gate from the message's EngineVersion.
+        if ctx.version.is_enabled(ProtocolFeature::BlockLinks)
+            && link_body.r#type != details.link_type
+        {
+            return false;
+        }
+
+        if self.is_remove_type(candidate) {
+            // 1. Delete all remove messages
+            true
+        } else if self.is_add_type(candidate) {
+            // 2. Delete all add messages whose target is not in the target_fids list
+            match link_body.target {
+                Some(Target::TargetFid(target_fid)) => !details.target_fids.contains(&target_fid),
+                _ => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    fn compact_state_add_conflict(
+        &self,
+        message: &Message,
+        details: &CompactStateDetails,
+    ) -> Option<HubError> {
+        let data = message.data.as_ref().unwrap();
+        if let Some(Body::LinkBody(link_body)) = &data.body {
+            if let Some(Target::TargetFid(target_fid)) = link_body.target {
+                // If the add is older than the compact state and its target fid is not in the
+                // target_fids list, it is superseded by the compact state and can't be merged.
+                if data.timestamp < details.timestamp && !details.target_fids.contains(&target_fid)
+                {
+                    return Some(HubError {
+                        code: "bad_request.conflict".to_string(),
+                        message: format!(
+                            "Target fid {} not in the compact state target fids",
+                            target_fid
+                        ),
+                    });
+                }
+            }
+        }
+        None
     }
 }

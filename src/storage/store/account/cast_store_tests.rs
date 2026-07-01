@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use super::super::super::test_helper::FID_FOR_TEST;
+    use super::super::super::test_helper::{default_merge_ctx, FID_FOR_TEST};
     use crate::proto::cast_add_body::Parent;
     use crate::proto::reaction_body::Target;
     use crate::proto::{self as message, hub_event, CastType, HubEvent, HubEventType};
@@ -59,7 +59,7 @@ mod tests {
         err_message: String,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(&message, &mut txn, false);
+        let result = store.merge(&message, &mut txn, &default_merge_ctx());
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert_eq!(error.code, err_code);
@@ -73,7 +73,9 @@ mod tests {
         deleted_messages: Vec<message::Message>,
     ) {
         let mut txn = RocksDbTransactionBatch::new();
-        let result = store.merge(message, &mut txn, false).unwrap();
+        let result = store
+            .merge(message, &mut txn, &default_merge_ctx())
+            .unwrap();
         assert_eq!(result.r#type(), HubEventType::MergeMessage);
         match &result.body {
             Some(hub_event::Body::MergeMessageBody(body)) => {
@@ -96,7 +98,9 @@ mod tests {
         let mut events = Vec::new();
 
         for message in messages {
-            let result = store.merge(message, &mut txn, false).unwrap();
+            let result = store
+                .merge(message, &mut txn, &default_merge_ctx())
+                .unwrap();
             events.push(result.clone());
             assert_eq!(result.r#type(), HubEventType::MergeMessage);
             match &result.body {
@@ -1271,7 +1275,9 @@ mod tests {
         );
 
         let mut txn1 = RocksDbTransactionBatch::new();
-        let _result1 = store.merge(&cast_remove_earlier, &mut txn1, false).unwrap();
+        let _result1 = store
+            .merge(&cast_remove_earlier, &mut txn1, &default_merge_ctx())
+            .unwrap();
         db.commit(txn1).unwrap();
 
         merge_message_failure(

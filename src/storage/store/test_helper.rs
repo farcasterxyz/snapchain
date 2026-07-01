@@ -38,6 +38,15 @@ use tracing_subscriber::EnvFilter;
 
 pub const FID_FOR_TEST: u64 = 1234;
 
+/// A default `MergeContext` for store tests whose store has no compact state (so the engine
+/// version never affects the merge). Uses the latest version. Link-compaction tests, which are
+/// version-sensitive, build their own context instead.
+pub fn default_merge_ctx() -> crate::storage::store::account::MergeContext {
+    crate::storage::store::account::MergeContext {
+        version: crate::version::version::EngineVersion::latest(),
+    }
+}
+
 #[cfg(test)]
 pub const FID2_FOR_TEST: u64 = 1235;
 
