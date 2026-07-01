@@ -2529,6 +2529,92 @@ mod tests {
     }
 
     #[test]
+    fn test_follow_compaction_at_equal_timestamp_is_type_scoped() {
+        // The compaction scan includes messages whose timestamp EQUALS the compact state's
+        // (the cutoff is `timestamp > compact_state_timestamp`, so `==` is still swept). Pin
+        // that boundary together with type-scoping: a follow add sharing the compact state's
+        // exact timestamp is deleted, while a block add at that same timestamp survives (V19).
+        let (store, db, _temp_dir) = create_test_store();
+
+        // non_target_follow_compact_state() has timestamp 2000; use the same for both adds.
+        let follow_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW,
+            TARGET_FID,
+            Some(2000),
+            None,
+        );
+        merge_message_success(&store, &db, &follow_add);
+
+        let block_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK,
+            TARGET_FID,
+            Some(2000),
+            None,
+        );
+        merge_message_success(&store, &db, &block_add);
+
+        let follow_compact_state = non_target_follow_compact_state();
+        merge_compact_state_with_scope(&store, &db, &follow_compact_state, true);
+
+        // Equal-timestamp follow (same type, target not listed) is swept...
+        assert!(LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_FOLLOW.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .is_none());
+
+        // ...but the equal-timestamp block (different type) survives.
+        let retrieved = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, block_add);
+    }
+
+    #[test]
+    fn test_block_add_after_existing_follow_compact_state_is_accepted() {
+        // Forward durability: a follow LinkCompactState must not block a LATER block add, even
+        // one older than the compact state whose target it doesn't list. The compact-state
+        // lookup in merge_add is keyed by (fid, link_type), so a block add never matches a
+        // follow compact state and is accepted. (This scoping is structural, not version-gated.)
+        let (store, db, _temp_dir) = create_test_store();
+
+        let follow_compact_state = non_target_follow_compact_state(); // timestamp 2000
+        merge_compact_state_with_scope(&store, &db, &follow_compact_state, true);
+
+        // Block add older than the follow compact state, target not in its target_fids.
+        let block_add = messages_factory::links::create_link_add(
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK,
+            TARGET_FID,
+            Some(1000),
+            None,
+        );
+        // merge_message_success asserts the merge succeeds with no deletions — i.e. the block
+        // add is not rejected as superseded by the follow compact state.
+        merge_message_success(&store, &db, &block_add);
+
+        let retrieved = LinkStore::get_link_add(
+            &store,
+            FID_FOR_TEST,
+            LINK_TYPE_BLOCK.to_string(),
+            Some(Target::TargetFid(TARGET_FID)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retrieved, block_add);
+    }
+
+    #[test]
     fn test_legacy_follow_compaction_deletes_other_link_type_adds() {
         // Pre-V19 (type-blind) behavior: with scope_compaction_by_type = false, a "follow"
         // compaction deletes a "block" add whose target is not in the compact state. This is

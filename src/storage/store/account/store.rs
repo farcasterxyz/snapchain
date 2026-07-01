@@ -85,7 +85,9 @@ pub trait StoreDef: Send + Sync {
 
     /// Parse a compact-state message into the details compaction needs. Only stores that
     /// support compact state override this; the default is never reached for other stores
-    /// because callers guard on `compact_state_type_supported()`.
+    /// because callers only invoke it after confirming the store supports compact state
+    /// (`is_compact_state_type()` on the merge path, `compact_state_type_supported()` in
+    /// `merge_add`/`merge_remove`).
     fn read_compact_state_details(
         &self,
         _message: &Message,

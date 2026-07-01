@@ -637,6 +637,8 @@ impl StoreDef for LinkStore {
             return false;
         }
 
+        // Reached only for links this compact state is allowed to compact (same type once the
+        // type gate above is active; any type before then):
         if self.is_remove_type(candidate) {
             // 1. Delete all remove messages
             true
