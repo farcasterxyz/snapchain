@@ -10,7 +10,7 @@ use crate::proto::{
 };
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
-    BlockEventStore, OnchainEventStorageError, OnchainEventStore, StorageLendStore,
+    BlockEventStore, MergeContext, OnchainEventStorageError, OnchainEventStore, StorageLendStore,
     StorageLendStoreDef, StorageSlot, Store, StoreEventHandler,
 };
 use crate::storage::store::engine_metrics::Metrics;
@@ -397,11 +397,22 @@ impl BlockEngine {
             false
         };
         match msg_type {
-            MessageType::LendStorage => Ok(StorageLendStore::merge(
-                &self.stores.storage_lend_store,
-                message,
-                txn_batch,
-            )?),
+            MessageType::LendStorage => {
+                let ts = message
+                    .data
+                    .as_ref()
+                    .ok_or(MessageValidationError::NoMessageData)?
+                    .timestamp;
+                let version =
+                    EngineVersion::version_for(&FarcasterTime::new(ts as u64), self.network);
+                let ctx = MergeContext { version };
+                Ok(StorageLendStore::merge(
+                    &self.stores.storage_lend_store,
+                    message,
+                    txn_batch,
+                    &ctx,
+                )?)
+            }
             MessageType::KeyAdd if gasless_enabled => {
                 // BlockEngine is the admission path — full validation, including the
                 // request_fid IdRegister + custody match.

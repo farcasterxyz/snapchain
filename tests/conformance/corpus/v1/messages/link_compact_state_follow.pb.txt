@@ -1,0 +1,19 @@
+# Wire-format disassembly of the Message (review aid; see README).
+Message {
+  1 data {  # 27 bytes
+    1 type: 14
+    2 fid: 1234
+    3 timestamp: 94608000
+    4 network: 1
+    17 link_compact_state_body {  # 12 bytes
+      1: "follow"  # string, 6 bytes
+      2: 0xc803  # 2 bytes
+    }
+  }
+  2 hash: 0x6f6b7d0748c079186da2b91fafbcde7bd6ea0949  # 20 bytes
+  3 hash_scheme: 1
+  4 signature: 0x227c1229c65c15fce22f71c49797f786c9847b0da08082e0d3b67c1dbe3eed4408fa2b49e00c5a430f0f19cf6b1e4cb5321fe5a1a521b325dc3cab1d8fff7b06  # 64 bytes
+  5 signature_scheme: 1
+  6 signer: 0x69104ef20c6676aacc9e8c291800d1b7e911e20f85b4066156ea118ace44b8d7  # 32 bytes
+  7 data_bytes: 0x080e10d2091880b58e2d20018a010c0a06666f6c6c6f771202c803  # 27 bytes
+}

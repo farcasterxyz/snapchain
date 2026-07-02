@@ -52,4 +52,21 @@ mod tests {
             assert!(validations::link::validate_link_body(&link).is_ok())
         }
     }
+
+    // FIP-263: "block" is valid by absence of restriction, not special-casing —
+    // validate_link_type has no allowlist and accepts any 1-8 byte string.
+    #[test]
+    fn test_validate_link_type_accepts_block() {
+        assert!(validations::link::validate_link_type("block").is_ok());
+    }
+
+    #[test]
+    fn test_validate_link_body_accepts_block() {
+        let block = crate::proto::LinkBody {
+            display_timestamp: None,
+            r#type: "block".to_string(),
+            target: Some(link_body::Target::TargetFid(456)),
+        };
+        assert!(validations::link::validate_link_body(&block).is_ok());
+    }
 }
