@@ -298,7 +298,10 @@ impl BlockReceiver {
                         "Failed to read max block event seqnum during confirmation retry: {}",
                         err
                     );
-                    return;
+                    // A store read error must not silently abort the guard: fall through
+                    // to the loud error! + gap_unresolved metric below (via `break`)
+                    // rather than returning, so an unconfirmed seqnum is never swallowed.
+                    break;
                 }
             };
             warn!(
