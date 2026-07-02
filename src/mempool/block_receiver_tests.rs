@@ -5,7 +5,7 @@ mod tests {
     use crate::core::types::{
         Address, ShardId, SnapchainShard, SnapchainValidator, SnapchainValidatorSet, Vote,
     };
-    use crate::mempool::block_receiver::{BlockReceiver, Config};
+    use crate::mempool::block_receiver::{BlockReceiver, BlockReceiverError, Config};
     use crate::mempool::mempool::{MempoolRequest, MempoolSource};
     use crate::proto::{Block, CommitSignature, Commits, ShardHash};
     use crate::storage::db::RocksDB;
@@ -87,6 +87,7 @@ mod tests {
                 sync_batch_size: 500,
                 enabled: true,
             },
+            statsd: test_helper::statsd_client(),
         };
 
         TestSetup {
@@ -397,5 +398,52 @@ mod tests {
         process_heartbeats(&mut setup.shard_engine, &mut setup.mempool_rx, 1).await;
 
         handle.abort();
+    }
+
+    /// Regression guard for the seqnum-drop incident: a block event that is already
+    /// durably committed must confirm even when the `BlockConfirmedBody` broadcast is
+    /// missed (that channel is best-effort). Before the fix, `wait_for_confirmation`
+    /// trusted only the broadcast and would false-timeout, dropping the seqnum and
+    /// later wedging the shard.
+    #[tokio::test]
+    async fn test_confirmation_reads_store_when_broadcast_missed() {
+        let mut setup = setup_test().await;
+
+        // Produce a heartbeat block event and commit it directly to the shard store.
+        let blocks =
+            generate_heartbeats(&mut setup.block_engine, None, &setup.validator_keypair, 1);
+        let heartbeat_event = blocks
+            .iter()
+            .flat_map(|block| block.events.iter())
+            .last()
+            .expect("expected a heartbeat block event")
+            .clone();
+        let seqnum = heartbeat_event.seqnum();
+        test_helper::commit_block_events(&mut setup.shard_engine, vec![&heartbeat_event]).await;
+
+        // Make the confirmation broadcast unreachable: swap in a receiver whose sender
+        // we hold (but never send on), simulating a dropped/lagged BlockConfirmedBody.
+        let (_silent_tx, silent_rx) = broadcast::channel(4);
+        setup.block_receiver.event_rx = silent_rx;
+
+        // Must still confirm quickly, via the store rather than the silent broadcast.
+        let result = setup
+            .block_receiver
+            .wait_for_confirmation(seqnum, Duration::from_millis(500))
+            .await;
+        assert!(
+            result.is_ok(),
+            "a store-committed seqnum must confirm even without a broadcast notification"
+        );
+
+        // A seqnum the store does not have still times out (no false positives).
+        let result = setup
+            .block_receiver
+            .wait_for_confirmation(seqnum + 1, Duration::from_millis(300))
+            .await;
+        assert!(matches!(
+            result,
+            Err(BlockReceiverError::ConfirmationTimedOut)
+        ));
     }
 }

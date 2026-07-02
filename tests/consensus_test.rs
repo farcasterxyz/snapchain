@@ -566,6 +566,7 @@ impl NodeForTest {
                     enabled: true,
                     ..block_receiver::Config::default()
                 },
+                statsd: statsd_client.clone(),
             };
             let handle = tokio::spawn(async move { block_receiver.run().await });
             join_handles.push(handle);

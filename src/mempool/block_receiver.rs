@@ -3,7 +3,7 @@ use std::time::Duration;
 use tokio::select;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::Instant;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::consensus::consensus::SystemMessage;
 use crate::consensus::validator::StoredValidatorSets;
@@ -11,8 +11,21 @@ use crate::core::util::verify_signatures;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::proto::{hub_event, Block, HubEvent};
 use crate::storage::store::{mempool_poller::MempoolMessage, stores::Stores};
+use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// While waiting for a `BlockConfirmedBody` notification, also poll the durable
+/// store this often. The broadcast `event_rx` is best-effort (a lagged or dropped
+/// message is indistinguishable from a real miss), so the store is the tiebreaker.
+const STORE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How many times to re-drive a block's events into the durable store after a
+/// genuine confirmation timeout before giving up and alerting. This is preventive:
+/// it keeps the store ahead of consensus so a later dependent event never wedges the
+/// shard. It cannot recover an already-wedged shard (commit needs consensus, which is
+/// frozen) — that remains the job of the manual `reconcile_heartbeat_event` override.
+const MAX_CONFIRMATION_RETRIES: u32 = 3;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
@@ -50,6 +63,7 @@ pub struct BlockReceiver {
     pub stores: Stores,
     pub validator_sets: StoredValidatorSets,
     pub config: Config,
+    pub statsd: StatsdClientWrapper,
 }
 
 impl BlockReceiver {
@@ -86,14 +100,48 @@ impl BlockReceiver {
         return verify_signatures(&commits, &self.validator_sets);
     }
 
-    async fn wait_for_confirmation(
+    /// True once the durable block-event store has persisted `seqnum`.
+    ///
+    /// The store is the acknowledged source of truth; the `BlockConfirmedBody`
+    /// notifications on `event_rx` are only a best-effort fast path. Consulting the
+    /// store directly is what prevents a lagged or dropped broadcast message from
+    /// being mistaken for a real failure — the bug that silently dropped a seqnum and
+    /// later wedged the shard.
+    fn confirmed_in_store(&self, seqnum: u64) -> bool {
+        match self.stores.block_event_store.max_seqnum() {
+            Ok(max_seqnum) => max_seqnum >= seqnum,
+            Err(err) => {
+                warn!(
+                    shard = self.shard_id,
+                    seqnum,
+                    "Failed to read max block event seqnum from store while confirming: {}",
+                    err
+                );
+                false
+            }
+        }
+    }
+
+    pub(crate) async fn wait_for_confirmation(
         &mut self,
         seqnum: u64,
         timeout: Duration,
     ) -> Result<(), BlockReceiverError> {
         let deadline = Instant::now() + timeout;
         loop {
-            let timeout = tokio::time::sleep_until(deadline);
+            // The store is the source of truth. Check it before waiting (the event may
+            // already be committed) and after every wakeup, so a missed broadcast
+            // notification can never turn a durably-committed seqnum into a timeout.
+            if self.confirmed_in_store(seqnum) {
+                return Ok(());
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(BlockReceiverError::ConfirmationTimedOut);
+            }
+            // Wake on a confirmation event or a short poll tick (bounded by the
+            // deadline), so the store re-check above still runs if no broadcast arrives.
+            let poll = tokio::time::sleep(STORE_POLL_INTERVAL.min(deadline - now));
             select! {
                 event = self.event_rx.recv() => {
                     if let Ok(event) = event {
@@ -104,10 +152,7 @@ impl BlockReceiver {
                         }
                     }
                 }
-                _ = timeout => {
-                    return Err(BlockReceiverError::ConfirmationTimedOut)
-                }
-
+                _ = poll => {}
             }
         }
     }
@@ -214,19 +259,77 @@ impl BlockReceiver {
             };
 
             self.submit_block(&block).await;
-            // If confirmation fails, we'll try move onto the next block and retry this block if needed. Conservative timeout here is better so we don't keep retrying the same block events.
+            let target_seqnum = last_event_in_block.seqnum();
+            // Make sure the events we just submitted actually reach the durable store
+            // before advancing. On a genuine timeout (store still behind — not just a
+            // missed broadcast, which wait_for_confirmation now filters out) re-drive
+            // the missing range instead of silently moving on: an unpersisted seqnum
+            // here is the latent gap that later wedges the shard when a dependent event
+            // is rejected as "not next".
             if let Err(BlockReceiverError::ConfirmationTimedOut) = self
-                .wait_for_confirmation(
-                    last_event_in_block.seqnum(),
-                    self.config.single_block_confirmation_timeout,
-                )
+                .wait_for_confirmation(target_seqnum, self.config.single_block_confirmation_timeout)
                 .await
             {
-                warn!(
-                    seqnum = last_event_in_block.seqnum(),
-                    "Timed out waiting for confirmation",
-                );
+                self.ensure_events_confirmed(target_seqnum).await;
             };
         }
+    }
+
+    /// Re-drive block events up to `target_seqnum` into the durable store after a
+    /// genuine confirmation timeout, retrying a bounded number of times via the same
+    /// `sync_missing_block_events` path used for forward gaps. Unlike the previous
+    /// warn-and-continue behavior, this refuses to let the receiver advance past an
+    /// unpersisted seqnum.
+    ///
+    /// This is *preventive* — it keeps the store ahead of consensus so a later
+    /// dependent event never wedges the shard. It cannot un-wedge a shard whose
+    /// consensus is already frozen on the dependent block (commit needs consensus);
+    /// recovering that state remains the job of the manual `reconcile_heartbeat_event`
+    /// override.
+    async fn ensure_events_confirmed(&mut self, target_seqnum: u64) {
+        for attempt in 1..=MAX_CONFIRMATION_RETRIES {
+            let from = match self.stores.block_event_store.max_seqnum() {
+                Ok(max_seqnum) if max_seqnum >= target_seqnum => return,
+                Ok(max_seqnum) => max_seqnum + 1,
+                Err(err) => {
+                    warn!(
+                        shard = self.shard_id,
+                        target_seqnum,
+                        "Failed to read max block event seqnum during confirmation retry: {}",
+                        err
+                    );
+                    return;
+                }
+            };
+            warn!(
+                shard = self.shard_id,
+                target_seqnum,
+                from,
+                attempt,
+                "Block event confirmation timed out; re-syncing missing range"
+            );
+            if self
+                .sync_missing_block_events(from, target_seqnum)
+                .await
+                .is_ok()
+                && self.confirmed_in_store(target_seqnum)
+            {
+                return;
+            }
+        }
+        if self.confirmed_in_store(target_seqnum) {
+            return;
+        }
+        // The gap survived every retry. Surface it loudly and as a metric so it is
+        // alertable *before* a dependent event wedges the shard — this incident was
+        // invisible until a human noticed the halt.
+        error!(
+            shard = self.shard_id,
+            seqnum = target_seqnum,
+            retries = MAX_CONFIRMATION_RETRIES,
+            "Block event confirmation unresolved after retries; shard may wedge if a dependent event arrives"
+        );
+        self.statsd
+            .count_with_shard(self.shard_id, "block_receiver.gap_unresolved", 1, vec![]);
     }
 }
