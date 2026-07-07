@@ -248,7 +248,8 @@ fn build_secondary_indices(
             }
             on_chain_event::Body::SignerMigratedEventBody(_)
             | on_chain_event::Body::StorageRentEventBody(_)
-            | on_chain_event::Body::TierPurchaseEventBody(_) => {}
+            | on_chain_event::Body::TierPurchaseEventBody(_)
+            | on_chain_event::Body::ChannelRegisterEventBody(_) => {}
         }
     };
 

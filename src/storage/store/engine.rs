@@ -767,6 +767,13 @@ impl ShardEngine {
                     continue;
                 }
 
+                if onchain_event.r#type() == OnChainEventType::EventTypeChannelRegister
+                    && !version.is_enabled(ProtocolFeature::ChannelRegistrations)
+                {
+                    warn!("Saw channel register event while feature isn't active");
+                    continue;
+                }
+
                 let event = self
                     .stores
                     .onchain_event_store

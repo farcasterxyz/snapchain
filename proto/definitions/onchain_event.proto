@@ -7,6 +7,7 @@ enum OnChainEventType {
   EVENT_TYPE_ID_REGISTER = 3;
   EVENT_TYPE_STORAGE_RENT = 4;
   EVENT_TYPE_TIER_PURCHASE = 5;
+  EVENT_TYPE_CHANNEL_REGISTER = 6;
 }
 
 message OnChainEvent {
@@ -24,9 +25,38 @@ message OnChainEvent {
     IdRegisterEventBody id_register_event_body = 11;
     StorageRentEventBody storage_rent_event_body = 12;
     TierPurchaseBody tier_purchase_event_body = 15;
+    ChannelRegisterBody channel_register_event_body = 16;
   }
   uint32 tx_index = 13;
   uint32 version = 14;
+}
+
+enum ChannelRegisterEventType {
+  CHANNEL_REGISTER_EVENT_TYPE_NONE = 0;
+  CHANNEL_REGISTER_EVENT_TYPE_REGISTER = 1;
+  CHANNEL_REGISTER_EVENT_TYPE_RENEW = 2;
+  CHANNEL_REGISTER_EVENT_TYPE_TRANSFER = 3;
+}
+
+// Field-presence rules below are producer conventions (the connector), not
+// validated at merge; merge-side validation lands with the ingestion code.
+message ChannelRegisterBody {
+  // Verbatim name from the registry event; label = keccak256(channel_key).
+  // Empty for TRANSFER (the ERC-721 Transfer log carries only the tokenId).
+  // The registry contract validates name length only, so non-UTF-8 names are
+  // registrable onchain but unrepresentable here (proto3 string requires valid
+  // UTF-8). Such logs fail ABI decode in the connector and are never minted as
+  // events — deterministic on every node, and the dropped names are
+  // untypeable in any client.
+  string channel_key = 1;
+  // Absolute unix timestamp in seconds. 0 for TRANSFER.
+  uint64 expiry = 2;
+  // REGISTER: the registrant. TRANSFER: the receiving address. Empty for RENEW.
+  bytes owner_address = 3;
+  ChannelRegisterEventType event_type = 4;
+  // keccak256(channel_key), equal to the ERC-721 tokenId. Present on all event
+  // types — the join key tying REGISTER/RENEW/TRANSFER for one channel together.
+  bytes label = 5;
 }
 
 enum TierType {

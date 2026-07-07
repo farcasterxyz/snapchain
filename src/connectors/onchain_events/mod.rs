@@ -575,6 +575,9 @@ impl Subscriber {
             OnChainEventType::EventTypeTierPurchase => {
                 self.count("num_tier_purchase_events", 1, vec![]);
             }
+            OnChainEventType::EventTypeChannelRegister => {
+                self.count("num_channel_register_events", 1, vec![]);
+            }
         };
         match &event.body {
             Some(on_chain_event::Body::IdRegisterEventBody(id_register_event_body)) => {

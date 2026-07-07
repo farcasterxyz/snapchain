@@ -481,6 +481,12 @@ impl BlockEngine {
         let mut validation_errors = vec![];
         for message in &snapchain_txn.system_messages {
             if let Some(ref onchain_event) = message.on_chain_event {
+                if onchain_event.r#type() == proto::OnChainEventType::EventTypeChannelRegister
+                    && !version.is_enabled(ProtocolFeature::ChannelRegistrations)
+                {
+                    warn!("Saw channel register event while feature isn't active");
+                    continue;
+                }
                 match self
                     .stores
                     .onchain_event_store
