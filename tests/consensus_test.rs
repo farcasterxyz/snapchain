@@ -2036,6 +2036,19 @@ async fn test_read_node_relays_rpc_submission_to_validators() {
         .await
         .expect("read nodes did not catch up after RPC-via-read-node commit");
 
+    // Block and shard-chunk replication advance independently on read nodes, and
+    // the cast lives in a shard chunk — not the block — so reaching the block
+    // height alone doesn't guarantee the read node's cast store has been updated.
+    // Wait for the shard chunks too before asserting (mirrors `test_read_node`);
+    // otherwise the assertion races shard-chunk application and flakes under CI load.
+    for shard_id in 1..num_shards + 1 {
+        let target_height = network.max_shard_height(shard_id);
+        network
+            .read_wait_for_shard_chunk(shard_id, target_height)
+            .await
+            .expect("read nodes did not catch up to shard chunk after RPC-via-read-node commit");
+    }
+
     assert_network_has_cast(&network, fid, cast.hash);
 }
 
