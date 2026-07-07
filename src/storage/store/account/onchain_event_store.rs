@@ -1,11 +1,12 @@
-use super::{get_from_db_or_txn, make_fid_key, StoreEventHandler};
+use super::{get_from_db_or_txn, make_fid_key, StoreEventHandler, TRUE_VALUE};
 use crate::core::error::HubError;
 use crate::core::message::HubEventExt;
 use crate::core::util::FarcasterTime;
 use crate::proto::{
-    self, on_chain_event, on_chain_event::Body, FarcasterNetwork, HubEvent, HubEventType,
-    IdRegisterEventBody, IdRegisterEventType, MergeOnChainEventBody, OnChainEvent,
-    OnChainEventType, SignerEventBody, SignerEventType, TierType,
+    self, on_chain_event, on_chain_event::Body, ChannelRegisterBody, ChannelRegisterEventType,
+    FarcasterNetwork, HubEvent, HubEventType, IdRegisterEventBody, IdRegisterEventType,
+    MergeOnChainEventBody, OnChainEvent, OnChainEventType, SignerEventBody, SignerEventType,
+    TierType,
 };
 use crate::proto::{LendStorageBody, StorageUnitType};
 use crate::storage::constants::{OnChainEventPostfix, RootPrefix, PAGE_SIZE_MAX};
@@ -13,12 +14,16 @@ use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch, RocksdbE
 use crate::storage::store::account::StoreOptions;
 use crate::storage::util::increment_vec_u8;
 use crate::version::version::{EngineVersion, ProtocolFeature};
+use alloy_primitives::keccak256;
 use prost::{DecodeError, Message};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use thiserror::Error;
+use tracing::warn;
 
 static PAGE_SIZE: usize = 1000;
+const EVM_ADDRESS_LENGTH: usize = 20;
+const CHANNEL_LABEL_LENGTH: usize = 32;
 
 pub const UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP: u32 = 1724889600; // 2024-08-29 Midnight UTC
 const UNIT_TYPE_2024_CUTOFF_TIMESTAMP: u32 = 1752685200; // 2025-07-16 5PM UTC (Engine version 6)
@@ -57,6 +62,22 @@ pub enum OnchainEventStorageError {
 pub struct OnchainEventsPage {
     pub onchain_events: Vec<OnChainEvent>,
     pub next_page_token: Option<Vec<u8>>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ChannelOwner {
+    #[prost(string, tag = "1")]
+    pub channel_key: String,
+    #[prost(bytes = "vec", tag = "2")]
+    pub owner_address: Vec<u8>,
+    #[prost(uint64, tag = "3")]
+    pub expiry: u64,
+    #[prost(uint32, tag = "4")]
+    pub block_number: u32,
+    #[prost(uint32, tag = "5")]
+    pub tx_index: u32,
+    #[prost(uint32, tag = "6")]
+    pub log_index: u32,
 }
 
 fn make_block_number_key(block_number: u32) -> Vec<u8> {
@@ -126,6 +147,249 @@ fn make_signer_onchain_event_by_signer_key(fid: u64, key: Vec<u8>) -> Vec<u8> {
     signer_key.extend(make_fid_key(fid));
     signer_key.extend(key);
     signer_key
+}
+
+fn make_channel_register_by_channel_key(channel_key: &str) -> Vec<u8> {
+    let mut key = vec![
+        RootPrefix::OnChainEvent as u8,
+        OnChainEventPostfix::ChannelRegisterByChannelKey as u8,
+    ];
+    key.extend(channel_key.as_bytes());
+    key
+}
+
+fn make_channel_register_channel_key_by_label_key(label: &[u8]) -> Vec<u8> {
+    let mut key = vec![
+        RootPrefix::OnChainEvent as u8,
+        OnChainEventPostfix::ChannelRegisterChannelKeyByLabel as u8,
+    ];
+    key.extend(label);
+    key
+}
+
+fn make_channel_register_by_owner_address_prefix(owner_address: &[u8]) -> Vec<u8> {
+    let mut key = vec![
+        RootPrefix::OnChainEvent as u8,
+        OnChainEventPostfix::ChannelRegisterByOwnerAddress as u8,
+    ];
+    key.extend(owner_address);
+    key
+}
+
+fn make_channel_register_by_owner_address_key(owner_address: &[u8], channel_key: &str) -> Vec<u8> {
+    let mut key = make_channel_register_by_owner_address_prefix(owner_address);
+    key.extend(channel_key.as_bytes());
+    key
+}
+
+fn incoming_channel_event_is_older(owner: &ChannelOwner, event: &OnChainEvent) -> bool {
+    (event.block_number, event.tx_index, event.log_index)
+        < (owner.block_number, owner.tx_index, owner.log_index)
+}
+
+fn channel_owner_from_event(
+    onchain_event: &OnChainEvent,
+    body: &ChannelRegisterBody,
+) -> ChannelOwner {
+    ChannelOwner {
+        channel_key: body.channel_key.clone(),
+        owner_address: body.owner_address.clone(),
+        expiry: body.expiry,
+        block_number: onchain_event.block_number,
+        tx_index: onchain_event.tx_index,
+        log_index: onchain_event.log_index,
+    }
+}
+
+fn move_channel_owner_address_index(
+    txn: &mut RocksDbTransactionBatch,
+    channel_key: &str,
+    old_owner_address: Option<&[u8]>,
+    new_owner_address: &[u8],
+) {
+    if let Some(old_owner_address) = old_owner_address {
+        if old_owner_address != new_owner_address {
+            txn.delete(make_channel_register_by_owner_address_key(
+                old_owner_address,
+                channel_key,
+            ));
+        }
+    }
+
+    txn.put(
+        make_channel_register_by_owner_address_key(new_owner_address, channel_key),
+        vec![TRUE_VALUE],
+    );
+}
+
+fn validate_channel_label(label: &[u8]) -> bool {
+    if label.len() != CHANNEL_LABEL_LENGTH {
+        warn!(
+            "Skipping channel register index update with invalid label length {}",
+            label.len()
+        );
+        return false;
+    }
+    true
+}
+
+fn validate_channel_owner_address(owner_address: &[u8]) -> bool {
+    if owner_address.len() != EVM_ADDRESS_LENGTH {
+        warn!(
+            "Skipping channel register index update with invalid owner address length {}",
+            owner_address.len()
+        );
+        return false;
+    }
+    true
+}
+
+fn validate_channel_key_label(channel_key: &str, label: &[u8]) -> bool {
+    if keccak256(channel_key.as_bytes()).as_slice() != label {
+        warn!("Skipping channel register index update with mismatched channel key and label");
+        return false;
+    }
+    true
+}
+
+fn read_channel_owner_by_channel_key(
+    db: &RocksDB,
+    txn: &RocksDbTransactionBatch,
+    channel_key: &str,
+) -> Result<Option<ChannelOwner>, OnchainEventStorageError> {
+    match get_from_db_or_txn(db, txn, &make_channel_register_by_channel_key(channel_key))? {
+        Some(bytes) => Ok(Some(ChannelOwner::decode(bytes.as_slice())?)),
+        None => Ok(None),
+    }
+}
+
+fn build_secondary_indices_for_channel_register(
+    db: &RocksDB,
+    txn: &mut RocksDbTransactionBatch,
+    onchain_event: &OnChainEvent,
+    channel_register_body: &ChannelRegisterBody,
+) -> Result<(), OnchainEventStorageError> {
+    if !validate_channel_label(&channel_register_body.label) {
+        return Ok(());
+    }
+
+    match channel_register_body.event_type() {
+        ChannelRegisterEventType::Register => {
+            if !validate_channel_owner_address(&channel_register_body.owner_address)
+                || !validate_channel_key_label(
+                    &channel_register_body.channel_key,
+                    &channel_register_body.label,
+                )
+            {
+                return Ok(());
+            }
+
+            let channel_owner = channel_owner_from_event(onchain_event, channel_register_body);
+            let by_channel_key =
+                make_channel_register_by_channel_key(&channel_register_body.channel_key);
+
+            let existing_owner =
+                read_channel_owner_by_channel_key(db, txn, &channel_register_body.channel_key)?;
+            if let Some(existing_owner) = &existing_owner {
+                if incoming_channel_event_is_older(&existing_owner, onchain_event) {
+                    return Ok(());
+                }
+            }
+
+            txn.put(
+                make_channel_register_channel_key_by_label_key(&channel_register_body.label),
+                channel_register_body.channel_key.as_bytes().to_vec(),
+            );
+            move_channel_owner_address_index(
+                txn,
+                &channel_register_body.channel_key,
+                existing_owner
+                    .as_ref()
+                    .map(|owner| owner.owner_address.as_slice()),
+                &channel_owner.owner_address,
+            );
+            txn.put(by_channel_key, channel_owner.encode_to_vec());
+        }
+        ChannelRegisterEventType::Renew => {
+            if !validate_channel_key_label(
+                &channel_register_body.channel_key,
+                &channel_register_body.label,
+            ) {
+                return Ok(());
+            }
+
+            let Some(mut channel_owner) =
+                read_channel_owner_by_channel_key(db, txn, &channel_register_body.channel_key)?
+            else {
+                warn!(
+                    "Skipping channel renew for unknown channel key {}",
+                    channel_register_body.channel_key
+                );
+                return Ok(());
+            };
+            if incoming_channel_event_is_older(&channel_owner, onchain_event) {
+                return Ok(());
+            }
+            channel_owner.expiry = channel_register_body.expiry;
+            channel_owner.channel_key = channel_register_body.channel_key.clone();
+            channel_owner.block_number = onchain_event.block_number;
+            channel_owner.tx_index = onchain_event.tx_index;
+            channel_owner.log_index = onchain_event.log_index;
+            txn.put(
+                make_channel_register_by_channel_key(&channel_register_body.channel_key),
+                channel_owner.encode_to_vec(),
+            );
+        }
+        ChannelRegisterEventType::Transfer => {
+            if !validate_channel_owner_address(&channel_register_body.owner_address) {
+                return Ok(());
+            }
+
+            let Some(channel_key) = get_from_db_or_txn(
+                db,
+                txn,
+                &make_channel_register_channel_key_by_label_key(&channel_register_body.label),
+            )?
+            else {
+                warn!(
+                    "Skipping channel transfer for unknown label 0x{}",
+                    hex::encode(&channel_register_body.label)
+                );
+                return Ok(());
+            };
+            let channel_key =
+                String::from_utf8(channel_key).map_err(|err| DecodeError::new(err.to_string()))?;
+            let Some(mut channel_owner) = read_channel_owner_by_channel_key(db, txn, &channel_key)?
+            else {
+                warn!(
+                    "Skipping channel transfer for unknown channel key {}",
+                    channel_key
+                );
+                return Ok(());
+            };
+            if incoming_channel_event_is_older(&channel_owner, onchain_event) {
+                return Ok(());
+            }
+            let old_owner_address = channel_owner.owner_address.clone();
+            channel_owner.owner_address = channel_register_body.owner_address.clone();
+            channel_owner.block_number = onchain_event.block_number;
+            channel_owner.tx_index = onchain_event.tx_index;
+            channel_owner.log_index = onchain_event.log_index;
+            move_channel_owner_address_index(
+                txn,
+                &channel_key,
+                Some(&old_owner_address),
+                &channel_owner.owner_address,
+            );
+            txn.put(
+                make_channel_register_by_channel_key(&channel_key),
+                channel_owner.encode_to_vec(),
+            );
+        }
+        ChannelRegisterEventType::None => {}
+    }
+
+    Ok(())
 }
 
 fn build_secondary_indices_for_id_register(
@@ -246,12 +510,101 @@ fn build_secondary_indices(
             on_chain_event::Body::SignerEventBody(signer_event_body) => {
                 build_secondary_indices_for_signer(db, txn, onchain_event, signer_event_body)?
             }
+            on_chain_event::Body::ChannelRegisterEventBody(channel_register_body) => {
+                build_secondary_indices_for_channel_register(
+                    db,
+                    txn,
+                    onchain_event,
+                    channel_register_body,
+                )?
+            }
             on_chain_event::Body::SignerMigratedEventBody(_)
             | on_chain_event::Body::StorageRentEventBody(_)
-            | on_chain_event::Body::TierPurchaseEventBody(_)
-            | on_chain_event::Body::ChannelRegisterEventBody(_) => {}
+            | on_chain_event::Body::TierPurchaseEventBody(_) => {}
         }
     };
+
+    Ok(())
+}
+
+pub fn put_channel_key_by_owner_address(
+    txn: &mut RocksDbTransactionBatch,
+    owner_address: &[u8],
+    channel_key: &str,
+) -> Result<(), OnchainEventStorageError> {
+    validate_evm_address(owner_address)?;
+    txn.put(
+        make_channel_register_by_owner_address_key(owner_address, channel_key),
+        vec![TRUE_VALUE],
+    );
+    Ok(())
+}
+
+pub fn delete_channel_key_by_owner_address(
+    txn: &mut RocksDbTransactionBatch,
+    owner_address: &[u8],
+    channel_key: &str,
+) -> Result<(), OnchainEventStorageError> {
+    validate_evm_address(owner_address)?;
+    txn.delete(make_channel_register_by_owner_address_key(
+        owner_address,
+        channel_key,
+    ));
+    Ok(())
+}
+
+pub fn get_channel_keys_by_owner_address(
+    db: &RocksDB,
+    owner_address: &[u8],
+    page_options: &PageOptions,
+) -> Result<(Vec<String>, Option<Vec<u8>>), OnchainEventStorageError> {
+    validate_evm_address(owner_address)?;
+    let start_prefix = make_channel_register_by_owner_address_prefix(owner_address);
+    let stop_prefix = increment_vec_u8(&start_prefix);
+    let channel_key_offset = start_prefix.len();
+    let mut channel_keys = vec![];
+    let mut last_key = vec![];
+
+    db.for_each_iterator_by_prefix_paged(
+        Some(start_prefix),
+        Some(stop_prefix),
+        page_options,
+        |key, _value| {
+            let channel_key = String::from_utf8(key[channel_key_offset..].to_vec())
+                .map_err(|e| HubError::from(DecodeError::new(e.to_string())))?;
+            channel_keys.push(channel_key);
+
+            if channel_keys.len() >= page_options.page_size.unwrap_or(PAGE_SIZE_MAX) {
+                last_key = key.to_vec();
+                return Ok(true);
+            }
+
+            Ok(false)
+        },
+    )
+    .map_err(OnchainEventStorageError::HubError)?;
+
+    let next_page_token = if last_key.is_empty() {
+        None
+    } else {
+        Some(last_key)
+    };
+
+    Ok((channel_keys, next_page_token))
+}
+
+fn validate_evm_address(owner_address: &[u8]) -> Result<(), OnchainEventStorageError> {
+    if owner_address.len() != EVM_ADDRESS_LENGTH {
+        return Err(HubError::validation_failure(
+            format!(
+                "expected {}-byte EVM address, got {}",
+                EVM_ADDRESS_LENGTH,
+                owner_address.len()
+            )
+            .as_str(),
+        )
+        .into());
+    }
 
     Ok(())
 }
@@ -702,6 +1055,16 @@ impl OnchainEventStore {
         txn_batch: Option<&RocksDbTransactionBatch>,
     ) -> Result<Option<OnChainEvent>, OnchainEventStorageError> {
         get_event_by_secondary_key(&self.db, make_id_register_by_fid_key(fid), txn_batch)
+    }
+
+    pub fn get_channel_owner(
+        &self,
+        channel_key: &str,
+        txn_batch: Option<&RocksDbTransactionBatch>,
+    ) -> Result<Option<ChannelOwner>, OnchainEventStorageError> {
+        let empty_txn = RocksDbTransactionBatch::new();
+        let txn = txn_batch.unwrap_or(&empty_txn);
+        read_channel_owner_by_channel_key(&self.db, txn, channel_key)
     }
 
     pub fn get_active_signer(

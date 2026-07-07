@@ -162,4 +162,9 @@ pub enum OnChainEventPostfix {
 
     #[allow(dead_code)] // TODO
     IdRegisterByCustodyAddress = 53,
+
+    ChannelRegisterByFid = 54,
+    ChannelRegisterByChannelKey = 55,
+    ChannelRegisterChannelKeyByLabel = 56,
+    ChannelRegisterByOwnerAddress = 57,
 }

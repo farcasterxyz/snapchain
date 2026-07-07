@@ -2,16 +2,19 @@
 mod tests {
     use crate::core::util::FarcasterTime;
     use crate::proto::{
-        FarcasterNetwork, IdRegisterEventType, SignerEventType, StorageUnitType, TierType,
+        ChannelRegisterEventType, FarcasterNetwork, IdRegisterEventType, SignerEventType,
+        StorageUnitType, TierType,
     };
-    use crate::storage::db;
     use crate::storage::db::RocksDbTransactionBatch;
+    use crate::storage::db::{self, PageOptions};
     use crate::storage::store::account::{
-        block_event_store, OnchainEventStore, StorageSlot, StoreEventHandler,
+        block_event_store, delete_channel_key_by_owner_address, get_channel_keys_by_owner_address,
+        put_channel_key_by_owner_address, OnchainEventStore, StorageSlot, StoreEventHandler,
     };
     use crate::storage::store::test_helper::default_custody_address;
     use crate::utils::factory::{self, events_factory, signers};
     use crate::version::version::EngineVersion;
+    use alloy_primitives::keccak256;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -26,6 +29,22 @@ mod tests {
             OnchainEventStore::new(Arc::new(db), StoreEventHandler::new()),
             dir,
         )
+    }
+
+    fn channel_label(channel_key: &str) -> Vec<u8> {
+        keccak256(channel_key.as_bytes()).to_vec()
+    }
+
+    fn owner(byte: u8) -> Vec<u8> {
+        vec![byte; 20]
+    }
+
+    fn merge_channel_events(store: &OnchainEventStore, events: Vec<crate::proto::OnChainEvent>) {
+        let mut txn = RocksDbTransactionBatch::new();
+        for event in events {
+            store.merge_onchain_event(event, &mut txn).unwrap();
+        }
+        store.db.commit(txn).unwrap();
     }
 
     // This test deliberately pins historical grant dates, because a unit's cohort (legacy / 2024 /
@@ -527,8 +546,6 @@ mod tests {
 
     #[test]
     fn test_get_all_onchain_events() {
-        use crate::storage::db::PageOptions;
-
         let (store, _dir) = store();
 
         // Create different types of onchain events
@@ -644,6 +661,376 @@ mod tests {
                 rent_event1.clone(),
                 rent_event2.clone(),
             ]
+        );
+    }
+
+    #[test]
+    fn test_channel_renew_overwrites_expiry() {
+        let (store, _dir) = store();
+        let label = channel_label("pets");
+        let owner = owner(10);
+        merge_channel_events(
+            &store,
+            vec![
+                events_factory::create_channel_register_event(
+                    "pets",
+                    label.clone(),
+                    owner.clone(),
+                    100,
+                    ChannelRegisterEventType::Register,
+                    1,
+                    1,
+                ),
+                events_factory::create_channel_register_event(
+                    "pets",
+                    label,
+                    vec![],
+                    250,
+                    ChannelRegisterEventType::Renew,
+                    2,
+                    1,
+                ),
+            ],
+        );
+
+        let channel_owner = store.get_channel_owner("pets", None).unwrap().unwrap();
+        assert_eq!(channel_owner.channel_key, "pets");
+        assert_eq!(channel_owner.owner_address, owner);
+        assert_eq!(channel_owner.expiry, 250);
+    }
+
+    #[test]
+    fn test_channel_transfer_rebinds_owner_address() {
+        let (store, _dir) = store();
+        let label = channel_label("casts");
+        let first_owner = owner(11);
+        let next_owner = owner(12);
+        merge_channel_events(
+            &store,
+            vec![
+                events_factory::create_channel_register_event(
+                    "casts",
+                    label.clone(),
+                    first_owner,
+                    100,
+                    ChannelRegisterEventType::Register,
+                    1,
+                    1,
+                ),
+                events_factory::create_channel_register_event(
+                    "",
+                    label,
+                    next_owner.clone(),
+                    0,
+                    ChannelRegisterEventType::Transfer,
+                    2,
+                    1,
+                ),
+            ],
+        );
+
+        let channel_owner = store.get_channel_owner("casts", None).unwrap().unwrap();
+        assert_eq!(channel_owner.channel_key, "casts");
+        assert_eq!(channel_owner.owner_address, next_owner);
+        assert_eq!(channel_owner.expiry, 100);
+    }
+
+    #[test]
+    fn test_channel_reregistration_supersedes_prior_record() {
+        let (store, _dir) = store();
+        let label = channel_label("music");
+        let old_owner = owner(13);
+        let new_owner = owner(14);
+        merge_channel_events(
+            &store,
+            vec![
+                events_factory::create_channel_register_event(
+                    "music",
+                    label.clone(),
+                    old_owner,
+                    100,
+                    ChannelRegisterEventType::Register,
+                    1,
+                    1,
+                ),
+                events_factory::create_channel_register_event(
+                    "music",
+                    label,
+                    new_owner.clone(),
+                    500,
+                    ChannelRegisterEventType::Register,
+                    10,
+                    1,
+                ),
+            ],
+        );
+
+        let channel_owner = store.get_channel_owner("music", None).unwrap().unwrap();
+        assert_eq!(channel_owner.channel_key, "music");
+        assert_eq!(channel_owner.owner_address, new_owner);
+        assert_eq!(channel_owner.expiry, 500);
+    }
+
+    #[test]
+    fn test_channel_mint_transfer_does_not_clobber_register() {
+        let (store, _dir) = store();
+        let label = channel_label("frames");
+        let owner = owner(15);
+        merge_channel_events(
+            &store,
+            vec![
+                events_factory::create_channel_register_event(
+                    "frames",
+                    label.clone(),
+                    owner.clone(),
+                    900,
+                    ChannelRegisterEventType::Register,
+                    1,
+                    1,
+                ),
+                events_factory::create_channel_register_event(
+                    "",
+                    label,
+                    owner.clone(),
+                    0,
+                    ChannelRegisterEventType::Transfer,
+                    1,
+                    2,
+                ),
+            ],
+        );
+
+        let channel_owner = store.get_channel_owner("frames", None).unwrap().unwrap();
+        assert_eq!(channel_owner.owner_address, owner);
+        assert_eq!(channel_owner.expiry, 900);
+    }
+
+    #[test]
+    fn test_channel_mint_transfer_before_register_is_skipped_then_register_applies() {
+        let (store, _dir) = store();
+        let label = channel_label("early");
+        let owner = owner(18);
+        merge_channel_events(
+            &store,
+            vec![
+                events_factory::create_channel_register_event(
+                    "",
+                    label.clone(),
+                    owner.clone(),
+                    0,
+                    ChannelRegisterEventType::Transfer,
+                    1,
+                    1,
+                ),
+                events_factory::create_channel_register_event(
+                    "early",
+                    label,
+                    owner.clone(),
+                    700,
+                    ChannelRegisterEventType::Register,
+                    1,
+                    2,
+                ),
+            ],
+        );
+
+        let channel_owner = store.get_channel_owner("early", None).unwrap().unwrap();
+        assert_eq!(channel_owner.owner_address, owner);
+        assert_eq!(channel_owner.expiry, 700);
+    }
+
+    #[test]
+    fn test_channel_transfer_unknown_label_skips_index_update() {
+        let (store, _dir) = store();
+        merge_channel_events(
+            &store,
+            vec![events_factory::create_channel_register_event(
+                "",
+                channel_label("unknown"),
+                owner(16),
+                0,
+                ChannelRegisterEventType::Transfer,
+                1,
+                1,
+            )],
+        );
+
+        assert!(store.get_channel_owner("unknown", None).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_channel_register_with_mismatched_label_skips_index_update() {
+        let (store, _dir) = store();
+        merge_channel_events(
+            &store,
+            vec![events_factory::create_channel_register_event(
+                "bad-label",
+                channel_label("different"),
+                owner(19),
+                100,
+                ChannelRegisterEventType::Register,
+                1,
+                1,
+            )],
+        );
+
+        assert!(store
+            .get_channel_owner("bad-label", None)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_channel_transfer_with_invalid_owner_address_skips_index_update() {
+        let (store, _dir) = store();
+        let label = channel_label("invalid-owner");
+        let original_owner = owner(20);
+        merge_channel_events(
+            &store,
+            vec![
+                events_factory::create_channel_register_event(
+                    "invalid-owner",
+                    label.clone(),
+                    original_owner.clone(),
+                    100,
+                    ChannelRegisterEventType::Register,
+                    1,
+                    1,
+                ),
+                events_factory::create_channel_register_event(
+                    "",
+                    label,
+                    vec![1, 2, 3],
+                    0,
+                    ChannelRegisterEventType::Transfer,
+                    2,
+                    1,
+                ),
+            ],
+        );
+
+        let channel_owner = store
+            .get_channel_owner("invalid-owner", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(channel_owner.owner_address, original_owner);
+        assert_eq!(channel_owner.expiry, 100);
+    }
+
+    #[test]
+    fn test_channel_by_owner_address_moves_on_transfer_and_reregistration() {
+        let (store, _dir) = store();
+        let page_options = PageOptions {
+            page_size: None,
+            page_token: None,
+            reverse: false,
+        };
+        let first_owner = owner(21);
+        let second_owner = owner(22);
+        let third_owner = owner(23);
+        let label = channel_label("moves");
+
+        merge_channel_events(
+            &store,
+            vec![
+                events_factory::create_channel_register_event(
+                    "moves",
+                    label.clone(),
+                    first_owner.clone(),
+                    100,
+                    ChannelRegisterEventType::Register,
+                    1,
+                    1,
+                ),
+                events_factory::create_channel_register_event(
+                    "",
+                    label.clone(),
+                    second_owner.clone(),
+                    0,
+                    ChannelRegisterEventType::Transfer,
+                    2,
+                    1,
+                ),
+            ],
+        );
+
+        let (channel_keys, _) =
+            get_channel_keys_by_owner_address(&store.db, &first_owner, &page_options).unwrap();
+        assert!(channel_keys.is_empty());
+        let (channel_keys, _) =
+            get_channel_keys_by_owner_address(&store.db, &second_owner, &page_options).unwrap();
+        assert_eq!(channel_keys, vec!["moves".to_string()]);
+
+        merge_channel_events(
+            &store,
+            vec![events_factory::create_channel_register_event(
+                "moves",
+                label,
+                third_owner.clone(),
+                500,
+                ChannelRegisterEventType::Register,
+                10,
+                1,
+            )],
+        );
+
+        let (channel_keys, _) =
+            get_channel_keys_by_owner_address(&store.db, &second_owner, &page_options).unwrap();
+        assert!(channel_keys.is_empty());
+        let (channel_keys, _) =
+            get_channel_keys_by_owner_address(&store.db, &third_owner, &page_options).unwrap();
+        assert_eq!(channel_keys, vec!["moves".to_string()]);
+    }
+
+    #[test]
+    fn test_channel_by_owner_address_helpers_write_read_delete() {
+        let (store, _dir) = store();
+        let address = owner(17);
+        let page_options = PageOptions {
+            page_size: None,
+            page_token: None,
+            reverse: false,
+        };
+
+        let mut txn = RocksDbTransactionBatch::new();
+        put_channel_key_by_owner_address(&mut txn, &address, "alpha").unwrap();
+        put_channel_key_by_owner_address(&mut txn, &address, "beta").unwrap();
+        store.db.commit(txn).unwrap();
+
+        let (channel_keys, next_page_token) =
+            get_channel_keys_by_owner_address(&store.db, &address, &page_options).unwrap();
+        assert_eq!(channel_keys, vec!["alpha".to_string(), "beta".to_string()]);
+        assert!(next_page_token.is_none());
+
+        let mut txn = RocksDbTransactionBatch::new();
+        delete_channel_key_by_owner_address(&mut txn, &address, "alpha").unwrap();
+        store.db.commit(txn).unwrap();
+
+        let (channel_keys, _) =
+            get_channel_keys_by_owner_address(&store.db, &address, &page_options).unwrap();
+        assert_eq!(channel_keys, vec!["beta".to_string()]);
+    }
+
+    #[test]
+    fn test_channel_by_owner_address_helpers_reject_non_evm_addresses() {
+        let (store, _dir) = store();
+        let short_address = vec![1, 2, 3];
+        let page_options = PageOptions {
+            page_size: None,
+            page_token: None,
+            reverse: false,
+        };
+
+        let mut txn = RocksDbTransactionBatch::new();
+        let err = put_channel_key_by_owner_address(&mut txn, &short_address, "alpha")
+            .err()
+            .unwrap();
+        assert_eq!(
+            err.to_string(),
+            "bad_request.validation_failure/expected 20-byte EVM address, got 3"
+        );
+        assert!(
+            get_channel_keys_by_owner_address(&store.db, &short_address, &page_options).is_err()
         );
     }
 }

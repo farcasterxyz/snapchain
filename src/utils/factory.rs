@@ -53,8 +53,9 @@ pub mod events_factory {
     use super::*;
     use crate::{
         proto::{
-            self, BlockEvent, BlockEventData, BlockEventType, HeartbeatEventBody,
-            MergeMessageEventBody, StorageUnitType, TierPurchaseBody, TierType,
+            self, BlockEvent, BlockEventData, BlockEventType, ChannelRegisterBody,
+            ChannelRegisterEventType, HeartbeatEventBody, MergeMessageEventBody, StorageUnitType,
+            TierPurchaseBody, TierType,
         },
         storage::store::account::{StorageSlot, UNIT_TYPE_LEGACY_CUTOFF_TIMESTAMP},
     };
@@ -278,6 +279,38 @@ pub mod events_factory {
                     for_days,
                     tier_type: TierType::Pro as i32,
                     payer: rand::random::<[u8; 32]>().to_vec(),
+                },
+            )),
+        }
+    }
+
+    pub fn create_channel_register_event(
+        channel_key: &str,
+        label: Vec<u8>,
+        owner_address: Vec<u8>,
+        expiry: u64,
+        event_type: ChannelRegisterEventType,
+        block_number: u32,
+        log_index: u32,
+    ) -> OnChainEvent {
+        OnChainEvent {
+            r#type: OnChainEventType::EventTypeChannelRegister as i32,
+            chain_id: 8453,
+            block_number,
+            block_hash: vec![],
+            block_timestamp: block_number as u64,
+            transaction_hash: rand::random::<[u8; 32]>().to_vec(),
+            log_index,
+            fid: 0,
+            tx_index: 0,
+            version: 1,
+            body: Some(proto::on_chain_event::Body::ChannelRegisterEventBody(
+                ChannelRegisterBody {
+                    channel_key: channel_key.to_string(),
+                    expiry,
+                    owner_address,
+                    event_type: event_type as i32,
+                    label,
                 },
             )),
         }
