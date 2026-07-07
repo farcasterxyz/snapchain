@@ -45,6 +45,14 @@ jobs:
           path: ./snapchain
           fetch-depth: 0
 
+      # Cache cargo registry/git and the build target dir to speed up CI. Malachite is a path
+      # dependency; cargo fingerprints its source and rebuilds only the changed malachite crates
+      # on a ref bump, so no custom cache key is needed to keep artifacts correct.
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./snapchain
+
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
