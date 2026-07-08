@@ -1313,10 +1313,22 @@ pub struct ChannelsByFidRequest {
     pub fid: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub page_token: Option<Vec<u8>>,
 
     // For backwards compatibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pageSize: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pageToken: Option<Vec<u8>>,
 }
 
 impl ChannelsByFidRequest {
@@ -1324,6 +1336,7 @@ impl ChannelsByFidRequest {
         proto::ChannelsByFidRequest {
             fid: self.fid,
             page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
         }
     }
 }
@@ -1345,6 +1358,32 @@ pub struct ChannelsResponse {
     pub channels: Vec<ChannelInfo>,
     #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
     pub next_page_token: Option<String>,
+}
+
+impl From<proto::ChannelInfo> for ChannelInfo {
+    fn from(channel: proto::ChannelInfo) -> Self {
+        ChannelInfo {
+            channel_key: channel.channel_key,
+            fid: channel.fid,
+            owner_address: channel.owner_address,
+            expiry: channel.expiry,
+        }
+    }
+}
+
+impl From<proto::ChannelsResponse> for ChannelsResponse {
+    fn from(response: proto::ChannelsResponse) -> Self {
+        ChannelsResponse {
+            channels: response
+                .channels
+                .into_iter()
+                .map(ChannelInfo::from)
+                .collect(),
+            next_page_token: response
+                .next_page_token
+                .map(|token| BASE64_STANDARD.encode(token)),
+        }
+    }
 }
 
 #[allow(non_camel_case_types)]
@@ -3673,22 +3712,7 @@ where
                 error: "Failed to get channels by address".to_string(),
                 error_detail: Some(e.to_string()),
             })?;
-        let channels_response = response.into_inner();
-        Ok(ChannelsResponse {
-            channels: channels_response
-                .channels
-                .into_iter()
-                .map(|channel| ChannelInfo {
-                    channel_key: channel.channel_key,
-                    fid: channel.fid,
-                    owner_address: channel.owner_address,
-                    expiry: channel.expiry,
-                })
-                .collect(),
-            next_page_token: channels_response
-                .next_page_token
-                .map(|token| BASE64_STANDARD.encode(token)),
-        })
+        Ok(response.into_inner().into())
     }
 
     /// GET /v1/channelsByFid
@@ -3705,22 +3729,7 @@ where
                 error: "Failed to get channels by fid".to_string(),
                 error_detail: Some(e.to_string()),
             })?;
-        let channels_response = response.into_inner();
-        Ok(ChannelsResponse {
-            channels: channels_response
-                .channels
-                .into_iter()
-                .map(|channel| ChannelInfo {
-                    channel_key: channel.channel_key,
-                    fid: channel.fid,
-                    owner_address: channel.owner_address,
-                    expiry: channel.expiry,
-                })
-                .collect(),
-            next_page_token: channels_response
-                .next_page_token
-                .map(|token| BASE64_STANDARD.encode(token)),
-        })
+        Ok(response.into_inner().into())
     }
 
     async fn get_events(&self, req: EventsRequest) -> Result<EventsResponse, ErrorResponse> {

@@ -5,7 +5,7 @@ mod tests {
     use async_trait::async_trait;
     use base64::Engine;
     use prost::Message;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use tokio::time::{sleep, timeout};
@@ -143,6 +143,7 @@ mod tests {
             .get_channels_by_fid(Request::new(ChannelsByFidRequest {
                 fid,
                 page_size: None,
+                page_token: None,
             }))
             .await
             .unwrap()
@@ -205,7 +206,11 @@ mod tests {
     }
 
     fn channels_by_fid_request(fid: u64, page_size: Option<u32>) -> Request<ChannelsByFidRequest> {
-        Request::new(ChannelsByFidRequest { fid, page_size })
+        Request::new(ChannelsByFidRequest {
+            fid,
+            page_size,
+            page_token: None,
+        })
     }
 
     fn merge_verification(stores: &Stores, verification: &proto::Message) {
@@ -1025,8 +1030,52 @@ mod tests {
         assert_eq!(by_address.next_page_token, None);
     }
 
+    // Registers `channel_key` to `owner_address` at a distinct chain position so
+    // several channels can coexist under one or more owner addresses.
+    fn register_channel_at(
+        block_engine: &BlockEngine,
+        channel_key: &str,
+        owner_address: Vec<u8>,
+        expiry: u64,
+        log_index: u32,
+    ) {
+        merge_channel_event(
+            block_engine,
+            events_factory::create_channel_register_event(
+                channel_key,
+                channel_label(channel_key),
+                owner_address,
+                expiry,
+                ChannelRegisterEventType::Register,
+                1,
+                log_index,
+            ),
+        );
+    }
+
+    async fn channels_by_fid_page(
+        service: &MyHubService,
+        fid: u64,
+        page_size: Option<u32>,
+        page_token: Option<Vec<u8>>,
+    ) -> proto::ChannelsResponse {
+        service
+            .get_channels_by_fid(Request::new(ChannelsByFidRequest {
+                fid,
+                page_size,
+                page_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+    }
+
+    // Scenario (g): a fid with two verified addresses owning four channels total,
+    // walked with page_size smaller than the total. Asserts the paged union equals
+    // the unpaginated result with no duplicates, that a page crosses an address
+    // boundary, and that the final page's token is unset (== enumeration complete).
     #[tokio::test]
-    async fn test_channel_reads_by_fid_page_size_is_result_cap() {
+    async fn test_channel_reads_by_fid_cursor_round_trip() {
         let (
             stores,
             _senders,
@@ -1036,35 +1085,214 @@ mod tests {
             _shard_decision_tx,
             _block_decision_tx,
         ) = make_server(None).await;
-        let address = owner_address(14);
+        // owner_address(20) < owner_address(21) lexicographically, so the composite
+        // cursor visits address_a's channels before address_b's.
+        let address_a = owner_address(20);
+        let address_b = owner_address(21);
         let expiry = now_unix_seconds() + 3600;
-        merge_channel_registration(&block_engine, "cap_one", address.clone(), expiry);
-        merge_channel_event(
-            &block_engine,
-            events_factory::create_channel_register_event(
-                "cap_two",
-                channel_label("cap_two"),
-                address.clone(),
-                expiry,
-                ChannelRegisterEventType::Register,
-                1,
-                2,
-            ),
+        register_channel_at(&block_engine, "rt_a1", address_a.clone(), expiry, 1);
+        register_channel_at(&block_engine, "rt_a2", address_a.clone(), expiry, 2);
+        register_channel_at(&block_engine, "rt_b1", address_b.clone(), expiry, 3);
+        register_channel_at(&block_engine, "rt_b2", address_b.clone(), expiry, 4);
+        merge_verification(
+            stores.get(&1).unwrap(),
+            &verification_add(SHARD1_FID, address_a.clone(), 10),
         );
+        merge_verification(
+            stores.get(&1).unwrap(),
+            &verification_add(SHARD1_FID, address_b.clone(), 20),
+        );
+
+        // Unpaginated baseline: all four channels, no token.
+        let full = channels_by_fid_page(&service, SHARD1_FID, None, None).await;
+        let full_keys: Vec<String> = full
+            .channels
+            .iter()
+            .map(|c| c.channel_key.clone())
+            .collect();
+        assert_eq!(full_keys, vec!["rt_a1", "rt_a2", "rt_b1", "rt_b2"]);
+        assert_eq!(full.next_page_token, None);
+
+        // Page 1 of 2 (page_size 3) must cross the address_a -> address_b boundary.
+        let page1 = channels_by_fid_page(&service, SHARD1_FID, Some(3), None).await;
+        assert_eq!(page1.channels.len(), 3);
+        assert!(page1.next_page_token.is_some());
+        let page1_owners: HashSet<Vec<u8>> = page1
+            .channels
+            .iter()
+            .map(|c| c.owner_address.clone())
+            .collect();
+        assert_eq!(page1_owners.len(), 2, "page 1 should span both addresses");
+
+        // Page 2 resumes strictly after the token and completes.
+        let page2 =
+            channels_by_fid_page(&service, SHARD1_FID, Some(3), page1.next_page_token.clone())
+                .await;
+        assert_eq!(page2.next_page_token, None);
+
+        let mut walked: Vec<String> = page1
+            .channels
+            .iter()
+            .chain(page2.channels.iter())
+            .map(|c| c.channel_key.clone())
+            .collect();
+        let deduped: HashSet<String> = walked.iter().cloned().collect();
+        assert_eq!(deduped.len(), walked.len(), "pages must not duplicate");
+        walked.sort();
+        assert_eq!(walked, vec!["rt_a1", "rt_a2", "rt_b1", "rt_b2"]);
+        for channel in page1.channels.iter().chain(page2.channels.iter()) {
+            assert_eq!(channel.fid, SHARD1_FID);
+        }
+    }
+
+    // The composite cursor round-trips at the single-address level too, and the
+    // page-size clamp caps an omitted/oversized request without dropping results.
+    #[tokio::test]
+    async fn test_channel_reads_by_address_pagination_round_trip() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let address = owner_address(22);
+        let expiry = now_unix_seconds() + 3600;
+        register_channel_at(&block_engine, "pa_1", address.clone(), expiry, 1);
+        register_channel_at(&block_engine, "pa_2", address.clone(), expiry, 2);
+        register_channel_at(&block_engine, "pa_3", address.clone(), expiry, 3);
+        merge_verification(
+            stores.get(&1).unwrap(),
+            &verification_add(SHARD1_FID, address.clone(), 10),
+        );
+
+        let mut walked = Vec::new();
+        let mut page_token = None;
+        loop {
+            let response = service
+                .get_channels_by_address(Request::new(ChannelsByAddressRequest {
+                    owner_address: address.clone(),
+                    page_size: Some(2),
+                    page_token: page_token.clone(),
+                    reverse: None,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            for channel in &response.channels {
+                assert_eq!(channel.fid, SHARD1_FID);
+                walked.push(channel.channel_key.clone());
+            }
+            match response.next_page_token {
+                Some(token) => page_token = Some(token),
+                None => break,
+            }
+        }
+
+        assert_eq!(walked, vec!["pa_1", "pa_2", "pa_3"]);
+    }
+
+    // Non-EVM (Solana) and malformed verifications must never contribute an
+    // owner address to the EVM-only channel resolution.
+    #[tokio::test]
+    async fn test_channel_reads_by_fid_excludes_non_ethereum() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let evm_address = owner_address(23);
+        let solana_address = vec![7u8; 32];
+        let expiry = now_unix_seconds() + 3600;
+        register_channel_at(&block_engine, "evm_owned", evm_address.clone(), expiry, 1);
+
+        merge_verification(
+            stores.get(&1).unwrap(),
+            &verification_add(SHARD1_FID, evm_address, 10),
+        );
+        // The Solana verification's 32-byte address must be filtered out before
+        // resolution. Without the protocol/length filter it would be treated as an
+        // owner address and fail the 20-byte EVM validation, erroring the request.
+        let solana_verification = messages_factory::verifications::create_verification_add(
+            SHARD1_FID,
+            2, // Protocol::Solana
+            solana_address,
+            vec![],
+            vec![],
+            Some(20),
+            None,
+        );
+        merge_verification(stores.get(&1).unwrap(), &solana_verification);
+
+        let keys = get_channels_by_fid_keys(&service, SHARD1_FID).await;
+        assert_eq!(keys, vec!["evm_owned"]);
+    }
+
+    // A non-20-byte address is a client error, mapped to INVALID_ARGUMENT rather
+    // than surfacing as an opaque internal error.
+    #[tokio::test]
+    async fn test_channel_reads_by_address_rejects_malformed_address() {
+        let (
+            _stores,
+            _senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+
+        let status = service
+            .get_channels_by_address(channels_by_address_request(vec![0u8; 4]))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    // Pins the accepted last-key cursor contract (shared with by-address): when a
+    // page fills exactly on the final entry, a token is still returned and the
+    // next request returns an empty final page with the token unset. Callers page
+    // until the token is unset; a present token does not guarantee more results.
+    #[tokio::test]
+    async fn test_channel_reads_by_fid_exact_boundary_yields_final_empty_page() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let address = owner_address(25);
+        let expiry = now_unix_seconds() + 3600;
+        register_channel_at(&block_engine, "eb_1", address.clone(), expiry, 1);
+        register_channel_at(&block_engine, "eb_2", address.clone(), expiry, 2);
         merge_verification(
             stores.get(&1).unwrap(),
             &verification_add(SHARD1_FID, address, 10),
         );
 
-        let response = service
-            .get_channels_by_fid(channels_by_fid_request(SHARD1_FID, Some(1)))
-            .await
-            .unwrap()
-            .into_inner();
+        // Two channels, page_size 2: the page fills exactly on the last entry.
+        let page1 = channels_by_fid_page(&service, SHARD1_FID, Some(2), None).await;
+        assert_eq!(page1.channels.len(), 2);
+        assert!(
+            page1.next_page_token.is_some(),
+            "boundary-aligned page still returns a token"
+        );
 
-        assert_eq!(response.channels.len(), 1);
-        assert_eq!(response.channels[0].fid, SHARD1_FID);
-        assert_eq!(response.next_page_token, None);
+        // Resuming yields the final empty page with no token.
+        let page2 =
+            channels_by_fid_page(&service, SHARD1_FID, Some(2), page1.next_page_token.clone())
+                .await;
+        assert!(page2.channels.is_empty());
+        assert_eq!(page2.next_page_token, None);
     }
 
     #[tokio::test]

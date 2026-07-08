@@ -181,8 +181,10 @@ message ChannelsByAddressRequest {
 
 message ChannelsByFidRequest {
   uint64 fid = 1;
-  // Result cap only. This joined read has no page token or reverse cursor.
   optional uint32 page_size = 2;
+  // Opaque composite cursor over the fid's verified addresses joined with the
+  // channel owner-address index. No reverse cursor (addresses iterate ascending).
+  optional bytes page_token = 3;
 }
 
 message ChannelInfo {

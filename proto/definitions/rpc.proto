@@ -97,7 +97,10 @@ service HubService {
   // node-local consistency class as GetChannelOwner: resolution covers only the
   // verification shards this node hosts, and shard-0 ownership state and
   // verification shards progress independently, so transient skew is possible.
-  // This read is not consensus.
+  // This read is not consensus. `page_token` is opaque bytes; callers page until
+  // `next_page_token` is unset, which marks the end of enumeration. A page that
+  // lands exactly on the last entry may return a token that yields one final
+  // empty page, so a present token means "page again", not "results guaranteed".
   rpc GetChannelsByAddress(ChannelsByAddressRequest) returns (ChannelsResponse);
   // Lists unexpired channels that currently resolve to `fid`. The node must
   // host the fid's home shard, following existing fid-routed read behavior.
@@ -106,9 +109,13 @@ service HubService {
   // hosts, and shard-0 ownership state and verification shards progress
   // independently, so transient skew is possible. This read is not consensus.
   //
-  // This is a joined read over the fid's verified EVM addresses and channel
-  // owner-address indexes, so it has no natural single cursor. `page_size` is a
-  // result cap only; `next_page_token` is always unset.
+  // This is a joined read over the fid's verified EVM addresses and the channel
+  // owner-address index. The verified addresses are enumerated in ascending
+  // order, making the owner-address index key a globally ordered composite
+  // cursor across the join. `page_token` is opaque bytes and the paging contract
+  // is identical to GetChannelsByAddress: page until `next_page_token` is unset
+  // (a boundary-aligned page may return one final empty page). There is no
+  // `reverse` (addresses iterate ascending only).
   rpc GetChannelsByFid(ChannelsByFidRequest) returns (ChannelsResponse);
   rpc GetIdRegistryOnChainEvent(FidRequest) returns (OnChainEvent);
   rpc GetIdRegistryOnChainEventByAddress(IdRegistryEventByAddressRequest) returns (OnChainEvent);
