@@ -55,16 +55,17 @@ use crate::version::version::{EngineVersion, ProtocolFeature};
 use hex::ToHex;
 use moka::policy::EvictionPolicy;
 use moka::sync::{Cache, CacheBuilder};
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, timeout};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::{Request, Response, Status};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 pub const MEMPOOL_ADD_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
@@ -122,18 +123,21 @@ fn signer_store_error_to_status(err: HubError) -> Status {
     }
 }
 
-fn unix_timestamp_seconds() -> Result<u64, Status> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .map_err(|err| Status::internal(format!("System time error: {}", err)))
-}
-
 fn resolve_channel_owner_fid(
     shard_stores: &HashMap<u32, Stores>,
     owner_address: &[u8],
 ) -> Result<u64, Status> {
-    let mut winner: Option<(u64, [u8; 24])> = None;
+    // Last-write-wins winner, keyed so that plain tuple ordering encodes the
+    // selection rule. `ts_hash` is a 24-byte big-endian timestamp ++ message
+    // hash, so the higher `ts_hash` wins on timestamp and, at equal timestamps,
+    // on the message-hash bytes — this already resolves any tie between two
+    // distinct verifications. `Reverse(fid)` is only consulted on a full 24-byte
+    // `ts_hash` tie, which cannot occur for two distinct messages (the hash
+    // differs); it exists solely to keep the result total and deterministic.
+    // Strict `>` means an identical key never displaces the incumbent, so the
+    // winner is independent of shard/candidate iteration order (the
+    // `shard_stores` map iterates in an unspecified order).
+    let mut winner: Option<([u8; 24], Reverse<u64>)> = None;
 
     for stores in shard_stores.values() {
         let candidates = VerificationStore::get_verifications_by_address(
@@ -142,6 +146,9 @@ fn resolve_channel_owner_fid(
         )
         .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?;
 
+        // The by-address index yields best-effort candidates; re-validate each
+        // against the primary VerificationAdds and take the authoritative
+        // `ts_hash` from the surviving primary message, never the index value.
         for (fid, _indexed_ts_hash) in candidates {
             let Some(primary_add) = VerificationStore::get_verification_add(
                 &stores.verification_store,
@@ -155,24 +162,29 @@ fn resolve_channel_owner_fid(
             };
 
             let Some(data) = primary_add.data.as_ref() else {
+                // Unlike a missing primary add (a benign stale/orphan index entry),
+                // a surviving primary VerificationAdd with no `data` is a data-integrity
+                // anomaly: messages carry `data` by construction once merged. Skip it
+                // so one bad record can't fail the read, but log it so the anomaly is
+                // observable rather than silently under-reporting the owner as parked.
+                warn!(
+                    fid,
+                    owner_address = hex::encode(owner_address),
+                    "channel owner resolution skipped a VerificationAdd with no data",
+                );
                 continue;
             };
             let ts_hash = make_ts_hash(data.timestamp, &primary_add.hash)
                 .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?;
 
-            if winner
-                .as_ref()
-                .map(|(winner_fid, winner_ts_hash)| {
-                    ts_hash > *winner_ts_hash || (ts_hash == *winner_ts_hash && fid < *winner_fid)
-                })
-                .unwrap_or(true)
-            {
-                winner = Some((fid, ts_hash));
+            let candidate = (ts_hash, Reverse(fid));
+            if winner.as_ref().is_none_or(|best| candidate > *best) {
+                winner = Some(candidate);
             }
         }
     }
 
-    Ok(winner.map(|(fid, _ts_hash)| fid).unwrap_or(0))
+    Ok(winner.map(|(_ts_hash, fid)| fid.0).unwrap_or(0))
 }
 
 /// Build a unified `Signer` record from an on-chain `OnChainEvent` whose body is a
@@ -2669,7 +2681,7 @@ impl HubService for MyHubService {
             .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
             .ok_or_else(|| Status::not_found("channel not registered"))?;
 
-        if channel_owner.expiry <= unix_timestamp_seconds()? {
+        if channel_owner.expiry <= FarcasterTime::current().to_unix_seconds() {
             return Err(Status::not_found("channel registration expired"));
         }
 

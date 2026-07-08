@@ -98,15 +98,11 @@ mod tests {
         block_stores.onchain_event_store.db.commit(txn).unwrap();
     }
 
-    fn merge_verification_add(stores: &Stores, verification_add: &proto::Message) {
+    fn merge_verification(stores: &Stores, verification: &proto::Message) {
         let mut txn = RocksDbTransactionBatch::new();
         stores
             .verification_store
-            .merge(
-                verification_add,
-                &mut txn,
-                &test_helper::default_merge_ctx(),
-            )
+            .merge(verification, &mut txn, &test_helper::default_merge_ctx())
             .unwrap();
         stores.db.commit(txn).unwrap();
     }
@@ -468,7 +464,7 @@ mod tests {
             Some(1),
             None,
         );
-        merge_verification_add(stores.get(&1).unwrap(), &verification_add);
+        merge_verification(stores.get(&1).unwrap(), &verification_add);
 
         let response = service
             .get_channel_owner(Request::new(ChannelOwnerRequest {
@@ -519,8 +515,8 @@ mod tests {
             Some(10),
             None,
         );
-        merge_verification_add(stores.get(&2).unwrap(), &later);
-        merge_verification_add(stores.get(&1).unwrap(), &earlier);
+        merge_verification(stores.get(&2).unwrap(), &later);
+        merge_verification(stores.get(&1).unwrap(), &earlier);
 
         let response = service
             .get_channel_owner(Request::new(ChannelOwnerRequest {
@@ -531,6 +527,122 @@ mod tests {
             .into_inner();
 
         assert_eq!(response.fid, SHARD2_FID);
+    }
+
+    // Mirror of the test above with the later verification on the OTHER shard.
+    // `shard_stores` is a `HashMap` iterated in an unspecified order, so running
+    // both directions pins "latest ts_hash wins" rather than an accidental
+    // "last shard iterated wins" — one direction alone could pass by luck of the
+    // hash order.
+    #[tokio::test]
+    async fn test_get_channel_owner_lww_across_hosted_shards_reversed() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let address = owner_address(6);
+        merge_channel_registration(
+            &block_engine,
+            "lww_reversed",
+            address.clone(),
+            now_unix_seconds() + 3600,
+        );
+        let later = messages_factory::verifications::create_verification_add(
+            SHARD1_FID,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(20),
+            None,
+        );
+        let earlier = messages_factory::verifications::create_verification_add(
+            SHARD2_FID,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(10),
+            None,
+        );
+        merge_verification(stores.get(&1).unwrap(), &later);
+        merge_verification(stores.get(&2).unwrap(), &earlier);
+
+        let response = service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: "lww_reversed".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.fid, SHARD1_FID);
+    }
+
+    // A verification remove deletes both the primary add and its by-address index
+    // entry, so a channel that resolved to an fid must fall back to parked once
+    // the owner removes their verification. This exercises the real
+    // add-then-remove path end to end, distinct from the artificial orphan seed.
+    #[tokio::test]
+    async fn test_get_channel_owner_reverts_to_parked_after_verification_remove() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let address = owner_address(7);
+        let expiry = now_unix_seconds() + 3600;
+        merge_channel_registration(&block_engine, "removed", address.clone(), expiry);
+        let verification_add = messages_factory::verifications::create_verification_add(
+            SHARD1_FID,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(10),
+            None,
+        );
+        merge_verification(stores.get(&1).unwrap(), &verification_add);
+
+        // Sanity: resolves to the verifier before the remove.
+        let resolved = service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: "removed".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resolved.fid, SHARD1_FID);
+
+        // Later remove wins the CRDT and clears both the add and the index entry.
+        let verification_remove = messages_factory::verifications::create_verification_remove(
+            SHARD1_FID,
+            address.clone(),
+            Some(20),
+            None,
+        );
+        merge_verification(stores.get(&1).unwrap(), &verification_remove);
+
+        let response = service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: "removed".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.fid, 0);
+        assert_eq!(response.owner_address, address);
+        assert_eq!(response.expiry, expiry);
     }
 
     #[tokio::test]

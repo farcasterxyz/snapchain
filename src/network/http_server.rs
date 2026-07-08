@@ -1259,9 +1259,13 @@ impl ChannelOwnerRequest {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChannelOwnerResponse {
+    /// 0 = registered but no verified owner found on this node's hosted shards
+    /// ("parked"). Parking is computed at read time, never stored.
     pub fid: u64,
+    /// Raw 20-byte EVM address from the channel registry fold, hex-encoded.
     #[serde(with = "serdehex", rename = "ownerAddress")]
     pub owner_address: Vec<u8>,
+    /// Absolute expiry, unix seconds, as emitted by the registry contract.
     pub expiry: u64,
 }
 

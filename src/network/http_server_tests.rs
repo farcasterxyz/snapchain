@@ -454,6 +454,33 @@ pub mod tests {
         assert_eq!(nonces.get("8888"), Some(&serde_json::json!(0)));
     }
 
+    /// Pins the JSON-on-the-wire shape for `ChannelOwnerResponse`. The address
+    /// field must serialize as a "0x"-prefixed lowercase hex string under the
+    /// camelCase key `ownerAddress` (via `serdehex` + `rename`); `fid` and
+    /// `expiry` are plain numbers. The stub-based HTTP test elsewhere only
+    /// exercises the default (all-zero) response, so this pins the encoding of a
+    /// real 20-byte address.
+    #[test]
+    fn channel_owner_response_json_shape() {
+        use crate::network::http_server::ChannelOwnerResponse;
+
+        let response = ChannelOwnerResponse {
+            fid: 1234,
+            owner_address: vec![0x11u8; 20],
+            expiry: 1_700_000_000,
+        };
+
+        let json = serde_json::to_value(&response).expect("serialize");
+        assert_eq!(json["fid"], 1234);
+        assert_eq!(json["expiry"], 1_700_000_000u64);
+        assert_eq!(
+            json["ownerAddress"],
+            serde_json::json!(format!("0x{}", "11".repeat(20)))
+        );
+        // The raw snake_case key must not leak onto the wire.
+        assert!(json.get("owner_address").is_none());
+    }
+
     #[tokio::test]
     async fn test_current_peers() {
         let mut mock_hub_service = MockHubService::new();
