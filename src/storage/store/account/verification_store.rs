@@ -1,8 +1,9 @@
 use super::{
-    make_fid_key, make_user_key,
+    make_fid_key, make_user_key, read_fid_key,
     store::{Store, StoreDef},
-    MessagesPage, StoreEventHandler, TS_HASH_LENGTH,
+    MessagesPage, StoreEventHandler, FID_BYTES, TS_HASH_LENGTH,
 };
+use crate::storage::util::increment_vec_u8;
 use crate::{
     core::error::HubError,
     proto::{Protocol, SignatureScheme, VerificationAddAddressBody, VerificationRemoveBody},
@@ -110,12 +111,9 @@ impl StoreDef for VerificationStoreDef {
             });
         }
 
-        // Puts the fid into the byAddress index
-        let by_address_key = Self::make_verification_by_address_key(address);
-        txn.put(
-            by_address_key,
-            make_fid_key(message.data.as_ref().unwrap().fid),
-        );
+        let by_address_key =
+            Self::make_verification_by_address_key(address, message.data.as_ref().unwrap().fid);
+        txn.put(by_address_key, _ts_hash.to_vec());
 
         Ok(())
     }
@@ -144,8 +142,8 @@ impl StoreDef for VerificationStoreDef {
             });
         }
 
-        // Delete the message key from byAddress index
-        let by_address_key = Self::make_verification_by_address_key(address);
+        let by_address_key =
+            Self::make_verification_by_address_key(address, message.data.as_ref().unwrap().fid);
         txn.delete(by_address_key);
 
         Ok(())
@@ -213,11 +211,18 @@ impl StoreDef for VerificationStoreDef {
 
 impl VerificationStoreDef {
     #[inline]
-    pub fn make_verification_by_address_key(address: &[u8]) -> Vec<u8> {
+    pub fn make_verification_by_address_prefix(address: &[u8]) -> Vec<u8> {
         let mut key = Vec::with_capacity(1 + address.len());
 
         key.push(RootPrefix::VerificationByAddress as u8);
         key.extend_from_slice(address);
+        key
+    }
+
+    #[inline]
+    pub fn make_verification_by_address_key(address: &[u8], fid: u64) -> Vec<u8> {
+        let mut key = Self::make_verification_by_address_prefix(address);
+        key.extend_from_slice(&make_fid_key(fid));
         key
     }
 
@@ -312,6 +317,45 @@ impl VerificationStore {
         };
 
         store.get_remove(&partial_message)
+    }
+
+    pub fn get_verifications_by_address(
+        store: &Store<VerificationStoreDef>,
+        address: &[u8],
+    ) -> Result<Vec<(u64, [u8; TS_HASH_LENGTH])>, HubError> {
+        let prefix = VerificationStoreDef::make_verification_by_address_prefix(address);
+        let stop_prefix = increment_vec_u8(&prefix);
+        let mut entries = Vec::new();
+
+        store.db().for_each_iterator_by_prefix(
+            Some(prefix.clone()),
+            Some(stop_prefix),
+            &PageOptions::default(),
+            |key, value| {
+                if key.len() != prefix.len() + FID_BYTES {
+                    return Err(HubError::internal_db_error(&format!(
+                        "invalid verification by address key length: {}",
+                        key.len()
+                    )));
+                }
+
+                if value.len() != TS_HASH_LENGTH {
+                    return Err(HubError::internal_db_error(&format!(
+                        "invalid verification by address value length: {}",
+                        value.len()
+                    )));
+                }
+
+                let fid = read_fid_key(key, prefix.len());
+                let mut ts_hash = [0u8; TS_HASH_LENGTH];
+                ts_hash.copy_from_slice(value);
+                entries.push((fid, ts_hash));
+
+                Ok(false)
+            },
+        )?;
+
+        Ok(entries)
     }
 
     #[inline]

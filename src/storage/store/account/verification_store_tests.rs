@@ -4,7 +4,7 @@ mod tests {
     use crate::proto::{self as message, hub_event, HubEventType, ReactionType};
     use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{
-        Store, StoreEventHandler, VerificationStore, VerificationStoreDef,
+        make_ts_hash, Store, StoreEventHandler, VerificationStore, VerificationStoreDef,
     };
     use crate::storage::util::{decrement_vec_u8, increment_vec_u8};
     use crate::utils::factory::{address, messages_factory};
@@ -176,6 +176,146 @@ mod tests {
 
         let retrieved = VerificationStore::get_verification_remove(&store, FID_FOR_TEST, &address);
         assert_eq!(retrieved.unwrap().unwrap(), verification_remove);
+    }
+
+    #[test]
+    fn test_get_verifications_by_address_returns_all_fid_entries() {
+        let (store, db, _temp_dir) = create_test_store();
+        let address = address::generate_random_address();
+        let fid1 = FID_FOR_TEST;
+        let fid2 = FID_FOR_TEST + 1;
+
+        let verification_add1 = messages_factory::verifications::create_verification_add(
+            fid1,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(1),
+            None,
+        );
+        let verification_add2 = messages_factory::verifications::create_verification_add(
+            fid2,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(2),
+            None,
+        );
+
+        merge_message_success(&store, &db, &verification_add1);
+        merge_message_success(&store, &db, &verification_add2);
+
+        let entries = VerificationStore::get_verifications_by_address(&store, &address).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|(fid, ts_hash)| {
+            *fid == fid1
+                && *ts_hash
+                    == make_ts_hash(
+                        verification_add1.data.as_ref().unwrap().timestamp,
+                        &verification_add1.hash,
+                    )
+                    .unwrap()
+        }));
+        assert!(entries.iter().any(|(fid, ts_hash)| {
+            *fid == fid2
+                && *ts_hash
+                    == make_ts_hash(
+                        verification_add2.data.as_ref().unwrap().timestamp,
+                        &verification_add2.hash,
+                    )
+                    .unwrap()
+        }));
+    }
+
+    #[test]
+    fn test_verification_remove_deletes_only_own_by_address_entry() {
+        let (store, db, _temp_dir) = create_test_store();
+        let address = address::generate_random_address();
+        let fid1 = FID_FOR_TEST;
+        let fid2 = FID_FOR_TEST + 1;
+
+        let verification_add1 = messages_factory::verifications::create_verification_add(
+            fid1,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(1),
+            None,
+        );
+        let verification_add2 = messages_factory::verifications::create_verification_add(
+            fid2,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(2),
+            None,
+        );
+        let verification_remove1 = messages_factory::verifications::create_verification_remove(
+            fid1,
+            address.clone(),
+            Some(3),
+            None,
+        );
+
+        merge_message_success(&store, &db, &verification_add1);
+        merge_message_success(&store, &db, &verification_add2);
+        merge_message_with_conflicts(&store, &db, &verification_remove1, vec![verification_add1]);
+
+        let entries = VerificationStore::get_verifications_by_address(&store, &address).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, fid2);
+        assert_eq!(
+            entries[0].1,
+            make_ts_hash(
+                verification_add2.data.as_ref().unwrap().timestamp,
+                &verification_add2.hash
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_reverify_updates_own_by_address_ts_hash() {
+        let (store, db, _temp_dir) = create_test_store();
+        let address = address::generate_random_address();
+
+        let verification_add = messages_factory::verifications::create_verification_add(
+            FID_FOR_TEST,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(1),
+            None,
+        );
+        let verification_add_later = messages_factory::verifications::create_verification_add(
+            FID_FOR_TEST,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(2),
+            None,
+        );
+
+        merge_message_success(&store, &db, &verification_add);
+        merge_message_with_conflicts(&store, &db, &verification_add_later, vec![verification_add]);
+
+        let entries = VerificationStore::get_verifications_by_address(&store, &address).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, FID_FOR_TEST);
+        assert_eq!(
+            entries[0].1,
+            make_ts_hash(
+                verification_add_later.data.as_ref().unwrap().timestamp,
+                &verification_add_later.hash
+            )
+            .unwrap()
+        );
     }
 
     // getVerificationAddsByFid tests

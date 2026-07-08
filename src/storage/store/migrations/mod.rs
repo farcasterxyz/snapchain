@@ -1,5 +1,6 @@
 use crate::storage::db::{RocksDB, RocksdbError};
 use crate::storage::store::migrations::m1_fix_fname_index::M1FixFnameSecondaryIndex;
+use crate::storage::store::migrations::m2_verification_by_address_index::M2VerificationByAddressIndex;
 use crate::storage::store::stores::Stores;
 use crate::{core::error::HubError, storage::constants::RootPrefix};
 use async_trait::async_trait;
@@ -8,9 +9,10 @@ use thiserror::Error;
 use tracing::info;
 
 mod m1_fix_fname_index;
+mod m2_verification_by_address_index;
 
 /// The latest DB schema version supported by this version of the code.
-pub const LATEST_SCHEMA_VERSION: u32 = 1;
+pub const LATEST_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Error, Debug)]
 pub enum MigrationError {
@@ -57,7 +59,8 @@ impl MigrationRunner {
     pub fn new(context: MigrationContext) -> Self {
         let all_migrations: Vec<Box<dyn AsyncMigration>> = vec![
             Box::new(M1FixFnameSecondaryIndex),
-            // Add future migrations here, e.g., Box::new(M2DoSomethingElse)
+            Box::new(M2VerificationByAddressIndex),
+            // Add future migrations here, e.g., Box::new(M3DoSomethingElse)
         ];
 
         Self {
