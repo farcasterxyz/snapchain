@@ -224,20 +224,15 @@ fn move_channel_owner_address_index(
     channel_key: &str,
     old_owner_address: Option<&[u8]>,
     new_owner_address: &[u8],
-) {
+) -> Result<(), OnchainEventStorageError> {
     if let Some(old_owner_address) = old_owner_address {
         if old_owner_address != new_owner_address {
-            txn.delete(make_channel_register_by_owner_address_key(
-                old_owner_address,
-                channel_key,
-            ));
+            delete_channel_key_by_owner_address(txn, old_owner_address, channel_key)?;
         }
     }
 
-    txn.put(
-        make_channel_register_by_owner_address_key(new_owner_address, channel_key),
-        vec![TRUE_VALUE],
-    );
+    put_channel_key_by_owner_address(txn, new_owner_address, channel_key)?;
+    Ok(())
 }
 
 fn validate_channel_label(label: &[u8]) -> bool {
@@ -329,7 +324,7 @@ fn build_secondary_indices_for_channel_register(
                     .as_ref()
                     .map(|owner| owner.owner_address.as_slice()),
                 &channel_owner.owner_address,
-            );
+            )?;
             txn.put(by_channel_key, channel_owner.encode_to_vec());
         }
         ChannelRegisterEventType::Renew => {
@@ -397,7 +392,7 @@ fn build_secondary_indices_for_channel_register(
                 &channel_key,
                 Some(&old_owner_address),
                 &channel_owner.owner_address,
-            );
+            )?;
             txn.put(
                 make_channel_register_by_channel_key(&channel_key),
                 channel_owner.encode_to_vec(),
@@ -553,11 +548,9 @@ fn build_secondary_indices(
     Ok(())
 }
 
-// Read/write surface for the by-owner-address index, used by the later
-// resolution/binding increment. The production merge path maintains this same index via
-// `move_channel_owner_address_index`; both go through
-// `make_channel_register_by_owner_address_key`, which is the single source of truth for
-// the key layout.
+// Read/write surface for the by-owner-address index. The production merge path
+// goes through these helpers so validation, key layout, and values stay
+// centralized.
 pub fn put_channel_key_by_owner_address(
     txn: &mut RocksDbTransactionBatch,
     owner_address: &[u8],
