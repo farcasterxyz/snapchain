@@ -302,60 +302,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sorted_block_engine_events_does_not_change_events_hash() {
-        let (mut sorted_engine, _sorted_temp_dir) = setup();
-        let (mut unsorted_engine, _unsorted_temp_dir) = setup_with_options(BlockEngineOptions {
-            network: FarcasterNetwork::Mainnet,
-            ..BlockEngineOptions::default()
-        });
+    async fn test_block_engine_onchain_input_order_does_not_change_committed_state() {
+        // Two properties from one setup: two fresh V20 engines see the same same-eth-block
+        // REGISTER + TRANSFER pair in opposite mempool arrival orders.
+        //
+        // 1. state_root convergence (consensus agreement): both orders must commit the SAME
+        //    non-empty state_root — nodes that pulled these events in different mempool orders
+        //    still agree on hashed state. NB this holds by the content-keyed trie and does not by
+        //    itself exercise the sort (it would pass with the sort disabled too). Whether the sort
+        //    *itself* perturbs state_root is not reachable through the engine: channel events are
+        //    only accepted once ChannelRegistrations is on, and SortedBlockEngineEvents
+        //    co-activates with it, so there is no "accepted-but-unsorted" state to compare
+        //    against. That neutrality is structural — the channel-owner index is a RocksDB
+        //    secondary index, never a trie leaf (see block_engine.rs / onchain_event_store.rs).
+        // 2. owner resolution (the sort's actual signal): engine_a's INVERTED input resolves the
+        //    post-TRANSFER owner 0xBB only because the canonical sort reorders REGISTER before
+        //    TRANSFER. With the sort disabled engine_a drops the TRANSFER and resolves 0xAA, so
+        //    the owner assertion below is what fails if the sort regresses.
+        let channel_key = "order-independent";
 
-        register_user(
-            FID_FOR_TEST,
-            default_signer(),
-            default_custody_address(),
-            400,
-            &mut sorted_engine,
-        );
-        register_user(
-            FID_FOR_TEST,
-            default_signer(),
-            default_custody_address(),
-            400,
-            &mut unsorted_engine,
-        );
-
-        let channel_key = "hash-pin";
-        let (transfer, register) = inverted_same_block_channel_events(channel_key);
-        let lend_message = messages_factory::storage_lend::create_storage_lend(
-            FID_FOR_TEST,
-            FID_FOR_TEST + 1,
-            100,
-            StorageUnitType::UnitType2025,
+        // Engine A: inverted mempool order — TRANSFER (log_index 9) before REGISTER (log_index 7).
+        let (mut engine_a, _dir_a) = setup();
+        let (transfer_a, register_a) = inverted_same_block_channel_events(channel_key);
+        let height_a = engine_a.get_confirmed_height().increment();
+        let change_a = engine_a.propose_state_change(
+            vec![
+                MempoolMessage::OnchainEvent(transfer_a),
+                MempoolMessage::OnchainEvent(register_a),
+            ],
+            height_a,
             None,
+        );
+        validate_and_commit_state_change(&mut engine_a, &change_a);
+
+        // Engine B: canonical order — REGISTER before TRANSFER.
+        let (mut engine_b, _dir_b) = setup();
+        let (transfer_b, register_b) = inverted_same_block_channel_events(channel_key);
+        let height_b = engine_b.get_confirmed_height().increment();
+        let change_b = engine_b.propose_state_change(
+            vec![
+                MempoolMessage::OnchainEvent(register_b),
+                MempoolMessage::OnchainEvent(transfer_b),
+            ],
+            height_b,
             None,
         );
-        let proposal_messages = vec![
-            MempoolMessage::OnchainEvent(transfer),
-            MempoolMessage::OnchainEvent(register),
-            MempoolMessage::UserMessage(lend_message),
-        ];
-        let timestamp = FarcasterTime::from_unix_seconds(4102444800);
+        validate_and_commit_state_change(&mut engine_b, &change_b);
 
-        let sorted_state_change = sorted_engine.propose_state_change(
-            proposal_messages.clone(),
-            sorted_engine.get_confirmed_height().increment(),
-            Some(timestamp.clone()),
-        );
-        let unsorted_state_change = unsorted_engine.propose_state_change(
-            proposal_messages,
-            unsorted_engine.get_confirmed_height().increment(),
-            Some(timestamp),
-        );
+        // Hashed consensus state is identical (and non-empty) regardless of input order.
+        assert!(!change_a.new_state_root.is_empty());
+        assert_eq!(change_a.new_state_root, change_b.new_state_root);
 
-        assert_eq!(
-            sorted_state_change.events_hash,
-            unsorted_state_change.events_hash
-        );
+        // ...and both resolve the same post-TRANSFER owner (0xBB). This is the assertion that
+        // fails if the canonical sort is ever disabled for engine_a's inverted input.
+        for engine in [&engine_a, &engine_b] {
+            let owner = engine
+                .stores()
+                .onchain_event_store
+                .get_channel_owner(channel_key, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(owner.owner_address, channel_owner(0xBB));
+        }
     }
 
     #[tokio::test]

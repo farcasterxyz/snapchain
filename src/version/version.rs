@@ -272,6 +272,14 @@ impl EngineVersion {
             ProtocolFeature::LiveAt => self >= &EngineVersion::V17,
             ProtocolFeature::StorageExpiryExtension2026 => self >= &EngineVersion::V18,
             ProtocolFeature::BlockLinks => self >= &EngineVersion::V19,
+            // Distinct features, but their activation boundaries MUST stay identical.
+            // ChannelRegistrations gates *acceptance* of channel-register events (which build the
+            // order-dependent shard-0 channel-owner index); SortedBlockEngineEvents gates the
+            // *canonical ordering* of shard-0 system messages. If SortedBlockEngineEvents ever
+            // lagged ChannelRegistrations, BlockEngine would accept channel-register events but
+            // replay them unsorted, reintroducing the same-eth-block owner divergence this fix
+            // closes. Kept in one arm so they share the V20 boundary; the lock-step invariant is
+            // enforced by `test_channel_registrations_and_sorted_events_activate_together`.
             ProtocolFeature::ChannelRegistrations | ProtocolFeature::SortedBlockEngineEvents => {
                 self >= &EngineVersion::V20
             }
@@ -723,6 +731,24 @@ mod version_test {
             EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet)
                 .is_enabled(ProtocolFeature::SortedBlockEngineEvents)
         );
+    }
+
+    #[test]
+    fn test_channel_registrations_and_sorted_events_activate_together() {
+        // CONSENSUS INVARIANT: these two features must be enabled at the exact same versions.
+        // If SortedBlockEngineEvents ever lagged ChannelRegistrations, BlockEngine would accept
+        // channel-register events but replay them unsorted, reintroducing the same-eth-block
+        // channel-owner divergence this fix closes. This test fails CI if a future change splits
+        // their activation boundaries.
+        use strum::IntoEnumIterator;
+        for version in EngineVersion::iter() {
+            assert_eq!(
+                version.is_enabled(ProtocolFeature::ChannelRegistrations),
+                version.is_enabled(ProtocolFeature::SortedBlockEngineEvents),
+                "ChannelRegistrations and SortedBlockEngineEvents must co-activate; they differ at {:?}",
+                version
+            );
+        }
     }
 
     #[test]

@@ -195,16 +195,21 @@ pub(crate) fn block_engine_system_messages_for_replay<'a>(
     }
 
     let mut sorted_system_messages = system_messages.to_vec();
+    // CONSENSUS-CRITICAL: the ordering semantics here must stay identical to ShardEngine's
+    // comparator in engine.rs (`replay_snapchain_txn`, its `sorted_system_messages.sort_by`
+    // block). Both engines replay the same onchain events and must canonicalize their order
+    // the same way; if the two diverge, block-shard and data-shard replay fold shard-0 state
+    // differently. Change both together, or extract a shared comparator.
     sorted_system_messages.sort_by(|a, b| {
         match (&a.on_chain_event, &b.on_chain_event) {
             (Some(event_a), Some(event_b)) => {
-                // Both are OnChainEvents, sort by block_number then log_index.
+                // Both are OnChainEvents: order by block_number then log_index.
                 (event_a.block_number, event_a.log_index)
                     .cmp(&(event_b.block_number, event_b.log_index))
             }
-            (Some(_), None) => Ordering::Less, // OnChainEvents come before FnameTransfers.
-            (None, Some(_)) => Ordering::Greater, // FnameTransfers come after OnChainEvents.
-            (None, None) => Ordering::Equal,   // Both are FnameTransfers, sort equal
+            (Some(_), None) => Ordering::Less, // OnChainEvents sort before other system messages.
+            (None, Some(_)) => Ordering::Greater, // Other system messages sort after OnChainEvents.
+            (None, None) => Ordering::Equal, // Neither is an OnChainEvent; keep input order (stable sort).
         }
     });
 
