@@ -297,6 +297,22 @@ pub mod tests {
             Ok(Response::new(response))
         }
 
+        async fn get_channels_by_address(
+            &self,
+            _request: Request<ChannelsByAddressRequest>,
+        ) -> Result<Response<ChannelsResponse>, Status> {
+            let response = ChannelsResponse::default();
+            Ok(Response::new(response))
+        }
+
+        async fn get_channels_by_fid(
+            &self,
+            _request: Request<ChannelsByFidRequest>,
+        ) -> Result<Response<ChannelsResponse>, Status> {
+            let response = ChannelsResponse::default();
+            Ok(Response::new(response))
+        }
+
         async fn get_id_registry_on_chain_event(
             &self,
             _request: Request<FidRequest>,

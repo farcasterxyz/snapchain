@@ -19,7 +19,8 @@ use crate::proto::hub_service_server::HubService;
 use crate::proto::{
     self, cast_add_body, casts_by_parent_request, link_body, links_by_target_request, message_data,
     on_chain_event::Body, reaction_body, reactions_by_target_request, Block, BlocksRequest, CastId,
-    CastsByParentRequest, ChannelOwnerRequest, ChannelOwnerResponse, DbStats, EventRequest,
+    CastsByParentRequest, ChannelInfo, ChannelOwnerRequest, ChannelOwnerResponse,
+    ChannelsByAddressRequest, ChannelsByFidRequest, ChannelsResponse, DbStats, EventRequest,
     EventsRequest, EventsResponse, FidAddressTypeRequest, FidAddressTypeResponse, FidRequest,
     FidTimestampRequest, FidsRequest, FidsResponse, GetConnectedPeersRequest,
     GetConnectedPeersResponse, GetInfoRequest, GetInfoResponse, GetMeshViewRequest, Height,
@@ -37,11 +38,12 @@ use crate::storage::constants::OnChainEventPostfix;
 use crate::storage::constants::RootPrefix;
 use crate::storage::db::PageOptions;
 use crate::storage::db::RocksDbTransactionBatch;
+use crate::storage::store::account::get_channel_keys_by_owner_address;
 use crate::storage::store::account::UsernameProofStore;
 use crate::storage::store::account::{
     get_app_nonce, get_gasless_key_count, get_gasless_key_record, get_last_used_at, get_user_nonce,
-    list_gasless_keys_by_fid, CastStore, GaslessKeyRecord, LinkStore, ReactionStore, UserDataStore,
-    VerificationStore,
+    list_gasless_keys_by_fid, CastStore, GaslessKeyRecord, LinkStore, OnchainEventStorageError,
+    ReactionStore, UserDataStore, VerificationStore,
 };
 use crate::storage::store::account::{make_ts_hash, MessagesPage};
 use crate::storage::store::account::{message_bytes_decode, IntoI32};
@@ -56,7 +58,7 @@ use hex::ToHex;
 use moka::policy::EvictionPolicy;
 use moka::sync::{Cache, CacheBuilder};
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -185,6 +187,53 @@ fn resolve_channel_owner_fid(
     }
 
     Ok(winner.map(|(_ts_hash, fid)| fid.0).unwrap_or(0))
+}
+
+fn onchain_event_storage_error_to_status(err: OnchainEventStorageError) -> Status {
+    match err {
+        OnchainEventStorageError::HubError(hub_error)
+            if hub_error.code.starts_with("bad_request") =>
+        {
+            Status::invalid_argument(hub_error.to_string())
+        }
+        other => Status::internal(format!("Store error: {:?}", other)),
+    }
+}
+
+fn channel_infos_by_owner_address(
+    block_stores: &BlockStores,
+    owner_address: &[u8],
+    fid: u64,
+    page_options: &PageOptions,
+) -> Result<(Vec<ChannelInfo>, Option<Vec<u8>>), Status> {
+    let (channel_keys, next_page_token) =
+        get_channel_keys_by_owner_address(&block_stores.db, owner_address, page_options)
+            .map_err(onchain_event_storage_error_to_status)?;
+    let now = FarcasterTime::current().to_unix_seconds();
+    let mut channels = Vec::with_capacity(channel_keys.len());
+
+    for channel_key in channel_keys {
+        let Some(channel_owner) = block_stores
+            .onchain_event_store
+            .get_channel_owner(&channel_key, None)
+            .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
+        else {
+            continue;
+        };
+
+        if channel_owner.expiry <= now || channel_owner.owner_address != owner_address {
+            continue;
+        }
+
+        channels.push(ChannelInfo {
+            channel_key,
+            fid,
+            owner_address: channel_owner.owner_address,
+            expiry: channel_owner.expiry,
+        });
+    }
+
+    Ok((channels, next_page_token))
 }
 
 /// Build a unified `Signer` record from an on-chain `OnChainEvent` whose body is a
@@ -2687,6 +2736,125 @@ impl HubService for MyHubService {
             fid,
             owner_address: channel_owner.owner_address,
             expiry: channel_owner.expiry,
+        }))
+    }
+
+    async fn get_channels_by_address(
+        &self,
+        request: Request<ChannelsByAddressRequest>,
+    ) -> Result<Response<ChannelsResponse>, Status> {
+        let req = request.into_inner();
+        let page_options = req.page_options();
+        let (mut channels, next_page_token) = channel_infos_by_owner_address(
+            &self.block_stores,
+            &req.owner_address,
+            0,
+            &page_options,
+        )?;
+
+        if !channels.is_empty() {
+            let fid = resolve_channel_owner_fid(&self.shard_stores, &req.owner_address)?;
+            for channel in &mut channels {
+                channel.fid = fid;
+            }
+        }
+
+        Ok(Response::new(ChannelsResponse {
+            channels,
+            next_page_token,
+        }))
+    }
+
+    async fn get_channels_by_fid(
+        &self,
+        request: Request<ChannelsByFidRequest>,
+    ) -> Result<Response<ChannelsResponse>, Status> {
+        let req = request.into_inner();
+        let stores = self.get_stores_for(req.fid)?;
+        let result_cap = req.page_size.map(|size| size as usize);
+        if result_cap == Some(0) {
+            return Ok(Response::new(ChannelsResponse {
+                channels: vec![],
+                next_page_token: None,
+            }));
+        }
+
+        let mut verification_page_token = None;
+        let mut owner_addresses = Vec::new();
+        let mut seen_owner_addresses = HashSet::new();
+
+        loop {
+            let verification_page_options = PageOptions {
+                page_size: None,
+                page_token: verification_page_token.clone(),
+                reverse: false,
+            };
+            let page = VerificationStore::get_verification_adds_by_fid(
+                &stores.verification_store,
+                req.fid,
+                &verification_page_options,
+            )
+            .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?;
+
+            for message in page.messages {
+                let Some(data) = message.data else {
+                    continue;
+                };
+                let Some(proto::message_data::Body::VerificationAddAddressBody(body)) = data.body
+                else {
+                    continue;
+                };
+                if body.protocol != proto::Protocol::Ethereum as i32 || body.address.len() != 20 {
+                    continue;
+                }
+                if seen_owner_addresses.insert(body.address.clone()) {
+                    owner_addresses.push(body.address);
+                }
+            }
+
+            let Some(next_page_token) = page.next_page_token else {
+                break;
+            };
+            verification_page_token = Some(next_page_token);
+        }
+
+        let mut channels = vec![];
+        'addresses: for owner_address in owner_addresses {
+            let winner = resolve_channel_owner_fid(&self.shard_stores, &owner_address)?;
+            if winner != req.fid {
+                continue;
+            }
+
+            let mut channel_page_token = None;
+            loop {
+                let remaining = result_cap.map(|cap| cap.saturating_sub(channels.len()));
+                if remaining == Some(0) {
+                    break 'addresses;
+                }
+
+                let channel_page_options = PageOptions {
+                    page_size: remaining,
+                    page_token: channel_page_token.clone(),
+                    reverse: false,
+                };
+                let (mut address_channels, next_page_token) = channel_infos_by_owner_address(
+                    &self.block_stores,
+                    &owner_address,
+                    req.fid,
+                    &channel_page_options,
+                )?;
+                channels.append(&mut address_channels);
+
+                let Some(next_page_token) = next_page_token else {
+                    break;
+                };
+                channel_page_token = Some(next_page_token);
+            }
+        }
+
+        Ok(Response::new(ChannelsResponse {
+            channels,
+            next_page_token: None,
         }))
     }
 

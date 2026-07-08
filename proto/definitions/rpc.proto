@@ -93,6 +93,23 @@ service HubService {
   // deployed grace period). NOT_FOUND is returned only for a channel key with
   // no registration record at all.
   rpc GetChannelOwner(ChannelOwnerRequest) returns (ChannelOwnerResponse);
+  // Lists unexpired channels for a raw 20-byte EVM owner address using the same
+  // node-local consistency class as GetChannelOwner: resolution covers only the
+  // verification shards this node hosts, and shard-0 ownership state and
+  // verification shards progress independently, so transient skew is possible.
+  // This read is not consensus.
+  rpc GetChannelsByAddress(ChannelsByAddressRequest) returns (ChannelsResponse);
+  // Lists unexpired channels that currently resolve to `fid`. The node must
+  // host the fid's home shard, following existing fid-routed read behavior.
+  // Address resolution uses the same node-local consistency class as
+  // GetChannelOwner: resolution covers only the verification shards this node
+  // hosts, and shard-0 ownership state and verification shards progress
+  // independently, so transient skew is possible. This read is not consensus.
+  //
+  // This is a joined read over the fid's verified EVM addresses and channel
+  // owner-address indexes, so it has no natural single cursor. `page_size` is a
+  // result cap only; `next_page_token` is always unset.
+  rpc GetChannelsByFid(ChannelsByFidRequest) returns (ChannelsResponse);
   rpc GetIdRegistryOnChainEvent(FidRequest) returns (OnChainEvent);
   rpc GetIdRegistryOnChainEventByAddress(IdRegistryEventByAddressRequest) returns (OnChainEvent);
   rpc GetCurrentStorageLimitsByFid(FidRequest) returns (StorageLimitsResponse);

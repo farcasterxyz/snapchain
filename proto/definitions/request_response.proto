@@ -171,6 +171,34 @@ message ChannelOwnerResponse {
   uint64 expiry = 3;
 }
 
+message ChannelsByAddressRequest {
+  // Raw 20-byte EVM address.
+  bytes owner_address = 1;
+  optional uint32 page_size = 2;
+  optional bytes page_token = 3;
+  optional bool reverse = 4;
+}
+
+message ChannelsByFidRequest {
+  uint64 fid = 1;
+  // Result cap only. This joined read has no page token or reverse cursor.
+  optional uint32 page_size = 2;
+}
+
+message ChannelInfo {
+  string channel_key = 1;
+  // Resolved winner; 0 = parked.
+  uint64 fid = 2;
+  bytes owner_address = 3;
+  // Absolute expiry, unix seconds, as emitted by the registry contract.
+  uint64 expiry = 4;
+}
+
+message ChannelsResponse {
+  repeated ChannelInfo channels = 1;
+  optional bytes next_page_token = 2;
+}
+
 message TierDetails {
   TierType tier_type = 1;
   uint64 expires_at = 2;
@@ -513,4 +541,3 @@ message MeshTopology {
   repeated UnreachableNode unreachable = 2;
   uint64 generated_at = 3; // unix millis
 }
-
