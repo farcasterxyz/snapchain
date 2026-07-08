@@ -54,6 +54,7 @@ pub enum ProtocolFeature {
     StorageExpiryExtension2026,
     BlockLinks,
     ChannelRegistrations,
+    SortedBlockEngineEvents,
 }
 
 pub struct VersionSchedule {
@@ -271,7 +272,9 @@ impl EngineVersion {
             ProtocolFeature::LiveAt => self >= &EngineVersion::V17,
             ProtocolFeature::StorageExpiryExtension2026 => self >= &EngineVersion::V18,
             ProtocolFeature::BlockLinks => self >= &EngineVersion::V19,
-            ProtocolFeature::ChannelRegistrations => self >= &EngineVersion::V20,
+            ProtocolFeature::ChannelRegistrations | ProtocolFeature::SortedBlockEngineEvents => {
+                self >= &EngineVersion::V20
+            }
         }
     }
 
@@ -688,6 +691,37 @@ mod version_test {
         assert!(
             EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet)
                 .is_enabled(ProtocolFeature::ChannelRegistrations)
+        );
+    }
+
+    #[test]
+    fn test_sorted_block_engine_events_feature_gate() {
+        // Gate closed below V20, open at V20+. BlockEngine replay consults this
+        // boundary before canonicalizing shard-0 onchain-event order.
+        assert_eq!(
+            EngineVersion::V19.is_enabled(ProtocolFeature::SortedBlockEngineEvents),
+            false
+        );
+        assert_eq!(
+            EngineVersion::V20.is_enabled(ProtocolFeature::SortedBlockEngineEvents),
+            true
+        );
+        assert_eq!(
+            EngineVersion::latest().is_enabled(ProtocolFeature::SortedBlockEngineEvents),
+            true
+        );
+    }
+
+    #[test]
+    fn test_sorted_block_engine_events_activation_schedule() {
+        let far_future = FarcasterTime::from_unix_seconds(4102444800); // 2100-01-01 UTC
+        for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
+            assert!(!EngineVersion::version_for(&far_future, network)
+                .is_enabled(ProtocolFeature::SortedBlockEngineEvents));
+        }
+        assert!(
+            EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet)
+                .is_enabled(ProtocolFeature::SortedBlockEngineEvents)
         );
     }
 

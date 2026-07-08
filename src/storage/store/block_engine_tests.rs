@@ -1,13 +1,52 @@
 #[cfg(test)]
 mod tests {
     use crate::core::util::FarcasterTime;
-    use crate::proto::{BlockEventType, FarcasterNetwork, StorageUnitType};
+    use crate::proto::{
+        BlockEventType, ChannelRegisterEventType, FarcasterNetwork, OnChainEvent, StorageUnitType,
+    };
     use crate::storage::store::block_engine::BlockStateChange;
     use crate::storage::store::block_engine_test_helpers::*;
     use crate::storage::store::mempool_poller::MempoolMessage;
     use crate::storage::store::test_helper::{trie_ctx, FID_FOR_TEST};
     use crate::storage::trie::merkle_trie::TrieKey;
     use crate::utils::factory::{events_factory, messages_factory, signers};
+    use alloy_primitives::keccak256;
+
+    fn channel_label(channel_key: &str) -> Vec<u8> {
+        keccak256(channel_key.as_bytes()).to_vec()
+    }
+
+    fn channel_owner(byte: u8) -> Vec<u8> {
+        vec![byte; 20]
+    }
+
+    fn inverted_same_block_channel_events(channel_key: &str) -> (OnChainEvent, OnChainEvent) {
+        let label = channel_label(channel_key);
+        let block_number = 42;
+        let mut register = events_factory::create_channel_register_event(
+            channel_key,
+            label.clone(),
+            channel_owner(0xAA),
+            1_000,
+            ChannelRegisterEventType::Register,
+            block_number,
+            7,
+        );
+        register.transaction_hash = vec![0x11; 32];
+
+        let mut transfer = events_factory::create_channel_register_event(
+            "",
+            label,
+            channel_owner(0xBB),
+            0,
+            ChannelRegisterEventType::Transfer,
+            block_number,
+            9,
+        );
+        transfer.transaction_hash = vec![0x22; 32];
+
+        (transfer, register)
+    }
 
     #[tokio::test]
     async fn test_trie_updated_only_on_commit() {
@@ -205,6 +244,118 @@ mod tests {
             )
             .unwrap();
         assert_eq!(storage_slot.units_for(StorageUnitType::UnitType2025), 1);
+    }
+
+    #[tokio::test]
+    async fn test_block_engine_sorts_channel_events_before_replay_when_enabled() {
+        let (mut block_engine, _temp_dir) = setup();
+        let channel_key = "ordered";
+        let (transfer, register) = inverted_same_block_channel_events(channel_key);
+        let height = block_engine.get_confirmed_height().increment();
+
+        let state_change = block_engine.propose_state_change(
+            vec![
+                MempoolMessage::OnchainEvent(transfer),
+                MempoolMessage::OnchainEvent(register),
+            ],
+            height,
+            None,
+        );
+
+        validate_and_commit_state_change(&mut block_engine, &state_change);
+        let stores = block_engine.stores();
+        let owner_record = stores
+            .onchain_event_store
+            .get_channel_owner(channel_key, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner_record.owner_address, channel_owner(0xBB));
+    }
+
+    #[tokio::test]
+    async fn test_block_engine_pre_v20_drops_channel_events_before_ordering_matters() {
+        let (mut block_engine, _temp_dir) = setup_with_options(BlockEngineOptions {
+            network: FarcasterNetwork::Mainnet,
+            ..BlockEngineOptions::default()
+        });
+        let channel_key = "pre-v20";
+        let (transfer, register) = inverted_same_block_channel_events(channel_key);
+        let height = block_engine.get_confirmed_height().increment();
+        let timestamp = FarcasterTime::from_unix_seconds(4102444800);
+
+        let state_change = block_engine.propose_state_change(
+            vec![
+                MempoolMessage::OnchainEvent(transfer),
+                MempoolMessage::OnchainEvent(register),
+            ],
+            height,
+            Some(timestamp),
+        );
+
+        validate_and_commit_state_change(&mut block_engine, &state_change);
+        let stores = block_engine.stores();
+        assert!(stores
+            .onchain_event_store
+            .get_channel_owner(channel_key, None)
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_sorted_block_engine_events_does_not_change_events_hash() {
+        let (mut sorted_engine, _sorted_temp_dir) = setup();
+        let (mut unsorted_engine, _unsorted_temp_dir) = setup_with_options(BlockEngineOptions {
+            network: FarcasterNetwork::Mainnet,
+            ..BlockEngineOptions::default()
+        });
+
+        register_user(
+            FID_FOR_TEST,
+            default_signer(),
+            default_custody_address(),
+            400,
+            &mut sorted_engine,
+        );
+        register_user(
+            FID_FOR_TEST,
+            default_signer(),
+            default_custody_address(),
+            400,
+            &mut unsorted_engine,
+        );
+
+        let channel_key = "hash-pin";
+        let (transfer, register) = inverted_same_block_channel_events(channel_key);
+        let lend_message = messages_factory::storage_lend::create_storage_lend(
+            FID_FOR_TEST,
+            FID_FOR_TEST + 1,
+            100,
+            StorageUnitType::UnitType2025,
+            None,
+            None,
+        );
+        let proposal_messages = vec![
+            MempoolMessage::OnchainEvent(transfer),
+            MempoolMessage::OnchainEvent(register),
+            MempoolMessage::UserMessage(lend_message),
+        ];
+        let timestamp = FarcasterTime::from_unix_seconds(4102444800);
+
+        let sorted_state_change = sorted_engine.propose_state_change(
+            proposal_messages.clone(),
+            sorted_engine.get_confirmed_height().increment(),
+            Some(timestamp.clone()),
+        );
+        let unsorted_state_change = unsorted_engine.propose_state_change(
+            proposal_messages,
+            unsorted_engine.get_confirmed_height().increment(),
+            Some(timestamp),
+        );
+
+        assert_eq!(
+            sorted_state_change.events_hash,
+            unsorted_state_change.events_hash
+        );
     }
 
     #[tokio::test]
