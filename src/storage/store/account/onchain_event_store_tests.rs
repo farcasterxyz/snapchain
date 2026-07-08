@@ -644,11 +644,7 @@ mod tests {
 
         // With exactly 6 events and page size 3, we should have exactly 2 pages
         // Test without page size limit (get all events)
-        let page_options = PageOptions {
-            page_size: None,
-            page_token: None,
-            reverse: false,
-        };
+        let page_options = PageOptions::default();
         let page = store.get_all_onchain_events(&page_options).unwrap();
         assert!(page.next_page_token.is_none());
         assert_eq!(
@@ -920,11 +916,7 @@ mod tests {
     #[test]
     fn test_channel_by_owner_address_moves_on_transfer_and_reregistration() {
         let (store, _dir) = store();
-        let page_options = PageOptions {
-            page_size: None,
-            page_token: None,
-            reverse: false,
-        };
+        let page_options = PageOptions::default();
         let first_owner = owner(21);
         let second_owner = owner(22);
         let third_owner = owner(23);
@@ -986,11 +978,7 @@ mod tests {
     fn test_channel_by_owner_address_helpers_write_read_delete() {
         let (store, _dir) = store();
         let address = owner(17);
-        let page_options = PageOptions {
-            page_size: None,
-            page_token: None,
-            reverse: false,
-        };
+        let page_options = PageOptions::default();
 
         let mut txn = RocksDbTransactionBatch::new();
         put_channel_key_by_owner_address(&mut txn, &address, "alpha").unwrap();
@@ -1015,11 +1003,7 @@ mod tests {
     fn test_channel_by_owner_address_helpers_reject_non_evm_addresses() {
         let (store, _dir) = store();
         let short_address = vec![1, 2, 3];
-        let page_options = PageOptions {
-            page_size: None,
-            page_token: None,
-            reverse: false,
-        };
+        let page_options = PageOptions::default();
 
         let mut txn = RocksDbTransactionBatch::new();
         let err = put_channel_key_by_owner_address(&mut txn, &short_address, "alpha")
@@ -1032,5 +1016,192 @@ mod tests {
         assert!(
             get_channel_keys_by_owner_address(&store.db, &short_address, &page_options).is_err()
         );
+    }
+
+    // The (block_number, tx_index, log_index) watermark must make the fold independent of
+    // merge order: an event that is older than the materialized record is dropped, on
+    // every node identically. These three tests feed the older event AFTER the newer one
+    // so the `incoming_channel_event_is_older` skip path is actually exercised.
+
+    #[test]
+    fn test_channel_stale_register_is_skipped() {
+        let (store, _dir) = store();
+        let page_options = PageOptions::default();
+        let label = channel_label("stale-reg");
+        let winner = owner(30);
+        let stale = owner(31);
+        merge_channel_events(
+            &store,
+            vec![
+                events_factory::create_channel_register_event(
+                    "stale-reg",
+                    label.clone(),
+                    winner.clone(),
+                    500,
+                    ChannelRegisterEventType::Register,
+                    5,
+                    1,
+                ),
+                events_factory::create_channel_register_event(
+                    "stale-reg",
+                    label,
+                    stale.clone(),
+                    100,
+                    ChannelRegisterEventType::Register,
+                    3,
+                    1,
+                ),
+            ],
+        );
+
+        let channel_owner = store.get_channel_owner("stale-reg", None).unwrap().unwrap();
+        assert_eq!(channel_owner.owner_address, winner);
+        assert_eq!(channel_owner.expiry, 500);
+        // The stale owner never entered the by-owner-address index; the winner still holds it.
+        let (stale_keys, _) =
+            get_channel_keys_by_owner_address(&store.db, &stale, &page_options).unwrap();
+        assert!(stale_keys.is_empty());
+        let (winner_keys, _) =
+            get_channel_keys_by_owner_address(&store.db, &winner, &page_options).unwrap();
+        assert_eq!(winner_keys, vec!["stale-reg".to_string()]);
+    }
+
+    #[test]
+    fn test_channel_stale_renew_is_skipped() {
+        let (store, _dir) = store();
+        let label = channel_label("stale-renew");
+        let owner = owner(32);
+        merge_channel_events(
+            &store,
+            vec![
+                events_factory::create_channel_register_event(
+                    "stale-renew",
+                    label.clone(),
+                    owner.clone(),
+                    500,
+                    ChannelRegisterEventType::Register,
+                    5,
+                    1,
+                ),
+                events_factory::create_channel_register_event(
+                    "stale-renew",
+                    label,
+                    vec![],
+                    999,
+                    ChannelRegisterEventType::Renew,
+                    3,
+                    1,
+                ),
+            ],
+        );
+
+        let channel_owner = store
+            .get_channel_owner("stale-renew", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(channel_owner.expiry, 500);
+    }
+
+    #[test]
+    fn test_channel_stale_transfer_is_skipped() {
+        let (store, _dir) = store();
+        let page_options = PageOptions::default();
+        let label = channel_label("stale-xfer");
+        let holder = owner(33);
+        let would_be = owner(34);
+        merge_channel_events(
+            &store,
+            vec![
+                events_factory::create_channel_register_event(
+                    "stale-xfer",
+                    label.clone(),
+                    holder.clone(),
+                    500,
+                    ChannelRegisterEventType::Register,
+                    5,
+                    1,
+                ),
+                // Older TRANSFER: its label still resolves (REGISTER wrote the mapping), but
+                // the watermark rejects it, so ownership must not move.
+                events_factory::create_channel_register_event(
+                    "",
+                    label,
+                    would_be.clone(),
+                    0,
+                    ChannelRegisterEventType::Transfer,
+                    3,
+                    1,
+                ),
+            ],
+        );
+
+        let channel_owner = store
+            .get_channel_owner("stale-xfer", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(channel_owner.owner_address, holder);
+        let (holder_keys, _) =
+            get_channel_keys_by_owner_address(&store.db, &holder, &page_options).unwrap();
+        assert_eq!(holder_keys, vec!["stale-xfer".to_string()]);
+        let (would_be_keys, _) =
+            get_channel_keys_by_owner_address(&store.db, &would_be, &page_options).unwrap();
+        assert!(would_be_keys.is_empty());
+    }
+
+    #[test]
+    fn test_channel_renew_unknown_key_is_skipped() {
+        let (store, _dir) = store();
+        // Well-formed RENEW (keccak(channel_key) == label) for a channel never registered.
+        merge_channel_events(
+            &store,
+            vec![events_factory::create_channel_register_event(
+                "never-registered",
+                channel_label("never-registered"),
+                vec![],
+                700,
+                ChannelRegisterEventType::Renew,
+                1,
+                1,
+            )],
+        );
+
+        assert!(store
+            .get_channel_owner("never-registered", None)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_channel_by_owner_address_pagination() {
+        let (store, _dir) = store();
+        let address = owner(35);
+
+        let mut txn = RocksDbTransactionBatch::new();
+        put_channel_key_by_owner_address(&mut txn, &address, "one").unwrap();
+        put_channel_key_by_owner_address(&mut txn, &address, "three").unwrap();
+        put_channel_key_by_owner_address(&mut txn, &address, "two").unwrap();
+        store.db.commit(txn).unwrap();
+
+        // Page 1: first two keys in lexicographic order, plus a continuation token.
+        let page1_opts = PageOptions {
+            page_size: Some(2),
+            page_token: None,
+            reverse: false,
+        };
+        let (page1, token) =
+            get_channel_keys_by_owner_address(&store.db, &address, &page1_opts).unwrap();
+        assert_eq!(page1, vec!["one".to_string(), "three".to_string()]);
+        let token = token.expect("expected a continuation token after a full page");
+
+        // Page 2: the remaining key, resuming strictly after the boundary (no duplicate).
+        let page2_opts = PageOptions {
+            page_size: Some(2),
+            page_token: Some(token),
+            reverse: false,
+        };
+        let (page2, token2) =
+            get_channel_keys_by_owner_address(&store.db, &address, &page2_opts).unwrap();
+        assert_eq!(page2, vec!["two".to_string()]);
+        assert!(token2.is_none());
     }
 }

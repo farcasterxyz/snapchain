@@ -64,6 +64,15 @@ pub struct OnchainEventsPage {
     pub next_page_token: Option<Vec<u8>>,
 }
 
+/// Storage-internal materialized channel-ownership record, persisted under
+/// `ChannelRegisterByChannelKey`. Hand-rolled rather than defined in
+/// `proto/definitions/` because it is a private on-disk value, not a wire/API type —
+/// mirroring the `GaslessKeyRecord` pattern in `key_add_store.rs`. The prost field
+/// tags below are therefore a stable on-disk contract: do not reorder or reuse them.
+/// `owner_address` is the raw 20-byte EVM address. No fid is stored: this record is a
+/// pure fold over channel events, and resolving an owner address to an fid is left to
+/// the read/query layer, deliberately not done here. `channel_key` is a denormalized
+/// copy of the key this record is stored under and must never be read as authoritative.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ChannelOwner {
     #[prost(string, tag = "1")]
@@ -201,6 +210,15 @@ fn channel_owner_from_event(
     }
 }
 
+/// Stamps the event's chain position onto an existing record. This triple is the
+/// ordering watermark compared by `incoming_channel_event_is_older`, so RENEW and
+/// TRANSFER must refresh it whenever they win.
+fn set_channel_owner_event_position(owner: &mut ChannelOwner, onchain_event: &OnChainEvent) {
+    owner.block_number = onchain_event.block_number;
+    owner.tx_index = onchain_event.tx_index;
+    owner.log_index = onchain_event.log_index;
+}
+
 fn move_channel_owner_address_index(
     txn: &mut RocksDbTransactionBatch,
     channel_key: &str,
@@ -234,11 +252,11 @@ fn validate_channel_label(label: &[u8]) -> bool {
 }
 
 fn validate_channel_owner_address(owner_address: &[u8]) -> bool {
-    if owner_address.len() != EVM_ADDRESS_LENGTH {
-        warn!(
-            "Skipping channel register index update with invalid owner address length {}",
-            owner_address.len()
-        );
+    // Delegates to the same length check the public helpers use so the
+    // "owner address is a 20-byte EVM address" invariant lives in one place;
+    // on the merge path a bad address is skipped with a warn rather than erroring.
+    if let Err(err) = validate_evm_address(owner_address) {
+        warn!("Skipping channel register index update: {}", err);
         return false;
     }
     true
@@ -246,7 +264,11 @@ fn validate_channel_owner_address(owner_address: &[u8]) -> bool {
 
 fn validate_channel_key_label(channel_key: &str, label: &[u8]) -> bool {
     if keccak256(channel_key.as_bytes()).as_slice() != label {
-        warn!("Skipping channel register index update with mismatched channel key and label");
+        warn!(
+            "Skipping channel register index update: keccak256(channel_key {}) != label 0x{}",
+            channel_key,
+            hex::encode(label)
+        );
         return false;
     }
     true
@@ -284,18 +306,18 @@ fn build_secondary_indices_for_channel_register(
                 return Ok(());
             }
 
-            let channel_owner = channel_owner_from_event(onchain_event, channel_register_body);
             let by_channel_key =
                 make_channel_register_by_channel_key(&channel_register_body.channel_key);
 
             let existing_owner =
                 read_channel_owner_by_channel_key(db, txn, &channel_register_body.channel_key)?;
             if let Some(existing_owner) = &existing_owner {
-                if incoming_channel_event_is_older(&existing_owner, onchain_event) {
+                if incoming_channel_event_is_older(existing_owner, onchain_event) {
                     return Ok(());
                 }
             }
 
+            let channel_owner = channel_owner_from_event(onchain_event, channel_register_body);
             txn.put(
                 make_channel_register_channel_key_by_label_key(&channel_register_body.label),
                 channel_register_body.channel_key.as_bytes().to_vec(),
@@ -331,10 +353,7 @@ fn build_secondary_indices_for_channel_register(
                 return Ok(());
             }
             channel_owner.expiry = channel_register_body.expiry;
-            channel_owner.channel_key = channel_register_body.channel_key.clone();
-            channel_owner.block_number = onchain_event.block_number;
-            channel_owner.tx_index = onchain_event.tx_index;
-            channel_owner.log_index = onchain_event.log_index;
+            set_channel_owner_event_position(&mut channel_owner, onchain_event);
             txn.put(
                 make_channel_register_by_channel_key(&channel_register_body.channel_key),
                 channel_owner.encode_to_vec(),
@@ -372,9 +391,7 @@ fn build_secondary_indices_for_channel_register(
             }
             let old_owner_address = channel_owner.owner_address.clone();
             channel_owner.owner_address = channel_register_body.owner_address.clone();
-            channel_owner.block_number = onchain_event.block_number;
-            channel_owner.tx_index = onchain_event.tx_index;
-            channel_owner.log_index = onchain_event.log_index;
+            set_channel_owner_event_position(&mut channel_owner, onchain_event);
             move_channel_owner_address_index(
                 txn,
                 &channel_key,
@@ -386,7 +403,16 @@ fn build_secondary_indices_for_channel_register(
                 channel_owner.encode_to_vec(),
             );
         }
-        ChannelRegisterEventType::None => {}
+        ChannelRegisterEventType::None => {
+            // `event_type()` maps any unrecognized i32 (including 0, or a future on-chain
+            // channel event type this binary predates) to `None`. The raw event is still
+            // persisted, but it builds no index; warn so the gap is diagnosable rather
+            // than silent.
+            warn!(
+                "Skipping channel register index update for unrecognized event_type {} (channel_key {})",
+                channel_register_body.event_type, channel_register_body.channel_key
+            );
+        }
     }
 
     Ok(())
@@ -527,6 +553,11 @@ fn build_secondary_indices(
     Ok(())
 }
 
+// Read/write surface for the by-owner-address index, used by the later
+// resolution/binding increment. The production merge path maintains this same index via
+// `move_channel_owner_address_index`; both go through
+// `make_channel_register_by_owner_address_key`, which is the single source of truth for
+// the key layout.
 pub fn put_channel_key_by_owner_address(
     txn: &mut RocksDbTransactionBatch,
     owner_address: &[u8],
@@ -1057,6 +1088,10 @@ impl OnchainEventStore {
         get_event_by_secondary_key(&self.db, make_id_register_by_fid_key(fid), txn_batch)
     }
 
+    /// Returns the materialized owner record for a channel key, or `None` if unknown.
+    /// Does not filter on `expiry` — callers decide whether an expired registration
+    /// counts as absent. The `block_number`/`tx_index`/`log_index` fields are an internal
+    /// ordering watermark and are not a stable contract for consumers.
     pub fn get_channel_owner(
         &self,
         channel_key: &str,
