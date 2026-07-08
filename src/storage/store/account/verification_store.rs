@@ -1,5 +1,5 @@
 use super::{
-    make_fid_key, make_user_key, read_fid_key,
+    make_fid_key, make_user_key, read_fid_key, read_ts_hash,
     store::{Store, StoreDef},
     MessagesPage, StoreEventHandler, FID_BYTES, TS_HASH_LENGTH,
 };
@@ -319,37 +319,47 @@ impl VerificationStore {
         store.get_remove(&partial_message)
     }
 
+    /// Returns the `(fid, ts_hash)` of every verification currently indexed for
+    /// `address`. This is a best-effort, node-local derived index, NOT a
+    /// consensus-hashed structure — callers must treat the results as
+    /// *candidates*, not ground truth:
+    ///
+    /// - A partial node only sees the verifiers whose home shard it hosts.
+    /// - While the background M2 migration is backfilling, a concurrent
+    ///   verification remove can race the backfill and momentarily leave a stale
+    ///   entry with no surviving primary `VerificationAdds` (node-local only, no
+    ///   consensus impact; self-heals the next time that (fid, address) is
+    ///   touched). A consumer that needs authoritative resolution should either
+    ///   gate on `schema_version >= 2` or re-validate each candidate against the
+    ///   primary verification adds.
     pub fn get_verifications_by_address(
         store: &Store<VerificationStoreDef>,
         address: &[u8],
     ) -> Result<Vec<(u64, [u8; TS_HASH_LENGTH])>, HubError> {
         let prefix = VerificationStoreDef::make_verification_by_address_prefix(address);
+        let prefix_len = prefix.len();
         let stop_prefix = increment_vec_u8(&prefix);
         let mut entries = Vec::new();
 
         store.db().for_each_iterator_by_prefix(
-            Some(prefix.clone()),
+            Some(prefix),
             Some(stop_prefix),
             &PageOptions::default(),
             |key, value| {
-                if key.len() != prefix.len() + FID_BYTES {
-                    return Err(HubError::internal_db_error(&format!(
-                        "invalid verification by address key length: {}",
-                        key.len()
-                    )));
+                // Best-effort, node-local index: skip anything that isn't a
+                // well-formed new-format (address ++ fid_key -> ts_hash) entry
+                // rather than failing the whole read. During the background M2
+                // migration a legacy address-only slot (key == prefix, 4-byte
+                // fid value) still lives under this prefix; tolerating it keeps
+                // reads for the address working instead of turning a transitional
+                // state into a read outage. Skipping also keeps read_ts_hash from
+                // ever seeing a short value.
+                if key.len() != prefix_len + FID_BYTES || value.len() != TS_HASH_LENGTH {
+                    return Ok(false);
                 }
 
-                if value.len() != TS_HASH_LENGTH {
-                    return Err(HubError::internal_db_error(&format!(
-                        "invalid verification by address value length: {}",
-                        value.len()
-                    )));
-                }
-
-                let fid = read_fid_key(key, prefix.len());
-                let mut ts_hash = [0u8; TS_HASH_LENGTH];
-                ts_hash.copy_from_slice(value);
-                entries.push((fid, ts_hash));
+                let fid = read_fid_key(key, prefix_len);
+                entries.push((fid, read_ts_hash(value, 0)));
 
                 Ok(false)
             },

@@ -6,7 +6,7 @@ use crate::{core::error::HubError, storage::constants::RootPrefix};
 use async_trait::async_trait;
 use std::sync::Arc;
 use thiserror::Error;
-use tracing::info;
+use tracing::{error, info};
 
 mod m1_fix_fname_index;
 mod m2_verification_by_address_index;
@@ -176,6 +176,16 @@ impl MigrationRunner {
                 // We will await the background migration, but we're inside a tokio::spawn, so not blocking engine startup
                 // This is done so that only one background migration runs at a time, and the SCHEMA_VERSION is updated correctly
                 if let Err(e) = migration.run(context.clone()).await {
+                    // The JoinHandle is dropped by the caller, so this is the only
+                    // place a background-migration failure surfaces — log it loudly
+                    // rather than letting it vanish into a detached task.
+                    error!(
+                        shard_id = context.stores.shard_id,
+                        version = migration.to_db_version(),
+                        description = migration.description(),
+                        error = %e,
+                        "Background migration failed."
+                    );
                     // If a migration fails, we'll write to DB that the migration is no longer running
                     Self::set_migration_running(&context, start_migrations_at as u32, false)?;
                     return Err(e);

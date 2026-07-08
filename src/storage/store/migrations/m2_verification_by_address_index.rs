@@ -2,19 +2,34 @@ use super::{AsyncMigration, MigrationContext, MigrationError};
 use crate::storage::constants::{RootPrefix, UserPostfix};
 use crate::storage::db::{PageOptions, RocksDbTransactionBatch};
 use crate::storage::store::account::{
-    make_user_key, FIDIterator, VerificationStoreDef, TS_HASH_LENGTH,
+    make_user_key, FIDIterator, VerificationStoreDef, FID_BYTES, TS_HASH_LENGTH,
 };
 use crate::storage::util::increment_vec_u8;
 use async_trait::async_trait;
-use tracing::info;
+use tracing::{info, warn};
 
 pub struct M2VerificationByAddressIndex;
 
-const ETH_ADDRESS_LENGTH: usize = 20;
-const SOLANA_ADDRESS_LENGTH: usize = 32;
+/// Max legacy-slot deletes per committed transaction, so no single write batch
+/// grows unbounded during the cleanup sweep. This bounds the RocksDB batch, not
+/// process memory: the collection phase still holds every legacy key in
+/// `old_keys` before deleting — O(legacy keys), acceptable for a one-shot
+/// background migration.
+const DELETE_CHUNK_SIZE: usize = 10_000;
 
-fn is_old_verification_by_address_key(key: &[u8]) -> bool {
-    key.len() == 1 + ETH_ADDRESS_LENGTH || key.len() == 1 + SOLANA_ADDRESS_LENGTH
+/// A legacy `VerificationByAddress` slot stores a bare `make_fid_key` value
+/// (`FID_BYTES` long); the new per-verifier entries store a `TS_HASH_LENGTH`
+/// (24) byte ts_hash. Discriminating on the value length is
+/// address-length-agnostic, so it needs no enumeration of the valid address
+/// sizes.
+///
+/// Correct only because `FID_BYTES != TS_HASH_LENGTH` and the sweep runs *after*
+/// the backfill has written the new entries into the same keyspace: this length
+/// check is what stops the sweep from deleting those fresh entries. If the two
+/// lengths ever converged, the sweep would misclassify new entries as legacy and
+/// delete them — a data-loss migration replayed by every node.
+fn is_old_verification_by_address_value(value: &[u8]) -> bool {
+    value.len() == FID_BYTES
 }
 
 #[async_trait]
@@ -29,9 +44,10 @@ impl AsyncMigration for M2VerificationByAddressIndex {
 
     async fn run(&self, context: MigrationContext) -> Result<(), MigrationError> {
         let fid_iterator = FIDIterator::new(context.stores.db.clone(), 0);
+        let shard_id = context.stores.shard_id;
 
         info!(
-            shard_id = context.stores.shard_id,
+            shard_id,
             "Starting verification by-address index migration."
         );
 
@@ -59,9 +75,19 @@ impl AsyncMigration for M2VerificationByAddressIndex {
                     &PageOptions::default(),
                     |key, value| {
                         if value.len() != TS_HASH_LENGTH {
-                            return Err(crate::core::error::HubError::internal_db_error(
-                                "invalid verification add ts_hash length during migration",
-                            ));
+                            // A primary VerificationAdds value is always a
+                            // 24-byte ts_hash; a malformed one means local DB
+                            // corruption for this entry. Skip and log it (M1's
+                            // stance) rather than aborting the whole migration —
+                            // aborting would leave the schema version un-bumped
+                            // and re-run the sweep from fid 0 on every restart.
+                            warn!(
+                                fid,
+                                shard_id,
+                                value_len = value.len(),
+                                "Skipping verification add with unexpected ts_hash length during migration."
+                            );
+                            return Ok(false);
                         }
 
                         let address = &key[prefix.len()..];
@@ -104,8 +130,8 @@ impl AsyncMigration for M2VerificationByAddressIndex {
                 Some(root_prefix),
                 Some(stop_prefix),
                 &PageOptions::default(),
-                |key, _value| {
-                    if is_old_verification_by_address_key(key) {
+                |key, value| {
+                    if is_old_verification_by_address_value(value) {
                         old_keys.push(key.to_vec());
                     }
 
@@ -115,16 +141,26 @@ impl AsyncMigration for M2VerificationByAddressIndex {
             .map_err(|e| MigrationError::InternalError(e.to_string()))?;
 
         if !old_keys.is_empty() {
-            let mut txn = RocksDbTransactionBatch::new();
             let old_key_count = old_keys.len();
+            let mut txn = RocksDbTransactionBatch::new();
             for key in old_keys {
                 txn.delete(key);
+                if txn.len() >= DELETE_CHUNK_SIZE {
+                    context
+                        .stores
+                        .db
+                        .commit(txn)
+                        .map_err(MigrationError::DbError)?;
+                    txn = RocksDbTransactionBatch::new();
+                }
             }
-            context
-                .stores
-                .db
-                .commit(txn)
-                .map_err(MigrationError::DbError)?;
+            if txn.len() > 0 {
+                context
+                    .stores
+                    .db
+                    .commit(txn)
+                    .map_err(MigrationError::DbError)?;
+            }
             info!(
                 shard_id = context.stores.shard_id,
                 count = old_key_count,
@@ -291,5 +327,48 @@ mod tests {
             ))
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_m2_deletes_all_legacy_slots_across_chunk_boundary() {
+        let (engine, _tmpdir) = test_helper::new_engine().await;
+        let stores = engine.get_stores();
+
+        // Seed more legacy slots than a single delete chunk holds, so the sweep
+        // exercises the mid-loop commit path (commit + fresh batch) and not just
+        // the final flush. Each slot is a legacy address-only key (value == a
+        // bare 4-byte fid).
+        let slot_count = DELETE_CHUNK_SIZE + 1;
+        let mut txn = RocksDbTransactionBatch::new();
+        for i in 0..slot_count {
+            let mut address = vec![0u8; 20];
+            address[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            txn.put(
+                VerificationStoreDef::make_verification_by_address_prefix(&address),
+                make_fid_key(i as u64),
+            );
+        }
+        stores.db.commit(txn).unwrap();
+
+        run_migration(stores.clone()).await;
+
+        // Every legacy slot is swept. No FIDs are registered, so phase 1 writes
+        // nothing and the root prefix must be completely empty afterward.
+        let root_prefix = vec![RootPrefix::VerificationByAddress as u8];
+        let stop_prefix = increment_vec_u8(&root_prefix);
+        let mut remaining = 0usize;
+        stores
+            .db
+            .for_each_iterator_by_prefix(
+                Some(root_prefix),
+                Some(stop_prefix),
+                &PageOptions::default(),
+                |_key, _value| {
+                    remaining += 1;
+                    Ok(false)
+                },
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
     }
 }
