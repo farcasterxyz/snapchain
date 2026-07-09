@@ -336,6 +336,13 @@ impl VerificationStore {
         store: &Store<VerificationStoreDef>,
         address: &[u8],
     ) -> Result<Vec<(u64, [u8; TS_HASH_LENGTH])>, HubError> {
+        // An empty address would make the prefix just the root byte and scan the
+        // entire by-address keyspace; no verification has an empty address, so
+        // answer the lookup honestly instead.
+        if address.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let prefix = VerificationStoreDef::make_verification_by_address_prefix(address);
         let prefix_len = prefix.len();
         let stop_prefix = increment_vec_u8(&prefix);

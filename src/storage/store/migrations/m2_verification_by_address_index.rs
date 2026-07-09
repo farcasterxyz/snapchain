@@ -10,11 +10,11 @@ use tracing::{info, warn};
 
 pub struct M2VerificationByAddressIndex;
 
-/// Max legacy-slot deletes per committed transaction, so no single write batch
-/// grows unbounded during the cleanup sweep. This bounds the RocksDB batch, not
-/// process memory: the collection phase still holds every legacy key in
-/// `old_keys` before deleting — O(legacy keys), acceptable for a one-shot
-/// background migration.
+/// Max legacy-slot deletes per pass of the cleanup sweep. Each pass scans from a
+/// resume point, collects up to this many legacy keys, deletes them in one
+/// committed batch, and resumes strictly after the last scanned key — bounding
+/// both the RocksDB write batch and process memory at O(chunk) regardless of how
+/// many legacy slots exist.
 const DELETE_CHUNK_SIZE: usize = 10_000;
 
 /// A legacy `VerificationByAddress` slot stores a bare `make_fid_key` value
@@ -43,7 +43,7 @@ impl AsyncMigration for M2VerificationByAddressIndex {
     }
 
     async fn run(&self, context: MigrationContext) -> Result<(), MigrationError> {
-        let fid_iterator = FIDIterator::new(context.stores.db.clone(), 0);
+        let mut fid_iterator = FIDIterator::new(context.stores.db.clone(), 0);
         let shard_id = context.stores.shard_id;
 
         info!(
@@ -51,7 +51,7 @@ impl AsyncMigration for M2VerificationByAddressIndex {
             "Starting verification by-address index migration."
         );
 
-        for fid in fid_iterator {
+        while let Some(fid) = fid_iterator.next() {
             if fid % 1000 == 0 {
                 info!(
                     fid,
@@ -120,47 +120,73 @@ impl AsyncMigration for M2VerificationByAddressIndex {
             }
         }
 
+        // The FIDIterator ends iteration on a fetch error exactly as if the fid
+        // space were exhausted. Sweeping after an INCOMPLETE backfill would
+        // delete legacy slots for fids that were never backfilled — permanent,
+        // silent index loss — so abort here (schema version stays un-bumped and
+        // the migration re-runs) rather than proceed to the sweep.
+        if let Some(err) = fid_iterator.take_error() {
+            return Err(MigrationError::InternalError(format!(
+                "FID iteration failed before completing the verification backfill; skipping legacy sweep: {}",
+                err
+            )));
+        }
+
+        // Sweep legacy slots in bounded passes: scan from a resume point,
+        // collect up to DELETE_CHUNK_SIZE legacy keys, delete them, and resume
+        // strictly after the last scanned key (`key ++ 0x00` is the smallest key
+        // greater than `key`, so variable-length keys cannot be skipped).
         let root_prefix = vec![RootPrefix::VerificationByAddress as u8];
         let stop_prefix = increment_vec_u8(&root_prefix);
-        let mut old_keys = Vec::new();
-        context
-            .stores
-            .db
-            .for_each_iterator_by_prefix(
-                Some(root_prefix),
-                Some(stop_prefix),
-                &PageOptions::default(),
-                |key, value| {
-                    if is_old_verification_by_address_value(value) {
-                        old_keys.push(key.to_vec());
-                    }
+        let mut resume_from = root_prefix.clone();
+        let mut old_key_count = 0usize;
+        loop {
+            let mut chunk: Vec<Vec<u8>> = Vec::new();
+            context
+                .stores
+                .db
+                .for_each_iterator_by_prefix(
+                    Some(resume_from.clone()),
+                    Some(stop_prefix.clone()),
+                    &PageOptions::default(),
+                    |key, value| {
+                        if is_old_verification_by_address_value(value) {
+                            chunk.push(key.to_vec());
+                            if chunk.len() >= DELETE_CHUNK_SIZE {
+                                return Ok(true);
+                            }
+                        }
 
-                    Ok(false)
-                },
-            )
-            .map_err(|e| MigrationError::InternalError(e.to_string()))?;
+                        Ok(false)
+                    },
+                )
+                .map_err(|e| MigrationError::InternalError(e.to_string()))?;
 
-        if !old_keys.is_empty() {
-            let old_key_count = old_keys.len();
+            let Some(last_key) = chunk.last().cloned() else {
+                break;
+            };
+            let full_chunk = chunk.len() >= DELETE_CHUNK_SIZE;
+
             let mut txn = RocksDbTransactionBatch::new();
-            for key in old_keys {
+            for key in chunk.drain(..) {
+                old_key_count += 1;
                 txn.delete(key);
-                if txn.len() >= DELETE_CHUNK_SIZE {
-                    context
-                        .stores
-                        .db
-                        .commit(txn)
-                        .map_err(MigrationError::DbError)?;
-                    txn = RocksDbTransactionBatch::new();
-                }
             }
-            if txn.len() > 0 {
-                context
-                    .stores
-                    .db
-                    .commit(txn)
-                    .map_err(MigrationError::DbError)?;
+            context
+                .stores
+                .db
+                .commit(txn)
+                .map_err(MigrationError::DbError)?;
+
+            if !full_chunk {
+                // The scan reached the end of the prefix; nothing left to sweep.
+                break;
             }
+            resume_from = last_key;
+            resume_from.push(0);
+        }
+
+        if old_key_count > 0 {
             info!(
                 shard_id = context.stores.shard_id,
                 count = old_key_count,
