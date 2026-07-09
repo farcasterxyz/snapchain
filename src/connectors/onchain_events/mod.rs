@@ -153,6 +153,9 @@ pub enum SubscribeError {
     #[error("Empty rpc url")]
     EmptyRpcUrl,
 
+    #[error("Invalid override contract address: {0}")]
+    InvalidOverrideAddress(String),
+
     #[error("Log missing block hash")]
     LogMissingBlockHash,
 
@@ -449,8 +452,16 @@ pub struct Subscriber {
     local_state_store: LocalStateStore,
     onchain_events_request_rx: broadcast::Receiver<OnchainEventsRequest>,
     chain: node_local_state::Chain,
-    override_tier_registry_address: Option<String>,
-    override_channel_registrar_address: Option<String>,
+    override_tier_registry_address: Option<Address>,
+    override_channel_registrar_address: Option<Address>,
+}
+
+/// Parses an override contract address from config once, at construction, so a
+/// malformed value surfaces as a structured startup error instead of a panic
+/// when the contract list is first built.
+fn parse_override_address(address: &str) -> Result<Address, SubscribeError> {
+    Address::from_str(address)
+        .map_err(|err| SubscribeError::InvalidOverrideAddress(format!("{}: {}", address, err)))
 }
 
 // TODO(aditi): Wait for 1 confirmation before "committing" an onchain event.
@@ -479,8 +490,16 @@ impl Subscriber {
             statsd_client,
             onchain_events_request_rx,
             chain,
-            override_tier_registry_address: config.override_tier_registry_address.clone(),
-            override_channel_registrar_address: config.override_channel_registrar_address.clone(),
+            override_tier_registry_address: config
+                .override_tier_registry_address
+                .as_deref()
+                .map(parse_override_address)
+                .transpose()?,
+            override_channel_registrar_address: config
+                .override_channel_registrar_address
+                .as_deref()
+                .map(parse_override_address)
+                .transpose()?,
         })
     }
 
@@ -492,10 +511,10 @@ impl Subscriber {
                 Contract::id_registry(),
             ],
             node_local_state::Chain::Base => {
-                let mut contracts = vec![match &self.override_tier_registry_address {
+                let mut contracts = vec![match self.override_tier_registry_address {
                     None => Contract::tier_registry(),
-                    Some(tier_registry_address) => Contract {
-                        address: Address::from_str(&tier_registry_address).unwrap(),
+                    Some(address) => Contract {
+                        address,
                         kind: ContractKind::TierRegistry,
                     },
                 }];
@@ -503,9 +522,9 @@ impl Subscriber {
                 // deploys. Until then the contract is only watched when the override is
                 // configured (tests + the testnet acceptance run), so the connector is a
                 // no-op on mainnet even after this code ships.
-                if let Some(channel_registrar_address) = &self.override_channel_registrar_address {
+                if let Some(address) = self.override_channel_registrar_address {
                     contracts.push(Contract {
-                        address: Address::from_str(&channel_registrar_address).unwrap(),
+                        address,
                         kind: ContractKind::ChannelRegistrar,
                     });
                 }
@@ -1183,9 +1202,11 @@ impl Subscriber {
             // Get and process logs
             match self.get_logs(&filter, contract.event_kind()).await {
                 Ok(_) => {
-                    // Update the last processed block
+                    // Advance only this contract's in-memory cursor. The stored
+                    // block number is chain-wide, so it is persisted by the caller
+                    // as the minimum across all polled contracts' cursors — see
+                    // the poll loop in sync_live_events.
                     *from_block = to_block + 1;
-                    self.record_block_number(to_block);
                 }
                 Err(err) => {
                     error!(
@@ -1335,6 +1356,18 @@ impl Subscriber {
                                  event_kind = contract.event_kind(),
                                  "Error polling registry events: {}", err
                              );
+                         }
+                     }
+                     // Persist the lowest cursor across polled contracts. The stored
+                     // block number is chain-wide, so recording any single contract's
+                     // progress would make a restart resume every contract from the
+                     // most-advanced one and silently skip a lagging contract's gap.
+                     // Resuming from the minimum re-polls blocks the faster contracts
+                     // already processed, which is safe (onchain event merges are
+                     // idempotent); skipped blocks are not recoverable.
+                     if let Some(min_next_block) = polled_last_blocks.iter().min() {
+                         if *min_next_block > 0 {
+                             self.record_block_number(min_next_block - 1);
                          }
                      }
                  }
