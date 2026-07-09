@@ -203,17 +203,18 @@ fn onchain_event_storage_error_to_status(err: OnchainEventStorageError) -> Statu
     }
 }
 
-/// Resolves `(owner_address, channel_key)` index entries into unexpired
-/// [`ChannelInfo`]s, stamping `fid` onto each. Expired records are dropped
-/// silently (a normal steady state); an index entry whose primary `ChannelOwner`
-/// disagrees on the owner address is dropped with a `warn!`, since the fold
-/// writes both sides in one transaction so a mismatch signals index corruption.
+/// Resolves `(owner_address, channel_key)` index entries into [`ChannelInfo`]s,
+/// stamping `fid` onto each. Lapsed records (expiry in the past) are included:
+/// release state is not computable from chain events, so callers interpret
+/// `expiry` themselves (see GetChannelOwner in rpc.proto). An index entry whose
+/// primary `ChannelOwner` disagrees on the owner address is dropped with a
+/// `warn!`, since the fold writes both sides in one transaction so a mismatch
+/// signals index corruption.
 fn channel_infos_for_index_keys(
     block_stores: &BlockStores,
     index_keys: impl IntoIterator<Item = (Vec<u8>, String)>,
     fid: u64,
 ) -> Result<Vec<ChannelInfo>, Status> {
-    let now = FarcasterTime::current().to_unix_seconds();
     let mut channels = Vec::new();
 
     for (owner_address, channel_key) in index_keys {
@@ -225,9 +226,6 @@ fn channel_infos_for_index_keys(
             continue;
         };
 
-        if channel_owner.expiry <= now {
-            continue;
-        }
         if channel_owner.owner_address != owner_address {
             warn!(
                 channel_key,

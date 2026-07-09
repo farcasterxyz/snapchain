@@ -192,7 +192,9 @@ message ChannelInfo {
   // Resolved winner; 0 = parked.
   uint64 fid = 2;
   bytes owner_address = 3;
-  // Absolute expiry, unix seconds, as emitted by the registry contract.
+  // Absolute expiry, unix seconds, as emitted by the registry contract. May be
+  // in the past: lapsed registrations are listed until superseded (see
+  // GetChannelOwner in rpc.proto).
   uint64 expiry = 4;
 }
 

@@ -857,6 +857,45 @@ mod tests {
         assert_eq!(by_address_resolved.next_page_token, None);
     }
 
+    // Lapsed registrations stay listed (with their past expiry) for the same
+    // reason GetChannelOwner returns them: release state is not computable
+    // from chain events, and a renewal prompt needs the owner to still see
+    // the channel.
+    #[tokio::test]
+    async fn test_channel_lists_include_lapsed_registrations() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let address = owner_address(9);
+        let expiry = now_unix_seconds() - 1;
+        merge_channel_registration(&block_engine, "lapsed_list", address.clone(), expiry);
+        merge_verification(
+            stores.get(&1).unwrap(),
+            &verification_add(SHARD1_FID, address.clone(), 10),
+        );
+
+        let by_address = service
+            .get_channels_by_address(channels_by_address_request(address.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(by_address.channels.len(), 1);
+        assert_eq!(by_address.channels[0].channel_key, "lapsed_list");
+        assert_eq!(by_address.channels[0].fid, SHARD1_FID);
+        assert_eq!(by_address.channels[0].expiry, expiry);
+
+        assert_eq!(
+            get_channels_by_fid_keys(&service, SHARD1_FID).await,
+            vec!["lapsed_list".to_string()]
+        );
+    }
+
     #[tokio::test]
     async fn test_channel_reads_last_verifier_wins_regardless_of_merge_order() {
         let (
