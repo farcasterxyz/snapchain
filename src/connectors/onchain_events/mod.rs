@@ -433,7 +433,8 @@ impl Contract {
             }
             // Channel registrar events are keyed by label/owner address onchain, not
             // by fid (the connector always emits fid = 0 and resolution happens at
-            // merge time), so there is no per-fid retry filter. Retry by block range.
+            // read time, via GetChannelOwner), so there is no per-fid retry filter.
+            // Retry by block range.
             ContractKind::ChannelRegistrar => vec![],
         }
     }
@@ -787,7 +788,7 @@ impl Subscriber {
                         // tokenId -> channel_key mapping from the REGISTER event. tokenId
                         // == uint256(label), so the tokenId's big-endian bytes reproduce
                         // `label` exactly. `to` is the receiving address, resolved to an
-                        // fid at merge time; fid is always 0 here.
+                        // fid at read time (see GetChannelOwner); fid is always 0 here.
                         let ChannelRegistrarAbi::Transfer { from: _, to, id } =
                             event.log_decode()?.inner.data;
                         add_event(
@@ -944,7 +945,7 @@ impl Subscriber {
                 // registration must never stall ingestion of subsequent events. (The
                 // BaseRegistrar's same-named `NameRegistered(uint256,...)` has a different
                 // topic0 and falls through to the silent `_` arm.) fid is always 0; the
-                // owner address is resolved to an fid at merge time.
+                // owner address is resolved to an fid at read time (see GetChannelOwner).
                 //
                 // NOTE: we decode with validate = true (unlike `event.log_decode()`, which
                 // passes false and would lossily replace non-UTF-8 bytes with U+FFFD and

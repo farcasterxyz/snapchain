@@ -39,7 +39,9 @@ enum ChannelRegisterEventType {
 }
 
 // Field-presence rules below are producer conventions (the connector), not
-// validated at merge; merge-side validation lands with the ingestion code.
+// merge validity rules: the store checks them only as index-input gating, so
+// an event that fails those checks still merges as a raw onchain event — it
+// just builds no channel index entries.
 message ChannelRegisterBody {
   // Verbatim name from the registry event; label = keccak256(channel_key).
   // Empty for TRANSFER (the ERC-721 Transfer log carries only the tokenId).
