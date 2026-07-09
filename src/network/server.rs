@@ -2681,10 +2681,6 @@ impl HubService for MyHubService {
             .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
             .ok_or_else(|| Status::not_found("channel not registered"))?;
 
-        if channel_owner.expiry <= FarcasterTime::current().to_unix_seconds() {
-            return Err(Status::not_found("channel registration expired"));
-        }
-
         let fid = resolve_channel_owner_fid(&self.shard_stores, &channel_owner.owner_address)?;
 
         Ok(Response::new(ChannelOwnerResponse {

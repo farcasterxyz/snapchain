@@ -384,10 +384,14 @@ mod tests {
         assert_eq!(err.message(), "channel not registered");
     }
 
+    // The registry emits no onchain event when a lapsed registration's grace
+    // period ends, so the endpoint reports the last known registration as-is
+    // (owner still resolvable, expiry visibly in the past) and callers
+    // interpret expiry themselves.
     #[tokio::test]
-    async fn test_get_channel_owner_expired_registration_returns_not_found() {
+    async fn test_get_channel_owner_lapsed_registration_returns_record() {
         let (
-            _stores,
+            stores,
             _senders,
             _engines,
             block_engine,
@@ -395,22 +399,31 @@ mod tests {
             _shard_decision_tx,
             _block_decision_tx,
         ) = make_server(None, None).await;
-        merge_channel_registration(
-            &block_engine,
-            "expired",
-            owner_address(1),
-            now_unix_seconds() - 1,
+        let address = owner_address(1);
+        let expiry = now_unix_seconds() - 1;
+        merge_channel_registration(&block_engine, "lapsed", address.clone(), expiry);
+        let verification = messages_factory::verifications::create_verification_add(
+            SHARD1_FID,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(10),
+            None,
         );
+        merge_verification(stores.get(&1).unwrap(), &verification);
 
-        let err = service
+        let response = service
             .get_channel_owner(Request::new(ChannelOwnerRequest {
-                channel_key: "expired".to_string(),
+                channel_key: "lapsed".to_string(),
             }))
             .await
-            .unwrap_err();
+            .unwrap()
+            .into_inner();
 
-        assert_eq!(err.code(), tonic::Code::NotFound);
-        assert_eq!(err.message(), "channel registration expired");
+        assert_eq!(response.fid, SHARD1_FID);
+        assert_eq!(response.owner_address, address);
+        assert_eq!(response.expiry, expiry);
     }
 
     #[tokio::test]
@@ -544,7 +557,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let address = owner_address(6);
         merge_channel_registration(
             &block_engine,
@@ -598,7 +611,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let address = owner_address(7);
         let expiry = now_unix_seconds() + 3600;
         merge_channel_registration(&block_engine, "removed", address.clone(), expiry);

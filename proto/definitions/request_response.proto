@@ -165,7 +165,9 @@ message ChannelOwnerResponse {
   uint64 fid = 1;
   // Raw 20-byte EVM address from the channel registry fold.
   bytes owner_address = 2;
-  // Absolute expiry, unix seconds, as emitted by the registry contract.
+  // Absolute expiry, unix seconds, as emitted by the registry contract. May be
+  // in the past: lapsed registrations are returned until superseded (see
+  // GetChannelOwner in rpc.proto).
   uint64 expiry = 3;
 }
 

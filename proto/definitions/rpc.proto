@@ -84,6 +84,14 @@ service HubService {
   // shard holds any verifier). Only a node hosting all data shards is guaranteed
   // to return the globally-correct owner. Callers that need an authoritative
   // answer must query a full node.
+  //
+  // Expiry is returned as-is and may be in the past. The registry contract
+  // emits no onchain event when a lapsed registration's grace period ends, so
+  // this endpoint reports the last known registration (owner address + expiry)
+  // until a later registration supersedes it; it never computes grace or
+  // release state. Callers interpret `expiry` themselves (e.g. against the
+  // deployed grace period). NOT_FOUND is returned only for a channel key with
+  // no registration record at all.
   rpc GetChannelOwner(ChannelOwnerRequest) returns (ChannelOwnerResponse);
   rpc GetIdRegistryOnChainEvent(FidRequest) returns (OnChainEvent);
   rpc GetIdRegistryOnChainEventByAddress(IdRegistryEventByAddressRequest) returns (OnChainEvent);
