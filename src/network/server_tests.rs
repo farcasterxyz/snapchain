@@ -1233,6 +1233,42 @@ mod tests {
         assert_eq!(walked, vec!["pa_1", "pa_2", "pa_3"]);
     }
 
+    // Pins the page-size contract shared with GetChannelsByFid: 0 is an empty
+    // page with no token, not "at least one row".
+    #[tokio::test]
+    async fn test_channel_reads_by_address_zero_page_size_returns_empty_page() {
+        let (
+            _stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let address = owner_address(24);
+        merge_channel_registration(
+            &block_engine,
+            "zero_page",
+            address.clone(),
+            now_unix_seconds() + 3600,
+        );
+
+        let response = service
+            .get_channels_by_address(Request::new(ChannelsByAddressRequest {
+                owner_address: address,
+                page_size: Some(0),
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(response.channels.is_empty());
+        assert_eq!(response.next_page_token, None);
+    }
+
     // Non-EVM (Solana) and malformed verifications must never contribute an
     // owner address to the EVM-only channel resolution.
     #[tokio::test]

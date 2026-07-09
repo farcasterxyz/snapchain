@@ -640,6 +640,12 @@ pub fn get_channel_keys_by_owner_address(
 /// address — addresses fully below it are skipped, the token's own address
 /// resumes strictly after it, and addresses above it start fresh — so a token
 /// minted from one address can never mis-scan another.
+///
+/// There is no snapshot isolation across pages: `owner_addresses` is re-derived
+/// per request, so if the set changes between pages the cursor follows standard
+/// paging semantics — an address removed after the token was minted stops
+/// contributing (its earlier entries were already returned), and an address
+/// added below the token is not revisited until a fresh enumeration.
 pub fn get_channel_keys_for_owner_addresses(
     db: &RocksDB,
     owner_addresses: &[Vec<u8>],

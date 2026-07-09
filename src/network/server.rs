@@ -2772,7 +2772,20 @@ impl HubService for MyHubService {
         request: Request<ChannelsByAddressRequest>,
     ) -> Result<Response<ChannelsResponse>, Status> {
         let req = request.into_inner();
-        let page_options = req.page_options();
+        // Match GetChannelsByFid's page-size contract on this public read: 0
+        // returns an empty page, and an omitted or oversized value is clamped
+        // to the server-side maximum so it can't trigger an unbounded scan.
+        let mut page_options = req.page_options();
+        page_options.page_size = match page_options.page_size {
+            Some(0) => {
+                return Ok(Response::new(ChannelsResponse {
+                    channels: vec![],
+                    next_page_token: None,
+                }));
+            }
+            Some(size) => Some(size.min(PAGE_SIZE_MAX)),
+            None => Some(PAGE_SIZE_MAX),
+        };
         let (mut channels, next_page_token) = channel_infos_by_owner_address(
             &self.block_stores,
             &req.owner_address,
