@@ -136,6 +136,10 @@ const ENGINE_VERSION_SCHEDULE_MAINNET: &[VersionSchedule] = [
         active_at: 1782147600, // 2026-06-22 5PM UTC (12:00 PM CDT)
         version: EngineVersion::V18,
     },
+    VersionSchedule {
+        active_at: 1785160800, // 2026-07-27 2PM UTC (9:00 AM CDT)
+        version: EngineVersion::V19,
+    },
 ]
 .as_slice();
 
@@ -199,6 +203,10 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
     VersionSchedule {
         active_at: 1781283600, // 2026-06-12 5PM UTC
         version: EngineVersion::V18,
+    },
+    VersionSchedule {
+        active_at: 1784048400, // 2026-07-14 5PM UTC (12:00 PM CDT)
+        version: EngineVersion::V19,
     },
 ]
 .as_slice();
@@ -602,14 +610,41 @@ mod version_test {
 
     #[test]
     fn test_block_links_activation_schedule() {
-        // V19 is devnet-only for now, so mainnet/testnet stay on V18 even far in the future.
-        let far_future = FarcasterTime::from_unix_seconds(4102444800); // 2100-01-01 UTC
-        for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
-            assert_eq!(
-                EngineVersion::version_for(&far_future, network),
-                EngineVersion::V18
-            );
-        }
+        // Testnet: V19 at 2026-07-14 17:00 UTC (12:00 PM CDT); pre-activation returns V18.
+        let testnet_active = 1784048400;
+        assert_eq!(
+            EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(testnet_active - 1),
+                FarcasterNetwork::Testnet,
+            ),
+            EngineVersion::V18
+        );
+        assert_eq!(
+            EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(testnet_active),
+                FarcasterNetwork::Testnet,
+            ),
+            EngineVersion::V19
+        );
+
+        // Mainnet: V19 at 2026-07-27 14:00 UTC (9:00 AM CDT); pre-activation returns V18.
+        let mainnet_active = 1785160800;
+        assert_eq!(
+            EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(mainnet_active - 1),
+                FarcasterNetwork::Mainnet,
+            ),
+            EngineVersion::V18
+        );
+        assert_eq!(
+            EngineVersion::version_for(
+                &FarcasterTime::from_unix_seconds(mainnet_active),
+                FarcasterNetwork::Mainnet,
+            ),
+            EngineVersion::V19
+        );
+
+        // Devnet: V19 from genesis.
         assert_eq!(
             EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet),
             EngineVersion::V19
@@ -686,6 +721,12 @@ mod version_test {
         );
 
         let time = FarcasterTime::from_unix_seconds(1782147600);
+        assert_eq!(
+            EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
+            Some(1785160800)
+        );
+
+        let time = FarcasterTime::from_unix_seconds(1785160800);
         assert_eq!(
             EngineVersion::next_version_timestamp_for(&time, FarcasterNetwork::Mainnet),
             None
