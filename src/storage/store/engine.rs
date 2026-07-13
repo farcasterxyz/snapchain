@@ -1,6 +1,6 @@
 use super::account::{
-    fold_channel_register_replica, IntoU8, OnchainEventStorageError, UserDataStore,
-    UsernameProofStore,
+    fold_channel_register_replica, get_channel_keys_by_owner_address, IntoU8,
+    OnchainEventStorageError, UserDataStore, UsernameProofStore,
 };
 use crate::connectors::onchain_events;
 use crate::consensus::proposer::ProposalSource;
@@ -803,6 +803,166 @@ impl ShardEngine {
         }
     }
 
+    /// Emit `ChannelOwnerChangeHint` HubEvents for a just-merged Ethereum
+    /// verification whose verified address owns one or more channels, by scanning
+    /// THIS shard's own ByOwnerAddress replica (the trie-free ownership index built
+    /// by the increment-7 block-event fold). Called only from the user-message
+    /// merge loop's `Ok(merge_events)` arm — the hottest path this feature touches.
+    ///
+    /// STRUCTURAL SAFETY CONTRACT (the rule this increment lives or dies by): this
+    /// hook is unable to fail, alter, or panic a message merge. Its ONLY effect on
+    /// the caller is the `Vec<HubEvent>` it returns, which the caller
+    /// `events.extend(...)`s — it never sees the merge result, `validation_errors`,
+    /// or the trie. Every error — a missing/malformed body, a replica read/decode
+    /// error, an event-persist error — is swallowed with a `warn!` and yields fewer
+    /// hints, never an `Err`, never a panic, never a mutation of the merge. Do NOT
+    /// add a `?`, an `Err` early-return, or an unwrap on message/body data here.
+    ///
+    /// Hints are deliberately NOT trie-indexed. The sibling `merge_events` flow
+    /// through the `update_trie` loop at the call site; these hints are appended to
+    /// `events` strictly AFTER that loop and never reach `update_trie`.
+    /// `for_hub_event` pins `ChannelOwnerChangeHintBody` to zero trie keys, so a
+    /// hint contributes nothing to the shard root (asserted by the trie-discipline
+    /// test). The address is Ethereum-only: the replica stores validated 20-byte EVM
+    /// addresses, and Solana verifications never own channels, so they take no hint.
+    ///
+    /// `pub(crate)` only so tests can pin the two edges unreachable through any
+    /// running network: the pre-V20 gate and the Solana-protocol skip. The V20 fork
+    /// both opens the gate AND enables the replica fold, so no live network ever has
+    /// a populated replica with the feature off — that state exists only when the
+    /// hook is called directly with an explicit pre-V20 `version`. Production has a
+    /// single caller (the user-message merge loop).
+    pub(crate) fn emit_channel_owner_hints_for_verification(
+        &self,
+        msg: &proto::Message,
+        txn_batch: &mut RocksDbTransactionBatch,
+        version: EngineVersion,
+    ) -> Vec<HubEvent> {
+        if !version.is_enabled(ProtocolFeature::ChannelOwnershipEvents) {
+            return vec![];
+        }
+
+        // Extract (verified address, cause) for Ethereum verification add/remove
+        // only. Any missing/malformed body warns and skips; a non-Ethereum protocol
+        // (or any other message type) silently takes no hint.
+        let body = msg.data.as_ref().and_then(|data| data.body.as_ref());
+        let (address, cause) = match msg.msg_type() {
+            MessageType::VerificationAddEthAddress => match body {
+                Some(Body::VerificationAddAddressBody(add)) => {
+                    if add.protocol() != Protocol::Ethereum {
+                        return vec![];
+                    }
+                    (
+                        add.address.clone(),
+                        proto::ChannelOwnerChangeCause::VerificationAdd,
+                    )
+                }
+                _ => {
+                    warn!(
+                        fid = msg.fid(),
+                        hash = msg.hex_hash(),
+                        "Skipping channel-owner hints: VerificationAdd with missing/malformed body"
+                    );
+                    return vec![];
+                }
+            },
+            MessageType::VerificationRemove => match body {
+                Some(Body::VerificationRemoveBody(remove)) => {
+                    if remove.protocol() != Protocol::Ethereum {
+                        return vec![];
+                    }
+                    (
+                        remove.address.clone(),
+                        proto::ChannelOwnerChangeCause::VerificationRemove,
+                    )
+                }
+                _ => {
+                    warn!(
+                        fid = msg.fid(),
+                        hash = msg.hex_hash(),
+                        "Skipping channel-owner hints: VerificationRemove with missing/malformed body"
+                    );
+                    return vec![];
+                }
+            },
+            _ => return vec![],
+        };
+
+        // Scan this shard's own ByOwnerAddress replica to exhaustion in ascending
+        // key order — the pinned deterministic hint order. One hint per owned
+        // channel. N is unbounded but deterministic and economically bounded by
+        // registry fees (no cap/dedup by design). Every read/persist error is
+        // swallowed with a `warn!`: the merge has already committed and stays
+        // untouchable.
+        let mut hints = vec![];
+        let mut page_token: Option<Vec<u8>> = None;
+        loop {
+            let page_options = PageOptions {
+                page_token: page_token.take(),
+                ..PageOptions::default()
+            };
+            let (channel_keys, next_page_token) = match get_channel_keys_by_owner_address(
+                &self.stores.onchain_event_store.db,
+                &address,
+                &page_options,
+            ) {
+                Ok(page) => page,
+                Err(err) => {
+                    warn!(
+                        fid = msg.fid(),
+                        hash = msg.hex_hash(),
+                        "Skipping remaining channel-owner hints: replica scan failed: {:?}",
+                        err
+                    );
+                    break;
+                }
+            };
+
+            for channel_key in channel_keys {
+                let mut hint = HubEvent::new_event(
+                    HubEventType::ChannelOwnerChangeHint,
+                    hub_event::Body::ChannelOwnerChangeHintBody(
+                        proto::ChannelOwnerChangeHintBody {
+                            channel_key,
+                            owner_address: address.clone(),
+                            cause: cause as i32,
+                        },
+                    ),
+                );
+                // `commit_transaction` assigns the id (a normal incrementing seq via
+                // HubEventIdGenerator's wildcard arm) and persists the hint so it is
+                // subscriber-visible — the same machinery every store merge path uses.
+                // A persist error skips just this hint; it never propagates.
+                match self
+                    .stores
+                    .event_handler
+                    .commit_transaction(txn_batch, &mut hint)
+                {
+                    Ok(_) => hints.push(hint),
+                    Err(err) => {
+                        warn!(
+                            fid = msg.fid(),
+                            hash = msg.hex_hash(),
+                            "Skipping a channel-owner hint: event persist failed: {:?}",
+                            err
+                        );
+                    }
+                }
+            }
+
+            // A present token means "call again" but does not guarantee more results
+            // (a page that fills exactly on the last entry yields one final empty
+            // page); a `None` token means the sequence was fully enumerated. The
+            // token strictly advances past the last scanned key, so this terminates.
+            match next_page_token {
+                Some(token) => page_token = Some(token),
+                None => break,
+            }
+        }
+
+        hints
+    }
+
     pub(crate) fn replay_snapchain_txn(
         &mut self,
         trie_ctx: &merkle_trie::Context,
@@ -1105,6 +1265,15 @@ impl ShardEngine {
                                 user_messages_count += 1;
                             }
                             events.extend(merge_events.clone());
+                            // Verification-caused channel-owner hints. These ride the
+                            // user-message merge path but are STRUCTURALLY unable to affect
+                            // it: the helper swallows every error and returns only a Vec we
+                            // extend with. Appended AFTER the `update_trie` loop above and
+                            // never routed through it — hints are deliberately not
+                            // trie-indexed (see the helper's contract).
+                            events.extend(self.emit_channel_owner_hints_for_verification(
+                                msg, txn_batch, version,
+                            ));
                             message_types_to_prune.insert(msg.msg_type());
                         }
                         Err(err) => {
