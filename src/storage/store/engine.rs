@@ -1,4 +1,7 @@
-use super::account::{IntoU8, OnchainEventStorageError, UserDataStore, UsernameProofStore};
+use super::account::{
+    fold_channel_register_replica, IntoU8, OnchainEventStorageError, UserDataStore,
+    UsernameProofStore,
+};
 use crate::connectors::onchain_events;
 use crate::consensus::proposer::ProposalSource;
 use crate::core::{
@@ -736,14 +739,54 @@ impl ShardEngine {
                         MessageValidationError::InvalidMessageType(on_chain_event.r#type).into(),
                     );
                 }
-                // Feature active: intentionally a no-op (no store write, no trie update). The
-                // data-shard replica fold that consumes this event lands in the next increment,
-                // and shard-0 emission ships in that same increment — so no code path can mint a
-                // MergeOnChainEvent BlockEvent yet and this arm is currently unreachable on every
-                // network. It exists now only so the type's gate is present the moment the type
-                // is. (Devnet runs V20, so the gate is open there today; still unreachable
-                // without an emitter.)
-                Ok(vec![])
+                // Feature active: fold the fanned-out event into this shard's own replica.
+                // Shard 0 only fans channel-register events today; anything else is warned
+                // and dropped (the arm must not assume that forever).
+                if on_chain_event.r#type() != OnChainEventType::EventTypeChannelRegister {
+                    warn!(
+                        onchain_event_type = on_chain_event.r#type,
+                        seqnum = block_event.seqnum(),
+                        "Skipping MergeOnChainEvent BlockEvent replay: unexpected onchain event type"
+                    );
+                    return Ok(vec![]);
+                }
+                // Replica fold: secondary indexes only against this shard's OnchainEventStore
+                // — no primary-event write, no trie mutation (the hint contributes zero trie
+                // keys, pinned by merkle_trie tests). `Err` propagates to the caller, which
+                // warns and continues — same surface as the MergeMessage arm. On the
+                // route_fid(0) shard this event was already merged via the system-message
+                // path; the fold's LWW comparator is strict `<`, so re-applying at the same
+                // chain position rewrites byte-identical values and still reports the change,
+                // keeping "REGISTER/TRANSFER hints on every shard's stream" true.
+                match fold_channel_register_replica(
+                    &self.stores.onchain_event_store.db,
+                    txn_batch,
+                    on_chain_event,
+                )? {
+                    None => Ok(vec![]),
+                    Some(change) => {
+                        // Emit exactly one hint. `commit_transaction` assigns its event id
+                        // (a normal incrementing seq via HubEventIdGenerator's wildcard arm)
+                        // and persists it, exactly as the store merge paths do for their
+                        // events — so the hint is subscriber-visible on this shard's stream.
+                        let mut hint = HubEvent::new_event(
+                            HubEventType::ChannelOwnerChangeHint,
+                            hub_event::Body::ChannelOwnerChangeHintBody(
+                                proto::ChannelOwnerChangeHintBody {
+                                    channel_key: change.channel_key,
+                                    owner_address: change.owner_address,
+                                    cause: change.cause as i32,
+                                },
+                            ),
+                        );
+                        let id = self
+                            .stores
+                            .event_handler
+                            .commit_transaction(txn_batch, &mut hint)?;
+                        hint.id = id;
+                        Ok(vec![hint])
+                    }
+                }
             }
             proto::block_event_data::Body::HeartbeatEventBody(_) => Ok(vec![]),
         }

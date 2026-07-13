@@ -457,9 +457,6 @@ fn build_secondary_indices_for_channel_register(
 /// onchain-event record and does not touch the trie (those live in the shard-0
 /// merge path). Non-channel events fold to `None`. Returns the ownership change a
 /// REGISTER/TRANSFER recorded so the caller can emit a `ChannelOwnerChangeHint`.
-// `allow(dead_code)`: the data-shard replica arm that calls this lands in the same
-// increment's feature commit; this refactor commit only exposes the entry point.
-#[allow(dead_code)]
 pub(crate) fn fold_channel_register_replica(
     db: &RocksDB,
     txn: &mut RocksDbTransactionBatch,
@@ -1237,6 +1234,27 @@ impl OnchainEventStore {
         let empty_txn = RocksDbTransactionBatch::new();
         let txn = txn_batch.unwrap_or(&empty_txn);
         read_channel_owner_by_channel_key(&self.db, txn, channel_key)
+    }
+
+    /// Reads the ChannelKeyByLabel index (label -> channel_key). Test-only: the
+    /// production TRANSFER path resolves the label internally, so there is no
+    /// non-test caller; tests use it to assert the index materialized.
+    #[cfg(test)]
+    pub fn get_channel_key_by_label(
+        &self,
+        label: &[u8],
+    ) -> Result<Option<String>, OnchainEventStorageError> {
+        let empty_txn = RocksDbTransactionBatch::new();
+        match get_from_db_or_txn(
+            &self.db,
+            &empty_txn,
+            &make_channel_register_channel_key_by_label_key(label),
+        )? {
+            Some(bytes) => Ok(Some(
+                String::from_utf8(bytes).map_err(|err| DecodeError::new(err.to_string()))?,
+            )),
+            None => Ok(None),
+        }
     }
 
     pub fn get_active_signer(

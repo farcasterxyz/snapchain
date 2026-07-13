@@ -2,7 +2,8 @@
 mod tests {
     use crate::core::util::FarcasterTime;
     use crate::proto::{
-        BlockEventType, ChannelRegisterEventType, FarcasterNetwork, OnChainEvent, StorageUnitType,
+        block_event_data, Block, BlockEvent, BlockEventType, ChannelRegisterEventType,
+        FarcasterNetwork, OnChainEvent, StorageUnitType,
     };
     use crate::storage::store::block_engine::BlockStateChange;
     use crate::storage::store::block_engine_test_helpers::*;
@@ -299,6 +300,191 @@ mod tests {
             .get_channel_owner(channel_key, None)
             .unwrap()
             .is_none());
+    }
+
+    // --- Shard-0 fan-out of channel-register events (increment 7) -----------------------------
+
+    fn single_channel_register(channel_key: &str, owner_byte: u8) -> OnChainEvent {
+        events_factory::create_channel_register_event(
+            channel_key,
+            channel_label(channel_key),
+            channel_owner(owner_byte),
+            1_900_000_000,
+            ChannelRegisterEventType::Register,
+            100,
+            0,
+        )
+    }
+
+    fn merge_on_chain_fan_out_events(block: &Block) -> Vec<&BlockEvent> {
+        block
+            .events
+            .iter()
+            .filter(|event| {
+                event.data.as_ref().unwrap().r#type() == BlockEventType::MergeOnChainEvent
+            })
+            .collect()
+    }
+
+    fn fanned_out_onchain_event(block_event: &BlockEvent) -> &OnChainEvent {
+        match block_event.data.as_ref().unwrap().body.as_ref().unwrap() {
+            block_event_data::Body::MergeOnChainEventEventBody(body) => {
+                body.on_chain_event.as_ref().unwrap()
+            }
+            other => panic!("expected MergeOnChainEventEventBody, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_channel_register_fans_out_one_merge_on_chain_event() {
+        // V20 devnet: a merged channel-register event fans out exactly one
+        // MergeOnChainEvent BlockEvent carrying the whole original event, seqnum-chained
+        // and persisted, with events_hash covering it.
+        let (mut block_engine, _temp_dir) = setup();
+        let register = single_channel_register("pets", 0xAA);
+
+        let block = commit_event(&mut block_engine, &register);
+
+        let fan_out = merge_on_chain_fan_out_events(&block);
+        assert_eq!(
+            fan_out.len(),
+            1,
+            "exactly one fan-out event per channel register"
+        );
+        let data = fan_out[0].data.as_ref().unwrap();
+        assert_eq!(data.seqnum, 1, "first block event gets seqnum 1");
+        assert_eq!(data.event_index, 0);
+        assert_eq!(
+            data.block_number,
+            block.header.as_ref().unwrap().height.unwrap().block_number
+        );
+        // Carries the whole original event.
+        let carried = fanned_out_onchain_event(fan_out[0]);
+        assert_eq!(carried.transaction_hash, register.transaction_hash);
+        assert_eq!(carried.r#type, register.r#type);
+        // events_hash covers the fan-out event's hash.
+        let mut hasher = blake3::Hasher::new();
+        for event in &block.events {
+            hasher.update(&event.hash);
+        }
+        assert_eq!(
+            block.header.as_ref().unwrap().events_hash,
+            hasher.finalize().as_bytes().to_vec()
+        );
+        // Persisted in the block-event store.
+        let stored = block_engine
+            .stores()
+            .block_event_store
+            .get_block_event_by_seqnum(1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(&stored, fan_out[0]);
+    }
+
+    #[tokio::test]
+    async fn test_channel_register_fan_out_seqnum_chains_across_blocks() {
+        // Two registers in consecutive blocks get consecutive seqnums (1, then 2), proving the
+        // fan-out reads the persisted max seqnum rather than resetting per block.
+        let (mut block_engine, _temp_dir) = setup();
+
+        // Distinct log indices so the two registers have distinct onchain primary keys.
+        let register1 = events_factory::create_channel_register_event(
+            "pets",
+            channel_label("pets"),
+            channel_owner(0xAA),
+            1_900_000_000,
+            ChannelRegisterEventType::Register,
+            100,
+            0,
+        );
+        let register2 = events_factory::create_channel_register_event(
+            "casts",
+            channel_label("casts"),
+            channel_owner(0xBB),
+            1_900_000_000,
+            ChannelRegisterEventType::Register,
+            100,
+            1,
+        );
+        let block1 = commit_event(&mut block_engine, &register1);
+        let block2 = commit_event(&mut block_engine, &register2);
+
+        assert_eq!(
+            merge_on_chain_fan_out_events(&block1)[0]
+                .data
+                .as_ref()
+                .unwrap()
+                .seqnum,
+            1
+        );
+        assert_eq!(
+            merge_on_chain_fan_out_events(&block2)[0]
+                .data
+                .as_ref()
+                .unwrap()
+                .seqnum,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pre_feature_channel_register_does_not_fan_out() {
+        // Mainnet pre-V20: ChannelRegistrations (and, co-activated, ChannelOwnershipEvents) are
+        // off, so the channel event is dropped before it can merge — no fan-out, and events_hash
+        // stays empty, byte-identical to the pre-increment behavior.
+        let (mut block_engine, _temp_dir) = setup_with_options(BlockEngineOptions {
+            network: FarcasterNetwork::Mainnet,
+            ..BlockEngineOptions::default()
+        });
+        let height = block_engine.get_confirmed_height().increment();
+        let state_change = block_engine.propose_state_change(
+            vec![MempoolMessage::OnchainEvent(single_channel_register(
+                "pets", 0xAA,
+            ))],
+            height,
+            Some(FarcasterTime::from_unix_seconds(4102444800)),
+        );
+
+        assert!(
+            state_change.events.is_empty(),
+            "no fan-out before the feature is active"
+        );
+        assert!(state_change.events_hash.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_non_channel_onchain_event_does_not_fan_out() {
+        // A non-channel onchain event (storage rent) still produces a MergeOnChainEventBody hub
+        // event, but the fan-out arm only carries channel registers — so nothing is emitted.
+        let (mut block_engine, _temp_dir) = setup();
+        let rent = events_factory::create_rent_event(
+            FID_FOR_TEST,
+            1,
+            StorageUnitType::UnitType2025,
+            false,
+            FarcasterNetwork::Devnet,
+        );
+
+        let block = commit_event(&mut block_engine, &rent);
+
+        assert!(
+            merge_on_chain_fan_out_events(&block).is_empty(),
+            "only channel-register events fan out"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_channel_register_fan_out_is_deterministic() {
+        // Two fresh engines replaying the same channel register produce byte-identical event
+        // lists — the fan-out is a pure function of the block's merged events.
+        let register = single_channel_register("pets", 0xAA);
+
+        let (mut engine_a, _dir_a) = setup();
+        let (mut engine_b, _dir_b) = setup();
+        let block_a = commit_event(&mut engine_a, &register);
+        let block_b = commit_event(&mut engine_b, &register);
+
+        assert_eq!(block_a.events, block_b.events);
     }
 
     #[tokio::test]

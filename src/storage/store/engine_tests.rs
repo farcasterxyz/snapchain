@@ -4491,68 +4491,342 @@ mod tests {
     }
 
     // ----------------------------------------------------------------------------------------
-    // MergeOnChainEvent BlockEvent admission arm (ownership-events increment 6).
+    // MergeOnChainEvent BlockEvent replica fold + ownership hints (increment 7).
     //
-    // This BlockEventType is inert this increment: shard-0 emission and the data-shard replica
-    // fold both ship in a later increment, so NO production code path mints a MergeOnChainEvent
-    // BlockEvent yet. These tests construct one directly (nothing else can) to pin the
-    // receiver-side gate in `handle_block_event` on both sides of the ChannelOwnershipEvents
-    // feature boundary. Both sides are observably inert — no channel-owner index is folded and
-    // the trie is untouched. The difference is internal: active takes the `Ok(vec![])` no-op
-    // path; pre-feature takes the `InvalidMessageType` reject path (warned + swallowed by the
-    // caller). The gate ships WITH the type so a type merged pre-gate can never become a
-    // permanent replay divergence when emission lands later.
+    // Shard 0 fans channel-register events to every data shard as a MergeOnChainEvent BlockEvent;
+    // `handle_block_event` runs the trie-free replica fold against the shard's own
+    // OnchainEventStore and emits a ChannelOwnerChangeHint whenever a REGISTER/TRANSFER records a
+    // new owner. These tests drive that arm through the real block-event commit path. The
+    // pre-feature reject test is unchanged: the gate still ships WITH the type.
     // ----------------------------------------------------------------------------------------
     mod channel_ownership_events_block_event_tests {
         use super::*;
+        use crate::storage::store::account::get_channel_keys_by_owner_address;
         use alloy_primitives::keccak256;
 
         const CHANNEL_KEY: &str = "pets";
 
-        fn channel_register_onchain_event() -> OnChainEvent {
+        fn channel_label(channel_key: &str) -> Vec<u8> {
+            keccak256(channel_key.as_bytes()).to_vec()
+        }
+
+        fn channel_event(
+            channel_key: &str,
+            label_source: &str,
+            owner_byte: u8,
+            event_type: proto::ChannelRegisterEventType,
+            expiry: u64,
+            block_number: u32,
+        ) -> OnChainEvent {
             events_factory::create_channel_register_event(
-                CHANNEL_KEY,
-                keccak256(CHANNEL_KEY.as_bytes()).to_vec(),
-                vec![0xCC; 20],
-                1_900_000_000,
-                proto::ChannelRegisterEventType::Register,
-                100,
+                channel_key,
+                channel_label(label_source),
+                vec![owner_byte; 20],
+                expiry,
+                event_type,
+                block_number,
                 0,
             )
         }
 
+        fn channel_register_onchain_event() -> OnChainEvent {
+            channel_event(
+                CHANNEL_KEY,
+                CHANNEL_KEY,
+                0xCC,
+                proto::ChannelRegisterEventType::Register,
+                1_900_000_000,
+                100,
+            )
+        }
+
+        // Commits one MergeOnChainEvent BlockEvent (seqnum-chained) through the data-shard path.
+        async fn apply_channel_block_event(
+            engine: &mut ShardEngine,
+            onchain_event: OnChainEvent,
+            seqnum: u64,
+        ) {
+            let block_event =
+                events_factory::create_merge_on_chain_event_event(onchain_event, seqnum);
+            commit_block_events(engine, vec![&block_event]).await;
+        }
+
+        fn owner_change_hints(engine: &ShardEngine) -> Vec<HubEvent> {
+            HubEvent::get_events(engine.db.clone(), 0, None, None)
+                .unwrap()
+                .events
+                .into_iter()
+                .filter(|event| event.r#type == HubEventType::ChannelOwnerChangeHint as i32)
+                .collect()
+        }
+
+        fn assert_hint(
+            hint: &HubEvent,
+            channel_key: &str,
+            owner_address: &[u8],
+            cause: proto::ChannelOwnerChangeCause,
+        ) {
+            let body = match hint.body.as_ref().unwrap() {
+                proto::hub_event::Body::ChannelOwnerChangeHintBody(body) => body,
+                other => panic!("expected ChannelOwnerChangeHintBody, got {:?}", other),
+            };
+            assert_eq!(body.channel_key, channel_key);
+            assert_eq!(body.owner_address, owner_address);
+            assert_eq!(body.cause, cause as i32);
+            // A subscriber-visible event id, assigned by the shared HubEventIdGenerator.
+            assert!(hint.id > 0, "hint must carry a normal (nonzero) event id");
+        }
+
+        fn owner_channels(engine: &ShardEngine, owner_byte: u8) -> Vec<String> {
+            get_channel_keys_by_owner_address(
+                &engine.get_stores().onchain_event_store.db,
+                &vec![owner_byte; 20],
+                &PageOptions::default(),
+            )
+            .unwrap()
+            .0
+        }
+
         #[tokio::test]
-        async fn test_active_merge_on_chain_event_block_event_is_inert_no_op() {
-            // Devnet runs V20, so ChannelOwnershipEvents is active and the arm takes the
-            // `Ok(vec![])` no-op path. Committing must succeed (propose and validate legs agree
-            // on an empty event set → events_hash matches), persist the raw event, and change
-            // nothing else: no trie write, no channel-owner replica (the fold lands later).
+        async fn test_active_merge_on_chain_event_block_event_folds_replica_and_hints() {
+            // Devnet runs V20, so the arm folds the fanned-out REGISTER into this shard's own
+            // replica: it materializes all three secondary indexes (ByChannelKey,
+            // ChannelKeyByLabel, ByOwnerAddress), emits exactly one REGISTER hint, and — being a
+            // secondary-index-only fold — never touches the trie.
             let (mut engine, _temp_dir) = test_helper::new_engine().await;
             assert!(EngineVersion::latest().is_enabled(ProtocolFeature::ChannelOwnershipEvents));
 
             let root_before = engine.trie_root_hash();
-            let block_event = events_factory::create_merge_on_chain_event_event(
-                channel_register_onchain_event(),
-                1,
-            );
-            commit_block_events(&mut engine, vec![&block_event]).await;
+            apply_channel_block_event(&mut engine, channel_register_onchain_event(), 1).await;
 
-            // Raw event is logged (put_block_event runs regardless of the arm)...
-            assert!(block_event_exists(&engine, &block_event));
-            // ...but nothing was applied: trie root unchanged and no owner index materialized.
+            let stores = engine.get_stores();
+            // ByChannelKey.
+            let owner = stores
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(owner.channel_key, CHANNEL_KEY);
+            assert_eq!(owner.owner_address, vec![0xCC; 20]);
+            // ChannelKeyByLabel.
+            assert_eq!(
+                stores
+                    .onchain_event_store
+                    .get_channel_key_by_label(&channel_label(CHANNEL_KEY))
+                    .unwrap(),
+                Some(CHANNEL_KEY.to_string())
+            );
+            // ByOwnerAddress.
+            assert_eq!(owner_channels(&engine, 0xCC), vec![CHANNEL_KEY.to_string()]);
+
+            // Exactly one REGISTER hint carrying the recorded owner.
+            let hints = owner_change_hints(&engine);
+            assert_eq!(hints.len(), 1);
+            assert_hint(
+                &hints[0],
+                CHANNEL_KEY,
+                &vec![0xCC; 20],
+                proto::ChannelOwnerChangeCause::Register,
+            );
+
+            // Trie-free: the replica lives entirely in RocksDB secondary indexes.
             assert_eq!(
                 to_hex(&root_before),
                 to_hex(&engine.trie_root_hash()),
-                "no-op MergeOnChainEvent replay must not touch the trie"
+                "replica fold must not touch the trie"
             );
+        }
+
+        #[tokio::test]
+        async fn test_renew_updates_expiry_and_emits_no_hint() {
+            // RENEW extends expiry without changing ownership — the index is updated but no hint
+            // fires (the cause enum has no RENEW variant by design).
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            apply_channel_block_event(&mut engine, channel_register_onchain_event(), 1).await;
+
+            let renew = channel_event(
+                CHANNEL_KEY,
+                CHANNEL_KEY,
+                0xCC,
+                proto::ChannelRegisterEventType::Renew,
+                2_000_000_000,
+                101,
+            );
+            apply_channel_block_event(&mut engine, renew, 2).await;
+
             let owner = engine
                 .get_stores()
                 .onchain_event_store
                 .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(owner.expiry, 2_000_000_000, "renew updates expiry");
+            // Only the register's hint — renew adds none.
+            assert_eq!(owner_change_hints(&engine).len(), 1);
+        }
+
+        #[tokio::test]
+        async fn test_transfer_moves_owner_and_hints_new_owner() {
+            // TRANSFER rebinds the channel to a new owner (resolved via ChannelKeyByLabel), moves
+            // the ByOwnerAddress index, and emits a TRANSFER hint carrying the NEW owner.
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let register = channel_event(
+                CHANNEL_KEY,
+                CHANNEL_KEY,
+                0xAA,
+                proto::ChannelRegisterEventType::Register,
+                1_900_000_000,
+                100,
+            );
+            apply_channel_block_event(&mut engine, register, 1).await;
+
+            // A transfer carries the label (not the channel_key) and the new owner.
+            let transfer = channel_event(
+                "",
+                CHANNEL_KEY,
+                0xBB,
+                proto::ChannelRegisterEventType::Transfer,
+                0,
+                101,
+            );
+            apply_channel_block_event(&mut engine, transfer, 2).await;
+
+            let owner = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                owner.owner_address,
+                vec![0xBB; 20],
+                "owner moved to new address"
+            );
+            // ByOwnerAddress moved: old owner empty, new owner holds the channel.
+            assert!(owner_channels(&engine, 0xAA).is_empty());
+            assert_eq!(owner_channels(&engine, 0xBB), vec![CHANNEL_KEY.to_string()]);
+
+            let hints = owner_change_hints(&engine);
+            assert_eq!(hints.len(), 2, "one REGISTER hint, one TRANSFER hint");
+            assert_hint(
+                &hints[1],
+                CHANNEL_KEY,
+                &vec![0xBB; 20],
+                proto::ChannelOwnerChangeCause::Transfer,
+            );
+        }
+
+        #[tokio::test]
+        async fn test_lww_older_event_is_skipped_and_emits_no_hint() {
+            // A later-arriving but chain-older REGISTER loses LWW: no write, no hint.
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let register = channel_event(
+                CHANNEL_KEY,
+                CHANNEL_KEY,
+                0xAA,
+                proto::ChannelRegisterEventType::Register,
+                1_900_000_000,
+                100,
+            );
+            apply_channel_block_event(&mut engine, register, 1).await;
+
+            let older = channel_event(
+                CHANNEL_KEY,
+                CHANNEL_KEY,
+                0xDD,
+                proto::ChannelRegisterEventType::Register,
+                1_900_000_000,
+                50, // earlier block → older chain position
+            );
+            apply_channel_block_event(&mut engine, older, 2).await;
+
+            let owner = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                owner.owner_address,
+                vec![0xAA; 20],
+                "older event must not overwrite"
+            );
+            assert_eq!(
+                owner_change_hints(&engine).len(),
+                1,
+                "no hint for the skipped event"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_transfer_with_unknown_label_skips_and_emits_no_hint() {
+            // A transfer whose label resolves to no registered channel is warned and skipped —
+            // no owner index, no hint.
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let transfer = channel_event(
+                "",
+                "ghost",
+                0xBB,
+                proto::ChannelRegisterEventType::Transfer,
+                0,
+                100,
+            );
+            apply_channel_block_event(&mut engine, transfer, 1).await;
+
+            assert!(engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner("ghost", None)
+                .unwrap()
+                .is_none());
+            assert!(owner_change_hints(&engine).is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_double_application_is_idempotent_and_still_hints() {
+            // On the route_fid(0) shard a channel event is merged first as a system message
+            // (primary + fold, no hint) and THEN re-applied as a block event. The block-event
+            // replica fold re-runs at the same chain position: strict-`<` LWW rewrites
+            // byte-identical index values, and the hint still fires — pinning "REGISTER/TRANSFER
+            // hints on every shard's stream" even where the event was already merged.
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let register = channel_register_onchain_event();
+
+            // System-message path: materializes the index, emits a MergeOnChainEvent (no hint).
+            commit_event(&mut engine, &register).await;
+            let owner_after_system = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
                 .unwrap();
             assert!(
-                owner.is_none(),
-                "the replica fold ships in a later increment; no owner index this increment"
+                owner_change_hints(&engine).is_empty(),
+                "system merge emits no hint"
+            );
+
+            // Block-event path on the SAME shard: no block events exist yet, so seqnum 1.
+            apply_channel_block_event(&mut engine, register, 1).await;
+
+            let owner_after_block = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                owner_after_system, owner_after_block,
+                "re-application at equal chain position is byte-identical"
+            );
+            assert_eq!(owner_channels(&engine, 0xCC), vec![CHANNEL_KEY.to_string()]);
+            // The block-event path emits the hint even though the event was already merged.
+            let hints = owner_change_hints(&engine);
+            assert_eq!(hints.len(), 1);
+            assert_hint(
+                &hints[0],
+                CHANNEL_KEY,
+                &vec![0xCC; 20],
+                proto::ChannelOwnerChangeCause::Register,
             );
         }
 
