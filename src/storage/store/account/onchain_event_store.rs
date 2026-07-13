@@ -353,7 +353,7 @@ fn build_secondary_indices_for_channel_register(
             txn.put(by_channel_key, channel_owner.encode_to_vec());
             Some(ChannelOwnerChange {
                 channel_key: channel_register_body.channel_key.clone(),
-                owner_address: channel_owner.owner_address.clone(),
+                owner_address: channel_owner.owner_address,
                 cause: ChannelOwnerChangeCause::Register,
             })
         }
@@ -432,7 +432,7 @@ fn build_secondary_indices_for_channel_register(
             );
             Some(ChannelOwnerChange {
                 channel_key,
-                owner_address: channel_owner.owner_address.clone(),
+                owner_address: channel_owner.owner_address,
                 cause: ChannelOwnerChangeCause::Transfer,
             })
         }
