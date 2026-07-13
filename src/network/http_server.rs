@@ -4716,6 +4716,53 @@ mod tests {
     }
 
     #[test]
+    fn channel_owner_change_hint_cause_maps_every_variant() {
+        // The proto->JSON cause conversion is a hand-written int->variant table; the round-trip
+        // test above only exercises TRANSFER. Pin every arm (0..=4) plus the unknown-int
+        // fallback: the NEXT increment starts emitting REGISTER/VERIFICATION_* hints, so the
+        // arms about to go live are otherwise untested, and a transposition or a wrong fallback
+        // on this public wire contract would ship silently. The unknown case also freezes the
+        // intended forward-compat behavior (a future proto cause degrades to NONE, not a panic).
+        use ChannelOwnerChangeCause::*;
+        let cases = [
+            (0, CHANNEL_OWNER_CHANGE_CAUSE_NONE),
+            (1, CHANNEL_OWNER_CHANGE_CAUSE_REGISTER),
+            (2, CHANNEL_OWNER_CHANGE_CAUSE_TRANSFER),
+            (3, CHANNEL_OWNER_CHANGE_CAUSE_VERIFICATION_ADD),
+            (4, CHANNEL_OWNER_CHANGE_CAUSE_VERIFICATION_REMOVE),
+            (99, CHANNEL_OWNER_CHANGE_CAUSE_NONE),
+        ];
+        for (proto_cause, expected) in cases {
+            let proto_event = proto::HubEvent {
+                r#type: proto::HubEventType::ChannelOwnerChangeHint as i32,
+                id: 1,
+                body: Some(proto::hub_event::Body::ChannelOwnerChangeHintBody(
+                    proto::ChannelOwnerChangeHintBody {
+                        channel_key: "pets".to_string(),
+                        owner_address: vec![0xCC; 20],
+                        cause: proto_cause,
+                    },
+                )),
+                block_number: 1,
+                shard_index: 2,
+                timestamp: 0,
+            };
+            let json = map_proto_hub_event_to_json_hub_event(proto_event)
+                .expect("cause mapping must not fail");
+            let body = json
+                .channel_owner_change_hint_body
+                .expect("hint body present");
+            assert_eq!(
+                std::mem::discriminant(&body.cause),
+                std::mem::discriminant(&expected),
+                "proto cause {} must map to {:?}",
+                proto_cause,
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn key_remove_body_round_trips_to_json_message_data() {
         let proto_body = proto::KeyRemoveBody {
             key: vec![0xAA; 32],
