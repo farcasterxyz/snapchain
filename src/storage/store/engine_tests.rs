@@ -4489,4 +4489,107 @@ mod tests {
                 .all(|key| engine.trie_key_exists(trie_ctx(), key))
         }
     }
+
+    // ----------------------------------------------------------------------------------------
+    // MergeOnChainEvent BlockEvent admission arm (ownership-events increment 6).
+    //
+    // This BlockEventType is inert this increment: shard-0 emission and the data-shard replica
+    // fold both ship in a later increment, so NO production code path mints a MergeOnChainEvent
+    // BlockEvent yet. These tests construct one directly (nothing else can) to pin the
+    // receiver-side gate in `handle_block_event` on both sides of the ChannelOwnershipEvents
+    // feature boundary. Both sides are observably inert — no channel-owner index is folded and
+    // the trie is untouched. The difference is internal: active takes the `Ok(vec![])` no-op
+    // path; pre-feature takes the `InvalidMessageType` reject path (warned + swallowed by the
+    // caller). The gate ships WITH the type so a type merged pre-gate can never become a
+    // permanent replay divergence when emission lands later.
+    // ----------------------------------------------------------------------------------------
+    mod channel_ownership_events_block_event_tests {
+        use super::*;
+        use alloy_primitives::keccak256;
+
+        const CHANNEL_KEY: &str = "pets";
+
+        fn channel_register_onchain_event() -> OnChainEvent {
+            events_factory::create_channel_register_event(
+                CHANNEL_KEY,
+                keccak256(CHANNEL_KEY.as_bytes()).to_vec(),
+                vec![0xCC; 20],
+                1_900_000_000,
+                proto::ChannelRegisterEventType::Register,
+                100,
+                0,
+            )
+        }
+
+        #[tokio::test]
+        async fn test_active_merge_on_chain_event_block_event_is_inert_no_op() {
+            // Devnet runs V20, so ChannelOwnershipEvents is active and the arm takes the
+            // `Ok(vec![])` no-op path. Committing must succeed (propose and validate legs agree
+            // on an empty event set → events_hash matches), persist the raw event, and change
+            // nothing else: no trie write, no channel-owner replica (the fold lands later).
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            assert!(EngineVersion::latest().is_enabled(ProtocolFeature::ChannelOwnershipEvents));
+
+            let root_before = engine.trie_root_hash();
+            let block_event = events_factory::create_merge_on_chain_event_event(
+                channel_register_onchain_event(),
+                1,
+            );
+            commit_block_events(&mut engine, vec![&block_event]).await;
+
+            // Raw event is logged (put_block_event runs regardless of the arm)...
+            assert!(block_event_exists(&engine, &block_event));
+            // ...but nothing was applied: trie root unchanged and no owner index materialized.
+            assert_eq!(
+                to_hex(&root_before),
+                to_hex(&engine.trie_root_hash()),
+                "no-op MergeOnChainEvent replay must not touch the trie"
+            );
+            let owner = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap();
+            assert!(
+                owner.is_none(),
+                "the replica fold ships in a later increment; no owner index this increment"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_pre_feature_merge_on_chain_event_block_event_is_rejected() {
+            // On Mainnet the block's timestamp (0) resolves to a pre-V20 version, so
+            // ChannelOwnershipEvents is inactive and the arm returns `InvalidMessageType`. The
+            // caller warns and swallows the error, so the block still commits — but no state is
+            // produced: the merge is short-circuited before any fold or trie write.
+            let (mut engine, _temp_dir) = test_helper::new_engine_with_options(EngineOptions {
+                network: Some(FarcasterNetwork::Mainnet),
+                ..Default::default()
+            })
+            .await;
+
+            let root_before = engine.trie_root_hash();
+            let block_event = events_factory::create_merge_on_chain_event_event(
+                channel_register_onchain_event(),
+                1,
+            );
+            commit_block_events(&mut engine, vec![&block_event]).await;
+
+            assert!(block_event_exists(&engine, &block_event));
+            assert_eq!(
+                to_hex(&root_before),
+                to_hex(&engine.trie_root_hash()),
+                "rejected MergeOnChainEvent replay must not touch the trie"
+            );
+            let owner = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap();
+            assert!(
+                owner.is_none(),
+                "pre-feature replay must not fold any owner index"
+            );
+        }
+    }
 }

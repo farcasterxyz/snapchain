@@ -54,6 +54,11 @@ impl MempoolMessage {
                     Some(block_event_data::Body::MergeMessageEventBody(body)) => {
                         body.message.as_ref().unwrap().fid()
                     }
+                    Some(block_event_data::Body::MergeOnChainEventEventBody(body)) => {
+                        // BlockEvents route by `for_shard`, not fid; this is only used for
+                        // grouping/telemetry. Channel-register onchain events carry fid 0.
+                        body.on_chain_event.as_ref().map_or(0, |e| e.fid)
+                    }
                     Some(block_event_data::Body::HeartbeatEventBody(_)) => 0,
                     None => 0,
                 },

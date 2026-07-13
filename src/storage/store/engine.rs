@@ -711,6 +711,40 @@ impl ShardEngine {
                 }
                 Ok(hub_events)
             }
+            proto::block_event_data::Body::MergeOnChainEventEventBody(merge_on_chain_event) => {
+                let on_chain_event = merge_on_chain_event
+                    .on_chain_event
+                    .as_ref()
+                    .ok_or(MessageValidationError::BlockEventMissingBody)?;
+                // Same gating home as the MergeMessage arm above: any shard-0-fanned BlockEvent
+                // type gates here, not at the call site. The inactive path returns
+                // `InvalidMessageType` (mirroring the MergeMessage arm) so a pre-feature replay
+                // surfaces a `warn!` through the caller's error arm instead of merging into a
+                // store the rest of the code can't reason about. The gate ships WITH the type:
+                // a type that can merge before its gate exists is a permanent replay divergence.
+                let block_ts = block_event.block_timestamp();
+                let version =
+                    EngineVersion::version_for(&FarcasterTime::new(block_ts), self.network);
+                if !version.is_enabled(ProtocolFeature::ChannelOwnershipEvents) {
+                    warn!(
+                        onchain_event_type = on_chain_event.r#type,
+                        seqnum = block_event.seqnum(),
+                        block_timestamp = block_ts,
+                        "Skipping MergeOnChainEvent BlockEvent replay: feature not yet active for block timestamp"
+                    );
+                    return Err(
+                        MessageValidationError::InvalidMessageType(on_chain_event.r#type).into(),
+                    );
+                }
+                // Feature active: intentionally a no-op (no store write, no trie update). The
+                // data-shard replica fold that consumes this event lands in the next increment,
+                // and shard-0 emission ships in that same increment — so no code path can mint a
+                // MergeOnChainEvent BlockEvent yet and this arm is currently unreachable on every
+                // network. It exists now only so the type's gate is present the moment the type
+                // is. (Devnet runs V20, so the gate is open there today; still unreachable
+                // without an emitter.)
+                Ok(vec![])
+            }
             proto::block_event_data::Body::HeartbeatEventBody(_) => Ok(vec![]),
         }
     }
