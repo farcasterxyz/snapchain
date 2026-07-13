@@ -404,12 +404,19 @@ pub async fn validate_and_commit_state_change(
 }
 
 pub fn default_storage_event(fid: u64) -> OnChainEvent {
-    events_factory::create_rent_event(
+    // Grant the unit with a rolling, recent timestamp rather than a fixed historical
+    // one. `StorageSlot::is_active` compares `invalidate_at` against wall-clock
+    // `SystemTime::now()`, so a fixed grant date eventually ages out of its validity
+    // window: once real time passes `grant_ts + validity`, the slot goes inactive and
+    // `prepare_proposal` silently drops the fid's messages. That is especially easy to
+    // hit when a test proposes against a pre-`StorageExpiryExtension2026` (< V18) engine
+    // version, where the unit only gets the 1-year (unextended) validity. A `now`-dated
+    // rent event still classifies as `UnitType2025` (both the 2025-cohort and new-rental
+    // branches store into `units_2025`) but never expires under test.
+    events_factory::create_rent_event_with_timestamp(
         fid,
         1,
-        proto::StorageUnitType::UnitType2025,
-        false,
-        proto::FarcasterNetwork::Devnet,
+        crate::utils::factory::time::current_timestamp(),
     )
 }
 
