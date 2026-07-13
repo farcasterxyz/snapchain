@@ -5092,18 +5092,25 @@ mod tests {
                 .collect()
         }
 
+        // Decode a hint's body. Every event reaching this is already filtered to
+        // `type == ChannelOwnerChangeHint` (by `owner_change_hints`), so the body variant is
+        // guaranteed; a mismatch is a test-harness bug and panics loudly.
+        fn hint_body(hint: &HubEvent) -> &proto::ChannelOwnerChangeHintBody {
+            match hint.body.as_ref().unwrap() {
+                proto::hub_event::Body::ChannelOwnerChangeHintBody(body) => body,
+                other => panic!("expected ChannelOwnerChangeHintBody, got {:?}", other),
+            }
+        }
+
         // Only VERIFICATION_* hints, in emission (id) order — filters out the REGISTER/TRANSFER
         // hints that the block-event fold emits while seeding the replica.
         fn verification_hints(engine: &ShardEngine) -> Vec<HubEvent> {
             owner_change_hints(engine)
                 .into_iter()
-                .filter(|hint| match hint.body.as_ref() {
-                    Some(proto::hub_event::Body::ChannelOwnerChangeHintBody(body)) => {
-                        body.cause == proto::ChannelOwnerChangeCause::VerificationAdd as i32
-                            || body.cause
-                                == proto::ChannelOwnerChangeCause::VerificationRemove as i32
-                    }
-                    _ => false,
+                .filter(|hint| {
+                    let cause = hint_body(hint).cause;
+                    cause == proto::ChannelOwnerChangeCause::VerificationAdd as i32
+                        || cause == proto::ChannelOwnerChangeCause::VerificationRemove as i32
                 })
                 .collect()
         }
@@ -5114,10 +5121,7 @@ mod tests {
             owner_address: &[u8],
             cause: proto::ChannelOwnerChangeCause,
         ) {
-            let body = match hint.body.as_ref().unwrap() {
-                proto::hub_event::Body::ChannelOwnerChangeHintBody(body) => body,
-                other => panic!("expected ChannelOwnerChangeHintBody, got {:?}", other),
-            };
+            let body = hint_body(hint);
             assert_eq!(body.channel_key, channel_key);
             assert_eq!(body.owner_address, owner_address);
             assert_eq!(body.cause, cause as i32);
@@ -5396,6 +5400,163 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn test_malformed_verification_body_skips_without_panic() {
+            // Adversarial-input pin (plan risk 1): the message body is untrusted network input.
+            // A message whose type passes the filter but whose body is missing or the WRONG
+            // variant — plus one with no `data` at all — must hit the warn-and-skip path: no
+            // hint, and crucially no panic (no unwrap on body/message data). The replica is
+            // populated for this address, so a well-formed body WOULD emit; the empties below are
+            // the malformed body's doing, not an empty replica.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            register_channel(&mut engine, "pets", verified_address()).await;
+
+            // Sanity: a well-formed add for this owner emits one hint (so "empty" below is meaningful).
+            let mut txn = RocksDbTransactionBatch::new();
+            assert_eq!(
+                engine
+                    .emit_channel_owner_hints_for_verification(
+                        &verification_add(messages_factory::farcaster_time()),
+                        &mut txn,
+                        EngineVersion::V20,
+                    )
+                    .len(),
+                1,
+                "sanity: a well-formed add for this owner emits one hint"
+            );
+
+            // 1. type == VerificationAddEthAddress but body = None.
+            let mut no_body = verification_add(messages_factory::farcaster_time());
+            no_body.data.as_mut().unwrap().body = None;
+
+            // 2. type == VerificationAddEthAddress but body is a DIFFERENT (Remove) variant.
+            let mut wrong_variant = verification_add(messages_factory::farcaster_time());
+            wrong_variant.data.as_mut().unwrap().body = Some(
+                proto::message_data::Body::VerificationRemoveBody(proto::VerificationRemoveBody {
+                    address: verified_address(),
+                    protocol: proto::Protocol::Ethereum as i32,
+                }),
+            );
+
+            // 3. No `data` at all — msg_type() falls back to None, so the hook takes no hint.
+            let mut no_data = verification_add(messages_factory::farcaster_time());
+            no_data.data = None;
+
+            for (label, msg) in [
+                ("body = None", &no_body),
+                ("wrong body variant", &wrong_variant),
+                ("data = None", &no_data),
+            ] {
+                let mut txn = RocksDbTransactionBatch::new();
+                let hints = engine.emit_channel_owner_hints_for_verification(
+                    msg,
+                    &mut txn,
+                    EngineVersion::V20,
+                );
+                assert!(
+                    hints.is_empty(),
+                    "malformed message ({label}) must emit no hint and not panic"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn test_hint_fan_out_is_capped() {
+            // One verification for an address owning many channels must not emit an
+            // unbounded number of hints — that would draw down the shared 16384/block
+            // event-id budget. Drive the cap at a small value via the `_capped` seam:
+            // 5 owned channels registered in non-sorted order, cap 3 → exactly the 3
+            // LOWEST channel_keys, in ascending order (truncation is order-deterministic,
+            // not insertion-ordered). Production uses the 256 constant.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            for key in ["e", "b", "d", "a", "c"] {
+                register_channel(&mut engine, key, verified_address()).await;
+            }
+
+            let add = verification_add(messages_factory::farcaster_time());
+            let mut txn = RocksDbTransactionBatch::new();
+            let hints = engine.emit_channel_owner_hints_for_verification_capped(
+                &add,
+                &mut txn,
+                EngineVersion::V20,
+                3,
+            );
+
+            assert_eq!(hints.len(), 3, "fan-out truncated to the cap");
+            for (hint, channel_key) in hints.iter().zip(["a", "b", "c"]) {
+                assert_hint(
+                    hint,
+                    channel_key,
+                    &verified_address(),
+                    proto::ChannelOwnerChangeCause::VerificationAdd,
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn test_truncated_hints_do_not_touch_the_trie() {
+            // Truncation must be as trie-inert as normal emission: capping the fan-out
+            // mutates zero trie state, so it can never move the shard root (and thus can
+            // never affect the merge). Mirrors `test_hints_do_not_touch_the_trie`, but on
+            // the truncation path. (That a REAL merge survives ANY hook outcome — error,
+            // empty, or this truncation, which is strictly milder than the scan error
+            // tested there — is pinned by `test_verification_merge_survives_corrupt_replica`.)
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            for key in ["a", "b", "c", "d", "e"] {
+                register_channel(&mut engine, key, verified_address()).await;
+            }
+
+            let root_before = engine.trie_root_hash();
+
+            let add = verification_add(messages_factory::farcaster_time());
+            let mut txn = RocksDbTransactionBatch::new();
+            let hints = engine.emit_channel_owner_hints_for_verification_capped(
+                &add,
+                &mut txn,
+                EngineVersion::V20,
+                3,
+            );
+            assert_eq!(hints.len(), 3, "the cap truncated to 3 hints");
+            engine
+                .get_stores()
+                .onchain_event_store
+                .db
+                .commit(txn)
+                .unwrap();
+
+            assert_eq!(
+                to_hex(&root_before),
+                to_hex(&engine.trie_root_hash()),
+                "emitting truncated hints must not touch the shard root"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_cap_above_owned_count_emits_every_hint() {
+            // Regression guard: the cap only truncates when owned channels EXCEED it.
+            // With the cap well above the owned count, every owned channel still gets a
+            // hint — the normal path is unchanged by the cap.
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            for key in ["a", "b", "c"] {
+                register_channel(&mut engine, key, verified_address()).await;
+            }
+
+            let add = verification_add(messages_factory::farcaster_time());
+            let mut txn = RocksDbTransactionBatch::new();
+            let hints = engine.emit_channel_owner_hints_for_verification_capped(
+                &add,
+                &mut txn,
+                EngineVersion::V20,
+                256,
+            );
+
+            assert_eq!(
+                hints.len(),
+                3,
+                "a cap above the owned count emits one hint per channel"
+            );
+        }
+
+        #[tokio::test]
         async fn test_end_to_end_ownership_lifecycle() {
             // Capstone: a channel is registered by one address, transferred to the verified
             // address, then verified and unverified — exercising all four hint causes across the
@@ -5446,13 +5607,7 @@ mod tests {
 
             // The full hint sequence across both paths, in emission order.
             let hints = owner_change_hints(&engine);
-            let causes: Vec<i32> = hints
-                .iter()
-                .map(|hint| match hint.body.as_ref().unwrap() {
-                    proto::hub_event::Body::ChannelOwnerChangeHintBody(body) => body.cause,
-                    other => panic!("expected ChannelOwnerChangeHintBody, got {:?}", other),
-                })
-                .collect();
+            let causes: Vec<i32> = hints.iter().map(|hint| hint_body(hint).cause).collect();
             assert_eq!(
                 causes,
                 vec![

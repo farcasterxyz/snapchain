@@ -803,6 +803,16 @@ impl ShardEngine {
         }
     }
 
+    /// Per-verification cap on channel-owner hints. An unbounded fan-out could let a
+    /// single verification exhaust the shared 16384/block HubEvent id budget (see the
+    /// hook's SHARED-BUDGET COUPLING note). One verification's hints must stay a small
+    /// fraction of that budget so a single message can never approach exhaustion; 256
+    /// is ~1.5% of the budget, far above any plausible single-owner channel count, and
+    /// well below the block-safety threshold. An address owning more than this has its
+    /// hint set truncated in ascending key order (deterministic across nodes);
+    /// consumers reconcile the full set via `GetChannelOwner`.
+    const MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION: usize = 256;
+
     /// Emit `ChannelOwnerChangeHint` HubEvents for a just-merged Ethereum
     /// verification whose verified address owns one or more channels, by scanning
     /// THIS shard's own ByOwnerAddress replica (the trie-free ownership index built
@@ -810,13 +820,34 @@ impl ShardEngine {
     /// merge loop's `Ok(merge_events)` arm — the hottest path this feature touches.
     ///
     /// STRUCTURAL SAFETY CONTRACT (the rule this increment lives or dies by): this
-    /// hook is unable to fail, alter, or panic a message merge. Its ONLY effect on
-    /// the caller is the `Vec<HubEvent>` it returns, which the caller
-    /// `events.extend(...)`s — it never sees the merge result, `validation_errors`,
-    /// or the trie. Every error — a missing/malformed body, a replica read/decode
-    /// error, an event-persist error — is swallowed with a `warn!` and yields fewer
-    /// hints, never an `Err`, never a panic, never a mutation of the merge. Do NOT
-    /// add a `?`, an `Err` early-return, or an unwrap on message/body data here.
+    /// hook never sees the merge result, `validation_errors`, or the trie, so it
+    /// cannot change what merged or the shard root *directly*. Its effects are: (1) the
+    /// `Vec<HubEvent>` it returns, which the caller `events.extend(...)`s, and (2) the
+    /// trie-free hint events it commits into the caller's `txn_batch` via
+    /// `commit_transaction`. Every error — a missing/malformed body, a replica
+    /// read/decode error, an event-persist error — is swallowed with a `warn!` and
+    /// yields fewer hints, never an `Err`, never a panic on message/body data. Do NOT
+    /// add a `?`, an `Err` early-return, or an unwrap on message/body data here. (The
+    /// one non-message panic path, `commit_transaction`'s poisoned-mutex
+    /// `lock().unwrap()`, is shared with the whole merge loop and would already have
+    /// aborted upstream — this hook adds no new panic surface.)
+    ///
+    /// SHARED-BUDGET COUPLING — bounded by a per-verification cap. Effect (2) advances
+    /// the block-scoped, 14-bit `HubEventIdGenerator` sequence (`SEQUENCE_BITS`, 16384
+    /// events/block) that this hook SHARES with the merge loop and the mandatory
+    /// `BlockConfirmed` commit. An
+    /// unbounded fan-out (one verification → N hints for N owned channels) would let a
+    /// single verification against an address owning ~16k channels exhaust that shared
+    /// budget within the block — failing later merges (`commit_transaction(...)?`) and
+    /// tripping `BlockConfirmed`'s `.unwrap()`. So the fan-out is capped at
+    /// `MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION`: one verification can never draw more
+    /// than a small fraction of the block budget, restoring the property that flooding
+    /// requires many independently rate-limited messages. Truncation is contract-legal
+    /// — the amended `hub_event.proto` already tells consumers a shard may not carry
+    /// every hint; they reconcile via `GetChannelOwner`. Hints emit in ascending key
+    /// order, so WHICH channels survive truncation is deterministic across all nodes.
+    /// (The pre-existing `BlockConfirmed` `.unwrap()` fragility is a separate,
+    /// out-of-scope follow-up.)
     ///
     /// Hints are deliberately NOT trie-indexed. The sibling `merge_events` flow
     /// through the `update_trie` loop at the call site; these hints are appended to
@@ -837,6 +868,27 @@ impl ShardEngine {
         msg: &proto::Message,
         txn_batch: &mut RocksDbTransactionBatch,
         version: EngineVersion,
+    ) -> Vec<HubEvent> {
+        self.emit_channel_owner_hints_for_verification_capped(
+            msg,
+            txn_batch,
+            version,
+            Self::MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION,
+        )
+    }
+
+    /// Cap-parameterized body of [`Self::emit_channel_owner_hints_for_verification`].
+    /// `max` is `MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION` in the single production
+    /// call (the public wrapper above); it is a parameter, and this is `pub(crate)`,
+    /// ONLY so a test can drive the truncation path at a small `max` without
+    /// registering hundreds of channels. Do not call this from production with any
+    /// other value.
+    pub(crate) fn emit_channel_owner_hints_for_verification_capped(
+        &self,
+        msg: &proto::Message,
+        txn_batch: &mut RocksDbTransactionBatch,
+        version: EngineVersion,
+        max: usize,
     ) -> Vec<HubEvent> {
         if !version.is_enabled(ProtocolFeature::ChannelOwnershipEvents) {
             return vec![];
@@ -888,15 +940,16 @@ impl ShardEngine {
             _ => return vec![],
         };
 
-        // Scan this shard's own ByOwnerAddress replica to exhaustion in ascending
-        // key order — the pinned deterministic hint order. One hint per owned
-        // channel. N is unbounded but deterministic and economically bounded by
-        // registry fees (no cap/dedup by design). Every read/persist error is
-        // swallowed with a `warn!`: the merge has already committed and stays
-        // untouchable.
+        // Scan this shard's own ByOwnerAddress replica in ascending key order — the
+        // pinned deterministic hint order — emitting at most `max` hints. The cap
+        // bounds the fan-out so one verification can never approach the shared
+        // 16384/block event-id budget; truncation is contract-legal and, because
+        // emission is ascending-key, deterministic across nodes. Every read/persist
+        // error is swallowed with a `warn!`: the merge has
+        // already committed and stays untouchable.
         let mut hints = vec![];
         let mut page_token: Option<Vec<u8>> = None;
-        loop {
+        'scan: loop {
             let page_options = PageOptions {
                 page_token: page_token.take(),
                 ..PageOptions::default()
@@ -919,6 +972,22 @@ impl ShardEngine {
             };
 
             for channel_key in channel_keys {
+                // Cap the fan-out. `hints.len()` counts hints ACTUALLY emitted — a
+                // persist failure doesn't consume an event id, so it doesn't count
+                // toward the budget the cap protects. On reaching the cap, `warn!`
+                // once and stop the scan; the merge is unaffected and consumers
+                // reconcile the untruncated ownership set via `GetChannelOwner`.
+                if hints.len() >= max {
+                    warn!(
+                        fid = msg.fid(),
+                        hash = msg.hex_hash(),
+                        owner_address = hex::encode(&address),
+                        cap = max,
+                        "Truncating channel-owner hints: verified address owns more channels than the per-verification cap"
+                    );
+                    break 'scan;
+                }
+
                 let mut hint = HubEvent::new_event(
                     HubEventType::ChannelOwnerChangeHint,
                     hub_event::Body::ChannelOwnerChangeHintBody(
