@@ -86,10 +86,13 @@ message MergeUserNameProofBody {
 //   - Hints carry NO fid claims. On receipt, call GetChannelOwner to learn the
 //     current owner; this body's owner_address is a raw registry-owner address,
 //     not an authoritative resolution.
-//   - REGISTER/TRANSFER hints appear on EVERY shard's stream (they ride the
-//     shard-0 -> data-shard fan-out). VERIFICATION_ADD/REMOVE hints appear only
-//     on the verifier's home shard. Complete coverage therefore requires
-//     subscribing to all shards.
+//   - REGISTER/TRANSFER hints ride the shard-0 -> data-shard fan-out. The
+//     LATEST ownership update of a channel hints on every shard, but any single
+//     shard may COALESCE a rapid same-channel burst down to just the latest
+//     hint, so no single shard's stream is guaranteed to carry every hint.
+//     VERIFICATION_ADD/REMOVE hints appear only on the verifier's home shard.
+//     Complete coverage therefore requires subscribing to all shards and, as
+//     above, treating each hint as a re-read trigger rather than a full log.
 //   - Nothing fires when a lapsed registration's grace period ends (the chain
 //     is silent at expiry); consumers apply expiry themselves.
 message ChannelOwnerChangeHintBody {
