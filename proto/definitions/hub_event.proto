@@ -22,7 +22,10 @@ enum HubEventType {
   HUB_EVENT_TYPE_CHANNEL_OWNER_CHANGE_HINT = 12;
 }
 
-// What caused a channel's recorded owner to (possibly) change. RENEW is
+// What caused a channel's recorded owner to (possibly) change. NONE (0) is the
+// proto3 zero-default and is never emitted on a real hint; treat a NONE or
+// otherwise unrecognized cause as "re-read the owner" and do not assume the set
+// of causes is closed — new causes may be added over time. RENEW is
 // deliberately absent: extending a registration's expiry is not an ownership
 // change, so renewals emit no hint.
 enum ChannelOwnerChangeCause {
@@ -73,14 +76,16 @@ message MergeUserNameProofBody {
   Message deleted_username_proof_message = 4;
 }
 
-// A best-effort trigger telling consumers that a channel's owner may have
-// changed. CONSUMER CONTRACT (stable API):
-//   - Hints are at-least-once and may over-emit: the resolved winner may not
-//     have actually changed since the last hint. Treat a hint as "re-read",
-//     never as "the owner is now X".
+// A trigger telling consumers that a channel's owner may have changed. It is a
+// nudge, not authoritative data — it carries no resolved owner. CONSUMER
+// CONTRACT (stable API):
+//   - Delivery is at-least-once across the full shard set (see the coverage
+//     note below) and may over-emit: the resolved winner may not have actually
+//     changed since the last hint. Treat a hint as "re-read", never as "the
+//     owner is now X".
 //   - Hints carry NO fid claims. On receipt, call GetChannelOwner to learn the
-//     current owner; this body's owner_address is the raw registry owner that
-//     triggered the hint, not an authoritative resolution.
+//     current owner; this body's owner_address is a raw registry-owner address,
+//     not an authoritative resolution.
 //   - REGISTER/TRANSFER hints appear on EVERY shard's stream (they ride the
 //     shard-0 -> data-shard fan-out). VERIFICATION_ADD/REMOVE hints appear only
 //     on the verifier's home shard. Complete coverage therefore requires
@@ -88,9 +93,13 @@ message MergeUserNameProofBody {
 //   - Nothing fires when a lapsed registration's grace period ends (the chain
 //     is silent at expiry); consumers apply expiry themselves.
 message ChannelOwnerChangeHintBody {
+  // Channel identifier; pass this to GetChannelOwner to resolve the current
+  // owner.
   string channel_key = 1;
-  // Raw 20-byte EVM address recorded as the registry owner that triggered this
-  // hint. Not an authoritative resolution — consumers call GetChannelOwner.
+  // Raw 20-byte EVM registry-owner address the hint concerns: for
+  // REGISTER/TRANSFER, the newly-recorded owner; for VERIFICATION_ADD/REMOVE,
+  // the owner address whose verification changed. Not an authoritative
+  // resolution — consumers call GetChannelOwner.
   bytes owner_address = 2;
   ChannelOwnerChangeCause cause = 3;
 }
