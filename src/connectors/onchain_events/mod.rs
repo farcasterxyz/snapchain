@@ -66,6 +66,15 @@ sol!(
 );
 
 sol!(
+    /// Farcaster ChannelRegistrar on Base. Channel names are registered as
+    /// ERC-721 NFTs whose tokenId is `uint256(keccak256(channel name))`. The
+    /// connector consumes three of its events — `NameRegistered` (initial
+    /// registration), `NameRenewed` (expiry extension), and the ERC-721
+    /// `Transfer` (ownership change) — and emits each as an
+    /// `EVENT_TYPE_CHANNEL_REGISTER` onchain event. The mainnet address is
+    /// added as a constant once the contract deploys; until then it is only
+    /// watched when `override_channel_registrar_address` is set (see
+    /// `contracts()`).
     #[allow(missing_docs)]
     #[sol(rpc)]
     ChannelRegistrarAbi,
@@ -518,10 +527,10 @@ impl Subscriber {
                         kind: ContractKind::TierRegistry,
                     },
                 }];
-                // The mainnet ChannelRegistrar address is added as a constant once M1
-                // deploys. Until then the contract is only watched when the override is
-                // configured (tests + the testnet acceptance run), so the connector is a
-                // no-op on mainnet even after this code ships.
+                // The mainnet ChannelRegistrar address is added as a constant once the
+                // contract deploys. Until then the contract is only watched when the
+                // override is configured (tests + the testnet acceptance run), so the
+                // connector is a no-op on mainnet even after this code ships.
                 if let Some(address) = self.override_channel_registrar_address {
                     contracts.push(Contract {
                         address,
