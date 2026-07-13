@@ -4831,6 +4831,90 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn test_route_fid_zero_burst_coalesces_to_latest_hint() {
+            // Consumer-contract pin (hub_event.proto): on the route_fid(0) shard the
+            // system-message path leads the fan-out, so a rapid same-channel burst can be
+            // COALESCED down to just the latest hint on THIS shard — not every event hints
+            // here, only the latest one.
+            //
+            // Sequence: the system-message path merges REGISTER@100 then TRANSFER@101 first,
+            // advancing this shard's owner index to owner 0xBB @ block 101. The fanned-out
+            // block events then arrive in chain order:
+            //   - REGISTER@100 loses the strict-`<` LWW against the stored @101 → no write,
+            //     NO hint (it hinted on every fan-out-only shard, which never saw the
+            //     system-message lead — see test_transfer_moves_owner_and_hints_new_owner,
+            //     where the same REGISTER+TRANSFER via block events alone yields TWO hints).
+            //   - TRANSFER@101 re-applies at the equal chain position → byte-identical write,
+            //     Some(change) → the one TRANSFER hint this shard emits.
+            // The final owner state is identical to a fan-out-only shard; only the hint
+            // stream is coalesced. Deterministic per chain history.
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            assert!(EngineVersion::latest().is_enabled(ProtocolFeature::ChannelOwnershipEvents));
+
+            let register = channel_event(
+                CHANNEL_KEY,
+                CHANNEL_KEY,
+                0xAA,
+                proto::ChannelRegisterEventType::Register,
+                1_900_000_000,
+                100,
+            );
+            // A transfer carries the label (not the channel_key) and the new owner.
+            let transfer = channel_event(
+                "",
+                CHANNEL_KEY,
+                0xBB,
+                proto::ChannelRegisterEventType::Transfer,
+                0,
+                101,
+            );
+
+            // System-message path leads: it merges both events (index → 0xBB @ 101) and
+            // emits no hint.
+            commit_event(&mut engine, &register).await;
+            commit_event(&mut engine, &transfer).await;
+            assert!(
+                owner_change_hints(&engine).is_empty(),
+                "system-message merges emit no hint"
+            );
+
+            // Fanned-out REGISTER@100 arrives after the index already advanced to @101: it
+            // loses LWW and is coalesced away — no write, no hint.
+            apply_channel_block_event(&mut engine, register, 1).await;
+            let owner = engine
+                .get_stores()
+                .onchain_event_store
+                .get_channel_owner(CHANNEL_KEY, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                owner.owner_address,
+                vec![0xBB; 20],
+                "chain-older REGISTER must not overwrite the newer transfer"
+            );
+            assert!(
+                owner_change_hints(&engine).is_empty(),
+                "the coalesced (LWW-losing) REGISTER emits no hint on this shard"
+            );
+
+            // Fanned-out TRANSFER@101 re-applies at the equal position and emits the one hint.
+            apply_channel_block_event(&mut engine, transfer, 2).await;
+            let hints = owner_change_hints(&engine);
+            assert_eq!(
+                hints.len(),
+                1,
+                "only the latest event in the burst hints on route_fid(0)"
+            );
+            assert_hint(
+                &hints[0],
+                CHANNEL_KEY,
+                &vec![0xBB; 20],
+                proto::ChannelOwnerChangeCause::Transfer,
+            );
+            assert_eq!(owner_channels(&engine, 0xBB), vec![CHANNEL_KEY.to_string()]);
+        }
+
+        #[tokio::test]
         async fn test_pre_feature_merge_on_chain_event_block_event_is_rejected() {
             // On Mainnet the block's timestamp (0) resolves to a pre-V20 version, so
             // ChannelOwnershipEvents is inactive and the arm returns `InvalidMessageType`. The

@@ -753,11 +753,22 @@ impl ShardEngine {
                 // Replica fold: secondary indexes only against this shard's OnchainEventStore
                 // — no primary-event write, no trie mutation (the hint contributes zero trie
                 // keys, pinned by merkle_trie tests). `Err` propagates to the caller, which
-                // warns and continues — same surface as the MergeMessage arm. On the
-                // route_fid(0) shard this event was already merged via the system-message
-                // path; the fold's LWW comparator is strict `<`, so re-applying at the same
-                // chain position rewrites byte-identical values and still reports the change,
-                // keeping "REGISTER/TRANSFER hints on every shard's stream" true.
+                // warns and continues — same surface as the MergeMessage arm.
+                //
+                // route_fid(0) is the one data shard that ALSO merges this event via the
+                // system-message path, so it folds the event into this same store twice. The
+                // LWW comparator is strict `<`: re-applying at the SAME chain position rewrites
+                // byte-identical values and still reports the change, so the single-event (and
+                // latest-in-a-burst) case hints here exactly as on every fan-out-only shard.
+                // But the system-message path leads the fan-out, so for a rapid same-channel
+                // burst it can advance this shard's owner index PAST an earlier fanned event;
+                // that earlier event then loses the strict-`<` LWW here, writes nothing, and
+                // emits no hint on THIS shard (it still hinted on every shard that applies the
+                // fan-out alone). Final owner state converges regardless, and the outcome is
+                // deterministic per chain history. This per-shard coalescing is exactly what
+                // the hint consumer contract documents (see hub_event.proto): the latest update
+                // hints everywhere, but no single shard's stream is guaranteed to carry every
+                // hint — consumers subscribe to all shards and treat hints as re-read triggers.
                 match fold_channel_register_replica(
                     &self.stores.onchain_event_store.db,
                     txn_batch,
