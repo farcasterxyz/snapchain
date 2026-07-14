@@ -284,7 +284,7 @@ impl EngineVersion {
             // boundary so no fanned history is ever missing (registrations cannot exist before the
             // gate opens, and it opens at the same instant), making backfill unnecessary. Kept in
             // one arm so all three share the V20 boundary; the lock-step invariant is enforced by
-            // `test_channel_registrations_and_sorted_events_activate_together`.
+            // `test_channel_registrations_sorted_events_and_ownership_activate_together`.
             ProtocolFeature::ChannelRegistrations
             | ProtocolFeature::SortedBlockEngineEvents
             | ProtocolFeature::ChannelOwnershipEvents => self >= &EngineVersion::V20,
@@ -774,7 +774,7 @@ mod version_test {
     }
 
     #[test]
-    fn test_channel_registrations_and_sorted_events_activate_together() {
+    fn test_channel_registrations_sorted_events_and_ownership_activate_together() {
         // CONSENSUS INVARIANT: these three features must be enabled at the exact same versions.
         // If SortedBlockEngineEvents ever lagged ChannelRegistrations, BlockEngine would accept
         // channel-register events but replay them unsorted, reintroducing the same-eth-block

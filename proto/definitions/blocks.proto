@@ -106,8 +106,8 @@ enum BlockEventType {
   // Fans a shard-0 onchain-event merge (e.g. a channel registration) out to
   // every data shard so each can maintain a derived replica. Emitted by shard 0
   // only when the ChannelOwnershipEvents feature (>= V20) is active; applied by
-  // every data shard's replica fold. Inert until emission ships alongside the
-  // fold — no code path mints this type before then.
+  // every data shard's replica fold. No code path mints this type below V20, so
+  // it stays absent on any network where the feature is inactive.
   BLOCK_EVENT_TYPE_MERGE_ON_CHAIN_EVENT = 2;
 }
 
@@ -120,8 +120,8 @@ message MergeMessageEventBody {
 
 // Carries the whole original OnChainEvent (carry-the-original convention,
 // mirroring MergeMessageEventBody): data shards replay the same input shard 0
-// saw and the existing channel fold will consume it unmodified once that fold
-// ships (see the enum comment above — inert until emission lands).
+// saw and the existing channel fold consumes it unmodified (see the enum
+// comment above — gated at V20).
 message MergeOnChainEventEventBody {
   OnChainEvent on_chain_event = 1;
 }

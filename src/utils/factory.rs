@@ -102,9 +102,9 @@ pub mod events_factory {
         }
     }
 
-    // Mints a MergeOnChainEvent BlockEvent carrying the whole original OnChainEvent. No
-    // production code path emits this type yet (emission ships with the replica fold in a later
-    // increment); tests construct it directly to exercise the receiver-side admission arm. The
+    // Mints a MergeOnChainEvent BlockEvent carrying the whole original OnChainEvent. In
+    // production, shard 0 emits this type when the ChannelOwnershipEvents feature (>= V20) is
+    // active; tests construct it directly to exercise the receiver-side admission arm. The
     // block_timestamp is left at 0 so the caller controls the feature gate via the engine's
     // network (devnet -> V20 active; mainnet -> pre-V20 inactive), mirroring the KEY_ADD tests.
     pub fn create_merge_on_chain_event_event(
