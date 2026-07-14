@@ -205,7 +205,7 @@ const ENGINE_VERSION_SCHEDULE_TESTNET: &[VersionSchedule] = [
         version: EngineVersion::V18,
     },
     VersionSchedule {
-        active_at: 1784048400, // 2026-07-14 5PM UTC (12:00 PM CDT)
+        active_at: 1784124000, // 2026-07-15 2PM UTC (9:00 AM CDT)
         version: EngineVersion::V19,
     },
 ]
@@ -610,8 +610,8 @@ mod version_test {
 
     #[test]
     fn test_block_links_activation_schedule() {
-        // Testnet: V19 at 2026-07-14 17:00 UTC (12:00 PM CDT); pre-activation returns V18.
-        let testnet_active = 1784048400;
+        // Testnet: V19 at 2026-07-15 14:00 UTC (9:00 AM CDT); pre-activation returns V18.
+        let testnet_active = 1784124000;
         assert_eq!(
             EngineVersion::version_for(
                 &FarcasterTime::from_unix_seconds(testnet_active - 1),
