@@ -819,7 +819,7 @@ impl ShardEngine {
     /// by the channel-register block-event fold). Called only from the user-message
     /// merge loop's `Ok(merge_events)` arm — the hottest path this feature touches.
     ///
-    /// STRUCTURAL SAFETY CONTRACT (the rule this increment lives or dies by): this
+    /// STRUCTURAL SAFETY CONTRACT (the rule this hook lives or dies by): this
     /// hook never sees the merge result, `validation_errors`, or the trie, so it
     /// cannot change what merged or the shard root *directly*. Its effects are: (1) the
     /// `Vec<HubEvent>` it returns, which the caller `events.extend(...)`s, and (2) the
