@@ -302,7 +302,7 @@ mod tests {
             .is_none());
     }
 
-    // --- Shard-0 fan-out of channel-register events (increment 7) -----------------------------
+    // --- Shard-0 fan-out of channel-register events -------------------------------------------
 
     fn single_channel_register(channel_key: &str, owner_byte: u8) -> OnChainEvent {
         events_factory::create_channel_register_event(

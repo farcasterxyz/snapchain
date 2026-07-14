@@ -4719,7 +4719,7 @@ mod tests {
     fn channel_owner_change_hint_cause_maps_every_variant() {
         // The proto->JSON cause conversion is a hand-written int->variant table; the round-trip
         // test above only exercises TRANSFER. Pin every arm (0..=4) plus the unknown-int
-        // fallback: the NEXT increment starts emitting REGISTER/VERIFICATION_* hints, so the
+        // fallback: the ownership-hint feature emits REGISTER/VERIFICATION_* hints, so the
         // arms about to go live are otherwise untested, and a transposition or a wrong fallback
         // on this public wire contract would ship silently. The unknown case also freezes the
         // intended forward-compat behavior (a future proto cause degrades to NONE, not a panic).

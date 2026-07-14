@@ -4491,7 +4491,7 @@ mod tests {
     }
 
     // ----------------------------------------------------------------------------------------
-    // MergeOnChainEvent BlockEvent replica fold + ownership hints (increment 7).
+    // MergeOnChainEvent BlockEvent replica fold + ownership hints.
     //
     // Shard 0 fans channel-register events to every data shard as a MergeOnChainEvent BlockEvent;
     // `handle_block_event` runs the trie-free replica fold against the shard's own
@@ -4952,10 +4952,10 @@ mod tests {
     }
 
     // ----------------------------------------------------------------------------------------
-    // Verification-merge channel-owner hints (increment 8).
+    // Verification-merge channel-owner hints.
     //
     // When an Ethereum verification merges on the user-message path, the engine scans THIS
-    // shard's own ByOwnerAddress replica (built by the increment-7 block-event fold) and emits
+    // shard's own ByOwnerAddress replica (built by the channel-register block-event fold) and emits
     // one ChannelOwnerChangeHint per channel the verified address owns, cause VERIFICATION_ADD /
     // VERIFICATION_REMOVE. The hook is STRUCTURALLY unable to fail, alter, or panic the merge:
     // every error warns and yields fewer hints, and the merge result + trie are untouched.
@@ -5039,7 +5039,7 @@ mod tests {
             test_helper::commit_block_events(engine, vec![&block_event]).await;
         }
 
-        // Register `channel_key` to `owner` via the increment-7 block-event fold path (populates
+        // Register `channel_key` to `owner` via the channel-register block-event fold path (populates
         // the shard's own ByOwnerAddress replica). REGISTER hint fires as a side effect.
         async fn register_channel(engine: &mut ShardEngine, channel_key: &str, owner: Vec<u8>) {
             let event = events_factory::create_channel_register_event(

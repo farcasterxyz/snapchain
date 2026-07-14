@@ -816,7 +816,7 @@ impl ShardEngine {
     /// Emit `ChannelOwnerChangeHint` HubEvents for a just-merged Ethereum
     /// verification whose verified address owns one or more channels, by scanning
     /// THIS shard's own ByOwnerAddress replica (the trie-free ownership index built
-    /// by the increment-7 block-event fold). Called only from the user-message
+    /// by the channel-register block-event fold). Called only from the user-message
     /// merge loop's `Ok(merge_events)` arm — the hottest path this feature touches.
     ///
     /// STRUCTURAL SAFETY CONTRACT (the rule this increment lives or dies by): this

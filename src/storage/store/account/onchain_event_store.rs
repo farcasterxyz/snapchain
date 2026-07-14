@@ -452,7 +452,7 @@ fn build_secondary_indices_for_channel_register(
     Ok(change)
 }
 
-/// Data-shard replica entry point (increment 7): runs ONLY the channel-register
+/// Data-shard replica entry point: runs ONLY the channel-register
 /// secondary-index fold against `db`/`txn` — it does not write the primary
 /// onchain-event record and does not touch the trie (those live in the shard-0
 /// merge path). Non-channel events fold to `None`. Returns the ownership change a
