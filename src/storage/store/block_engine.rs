@@ -397,7 +397,19 @@ impl BlockEngine {
                 if version.is_enabled(ProtocolFeature::GaslessSigners) => {}
             crate::proto::message_data::Body::VerificationAddAddressBody(_)
             | crate::proto::message_data::Body::VerificationRemoveBody(_)
-                if version.is_enabled(ProtocolFeature::VerificationsOnShardZero) => {}
+                if version.is_enabled(ProtocolFeature::VerificationsOnShardZero) =>
+            {
+                let embedded_version = EngineVersion::version_for(
+                    &FarcasterTime::new(message_data.timestamp as u64),
+                    self.network,
+                );
+                if !embedded_version.is_enabled(ProtocolFeature::VerificationsOnShardZero) {
+                    // Old-regime verifications already live on the fid shard. Admitting one into
+                    // the empty replica could let force-override replay resurrect an older add
+                    // over a newer fid-shard remove.
+                    return Err(MessageValidationError::InvalidMessageType);
+                }
+            }
             _ => return Err(MessageValidationError::InvalidMessageType),
         }
 

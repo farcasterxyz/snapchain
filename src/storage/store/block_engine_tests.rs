@@ -257,6 +257,34 @@ mod tests {
     }
 
     #[test]
+    fn test_shard_zero_verification_rejects_pre_activation_embedded_timestamp() {
+        let (mut block_engine, _temp_dir) = setup_with_options(BlockEngineOptions {
+            network: FarcasterNetwork::Mainnet,
+            ..BlockEngineOptions::default()
+        });
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut block_engine,
+        );
+        let pre_activation_timestamp = messages_factory::farcaster_time();
+        let message = verification_add(pre_activation_timestamp, None);
+
+        assert!(matches!(
+            block_engine.validate_user_message(
+                &message,
+                &StorageSlot::new(0, 0, 1, u32::MAX),
+                &FarcasterTime::new(pre_activation_timestamp as u64),
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            ),
+            Err(MessageValidationError::InvalidMessageType)
+        ));
+    }
+
+    #[test]
     fn test_shard_zero_verification_merge_lww_index_trie_event_and_no_fanout() {
         let (mut block_engine, _temp_dir) = setup();
         register_user(
