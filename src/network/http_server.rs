@@ -5050,6 +5050,106 @@ mod tests {
     }
 
     #[test]
+    fn channel_enums_map_every_variant_and_reject_unknown_ints() {
+        // Each proto->JSON channel enum is a hand-written int->variant table, and the round-trip
+        // tests above exercise exactly one variant apiece (13 of 17 were otherwise unpinned). A
+        // transposition — ADD_MODERATOR rendering as ADD_MEMBER, say — is precisely the bug this
+        // shape invites, and on a public read API it would ship green. Pin every arm and the
+        // exact serialized string.
+        //
+        // Unknown ints ERROR here, unlike `ChannelOwnerChangeCause`, which deliberately degrades
+        // to NONE. Freeze the difference: a later "simplification" to `unwrap_or_default()` would
+        // otherwise silently render an unrecognized mode as NONE rather than failing the read.
+        fn name_of<T: Serialize>(v: &T) -> String {
+            serde_json::to_value(v)
+                .expect("enum serializes")
+                .as_str()
+                .expect("enum is a string")
+                .to_owned()
+        }
+
+        for (raw, expected) in [
+            (0, "CASTING_MODE_NONE"),
+            (1, "CASTING_MODE_EVERYONE"),
+            (2, "CASTING_MODE_MEMBERS_ONLY"),
+            (3, "CASTING_MODE_RECOMMENDED"),
+        ] {
+            let mapped = map_proto_casting_mode_to_json_casting_mode(raw).expect("known variant");
+            assert_eq!(name_of(&mapped), expected, "casting mode {}", raw);
+        }
+        assert!(map_proto_casting_mode_to_json_casting_mode(99).is_err());
+
+        for (raw, expected) in [
+            (0, "MEMBERSHIP_MODE_NONE"),
+            (1, "MEMBERSHIP_MODE_OPEN"),
+            (2, "MEMBERSHIP_MODE_APPROVAL"),
+        ] {
+            let mapped =
+                map_proto_membership_mode_to_json_membership_mode(raw).expect("known variant");
+            assert_eq!(name_of(&mapped), expected, "membership mode {}", raw);
+        }
+        assert!(map_proto_membership_mode_to_json_membership_mode(99).is_err());
+
+        for (raw, expected) in [
+            (0, "CHANNEL_MEMBER_ACTION_NONE"),
+            (1, "CHANNEL_MEMBER_ACTION_ADD_MEMBER"),
+            (2, "CHANNEL_MEMBER_ACTION_REMOVE_MEMBER"),
+            (3, "CHANNEL_MEMBER_ACTION_ADD_MODERATOR"),
+            (4, "CHANNEL_MEMBER_ACTION_REMOVE_MODERATOR"),
+            (5, "CHANNEL_MEMBER_ACTION_BAN"),
+            (6, "CHANNEL_MEMBER_ACTION_UNBAN"),
+        ] {
+            let mapped = map_proto_channel_member_action_to_json_channel_member_action(raw)
+                .expect("known variant");
+            assert_eq!(name_of(&mapped), expected, "member action {}", raw);
+        }
+        assert!(map_proto_channel_member_action_to_json_channel_member_action(99).is_err());
+
+        for (raw, expected) in [
+            (0, "CHANNEL_MODERATE_ACTION_NONE"),
+            (1, "CHANNEL_MODERATE_ACTION_HIDE"),
+            (2, "CHANNEL_MODERATE_ACTION_UNHIDE"),
+        ] {
+            let mapped = map_proto_channel_moderate_action_to_json_channel_moderate_action(raw)
+                .expect("known variant");
+            assert_eq!(name_of(&mapped), expected, "moderate action {}", raw);
+        }
+        assert!(map_proto_channel_moderate_action_to_json_channel_moderate_action(99).is_err());
+    }
+
+    #[test]
+    fn channel_update_body_json_keeps_empty_distinct_from_absent() {
+        // The whole reason ChannelUpdateBody's fields carry proto3 `optional` presence is that
+        // "set to empty" and "absent" are different intents (clear the field vs leave it alone),
+        // and presence cannot be added back after the wire format freezes. The round-trip test
+        // above only covers absent. Pin the other half: `skip_serializing_if = "Option::is_none"`
+        // must skip only None — swapping it for a skip-if-empty predicate, a common instinct when
+        // tidying JSON output, would collapse the two and erase the distinction on the read API.
+        let json = map_proto_message_data_to_json_message_data(sample_message_data(
+            Body::ChannelUpdateBody(proto::ChannelUpdateBody {
+                channel_id: vec![0x77; 32],
+                name: Some(String::new()),
+                description: None,
+                ..Default::default()
+            }),
+        ))
+        .expect("CHANNEL_UPDATE body must map cleanly");
+
+        let serialized = serde_json::to_value(&json).expect("serialize MessageData");
+        let body = &serialized["channelUpdateBody"];
+        assert_eq!(body["name"], "", "set-to-empty must serialize, not vanish");
+        assert!(body.get("description").is_none(), "absent must stay absent");
+
+        let parsed: MessageData =
+            serde_json::from_value(serialized).expect("deserialize MessageData");
+        let body = parsed
+            .channel_update_body
+            .expect("body survives round trip");
+        assert_eq!(body.name.as_deref(), Some(""));
+        assert!(body.description.is_none());
+    }
+
+    #[test]
     fn key_add_body_round_trips_to_json_message_data() {
         let proto_body = proto::KeyAddBody {
             key: vec![0x11; 32],

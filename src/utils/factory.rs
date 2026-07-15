@@ -860,6 +860,54 @@ pub mod messages_factory {
         }
     }
 
+    pub mod channels {
+        //! Bodies for the dormant channel message types. Shared by the ShardEngine and
+        //! BlockEngine inertness tests so both pin the same shapes: two copies of this fixture
+        //! could drift apart while still looking identical, leaving one engine asserting
+        //! inertness for a body that no longer matches the wire format.
+        use super::*;
+        use message::{ChannelMemberBody, ChannelModerateBody, ChannelPinBody, ChannelUpdateBody};
+
+        /// One representative body per channel message type, paired with its `MessageType`.
+        pub fn all_message_bodies() -> Vec<(MessageType, message::message_data::Body)> {
+            let channel_id = vec![0x11; 32];
+            let cast_hash = vec![0x22; 20];
+            vec![
+                (
+                    MessageType::ChannelUpdate,
+                    message::message_data::Body::ChannelUpdateBody(ChannelUpdateBody {
+                        channel_id: channel_id.clone(),
+                        name: Some("pets".to_string()),
+                        ..Default::default()
+                    }),
+                ),
+                (
+                    MessageType::ChannelMember,
+                    message::message_data::Body::ChannelMemberBody(ChannelMemberBody {
+                        channel_id: channel_id.clone(),
+                        fid: 42,
+                        action: message::ChannelMemberAction::AddMember as i32,
+                    }),
+                ),
+                (
+                    MessageType::ChannelPin,
+                    message::message_data::Body::ChannelPinBody(ChannelPinBody {
+                        channel_id: channel_id.clone(),
+                        cast_hash: cast_hash.clone(),
+                    }),
+                ),
+                (
+                    MessageType::ChannelModerate,
+                    message::message_data::Body::ChannelModerateBody(ChannelModerateBody {
+                        channel_id,
+                        cast_hash,
+                        action: message::ChannelModerateAction::Hide as i32,
+                    }),
+                ),
+            ]
+        }
+    }
+
     pub mod verifications {
         use message::{VerificationAddAddressBody, VerificationRemoveBody};
 

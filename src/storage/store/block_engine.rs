@@ -1335,51 +1335,20 @@ mod channel_message_inertness_tests {
     use super::MessageValidationError;
     use crate::core::util::FarcasterTime;
     use crate::core::validations::error::ValidationError;
-    use crate::proto::{self, message_data::Body, MessageType};
     use crate::storage::db::RocksDbTransactionBatch;
     use crate::storage::store::account::StorageSlot;
     use crate::storage::store::block_engine_test_helpers;
     use crate::utils::factory::messages_factory;
     use crate::version::version::EngineVersion;
 
-    fn channel_message_bodies() -> Vec<(MessageType, Body)> {
-        let channel_id = vec![0x11; 32];
-        let cast_hash = vec![0x22; 20];
-        vec![
-            (
-                MessageType::ChannelUpdate,
-                Body::ChannelUpdateBody(proto::ChannelUpdateBody {
-                    channel_id: channel_id.clone(),
-                    name: Some("pets".to_string()),
-                    ..Default::default()
-                }),
-            ),
-            (
-                MessageType::ChannelMember,
-                Body::ChannelMemberBody(proto::ChannelMemberBody {
-                    channel_id: channel_id.clone(),
-                    fid: 42,
-                    action: proto::ChannelMemberAction::AddMember as i32,
-                }),
-            ),
-            (
-                MessageType::ChannelPin,
-                Body::ChannelPinBody(proto::ChannelPinBody {
-                    channel_id: channel_id.clone(),
-                    cast_hash: cast_hash.clone(),
-                }),
-            ),
-            (
-                MessageType::ChannelModerate,
-                Body::ChannelModerateBody(proto::ChannelModerateBody {
-                    channel_id,
-                    cast_hash,
-                    action: proto::ChannelModerateAction::Hide as i32,
-                }),
-            ),
-        ]
-    }
-
+    /// Today every channel body dies at `validations::message::validate_message`, which
+    /// `validate_user_message` calls before the custody lookup — so the second arm below is what
+    /// actually fires, and the fid/signer registration is never reached. Both are deliberate.
+    /// The registration keeps this test honest if a later increment installs real body validation:
+    /// execution would then reach BlockEngine's own per-body allowlist and fail there (arm one)
+    /// rather than dying at `MissingFid`, which would be a setup artifact rather than a real pin.
+    /// The disjunction therefore asserts the property that matters — BlockEngine rejects channel
+    /// messages — without pinning which of the two independent layers does it.
     #[test]
     fn channel_messages_are_rejected_by_block_engine_validation() {
         let (mut engine, _tmpdir) = block_engine_test_helpers::setup();
@@ -1392,7 +1361,7 @@ mod channel_message_inertness_tests {
             &mut engine,
         );
 
-        for (message_type, body) in channel_message_bodies() {
+        for (message_type, body) in messages_factory::channels::all_message_bodies() {
             let message =
                 messages_factory::create_message_with_data(fid, message_type, body, None, None);
             let timestamp = FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64);
