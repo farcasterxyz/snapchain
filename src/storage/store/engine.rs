@@ -165,6 +165,16 @@ struct CachedTransaction {
     txn: RocksDbTransactionBatch,
 }
 
+/// How a `MergeMessage` BlockEvent's message is merged into a data shard's local store.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ReplayMerge {
+    /// The ordinary LWW merge, identical to live admission.
+    Normal,
+    /// Supersede whatever the local store holds for the message's logical key, without comparing
+    /// timestamps: shard 0's consensus order is the last write. Reserved for BlockEvent replay.
+    Forced,
+}
+
 pub struct ShardEngine {
     shard_id: u32,
     pub network: FarcasterNetwork,
@@ -676,30 +686,39 @@ impl ShardEngine {
                     .as_ref()
                     .ok_or(MessageValidationError::BlockEventMissingBody)?;
                 let msg_type = message.msg_type();
-                // Per-msg-type feature gating for shard-0-hosted user messages. Any future
-                // shard-0 feature whose merges propagate via a `MergeMessage` BlockEvent
-                // should add its gate here, not at the call site — the call site
+                // Per-msg-type feature gating and merge strategy for shard-0-hosted user
+                // messages, decided together so the two can never disagree about a type. Any
+                // future shard-0 feature whose merges propagate via a `MergeMessage` BlockEvent
+                // should add its arm here, not at the call site — the call site
                 // unconditionally invokes `handle_block_event` so this match is the single
                 // place that knows which feature owns which message type. Returning
                 // `InvalidMessageType` mirrors `validate_user_message`'s response to the
                 // analogous live-admission case, so a pre-feature replay surfaces a `warn!`
                 // through the caller's error arm and a downgraded validator never silently
                 // merges into a store the rest of the code can't reason about.
-                let feature_gate = match msg_type {
-                    MessageType::LendStorage => Some(ProtocolFeature::StorageLending),
+                //
+                // `Forced` is replay-only and must stay that way: unlike KEY_ADD / KEY_REMOVE,
+                // verifications also merge live and via the replicator, and both of those go
+                // through `merge_message`'s ordinary LWW path. Shard-0 consensus order is
+                // authoritative only for what shard 0 actually ordered.
+                let (feature_gate, merge_strategy) = match msg_type {
+                    MessageType::LendStorage => {
+                        (Some(ProtocolFeature::StorageLending), ReplayMerge::Normal)
+                    }
                     MessageType::KeyAdd | MessageType::KeyRemove => {
-                        Some(ProtocolFeature::GaslessSigners)
+                        (Some(ProtocolFeature::GaslessSigners), ReplayMerge::Normal)
                     }
-                    MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => {
-                        Some(ProtocolFeature::VerificationsOnShardZero)
-                    }
+                    MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => (
+                        Some(ProtocolFeature::VerificationsOnShardZero),
+                        ReplayMerge::Forced,
+                    ),
                     // The channel message types belong here, mapped to
                     // `ProtocolFeature::ChannelMessages`, as soon as anything can merge them.
                     // They are omitted only because `merge_message` rejects them outright today,
                     // so this gate would be unreachable. That makes the wildcard fail-OPEN for
                     // them: wire up merge dispatch without revisiting this arm and a channel
                     // message replayed via a BlockEvent merges with no version gate at all.
-                    _ => None,
+                    _ => (None, ReplayMerge::Normal),
                 };
                 if let Some(feature) = feature_gate {
                     let block_ts = block_event.block_timestamp();
@@ -717,13 +736,9 @@ impl ShardEngine {
                         );
                     }
                 }
-                let hub_events = if matches!(
-                    msg_type,
-                    MessageType::VerificationAddEthAddress | MessageType::VerificationRemove
-                ) {
-                    self.merge_replayed_verification(message, txn_batch)?
-                } else {
-                    self.merge_message(message, txn_batch)?
+                let hub_events = match merge_strategy {
+                    ReplayMerge::Forced => self.merge_replayed_verification(message, txn_batch)?,
+                    ReplayMerge::Normal => self.merge_message(message, txn_batch)?,
                 };
                 for event in &hub_events {
                     self.update_trie(trie_ctx, event, txn_batch)?;

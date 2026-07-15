@@ -623,6 +623,39 @@ impl<T: StoreDef + Clone> Store<T> {
         Ok(())
     }
 
+    /// Load the message a selector key points at. A selector whose message is missing is a
+    /// dangling pointer: warn and report no message, matching `StoreDef::get_merge_conflicts`.
+    fn resolve_selector_message(
+        &self,
+        txn: &RocksDbTransactionBatch,
+        fid: u64,
+        selector_key: &[u8],
+    ) -> Result<Option<Message>, HubError> {
+        let ts_hash = get_from_db_or_txn(&self.db, txn, selector_key)?;
+        if ts_hash.is_none() {
+            return Ok(None);
+        }
+
+        let message = get_message(
+            &self.db,
+            txn,
+            fid,
+            self.store_def.postfix(),
+            &vec_to_u8_24(&ts_hash)?,
+        )?;
+        if message.is_none() {
+            warn!(
+                ts_hash = format!("{:x?}", ts_hash.unwrap()),
+                "Message's ts_hash exists but message not found in store"
+            );
+        }
+
+        Ok(message)
+    }
+
+    /// Every record currently stored under `message`'s logical key, add and remove alike, with no
+    /// ordering comparison. `StoreDef::get_merge_conflicts` is the ordering-aware counterpart;
+    /// only force-override replay wants the unconditional view.
     fn get_existing_merge_conflicts(
         &self,
         message: &Message,
@@ -633,43 +666,11 @@ impl<T: StoreDef + Clone> Store<T> {
 
         if self.store_def.remove_type_supported() {
             let remove_key = self.store_def.make_remove_key(message)?;
-            if let Some(remove_ts_hash) = get_from_db_or_txn(&self.db, txn, &remove_key)? {
-                let remove_ts_hash_array = vec_to_u8_24(&Some(remove_ts_hash.clone()))?;
-                if let Some(existing_remove) = get_message(
-                    &self.db,
-                    txn,
-                    fid,
-                    self.store_def.postfix(),
-                    &remove_ts_hash_array,
-                )? {
-                    conflicts.push(existing_remove);
-                } else {
-                    warn!(
-                        remove_ts_hash = format!("{:x?}", remove_ts_hash),
-                        "Message's ts_hash exists but message not found in store"
-                    );
-                }
-            }
+            conflicts.extend(self.resolve_selector_message(txn, fid, &remove_key)?);
         }
 
         let add_key = self.store_def.make_add_key(message)?;
-        if let Some(add_ts_hash) = get_from_db_or_txn(&self.db, txn, &add_key)? {
-            let add_ts_hash_array = vec_to_u8_24(&Some(add_ts_hash.clone()))?;
-            if let Some(existing_add) = get_message(
-                &self.db,
-                txn,
-                fid,
-                self.store_def.postfix(),
-                &add_ts_hash_array,
-            )? {
-                conflicts.push(existing_add);
-            } else {
-                warn!(
-                    add_ts_hash = format!("{:x?}", add_ts_hash),
-                    "Message's ts_hash exists but message not found in store"
-                );
-            }
-        }
+        conflicts.extend(self.resolve_selector_message(txn, fid, &add_key)?);
 
         Ok(conflicts)
     }
@@ -705,6 +706,9 @@ impl<T: StoreDef + Clone> Store<T> {
     /// Merge an add/remove after superseding every existing record for its logical key,
     /// without comparing timestamp hashes. This is reserved for replay paths whose external
     /// ordering is authoritative. Stores with compact-state semantics must use normal merge.
+    ///
+    /// Re-merging a message that is already stored verbatim is a no-op rather than a
+    /// self-supersede: see the exclusion below.
     pub(crate) fn merge_force_override(
         &self,
         message: &Message,
@@ -718,14 +722,23 @@ impl<T: StoreDef + Clone> Store<T> {
         if !self.store_def.is_add_type(message)
             && !(self.store_def.remove_type_supported() && self.store_def.is_remove_type(message))
         {
-            return Err(HubError {
-                code: "bad_request.validation_failure".to_string(),
-                message: "invalid message type".to_string(),
-            });
+            return Err(HubError::validation_failure("invalid message type"));
         }
 
         let ts_hash = make_ts_hash(message.data.as_ref().unwrap().timestamp, &message.hash)?;
-        let merge_conflicts = self.get_existing_merge_conflicts(message, txn)?;
+        // The message may already be stored verbatim -- a replay whose row the fid shard already
+        // holds. It must not be listed as its own conflict. `TrieKey::for_message` keys on the
+        // message hash, and `MerkleTrie::update_for_event` applies a MergeMessage event's inserts
+        // before its deletes, so a message that deletes itself would have its trie key inserted
+        // and then removed, dropping it from the trie while the store, the secondary indexes and
+        // the event's own `message` field all keep it. Excluding it leaves the re-merge idempotent
+        // and store/index/trie/event mutually consistent. Equal hashes mean an identical message:
+        // the hash covers the full `data`, and both records are already keyed by the same fid.
+        let merge_conflicts: Vec<Message> = self
+            .get_existing_merge_conflicts(message, txn)?
+            .into_iter()
+            .filter(|conflict| conflict.hash != message.hash)
+            .collect();
         self.delete_many_transaction(txn, &merge_conflicts)?;
 
         if self.store_def.is_add_type(message) {

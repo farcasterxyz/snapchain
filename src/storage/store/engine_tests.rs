@@ -4101,13 +4101,23 @@ mod tests {
             message: &Message,
             seqnum: u64,
         ) -> ShardStateChange {
-            let block_event = create_merge_message_event(message.clone(), seqnum);
+            replay_verifications(engine, &[(message.clone(), seqnum)]).await
+        }
+
+        /// Replay several BlockEvents inside a single block, in the order given.
+        async fn replay_verifications(
+            engine: &mut ShardEngine,
+            messages: &[(Message, u64)],
+        ) -> ShardStateChange {
             let state_change = engine.propose_state_change(
                 engine.shard_id(),
-                vec![MempoolMessage::BlockEvent {
-                    for_shard: engine.shard_id(),
-                    message: block_event,
-                }],
+                messages
+                    .iter()
+                    .map(|(message, seqnum)| MempoolMessage::BlockEvent {
+                        for_shard: engine.shard_id(),
+                        message: create_merge_message_event(message.clone(), *seqnum),
+                    })
+                    .collect(),
                 None,
             );
             test_helper::validate_and_commit_state_change(engine, &state_change).await;
@@ -4184,6 +4194,95 @@ mod tests {
             assert!(merge_body_for(&state_change, &add)
                 .deleted_messages
                 .is_empty());
+        }
+
+        // A replay can carry a message the fid shard already holds verbatim. Force override must
+        // treat that as a no-op, not as a supersede of the row by itself: a self-supersede would
+        // list the message in its own event's `deleted_messages`, and because
+        // `MerkleTrie::update_for_event` applies inserts before deletes on a hash-keyed trie key,
+        // it would drop the message from the trie while the store kept the row -- a store/trie
+        // divergence, and an empty-trie `UnableToReloadRoot` panic in the degenerate case.
+        #[tokio::test]
+        async fn identical_replay_is_idempotent_across_store_index_and_trie() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            register_user(
+                VERIFICATION_FID,
+                test_helper::default_signer(),
+                test_helper::default_custody_address(),
+                &mut engine,
+            )
+            .await;
+            let add = verification_add(messages_factory::farcaster_time());
+
+            replay_verification(&mut engine, &add, 1).await;
+            let state_change = replay_verification(&mut engine, &add, 2).await;
+
+            let stores = engine.get_stores();
+            assert_eq!(
+                VerificationStore::get_verification_add(
+                    &stores.verification_store,
+                    VERIFICATION_FID,
+                    &verification_address(),
+                    None,
+                )
+                .unwrap(),
+                Some(add.clone())
+            );
+            assert_verification_index(&engine, Some(&add));
+            assert!(
+                message_exists_in_trie(&mut engine, &add),
+                "identical replay must leave the trie key intact"
+            );
+            assert_eq!(
+                engine
+                    .get_verifications_by_fid(VERIFICATION_FID)
+                    .unwrap()
+                    .messages,
+                vec![add.clone()]
+            );
+            assert!(
+                merge_body_for(&state_change, &add)
+                    .deleted_messages
+                    .is_empty(),
+                "a message must never appear in its own deleted_messages"
+            );
+        }
+
+        // Two BlockEvents for the same (fid, address) in one block. Conflict discovery reads
+        // through the shared txn batch, so the second must see the first's uncommitted write and
+        // supersede it. BlockEvent order wins over embedded timestamps, hence the older remove.
+        #[tokio::test]
+        async fn two_replays_for_one_address_in_one_block_settle_on_the_last() {
+            let (mut engine, _temp_dir) = test_helper::new_engine().await;
+            let timestamp = messages_factory::farcaster_time();
+            let add = verification_add(timestamp + 10);
+            let remove = verification_remove(timestamp);
+
+            replay_verifications(&mut engine, &[(add.clone(), 1), (remove.clone(), 2)]).await;
+
+            let stores = engine.get_stores();
+            assert_eq!(
+                VerificationStore::get_verification_remove(
+                    &stores.verification_store,
+                    VERIFICATION_FID,
+                    &verification_address(),
+                )
+                .unwrap(),
+                Some(remove.clone())
+            );
+            assert_eq!(
+                VerificationStore::get_verification_add(
+                    &stores.verification_store,
+                    VERIFICATION_FID,
+                    &verification_address(),
+                    None,
+                )
+                .unwrap(),
+                None
+            );
+            assert_verification_index(&engine, None);
+            assert!(!message_exists_in_trie(&mut engine, &add));
+            assert!(message_exists_in_trie(&mut engine, &remove));
         }
 
         #[tokio::test]
