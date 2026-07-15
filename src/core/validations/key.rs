@@ -54,10 +54,17 @@ pub const MAX_KEY_TTL_SECONDS: u32 = 90 * 24 * 60 * 60;
 pub const MAX_GASLESS_KEYS_PER_FID: u32 = 1000;
 
 // Upper bound on the number of entries in `KeyAddBody.scopes`. Scopes are semantically a set of
-// `MessageType` discriminants, so by pigeonhole any list longer than the MessageType enum's
-// variant count is guaranteed to contain duplicates. Keep this in sync with the enum in
-// `proto/definitions/message.proto` — bumping a new MessageType adds one slot.
-pub const MAX_KEY_ADD_SCOPES: usize = MessageType::VARIANT_COUNT;
+// `MessageType` discriminants, so by pigeonhole any list longer than the number of MessageType
+// variants is guaranteed to contain duplicates.
+//
+// MUST NOT track `MessageType::VARIANT_COUNT`. This bound is ungated and live on mainnet, so it
+// is a consensus value: if it moved when a variant was defined, a KEY_ADD with a scopes list
+// longer than the old bound would be rejected by old binaries and merged by new ones at the same
+// engine version — a permanent divergence from a message anyone can craft. It is pinned to the
+// value mainnet has enforced since KEY_ADD activated at V16, and may only change behind a
+// `ProtocolFeature`. It stays an upper bound regardless of how many variants exist: only a subset
+// of MessageType is ever an admissible scope (see `validate_key_add_scopes`).
+pub const MAX_KEY_ADD_SCOPES: usize = 16;
 
 // EIP-712 domain shared by KEY_ADD and KEY_REMOVE custody signatures. The FIP specifies a single
 // domain "Farcaster KeyAdd" for both primary types; the primary type itself disambiguates.
@@ -349,6 +356,13 @@ pub fn verify_signed_key_request_metadata(
 /// `EmptyScopes` when the list is empty and `InvalidScope(raw)` for any bad value, including the
 /// custody-level operations (`KEY_ADD` / `KEY_REMOVE`) which a signer must never be able to
 /// authorize — allowing those would let a signer mint or revoke other signers.
+///
+/// This function is ungated and live on mainnet, so the set of admissible scopes is a consensus
+/// value: it must depend only on this deny list, never on which `MessageType` variants happen to
+/// be defined. Defining a variant must not, on its own, widen what a KEY_ADD may authorize —
+/// mixed-binary nodes at the same engine version would then disagree on a KEY_ADD's validity.
+/// Message types with no merge path are therefore denied explicitly; admitting them is a
+/// deliberate, feature-gated decision for the increment that gives them semantics.
 fn validate_key_add_scopes(scopes: &[i32]) -> Result<(), ValidationError> {
     if scopes.is_empty() {
         return Err(ValidationError::EmptyScopes);
@@ -357,12 +371,37 @@ fn validate_key_add_scopes(scopes: &[i32]) -> Result<(), ValidationError> {
         return Err(ValidationError::TooManyScopes(MAX_KEY_ADD_SCOPES));
     }
     for scope in scopes {
-        match MessageType::try_from(*scope) {
-            Ok(MessageType::None) | Ok(MessageType::KeyAdd) | Ok(MessageType::KeyRemove) => {
-                return Err(ValidationError::InvalidScope(*scope));
-            }
-            Ok(_) => (),
-            Err(_) => return Err(ValidationError::InvalidScope(*scope)),
+        // Exhaustive on purpose — no wildcard. A wildcard here is fail-OPEN: it silently admits
+        // every future `MessageType` the moment the variant is defined, with no gate and no
+        // review. Listing both sides forces a new variant to compile-fail until someone decides,
+        // which is the only mechanism that makes that decision deliberate.
+        let admissible = match MessageType::try_from(*scope) {
+            Ok(MessageType::CastAdd)
+            | Ok(MessageType::CastRemove)
+            | Ok(MessageType::ReactionAdd)
+            | Ok(MessageType::ReactionRemove)
+            | Ok(MessageType::LinkAdd)
+            | Ok(MessageType::LinkRemove)
+            | Ok(MessageType::LinkCompactState)
+            | Ok(MessageType::VerificationAddEthAddress)
+            | Ok(MessageType::VerificationRemove)
+            | Ok(MessageType::UserDataAdd)
+            | Ok(MessageType::UsernameProof)
+            | Ok(MessageType::FrameAction)
+            | Ok(MessageType::LendStorage) => true,
+            // Custody-level operations a signer must never authorize, plus message types with no
+            // merge path on any network.
+            Ok(MessageType::None)
+            | Ok(MessageType::KeyAdd)
+            | Ok(MessageType::KeyRemove)
+            | Ok(MessageType::ChannelUpdate)
+            | Ok(MessageType::ChannelMember)
+            | Ok(MessageType::ChannelPin)
+            | Ok(MessageType::ChannelModerate) => false,
+            Err(_) => false,
+        };
+        if !admissible {
+            return Err(ValidationError::InvalidScope(*scope));
         }
     }
     Ok(())
@@ -870,6 +909,99 @@ mod tests {
             validate_key_add_body(&body),
             Err(ValidationError::InvalidScope(MessageType::KeyAdd as i32))
         );
+    }
+
+    #[test]
+    fn key_add_scope_admissibility_is_pinned_for_every_message_type() {
+        // The admissible set is a live mainnet consensus value, so pin it exhaustively in both
+        // directions. Rewriting the check as an allow-list could otherwise silently DEMOTE a
+        // currently-valid scope — a divergence in the opposite direction from the one that
+        // motivated the rewrite, and just as permanent.
+        let admissible = [
+            MessageType::CastAdd,
+            MessageType::CastRemove,
+            MessageType::ReactionAdd,
+            MessageType::ReactionRemove,
+            MessageType::LinkAdd,
+            MessageType::LinkRemove,
+            MessageType::LinkCompactState,
+            MessageType::VerificationAddEthAddress,
+            MessageType::VerificationRemove,
+            MessageType::UserDataAdd,
+            MessageType::UsernameProof,
+            MessageType::FrameAction,
+            MessageType::LendStorage,
+        ];
+        let denied = [
+            MessageType::None,
+            MessageType::KeyAdd,
+            MessageType::KeyRemove,
+            MessageType::ChannelUpdate,
+            MessageType::ChannelMember,
+            MessageType::ChannelPin,
+            MessageType::ChannelModerate,
+        ];
+        assert_eq!(
+            admissible.len() + denied.len(),
+            MessageType::VARIANT_COUNT,
+            "a MessageType variant is classified by neither list"
+        );
+        for message_type in admissible {
+            let mut body = sample_key_add_body();
+            body.scopes = vec![message_type as i32];
+            assert_eq!(
+                validate_key_add_body(&body),
+                Ok(()),
+                "{:?} must remain an admissible gasless-key scope",
+                message_type
+            );
+        }
+        for message_type in denied {
+            let mut body = sample_key_add_body();
+            body.scopes = vec![MessageType::CastAdd as i32, message_type as i32];
+            assert_eq!(
+                validate_key_add_body(&body),
+                Err(ValidationError::InvalidScope(message_type as i32)),
+                "{:?} must not be an admissible gasless-key scope",
+                message_type
+            );
+        }
+    }
+
+    #[test]
+    fn max_key_add_scopes_is_pinned_and_does_not_track_the_enum() {
+        // CONSENSUS INVARIANT: this bound is ungated and live on mainnet, so defining a new
+        // MessageType must not move it. `key_add_body_rejects_too_many_scopes` derives its input
+        // from the constant and so passes at any value; only a literal assertion catches drift.
+        assert_eq!(MAX_KEY_ADD_SCOPES, 16);
+        assert!(
+            MAX_KEY_ADD_SCOPES < MessageType::VARIANT_COUNT,
+            "MessageType gained variants without a deliberate consensus decision about this bound"
+        );
+    }
+
+    #[test]
+    fn key_add_body_rejects_dormant_channel_scopes() {
+        // Defining a new MessageType must never widen what a KEY_ADD may authorize. Before the
+        // channel message types existed, `MessageType::try_from(18..=21)` failed and these scopes
+        // were rejected as unrecognized; a gasless key must not become scopeable to a message type
+        // that no engine can merge. KEY_ADD is live on mainnet, so silently accepting a previously
+        // invalid KEY_ADD would fork nodes running different binaries at the same engine version.
+        for channel_type in [
+            MessageType::ChannelUpdate,
+            MessageType::ChannelMember,
+            MessageType::ChannelPin,
+            MessageType::ChannelModerate,
+        ] {
+            let mut body = sample_key_add_body();
+            body.scopes = vec![MessageType::CastAdd as i32, channel_type as i32];
+            assert_eq!(
+                validate_key_add_body(&body),
+                Err(ValidationError::InvalidScope(channel_type as i32)),
+                "{:?} must not be an admissible gasless-key scope",
+                channel_type
+            );
+        }
     }
 
     #[test]
