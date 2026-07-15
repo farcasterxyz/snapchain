@@ -553,10 +553,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_engine_block_link_deleted_by_follow_compaction_pre_v19() {
-        // End-to-end on testnet at a present-day timestamp (pre-V19): the engine derives
+        // End-to-end on testnet at a pre-V19 timestamp: the engine derives
         // scope_link_compaction = false, so a follow compact state compacts type-blind and
         // deletes the block link too — the legacy behavior preserved for deterministic replay.
-        let timestamp = messages_factory::farcaster_time();
+        // Pinned to a fixed instant inside the V18 window (unix 1782000000, ~2026-06-20) rather
+        // than wall-clock time, which drifts past the 2026-07-15 14:00 UTC testnet V19 cutover.
+        let timestamp = FarcasterTime::from_unix_seconds(1782000000).to_u64() as u32;
         let target_fid = 15;
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             network: Some(FarcasterNetwork::Testnet),
