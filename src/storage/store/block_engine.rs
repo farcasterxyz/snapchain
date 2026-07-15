@@ -404,9 +404,20 @@ impl BlockEngine {
                     self.network,
                 );
                 if !embedded_version.is_enabled(ProtocolFeature::VerificationsOnShardZero) {
-                    // Old-regime verifications already live on the fid shard. Admitting one into
-                    // the empty replica could let force-override replay resurrect an older add
-                    // over a newer fid-shard remove.
+                    // Reject a verification minted before this feature existed, even inside a
+                    // block that has it. Such a message already lives on the fid shard, and this
+                    // replica starts empty at activation, so it holds no history to judge the
+                    // message against.
+                    //
+                    // The hazard is for machinery that does not exist yet, which is why this
+                    // rejects rather than merges: if a later change fans shard-0 verification
+                    // merges out to fid shards, an add admitted here could carry an older
+                    // `ts_hash` than a remove the fid shard has already applied. Should that
+                    // replay overwrite local state instead of re-running the CRDT compare in
+                    // `Store::merge_add`, it would resurrect the add and undo the remove.
+                    // Refusing old-regime messages here means such a replay can never encounter
+                    // one. Dropping this check is a one-line revert if that fan-out lands with
+                    // conflict-free replay semantics instead.
                     return Err(MessageValidationError::InvalidMessageType);
                 }
             }
@@ -490,11 +501,35 @@ impl BlockEngine {
             MessageType::VerificationAddEthAddress | MessageType::VerificationRemove
                 if block_version.is_enabled(ProtocolFeature::VerificationsOnShardZero) =>
             {
-                let version = EngineVersion::version_for(
-                    &FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64),
-                    self.network,
-                );
-                let ctx = MergeContext { version };
+                // Two different version notions meet here, deliberately. The arm's gate uses the
+                // *block* version, because whether shard 0 may host verifications at all is a
+                // property of the block being replayed. The `MergeContext` carries the message's
+                // *embedded* version, because merge semantics are a property of the message.
+                //
+                // Be precise about what that context does today: nothing. `Store::merge` forwards
+                // `ctx` only to `merge_compact_state`, and `VerificationStoreDef` has no compact
+                // state, so verification adds/removes never read it. It is derived this way so it
+                // agrees by construction with how `ShardEngine::merge_message` builds the context
+                // for this same store, *if* `VerificationStoreDef` ever gates a merge decision on
+                // version (as `LinkStoreDef` already does). Do not read this as a live
+                // constraint, and do not "simplify" it to the block version — that would
+                // silently diverge from the fid shard the moment it starts mattering.
+                //
+                // Only the context half mirrors `ShardEngine`: it has no block-version notion at
+                // all, because a data shard needs no feature gate to host its own verifications.
+                // Do not go looking there for the gate above.
+                let ts = message
+                    .data
+                    .as_ref()
+                    .ok_or(MessageValidationError::NoMessageData)?
+                    .timestamp;
+                // Named apart from `block_version` on purpose: both are `EngineVersion`, so only
+                // the names keep the gate and the merge context from being swapped by a refactor.
+                let embedded_version =
+                    EngineVersion::version_for(&FarcasterTime::new(ts as u64), self.network);
+                let ctx = MergeContext {
+                    version: embedded_version,
+                };
                 Ok(vec![self
                     .stores
                     .verification_store
@@ -614,12 +649,63 @@ impl BlockEngine {
                             }
                         }
                     }
+                    // Nothing routes verifications here (`route_message` sends them to the fid's
+                    // data shard), so in practice this arm is reached only by tests. Routing is a
+                    // mempool convention, though, not something replay checks: on any network
+                    // where the feature is live, a hand-built block containing a verification
+                    // would merge here. Today that means devnet only — V20 is unscheduled on
+                    // mainnet and testnet.
+                    //
+                    // Whichever change flips routing to shard 0 owes at least two things beyond
+                    // the flip itself. It is not a one-line change, and this arm is the handoff:
+                    //
+                    // 1. Fan-out is mandatory, not optional. Verification merges reach no data
+                    //    shard today — not via an explicit exclusion, but because
+                    //    `generate_block_events` fans out an allowlist (`LendStorage | KeyAdd |
+                    //    KeyRemove`) and verifications fall into its catch-all. Data shards still
+                    //    own consumers that read their *local* verification store — notably
+                    //    `ShardEngine::verify_fid_owns_address`, which gates primary-address
+                    //    UserData. Flipping routing without extending that allowlist would strand
+                    //    every new verification on shard 0 and make primary-address sets fail with
+                    //    `AddressNotPartOfVerification` network-wide.
+                    // 2. Quota has no mechanism here, which is a structural gap rather than a
+                    //    missing call: verifications are storage-limited on data shards
+                    //    (`StoreType::Verifications`, enforced by `ShardEngine`'s post-merge
+                    //    `prune_messages`), but `BlockStores` carries no `StoreLimits` and this
+                    //    engine has no prune driver at all. The `prune_size_limit` handed to
+                    //    `VerificationStore::new` is not that mechanism and enforces nothing —
+                    //    `get_prune_size_limit` has no callers; it is set to the data shard's
+                    //    value only so the two cannot drift. Deferred deliberately — replica-only
+                    //    counts cannot stand in for the fid shard's full history, so the rule is
+                    //    the replay leg's to define.
                     MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => {
                         if version.is_enabled(ProtocolFeature::VerificationsOnShardZero) {
-                            if let Ok(events) = self.merge_message(message, txn_batch, version) {
-                                // Replica pruning is intentionally deferred until the replay leg
-                                // defines how shard-0 replica counts relate to fid-shard quota.
-                                hub_events.extend(events);
+                            match self.merge_message(message, txn_batch, version) {
+                                Ok(events) => hub_events.extend(events),
+                                Err(err) => {
+                                    // Surfaced rather than swallowed, unlike the arms above, and
+                                    // the asymmetry is deliberate. For those types the routine
+                                    // rejections are caught in `validate_user_message`, so a merge
+                                    // error is near-unreachable. A verification's rejections --
+                                    // duplicate, add superseded by a newer remove, stale add after
+                                    // a remove -- are all detected *here*, because the validation
+                                    // arm above checks only signatures and the version floor. Drop
+                                    // them and `simulate_message`, which reports success when
+                                    // `validation_errors` is empty, would tell a submitter their
+                                    // verification was accepted while it was never stored.
+                                    //
+                                    // Consensus is unaffected either way: both consensus callers
+                                    // of `replay_snapchain_txn` discard `validation_errors`, and
+                                    // neither the trie nor block events are touched when no merge
+                                    // event is produced. Only `simulate_message` reads this.
+                                    warn!(
+                                        fid = message.fid(),
+                                        hash = message.hex_hash(),
+                                        "Error merging shard-0 verification: {:?}",
+                                        err
+                                    );
+                                    validation_errors.push(err);
+                                }
                             }
                         }
                     }
