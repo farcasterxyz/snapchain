@@ -1,16 +1,22 @@
 #[cfg(test)]
 mod tests {
     use crate::core::util::FarcasterTime;
+    use crate::core::validations::error::ValidationError;
     use crate::proto::{
         block_event_data, Block, BlockEvent, BlockEventType, ChannelRegisterEventType,
-        FarcasterNetwork, OnChainEvent, StorageUnitType,
+        FarcasterNetwork, HubEvent, Message, OnChainEvent, StorageUnitType,
     };
-    use crate::storage::store::block_engine::BlockStateChange;
+    use crate::storage::db::RocksDbTransactionBatch;
+    use crate::storage::store::account::{
+        make_ts_hash, HubEventStorageExt, StorageSlot, VerificationStore,
+    };
+    use crate::storage::store::block_engine::{BlockStateChange, MessageValidationError};
     use crate::storage::store::block_engine_test_helpers::*;
     use crate::storage::store::mempool_poller::MempoolMessage;
     use crate::storage::store::test_helper::{trie_ctx, FID_FOR_TEST};
     use crate::storage::trie::merkle_trie::TrieKey;
     use crate::utils::factory::{events_factory, messages_factory, signers};
+    use crate::version::version::EngineVersion;
     use alloy_primitives::keccak256;
 
     fn channel_label(channel_key: &str) -> Vec<u8> {
@@ -47,6 +53,73 @@ mod tests {
         transfer.transaction_hash = vec![0x22; 32];
 
         (transfer, register)
+    }
+
+    const VERIFICATION_FID: u64 = 2;
+    const VERIFICATION_ADDRESS_HEX: &str = "91031dcfdea024b4d51e775486111d2b2a715871";
+    const VERIFICATION_CLAIM_SIGNATURE_HEX: &str = "b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c";
+    const VERIFICATION_BLOCK_HASH_HEX: &str =
+        "d74860c4bbf574d5ad60f03a478a30f990e05ac723e138a5c860cdb3095f4296";
+
+    fn verification_address() -> Vec<u8> {
+        hex::decode(VERIFICATION_ADDRESS_HEX).unwrap()
+    }
+
+    fn verification_add(
+        timestamp: u32,
+        private_key: Option<&ed25519_dalek::SigningKey>,
+    ) -> Message {
+        messages_factory::verifications::create_verification_add(
+            VERIFICATION_FID,
+            0,
+            verification_address(),
+            hex::decode(VERIFICATION_CLAIM_SIGNATURE_HEX).unwrap(),
+            hex::decode(VERIFICATION_BLOCK_HASH_HEX).unwrap(),
+            Some(timestamp),
+            private_key,
+        )
+    }
+
+    fn assert_verification_index(
+        engine: &crate::storage::store::block_engine::BlockEngine,
+        expected: Option<&Message>,
+    ) {
+        let stores = engine.stores();
+        let entries = VerificationStore::get_verifications_by_address(
+            &stores.verification_store,
+            &verification_address(),
+        )
+        .unwrap();
+        match expected {
+            Some(message) => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].0, VERIFICATION_FID);
+                assert_eq!(
+                    entries[0].1,
+                    make_ts_hash(message.data.as_ref().unwrap().timestamp, &message.hash).unwrap()
+                );
+            }
+            None => assert!(entries.is_empty()),
+        }
+    }
+
+    fn assert_no_verification_block_events(block: &Block) {
+        assert!(block.events.iter().all(|event| {
+            let Some(data) = event.data.as_ref() else {
+                return true;
+            };
+            let Some(block_event_data::Body::MergeMessageEventBody(body)) = data.body.as_ref()
+            else {
+                return true;
+            };
+            !matches!(
+                body.message.as_ref().map(Message::msg_type),
+                Some(
+                    crate::proto::MessageType::VerificationAddEthAddress
+                        | crate::proto::MessageType::VerificationRemove
+                )
+            )
+        }));
     }
 
     #[tokio::test]
@@ -107,6 +180,160 @@ mod tests {
 
         validate_and_commit_state_change(&mut block_engine, &state_change);
         assert_eq!(block_engine.get_confirmed_height(), height);
+    }
+
+    #[test]
+    fn test_shard_zero_verification_validation_gate_and_signatures() {
+        let (mut block_engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut block_engine,
+        );
+        let timestamp = messages_factory::farcaster_time();
+        let block_timestamp = FarcasterTime::new(timestamp as u64);
+        let storage_slot = StorageSlot::new(0, 0, 1, u32::MAX);
+
+        let valid = verification_add(timestamp, None);
+        assert!(block_engine
+            .validate_user_message(
+                &valid,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            )
+            .is_ok());
+
+        assert!(matches!(
+            block_engine.validate_user_message(
+                &valid,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V19,
+                &mut RocksDbTransactionBatch::new(),
+            ),
+            Err(MessageValidationError::InvalidMessageType)
+        ));
+
+        let mut bad_claim_signature = hex::decode(VERIFICATION_CLAIM_SIGNATURE_HEX).unwrap();
+        bad_claim_signature[0] ^= 0xff;
+        let invalid_signature = messages_factory::verifications::create_verification_add(
+            VERIFICATION_FID,
+            0,
+            verification_address(),
+            bad_claim_signature,
+            hex::decode(VERIFICATION_BLOCK_HASH_HEX).unwrap(),
+            Some(timestamp),
+            None,
+        );
+        assert!(matches!(
+            block_engine.validate_user_message(
+                &invalid_signature,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            ),
+            Err(MessageValidationError::MessageValidationError(
+                ValidationError::InvalidClaimSignature
+            ))
+        ));
+
+        let inactive_signer = signers::generate_signer();
+        let invalid_signer = verification_add(timestamp, Some(&inactive_signer));
+        assert!(matches!(
+            block_engine.validate_user_message(
+                &invalid_signer,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            ),
+            Err(MessageValidationError::MissingSigner)
+        ));
+    }
+
+    #[test]
+    fn test_shard_zero_verification_merge_lww_index_trie_event_and_no_fanout() {
+        let (mut block_engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut block_engine,
+        );
+        let timestamp = messages_factory::farcaster_time();
+
+        let add = verification_add(timestamp, None);
+        let add_block = commit_message(&mut block_engine, &add, Validity::Valid);
+        assert_no_verification_block_events(&add_block);
+        assert_verification_index(&block_engine, Some(&add));
+        assert_eq!(
+            VerificationStore::get_verification_add(
+                &block_engine.stores().verification_store,
+                VERIFICATION_FID,
+                &verification_address(),
+                None,
+            )
+            .unwrap(),
+            Some(add.clone())
+        );
+        let add_event_id =
+            crate::storage::store::account::HubEventIdGenerator::make_event_id_for_block_number(
+                add_block
+                    .header
+                    .as_ref()
+                    .unwrap()
+                    .height
+                    .as_ref()
+                    .unwrap()
+                    .block_number,
+            ) + 1;
+        let add_event = HubEvent::get_event(block_engine.stores().db, add_event_id).unwrap();
+        match add_event.body {
+            Some(crate::proto::hub_event::Body::MergeMessageBody(body)) => {
+                assert_eq!(body.message, Some(add.clone()));
+            }
+            other => panic!("expected merge-message hub event, got {other:?}"),
+        }
+
+        let replacement = verification_add(timestamp + 1, None);
+        let replacement_block = commit_message(&mut block_engine, &replacement, Validity::Valid);
+        assert_no_verification_block_events(&replacement_block);
+        assert_verification_index(&block_engine, Some(&replacement));
+        assert!(message_exists_in_trie(&mut block_engine, &replacement));
+        assert!(!message_exists_in_trie(&mut block_engine, &add));
+
+        let remove = messages_factory::verifications::create_verification_remove(
+            VERIFICATION_FID,
+            verification_address(),
+            Some(timestamp + 2),
+            None,
+        );
+        let remove_block = commit_message(&mut block_engine, &remove, Validity::Valid);
+        assert_no_verification_block_events(&remove_block);
+        assert_verification_index(&block_engine, None);
+        assert!(message_exists_in_trie(&mut block_engine, &remove));
+        assert!(!message_exists_in_trie(&mut block_engine, &replacement));
+        assert_eq!(
+            VerificationStore::get_verification_remove(
+                &block_engine.stores().verification_store,
+                VERIFICATION_FID,
+                &verification_address(),
+            )
+            .unwrap(),
+            Some(remove.clone())
+        );
+
+        let old_add_block = commit_message(&mut block_engine, &add, Validity::Invalid);
+        assert_no_verification_block_events(&old_add_block);
+        assert_verification_index(&block_engine, None);
+        assert!(message_exists_in_trie(&mut block_engine, &remove));
+        assert!(!message_exists_in_trie(&mut block_engine, &add));
     }
 
     #[tokio::test]

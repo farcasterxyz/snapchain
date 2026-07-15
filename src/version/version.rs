@@ -57,6 +57,7 @@ pub enum ProtocolFeature {
     SortedBlockEngineEvents,
     ChannelOwnershipEvents,
     ChannelMessages,
+    VerificationsOnShardZero,
 }
 
 pub struct VersionSchedule {
@@ -285,9 +286,11 @@ impl EngineVersion {
             // boundary so no fanned history is ever missing (registrations cannot exist before the
             // gate opens, and it opens at the same instant), making backfill unnecessary.
             // ChannelMessages is consensus-coupled to registrations because channel-message
-            // validation depends on the registration state established at that boundary. All four
+            // validation depends on the registration state established at that boundary. All five
             // are kept in one arm so they share the V20 boundary; the lock-step invariant is
             // enforced by `test_channel_features_activate_together`.
+            // Shard-0 owner resolution reads the verification replica, so it must activate with
+            // channel messages.
             //
             // ChannelMessages has no consumer yet: the four channel message types exist on the
             // wire, but nothing merges, stores, or replicates them. (Routing and JSON read
@@ -299,7 +302,8 @@ impl EngineVersion {
             ProtocolFeature::ChannelRegistrations
             | ProtocolFeature::SortedBlockEngineEvents
             | ProtocolFeature::ChannelOwnershipEvents
-            | ProtocolFeature::ChannelMessages => self >= &EngineVersion::V20,
+            | ProtocolFeature::ChannelMessages
+            | ProtocolFeature::VerificationsOnShardZero => self >= &EngineVersion::V20,
         }
     }
 
@@ -806,15 +810,34 @@ mod version_test {
     }
 
     #[test]
+    fn test_verifications_on_shard_zero_feature_gate() {
+        assert!(!EngineVersion::V19.is_enabled(ProtocolFeature::VerificationsOnShardZero));
+        assert!(EngineVersion::V20.is_enabled(ProtocolFeature::VerificationsOnShardZero));
+        assert!(EngineVersion::latest().is_enabled(ProtocolFeature::VerificationsOnShardZero));
+
+        let far_future = FarcasterTime::from_unix_seconds(4102444800); // 2100-01-01 UTC
+        for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
+            assert!(!EngineVersion::version_for(&far_future, network)
+                .is_enabled(ProtocolFeature::VerificationsOnShardZero));
+        }
+        assert!(
+            EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet)
+                .is_enabled(ProtocolFeature::VerificationsOnShardZero)
+        );
+    }
+
+    #[test]
     fn test_channel_features_activate_together() {
-        // CONSENSUS INVARIANT: these four features must be enabled at the exact same versions.
+        // CONSENSUS INVARIANT: these five features must be enabled at the exact same versions.
         // If SortedBlockEngineEvents ever lagged ChannelRegistrations, BlockEngine would accept
         // channel-register events but replay them unsorted, reintroducing the same-eth-block
         // channel-owner divergence this fix closes. ChannelOwnershipEvents gates the fan-out of
         // those registrations; if it lagged, a registration could be admitted with no shard ever
         // fanning it out (or, mixed across binaries, diverge on which blocks fan out).
         // ChannelMessages validates against the registration state, so it must share the same
-        // boundary. This test fails CI if a future change splits any activation boundary.
+        // boundary. Shard-0 channel-owner resolution reads the verification replica, so that
+        // replica must activate at the same boundary too. This test fails CI if a future change
+        // splits any activation boundary.
         use strum::IntoEnumIterator;
         for version in EngineVersion::iter() {
             let channel_registrations = version.is_enabled(ProtocolFeature::ChannelRegistrations);
@@ -834,6 +857,12 @@ mod version_test {
                 channel_registrations,
                 version.is_enabled(ProtocolFeature::ChannelMessages),
                 "ChannelRegistrations and ChannelMessages must co-activate; they differ at {:?}",
+                version
+            );
+            assert_eq!(
+                channel_registrations,
+                version.is_enabled(ProtocolFeature::VerificationsOnShardZero),
+                "ChannelRegistrations and VerificationsOnShardZero must co-activate; they differ at {:?}",
                 version
             );
         }

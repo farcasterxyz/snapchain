@@ -11,7 +11,8 @@ use crate::proto::{
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
     BlockEventStore, MergeContext, OnchainEventStorageError, OnchainEventStore, StorageLendStore,
-    StorageLendStoreDef, StorageSlot, Store, StoreEventHandler,
+    StorageLendStoreDef, StorageSlot, Store, StoreEventHandler, VerificationStore,
+    VerificationStoreDef,
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
@@ -104,6 +105,7 @@ pub struct BlockStores {
     pub block_event_store: BlockEventStore,
     pub onchain_event_store: OnchainEventStore,
     pub storage_lend_store: Store<StorageLendStoreDef>,
+    pub verification_store: Store<VerificationStoreDef>,
     pub network: FarcasterNetwork,
     pub db: Arc<RocksDB>,
     pub trie: MerkleTrie,
@@ -118,6 +120,11 @@ impl BlockStores {
             block_event_store: BlockEventStore { db: db.clone() },
             onchain_event_store: OnchainEventStore::new(db.clone(), store_event_handler.clone()),
             storage_lend_store: StorageLendStore::new(db.clone(), store_event_handler.clone(), 100),
+            verification_store: VerificationStore::new(
+                db.clone(),
+                store_event_handler.clone(),
+                100,
+            ),
             network,
             db: db.clone(),
             trie,
@@ -388,6 +395,9 @@ impl BlockEngine {
             crate::proto::message_data::Body::KeyAddBody(_)
             | crate::proto::message_data::Body::KeyRemoveBody(_)
                 if version.is_enabled(ProtocolFeature::GaslessSigners) => {}
+            crate::proto::message_data::Body::VerificationAddAddressBody(_)
+            | crate::proto::message_data::Body::VerificationRemoveBody(_)
+                if version.is_enabled(ProtocolFeature::VerificationsOnShardZero) => {}
             _ => return Err(MessageValidationError::InvalidMessageType),
         }
 
@@ -415,6 +425,7 @@ impl BlockEngine {
         &self,
         message: &proto::Message,
         txn_batch: &mut RocksDbTransactionBatch,
+        block_version: EngineVersion,
     ) -> Result<Vec<proto::HubEvent>, MessageValidationError> {
         let msg_type = message.msg_type();
         let gasless_enabled = if matches!(msg_type, MessageType::KeyAdd | MessageType::KeyRemove) {
@@ -463,6 +474,19 @@ impl BlockEngine {
                     message,
                     txn_batch,
                 )?])
+            }
+            MessageType::VerificationAddEthAddress | MessageType::VerificationRemove
+                if block_version.is_enabled(ProtocolFeature::VerificationsOnShardZero) =>
+            {
+                let version = EngineVersion::version_for(
+                    &FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64),
+                    self.network,
+                );
+                let ctx = MergeContext { version };
+                Ok(vec![self
+                    .stores
+                    .verification_store
+                    .merge(message, txn_batch, &ctx)?])
             }
             _ => return Err(MessageValidationError::InvalidMessageType),
         }
@@ -552,7 +576,7 @@ impl BlockEngine {
                 Ok(()) => match message.msg_type() {
                     MessageType::LendStorage => {
                         if version.is_enabled(ProtocolFeature::StorageLending) {
-                            if let Ok(events) = self.merge_message(message, txn_batch) {
+                            if let Ok(events) = self.merge_message(message, txn_batch, version) {
                                 for event in &events {
                                     match event.body.as_ref().unwrap() {
                                         proto::hub_event::Body::MergeMessageBody(
@@ -573,7 +597,16 @@ impl BlockEngine {
                         // storage units. Emitted MergeMessageBody propagates to shards via
                         // BlockEvent so their local DBs can replay the same merge.
                         if version.is_enabled(ProtocolFeature::GaslessSigners) {
-                            if let Ok(events) = self.merge_message(message, txn_batch) {
+                            if let Ok(events) = self.merge_message(message, txn_batch, version) {
+                                hub_events.extend(events);
+                            }
+                        }
+                    }
+                    MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => {
+                        if version.is_enabled(ProtocolFeature::VerificationsOnShardZero) {
+                            if let Ok(events) = self.merge_message(message, txn_batch, version) {
+                                // Replica pruning is intentionally deferred until the replay leg
+                                // defines how shard-0 replica counts relate to fid-shard quota.
                                 hub_events.extend(events);
                             }
                         }

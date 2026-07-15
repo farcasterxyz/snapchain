@@ -104,4 +104,17 @@ mod tests {
             "expected shard 1 or 2, got {shard}"
         );
     }
+
+    #[test]
+    fn verifications_still_route_by_fid_to_data_shards() {
+        let router: Box<dyn MessageRouter> = Box::new(EvenOddRouterForTest {});
+
+        for message_type in [
+            MessageType::VerificationAddEthAddress,
+            MessageType::VerificationRemove,
+        ] {
+            assert_eq!(route_message(&router, &msg(message_type, 1), 2), 1);
+            assert_eq!(route_message(&router, &msg(message_type, 2), 2), 2);
+        }
+    }
 }
