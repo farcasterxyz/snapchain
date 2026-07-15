@@ -2846,3 +2846,82 @@ mod prune_arm_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod channel_message_inertness_tests {
+    use super::MessageValidationError;
+    use crate::mempool::routing::{route_message, MessageRouter, ShardRouter};
+    use crate::proto::{self, message_data::Body, MessageType};
+    use crate::storage::db::RocksDbTransactionBatch;
+    use crate::storage::store::test_helper;
+    use crate::utils::factory::messages_factory;
+
+    fn channel_message_bodies() -> Vec<(MessageType, Body)> {
+        let channel_id = vec![0x11; 32];
+        let cast_hash = vec![0x22; 20];
+        vec![
+            (
+                MessageType::ChannelUpdate,
+                Body::ChannelUpdateBody(proto::ChannelUpdateBody {
+                    channel_id: channel_id.clone(),
+                    name: Some("pets".to_string()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                MessageType::ChannelMember,
+                Body::ChannelMemberBody(proto::ChannelMemberBody {
+                    channel_id: channel_id.clone(),
+                    fid: 42,
+                    action: proto::ChannelMemberAction::AddMember as i32,
+                }),
+            ),
+            (
+                MessageType::ChannelPin,
+                Body::ChannelPinBody(proto::ChannelPinBody {
+                    channel_id: channel_id.clone(),
+                    cast_hash: cast_hash.clone(),
+                }),
+            ),
+            (
+                MessageType::ChannelModerate,
+                Body::ChannelModerateBody(proto::ChannelModerateBody {
+                    channel_id,
+                    cast_hash,
+                    action: proto::ChannelModerateAction::Hide as i32,
+                }),
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn channel_messages_have_no_shard_engine_merge_dispatch() {
+        let (engine, _tmpdir) = test_helper::new_engine().await;
+
+        for (message_type, body) in channel_message_bodies() {
+            let message =
+                messages_factory::create_message_with_data(1234, message_type, body, None, None);
+            let result = engine.merge_message(&message, &mut RocksDbTransactionBatch::new());
+            assert!(matches!(
+                result,
+                Err(MessageValidationError::InvalidMessageType(value))
+                    if value == message_type as i32
+            ));
+        }
+    }
+
+    #[test]
+    fn channel_messages_continue_to_route_by_fid() {
+        let router: Box<dyn MessageRouter> = Box::new(ShardRouter {});
+        let fid = 1234;
+        let num_shards = 2;
+        let expected = router.route_fid(fid, num_shards);
+
+        for (message_type, body) in channel_message_bodies() {
+            let message =
+                messages_factory::create_message_with_data(fid, message_type, body, None, None);
+            assert_eq!(route_message(&router, &message, num_shards), expected);
+            assert_ne!(expected, 0);
+        }
+    }
+}

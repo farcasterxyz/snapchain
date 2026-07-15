@@ -457,6 +457,11 @@ impl Replicator {
                 messages.extend(borrows);
                 messages
             }
+            // Channel-message semantics land in a later increment.
+            proto::MessageType::ChannelUpdate
+            | proto::MessageType::ChannelMember
+            | proto::MessageType::ChannelPin
+            | proto::MessageType::ChannelModerate => vec![],
         };
 
         // Build a hashmap of message_hash -> message and put it in the cache

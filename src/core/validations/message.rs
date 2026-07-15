@@ -235,6 +235,13 @@ pub fn validate_message(
         Some(proto::message_data::Body::KeyRemoveBody(key_remove_body)) => {
             key::validate_key_remove_body(&key_remove_body)?;
         }
+        // Channel-message semantics land in a later increment.
+        Some(proto::message_data::Body::ChannelUpdateBody(_))
+        | Some(proto::message_data::Body::ChannelMemberBody(_))
+        | Some(proto::message_data::Body::ChannelPinBody(_))
+        | Some(proto::message_data::Body::ChannelModerateBody(_)) => {
+            return Err(ValidationError::InvalidMessageType);
+        }
         None => {}
     }
 

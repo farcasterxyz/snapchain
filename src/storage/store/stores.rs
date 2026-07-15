@@ -146,6 +146,11 @@ impl Limits {
             // NEYN-10580 (shard routing) and NEYN-10573/10574 (engine handling) land.
             MessageType::KeyAdd => StoreType::None,
             MessageType::KeyRemove => StoreType::None,
+            // Channel-message semantics land in a later increment.
+            MessageType::ChannelUpdate
+            | MessageType::ChannelMember
+            | MessageType::ChannelPin
+            | MessageType::ChannelModerate => StoreType::None,
             MessageType::None => StoreType::None,
         }
     }

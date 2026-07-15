@@ -165,6 +165,17 @@ pub struct MessageData {
     pub key_add_body: Option<KeyAddBody>,
     #[serde(rename = "keyRemoveBody", skip_serializing_if = "Option::is_none")]
     pub key_remove_body: Option<KeyRemoveBody>,
+    #[serde(rename = "channelUpdateBody", skip_serializing_if = "Option::is_none")]
+    pub channel_update_body: Option<ChannelUpdateBody>,
+    #[serde(rename = "channelMemberBody", skip_serializing_if = "Option::is_none")]
+    pub channel_member_body: Option<ChannelMemberBody>,
+    #[serde(rename = "channelPinBody", skip_serializing_if = "Option::is_none")]
+    pub channel_pin_body: Option<ChannelPinBody>,
+    #[serde(
+        rename = "channelModerateBody",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub channel_moderate_body: Option<ChannelModerateBody>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -334,6 +345,88 @@ pub struct KeyRemoveBody {
     pub signature_type: u32,
     pub deadline: u32,
     pub nonce: u32,
+}
+
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum CastingMode {
+    CASTING_MODE_NONE = 0,
+    CASTING_MODE_EVERYONE = 1,
+    CASTING_MODE_MEMBERS_ONLY = 2,
+    CASTING_MODE_RECOMMENDED = 3,
+}
+
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum MembershipMode {
+    MEMBERSHIP_MODE_NONE = 0,
+    MEMBERSHIP_MODE_OPEN = 1,
+    MEMBERSHIP_MODE_APPROVAL = 2,
+}
+
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum ChannelMemberAction {
+    CHANNEL_MEMBER_ACTION_NONE = 0,
+    CHANNEL_MEMBER_ACTION_ADD_MEMBER = 1,
+    CHANNEL_MEMBER_ACTION_REMOVE_MEMBER = 2,
+    CHANNEL_MEMBER_ACTION_ADD_MODERATOR = 3,
+    CHANNEL_MEMBER_ACTION_REMOVE_MODERATOR = 4,
+    CHANNEL_MEMBER_ACTION_BAN = 5,
+    CHANNEL_MEMBER_ACTION_UNBAN = 6,
+}
+
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum ChannelModerateAction {
+    CHANNEL_MODERATE_ACTION_NONE = 0,
+    CHANNEL_MODERATE_ACTION_HIDE = 1,
+    CHANNEL_MODERATE_ACTION_UNHIDE = 2,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelUpdateBody {
+    #[serde(with = "serdehex", rename = "channelId")]
+    pub channel_id: Vec<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(rename = "imageUrl", skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<String>,
+    #[serde(rename = "castingMode", skip_serializing_if = "Option::is_none")]
+    pub casting_mode: Option<CastingMode>,
+    #[serde(rename = "membershipMode", skip_serializing_if = "Option::is_none")]
+    pub membership_mode: Option<MembershipMode>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelMemberBody {
+    #[serde(with = "serdehex", rename = "channelId")]
+    pub channel_id: Vec<u8>,
+    pub fid: u64,
+    pub action: ChannelMemberAction,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelPinBody {
+    #[serde(with = "serdehex", rename = "channelId")]
+    pub channel_id: Vec<u8>,
+    #[serde(with = "serdehex", rename = "castHash")]
+    pub cast_hash: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelModerateBody {
+    #[serde(with = "serdehex", rename = "channelId")]
+    pub channel_id: Vec<u8>,
+    #[serde(with = "serdehex", rename = "castHash")]
+    pub cast_hash: Vec<u8>,
+    pub action: ChannelModerateAction,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2098,6 +2191,178 @@ fn map_proto_key_remove_body_to_json_key_remove_body(
     })
 }
 
+fn map_proto_casting_mode_to_json_casting_mode(
+    casting_mode: i32,
+) -> Result<CastingMode, ErrorResponse> {
+    Ok(
+        match proto::CastingMode::try_from(casting_mode).map_err(|_| ErrorResponse {
+            error: "Invalid casting mode".to_string(),
+            error_detail: None,
+        })? {
+            proto::CastingMode::None => CastingMode::CASTING_MODE_NONE,
+            proto::CastingMode::Everyone => CastingMode::CASTING_MODE_EVERYONE,
+            proto::CastingMode::MembersOnly => CastingMode::CASTING_MODE_MEMBERS_ONLY,
+            proto::CastingMode::Recommended => CastingMode::CASTING_MODE_RECOMMENDED,
+        },
+    )
+}
+
+fn map_proto_membership_mode_to_json_membership_mode(
+    membership_mode: i32,
+) -> Result<MembershipMode, ErrorResponse> {
+    Ok(
+        match proto::MembershipMode::try_from(membership_mode).map_err(|_| ErrorResponse {
+            error: "Invalid membership mode".to_string(),
+            error_detail: None,
+        })? {
+            proto::MembershipMode::None => MembershipMode::MEMBERSHIP_MODE_NONE,
+            proto::MembershipMode::Open => MembershipMode::MEMBERSHIP_MODE_OPEN,
+            proto::MembershipMode::Approval => MembershipMode::MEMBERSHIP_MODE_APPROVAL,
+        },
+    )
+}
+
+fn map_proto_channel_member_action_to_json_channel_member_action(
+    action: i32,
+) -> Result<ChannelMemberAction, ErrorResponse> {
+    Ok(
+        match proto::ChannelMemberAction::try_from(action).map_err(|_| ErrorResponse {
+            error: "Invalid channel member action".to_string(),
+            error_detail: None,
+        })? {
+            proto::ChannelMemberAction::None => ChannelMemberAction::CHANNEL_MEMBER_ACTION_NONE,
+            proto::ChannelMemberAction::AddMember => {
+                ChannelMemberAction::CHANNEL_MEMBER_ACTION_ADD_MEMBER
+            }
+            proto::ChannelMemberAction::RemoveMember => {
+                ChannelMemberAction::CHANNEL_MEMBER_ACTION_REMOVE_MEMBER
+            }
+            proto::ChannelMemberAction::AddModerator => {
+                ChannelMemberAction::CHANNEL_MEMBER_ACTION_ADD_MODERATOR
+            }
+            proto::ChannelMemberAction::RemoveModerator => {
+                ChannelMemberAction::CHANNEL_MEMBER_ACTION_REMOVE_MODERATOR
+            }
+            proto::ChannelMemberAction::Ban => ChannelMemberAction::CHANNEL_MEMBER_ACTION_BAN,
+            proto::ChannelMemberAction::Unban => ChannelMemberAction::CHANNEL_MEMBER_ACTION_UNBAN,
+        },
+    )
+}
+
+fn map_proto_channel_moderate_action_to_json_channel_moderate_action(
+    action: i32,
+) -> Result<ChannelModerateAction, ErrorResponse> {
+    Ok(
+        match proto::ChannelModerateAction::try_from(action).map_err(|_| ErrorResponse {
+            error: "Invalid channel moderate action".to_string(),
+            error_detail: None,
+        })? {
+            proto::ChannelModerateAction::None => {
+                ChannelModerateAction::CHANNEL_MODERATE_ACTION_NONE
+            }
+            proto::ChannelModerateAction::Hide => {
+                ChannelModerateAction::CHANNEL_MODERATE_ACTION_HIDE
+            }
+            proto::ChannelModerateAction::Unhide => {
+                ChannelModerateAction::CHANNEL_MODERATE_ACTION_UNHIDE
+            }
+        },
+    )
+}
+
+fn map_proto_channel_update_body_to_json_channel_update_body(
+    body: proto::ChannelUpdateBody,
+) -> Result<ChannelUpdateBody, ErrorResponse> {
+    Ok(ChannelUpdateBody {
+        channel_id: body.channel_id,
+        name: body.name,
+        description: body.description,
+        image_url: body.image_url,
+        header: body.header,
+        rules: body.rules,
+        casting_mode: body
+            .casting_mode
+            .map(map_proto_casting_mode_to_json_casting_mode)
+            .transpose()?,
+        membership_mode: body
+            .membership_mode
+            .map(map_proto_membership_mode_to_json_membership_mode)
+            .transpose()?,
+    })
+}
+
+fn map_proto_channel_member_body_to_json_channel_member_body(
+    body: proto::ChannelMemberBody,
+) -> Result<ChannelMemberBody, ErrorResponse> {
+    Ok(ChannelMemberBody {
+        channel_id: body.channel_id,
+        fid: body.fid,
+        action: map_proto_channel_member_action_to_json_channel_member_action(body.action)?,
+    })
+}
+
+fn map_proto_channel_pin_body_to_json_channel_pin_body(
+    body: proto::ChannelPinBody,
+) -> ChannelPinBody {
+    ChannelPinBody {
+        channel_id: body.channel_id,
+        cast_hash: body.cast_hash,
+    }
+}
+
+fn map_proto_channel_moderate_body_to_json_channel_moderate_body(
+    body: proto::ChannelModerateBody,
+) -> Result<ChannelModerateBody, ErrorResponse> {
+    Ok(ChannelModerateBody {
+        channel_id: body.channel_id,
+        cast_hash: body.cast_hash,
+        action: map_proto_channel_moderate_action_to_json_channel_moderate_action(body.action)?,
+    })
+}
+
+fn map_proto_message_data_without_body(
+    message_type: i32,
+    fid: u64,
+    timestamp: u32,
+    network: i32,
+) -> Result<MessageData, ErrorResponse> {
+    Ok(MessageData {
+        message_type: MessageType::try_from(message_type)
+            .map_err(|_| ErrorResponse {
+                error: "Invalid message type".to_string(),
+                error_detail: None,
+            })?
+            .as_str_name()
+            .to_owned(),
+        fid,
+        timestamp,
+        network: FarcasterNetwork::try_from(network)
+            .map_err(|_| ErrorResponse {
+                error: "Invalid network".to_string(),
+                error_detail: None,
+            })?
+            .as_str_name()
+            .to_owned(),
+        cast_add_body: None,
+        cast_remove_body: None,
+        reaction_body: None,
+        verification_add_address_body: None,
+        verification_remove_body: None,
+        user_data_body: None,
+        link_body: None,
+        username_proof_body: None,
+        frame_action_body: None,
+        link_compact_state_body: None,
+        lend_storage_body: None,
+        key_add_body: None,
+        key_remove_body: None,
+        channel_update_body: None,
+        channel_member_body: None,
+        channel_pin_body: None,
+        channel_moderate_body: None,
+    })
+}
+
 fn map_proto_message_data_to_json_message_data(
     message_data: proto::MessageData,
 ) -> Result<MessageData, ErrorResponse> {
@@ -2134,6 +2399,10 @@ fn map_proto_message_data_to_json_message_data(
                 lend_storage_body: None,
                 key_add_body: None,
                 key_remove_body: None,
+                channel_update_body: None,
+                channel_member_body: None,
+                channel_pin_body: None,
+                channel_moderate_body: None,
             })
         }
         Some(Body::CastRemoveBody(cast_remove_body)) => Ok(MessageData {
@@ -2168,6 +2437,10 @@ fn map_proto_message_data_to_json_message_data(
             lend_storage_body: None,
             key_add_body: None,
             key_remove_body: None,
+            channel_update_body: None,
+            channel_member_body: None,
+            channel_pin_body: None,
+            channel_moderate_body: None,
         }),
         Some(Body::FrameActionBody(frame_action_body)) => {
             return Ok(MessageData {
@@ -2211,6 +2484,10 @@ fn map_proto_message_data_to_json_message_data(
                 lend_storage_body: None,
                 key_add_body: None,
                 key_remove_body: None,
+                channel_update_body: None,
+                channel_member_body: None,
+                channel_pin_body: None,
+                channel_moderate_body: None,
             });
         }
         Some(Body::LinkBody(link_body)) => {
@@ -2245,6 +2522,10 @@ fn map_proto_message_data_to_json_message_data(
                 lend_storage_body: None,
                 key_add_body: None,
                 key_remove_body: None,
+                channel_update_body: None,
+                channel_member_body: None,
+                channel_pin_body: None,
+                channel_moderate_body: None,
             });
         }
         Some(Body::LinkCompactStateBody(link_compact_state_body)) => {
@@ -2280,6 +2561,10 @@ fn map_proto_message_data_to_json_message_data(
                 link_compact_state_body: Some(result),
                 key_add_body: None,
                 key_remove_body: None,
+                channel_update_body: None,
+                channel_member_body: None,
+                channel_pin_body: None,
+                channel_moderate_body: None,
             });
         }
         Some(Body::ReactionBody(reaction_body)) => {
@@ -2314,6 +2599,10 @@ fn map_proto_message_data_to_json_message_data(
                 lend_storage_body: None,
                 key_add_body: None,
                 key_remove_body: None,
+                channel_update_body: None,
+                channel_member_body: None,
+                channel_pin_body: None,
+                channel_moderate_body: None,
             });
         }
         Some(Body::UserDataBody(user_data_body)) => {
@@ -2348,6 +2637,10 @@ fn map_proto_message_data_to_json_message_data(
                 lend_storage_body: None,
                 key_add_body: None,
                 key_remove_body: None,
+                channel_update_body: None,
+                channel_member_body: None,
+                channel_pin_body: None,
+                channel_moderate_body: None,
             });
         }
         Some(Body::UsernameProofBody(username_proof_body)) => {
@@ -2383,6 +2676,10 @@ fn map_proto_message_data_to_json_message_data(
                 lend_storage_body: None,
                 key_add_body: None,
                 key_remove_body: None,
+                channel_update_body: None,
+                channel_member_body: None,
+                channel_pin_body: None,
+                channel_moderate_body: None,
             });
         }
         Some(Body::VerificationAddAddressBody(verification_add_address_body)) => {
@@ -2419,6 +2716,10 @@ fn map_proto_message_data_to_json_message_data(
                 lend_storage_body: None,
                 key_add_body: None,
                 key_remove_body: None,
+                channel_update_body: None,
+                channel_member_body: None,
+                channel_pin_body: None,
+                channel_moderate_body: None,
             });
         }
         Some(Body::VerificationRemoveBody(verification_remove_body)) => {
@@ -2455,6 +2756,10 @@ fn map_proto_message_data_to_json_message_data(
                 lend_storage_body: None,
                 key_add_body: None,
                 key_remove_body: None,
+                channel_update_body: None,
+                channel_member_body: None,
+                channel_pin_body: None,
+                channel_moderate_body: None,
             });
         }
         Some(Body::LendStorageBody(lend_storage_body)) => {
@@ -2489,6 +2794,10 @@ fn map_proto_message_data_to_json_message_data(
                 lend_storage_body: Some(result),
                 key_add_body: None,
                 key_remove_body: None,
+                channel_update_body: None,
+                channel_member_body: None,
+                channel_pin_body: None,
+                channel_moderate_body: None,
             });
         }
         Some(Body::KeyAddBody(key_add_body)) => {
@@ -2523,6 +2832,10 @@ fn map_proto_message_data_to_json_message_data(
                 lend_storage_body: None,
                 key_add_body: Some(result),
                 key_remove_body: None,
+                channel_update_body: None,
+                channel_member_body: None,
+                channel_pin_body: None,
+                channel_moderate_body: None,
             });
         }
         Some(Body::KeyRemoveBody(key_remove_body)) => {
@@ -2557,7 +2870,57 @@ fn map_proto_message_data_to_json_message_data(
                 lend_storage_body: None,
                 key_add_body: None,
                 key_remove_body: Some(result),
+                channel_update_body: None,
+                channel_member_body: None,
+                channel_pin_body: None,
+                channel_moderate_body: None,
             });
+        }
+        Some(Body::ChannelUpdateBody(body)) => {
+            let mut result = map_proto_message_data_without_body(
+                message_data.r#type,
+                message_data.fid,
+                message_data.timestamp,
+                message_data.network,
+            )?;
+            result.channel_update_body = Some(
+                map_proto_channel_update_body_to_json_channel_update_body(body)?,
+            );
+            Ok(result)
+        }
+        Some(Body::ChannelMemberBody(body)) => {
+            let mut result = map_proto_message_data_without_body(
+                message_data.r#type,
+                message_data.fid,
+                message_data.timestamp,
+                message_data.network,
+            )?;
+            result.channel_member_body = Some(
+                map_proto_channel_member_body_to_json_channel_member_body(body)?,
+            );
+            Ok(result)
+        }
+        Some(Body::ChannelPinBody(body)) => {
+            let mut result = map_proto_message_data_without_body(
+                message_data.r#type,
+                message_data.fid,
+                message_data.timestamp,
+                message_data.network,
+            )?;
+            result.channel_pin_body =
+                Some(map_proto_channel_pin_body_to_json_channel_pin_body(body));
+            Ok(result)
+        }
+        Some(Body::ChannelModerateBody(body)) => {
+            let mut result = map_proto_message_data_without_body(
+                message_data.r#type,
+                message_data.fid,
+                message_data.timestamp,
+                message_data.network,
+            )?;
+            result.channel_moderate_body =
+                Some(map_proto_channel_moderate_body_to_json_channel_moderate_body(body)?);
+            Ok(result)
         }
         None => Err(ErrorResponse {
             error: "No message data".to_string(),
@@ -4528,21 +4891,162 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{self, message_data::Body, MessageData, MessageType};
+    use crate::proto::{self, message_data::Body, MessageType};
 
     fn sample_message_data(body: Body) -> proto::MessageData {
         let r#type = match &body {
             Body::KeyAddBody(_) => MessageType::KeyAdd as i32,
             Body::KeyRemoveBody(_) => MessageType::KeyRemove as i32,
+            Body::ChannelUpdateBody(_) => MessageType::ChannelUpdate as i32,
+            Body::ChannelMemberBody(_) => MessageType::ChannelMember as i32,
+            Body::ChannelPinBody(_) => MessageType::ChannelPin as i32,
+            Body::ChannelModerateBody(_) => MessageType::ChannelModerate as i32,
             _ => MessageType::None as i32,
         };
-        MessageData {
+        proto::MessageData {
             r#type,
             fid: 1108653,
             timestamp: 100_000,
             network: proto::FarcasterNetwork::Testnet as i32,
             body: Some(body),
         }
+    }
+
+    #[test]
+    fn channel_update_body_round_trips_to_json_message_data() {
+        let json = map_proto_message_data_to_json_message_data(sample_message_data(
+            Body::ChannelUpdateBody(proto::ChannelUpdateBody {
+                channel_id: vec![0x11; 32],
+                name: Some("Pets".to_string()),
+                description: None,
+                image_url: Some("https://example.com/pets.png".to_string()),
+                header: Some("Welcome".to_string()),
+                rules: Some("Be kind".to_string()),
+                casting_mode: Some(proto::CastingMode::Recommended as i32),
+                membership_mode: Some(proto::MembershipMode::Approval as i32),
+            }),
+        ))
+        .expect("CHANNEL_UPDATE body must map cleanly");
+
+        assert_eq!(json.message_type, "MESSAGE_TYPE_CHANNEL_UPDATE");
+        let serialized = serde_json::to_value(&json).expect("serialize MessageData");
+        let body = &serialized["channelUpdateBody"];
+        assert_eq!(body["channelId"], format!("0x{}", "11".repeat(32)));
+        assert_eq!(body["name"], "Pets");
+        assert!(body.get("description").is_none());
+        assert_eq!(body["imageUrl"], "https://example.com/pets.png");
+        assert_eq!(body["header"], "Welcome");
+        assert_eq!(body["rules"], "Be kind");
+        assert_eq!(body["castingMode"], "CASTING_MODE_RECOMMENDED");
+        assert_eq!(body["membershipMode"], "MEMBERSHIP_MODE_APPROVAL");
+
+        let parsed: MessageData =
+            serde_json::from_value(serialized).expect("deserialize MessageData");
+        let body = parsed
+            .channel_update_body
+            .expect("channelUpdateBody survives round trip");
+        assert_eq!(body.channel_id, vec![0x11; 32]);
+        assert_eq!(body.name.as_deref(), Some("Pets"));
+        assert!(body.description.is_none());
+        assert_eq!(
+            body.image_url.as_deref(),
+            Some("https://example.com/pets.png")
+        );
+        assert!(matches!(
+            body.casting_mode,
+            Some(CastingMode::CASTING_MODE_RECOMMENDED)
+        ));
+        assert!(matches!(
+            body.membership_mode,
+            Some(MembershipMode::MEMBERSHIP_MODE_APPROVAL)
+        ));
+    }
+
+    #[test]
+    fn channel_member_body_round_trips_to_json_message_data() {
+        let json = map_proto_message_data_to_json_message_data(sample_message_data(
+            Body::ChannelMemberBody(proto::ChannelMemberBody {
+                channel_id: vec![0x22; 32],
+                fid: 42,
+                action: proto::ChannelMemberAction::Ban as i32,
+            }),
+        ))
+        .expect("CHANNEL_MEMBER body must map cleanly");
+
+        assert_eq!(json.message_type, "MESSAGE_TYPE_CHANNEL_MEMBER");
+        let serialized = serde_json::to_value(&json).expect("serialize MessageData");
+        let body = &serialized["channelMemberBody"];
+        assert_eq!(body["channelId"], format!("0x{}", "22".repeat(32)));
+        assert_eq!(body["fid"], 42);
+        assert_eq!(body["action"], "CHANNEL_MEMBER_ACTION_BAN");
+
+        let parsed: MessageData =
+            serde_json::from_value(serialized).expect("deserialize MessageData");
+        let body = parsed
+            .channel_member_body
+            .expect("channelMemberBody survives round trip");
+        assert_eq!(body.channel_id, vec![0x22; 32]);
+        assert_eq!(body.fid, 42);
+        assert!(matches!(
+            body.action,
+            ChannelMemberAction::CHANNEL_MEMBER_ACTION_BAN
+        ));
+    }
+
+    #[test]
+    fn channel_pin_body_round_trips_to_json_message_data() {
+        let json = map_proto_message_data_to_json_message_data(sample_message_data(
+            Body::ChannelPinBody(proto::ChannelPinBody {
+                channel_id: vec![0x33; 32],
+                cast_hash: vec![0x44; 20],
+            }),
+        ))
+        .expect("CHANNEL_PIN body must map cleanly");
+
+        assert_eq!(json.message_type, "MESSAGE_TYPE_CHANNEL_PIN");
+        let serialized = serde_json::to_value(&json).expect("serialize MessageData");
+        let body = &serialized["channelPinBody"];
+        assert_eq!(body["channelId"], format!("0x{}", "33".repeat(32)));
+        assert_eq!(body["castHash"], format!("0x{}", "44".repeat(20)));
+
+        let parsed: MessageData =
+            serde_json::from_value(serialized).expect("deserialize MessageData");
+        let body = parsed
+            .channel_pin_body
+            .expect("channelPinBody survives round trip");
+        assert_eq!(body.channel_id, vec![0x33; 32]);
+        assert_eq!(body.cast_hash, vec![0x44; 20]);
+    }
+
+    #[test]
+    fn channel_moderate_body_round_trips_to_json_message_data() {
+        let json = map_proto_message_data_to_json_message_data(sample_message_data(
+            Body::ChannelModerateBody(proto::ChannelModerateBody {
+                channel_id: vec![0x55; 32],
+                cast_hash: vec![0x66; 20],
+                action: proto::ChannelModerateAction::Unhide as i32,
+            }),
+        ))
+        .expect("CHANNEL_MODERATE body must map cleanly");
+
+        assert_eq!(json.message_type, "MESSAGE_TYPE_CHANNEL_MODERATE");
+        let serialized = serde_json::to_value(&json).expect("serialize MessageData");
+        let body = &serialized["channelModerateBody"];
+        assert_eq!(body["channelId"], format!("0x{}", "55".repeat(32)));
+        assert_eq!(body["castHash"], format!("0x{}", "66".repeat(20)));
+        assert_eq!(body["action"], "CHANNEL_MODERATE_ACTION_UNHIDE");
+
+        let parsed: MessageData =
+            serde_json::from_value(serialized).expect("deserialize MessageData");
+        let body = parsed
+            .channel_moderate_body
+            .expect("channelModerateBody survives round trip");
+        assert_eq!(body.channel_id, vec![0x55; 32]);
+        assert_eq!(body.cast_hash, vec![0x66; 20]);
+        assert!(matches!(
+            body.action,
+            ChannelModerateAction::CHANNEL_MODERATE_ACTION_UNHIDE
+        ));
     }
 
     #[test]
