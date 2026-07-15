@@ -339,6 +339,63 @@ mod tests {
         ));
     }
 
+    /// A message's `r#type` and its body are independent on the wire, and nothing in
+    /// `validate_message` requires them to agree. `route_message` and the merge arm dispatch on
+    /// `r#type`, while the validation arm matches on the body -- so a KEY_ADD-typed message
+    /// carrying a verification body routes to shard 0 and reaches the verification validation arm.
+    /// Admitting it would let `submit_message` accept and gossip a message shard 0 can never merge
+    /// (`merge_key_add` rejects the body), burning mempool and block space, and would be a devnet
+    /// behavior change out of an increment that must be inert. Such a message must stay rejected
+    /// exactly as it was before verification arms existed.
+    #[test]
+    fn test_shard_zero_verification_body_with_mismatched_type_is_rejected() {
+        let (mut block_engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut block_engine,
+        );
+        let timestamp = messages_factory::farcaster_time();
+
+        for spoofed_type in [
+            crate::proto::MessageType::KeyAdd,
+            crate::proto::MessageType::KeyRemove,
+            crate::proto::MessageType::LendStorage,
+        ] {
+            let body = crate::proto::VerificationAddAddressBody {
+                address: verification_address(),
+                claim_signature: hex::decode(VERIFICATION_CLAIM_SIGNATURE_HEX).unwrap(),
+                block_hash: hex::decode(VERIFICATION_BLOCK_HASH_HEX).unwrap(),
+                verification_type: 0,
+                chain_id: 0,
+                protocol: 0,
+            };
+            let spoofed = messages_factory::create_message_with_data(
+                VERIFICATION_FID,
+                spoofed_type,
+                crate::proto::message_data::Body::VerificationAddAddressBody(body),
+                Some(timestamp),
+                None,
+            );
+
+            assert!(
+                matches!(
+                    block_engine.validate_user_message(
+                        &spoofed,
+                        &StorageSlot::new(0, 0, 1, u32::MAX),
+                        &FarcasterTime::new(timestamp as u64),
+                        EngineVersion::V20,
+                        &mut RocksDbTransactionBatch::new(),
+                    ),
+                    Err(MessageValidationError::InvalidMessageType)
+                ),
+                "{spoofed_type:?}-typed message with a verification body must be rejected"
+            );
+        }
+    }
+
     /// End-to-end inertness on a network where the feature is dormant. The unit tests above drive
     /// `validate_user_message` directly; this one drives a whole block through propose/commit, so
     /// it pins all three gates together -- the validation arm, the replay gate, and the merge

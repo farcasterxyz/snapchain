@@ -395,10 +395,25 @@ impl BlockEngine {
             crate::proto::message_data::Body::KeyAddBody(_)
             | crate::proto::message_data::Body::KeyRemoveBody(_)
                 if version.is_enabled(ProtocolFeature::GaslessSigners) => {}
-            crate::proto::message_data::Body::VerificationAddAddressBody(_)
-            | crate::proto::message_data::Body::VerificationRemoveBody(_)
+            body @ (crate::proto::message_data::Body::VerificationAddAddressBody(_)
+            | crate::proto::message_data::Body::VerificationRemoveBody(_))
                 if version.is_enabled(ProtocolFeature::VerificationsOnShardZero) =>
             {
+                // A message's `r#type` and its body are independent on the wire; routing and the
+                // merge path dispatch on `r#type` while this match dispatches on the body. Without
+                // an agreement check, a KEY_ADD-typed message carrying a verification body routes
+                // to shard 0 and would be admitted here — accepted and gossiped by submit_message
+                // even though merge (dispatching on `r#type`) can never merge it. Require
+                // agreement so such a message stays rejected exactly as before these arms existed.
+                let expected_type = match body {
+                    crate::proto::message_data::Body::VerificationAddAddressBody(_) => {
+                        MessageType::VerificationAddEthAddress
+                    }
+                    _ => MessageType::VerificationRemove,
+                };
+                if msg_type != expected_type {
+                    return Err(MessageValidationError::InvalidMessageType);
+                }
                 let embedded_version = EngineVersion::version_for(
                     &FarcasterTime::new(message_data.timestamp as u64),
                     self.network,
