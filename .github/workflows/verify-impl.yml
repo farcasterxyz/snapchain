@@ -31,6 +31,18 @@ jobs:
           ref: ${{ env.MALACHITE_GIT_REF }}
           path: ./malachite
 
+      # Malachite is a path dependency, and cargo fingerprints path deps by source-file mtime.
+      # actions/checkout stamps every file with the checkout time (always "now"), which is newer than
+      # the cached build artifacts, so cargo rebuilds all malachite crates on every run despite a cache
+      # hit. Pin the source mtimes to the checked-out commit's date: stable across runs and older than
+      # the cached artifacts, so cargo trusts the cached malachite build. Correctness on a ref bump is
+      # guaranteed by the rust-cache key below, which includes MALACHITE_GIT_REF, so a bump gets a cold
+      # cache and a full rebuild instead of reusing stale artifacts.
+      - name: Pin malachite source mtimes for cargo cache reuse
+        run: |
+          commit_ts=$(git -C ./malachite show -s --format=%cI HEAD)
+          find ./malachite -type f -not -path '*/.git/*' -exec touch -d "$commit_ts" {} +
+
       - name: Install Rust 1.95.0
         uses: dtolnay/rust-toolchain@1.95.0
         with:
@@ -46,12 +58,15 @@ jobs:
           fetch-depth: 0
 
       # Cache cargo registry/git and the build target dir to speed up CI. Malachite is a path
-      # dependency; cargo fingerprints its source and rebuilds only the changed malachite crates
-      # on a ref bump, so no custom cache key is needed to keep artifacts correct.
+      # dependency whose artifacts rust-cache keeps, but cargo only reuses them because the mtime
+      # pinning step above stops the fresh checkout from invalidating them. MALACHITE_GIT_REF is part
+      # of the cache key so a ref bump lands on a cold cache and rebuilds malachite from scratch,
+      # rather than reusing artifacts from the previous ref.
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ./snapchain
+          key: malachite-${{ env.MALACHITE_GIT_REF }}
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
