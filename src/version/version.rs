@@ -288,6 +288,14 @@ impl EngineVersion {
             // validation depends on the registration state established at that boundary. All four
             // are kept in one arm so they share the V20 boundary; the lock-step invariant is
             // enforced by `test_channel_features_activate_together`.
+            //
+            // ChannelMessages has no consumer yet: the four channel message types exist on the
+            // wire, but nothing merges, stores, or replicates them. (Routing and JSON read
+            // mapping DO handle them — that is deliberate and inert; do not widen this sentence.)
+            // Whatever adds merge dispatch must gate it on this feature in the same change.
+            // Nothing will remind you: `merge_message` ends in a catch-all arm, so new handling
+            // raises no exhaustiveness error, and no compiler check can demand a runtime gate.
+            // A type that can merge before its gate is a permanent replay divergence.
             ProtocolFeature::ChannelRegistrations
             | ProtocolFeature::SortedBlockEngineEvents
             | ProtocolFeature::ChannelOwnershipEvents

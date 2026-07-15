@@ -263,7 +263,10 @@ message KeyRemoveBody {
   uint32 nonce = 5; // Monotonically increasing nonce (user nonce for custody, app nonce for self)
 }
 
-/** ADVISORY metadata: the protocol accepts casts into a channel regardless of mode; clients enforce it. */
+/**
+ * ADVISORY metadata only: the protocol accepts casts into a channel regardless
+ * of mode, and never enforces it at cast merge. Clients may enforce it.
+ */
 enum CastingMode {
   CASTING_MODE_NONE = 0;
   CASTING_MODE_EVERYONE = 1;
@@ -271,7 +274,12 @@ enum CastingMode {
   CASTING_MODE_RECOMMENDED = 3;
 }
 
-/** Protocol-relevant: gates self-join validity when membership messages ship. */
+/**
+ * Protocol-relevant, unlike CastingMode: this is intended to gate whether an fid
+ * may add itself as a member (a ChannelMemberBody with CHANNEL_MEMBER_ACTION_ADD_MEMBER
+ * whose fid equals the sending message's fid). OPEN admits self-adds; APPROVAL
+ * requires a moderator. Not enforced yet — no channel message merges on any network.
+ */
 enum MembershipMode {
   MEMBERSHIP_MODE_NONE = 0;
   MEMBERSHIP_MODE_OPEN = 1;
@@ -295,7 +303,10 @@ enum ChannelModerateAction {
 }
 
 message ChannelUpdateBody {
-  bytes channel_id = 1; // 32-byte keccak256 label of the channel key; equals the registry tokenId and the ChannelRegisterChannelKeyByLabel join key
+  // 32-byte keccak256 of the channel key (the verbatim registry name), equal to
+  // the ERC-721 tokenId and to ChannelRegisterBody.label in onchain_event.proto
+  // — the join key tying a channel's registry events and messages together.
+  bytes channel_id = 1;
   optional string name = 2;
   optional string description = 3;
   optional string image_url = 4;
@@ -306,19 +317,26 @@ message ChannelUpdateBody {
 }
 
 message ChannelMemberBody {
-  bytes channel_id = 1; // 32-byte keccak256 label of the channel key; equals the registry tokenId and the ChannelRegisterChannelKeyByLabel join key
+  // 32-byte keccak256 of the channel key (the verbatim registry name), equal to
+  // the ERC-721 tokenId and to ChannelRegisterBody.label in onchain_event.proto.
+  bytes channel_id = 1;
   uint64 fid = 2;
   ChannelMemberAction action = 3;
 }
 
-/** A single pin per channel; a new pin replaces the previous pin. Empty cast_hash unpins as a working assumption; the store increment owns the final semantic. */
+/** A single pin per channel; a new pin replaces the previous one. */
 message ChannelPinBody {
-  bytes channel_id = 1; // 32-byte keccak256 label of the channel key; equals the registry tokenId and the ChannelRegisterChannelKeyByLabel join key
+  // 32-byte keccak256 of the channel key (the verbatim registry name), equal to
+  // the ERC-721 tokenId and to ChannelRegisterBody.label in onchain_event.proto.
+  bytes channel_id = 1;
+  // The pinned cast. An empty cast_hash unpins.
   bytes cast_hash = 2;
 }
 
 message ChannelModerateBody {
-  bytes channel_id = 1; // 32-byte keccak256 label of the channel key; equals the registry tokenId and the ChannelRegisterChannelKeyByLabel join key
+  // 32-byte keccak256 of the channel key (the verbatim registry name), equal to
+  // the ERC-721 tokenId and to ChannelRegisterBody.label in onchain_event.proto.
+  bytes channel_id = 1;
   bytes cast_hash = 2;
   ChannelModerateAction action = 3;
 }
