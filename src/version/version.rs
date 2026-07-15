@@ -286,11 +286,27 @@ impl EngineVersion {
             // boundary so no fanned history is ever missing (registrations cannot exist before the
             // gate opens, and it opens at the same instant), making backfill unnecessary.
             // ChannelMessages is consensus-coupled to registrations because channel-message
-            // validation depends on the registration state established at that boundary. All five
+            // validation depends on the registration state established at that boundary. All four
             // are kept in one arm so they share the V20 boundary; the lock-step invariant is
             // enforced by `test_channel_features_activate_together`.
-            // Shard-0 owner resolution reads the verification replica, so it must activate with
-            // channel messages.
+            //
+            // VerificationsOnShardZero rides the same arm for a WEAKER reason, and the difference
+            // matters: it is bundled to share the single V20 rollout boundary, NOT because a
+            // present coupling forces it. Nothing reads the shard-0 verification replica today
+            // (every `verification_store` reader goes through `Stores`, never `BlockStores`).
+            // That is not the same as the feature being inert once V20 is live — a shard-0
+            // verification merge folds into the shard-0 trie like any other, so it moves the
+            // state root.
+            //
+            // Note what this boundary implies for whatever eventually does read the replica.
+            // Verifications route to the fid's data shard (`route_message`), so in practice the
+            // replica stays empty — but that is a property of honest proposers building from
+            // routed mempools, not something replay enforces. And shard-0 admission deliberately
+            // rejects verifications whose embedded timestamp predates the feature (see
+            // `BlockEngine::validate_user_message`), so the replica never holds pre-V20 history.
+            // A consumer needing a fid's full verification set must read the fid shard; a
+            // consumer co-activating with this feature reads an empty store on day one. Revisit
+            // this bundling if a consumer needs history at first read.
             //
             // ChannelMessages has no consumer yet: the four channel message types exist on the
             // wire, but nothing merges, stores, or replicates them. (Routing and JSON read
@@ -828,16 +844,19 @@ mod version_test {
 
     #[test]
     fn test_channel_features_activate_together() {
-        // CONSENSUS INVARIANT: these five features must be enabled at the exact same versions.
+        // CONSENSUS INVARIANT: the four channel features must be enabled at the exact same
+        // versions. VerificationsOnShardZero is pinned alongside them for a weaker reason, spelled
+        // out at the end of this comment — do not read it as consensus-coupled.
         // If SortedBlockEngineEvents ever lagged ChannelRegistrations, BlockEngine would accept
         // channel-register events but replay them unsorted, reintroducing the same-eth-block
         // channel-owner divergence this fix closes. ChannelOwnershipEvents gates the fan-out of
         // those registrations; if it lagged, a registration could be admitted with no shard ever
         // fanning it out (or, mixed across binaries, diverge on which blocks fan out).
         // ChannelMessages validates against the registration state, so it must share the same
-        // boundary. Shard-0 channel-owner resolution reads the verification replica, so that
-        // replica must activate at the same boundary too. This test fails CI if a future change
-        // splits any activation boundary.
+        // boundary. VerificationsOnShardZero has no present coupling — it is pinned here so the
+        // shard-0 replica shares the one V20 rollout boundary rather than drifting into its own;
+        // see the comment on the matching arm in `is_enabled`. This test fails CI if a future
+        // change splits any activation boundary.
         use strum::IntoEnumIterator;
         for version in EngineVersion::iter() {
             let channel_registrations = version.is_enabled(ProtocolFeature::ChannelRegistrations);
