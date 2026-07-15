@@ -690,6 +690,9 @@ impl ShardEngine {
                     MessageType::KeyAdd | MessageType::KeyRemove => {
                         Some(ProtocolFeature::GaslessSigners)
                     }
+                    MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => {
+                        Some(ProtocolFeature::VerificationsOnShardZero)
+                    }
                     // The channel message types belong here, mapped to
                     // `ProtocolFeature::ChannelMessages`, as soon as anything can merge them.
                     // They are omitted only because `merge_message` rejects them outright today,
@@ -714,7 +717,14 @@ impl ShardEngine {
                         );
                     }
                 }
-                let hub_events = self.merge_message(&message, txn_batch)?;
+                let hub_events = if matches!(
+                    msg_type,
+                    MessageType::VerificationAddEthAddress | MessageType::VerificationRemove
+                ) {
+                    self.merge_replayed_verification(message, txn_batch)?
+                } else {
+                    self.merge_message(message, txn_batch)?
+                };
                 for event in &hub_events {
                     self.update_trie(trie_ctx, event, txn_batch)?;
                 }
@@ -1705,6 +1715,22 @@ impl ShardEngine {
         self.metrics
             .time_with_shard("merge_message_time_us", elapsed.as_micros() as u64);
         Ok(event)
+    }
+
+    fn merge_replayed_verification(
+        &self,
+        message: &proto::Message,
+        txn_batch: &mut RocksDbTransactionBatch,
+    ) -> Result<Vec<proto::HubEvent>, MessageValidationError> {
+        // With the shard-0 admission timestamp floor, force override differs from plain LWW only
+        // for post-activation messages whose embedded timestamps disagree with shard-0 consensus
+        // order due to bounded backdating. Pre-activation rows always lose to floored shard-0
+        // messages under either rule.
+        Ok(vec![self
+            .stores
+            .verification_store
+            .merge_force_override(message, txn_batch)
+            .map_err(MessageValidationError::StoreError)?])
     }
 
     fn prune_messages(
@@ -2792,6 +2818,45 @@ impl ShardEngine {
             return false;
         }
         signer_event.event_type == proto::SignerEventType::Remove as i32
+    }
+}
+
+#[cfg(test)]
+mod verification_replay_gate_tests {
+    use super::{EngineError, MessageValidationError};
+    use crate::proto::{FarcasterNetwork, MessageType};
+    use crate::storage::db::RocksDbTransactionBatch;
+    use crate::storage::store::test_helper::{self, trie_ctx, EngineOptions, FID3_FOR_TEST};
+    use crate::utils::factory::{events_factory, messages_factory};
+
+    #[tokio::test]
+    async fn pre_feature_verification_block_event_returns_invalid_message_type() {
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            network: Some(FarcasterNetwork::Mainnet),
+            ..Default::default()
+        })
+        .await;
+        let remove = messages_factory::verifications::create_verification_remove(
+            FID3_FOR_TEST,
+            vec![0x11; 20],
+            Some(1),
+            None,
+        );
+        // The factory's block timestamp is zero, which resolves before the feature on mainnet.
+        let block_event = events_factory::create_merge_message_event(remove, 1);
+
+        let result = engine.handle_block_event(
+            trie_ctx(),
+            &block_event,
+            &mut RocksDbTransactionBatch::new(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(EngineError::EngineMessageValidationError(
+                MessageValidationError::InvalidMessageType(value)
+            )) if value == MessageType::VerificationRemove as i32
+        ));
     }
 }
 

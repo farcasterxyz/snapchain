@@ -623,6 +623,57 @@ impl<T: StoreDef + Clone> Store<T> {
         Ok(())
     }
 
+    fn get_existing_merge_conflicts(
+        &self,
+        message: &Message,
+        txn: &RocksDbTransactionBatch,
+    ) -> Result<Vec<Message>, HubError> {
+        let mut conflicts = Vec::new();
+        let fid = message.data.as_ref().unwrap().fid;
+
+        if self.store_def.remove_type_supported() {
+            let remove_key = self.store_def.make_remove_key(message)?;
+            if let Some(remove_ts_hash) = get_from_db_or_txn(&self.db, txn, &remove_key)? {
+                let remove_ts_hash_array = vec_to_u8_24(&Some(remove_ts_hash.clone()))?;
+                if let Some(existing_remove) = get_message(
+                    &self.db,
+                    txn,
+                    fid,
+                    self.store_def.postfix(),
+                    &remove_ts_hash_array,
+                )? {
+                    conflicts.push(existing_remove);
+                } else {
+                    warn!(
+                        remove_ts_hash = format!("{:x?}", remove_ts_hash),
+                        "Message's ts_hash exists but message not found in store"
+                    );
+                }
+            }
+        }
+
+        let add_key = self.store_def.make_add_key(message)?;
+        if let Some(add_ts_hash) = get_from_db_or_txn(&self.db, txn, &add_key)? {
+            let add_ts_hash_array = vec_to_u8_24(&Some(add_ts_hash.clone()))?;
+            if let Some(existing_add) = get_message(
+                &self.db,
+                txn,
+                fid,
+                self.store_def.postfix(),
+                &add_ts_hash_array,
+            )? {
+                conflicts.push(existing_add);
+            } else {
+                warn!(
+                    add_ts_hash = format!("{:x?}", add_ts_hash),
+                    "Message's ts_hash exists but message not found in store"
+                );
+            }
+        }
+
+        Ok(conflicts)
+    }
+
     pub fn merge(
         &self,
         message: &Message,
@@ -648,6 +699,39 @@ impl<T: StoreDef + Clone> Store<T> {
             self.merge_add(&ts_hash, message, txn)
         } else {
             self.merge_remove(&ts_hash, message, txn)
+        }
+    }
+
+    /// Merge an add/remove after superseding every existing record for its logical key,
+    /// without comparing timestamp hashes. This is reserved for replay paths whose external
+    /// ordering is authoritative. Stores with compact-state semantics must use normal merge.
+    pub(crate) fn merge_force_override(
+        &self,
+        message: &Message,
+        txn: &mut RocksDbTransactionBatch,
+    ) -> Result<HubEvent, HubError> {
+        if self.store_def.compact_state_type_supported() {
+            return Err(HubError::invalid_parameter(
+                "force override is not supported for compact-state stores",
+            ));
+        }
+        if !self.store_def.is_add_type(message)
+            && !(self.store_def.remove_type_supported() && self.store_def.is_remove_type(message))
+        {
+            return Err(HubError {
+                code: "bad_request.validation_failure".to_string(),
+                message: "invalid message type".to_string(),
+            });
+        }
+
+        let ts_hash = make_ts_hash(message.data.as_ref().unwrap().timestamp, &message.hash)?;
+        let merge_conflicts = self.get_existing_merge_conflicts(message, txn)?;
+        self.delete_many_transaction(txn, &merge_conflicts)?;
+
+        if self.store_def.is_add_type(message) {
+            self.merge_add_with_conflicts(&ts_hash, message, txn, merge_conflicts)
+        } else {
+            self.merge_remove_with_conflicts(&ts_hash, message, txn, merge_conflicts)
         }
     }
 
@@ -805,8 +889,18 @@ impl<T: StoreDef + Clone> Store<T> {
             merge_conflicts
         };
 
+        self.merge_add_with_conflicts(ts_hash, message, txn, merge_conflicts)
+    }
+
+    fn merge_add_with_conflicts(
+        &self,
+        ts_hash: &[u8; TS_HASH_LENGTH],
+        message: &Message,
+        txn: &mut RocksDbTransactionBatch,
+        merge_conflicts: Vec<Message>,
+    ) -> Result<HubEvent, HubError> {
         // Add ops to store the message by messageKey and index the messageKey by set and by target
-        self.put_add_transaction(txn, &ts_hash, message)?;
+        self.put_add_transaction(txn, ts_hash, message)?;
 
         // Event handler
         let mut hub_event = self.store_def.merge_event_args(message, merge_conflicts);
@@ -867,6 +961,16 @@ impl<T: StoreDef + Clone> Store<T> {
             merge_conflicts
         };
 
+        self.merge_remove_with_conflicts(ts_hash, message, txn, merge_conflicts)
+    }
+
+    fn merge_remove_with_conflicts(
+        &self,
+        ts_hash: &[u8; TS_HASH_LENGTH],
+        message: &Message,
+        txn: &mut RocksDbTransactionBatch,
+        merge_conflicts: Vec<Message>,
+    ) -> Result<HubEvent, HubError> {
         // Add ops to store the message by messageKey and index the messageKey by set and by target
         self.put_remove_transaction(txn, ts_hash, message)?;
 

@@ -671,18 +671,18 @@ impl BlockEngine {
                     // would merge here. Today that means devnet only — V20 is unscheduled on
                     // mainnet and testnet.
                     //
-                    // Whichever change flips routing to shard 0 owes at least two things beyond
-                    // the flip itself. It is not a one-line change, and this arm is the handoff:
+                    // Before routing flips to shard 0, two obligations beyond the flip itself
+                    // must be satisfied. Fan-out now satisfies the first; the second remains:
                     //
-                    // 1. Fan-out is mandatory, not optional. Verification merges reach no data
-                    //    shard today — not via an explicit exclusion, but because
-                    //    `generate_block_events` fans out an allowlist (`LendStorage | KeyAdd |
-                    //    KeyRemove`) and verifications fall into its catch-all. Data shards still
-                    //    own consumers that read their *local* verification store — notably
-                    //    `ShardEngine::verify_fid_owns_address`, which gates primary-address
-                    //    UserData. Flipping routing without extending that allowlist would strand
-                    //    every new verification on shard 0 and make primary-address sets fail with
-                    //    `AddressNotPartOfVerification` network-wide.
+                    // 1. Fan-out is mandatory, not optional. Verification merge events are now
+                    //    allowlisted by `generate_block_events`, but routing still prevents
+                    //    production verification merges on shard 0, so the replay leg remains
+                    //    unreachable. Data shards own consumers that read their *local*
+                    //    verification store — notably `ShardEngine::verify_fid_owns_address`,
+                    //    which gates primary-address UserData. Flipping routing without this
+                    //    fan-out would strand every new verification on shard 0 and make
+                    //    primary-address sets fail with `AddressNotPartOfVerification`
+                    //    network-wide.
                     // 2. Quota has no mechanism here, which is a structural gap rather than a
                     //    missing call: verifications are storage-limited on data shards
                     //    (`StoreType::Verifications`, enforced by `ShardEngine`'s post-merge
@@ -792,14 +792,14 @@ impl BlockEngine {
                         match msg_type {
                             MessageType::LendStorage
                             | MessageType::KeyAdd
-                            | MessageType::KeyRemove => {
+                            | MessageType::KeyRemove
+                            | MessageType::VerificationAddEthAddress
+                            | MessageType::VerificationRemove => {
                                 // All shard-0-hosted user messages propagate the same way:
                                 // wrap the original message in a MergeMessageEvent so shards
                                 // 1..N can replay the merge into their local DBs via
-                                // ShardEngine::handle_block_event. For KEY_ADD / KEY_REMOVE
-                                // this is what makes gasless-key records visible on every
-                                // shard for scope enforcement, TTL checks, and last_used_at
-                                // bumps (NEYN-10575, NEYN-10576).
+                                // ShardEngine::handle_block_event. Upstream merge gates decide
+                                // whether a feature's messages can reach this allowlist.
                                 max_block_event_seqnum += 1;
                                 let data = BlockEventData {
                                     seqnum: max_block_event_seqnum,

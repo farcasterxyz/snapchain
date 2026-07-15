@@ -112,28 +112,43 @@ mod tests {
         }
     }
 
-    /// Pins the inertness of fan-out: shard 0 must not emit verification BlockEvents, so no data
-    /// shard ever replays one. Filters for verification merges specifically rather than requiring
-    /// `block.events` to be empty, because devnet's 5-block heartbeat interval means a heartbeat
-    /// BlockEvent legitimately shares a block with these merges.
+    fn verification_block_event_messages(block: &Block) -> Vec<&Message> {
+        block
+            .events
+            .iter()
+            .filter_map(|event| {
+                let block_event_data::Body::MergeMessageEventBody(body) =
+                    event.data.as_ref()?.body.as_ref()?
+                else {
+                    return None;
+                };
+                let message = body.message.as_ref()?;
+                matches!(
+                    message.msg_type(),
+                    crate::proto::MessageType::VerificationAddEthAddress
+                        | crate::proto::MessageType::VerificationRemove
+                )
+                .then_some(message)
+            })
+            .collect()
+    }
+
+    /// Use only when no verification merged. Verification types are allowlisted for fan-out, so
+    /// absence here proves the block produced no verification MergeMessage HubEvent; it is not an
+    /// assertion that the message types are excluded. Heartbeats may legitimately share the block.
     fn assert_no_verification_block_events(block: &Block) {
-        for event in &block.events {
-            let Some(block_event_data::Body::MergeMessageEventBody(body)) =
-                event.data.as_ref().and_then(|data| data.body.as_ref())
-            else {
-                continue;
-            };
-            assert!(
-                !matches!(
-                    body.message.as_ref().map(Message::msg_type),
-                    Some(
-                        crate::proto::MessageType::VerificationAddEthAddress
-                            | crate::proto::MessageType::VerificationRemove
-                    )
-                ),
-                "verification fanned out of shard 0: {body:?}"
-            );
-        }
+        assert!(
+            verification_block_event_messages(block).is_empty(),
+            "block without a verification merge emitted a verification BlockEvent"
+        );
+    }
+
+    fn assert_one_verification_block_event(block: &Block, expected: &Message) {
+        assert_eq!(
+            verification_block_event_messages(block),
+            vec![expected],
+            "a verification merge must emit exactly one BlockEvent carrying the original message"
+        );
     }
 
     #[tokio::test]
@@ -434,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn test_shard_zero_verification_merge_lww_index_trie_event_and_no_fanout() {
+    fn test_shard_zero_verification_merge_lww_index_trie_event_and_fanout() {
         let (mut block_engine, _temp_dir) = setup();
         register_user(
             VERIFICATION_FID,
@@ -447,7 +462,7 @@ mod tests {
 
         let add = verification_add(timestamp, None);
         let add_block = commit_message(&mut block_engine, &add, Validity::Valid);
-        assert_no_verification_block_events(&add_block);
+        assert_one_verification_block_event(&add_block, &add);
         assert_verification_index(&block_engine, Some(&add));
         assert_eq!(
             VerificationStore::get_verification_add(
@@ -482,7 +497,7 @@ mod tests {
         // assertion here names the *other* message -- the LWW eviction is the claim.
         let replacement = verification_add(timestamp + 1, None);
         let replacement_block = commit_message(&mut block_engine, &replacement, Validity::Valid);
-        assert_no_verification_block_events(&replacement_block);
+        assert_one_verification_block_event(&replacement_block, &replacement);
         assert_verification_index(&block_engine, Some(&replacement));
         assert!(!message_exists_in_trie(&mut block_engine, &add));
 
@@ -493,7 +508,7 @@ mod tests {
             None,
         );
         let remove_block = commit_message(&mut block_engine, &remove, Validity::Valid);
-        assert_no_verification_block_events(&remove_block);
+        assert_one_verification_block_event(&remove_block, &remove);
         assert_verification_index(&block_engine, None);
         assert!(!message_exists_in_trie(&mut block_engine, &replacement));
         assert_eq!(
