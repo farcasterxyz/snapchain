@@ -55,6 +55,15 @@ mod tests {
         (transfer, register)
     }
 
+    // The claim signature below is bound to a (fid, address, network, block hash, protocol)
+    // tuple, so the fid is load-bearing: changing it fails with `InvalidClaimSignature` rather
+    // than anything that names a fid. Same fixture the data-shard verification tests use.
+    //
+    // The `network` in that tuple is the *message's* own field, which `messages_factory`
+    // hardcodes to Mainnet -- not the engine's. `validate_message` reads the claim's network from
+    // `message_data.network` and only requires the two to agree when the engine is Mainnet, which
+    // is why this one fixture validates against both the devnet `setup()` engine and the mainnet
+    // engine used by the pre-activation test.
     const VERIFICATION_FID: u64 = 2;
     const VERIFICATION_ADDRESS_HEX: &str = "91031dcfdea024b4d51e775486111d2b2a715871";
     const VERIFICATION_CLAIM_SIGNATURE_HEX: &str = "b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c";
@@ -103,23 +112,28 @@ mod tests {
         }
     }
 
+    /// Pins the inertness of fan-out: shard 0 must not emit verification BlockEvents, so no data
+    /// shard ever replays one. Filters for verification merges specifically rather than requiring
+    /// `block.events` to be empty, because devnet's 5-block heartbeat interval means a heartbeat
+    /// BlockEvent legitimately shares a block with these merges.
     fn assert_no_verification_block_events(block: &Block) {
-        assert!(block.events.iter().all(|event| {
-            let Some(data) = event.data.as_ref() else {
-                return true;
-            };
-            let Some(block_event_data::Body::MergeMessageEventBody(body)) = data.body.as_ref()
+        for event in &block.events {
+            let Some(block_event_data::Body::MergeMessageEventBody(body)) =
+                event.data.as_ref().and_then(|data| data.body.as_ref())
             else {
-                return true;
+                continue;
             };
-            !matches!(
-                body.message.as_ref().map(Message::msg_type),
-                Some(
-                    crate::proto::MessageType::VerificationAddEthAddress
-                        | crate::proto::MessageType::VerificationRemove
-                )
-            )
-        }));
+            assert!(
+                !matches!(
+                    body.message.as_ref().map(Message::msg_type),
+                    Some(
+                        crate::proto::MessageType::VerificationAddEthAddress
+                            | crate::proto::MessageType::VerificationRemove
+                    )
+                ),
+                "verification fanned out of shard 0: {body:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -218,6 +232,34 @@ mod tests {
             Err(MessageValidationError::InvalidMessageType)
         ));
 
+        // The arm admits `VerificationRemoveBody` as well as adds, so gate both -- a gate that
+        // covered only adds would leave removes admissible pre-activation.
+        let remove = messages_factory::verifications::create_verification_remove(
+            VERIFICATION_FID,
+            verification_address(),
+            Some(timestamp),
+            None,
+        );
+        assert!(block_engine
+            .validate_user_message(
+                &remove,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            )
+            .is_ok());
+        assert!(matches!(
+            block_engine.validate_user_message(
+                &remove,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V19,
+                &mut RocksDbTransactionBatch::new(),
+            ),
+            Err(MessageValidationError::InvalidMessageType)
+        ));
+
         let mut bad_claim_signature = hex::decode(VERIFICATION_CLAIM_SIGNATURE_HEX).unwrap();
         bad_claim_signature[0] ^= 0xff;
         let invalid_signature = messages_factory::verifications::create_verification_add(
@@ -269,7 +311,20 @@ mod tests {
             1,
             &mut block_engine,
         );
-        let pre_activation_timestamp = messages_factory::farcaster_time();
+        // Be precise about what this pins, because it is weaker than the name suggests. No
+        // network can currently straddle the activation boundary: V20 is unscheduled on mainnet
+        // and testnet (so *every* timestamp there resolves pre-V20), and devnet activates V20 at
+        // timestamp 0 (so no pre-activation timestamp exists at all). This test therefore proves
+        // the floor is present and rejects -- deleting the floor turns it red -- but it cannot
+        // yet prove the floor *discriminates* pre- from post-activation timestamps. Add that
+        // boundary test when V20 is scheduled; until then the discrimination is untestable.
+        //
+        // Pinned to the Farcaster epoch rather than `now` so the test keeps meaning the same
+        // thing afterwards: once V20 is scheduled, `now` would resolve to V20, the floor would
+        // rightly stop rejecting, and a `now`-based test would go red during the very rollout it
+        // exists to protect. Only the future bound in `validate_timestamp` constrains this value,
+        // so an epoch timestamp reaches the floor instead of dying earlier on an unrelated error.
+        let pre_activation_timestamp = 0;
         let message = verification_add(pre_activation_timestamp, None);
 
         assert!(matches!(
@@ -282,6 +337,43 @@ mod tests {
             ),
             Err(MessageValidationError::InvalidMessageType)
         ));
+    }
+
+    /// End-to-end inertness on a network where the feature is dormant. The unit tests above drive
+    /// `validate_user_message` directly; this one drives a whole block through propose/commit, so
+    /// it pins all three gates together -- the validation arm, the replay gate, and the merge
+    /// arm's own guard -- plus the things a consensus reader actually cares about: no trie key,
+    /// no stored verification, no fan-out.
+    #[test]
+    fn test_shard_zero_verification_inert_in_pre_activation_block() {
+        let (mut block_engine, _temp_dir) = setup_with_options(BlockEngineOptions {
+            network: FarcasterNetwork::Mainnet,
+            ..BlockEngineOptions::default()
+        });
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut block_engine,
+        );
+
+        let add = verification_add(messages_factory::farcaster_time(), None);
+        let block = commit_message(&mut block_engine, &add, Validity::Invalid);
+
+        assert_no_verification_block_events(&block);
+        assert_verification_index(&block_engine, None);
+        assert_eq!(
+            VerificationStore::get_verification_add(
+                &block_engine.stores().verification_store,
+                VERIFICATION_FID,
+                &verification_address(),
+                None,
+            )
+            .unwrap(),
+            None,
+            "a dormant-feature block must not merge a verification into the replica"
+        );
     }
 
     #[test]
@@ -329,11 +421,12 @@ mod tests {
             other => panic!("expected merge-message hub event, got {other:?}"),
         }
 
+        // `commit_message` already asserts the committed message's own trie presence, so each
+        // assertion here names the *other* message -- the LWW eviction is the claim.
         let replacement = verification_add(timestamp + 1, None);
         let replacement_block = commit_message(&mut block_engine, &replacement, Validity::Valid);
         assert_no_verification_block_events(&replacement_block);
         assert_verification_index(&block_engine, Some(&replacement));
-        assert!(message_exists_in_trie(&mut block_engine, &replacement));
         assert!(!message_exists_in_trie(&mut block_engine, &add));
 
         let remove = messages_factory::verifications::create_verification_remove(
@@ -345,7 +438,6 @@ mod tests {
         let remove_block = commit_message(&mut block_engine, &remove, Validity::Valid);
         assert_no_verification_block_events(&remove_block);
         assert_verification_index(&block_engine, None);
-        assert!(message_exists_in_trie(&mut block_engine, &remove));
         assert!(!message_exists_in_trie(&mut block_engine, &replacement));
         assert_eq!(
             VerificationStore::get_verification_remove(
@@ -357,11 +449,19 @@ mod tests {
             Some(remove.clone())
         );
 
+        // The stale add is rejected by the CRDT in `merge`, not by `validate_user_message` -- so
+        // the rejection is only visible if the merge error is surfaced rather than swallowed.
+        // `simulate_message` is what submitMessage consults once routing reaches shard 0; it
+        // must not report success for a message that was never stored.
+        assert!(
+            block_engine.simulate_message(&add).is_err(),
+            "stale add's merge error must reach simulate_message, not be swallowed"
+        );
+
         let old_add_block = commit_message(&mut block_engine, &add, Validity::Invalid);
         assert_no_verification_block_events(&old_add_block);
         assert_verification_index(&block_engine, None);
         assert!(message_exists_in_trie(&mut block_engine, &remove));
-        assert!(!message_exists_in_trie(&mut block_engine, &add));
     }
 
     #[tokio::test]
