@@ -3,14 +3,18 @@ mod tests {
     use crate::core::util::FarcasterTime;
     use crate::core::validations::error::ValidationError;
     use crate::proto::{
-        block_event_data, Block, BlockEvent, BlockEventType, ChannelRegisterEventType,
-        FarcasterNetwork, HubEvent, Message, MessageType, OnChainEvent, StorageUnitType, StoreType,
+        block_event_data, Block, BlockEvent, BlockEventType, ChannelMemberAction,
+        ChannelRegisterEventType, FarcasterNetwork, HubEvent, MembershipMode, Message, MessageType,
+        OnChainEvent, StorageUnitType, StoreType,
     };
     use crate::storage::db::RocksDbTransactionBatch;
     use crate::storage::store::account::{
         make_ts_hash, HubEventStorageExt, IntoU8, MergeContext, StorageSlot, VerificationStore,
     };
-    use crate::storage::store::block_engine::{BlockStateChange, MessageValidationError};
+    use crate::storage::store::block_engine::{
+        channel_member_authority, BlockStateChange, ChannelAuthorRole, ChannelAuthorityDecision,
+        MessageValidationError,
+    };
     use crate::storage::store::block_engine_test_helpers::*;
     use crate::storage::store::mempool_poller::MempoolMessage;
     use crate::storage::store::stores::Limits;
@@ -167,6 +171,260 @@ mod tests {
     }
 
     #[test]
+    fn channel_member_authority_exhaustively_matches_t1() {
+        use crate::storage::store::account::ChannelMemberState;
+
+        let actions = [
+            ChannelMemberAction::AddMember,
+            ChannelMemberAction::RemoveMember,
+            ChannelMemberAction::AddModerator,
+            ChannelMemberAction::RemoveModerator,
+            ChannelMemberAction::Ban,
+            ChannelMemberAction::Unban,
+        ];
+        let roles = [
+            ChannelAuthorRole::Owner,
+            ChannelAuthorRole::Moderator,
+            ChannelAuthorRole::Member,
+            ChannelAuthorRole::Other,
+        ];
+        let states = [
+            None,
+            Some(ChannelMemberState::Removed),
+            Some(ChannelMemberState::Member),
+            Some(ChannelMemberState::Moderator),
+            Some(ChannelMemberState::Banned),
+        ];
+
+        let mut cells = 0;
+        for action in actions {
+            for role in roles {
+                for state in states {
+                    for is_self in [false, true] {
+                        cells += 1;
+                        // This matcher is a direct transcription of T1's allowed cells. The
+                        // production helper is total and returns a reason for every rejected
+                        // cell; this matrix deliberately compares only admission so changing
+                        // a rejection category cannot hide an authority-table drift.
+                        let expected = match action {
+                            ChannelMemberAction::AddMember => {
+                                matches!(state, None | Some(ChannelMemberState::Removed))
+                                    && (matches!(
+                                        role,
+                                        ChannelAuthorRole::Owner | ChannelAuthorRole::Moderator
+                                    ) || is_self)
+                            }
+                            ChannelMemberAction::RemoveMember => match state {
+                                Some(ChannelMemberState::Member) => {
+                                    matches!(
+                                        role,
+                                        ChannelAuthorRole::Owner | ChannelAuthorRole::Moderator
+                                    ) || is_self
+                                }
+                                Some(ChannelMemberState::Moderator) => is_self,
+                                _ => false,
+                            },
+                            ChannelMemberAction::AddModerator => {
+                                role == ChannelAuthorRole::Owner
+                                    && matches!(
+                                        state,
+                                        None | Some(ChannelMemberState::Removed)
+                                            | Some(ChannelMemberState::Member)
+                                    )
+                            }
+                            ChannelMemberAction::RemoveModerator => {
+                                role == ChannelAuthorRole::Owner
+                                    && state == Some(ChannelMemberState::Moderator)
+                            }
+                            ChannelMemberAction::Ban => match state {
+                                None
+                                | Some(ChannelMemberState::Removed)
+                                | Some(ChannelMemberState::Member) => matches!(
+                                    role,
+                                    ChannelAuthorRole::Owner | ChannelAuthorRole::Moderator
+                                ),
+                                Some(ChannelMemberState::Moderator) => {
+                                    role == ChannelAuthorRole::Owner
+                                }
+                                Some(ChannelMemberState::Banned) => false,
+                            },
+                            ChannelMemberAction::Unban => {
+                                state == Some(ChannelMemberState::Banned)
+                                    && matches!(
+                                        role,
+                                        ChannelAuthorRole::Owner | ChannelAuthorRole::Moderator
+                                    )
+                            }
+                            ChannelMemberAction::None => unreachable!(),
+                        };
+                        let actual = channel_member_authority(
+                            action,
+                            role,
+                            state,
+                            is_self,
+                            MembershipMode::Open,
+                            false,
+                        ) == ChannelAuthorityDecision::Allowed;
+                        assert_eq!(
+                            actual, expected,
+                            "T1 drift at action={action:?}, role={role:?}, state={state:?}, self={is_self}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(cells, 6 * 4 * 5 * 2);
+
+        // APPROVAL and NONE both close the self-add exception. Owner/moderator authority remains
+        // intact; an otherwise unauthorized joining fid is rejected in both restrictive modes.
+        for mode in [MembershipMode::Approval, MembershipMode::None] {
+            for state in [None, Some(ChannelMemberState::Removed)] {
+                assert_eq!(
+                    channel_member_authority(
+                        ChannelMemberAction::AddMember,
+                        ChannelAuthorRole::Other,
+                        state,
+                        true,
+                        mode,
+                        false,
+                    ),
+                    ChannelAuthorityDecision::Unauthorized
+                );
+            }
+        }
+
+        for state in states {
+            assert_eq!(
+                channel_member_authority(
+                    ChannelMemberAction::Ban,
+                    ChannelAuthorRole::Owner,
+                    state,
+                    false,
+                    MembershipMode::Open,
+                    true,
+                ),
+                ChannelAuthorityDecision::OwnerUnbannable
+            );
+        }
+    }
+
+    #[test]
+    fn channel_validation_checks_type_and_widths_before_registry_state() {
+        use crate::proto::message_data::Body;
+
+        let (mut engine, _tmpdir) = setup();
+        let fid = 1234;
+        register_user(
+            fid,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+        let timestamp = messages_factory::farcaster_time();
+        let block_timestamp = FarcasterTime::new(timestamp as u64);
+        let storage_slot = StorageSlot::new(0, 0, 1, u32::MAX);
+
+        let (_, update_body) = messages_factory::channels::all_message_bodies()
+            .into_iter()
+            .next()
+            .unwrap();
+        let mismatch = messages_factory::create_message_with_data(
+            fid,
+            MessageType::KeyAdd,
+            update_body,
+            Some(timestamp),
+            None,
+        );
+        assert!(matches!(
+            engine.validate_user_message(
+                &mismatch,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            ),
+            Err(MessageValidationError::InvalidMessageType)
+        ));
+
+        let wrong_channel_width = messages_factory::create_message_with_data(
+            fid,
+            MessageType::ChannelUpdate,
+            Body::ChannelUpdateBody(crate::proto::ChannelUpdateBody {
+                channel_id: vec![0x11; 31],
+                ..Default::default()
+            }),
+            Some(timestamp),
+            None,
+        );
+        let error = engine
+            .validate_user_message(
+                &wrong_channel_width,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MessageValidationError::HubError(ref hub_error)
+                if hub_error.message == "channel id must be 32 bytes"
+        ));
+
+        let wrong_cast_width = messages_factory::create_message_with_data(
+            fid,
+            MessageType::ChannelModerate,
+            Body::ChannelModerateBody(crate::proto::ChannelModerateBody {
+                channel_id: vec![0x11; 32],
+                cast_hash: vec![0x22; 19],
+                action: crate::proto::ChannelModerateAction::Hide as i32,
+            }),
+            Some(timestamp),
+            None,
+        );
+        let error = engine
+            .validate_user_message(
+                &wrong_cast_width,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MessageValidationError::HubError(ref hub_error)
+                if hub_error.message == "channel moderate cast hash must be 20 bytes"
+        ));
+
+        let unknown_channel = messages_factory::create_message_with_data(
+            fid,
+            MessageType::ChannelUpdate,
+            Body::ChannelUpdateBody(crate::proto::ChannelUpdateBody {
+                channel_id: vec![0x11; 32],
+                ..Default::default()
+            }),
+            Some(timestamp),
+            None,
+        );
+        let error = engine
+            .validate_user_message(
+                &unknown_channel,
+                &storage_slot,
+                &block_timestamp,
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MessageValidationError::HubError(ref hub_error)
+                if hub_error.message == "unknown channel"
+        ));
+    }
+
+    #[test]
     fn channel_owner_fid_resolution_sees_same_transaction_verification_changes() {
         let (engine, _tmpdir) = setup();
         let stores = engine.stores();
@@ -211,7 +469,7 @@ mod tests {
             stores
                 .resolve_channel_owner_fid(&owner_address, Some(&txn))
                 .unwrap(),
-            20
+            Some(20)
         );
         stores
             .verification_store
@@ -221,7 +479,7 @@ mod tests {
             stores
                 .resolve_channel_owner_fid(&owner_address, Some(&txn))
                 .unwrap(),
-            10
+            Some(10)
         );
     }
 

@@ -5258,7 +5258,7 @@ mod tests {
             assert_eq!(
                 stores
                     .onchain_event_store
-                    .get_channel_key_by_label(&channel_label(CHANNEL_KEY))
+                    .get_channel_key_by_label(&channel_label(CHANNEL_KEY), None)
                     .unwrap(),
                 Some(CHANNEL_KEY.to_string())
             );

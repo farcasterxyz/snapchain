@@ -130,7 +130,7 @@ fn signer_store_error_to_status(err: HubError) -> Status {
 fn resolve_channel_owner_fid(
     shard_stores: &HashMap<u32, Stores>,
     owner_address: &[u8],
-) -> Result<u64, Status> {
+) -> Result<Option<u64>, Status> {
     let mut authoritative_candidates = Vec::new();
 
     for stores in shard_stores.values() {
@@ -179,8 +179,7 @@ fn resolve_channel_owner_fid(
     Ok(
         crate::storage::store::account::select_verification_address_winner(
             authoritative_candidates,
-        )
-        .unwrap_or(0),
+        ),
     )
 }
 
@@ -2753,7 +2752,8 @@ impl HubService for MyHubService {
             .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
             .ok_or_else(|| Status::not_found("channel not registered"))?;
 
-        let fid = resolve_channel_owner_fid(&self.shard_stores, &channel_owner.owner_address)?;
+        let fid = resolve_channel_owner_fid(&self.shard_stores, &channel_owner.owner_address)?
+            .unwrap_or(0);
 
         Ok(Response::new(ChannelOwnerResponse {
             fid,
@@ -2789,7 +2789,8 @@ impl HubService for MyHubService {
         )?;
 
         if !channels.is_empty() {
-            let fid = resolve_channel_owner_fid(&self.shard_stores, &req.owner_address)?;
+            let fid =
+                resolve_channel_owner_fid(&self.shard_stores, &req.owner_address)?.unwrap_or(0);
             for channel in &mut channels {
                 channel.fid = fid;
             }
@@ -2878,7 +2879,7 @@ impl HubService for MyHubService {
         // GetChannelOwner resolves it to `req.fid`.
         let mut winning_addresses = Vec::new();
         for owner_address in owner_addresses {
-            if resolve_channel_owner_fid(&self.shard_stores, &owner_address)? == req.fid {
+            if resolve_channel_owner_fid(&self.shard_stores, &owner_address)? == Some(req.fid) {
                 winning_addresses.push(owner_address);
             }
         }

@@ -10,6 +10,7 @@ use crate::proto::{
 use crate::storage::constants::{RootPrefix, UserPostfix};
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use std::sync::Arc;
+use tracing::warn;
 
 // Proposed protocol values; these await protocol confirmation before activation. These bound
 // TOTAL permanent slots per channel, not live states. In particular, OPEN self-joins spend the
@@ -179,9 +180,15 @@ fn read_counter(db: &RocksDB, txn: &RocksDbTransactionBatch, key: &[u8]) -> Resu
     match get_from_db_or_txn(db, txn, key)? {
         None => Ok(0),
         Some(value) if value.len() == 4 => Ok(u32::from_be_bytes(value.try_into().unwrap())),
-        Some(_) => Err(HubError::invalid_internal_state(
-            "channel counter has invalid length",
-        )),
+        Some(value) => {
+            warn!(
+                actual_length = value.len(),
+                "Channel counter has invalid length"
+            );
+            Err(HubError::invalid_internal_state(
+                "channel counter has invalid length",
+            ))
+        }
     }
 }
 
@@ -206,15 +213,26 @@ fn load_slot_message<T: ChannelSlotStoreDef + Clone>(
         return Ok(None);
     };
     if pointer.len() != 4 + TS_HASH_LENGTH {
+        warn!(
+            actual_length = pointer.len(),
+            expected_length = 4 + TS_HASH_LENGTH,
+            "Channel slot pointer has invalid length"
+        );
         return Err(HubError::invalid_internal_state(
             "channel slot pointer has invalid length",
         ));
     }
     let fid = read_fid_key(&pointer, 0);
     let ts_hash: [u8; TS_HASH_LENGTH] = pointer[4..].try_into().unwrap();
-    get_message(&store.db(), txn, fid, store.store_def().postfix(), &ts_hash)?
-        .ok_or_else(|| HubError::invalid_internal_state("channel slot points to a missing message"))
-        .map(Some)
+    match get_message(&store.db(), txn, fid, store.store_def().postfix(), &ts_hash)? {
+        Some(message) => Ok(Some(message)),
+        None => {
+            warn!(fid, "Channel slot points to a missing message");
+            Err(HubError::invalid_internal_state(
+                "channel slot points to a missing message",
+            ))
+        }
+    }
 }
 
 trait ChannelSlotStoreDef: StoreDef {
@@ -342,6 +360,7 @@ fn merge_slot<T: ChannelSlotStoreDef + Clone>(
             new_slot_count = Some((
                 count_key,
                 count.checked_add(1).ok_or_else(|| {
+                    warn!("Channel slot count overflow");
                     HubError::invalid_internal_state("channel slot count overflow")
                 })?,
             ));
@@ -359,13 +378,15 @@ fn merge_slot<T: ChannelSlotStoreDef + Clone>(
         let key = channel_index_key(ChannelIndex::LiveModeratorCount, &channel_id, &[]);
         let count = read_counter(&store.db(), txn, &key)?;
         let next = if new_is_moderator {
-            count
-                .checked_add(1)
-                .ok_or_else(|| HubError::invalid_internal_state("live moderator count overflow"))?
+            count.checked_add(1).ok_or_else(|| {
+                warn!("Live moderator count overflow");
+                HubError::invalid_internal_state("live moderator count overflow")
+            })?
         } else {
-            count
-                .checked_sub(1)
-                .ok_or_else(|| HubError::invalid_internal_state("live moderator count underflow"))?
+            count.checked_sub(1).ok_or_else(|| {
+                warn!("Live moderator count underflow");
+                HubError::invalid_internal_state("live moderator count underflow")
+            })?
         };
         Some((key, next))
     } else {

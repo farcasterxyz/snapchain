@@ -11,11 +11,12 @@ use crate::proto::{
 };
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
-    make_ts_hash, select_verification_address_winner, BlockEventStore, ChannelMemberStore,
-    ChannelMemberStoreDef, ChannelModerateStore, ChannelModerateStoreDef, ChannelPinStore,
-    ChannelPinStoreDef, ChannelUpdateStore, ChannelUpdateStoreDef, IntoU8, MergeContext,
-    OnchainEventStorageError, OnchainEventStore, StorageLendStore, StorageLendStoreDef,
-    StorageSlot, Store, StoreEventHandler, VerificationStore, VerificationStoreDef,
+    make_ts_hash, select_verification_address_winner, BlockEventStore, ChannelMemberState,
+    ChannelMemberStore, ChannelMemberStoreDef, ChannelModerateStore, ChannelModerateStoreDef,
+    ChannelPinStore, ChannelPinStoreDef, ChannelUpdateStore, ChannelUpdateStoreDef, IntoU8,
+    MergeContext, OnchainEventStorageError, OnchainEventStore, StorageLendStore,
+    StorageLendStoreDef, StorageSlot, Store, StoreEventHandler, VerificationStore,
+    VerificationStoreDef, CHANNEL_ID_LENGTH, CHANNEL_MODERATE_CAST_HASH_LENGTH,
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
@@ -100,6 +101,148 @@ pub enum MessageValidationError {
 // The zero-storage case deliberately remains zero so storage-free fids cannot mint permanent
 // shard-0 rows.
 const VERIFICATION_TOMBSTONE_CAP_FLOOR: u32 = 256;
+const CHANNEL_MODERATOR_CAP: u32 = 10;
+
+/// The complete author-role axis of T1. `Other` includes both a never-seen author and a removed
+/// or banned author; those states carry no authority except through an explicit self rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChannelAuthorRole {
+    Owner,
+    Moderator,
+    Member,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChannelAuthorityDecision {
+    Allowed,
+    Unauthorized,
+    InvalidTargetState,
+    Banned,
+    OwnerUnbannable,
+}
+
+enum ChannelAdmissionBody<'a> {
+    Update(&'a proto::ChannelUpdateBody),
+    Member(&'a proto::ChannelMemberBody),
+    Pin(&'a proto::ChannelPinBody),
+    Moderate(&'a proto::ChannelModerateBody),
+}
+
+impl ChannelAdmissionBody<'_> {
+    fn channel_id(&self) -> &[u8] {
+        match self {
+            Self::Update(body) => &body.channel_id,
+            Self::Member(body) => &body.channel_id,
+            Self::Pin(body) => &body.channel_id,
+            Self::Moderate(body) => &body.channel_id,
+        }
+    }
+}
+
+/// T1, encoded as a total function over every member action, author role, target state, and the
+/// two explicit self exceptions. The exhaustive matrix test iterates this input space directly.
+/// In particular, a moderator target is owner-only for BAN, REMOVE_MODERATOR is the only normal
+/// demotion path, and self-leave is the sole REMOVE_MEMBER exception for a moderator target.
+pub(crate) fn channel_member_authority(
+    action: proto::ChannelMemberAction,
+    author_role: ChannelAuthorRole,
+    target_state: Option<ChannelMemberState>,
+    is_self: bool,
+    membership_mode: proto::MembershipMode,
+    target_is_owner: bool,
+) -> ChannelAuthorityDecision {
+    use proto::ChannelMemberAction::{
+        AddMember, AddModerator, Ban, None as NoAction, RemoveMember, RemoveModerator, Unban,
+    };
+
+    if action == NoAction {
+        return ChannelAuthorityDecision::InvalidTargetState;
+    }
+    if action == Ban && target_is_owner {
+        return ChannelAuthorityDecision::OwnerUnbannable;
+    }
+    if target_state == Some(ChannelMemberState::Banned) && action != Unban {
+        return ChannelAuthorityDecision::Banned;
+    }
+
+    let owner = author_role == ChannelAuthorRole::Owner;
+    let moderator = author_role == ChannelAuthorRole::Moderator;
+    match action {
+        AddMember => {
+            if !matches!(target_state, None | Some(ChannelMemberState::Removed)) {
+                return ChannelAuthorityDecision::InvalidTargetState;
+            }
+            if owner || moderator || (is_self && membership_mode == proto::MembershipMode::Open) {
+                ChannelAuthorityDecision::Allowed
+            } else {
+                ChannelAuthorityDecision::Unauthorized
+            }
+        }
+        RemoveMember => match target_state {
+            Some(ChannelMemberState::Member) if owner || moderator || is_self => {
+                ChannelAuthorityDecision::Allowed
+            }
+            Some(ChannelMemberState::Moderator) if is_self => ChannelAuthorityDecision::Allowed,
+            Some(ChannelMemberState::Moderator) => ChannelAuthorityDecision::InvalidTargetState,
+            _ => ChannelAuthorityDecision::InvalidTargetState,
+        },
+        AddModerator => {
+            if !matches!(
+                target_state,
+                None | Some(ChannelMemberState::Removed) | Some(ChannelMemberState::Member)
+            ) {
+                return ChannelAuthorityDecision::InvalidTargetState;
+            }
+            if owner {
+                ChannelAuthorityDecision::Allowed
+            } else {
+                ChannelAuthorityDecision::Unauthorized
+            }
+        }
+        RemoveModerator => {
+            if target_state != Some(ChannelMemberState::Moderator) {
+                return ChannelAuthorityDecision::InvalidTargetState;
+            }
+            if owner {
+                ChannelAuthorityDecision::Allowed
+            } else {
+                ChannelAuthorityDecision::Unauthorized
+            }
+        }
+        Ban => {
+            if target_state == Some(ChannelMemberState::Moderator) {
+                return if owner {
+                    ChannelAuthorityDecision::Allowed
+                } else {
+                    ChannelAuthorityDecision::Unauthorized
+                };
+            }
+            if !matches!(
+                target_state,
+                None | Some(ChannelMemberState::Removed) | Some(ChannelMemberState::Member)
+            ) {
+                return ChannelAuthorityDecision::InvalidTargetState;
+            }
+            if owner || moderator {
+                ChannelAuthorityDecision::Allowed
+            } else {
+                ChannelAuthorityDecision::Unauthorized
+            }
+        }
+        Unban => {
+            if target_state != Some(ChannelMemberState::Banned) {
+                return ChannelAuthorityDecision::InvalidTargetState;
+            }
+            if owner || moderator {
+                ChannelAuthorityDecision::Allowed
+            } else {
+                ChannelAuthorityDecision::Unauthorized
+            }
+        }
+        NoAction => unreachable!(),
+    }
+}
 
 /// How many permanent tombstone rows a fid may mint, given its live-add allowance.
 fn verification_tombstone_cap(max_messages: u32) -> u32 {
@@ -227,7 +370,7 @@ impl BlockStores {
         &self,
         owner_address: &[u8],
         maybe_txn: Option<&RocksDbTransactionBatch>,
-    ) -> Result<u64, HubError> {
+    ) -> Result<Option<u64>, HubError> {
         let candidates = VerificationStore::get_verifications_by_address(
             &self.verification_store,
             owner_address,
@@ -256,7 +399,7 @@ impl BlockStores {
             };
             authoritative.push((fid, make_ts_hash(data.timestamp, &primary_add.hash)?));
         }
-        Ok(select_verification_address_winner(authoritative).unwrap_or(0))
+        Ok(select_verification_address_winner(authoritative))
     }
 
     pub fn get_storage_slot_for_fid(
@@ -489,6 +632,189 @@ impl BlockEngine {
         .map(|_| MessageType::VerificationRemove))
     }
 
+    fn channel_validation_error(reason: &str) -> MessageValidationError {
+        MessageValidationError::HubError(HubError::validation_failure(reason))
+    }
+
+    fn channel_author_role(
+        &self,
+        channel_id: &[u8],
+        author_fid: u64,
+        owner_fid: Option<u64>,
+        txn_batch: &RocksDbTransactionBatch,
+    ) -> Result<ChannelAuthorRole, MessageValidationError> {
+        if owner_fid == Some(author_fid) {
+            return Ok(ChannelAuthorRole::Owner);
+        }
+        let state = ChannelMemberStore::member_state(
+            &self.stores.channel_member_store,
+            channel_id,
+            author_fid,
+            Some(txn_batch),
+        )
+        .map_err(MessageValidationError::HubError)?;
+        Ok(match state {
+            Some(ChannelMemberState::Moderator) => ChannelAuthorRole::Moderator,
+            Some(ChannelMemberState::Member) => ChannelAuthorRole::Member,
+            Some(ChannelMemberState::Removed) | Some(ChannelMemberState::Banned) | None => {
+                ChannelAuthorRole::Other
+            }
+        })
+    }
+
+    fn validate_channel_message(
+        &self,
+        message_data: &proto::MessageData,
+        txn_batch: &RocksDbTransactionBatch,
+    ) -> Result<(), MessageValidationError> {
+        use proto::message_data::Body;
+
+        let msg_type = MessageType::try_from(message_data.r#type)
+            .map_err(|_| MessageValidationError::InvalidMessageType)?;
+        // Type/body agreement is the first channel-specific decision. Routing and merge dispatch
+        // use the type while this arm sees the body, so accepting a mismatch would acknowledge a
+        // message that no merge arm can store.
+        let body = match (msg_type, message_data.body.as_ref()) {
+            (MessageType::ChannelUpdate, Some(Body::ChannelUpdateBody(body))) => {
+                ChannelAdmissionBody::Update(body)
+            }
+            (MessageType::ChannelMember, Some(Body::ChannelMemberBody(body))) => {
+                ChannelAdmissionBody::Member(body)
+            }
+            (MessageType::ChannelPin, Some(Body::ChannelPinBody(body))) => {
+                ChannelAdmissionBody::Pin(body)
+            }
+            (MessageType::ChannelModerate, Some(Body::ChannelModerateBody(body))) => {
+                ChannelAdmissionBody::Moderate(body)
+            }
+            _ => return Err(MessageValidationError::InvalidMessageType),
+        };
+
+        let channel_id = body.channel_id();
+        if channel_id.len() != CHANNEL_ID_LENGTH {
+            return Err(Self::channel_validation_error(
+                "channel id must be 32 bytes",
+            ));
+        }
+        if let ChannelAdmissionBody::Moderate(moderate) = &body {
+            if moderate.cast_hash.len() != CHANNEL_MODERATE_CAST_HASH_LENGTH {
+                return Err(Self::channel_validation_error(
+                    "channel moderate cast hash must be 20 bytes",
+                ));
+            }
+            let action = proto::ChannelModerateAction::try_from(moderate.action)
+                .map_err(|_| Self::channel_validation_error("invalid channel moderate action"))?;
+            if action == proto::ChannelModerateAction::None {
+                return Err(Self::channel_validation_error(
+                    "invalid channel moderate action",
+                ));
+            }
+        }
+
+        // D10: every hop reads the caller's transaction. The label index resolves the channel
+        // key; the primary record supplies the owner address; the shard-0 verification replica
+        // resolves that address under the shared deterministic winner rule. Expiry is
+        // intentionally not consulted (D7), and there is no clock input anywhere in this chain.
+        let channel_key = self
+            .stores
+            .onchain_event_store
+            .get_channel_key_by_label(channel_id, Some(txn_batch))
+            .map_err(|err| {
+                MessageValidationError::HubError(HubError::internal_db_error(&err.to_string()))
+            })?
+            .ok_or_else(|| Self::channel_validation_error("unknown channel"))?;
+        let channel_owner = self
+            .stores
+            .onchain_event_store
+            .get_channel_owner(&channel_key, Some(txn_batch))
+            .map_err(|err| {
+                MessageValidationError::HubError(HubError::internal_db_error(&err.to_string()))
+            })?
+            .ok_or_else(|| Self::channel_validation_error("unknown channel"))?;
+        let owner_fid = self
+            .stores
+            .resolve_channel_owner_fid(&channel_owner.owner_address, Some(txn_batch))
+            .map_err(MessageValidationError::HubError)?;
+        let author_role =
+            self.channel_author_role(channel_id, message_data.fid, owner_fid, txn_batch)?;
+
+        match body {
+            ChannelAdmissionBody::Update(_) => {
+                if author_role != ChannelAuthorRole::Owner {
+                    return Err(Self::channel_validation_error(
+                        "unauthorized channel action",
+                    ));
+                }
+            }
+            ChannelAdmissionBody::Pin(_) | ChannelAdmissionBody::Moderate(_) => {
+                if !matches!(
+                    author_role,
+                    ChannelAuthorRole::Owner | ChannelAuthorRole::Moderator
+                ) {
+                    return Err(Self::channel_validation_error(
+                        "unauthorized channel action",
+                    ));
+                }
+            }
+            ChannelAdmissionBody::Member(member) => {
+                let action = proto::ChannelMemberAction::try_from(member.action)
+                    .map_err(|_| Self::channel_validation_error("invalid channel member action"))?;
+                let target_state = ChannelMemberStore::member_state(
+                    &self.stores.channel_member_store,
+                    channel_id,
+                    member.fid,
+                    Some(txn_batch),
+                )
+                .map_err(MessageValidationError::HubError)?;
+                let membership_mode = ChannelUpdateStore::get_channel_update(
+                    &self.stores.channel_update_store,
+                    channel_id,
+                    Some(txn_batch),
+                )
+                .map_err(MessageValidationError::HubError)?
+                .map(|state| state.membership_mode)
+                .unwrap_or(proto::MembershipMode::Approval);
+                let decision = channel_member_authority(
+                    action,
+                    author_role,
+                    target_state,
+                    message_data.fid == member.fid,
+                    membership_mode,
+                    owner_fid == Some(member.fid),
+                );
+                let reason = match decision {
+                    ChannelAuthorityDecision::Allowed => None,
+                    ChannelAuthorityDecision::Unauthorized => Some("unauthorized channel action"),
+                    ChannelAuthorityDecision::InvalidTargetState => {
+                        Some("invalid channel target state")
+                    }
+                    ChannelAuthorityDecision::Banned => Some("channel member is banned"),
+                    ChannelAuthorityDecision::OwnerUnbannable => {
+                        Some("channel owner cannot be banned")
+                    }
+                };
+                if let Some(reason) = reason {
+                    return Err(Self::channel_validation_error(reason));
+                }
+                if action == proto::ChannelMemberAction::AddModerator
+                    && ChannelMemberStore::live_moderator_count(
+                        &self.stores.channel_member_store,
+                        channel_id,
+                        Some(txn_batch),
+                    )
+                    .map_err(MessageValidationError::HubError)?
+                        >= CHANNEL_MODERATOR_CAP
+                {
+                    return Err(Self::channel_validation_error(
+                        "channel moderator cap reached",
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn validate_user_message_with_verification_counts(
         &self,
         message: &proto::Message,
@@ -575,6 +901,28 @@ impl BlockEngine {
             .as_ref()
             .ok_or(MessageValidationError::NoMessageData)?
         {
+            body if matches!(
+                msg_type,
+                MessageType::ChannelUpdate
+                    | MessageType::ChannelMember
+                    | MessageType::ChannelPin
+                    | MessageType::ChannelModerate
+            ) || matches!(
+                body,
+                crate::proto::message_data::Body::ChannelUpdateBody(_)
+                    | crate::proto::message_data::Body::ChannelMemberBody(_)
+                    | crate::proto::message_data::Body::ChannelPinBody(_)
+                    | crate::proto::message_data::Body::ChannelModerateBody(_)
+            ) =>
+            {
+                if !version.is_enabled(ProtocolFeature::ChannelMessages) {
+                    return Err(MessageValidationError::InvalidMessageType);
+                }
+                // D9: channel slots resolve by shard-0 consensus order, not timestamp LWW.
+                // Embedded timestamps are inert, and these types did not exist before V20, so
+                // the verification activation floor has no channel analogue.
+                self.validate_channel_message(message_data, txn_batch)?;
+            }
             crate::proto::message_data::Body::LendStorageBody(lend_storage) => {
                 let total_storage_purchased = self
                     .stores

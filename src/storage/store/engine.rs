@@ -2033,6 +2033,21 @@ impl ShardEngine {
             ));
         }
 
+        // Channel state is shard-0-only in this increment. Keep direct data-shard admission
+        // rejected even after stateless channel validation activates; the replay gate below is
+        // intentionally gated-but-undispatchable until data-shard stores land.
+        if matches!(
+            message_data.r#type(),
+            MessageType::ChannelUpdate
+                | MessageType::ChannelMember
+                | MessageType::ChannelPin
+                | MessageType::ChannelModerate
+        ) {
+            return Err(MessageValidationError::InvalidMessageType(
+                message_data.r#type,
+            ));
+        }
+
         // State-dependent verifications:
         match &message_data.body {
             Some(proto::message_data::Body::UserDataBody(user_data)) => {
@@ -3052,14 +3067,26 @@ mod channel_message_inertness_tests {
             assert!(
                 matches!(
                     result,
-                    Err(MessageValidationError::MessageValidationError(
-                        ValidationError::InvalidMessageType
-                    ))
+                    Err(MessageValidationError::InvalidMessageType(value))
+                        if value == message_type as i32
                 ),
                 "{:?} must be rejected by ShardEngine admission, got {:?}",
                 message_type,
                 result
             );
+
+            let pre_feature = engine.validate_user_message(
+                &message,
+                &timestamp,
+                EngineVersion::V19,
+                &mut RocksDbTransactionBatch::new(),
+            );
+            assert!(matches!(
+                pre_feature,
+                Err(MessageValidationError::MessageValidationError(
+                    ValidationError::InvalidMessageType
+                ))
+            ));
         }
     }
 
