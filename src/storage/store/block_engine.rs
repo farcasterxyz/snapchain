@@ -11,7 +11,9 @@ use crate::proto::{
 };
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
-    BlockEventStore, IntoU8, MergeContext, OnchainEventStorageError, OnchainEventStore,
+    BlockEventStore, ChannelMemberStore, ChannelMemberStoreDef, ChannelModerateStore,
+    ChannelModerateStoreDef, ChannelPinStore, ChannelPinStoreDef, ChannelUpdateStore,
+    ChannelUpdateStoreDef, IntoU8, MergeContext, OnchainEventStorageError, OnchainEventStore,
     StorageLendStore, StorageLendStoreDef, StorageSlot, Store, StoreEventHandler,
     VerificationStore, VerificationStoreDef,
 };
@@ -163,6 +165,10 @@ pub struct BlockStores {
     pub onchain_event_store: OnchainEventStore,
     pub storage_lend_store: Store<StorageLendStoreDef>,
     pub verification_store: Store<VerificationStoreDef>,
+    pub channel_update_store: Store<ChannelUpdateStoreDef>,
+    pub channel_member_store: Store<ChannelMemberStoreDef>,
+    pub channel_pin_store: Store<ChannelPinStoreDef>,
+    pub channel_moderate_store: Store<ChannelModerateStoreDef>,
     pub network: FarcasterNetwork,
     pub db: Arc<RocksDB>,
     pub trie: MerkleTrie,
@@ -178,6 +184,22 @@ impl BlockStores {
             onchain_event_store: OnchainEventStore::new(db.clone(), store_event_handler.clone()),
             storage_lend_store: StorageLendStore::new(db.clone(), store_event_handler.clone(), 100),
             verification_store: VerificationStore::new(
+                db.clone(),
+                store_event_handler.clone(),
+                100,
+            ),
+            channel_update_store: ChannelUpdateStore::new(
+                db.clone(),
+                store_event_handler.clone(),
+                100,
+            ),
+            channel_member_store: ChannelMemberStore::new(
+                db.clone(),
+                store_event_handler.clone(),
+                100,
+            ),
+            channel_pin_store: ChannelPinStore::new(db.clone(), store_event_handler.clone(), 100),
+            channel_moderate_store: ChannelModerateStore::new(
                 db.clone(),
                 store_event_handler.clone(),
                 100,
