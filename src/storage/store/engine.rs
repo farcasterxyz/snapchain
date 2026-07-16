@@ -794,6 +794,16 @@ impl ShardEngine {
                     // `data_shard_block_version` is the block clock already threaded through
                     // `replay_snapchain_txn`, matching the former live-merge call site and the
                     // emitter's internal ChannelOwnershipEvents gate.
+                    //
+                    // TWO CLOCKS MEET HERE, and only a version-schedule coincidence keeps them
+                    // interchangeable. The feature gate above derives its version from the SHARD-0
+                    // block timestamp (VerificationsOnShardZero); this call passes the DATA-SHARD
+                    // block version (gating ChannelOwnershipEvents). `version::version_test::
+                    // test_channel_features_activate_together` pins both features to V20, which is
+                    // what makes the pair safe today -- no behavioral test would catch them
+                    // drifting apart. If the two features ever activate at different versions,
+                    // revisit this: a shard-0 event minted just after one activation can replay
+                    // into a data-shard block on the other side of the other.
                     hub_events.extend(self.emit_channel_owner_hints_for_verification(
                         message,
                         txn_batch,

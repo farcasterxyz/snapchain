@@ -83,16 +83,56 @@ pub enum MessageValidationError {
     MessageValidationError(#[from] validations::error::ValidationError),
 }
 
+// WHY SHARD-0 VERIFICATION TOMBSTONES ARE PERMANENT, AND THEREFORE WHY THEY NEED A CAP.
+//
+// Unlike the data shard's pruned store, shard 0 never reclaims a tombstone. Do not "clean this
+// up" by aging, pruning, or reclaiming them: dropping a tombstone empties the address's logical
+// key, which lets anyone re-gossip the owner's old post-V20-signed add. Shard 0 merges it (LWW
+// against nothing), fans it out, and force-override replay re-imposes it on the data shard
+// unconditionally — resurrecting a verification its owner deliberately removed. Pre-V20 pruning
+// had the same hole bounded by plain LWW; force-override amplifies it. Permanent-but-bounded is
+// the design, and the bound is what keeps "permanent" affordable.
+//
 // Legacy verification limits ran into the hundreds, so this floor lets a fid shed a large
 // pre-V20 verification set. Larger storage allocations scale the bound through `max_messages`.
 // The zero-storage case deliberately remains zero so storage-free fids cannot mint permanent
 // shard-0 rows.
 const VERIFICATION_TOMBSTONE_CAP_FLOOR: u32 = 256;
 
+/// How many permanent tombstone rows a fid may mint, given its live-add allowance.
+fn verification_tombstone_cap(max_messages: u32) -> u32 {
+    if max_messages == 0 {
+        0
+    } else {
+        max_messages.max(VERIFICATION_TOMBSTONE_CAP_FLOOR)
+    }
+}
+
+/// The hard bound on a fid's TOTAL permanent shard-0 verification rows (adds + tombstones).
+/// Because rows are never reclaimed, this is a lifetime bound on distinct addresses, not a
+/// concurrent one: a fid that reaches it can still replace rows it already has, but can never
+/// admit a new address again.
+fn verification_row_cap(max_messages: u32) -> u32 {
+    max_messages.saturating_add(verification_tombstone_cap(max_messages))
+}
+
 #[derive(Clone, Copy, Default)]
 struct VerificationMessageCounts {
     live_adds: u32,
     tombstones: u32,
+}
+
+impl VerificationMessageCounts {
+    /// The counter a message of `msg_type` belongs to, or `None` if it is not a verification type.
+    /// The single place that maps type -> counter: callers supply their own error for `None`, so
+    /// this mapping cannot drift between the trie read and the in-transaction delta.
+    fn counter_mut(&mut self, msg_type: MessageType) -> Option<&mut u32> {
+        match msg_type {
+            MessageType::VerificationAddEthAddress => Some(&mut self.live_adds),
+            MessageType::VerificationRemove => Some(&mut self.tombstones),
+            _ => None,
+        }
+    }
 }
 
 // `merge_key_add` / `merge_key_remove` in `account::gasless_key_merge` return the
@@ -346,15 +386,11 @@ impl BlockEngine {
                 })?;
             let count = u32::try_from(count)
                 .map_err(|_| HubError::internal_db_error("verification count exceeds u32"))?;
-            let target = match msg_type {
-                MessageType::VerificationAddEthAddress => &mut counts.live_adds,
-                MessageType::VerificationRemove => &mut counts.tombstones,
-                _ => {
-                    return Err(HubError::internal_db_error(
-                        "verification store mapping contains a non-verification type",
-                    ))
-                }
-            };
+            let target = counts.counter_mut(msg_type).ok_or_else(|| {
+                HubError::internal_db_error(
+                    "verification store mapping contains a non-verification type",
+                )
+            })?;
             *target = target
                 .checked_add(count)
                 .ok_or_else(|| HubError::internal_db_error("verification count overflow"))?;
@@ -362,14 +398,15 @@ impl BlockEngine {
         Ok(counts)
     }
 
-    /// True when the fid already has a primary record (add or remove) for `address`, meaning an
-    /// incoming message replaces it rather than growing the replica.
-    fn verification_logical_key_exists(
+    /// The type of the fid's existing primary record for `address`, if any. Callers must branch on
+    /// the TYPE, not merely on presence: which counter an incoming message grows depends on what it
+    /// replaces (see the transition match in `validate_user_message_with_verification_counts`).
+    fn verification_logical_key_type(
         &self,
         fid: u64,
         address: &[u8],
         txn_batch: &RocksDbTransactionBatch,
-    ) -> Result<bool, MessageValidationError> {
+    ) -> Result<Option<MessageType>, MessageValidationError> {
         let add_exists = VerificationStore::get_verification_add(
             &self.stores.verification_store,
             fid,
@@ -379,7 +416,7 @@ impl BlockEngine {
         .map_err(MessageValidationError::HubError)?
         .is_some();
         if add_exists {
-            return Ok(true);
+            return Ok(Some(MessageType::VerificationAddEthAddress));
         }
         Ok(VerificationStore::get_verification_remove_with_txn(
             &self.stores.verification_store,
@@ -388,7 +425,7 @@ impl BlockEngine {
             Some(txn_batch),
         )
         .map_err(MessageValidationError::HubError)?
-        .is_some())
+        .map(|_| MessageType::VerificationRemove))
     }
 
     fn validate_user_message_with_verification_counts(
@@ -569,33 +606,57 @@ impl BlockEngine {
                 if max_messages == 0 && is_add {
                     return Err(MessageValidationError::InsufficientStorage);
                 }
-                // A message that replaces an existing record for its address never grows the
-                // replica, so it is admitted even at cap — otherwise a fid at cap could never
-                // shed state via a remove.
-                let supersedes_existing =
-                    self.verification_logical_key_exists(message_data.fid, address, txn_batch)?;
-                if !supersedes_existing {
-                    if is_add {
+                // Admission is decided per TRANSITION, against the quantity each one actually
+                // grows. Two rules a reader may be tempted to collapse back into one, both of
+                // which are unsound — each was a live hole caught in review:
+                //
+                //   1. A type-blind "any existing row supersedes, so admit" carve-out lets an add
+                //      land on a tombstone, skipping the live-add cap while refunding a tombstone
+                //      slot. `remove addr; add addr` then cycles forever.
+                //   2. Gating only the counter a transition grows is still not enough, because
+                //      rows are PERMANENT while the counters are not. `add addr_i; remove addr_i`
+                //      returns `live_adds` to 0 every cycle and leaves a tombstone behind, so any
+                //      rule written purely over current counter state never engages.
+                //
+                // Rows appear ONLY in the two `None` arms, and both check `total_rows`. That makes
+                // the bound locally provable here: no fid can ever exceed
+                // `max_messages + tombstone_cap` permanent replica rows, for any message sequence.
+                let tombstone_cap = verification_tombstone_cap(max_messages);
+                let row_cap = verification_row_cap(max_messages);
+                let total_rows = verification_counts
+                    .live_adds
+                    .saturating_add(verification_counts.tombstones);
+                let existing =
+                    self.verification_logical_key_type(message_data.fid, address, txn_batch)?;
+                match (is_add, existing) {
+                    // Replacing an add with an add: net-zero on both counters, always admitted.
+                    (true, Some(MessageType::VerificationAddEthAddress)) => {}
+                    // Re-adding a tombstoned address. Row-neutral, but it grows `live_adds`.
+                    (true, Some(_)) => {
                         if verification_counts.live_adds >= max_messages {
                             return Err(MessageValidationError::InsufficientStorage);
                         }
-                    } else {
-                        let tombstone_cap = if max_messages == 0 {
-                            0
-                        } else {
-                            VERIFICATION_TOMBSTONE_CAP_FLOOR.max(max_messages)
-                        };
-                        if verification_counts.tombstones >= tombstone_cap {
+                    }
+                    // Mints a new add row.
+                    (true, None) => {
+                        if verification_counts.live_adds >= max_messages || total_rows >= row_cap {
+                            return Err(MessageValidationError::InsufficientStorage);
+                        }
+                    }
+                    // A remove over any existing row turns an add row into a tombstone row, or
+                    // replaces a tombstone with a newer one. Row-neutral either way, and
+                    // deliberately admitted even past `tombstone_cap`: a fid at cap, or one whose
+                    // storage lapsed, must always be able to shed live state.
+                    (false, Some(_)) => {}
+                    // Mints a new tombstone row. This is the pre-V20-address remove case: the
+                    // replica has never seen the address, so the row is new.
+                    (false, None) => {
+                        if verification_counts.tombstones >= tombstone_cap || total_rows >= row_cap
+                        {
                             return Err(MessageValidationError::InsufficientStorage);
                         }
                     }
                 }
-
-                // Shard 0 deliberately keeps verification tombstones permanently, unlike the
-                // data shard's pruned store. Dropping one would let an old post-V20-signed add be
-                // re-gossiped into an empty logical key, fanned out, and unconditionally reimposed
-                // by force-override replay. Separate live-add and bounded tombstone quotas let a
-                // fid shed and later re-add live state without opening that resurrection path.
             }
             _ => return Err(MessageValidationError::InvalidMessageType),
         }
@@ -724,15 +785,11 @@ impl BlockEngine {
         merge_message_body: &MergeMessageBody,
     ) -> Result<VerificationMessageCounts, BlockEngineError> {
         for deleted in &merge_message_body.deleted_messages {
-            let target = match deleted.msg_type() {
-                MessageType::VerificationAddEthAddress => &mut counts.live_adds,
-                MessageType::VerificationRemove => &mut counts.tombstones,
-                _ => {
-                    return Err(BlockEngineError::HubError(HubError::internal_db_error(
-                        "verification merge deleted a non-verification row",
-                    )))
-                }
-            };
+            let target = counts.counter_mut(deleted.msg_type()).ok_or_else(|| {
+                BlockEngineError::HubError(HubError::internal_db_error(
+                    "verification merge deleted a non-verification row",
+                ))
+            })?;
             *target = target.checked_sub(1).ok_or_else(|| {
                 BlockEngineError::HubError(HubError::internal_db_error(
                     "verification merge count underflow",
@@ -741,15 +798,11 @@ impl BlockEngine {
         }
 
         if let Some(message) = &merge_message_body.message {
-            let target = match message.msg_type() {
-                MessageType::VerificationAddEthAddress => &mut counts.live_adds,
-                MessageType::VerificationRemove => &mut counts.tombstones,
-                _ => {
-                    return Err(BlockEngineError::HubError(HubError::internal_db_error(
-                        "verification merge added a non-verification row",
-                    )))
-                }
-            };
+            let target = counts.counter_mut(message.msg_type()).ok_or_else(|| {
+                BlockEngineError::HubError(HubError::internal_db_error(
+                    "verification merge added a non-verification row",
+                ))
+            })?;
             *target = target.checked_add(1).ok_or_else(|| {
                 BlockEngineError::HubError(HubError::internal_db_error(
                     "verification merge count overflow",
@@ -1615,6 +1668,34 @@ impl BlockEngine {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod verification_cap_tests {
+    use super::{verification_row_cap, verification_tombstone_cap};
+
+    // Pinned as pure functions because the interesting input -- an allowance ABOVE the 256 floor,
+    // which takes ~52 storage units -- is impractical to reach through the commit path.
+    #[test]
+    fn tombstone_cap_floors_at_the_constant_and_then_scales() {
+        // No storage: storage-free fids must not mint permanent rows at all.
+        assert_eq!(verification_tombstone_cap(0), 0);
+        assert_eq!(verification_row_cap(0), 0);
+
+        // Below the floor (one 2025 unit is 5), the floor dominates so a whale shedding a large
+        // pre-V20 set is not blocked by its own small live allowance.
+        assert_eq!(verification_tombstone_cap(5), 256);
+        assert_eq!(verification_row_cap(5), 261);
+
+        // Above the floor, the allowance scales instead -- this is the `.max(max_messages)` term.
+        assert_eq!(verification_tombstone_cap(300), 300);
+        assert_eq!(verification_row_cap(300), 600);
+    }
+
+    #[test]
+    fn row_cap_saturates_rather_than_overflowing() {
+        assert_eq!(verification_row_cap(u32::MAX), u32::MAX);
     }
 }
 

@@ -443,6 +443,158 @@ mod tests {
     }
 
     #[test]
+    fn test_shard_zero_verification_remove_then_add_cycles_cannot_launder_the_add_cap() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+
+        // A type-blind supersede carve-out would let `remove addr; add addr` cycles mint unbounded
+        // permanent rows on one storage unit: the add lands on a tombstone, skipping the live-add
+        // cap, and refunds the tombstone slot for the next cycle. The live-add cap must bind on an
+        // add over a tombstone exactly as it does on a net-new add.
+        let mut live_index = 100u16;
+        for _ in 0..5 {
+            let address = quota_test_address(live_index);
+            commit_message(
+                &mut engine,
+                &verification_remove(address.clone(), timestamp),
+                Validity::Valid,
+            );
+            commit_message(
+                &mut engine,
+                &verification_contract_add(address, timestamp + 1),
+                Validity::Valid,
+            );
+            live_index += 1;
+        }
+        assert_eq!(verification_replica_counts(&engine), (5, 0));
+
+        // The sixth cycle mints its tombstone but cannot convert it: live adds are at cap.
+        let address = quota_test_address(live_index);
+        commit_message(
+            &mut engine,
+            &verification_remove(address.clone(), timestamp),
+            Validity::Valid,
+        );
+        commit_message(
+            &mut engine,
+            &verification_contract_add(address, timestamp + 1),
+            Validity::Invalid,
+        );
+        assert_eq!(verification_replica_counts(&engine), (5, 1));
+    }
+
+    #[test]
+    fn test_shard_zero_verification_add_then_remove_cycles_cannot_mint_unbounded_rows() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+
+        // Shard-0 rows are permanent, so the bound has to hold against sequences that return the
+        // COUNTERS to their starting point while leaving a row behind. `add addr_i; remove addr_i`
+        // is that sequence: the remove is row-neutral and ungated, and it resets `live_adds` to 0,
+        // so the live-add cap alone never engages and rows would grow forever.
+        //
+        // Drive the replica to the row cap with live_adds well BELOW max_messages, so only the
+        // total-row gate can reject the next mint.
+        let removes = (2000u16..2000 + 256)
+            .map(|index| verification_remove(quota_test_address(index), timestamp))
+            .collect::<Vec<_>>();
+        commit_messages(
+            &mut engine,
+            removes
+                .iter()
+                .map(|message| (message, Validity::Valid))
+                .collect(),
+        );
+        let adds = (3000u16..3005)
+            .map(|index| verification_contract_add(quota_test_address(index), timestamp))
+            .collect::<Vec<_>>();
+        commit_messages(
+            &mut engine,
+            adds.iter()
+                .map(|message| (message, Validity::Valid))
+                .collect(),
+        );
+        assert_eq!(verification_replica_counts(&engine), (5, 256));
+
+        // Shed all five live adds. Row-neutral and always admitted, but each mints a permanent
+        // tombstone, pushing tombstones past their own cap and rows to the row cap.
+        for index in 3000u16..3005 {
+            commit_message(
+                &mut engine,
+                &verification_remove(quota_test_address(index), timestamp + 1),
+                Validity::Valid,
+            );
+        }
+        assert_eq!(verification_replica_counts(&engine), (0, 261));
+
+        // live_adds is 0, so the live-add cap would happily admit this. The row cap must not.
+        let over_row_cap = verification_contract_add(quota_test_address(4000), timestamp + 2);
+        commit_message(&mut engine, &over_row_cap, Validity::Invalid);
+        assert_eq!(verification_replica_counts(&engine), (0, 261));
+
+        // Row-neutral traffic still works at the row cap: re-adding a tombstoned address.
+        let resurrect = verification_contract_add(quota_test_address(3000), timestamp + 3);
+        commit_message(&mut engine, &resurrect, Validity::Valid);
+        assert_eq!(verification_replica_counts(&engine), (1, 260));
+    }
+
+    #[test]
+    fn test_shard_zero_verification_add_then_remove_cycles_are_row_bounded() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+
+        // The attack the row cap exists to stop, in its literal form: each cycle takes a FRESH
+        // address, adds it (admitted -- `live_adds` is 0 at the top of every cycle, so the
+        // live-add cap never engages), then removes it (row-neutral, so the tombstone cap is
+        // never consulted either). Every cycle leaves one permanent row behind for two gasless
+        // messages. Only a bound on TOTAL ROWS terminates this.
+        const ROW_CAP: u16 = 261; // max_messages(5) + tombstone_cap(256)
+        for index in 0..ROW_CAP {
+            let address = quota_test_address(2000 + index);
+            commit_message(
+                &mut engine,
+                &verification_contract_add(address.clone(), timestamp),
+                Validity::Valid,
+            );
+            commit_message(
+                &mut engine,
+                &verification_remove(address, timestamp + 1),
+                Validity::Valid,
+            );
+        }
+        assert_eq!(verification_replica_counts(&engine), (0, ROW_CAP as u64));
+
+        // The next cycle cannot start: rows are at cap even though `live_adds` is 0.
+        commit_message(
+            &mut engine,
+            &verification_contract_add(quota_test_address(2999), timestamp),
+            Validity::Invalid,
+        );
+        assert_eq!(verification_replica_counts(&engine), (0, ROW_CAP as u64));
+    }
+
+    #[test]
     fn test_shard_zero_verification_tombstones_do_not_lock_out_live_adds() {
         let timestamp = messages_factory::farcaster_time();
         let (mut engine, _temp_dir) = setup();
