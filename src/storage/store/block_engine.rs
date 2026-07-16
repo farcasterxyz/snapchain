@@ -1948,4 +1948,23 @@ mod channel_message_inertness_tests {
             ));
         }
     }
+
+    #[test]
+    fn channel_messages_have_no_block_engine_merge_dispatch() {
+        let (engine, _tmpdir) = block_engine_test_helpers::setup();
+
+        for (message_type, body) in messages_factory::channels::all_message_bodies() {
+            let message =
+                messages_factory::create_message_with_data(1234, message_type, body, None, None);
+            let result = engine.merge_message(
+                &message,
+                &mut RocksDbTransactionBatch::new(),
+                EngineVersion::V20,
+            );
+            assert!(matches!(
+                result,
+                Err(MessageValidationError::InvalidMessageType)
+            ));
+        }
+    }
 }

@@ -42,6 +42,8 @@ mod verification_store;
 #[cfg(test)]
 mod cast_store_tests;
 #[cfg(test)]
+mod channel_store_tests;
+#[cfg(test)]
 mod gasless_key_merge_tests;
 #[cfg(test)]
 mod key_add_store_tests;
