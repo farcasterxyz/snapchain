@@ -83,6 +83,18 @@ pub enum MessageValidationError {
     MessageValidationError(#[from] validations::error::ValidationError),
 }
 
+// Legacy verification limits ran into the hundreds, so this floor lets a fid shed a large
+// pre-V20 verification set. Larger storage allocations scale the bound through `max_messages`.
+// The zero-storage case deliberately remains zero so storage-free fids cannot mint permanent
+// shard-0 rows.
+const VERIFICATION_TOMBSTONE_CAP_FLOOR: u32 = 256;
+
+#[derive(Clone, Copy, Default)]
+struct VerificationMessageCounts {
+    live_adds: u32,
+    tombstones: u32,
+}
+
 // `merge_key_add` / `merge_key_remove` in `account::gasless_key_merge` return the
 // ShardEngine-flavored `engine::MessageValidationError` (their historical home). Translate
 // into the block-engine variant so callers here can use `?` on them. The merge helpers only
@@ -284,7 +296,7 @@ impl BlockEngine {
     }
 
     /// Single-message convenience wrapper. TEST-ONLY BY CONSTRUCTION: it derives the verification
-    /// quota count by reading the trie, which is correct only at the START of a transaction.
+    /// quota counters by reading the trie, which is correct only at the START of a transaction.
     /// Block-engine trie updates are staged after the user-message loop, so a mid-loop caller
     /// would silently read a pre-transaction count and admit past the cap. Production must go
     /// through `replay_snapchain_txn`, which threads the transaction-local count instead. Keeping
@@ -298,46 +310,56 @@ impl BlockEngine {
         version: EngineVersion,
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<(), MessageValidationError> {
-        let verification_count = self.verification_message_count(message.fid(), txn_batch)?;
-        self.validate_user_message_with_verification_count(
+        let verification_counts = self.verification_message_counts(message.fid(), txn_batch)?;
+        self.validate_user_message_with_verification_counts(
             message,
             storage_slot,
             timestamp,
             version,
             txn_batch,
-            verification_count,
+            verification_counts,
         )
     }
 
-    /// Counts the fid's shard-0 verification replica rows from the trie, mirroring the data-shard
-    /// `Stores::get_usage_by_store_type` semantics (adds + removes) so the two enforce the same
-    /// notion of "how many verifications does this fid have".
-    fn verification_message_count(
+    /// Counts the fid's live adds and tombstones separately from the trie. The message types come
+    /// from the same store-type mapping used by data-shard accounting, while keeping the shard-0
+    /// quota semantics explicit per type.
+    fn verification_message_counts(
         &self,
         fid: u64,
         txn_batch: &RocksDbTransactionBatch,
-    ) -> Result<u32, HubError> {
-        let mut count = 0u64;
+    ) -> Result<VerificationMessageCounts, HubError> {
+        let mut counts = VerificationMessageCounts::default();
         for msg_type in Limits::store_type_to_message_types(StoreType::Verifications) {
-            count = count
-                .checked_add(
-                    self.stores
-                        .trie
-                        .get_count(
-                            &self.stores.db,
-                            txn_batch,
-                            &TrieKey::for_message_type(fid, msg_type.into_u8()),
-                        )
-                        .map_err(|err| {
-                            HubError::internal_db_error(&format!(
-                                "unable to count shard-0 verifications: {err}"
-                            ))
-                        })?,
+            let count = self
+                .stores
+                .trie
+                .get_count(
+                    &self.stores.db,
+                    txn_batch,
+                    &TrieKey::for_message_type(fid, msg_type.into_u8()),
                 )
+                .map_err(|err| {
+                    HubError::internal_db_error(&format!(
+                        "unable to count shard-0 verifications: {err}"
+                    ))
+                })?;
+            let count = u32::try_from(count)
+                .map_err(|_| HubError::internal_db_error("verification count exceeds u32"))?;
+            let target = match msg_type {
+                MessageType::VerificationAddEthAddress => &mut counts.live_adds,
+                MessageType::VerificationRemove => &mut counts.tombstones,
+                _ => {
+                    return Err(HubError::internal_db_error(
+                        "verification store mapping contains a non-verification type",
+                    ))
+                }
+            };
+            *target = target
+                .checked_add(count)
                 .ok_or_else(|| HubError::internal_db_error("verification count overflow"))?;
         }
-        u32::try_from(count)
-            .map_err(|_| HubError::internal_db_error("verification count exceeds u32"))
+        Ok(counts)
     }
 
     /// True when the fid already has a primary record (add or remove) for `address`, meaning an
@@ -369,14 +391,14 @@ impl BlockEngine {
         .is_some())
     }
 
-    fn validate_user_message_with_verification_count(
+    fn validate_user_message_with_verification_counts(
         &self,
         message: &proto::Message,
         storage_slot: &StorageSlot,
         timestamp: &FarcasterTime,
         version: EngineVersion,
         txn_batch: &mut RocksDbTransactionBatch,
-        verification_count: u32,
+        verification_counts: VerificationMessageCounts,
     ) -> Result<(), MessageValidationError> {
         // Ensure message data is present
         let message_data = message
@@ -537,14 +559,14 @@ impl BlockEngine {
                 }
 
                 // Production always constructs `Stores`/`BlockStores` with `StoreLimits::default()`,
-                // so this matches the data shard's limits exactly. If store limits ever become
-                // configurable, this must read the same injected value the data-shard prune uses
-                // or the two sides will enforce different caps on the same message.
-                let max_count =
+                // so the live-add limit matches the data shard's limit exactly. If store limits
+                // ever become configurable, this must read the same injected value the data-shard
+                // prune uses or the two sides will enforce different caps on the same message.
+                let max_messages =
                     StoreLimits::default().max_messages(storage_slot, StoreType::Verifications);
                 // With no active storage, adds are never admitted, including replacements. This
                 // is the spam gate for shard 0's otherwise gasless verification write path.
-                if max_count == 0 && is_add {
+                if max_messages == 0 && is_add {
                     return Err(MessageValidationError::InsufficientStorage);
                 }
                 // A message that replaces an existing record for its address never grows the
@@ -552,9 +574,28 @@ impl BlockEngine {
                 // shed state via a remove.
                 let supersedes_existing =
                     self.verification_logical_key_exists(message_data.fid, address, txn_batch)?;
-                if !supersedes_existing && verification_count >= max_count {
-                    return Err(MessageValidationError::InsufficientStorage);
+                if !supersedes_existing {
+                    if is_add {
+                        if verification_counts.live_adds >= max_messages {
+                            return Err(MessageValidationError::InsufficientStorage);
+                        }
+                    } else {
+                        let tombstone_cap = if max_messages == 0 {
+                            0
+                        } else {
+                            VERIFICATION_TOMBSTONE_CAP_FLOOR.max(max_messages)
+                        };
+                        if verification_counts.tombstones >= tombstone_cap {
+                            return Err(MessageValidationError::InsufficientStorage);
+                        }
+                    }
                 }
+
+                // Shard 0 deliberately keeps verification tombstones permanently, unlike the
+                // data shard's pruned store. Dropping one would let an old post-V20-signed add be
+                // re-gossiped into an empty logical key, fanned out, and unconditionally reimposed
+                // by force-override replay. Separate live-add and bounded tombstone quotas let a
+                // fid shed and later re-add live state without opening that resurrection path.
             }
             _ => return Err(MessageValidationError::InvalidMessageType),
         }
@@ -674,27 +715,49 @@ impl BlockEngine {
         }
     }
 
-    /// Applies one successful merge to the transaction-local verification replica count. Block-
-    /// engine trie updates are staged only after the user-message loop, so re-reading the trie
-    /// mid-loop would miss earlier merges; this tracks them instead.
+    /// Applies one successful merge to the transaction-local verification counters. Block-engine
+    /// trie updates are staged only after the user-message loop, so re-reading the trie mid-loop
+    /// would miss earlier merges. Applying every deleted message before the merged message makes
+    /// the event itself enforce all add/remove replacement transitions.
     fn apply_verification_count_delta(
-        count: u32,
+        mut counts: VerificationMessageCounts,
         merge_message_body: &MergeMessageBody,
-    ) -> Result<u32, BlockEngineError> {
-        let added = u32::from(merge_message_body.message.is_some());
-        let deleted = u32::try_from(merge_message_body.deleted_messages.len()).map_err(|_| {
-            BlockEngineError::HubError(HubError::internal_db_error(
-                "verification merge deleted too many rows",
-            ))
-        })?;
-        count
-            .checked_add(added)
-            .and_then(|count| count.checked_sub(deleted))
-            .ok_or_else(|| {
+    ) -> Result<VerificationMessageCounts, BlockEngineError> {
+        for deleted in &merge_message_body.deleted_messages {
+            let target = match deleted.msg_type() {
+                MessageType::VerificationAddEthAddress => &mut counts.live_adds,
+                MessageType::VerificationRemove => &mut counts.tombstones,
+                _ => {
+                    return Err(BlockEngineError::HubError(HubError::internal_db_error(
+                        "verification merge deleted a non-verification row",
+                    )))
+                }
+            };
+            *target = target.checked_sub(1).ok_or_else(|| {
                 BlockEngineError::HubError(HubError::internal_db_error(
                     "verification merge count underflow",
                 ))
-            })
+            })?;
+        }
+
+        if let Some(message) = &merge_message_body.message {
+            let target = match message.msg_type() {
+                MessageType::VerificationAddEthAddress => &mut counts.live_adds,
+                MessageType::VerificationRemove => &mut counts.tombstones,
+                _ => {
+                    return Err(BlockEngineError::HubError(HubError::internal_db_error(
+                        "verification merge added a non-verification row",
+                    )))
+                }
+            };
+            *target = target.checked_add(1).ok_or_else(|| {
+                BlockEngineError::HubError(HubError::internal_db_error(
+                    "verification merge count overflow",
+                ))
+            })?;
+        }
+
+        Ok(counts)
     }
 
     /// Mirrors `HubEventExt::from_validation_error`, which cannot be reused directly because it is
@@ -823,11 +886,11 @@ impl BlockEngine {
         } else {
             storage_slot.clone()
         };
-        let mut verification_count = if has_verification {
-            self.verification_message_count(snapchain_txn.fid, txn_batch)
+        let mut verification_counts = if has_verification {
+            self.verification_message_counts(snapchain_txn.fid, txn_batch)
                 .map_err(BlockEngineError::HubError)?
         } else {
-            0
+            VerificationMessageCounts::default()
         };
 
         for message in &snapchain_txn.user_messages {
@@ -837,13 +900,13 @@ impl BlockEngine {
                 }
                 _ => &storage_slot,
             };
-            match self.validate_user_message_with_verification_count(
+            match self.validate_user_message_with_verification_counts(
                 message,
                 validation_storage_slot,
                 timestamp,
                 version,
                 txn_batch,
-                verification_count,
+                verification_counts,
             ) {
                 Ok(()) => match message.msg_type() {
                     MessageType::LendStorage => {
@@ -891,9 +954,9 @@ impl BlockEngine {
                                             body,
                                         )) = event.body.as_ref()
                                         {
-                                            verification_count =
+                                            verification_counts =
                                                 Self::apply_verification_count_delta(
-                                                    verification_count,
+                                                    verification_counts,
                                                     body,
                                                 )?;
                                         }
