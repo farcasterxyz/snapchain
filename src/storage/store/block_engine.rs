@@ -129,6 +129,14 @@ enum ChannelAdmissionBody<'a> {
     Moderate(&'a proto::ChannelModerateBody),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChannelMergeDispatch {
+    Update,
+    Member,
+    Pin,
+    Moderate,
+}
+
 impl ChannelAdmissionBody<'_> {
     fn channel_id(&self) -> &[u8] {
         match self {
@@ -563,6 +571,7 @@ impl BlockEngine {
             txn_batch,
             verification_counts,
         )
+        .map(|_| ())
     }
 
     /// Counts the fid's live adds and tombstones separately from the trie. The message types come
@@ -666,7 +675,7 @@ impl BlockEngine {
         &self,
         message_data: &proto::MessageData,
         txn_batch: &RocksDbTransactionBatch,
-    ) -> Result<(), MessageValidationError> {
+    ) -> Result<ChannelMergeDispatch, MessageValidationError> {
         use proto::message_data::Body;
 
         let msg_type = MessageType::try_from(message_data.r#type)
@@ -737,6 +746,12 @@ impl BlockEngine {
             .map_err(MessageValidationError::HubError)?;
         let author_role =
             self.channel_author_role(channel_id, message_data.fid, owner_fid, txn_batch)?;
+        let dispatch = match &body {
+            ChannelAdmissionBody::Update(_) => ChannelMergeDispatch::Update,
+            ChannelAdmissionBody::Member(_) => ChannelMergeDispatch::Member,
+            ChannelAdmissionBody::Pin(_) => ChannelMergeDispatch::Pin,
+            ChannelAdmissionBody::Moderate(_) => ChannelMergeDispatch::Moderate,
+        };
 
         match body {
             ChannelAdmissionBody::Update(_) => {
@@ -812,7 +827,7 @@ impl BlockEngine {
             }
         }
 
-        Ok(())
+        Ok(dispatch)
     }
 
     fn validate_user_message_with_verification_counts(
@@ -823,7 +838,7 @@ impl BlockEngine {
         version: EngineVersion,
         txn_batch: &mut RocksDbTransactionBatch,
         verification_counts: VerificationMessageCounts,
-    ) -> Result<(), MessageValidationError> {
+    ) -> Result<Option<ChannelMergeDispatch>, MessageValidationError> {
         // Ensure message data is present
         let message_data = message
             .data
@@ -896,6 +911,7 @@ impl BlockEngine {
             }
         }
 
+        let mut channel_dispatch = None;
         match message_data
             .body
             .as_ref()
@@ -921,7 +937,7 @@ impl BlockEngine {
                 // D9: channel slots resolve by shard-0 consensus order, not timestamp LWW.
                 // Embedded timestamps are inert, and these types did not exist before V20, so
                 // the verification activation floor has no channel analogue.
-                self.validate_channel_message(message_data, txn_batch)?;
+                channel_dispatch = Some(self.validate_channel_message(message_data, txn_batch)?);
             }
             crate::proto::message_data::Body::LendStorageBody(lend_storage) => {
                 let total_storage_purchased = self
@@ -1087,7 +1103,35 @@ impl BlockEngine {
             .map_err(MessageValidationError::HubError)?;
         }
 
-        Ok(())
+        Ok(channel_dispatch)
+    }
+
+    fn merge_channel_message(
+        &self,
+        message: &proto::Message,
+        txn_batch: &mut RocksDbTransactionBatch,
+        dispatch: ChannelMergeDispatch,
+    ) -> Result<Vec<proto::HubEvent>, MessageValidationError> {
+        // `dispatch` is minted only by the gated validation arm after type/body agreement. Merge
+        // does not re-read a version or re-dispatch on the wire type, so those decisions are
+        // structurally unable to disagree.
+        let event = match dispatch {
+            ChannelMergeDispatch::Update => {
+                ChannelUpdateStore::merge(&self.stores.channel_update_store, message, txn_batch)?
+            }
+            ChannelMergeDispatch::Member => {
+                ChannelMemberStore::merge(&self.stores.channel_member_store, message, txn_batch)?
+            }
+            ChannelMergeDispatch::Pin => {
+                ChannelPinStore::merge(&self.stores.channel_pin_store, message, txn_batch)?
+            }
+            ChannelMergeDispatch::Moderate => ChannelModerateStore::merge(
+                &self.stores.channel_moderate_store,
+                message,
+                txn_batch,
+            )?,
+        };
+        Ok(vec![event])
     }
 
     fn merge_message(
@@ -1180,38 +1224,6 @@ impl BlockEngine {
                     .stores
                     .verification_store
                     .merge(message, txn_batch, &ctx)?])
-            }
-            MessageType::ChannelUpdate
-            | MessageType::ChannelMember
-            | MessageType::ChannelPin
-            | MessageType::ChannelModerate
-                if block_version.is_enabled(ProtocolFeature::ChannelMessages) =>
-            {
-                // One passed-in block-version gate owns all four dispatches. Keep this grouped:
-                // splitting the gate from the type dispatch can make validation and merge
-                // disagree under replay.
-                let event = match msg_type {
-                    MessageType::ChannelUpdate => ChannelUpdateStore::merge(
-                        &self.stores.channel_update_store,
-                        message,
-                        txn_batch,
-                    )?,
-                    MessageType::ChannelMember => ChannelMemberStore::merge(
-                        &self.stores.channel_member_store,
-                        message,
-                        txn_batch,
-                    )?,
-                    MessageType::ChannelPin => {
-                        ChannelPinStore::merge(&self.stores.channel_pin_store, message, txn_batch)?
-                    }
-                    MessageType::ChannelModerate => ChannelModerateStore::merge(
-                        &self.stores.channel_moderate_store,
-                        message,
-                        txn_batch,
-                    )?,
-                    _ => unreachable!(),
-                };
-                Ok(vec![event])
             }
             _ => return Err(MessageValidationError::InvalidMessageType),
         }
@@ -1402,7 +1414,7 @@ impl BlockEngine {
                 txn_batch,
                 verification_counts,
             ) {
-                Ok(()) => match message.msg_type() {
+                Ok(channel_dispatch) => match message.msg_type() {
                     MessageType::LendStorage => {
                         if version.is_enabled(ProtocolFeature::StorageLending) {
                             if let Ok(events) = self.merge_message(message, txn_batch, version) {
@@ -1508,39 +1520,41 @@ impl BlockEngine {
                     | MessageType::ChannelMember
                     | MessageType::ChannelPin
                     | MessageType::ChannelModerate => {
-                        if version.is_enabled(ProtocolFeature::ChannelMessages) {
-                            match self.merge_message(message, txn_batch, version) {
-                                Ok(events) => hub_events.extend(events),
-                                Err(err) => {
-                                    // State-aware admission catches ordinary authority failures,
-                                    // but duplicate/current-incumbent and store-integrity errors
-                                    // arise only during merge. Surface and persist them with the
-                                    // same deterministic MERGE_FAILURE behavior as shard-0
-                                    // verifications so simulate_message cannot report success for
-                                    // a message that was not stored.
-                                    warn!(
-                                        fid = message.fid(),
-                                        hash = message.hex_hash(),
-                                        "Error merging shard-0 channel message: {:?}",
-                                        err
-                                    );
-                                    let mut merge_failure =
-                                        Self::merge_failure_event(message, &err);
-                                    if let Err(event_err) = self
-                                        .stores
-                                        .event_handler
-                                        .commit_transaction(txn_batch, &mut merge_failure)
-                                    {
-                                        error!(
+                        let dispatch = channel_dispatch.ok_or_else(|| {
+                            BlockEngineError::HubError(HubError::invalid_internal_state(
+                                "validated channel message is missing merge dispatch",
+                            ))
+                        })?;
+                        match self.merge_channel_message(message, txn_batch, dispatch) {
+                            Ok(events) => hub_events.extend(events),
+                            Err(err) => {
+                                // State-aware admission catches ordinary authority failures,
+                                // but duplicate/current-incumbent and store-integrity errors
+                                // arise only during merge. Surface and persist them with the
+                                // same deterministic MERGE_FAILURE behavior as shard-0
+                                // verifications so simulate_message cannot report success for
+                                // a message that was not stored.
+                                warn!(
+                                    fid = message.fid(),
+                                    hash = message.hex_hash(),
+                                    "Error merging shard-0 channel message: {:?}",
+                                    err
+                                );
+                                let mut merge_failure = Self::merge_failure_event(message, &err);
+                                if let Err(event_err) = self
+                                    .stores
+                                    .event_handler
+                                    .commit_transaction(txn_batch, &mut merge_failure)
+                                {
+                                    error!(
                                             fid = message.fid(),
                                             hash = message.hex_hash(),
                                             "Failed to persist shard-0 channel merge failure event: {:?}",
                                             event_err
                                         );
-                                    }
-                                    hub_events.push(merge_failure);
-                                    validation_errors.push(err);
                                 }
+                                hub_events.push(merge_failure);
+                                validation_errors.push(err);
                             }
                         }
                     }
@@ -2330,25 +2344,20 @@ mod error_conversion_tests {
 
 #[cfg(test)]
 mod channel_message_inertness_tests {
-    use super::MessageValidationError;
+    use super::{ChannelMergeDispatch, MessageValidationError};
     use crate::core::util::FarcasterTime;
     use crate::core::validations::error::ValidationError;
+    use crate::proto::MessageType;
     use crate::storage::db::RocksDbTransactionBatch;
     use crate::storage::store::account::StorageSlot;
     use crate::storage::store::block_engine_test_helpers;
     use crate::utils::factory::messages_factory;
     use crate::version::version::EngineVersion;
 
-    /// Today every channel body dies at `validations::message::validate_message`, which
-    /// `validate_user_message` calls before the custody lookup — so the second arm below is what
-    /// actually fires, and the fid/signer registration is never reached. Both are deliberate.
-    /// The registration keeps this test honest if a later increment installs real body validation:
-    /// execution would then reach BlockEngine's own per-body allowlist and fail there (arm one)
-    /// rather than dying at `MissingFid`, which would be a setup artifact rather than a real pin.
-    /// The disjunction therefore asserts the property that matters — BlockEngine rejects channel
-    /// messages — without pinning which of the two independent layers does it.
+    /// Pre-feature channel bodies still die in stateless validation. With V20 active they reach
+    /// the channel arm and fail because the fixture's channel is intentionally unregistered.
     #[test]
-    fn channel_messages_are_rejected_by_block_engine_validation() {
+    fn channel_messages_are_gated_and_require_a_registered_channel() {
         let (mut engine, _tmpdir) = block_engine_test_helpers::setup();
         let fid = 1234;
         block_engine_test_helpers::register_user(
@@ -2363,7 +2372,7 @@ mod channel_message_inertness_tests {
             let message =
                 messages_factory::create_message_with_data(fid, message_type, body, None, None);
             let timestamp = FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64);
-            let result = engine.validate_user_message(
+            let active = engine.validate_user_message(
                 &message,
                 &StorageSlot::new(0, 0, 1, u32::MAX),
                 &timestamp,
@@ -2371,36 +2380,44 @@ mod channel_message_inertness_tests {
                 &mut RocksDbTransactionBatch::new(),
             );
             assert!(matches!(
-                result,
-                Err(MessageValidationError::InvalidMessageType)
-                    | Err(MessageValidationError::MessageValidationError(
-                        ValidationError::InvalidMessageType
-                    ))
+                active,
+                Err(MessageValidationError::HubError(ref error))
+                    if error.message == "unknown channel"
+            ));
+            let pre_feature = engine.validate_user_message(
+                &message,
+                &StorageSlot::new(0, 0, 1, u32::MAX),
+                &timestamp,
+                EngineVersion::V19,
+                &mut RocksDbTransactionBatch::new(),
+            );
+            assert!(matches!(
+                pre_feature,
+                Err(MessageValidationError::MessageValidationError(
+                    ValidationError::InvalidMessageType
+                ))
             ));
         }
     }
 
     #[test]
-    fn channel_messages_have_gated_block_engine_merge_dispatch() {
+    fn channel_validation_dispatch_covers_all_four_stores() {
         let (engine, _tmpdir) = block_engine_test_helpers::setup();
 
         for (message_type, body) in messages_factory::channels::all_message_bodies() {
             let message =
                 messages_factory::create_message_with_data(1234, message_type, body, None, None);
-            let pre_feature = engine.merge_message(
+            let dispatch = match message_type {
+                MessageType::ChannelUpdate => ChannelMergeDispatch::Update,
+                MessageType::ChannelMember => ChannelMergeDispatch::Member,
+                MessageType::ChannelPin => ChannelMergeDispatch::Pin,
+                MessageType::ChannelModerate => ChannelMergeDispatch::Moderate,
+                _ => unreachable!(),
+            };
+            let active = engine.merge_channel_message(
                 &message,
                 &mut RocksDbTransactionBatch::new(),
-                EngineVersion::V19,
-            );
-            assert!(matches!(
-                pre_feature,
-                Err(MessageValidationError::InvalidMessageType)
-            ));
-
-            let active = engine.merge_message(
-                &message,
-                &mut RocksDbTransactionBatch::new(),
-                EngineVersion::V20,
+                dispatch,
             );
             assert!(
                 active.is_ok(),

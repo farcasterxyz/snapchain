@@ -14,7 +14,7 @@ mod tests {
             StorageUnitType, Transaction,
         },
         storage::store::{
-            account::make_ts_hash,
+            account::{make_ts_hash, ChannelModerateStore},
             block_engine::BlockEngine,
             block_engine_test_helpers,
             engine::ShardEngine,
@@ -178,6 +178,40 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.message, "channel messages not yet active");
         }
+    }
+
+    #[tokio::test]
+    async fn test_channel_moderate_dedup_uses_the_full_message_key() {
+        let (_, block_engine, _, mut mempool, _, _, _, _, _) = setup(None, false, 1).await;
+        let fid = 1234;
+        let timestamp = messages_factory::farcaster_time();
+        let channel_id = vec![0x11; 32];
+        let moderate = |cast_byte| {
+            messages_factory::create_message_with_data(
+                fid,
+                proto::MessageType::ChannelModerate,
+                proto::message_data::Body::ChannelModerateBody(proto::ChannelModerateBody {
+                    channel_id: channel_id.clone(),
+                    cast_hash: vec![cast_byte; 20],
+                    action: proto::ChannelModerateAction::Hide as i32,
+                }),
+                Some(timestamp),
+                None,
+            )
+        };
+        let merged = moderate(0x22);
+        let distinct_slot = moderate(0x33);
+        let stores = block_engine.stores();
+        let mut txn = crate::storage::db::RocksDbTransactionBatch::new();
+        ChannelModerateStore::merge(&stores.channel_moderate_store, &merged, &mut txn).unwrap();
+        stores.db.commit(txn).unwrap();
+
+        assert!(mempool
+            .message_is_valid(0, &MempoolMessage::UserMessage(merged.clone()), true,)
+            .is_err());
+        assert!(mempool
+            .message_is_valid(0, &MempoolMessage::UserMessage(distinct_slot), true)
+            .is_ok());
     }
 
     async fn pull_message(
