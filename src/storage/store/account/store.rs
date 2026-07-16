@@ -71,7 +71,12 @@ pub trait StoreDef: Send + Sync {
     fn is_remove_type(&self, message: &Message) -> bool;
 
     /// Slot stores whose conflict order comes from an external consensus sequence must not use
-    /// the generic timestamp-LWW merge path. Their dedicated merge entry point overrides this.
+    /// the generic timestamp-LWW paths. Those paths maintain only the fid-scoped add key and the
+    /// message row; they know nothing about a slot store's cross-author slot index or its
+    /// per-channel counters, so any of them would strand the slot pointer (bricking the slot,
+    /// which fails closed on the next read) or silently desynchronise the counters. Every
+    /// mutating generic entry point is therefore gated on this, and slot stores merge through
+    /// their own dedicated entry point instead.
     fn requires_consensus_order_slot_merge(&self) -> bool {
         false
     }
@@ -776,6 +781,11 @@ impl<T: StoreDef + Clone> Store<T> {
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<HubEvent, HubError> {
+        if self.store_def.requires_consensus_order_slot_merge() {
+            return Err(HubError::validation_failure(
+                "slot store requires consensus-order merge",
+            ));
+        }
         // Get the message ts_hash
         let ts_hash = make_ts_hash(message.data.as_ref().unwrap().timestamp, &message.hash)?;
 
@@ -808,6 +818,11 @@ impl<T: StoreDef + Clone> Store<T> {
         txn: &mut RocksDbTransactionBatch,
         ctx: &MergeContext,
     ) -> Result<HubEvent, HubError> {
+        if self.store_def.requires_consensus_order_slot_merge() {
+            return Err(HubError::validation_failure(
+                "slot store requires consensus-order merge",
+            ));
+        }
         let mut merge_conflicts = vec![];
 
         // First, find if there's an existing compact state message, and if there is,
@@ -892,6 +907,11 @@ impl<T: StoreDef + Clone> Store<T> {
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<HubEvent, HubError> {
+        if self.store_def.requires_consensus_order_slot_merge() {
+            return Err(HubError::validation_failure(
+                "slot store requires consensus-order merge",
+            ));
+        }
         // If the store supports compact state messages, we don't merge messages that don't exist in the compact state
         if self.store_def.compact_state_type_supported() && !self.store_opts.conflict_free {
             // Get the compact state message
@@ -958,6 +978,11 @@ impl<T: StoreDef + Clone> Store<T> {
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<HubEvent, HubError> {
+        if self.store_def.requires_consensus_order_slot_merge() {
+            return Err(HubError::validation_failure(
+                "slot store requires consensus-order merge",
+            ));
+        }
         // If the store supports compact state messages, we don't merge messages that don't exist in the compact state
         if self.store_def.compact_state_type_supported() && !self.store_opts.conflict_free {
             // Get the compact state message
@@ -1029,6 +1054,11 @@ impl<T: StoreDef + Clone> Store<T> {
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<Option<HubEvent>, HubError> {
+        if self.store_def.requires_consensus_order_slot_merge() {
+            return Err(HubError::validation_failure(
+                "slot store requires consensus-order merge",
+            ));
+        }
         // Note that compact state messages are not pruned
         if self.store_def.compact_state_type_supported()
             && self.store_def.is_compact_state_type(&message)
@@ -1059,6 +1089,11 @@ impl<T: StoreDef + Clone> Store<T> {
         max_count: u32,
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<Vec<HubEvent>, HubError> {
+        if self.store_def.requires_consensus_order_slot_merge() {
+            return Err(HubError::validation_failure(
+                "slot store requires consensus-order merge",
+            ));
+        }
         let mut pruned_events = vec![];
 
         let mut count = current_count;
@@ -1100,6 +1135,11 @@ impl<T: StoreDef + Clone> Store<T> {
         key: &Vec<u8>,
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<Vec<HubEvent>, HubError> {
+        if self.store_def.requires_consensus_order_slot_merge() {
+            return Err(HubError::validation_failure(
+                "slot store requires consensus-order merge",
+            ));
+        }
         let mut revoke_events = vec![];
 
         let prefix = &make_message_primary_key(fid, self.store_def.postfix(), None);

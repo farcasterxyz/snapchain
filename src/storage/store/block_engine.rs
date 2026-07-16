@@ -245,6 +245,13 @@ impl BlockStores {
                 continue;
             };
             let Some(data) = primary_add.data.as_ref() else {
+                // A data-integrity anomaly, not an expected state: log it rather than silently
+                // under-reporting the owner as parked. Mirrors the RPC resolver.
+                warn!(
+                    fid = fid,
+                    address = hex::encode(owner_address),
+                    "VerificationAdd is missing message data; skipping owner candidate"
+                );
                 continue;
             };
             authoritative.push((fid, make_ts_hash(data.timestamp, &primary_add.hash)?));

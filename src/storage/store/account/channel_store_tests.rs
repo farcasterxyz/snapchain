@@ -675,6 +675,253 @@ mod tests {
         }
     }
 
+    /// The moderate slot key is `channel_id ++ cast_hash`. If channel_id were not fixed-width,
+    /// these two messages would build the SAME slot key while charging different cap counters:
+    /// the second would supersede the first's row and mint into channel `a`'s keyspace for free.
+    #[test]
+    fn variable_length_channel_id_cannot_collide_moderate_slots_or_launder_the_cap() {
+        let stores = test_stores();
+        let victim_channel = channel_id(0xAA);
+        let victim_cast = cast_hash(1);
+        let mut txn = RocksDbTransactionBatch::new();
+        ChannelModerateStore::merge(
+            &stores.moderate,
+            &moderate_message(
+                1,
+                victim_channel.clone(),
+                victim_cast.clone(),
+                ChannelModerateAction::Hide,
+                1,
+            ),
+            &mut txn,
+        )
+        .unwrap();
+
+        // Same bytes, split differently between the two fields.
+        let mut shifted_channel = victim_channel.clone();
+        shifted_channel.push(victim_cast[0]);
+        let shifted_cast = victim_cast[1..].to_vec();
+        let error = ChannelModerateStore::merge(
+            &stores.moderate,
+            &moderate_message(
+                2,
+                shifted_channel,
+                shifted_cast,
+                ChannelModerateAction::Unhide,
+                2,
+            ),
+            &mut txn,
+        )
+        .unwrap_err();
+        assert_eq!(error.message, "channel id must be 32 bytes");
+
+        // The victim's slot is untouched and its cap counter still reflects exactly its own rows.
+        assert_eq!(
+            ChannelModerateStore::moderation_state(
+                &stores.moderate,
+                &victim_channel,
+                &victim_cast,
+                Some(&txn),
+            )
+            .unwrap(),
+            Some(ChannelModerationState::Hidden)
+        );
+        assert_eq!(
+            ChannelModerateStore::slot_count(&stores.moderate, &victim_channel, Some(&txn))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn wrong_width_channel_id_and_cast_hash_are_rejected_by_every_slot_store() {
+        let stores = test_stores();
+        let short = vec![0x01; 31];
+        let long = vec![0x01; 33];
+        let mut txn = RocksDbTransactionBatch::new();
+        for bad in [short, long] {
+            for error in [
+                ChannelUpdateStore::merge(
+                    &stores.update,
+                    &update_message(1, bad.clone(), 1, Some("x"), None, None, None),
+                    &mut txn,
+                )
+                .unwrap_err(),
+                ChannelMemberStore::merge(
+                    &stores.member,
+                    &member_message(1, bad.clone(), 9, ChannelMemberAction::AddMember, 1),
+                    &mut txn,
+                )
+                .unwrap_err(),
+                ChannelPinStore::merge(
+                    &stores.pin,
+                    &pin_message(1, bad.clone(), cast_hash(1), 1),
+                    &mut txn,
+                )
+                .unwrap_err(),
+                ChannelModerateStore::merge(
+                    &stores.moderate,
+                    &moderate_message(1, bad.clone(), cast_hash(1), ChannelModerateAction::Hide, 1),
+                    &mut txn,
+                )
+                .unwrap_err(),
+            ] {
+                assert_eq!(error.message, "channel id must be 32 bytes");
+            }
+        }
+        assert!(txn.batch.is_empty(), "a rejected merge staged writes");
+
+        let error = ChannelModerateStore::merge(
+            &stores.moderate,
+            &moderate_message(
+                1,
+                channel_id(0xBB),
+                vec![0xCC; 19],
+                ChannelModerateAction::Hide,
+                1,
+            ),
+            &mut txn,
+        )
+        .unwrap_err();
+        assert_eq!(error.message, "channel moderate cast hash must be 20 bytes");
+    }
+
+    /// An explicit zero-valued mode means UNSPECIFIED on the wire and must fold to the same
+    /// restrictive value as an absent field — otherwise `Some(0)` is a way around the D3 default.
+    #[test]
+    fn explicitly_zero_modes_fold_restrictively_like_absent_modes() {
+        let stores = test_stores();
+        let channel = channel_id(0x5A);
+        let mut txn = RocksDbTransactionBatch::new();
+        ChannelUpdateStore::merge(
+            &stores.update,
+            &update_message(
+                1,
+                channel.clone(),
+                1,
+                Some("zeroed"),
+                None,
+                Some(CastingMode::None),
+                Some(MembershipMode::None),
+            ),
+            &mut txn,
+        )
+        .unwrap();
+
+        let state = ChannelUpdateStore::get_channel_update(&stores.update, &channel, Some(&txn))
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.membership_mode, MembershipMode::Approval);
+        assert_eq!(state.casting_mode, CastingMode::MembersOnly);
+    }
+
+    /// An unparseable mode must be refused at merge, not accepted into the slot and then blow up
+    /// on every read — that would be a one-message per-channel poison pill.
+    #[test]
+    fn unparseable_channel_update_modes_are_rejected_at_merge() {
+        let stores = test_stores();
+        let channel = channel_id(0x5B);
+        let mut txn = RocksDbTransactionBatch::new();
+        let mut poison = update_message(1, channel.clone(), 1, Some("poison"), None, None, None);
+        match poison.data.as_mut().unwrap().body.as_mut().unwrap() {
+            Body::ChannelUpdateBody(body) => body.casting_mode = Some(9999),
+            _ => unreachable!(),
+        }
+        let error = ChannelUpdateStore::merge(&stores.update, &poison, &mut txn).unwrap_err();
+        assert_eq!(error.message, "invalid channel casting mode");
+        assert!(txn.batch.is_empty());
+        assert!(
+            ChannelUpdateStore::get_channel_update(&stores.update, &channel, Some(&txn))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn re_merging_the_current_slot_incumbent_is_a_duplicate() {
+        let stores = test_stores();
+        let channel = channel_id(0x6C);
+        let mut txn = RocksDbTransactionBatch::new();
+        let message = update_message(1, channel, 1, Some("only"), None, None, None);
+        ChannelUpdateStore::merge(&stores.update, &message, &mut txn).unwrap();
+        let before = txn.batch.clone();
+        let error = ChannelUpdateStore::merge(&stores.update, &message, &mut txn).unwrap_err();
+        assert_eq!(error.message, "message has already been merged");
+        assert_eq!(txn.batch, before, "duplicate re-merge mutated the txn");
+    }
+
+    /// The slot index and counters are maintained only by `merge_slot`. Every generic mutating
+    /// path would strand the slot pointer or desync the counters, so all of them must refuse.
+    #[test]
+    fn generic_mutating_store_paths_are_rejected_for_channel_slots() {
+        let stores = test_stores();
+        let message = update_message(1, channel_id(9), 1, Some("x"), None, None, None);
+        let ts_hash = crate::storage::store::account::make_ts_hash(1, &message.hash).unwrap();
+        let expected = "slot store requires consensus-order merge";
+
+        let mut txn = RocksDbTransactionBatch::new();
+        assert_eq!(
+            stores
+                .update
+                .merge(
+                    &message,
+                    &mut txn,
+                    &crate::storage::store::test_helper::default_merge_ctx(),
+                )
+                .unwrap_err()
+                .message,
+            expected
+        );
+        assert_eq!(
+            stores
+                .update
+                .merge_add(&ts_hash, &message, &mut txn)
+                .unwrap_err()
+                .message,
+            expected
+        );
+        assert_eq!(
+            stores
+                .update
+                .merge_remove(&ts_hash, &message, &mut txn)
+                .unwrap_err()
+                .message,
+            expected
+        );
+        assert_eq!(
+            stores
+                .update
+                .revoke(&message, &mut txn)
+                .unwrap_err()
+                .message,
+            expected
+        );
+        assert_eq!(
+            stores
+                .update
+                .prune_message(&message, &mut txn)
+                .unwrap_err()
+                .message,
+            expected
+        );
+        assert_eq!(
+            stores
+                .update
+                .prune_messages(1, 100, 0, &mut txn)
+                .unwrap_err()
+                .message,
+            expected
+        );
+        assert_eq!(
+            stores
+                .update
+                .revoke_messages_by_signer(1, &message.signer, &mut txn)
+                .unwrap_err()
+                .message,
+            expected
+        );
+    }
+
     #[test]
     fn generic_timestamp_lww_merge_is_rejected_for_channel_slots() {
         let stores = test_stores();

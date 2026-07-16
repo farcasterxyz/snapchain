@@ -18,6 +18,18 @@ use std::sync::Arc;
 pub const CHANNEL_MEMBER_SLOT_CAP: u32 = 8_192;
 pub const CHANNEL_MODERATE_SLOT_CAP: u32 = 16_384;
 
+// CONSENSUS-CRITICAL: slot keys concatenate `channel_id` with a per-type suffix, so the
+// keyspace is prefix-free ONLY while `channel_id` is fixed-width. With a variable-length
+// channel_id, `(channel_id = C ++ x, suffix = s)` and `(channel_id = C, suffix = x ++ s)`
+// build the identical slot key while charging DIFFERENT cap counters (the counter key has no
+// suffix, so it stays injective). That splits the slot keyspace from the quantity meant to
+// bound it: one channel could supersede another channel's slots, and rows could be minted
+// into C's keyspace without ever charging C's cap. Both lengths are therefore enforced in the
+// slot path itself rather than deferred to the validation increment. `TrieKey::for_fname`
+// pads names for this same reason.
+pub const CHANNEL_ID_LENGTH: usize = 32;
+pub const CHANNEL_MODERATE_CAST_HASH_LENGTH: usize = 20;
+
 #[repr(u8)]
 #[derive(Clone, Copy)]
 enum ChannelIndex {
@@ -226,6 +238,29 @@ trait ChannelSlotStoreDef: StoreDef {
     }
 }
 
+/// The D3 fold for the two policy modes, shared by merge-time validation and the read fold so
+/// they cannot drift. An unparseable mode is rejected at merge (the slot must never hold state
+/// the fold cannot read). Both "absent" and the explicit zero variant mean UNSPECIFIED and fold
+/// to the most restrictive value, so a cosmetic-only update closes permissions rather than
+/// accidentally opening them — an explicit `Some(0)` must not be a way around that default.
+fn fold_channel_modes(body: &ChannelUpdateBody) -> Result<(CastingMode, MembershipMode), HubError> {
+    let casting_mode = body
+        .casting_mode
+        .map(CastingMode::try_from)
+        .transpose()
+        .map_err(|_| HubError::validation_failure("invalid channel casting mode"))?
+        .filter(|mode| *mode != CastingMode::None)
+        .unwrap_or(CastingMode::MembersOnly);
+    let membership_mode = body
+        .membership_mode
+        .map(MembershipMode::try_from)
+        .transpose()
+        .map_err(|_| HubError::validation_failure("invalid channel membership mode"))?
+        .filter(|mode| *mode != MembershipMode::None)
+        .unwrap_or(MembershipMode::Approval);
+    Ok((casting_mode, membership_mode))
+}
+
 fn member_state_for_message(message: &Message) -> Result<ChannelMemberState, HubError> {
     let action = match message.data.as_ref().and_then(|data| data.body.as_ref()) {
         Some(Body::ChannelMemberBody(body)) => ChannelMemberAction::try_from(body.action)
@@ -271,6 +306,12 @@ fn merge_slot<T: ChannelSlotStoreDef + Clone>(
     if !store_def.is_add_type(message) {
         return Err(HubError::validation_failure("invalid channel message type"));
     }
+    // The key-shape invariant gates everything else: a wrong-width channel_id would make the
+    // slot keyspace ambiguous (see CHANNEL_ID_LENGTH), so it is checked before any key is built.
+    let channel_id = store_def.channel_id(message)?;
+    if channel_id.len() != CHANNEL_ID_LENGTH {
+        return Err(HubError::validation_failure("channel id must be 32 bytes"));
+    }
     store_def.validate_slot_message(message)?;
     // CONSENSUS-CRITICAL DEVIATION: unlike data-shard stores, channel slots never compare
     // embedded timestamps or ts_hash ordering. Shard-0 consensus merge order is the total order;
@@ -289,7 +330,6 @@ fn merge_slot<T: ChannelSlotStoreDef + Clone>(
         return Err(HubError::duplicate("message has already been merged"));
     }
 
-    let channel_id = store_def.channel_id(message)?;
     let mut new_slot_count = None;
     if incumbent.is_none() {
         if let (Some(cap), Some(count_key)) =
@@ -475,6 +515,15 @@ impl ChannelSlotStoreDef for ChannelUpdateStoreDef {
         update_slot_suffix(message)
     }
 
+    /// Without this the slot could accept a body whose modes `get_channel_update` cannot parse,
+    /// leaving every read of the channel erroring until something supersedes it.
+    fn validate_slot_message(&self, message: &Message) -> Result<(), HubError> {
+        match message.data.as_ref().and_then(|data| data.body.as_ref()) {
+            Some(Body::ChannelUpdateBody(body)) => fold_channel_modes(body).map(|_| ()),
+            _ => Err(invalid_body("ChannelUpdate")),
+        }
+    }
+
     fn slot_key(&self, message: &Message) -> Result<Vec<u8>, HubError> {
         Ok(channel_index_key(
             ChannelIndex::UpdateSlot,
@@ -568,7 +617,21 @@ impl ChannelSlotStoreDef for ChannelModerateStoreDef {
     }
 
     fn validate_slot_message(&self, message: &Message) -> Result<(), HubError> {
-        moderation_state_for_message(message).map(|_| ())
+        moderation_state_for_message(message)?;
+        // The moderate slot key is `channel_id ++ cast_hash`; a fixed-width channel_id already
+        // restores injectivity, but pinning cast_hash too keeps the key bounded and the layout
+        // self-describing rather than resting on the other field's width.
+        match message.data.as_ref().and_then(|data| data.body.as_ref()) {
+            Some(Body::ChannelModerateBody(body))
+                if body.cast_hash.len() == CHANNEL_MODERATE_CAST_HASH_LENGTH =>
+            {
+                Ok(())
+            }
+            Some(Body::ChannelModerateBody(_)) => Err(HubError::validation_failure(
+                "channel moderate cast hash must be 20 bytes",
+            )),
+            _ => Err(invalid_body("ChannelModerate")),
+        }
     }
 
     fn slot_count_key(&self, channel_id: &[u8]) -> Option<Vec<u8>> {
@@ -627,20 +690,8 @@ impl ChannelUpdateStore {
             _ => return Err(invalid_body("ChannelUpdate")),
         };
         // ChannelUpdate is a whole-replace fold: absent fields are unset, never inherited from
-        // the superseded message. Unset policy modes fold to the most restrictive values so a
-        // cosmetic-only update closes permissions instead of accidentally opening them.
-        let casting_mode = body
-            .casting_mode
-            .map(CastingMode::try_from)
-            .transpose()
-            .map_err(|_| HubError::validation_failure("invalid channel casting mode"))?
-            .unwrap_or(CastingMode::MembersOnly);
-        let membership_mode = body
-            .membership_mode
-            .map(MembershipMode::try_from)
-            .transpose()
-            .map_err(|_| HubError::validation_failure("invalid channel membership mode"))?
-            .unwrap_or(MembershipMode::Approval);
+        // the superseded message. `fold_channel_modes` resolves the modes restrictively.
+        let (casting_mode, membership_mode) = fold_channel_modes(&body)?;
         Ok(Some(ChannelUpdateState {
             body,
             casting_mode,
