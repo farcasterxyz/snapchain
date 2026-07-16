@@ -10,6 +10,7 @@
 //!   key-remove   submit a KEY_REMOVE (custody-signed by default; --mode self-revoke for self-revoke)
 //!   cast-add     submit a CAST_ADD signed by an existing Ed25519 key
 //!   cast-remove  submit a CAST_REMOVE signed by an existing Ed25519 key
+//!   link         submit LINK_ADD / LINK_REMOVE / LINK_COMPACT_STATE (follows, blocks)
 //!   live-at      submit a USER_DATA_ADD of type LIVE_AT (FIP-268 presence heartbeat)
 //!   subscribe    stream HubEvents from a snapchain gRPC node and log them to stdout
 //!
@@ -76,6 +77,9 @@ enum Cmd {
     CastAdd(CastAddArgs),
     /// Submit a CAST_REMOVE signed by an existing Ed25519 key.
     CastRemove(CastRemoveArgs),
+    /// Submit a LINK_ADD / LINK_REMOVE / LINK_COMPACT_STATE (follows, blocks).
+    #[command(subcommand)]
+    Link(LinkCmd),
     /// Submit a USER_DATA_ADD of type LIVE_AT (FIP-268 presence heartbeat).
     // TODO: support all user data types
     LiveAt(LiveAtArgs),
@@ -184,6 +188,90 @@ struct CastRemoveArgs {
     /// Target cast hash (hex, optional 0x prefix).
     #[arg(long)]
     target_hash: String,
+
+    /// Hex Ed25519 secret of the signing key.
+    #[arg(long, env = "SIGNER_SECRET")]
+    signer_secret: String,
+}
+
+#[derive(Subcommand)]
+enum LinkCmd {
+    /// Submit a LINK_ADD — follow or block a target FID.
+    Add(LinkAddArgs),
+    /// Submit a LINK_REMOVE — undo a follow or block of a target FID.
+    Remove(LinkRemoveArgs),
+    /// Submit a LINK_COMPACT_STATE, replacing every link of this type with an
+    /// explicit target set. Targets not listed are dropped.
+    CompactState(LinkCompactStateArgs),
+}
+
+#[derive(clap::Args)]
+struct LinkAddArgs {
+    #[arg(long)]
+    fid: u64,
+
+    /// FID to follow/block.
+    #[arg(long)]
+    target_fid: u64,
+
+    /// Link type. `follow` and `block` are the well-known values; the node
+    /// enforces only a 1–8 byte length, so any short string is accepted.
+    #[arg(long = "type", default_value = "follow", value_parser = parse_link_type)]
+    link_type: String,
+
+    /// User-defined timestamp, preserved when compaction rewrites the message
+    /// timestamp. Defaults to unset.
+    #[arg(long)]
+    display_timestamp: Option<u32>,
+
+    /// Override the message timestamp (Farcaster epoch seconds).
+    #[arg(long)]
+    timestamp: Option<u32>,
+
+    /// Hex Ed25519 secret of the signing key.
+    #[arg(long, env = "SIGNER_SECRET")]
+    signer_secret: String,
+}
+
+#[derive(clap::Args)]
+struct LinkRemoveArgs {
+    #[arg(long)]
+    fid: u64,
+
+    /// FID to unfollow/unblock.
+    #[arg(long)]
+    target_fid: u64,
+
+    /// Link type. Must match the `type` of the LINK_ADD being undone.
+    #[arg(long = "type", default_value = "follow", value_parser = parse_link_type)]
+    link_type: String,
+
+    /// Override the message timestamp (Farcaster epoch seconds).
+    #[arg(long)]
+    timestamp: Option<u32>,
+
+    /// Hex Ed25519 secret of the signing key.
+    #[arg(long, env = "SIGNER_SECRET")]
+    signer_secret: String,
+}
+
+#[derive(clap::Args)]
+struct LinkCompactStateArgs {
+    #[arg(long)]
+    fid: u64,
+
+    /// Comma-separated target FIDs that survive compaction. At least one is
+    /// required; the node rejects an empty set.
+    #[arg(long, value_delimiter = ',', required = true)]
+    target_fids: Vec<u64>,
+
+    /// Link type whose state is being replaced.
+    #[arg(long = "type", default_value = "follow", value_parser = parse_link_type)]
+    link_type: String,
+
+    /// Override the message timestamp (Farcaster epoch seconds).
+    #[arg(long)]
+    timestamp: Option<u32>,
 
     /// Hex Ed25519 secret of the signing key.
     #[arg(long, env = "SIGNER_SECRET")]
@@ -378,6 +466,16 @@ fn parse_pubkey(s: &str) -> Result<[u8; 32], BoxedError> {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
     Ok(arr)
+}
+
+/// Mirrors `snapchain::core::validations::link::validate_link_type`, which bounds the
+/// type at 1–8 bytes but keeps no allowlist. Checked here so a typo fails at parse
+/// time rather than as a node-side rejection.
+fn parse_link_type(s: &str) -> Result<String, String> {
+    match s.len() {
+        1..=8 => Ok(s.to_string()),
+        n => Err(format!("link type must be 1-8 bytes, got {}", n)),
+    }
 }
 
 fn derive_custody(path: &str) -> Result<PrivateKeySigner, BoxedError> {
@@ -585,6 +683,62 @@ async fn run_cast_remove(
     submit(node, &msg, "CAST_REMOVE").await
 }
 
+async fn run_link(cmd: LinkCmd, node: &str, network: FarcasterNetwork) -> Result<(), BoxedError> {
+    match cmd {
+        LinkCmd::Add(args) => {
+            let signer = parse_secret(&args.signer_secret)?;
+            let mut msg = factory::links::create_link_add(
+                args.fid,
+                &args.link_type,
+                args.target_fid,
+                args.display_timestamp,
+                args.timestamp,
+                &signer,
+            );
+            retarget_network(&mut msg, network, &signer);
+            let label = format!(
+                "LINK_ADD {} {} -> {}",
+                args.link_type, args.fid, args.target_fid
+            );
+            submit(node, &msg, &label).await
+        }
+        LinkCmd::Remove(args) => {
+            let signer = parse_secret(&args.signer_secret)?;
+            let mut msg = factory::links::create_link_remove(
+                args.fid,
+                &args.link_type,
+                args.target_fid,
+                args.timestamp,
+                &signer,
+            );
+            retarget_network(&mut msg, network, &signer);
+            let label = format!(
+                "LINK_REMOVE {} {} -> {}",
+                args.link_type, args.fid, args.target_fid
+            );
+            submit(node, &msg, &label).await
+        }
+        LinkCmd::CompactState(args) => {
+            let signer = parse_secret(&args.signer_secret)?;
+            let label = format!(
+                "LINK_COMPACT_STATE {} {} -> {} target(s)",
+                args.link_type,
+                args.fid,
+                args.target_fids.len()
+            );
+            let mut msg = factory::links::create_link_compact_state(
+                args.fid,
+                &args.link_type,
+                args.target_fids,
+                args.timestamp,
+                &signer,
+            );
+            retarget_network(&mut msg, network, &signer);
+            submit(node, &msg, &label).await
+        }
+    }
+}
+
 async fn run_live_at(
     args: LiveAtArgs,
     node: &str,
@@ -743,6 +897,7 @@ async fn main() -> Result<(), BoxedError> {
         Cmd::KeyRemove(a) => run_key_remove(a, &cli.node, network).await,
         Cmd::CastAdd(a) => run_cast_add(a, &cli.node, network).await,
         Cmd::CastRemove(a) => run_cast_remove(a, &cli.node, network).await,
+        Cmd::Link(c) => run_link(c, &cli.node, network).await,
         Cmd::LiveAt(a) => run_live_at(a, &cli.node, network).await,
         Cmd::Subscribe(a) => run_subscribe(a).await,
     }

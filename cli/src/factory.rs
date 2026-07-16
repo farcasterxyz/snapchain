@@ -3,6 +3,7 @@
 //! Only the subset the CLI uses is mirrored here:
 //!   - [`casts::create_cast_add`], [`casts::create_cast_remove`]
 //!   - [`keys::create_key_add`], [`keys::create_key_remove_custody`], [`keys::create_key_remove_self_revoke`]
+//!   - [`links::create_link_add`], [`links::create_link_remove`], [`links::create_link_compact_state`]
 //!   - [`user_data::create_user_data_add`]
 //!
 //! `create_message_with_data` hard-codes `FarcasterNetwork::Mainnet`; the CLI's `retarget_network`
@@ -88,6 +89,74 @@ pub mod casts {
             fid,
             MessageType::CastRemove,
             proto::message_data::Body::CastRemoveBody(body),
+            timestamp,
+            private_key,
+        )
+    }
+}
+
+pub mod links {
+    use super::*;
+    use snapchain_proto::{link_body::Target, LinkBody, LinkCompactStateBody};
+
+    pub fn create_link_add(
+        fid: u64,
+        link_type: &str,
+        target_fid: u64,
+        display_timestamp: Option<u32>,
+        timestamp: Option<u32>,
+        private_key: &SigningKey,
+    ) -> proto::Message {
+        let body = LinkBody {
+            r#type: link_type.to_string(),
+            display_timestamp,
+            target: Some(Target::TargetFid(target_fid)),
+        };
+        create_message_with_data(
+            fid,
+            MessageType::LinkAdd,
+            proto::message_data::Body::LinkBody(body),
+            timestamp,
+            private_key,
+        )
+    }
+
+    pub fn create_link_remove(
+        fid: u64,
+        link_type: &str,
+        target_fid: u64,
+        timestamp: Option<u32>,
+        private_key: &SigningKey,
+    ) -> proto::Message {
+        let body = LinkBody {
+            r#type: link_type.to_string(),
+            display_timestamp: None,
+            target: Some(Target::TargetFid(target_fid)),
+        };
+        create_message_with_data(
+            fid,
+            MessageType::LinkRemove,
+            proto::message_data::Body::LinkBody(body),
+            timestamp,
+            private_key,
+        )
+    }
+
+    pub fn create_link_compact_state(
+        fid: u64,
+        link_type: &str,
+        target_fids: Vec<u64>,
+        timestamp: Option<u32>,
+        private_key: &SigningKey,
+    ) -> proto::Message {
+        let body = LinkCompactStateBody {
+            r#type: link_type.to_string(),
+            target_fids,
+        };
+        create_message_with_data(
+            fid,
+            MessageType::LinkCompactState,
+            proto::message_data::Body::LinkCompactStateBody(body),
             timestamp,
             private_key,
         )
