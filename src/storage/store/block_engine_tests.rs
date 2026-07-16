@@ -405,6 +405,54 @@ mod tests {
         commit_message(&mut replacement_engine, &replacement_add, Validity::Valid);
     }
 
+    // The `max_count == 0 && is_add` gate is invisible to the boundary test above: with no
+    // storage, a NON-superseding add is already rejected by `!supersedes_existing && 0 >= 0`.
+    // The gate only carries independent meaning for a SUPERSEDING add, which short-circuits the
+    // count check — i.e. a fid whose storage lapsed replacing a verification it already has.
+    // Without this case, deleting the gate leaves the whole suite green.
+    #[test]
+    fn test_shard_zero_superseding_add_rejected_without_storage() {
+        let timestamp = messages_factory::farcaster_time();
+        let (mut engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+
+        // Seed a record for the address so a later add supersedes rather than grows.
+        let existing_add = verification_add(timestamp, None);
+        commit_message(&mut engine, &existing_add, Validity::Valid);
+
+        // A superseding add for that same address, judged against an empty storage slot, must
+        // still be refused: shard 0's verification write path is otherwise gasless.
+        let superseding_add = verification_add(timestamp + 1, None);
+        assert!(matches!(
+            engine.validate_user_message(
+                &superseding_add,
+                &StorageSlot::new(0, 0, 0, u32::MAX),
+                &FarcasterTime::new((timestamp + 1) as u64),
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            ),
+            Err(MessageValidationError::InsufficientStorage)
+        ));
+
+        // The mirror case is admitted by design, so an at-cap fid can always shed state.
+        let superseding_remove = verification_remove(verification_address(), timestamp + 2);
+        assert!(engine
+            .validate_user_message(
+                &superseding_remove,
+                &StorageSlot::new(0, 0, 0, u32::MAX),
+                &FarcasterTime::new((timestamp + 2) as u64),
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            )
+            .is_ok());
+    }
+
     #[test]
     fn test_shard_zero_verification_quota_includes_borrowed_storage() {
         const LENDER_FID: u64 = 100;

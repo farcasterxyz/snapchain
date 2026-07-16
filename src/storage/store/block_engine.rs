@@ -808,8 +808,18 @@ impl BlockEngine {
                 )
             });
         let mut verification_storage_slot = if has_verification {
+            // Deliberately not `.unwrap()` like the slot above: that call passes
+            // count_borrowed_storage=false and never reads the lend store, while this one does.
+            // `get_storage_slot_for_fid` collapses a RocksDB error into `None`, so unwrapping
+            // would turn a transient local read failure into a panic on the propose/validate/
+            // commit paths. Surface it as an error instead, matching the data shard, whose
+            // equivalent read maps to `EngineError::UsageCountError` rather than aborting.
             self.storage_slot_for_transaction(snapchain_txn, version, true, true)
-                .unwrap()
+                .ok_or_else(|| {
+                    BlockEngineError::HubError(HubError::internal_db_error(
+                        "unable to read storage slot for shard-0 verification quota",
+                    ))
+                })?
         } else {
             storage_slot.clone()
         };
@@ -914,10 +924,23 @@ impl BlockEngine {
                                     );
                                     let mut merge_failure =
                                         Self::merge_failure_event(message, &err);
-                                    let _ = self
+                                    // Event-id assignment is a pure function of block content, so
+                                    // a failure here is identical on every node — the event drops
+                                    // from the stream network-wide rather than diverging.
+                                    // MergeFailure is trie-inert and never becomes a BlockEvent,
+                                    // so neither the state root nor events_hash is affected.
+                                    if let Err(event_err) = self
                                         .stores
                                         .event_handler
-                                        .commit_transaction(txn_batch, &mut merge_failure);
+                                        .commit_transaction(txn_batch, &mut merge_failure)
+                                    {
+                                        error!(
+                                            fid = message.fid(),
+                                            hash = message.hex_hash(),
+                                            "Failed to persist shard-0 verification merge failure event: {:?}",
+                                            event_err
+                                        );
+                                    }
                                     hub_events.push(merge_failure);
                                     validation_errors.push(err);
                                 }

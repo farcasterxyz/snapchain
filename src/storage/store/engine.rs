@@ -1395,8 +1395,8 @@ impl ShardEngine {
                         // gains a prune arm must opt in here too.
                         match self.handle_block_event(trie_ctx, block_event, txn_batch) {
                             Ok(hub_events) => {
-                                // MUTATION-TEST-TEMP
-                                let _ = Self::replayed_verification_prune_type(block_event);
+                                message_types_to_prune
+                                    .extend(Self::replayed_verification_prune_type(block_event));
                                 info!(
                                     num_hub_events = hub_events.len(),
                                     seqnum = block_event.seqnum(),
