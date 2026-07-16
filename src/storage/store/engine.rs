@@ -1321,6 +1321,27 @@ impl ShardEngine {
                         // dispatch function, not this site.
                         match self.handle_block_event(trie_ctx, block_event, txn_batch) {
                             Ok(hub_events) => {
+                                if let Some(proto::block_event_data::Body::MergeMessageEventBody(
+                                    body,
+                                )) = block_event
+                                    .data
+                                    .as_ref()
+                                    .and_then(|data| data.body.as_ref())
+                                {
+                                    if let Some(message) = body.message.as_ref() {
+                                        if matches!(
+                                            message.msg_type(),
+                                            MessageType::VerificationAddEthAddress
+                                                | MessageType::VerificationRemove
+                                        ) {
+                                            // Reuse the same deterministic post-loop prune pass
+                                            // as live user-message merges. The replay itself has
+                                            // already succeeded, so its combined pre-V20 +
+                                            // replayed state is what get_usage observes below.
+                                            message_types_to_prune.insert(message.msg_type());
+                                        }
+                                    }
+                                }
                                 info!(
                                     num_hub_events = hub_events.len(),
                                     seqnum = block_event.seqnum(),

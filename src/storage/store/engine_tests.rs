@@ -4088,9 +4088,13 @@ mod tests {
         }
 
         fn verification_remove(timestamp: u32) -> Message {
+            verification_remove_for_address(verification_address(), timestamp)
+        }
+
+        fn verification_remove_for_address(address: Vec<u8>, timestamp: u32) -> Message {
             messages_factory::verifications::create_verification_remove(
                 VERIFICATION_FID,
-                verification_address(),
+                address,
                 Some(timestamp),
                 None,
             )
@@ -4437,6 +4441,80 @@ mod tests {
                 merge_body_for(&state_change, &remove).deleted_messages,
                 vec![add]
             );
+        }
+
+        #[tokio::test]
+        async fn replay_prunes_combined_verification_state_to_storage_cap() {
+            let five_verification_limits =
+                StoreLimits::new(limits::legacy(), limits::legacy(), limits::legacy());
+            let (mut engine, _temp_dir) = test_helper::new_engine_with_options(EngineOptions {
+                limits: Some(five_verification_limits),
+                ..EngineOptions::default()
+            })
+            .await;
+            register_user(
+                VERIFICATION_FID,
+                test_helper::default_signer(),
+                test_helper::default_custody_address(),
+                &mut engine,
+            )
+            .await;
+            let timestamp = messages_factory::farcaster_time();
+            let pre_activation_rows = (1u8..=5)
+                .enumerate()
+                .map(|(index, byte)| {
+                    verification_remove_for_address(
+                        vec![byte; 20],
+                        timestamp + u32::try_from(index).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            for message in &pre_activation_rows {
+                commit_message(&mut engine, message).await;
+            }
+
+            let replayed_add = verification_add(timestamp + 10);
+            let state_change = replay_verification(&mut engine, &replayed_add, 1).await;
+
+            let stores = engine.get_stores();
+            assert_eq!(
+                VerificationStore::get_verification_remove(
+                    &stores.verification_store,
+                    VERIFICATION_FID,
+                    &[1; 20],
+                )
+                .unwrap(),
+                None,
+                "the oldest pre-activation row must be pruned"
+            );
+            for (index, message) in pre_activation_rows.iter().enumerate().skip(1) {
+                assert!(message_exists_in_trie(&mut engine, message));
+                assert!(VerificationStore::get_verification_remove(
+                    &stores.verification_store,
+                    VERIFICATION_FID,
+                    &[u8::try_from(index + 1).unwrap(); 20],
+                )
+                .unwrap()
+                .is_some());
+            }
+            assert!(message_exists_in_trie(&mut engine, &replayed_add));
+            assert_eq!(
+                stores
+                    .get_usage(
+                        VERIFICATION_FID,
+                        proto::MessageType::VerificationAddEthAddress,
+                        &mut RocksDbTransactionBatch::new(),
+                    )
+                    .unwrap(),
+                (5, 5)
+            );
+            assert!(state_change.events.iter().any(|event| {
+                matches!(
+                    &event.body,
+                    Some(hub_event::Body::PruneMessageBody(body))
+                        if body.message.as_ref() == Some(&pre_activation_rows[0])
+                )
+            }));
         }
     }
 
