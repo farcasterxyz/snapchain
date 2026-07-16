@@ -89,6 +89,15 @@ mod tests {
         )
     }
 
+    fn verification_remove(address: Vec<u8>, timestamp: u32) -> Message {
+        messages_factory::verifications::create_verification_remove(
+            VERIFICATION_FID,
+            address,
+            Some(timestamp),
+            None,
+        )
+    }
+
     fn assert_verification_index(
         engine: &crate::storage::store::block_engine::BlockEngine,
         expected: Option<&Message>,
@@ -311,6 +320,124 @@ mod tests {
             ),
             Err(MessageValidationError::MissingSigner)
         ));
+    }
+
+    #[test]
+    fn test_shard_zero_verification_quota_boundary() {
+        let timestamp = messages_factory::farcaster_time();
+
+        // No storage is an unconditional spam gate for adds, even before any replica rows exist.
+        let (mut no_storage_engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut no_storage_engine,
+        );
+        assert!(matches!(
+            no_storage_engine.validate_user_message(
+                &verification_add(timestamp, None),
+                &StorageSlot::new(0, 0, 0, u32::MAX),
+                &FarcasterTime::new(timestamp as u64),
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            ),
+            Err(MessageValidationError::InsufficientStorage)
+        ));
+
+        // One 2025 unit permits five verification records. Put six in one transaction so the
+        // sixth pins the in-transaction count maintained between successful merges.
+        let (mut engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+        let addresses = (1u8..=6).map(|byte| vec![byte; 20]).collect::<Vec<_>>();
+        let initial_removes = addresses
+            .iter()
+            .enumerate()
+            .map(|(index, address)| verification_remove(address.clone(), timestamp + index as u32))
+            .collect::<Vec<_>>();
+        let mut initial_results = initial_removes
+            .iter()
+            .take(5)
+            .map(|message| (message, Validity::Valid))
+            .collect::<Vec<_>>();
+        initial_results.push((&initial_removes[5], Validity::Invalid));
+        commit_messages(&mut engine, initial_results);
+
+        // A new logical key would grow the replica beyond five and is rejected.
+        let at_cap_add = verification_add(timestamp + 10, None);
+        commit_message(&mut engine, &at_cap_add, Validity::Invalid);
+
+        // A remove for an existing address is never quota-blocked: it supersedes the old row and
+        // leaves the replica count unchanged, allowing an at-cap user to shed live state.
+        let superseding_remove = verification_remove(addresses[0].clone(), timestamp + 11);
+        commit_message(&mut engine, &superseding_remove, Validity::Valid);
+
+        // Superseding adds are growth-neutral too. Build a second at-cap replica with the valid
+        // EOA fixture already present, then replace it with a newer add.
+        let (mut replacement_engine, _temp_dir) = setup();
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut replacement_engine,
+        );
+        let existing_add = verification_add(timestamp, None);
+        let filler_removes = (11u8..=14)
+            .enumerate()
+            .map(|(index, byte)| verification_remove(vec![byte; 20], timestamp + index as u32))
+            .collect::<Vec<_>>();
+        let mut at_cap_messages = vec![(&existing_add, Validity::Valid)];
+        at_cap_messages.extend(
+            filler_removes
+                .iter()
+                .map(|message| (message, Validity::Valid)),
+        );
+        commit_messages(&mut replacement_engine, at_cap_messages);
+        let replacement_add = verification_add(timestamp + 20, None);
+        commit_message(&mut replacement_engine, &replacement_add, Validity::Valid);
+    }
+
+    #[test]
+    fn test_shard_zero_verification_quota_includes_borrowed_storage() {
+        const LENDER_FID: u64 = 100;
+        let (mut engine, _temp_dir) = setup();
+        register_user(
+            LENDER_FID,
+            default_signer(),
+            default_custody_address(),
+            2,
+            &mut engine,
+        );
+        register_user(
+            VERIFICATION_FID,
+            default_signer(),
+            default_custody_address(),
+            0,
+            &mut engine,
+        );
+        let timestamp = messages_factory::farcaster_time();
+        let lend = messages_factory::storage_lend::create_storage_lend(
+            LENDER_FID,
+            VERIFICATION_FID,
+            1,
+            StorageUnitType::UnitType2025,
+            Some(timestamp),
+            None,
+        );
+        commit_message(&mut engine, &lend, Validity::Valid);
+
+        // The borrower owns no storage units. Admission succeeds only if shard 0 computes the
+        // verification limit from the net slot (purchased - lent + borrowed), as data shards do.
+        let add = verification_add(timestamp + 1, None);
+        commit_message(&mut engine, &add, Validity::Valid);
     }
 
     #[test]

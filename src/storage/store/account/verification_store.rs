@@ -3,7 +3,7 @@ use super::{
     store::{Store, StoreDef},
     MessagesPage, StoreEventHandler, FID_BYTES, TS_HASH_LENGTH,
 };
-use crate::storage::util::increment_vec_u8;
+use crate::storage::util::{increment_vec_u8, vec_to_u8_24};
 use crate::{
     core::error::HubError,
     proto::{Protocol, SignatureScheme, VerificationAddAddressBody, VerificationRemoveBody},
@@ -303,6 +303,15 @@ impl VerificationStore {
         fid: u64,
         address: &[u8],
     ) -> Result<Option<Message>, HubError> {
+        Self::get_verification_remove_with_txn(store, fid, address, None)
+    }
+
+    pub fn get_verification_remove_with_txn(
+        store: &Store<VerificationStoreDef>,
+        fid: u64,
+        address: &[u8],
+        maybe_txn: Option<&RocksDbTransactionBatch>,
+    ) -> Result<Option<Message>, HubError> {
         let partial_message = Message {
             data: Some(MessageData {
                 fid,
@@ -316,7 +325,24 @@ impl VerificationStore {
             ..Default::default()
         };
 
-        store.get_remove(&partial_message)
+        match maybe_txn {
+            Some(txn) => {
+                let removes_key = VerificationStoreDef::make_verification_removes_key(fid, address);
+                let message_ts_hash =
+                    super::message::get_from_db_or_txn(store.db().as_ref(), txn, &removes_key)?;
+                match message_ts_hash {
+                    Some(ts_hash) => super::message::get_message(
+                        store.db().as_ref(),
+                        txn,
+                        fid,
+                        store.postfix(),
+                        &vec_to_u8_24(&Some(ts_hash))?,
+                    ),
+                    None => Ok(None),
+                }
+            }
+            None => store.get_remove(&partial_message),
+        }
     }
 
     /// Returns the `(fid, ts_hash)` of every verification currently indexed for

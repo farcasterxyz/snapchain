@@ -6,16 +6,17 @@ use crate::mempool::mempool::MempoolMessagesRequest;
 use crate::proto::{
     self, block_event_data, Block, BlockEvent, BlockEventData, BlockEventType, FarcasterNetwork,
     HeartbeatEventBody, HubEvent, MergeMessageBody, MessageType, OnChainEvent, ShardChunkWitness,
-    Transaction,
+    StoreType, Transaction,
 };
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
-    BlockEventStore, MergeContext, OnchainEventStorageError, OnchainEventStore, StorageLendStore,
-    StorageLendStoreDef, StorageSlot, Store, StoreEventHandler, VerificationStore,
-    VerificationStoreDef,
+    BlockEventStore, IntoU8, MergeContext, OnchainEventStorageError, OnchainEventStore,
+    StorageLendStore, StorageLendStoreDef, StorageSlot, Store, StoreEventHandler,
+    VerificationStore, VerificationStoreDef,
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
+use crate::storage::store::stores::StoreLimits;
 use crate::storage::store::BlockStore;
 use crate::storage::trie::merkle_trie::{self, MerkleTrie, TrieKey};
 use crate::storage::trie::{self};
@@ -286,6 +287,88 @@ impl BlockEngine {
         version: EngineVersion,
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<(), MessageValidationError> {
+        self.validate_user_message_with_verification_count(
+            message,
+            storage_slot,
+            timestamp,
+            version,
+            txn_batch,
+            None,
+        )
+    }
+
+    fn verification_message_count(
+        &self,
+        fid: u64,
+        txn_batch: &RocksDbTransactionBatch,
+    ) -> Result<u32, HubError> {
+        let mut count = 0u64;
+        for msg_type in [
+            MessageType::VerificationAddEthAddress,
+            MessageType::VerificationRemove,
+        ] {
+            count = count
+                .checked_add(
+                    self.stores
+                        .trie
+                        .get_count(
+                            &self.stores.db,
+                            txn_batch,
+                            &TrieKey::for_message_type(fid, msg_type.into_u8()),
+                        )
+                        .map_err(|err| {
+                            HubError::internal_db_error(&format!(
+                                "unable to count shard-0 verifications: {err}"
+                            ))
+                        })?,
+                )
+                .ok_or_else(|| HubError::internal_db_error("verification count overflow"))?;
+        }
+        u32::try_from(count)
+            .map_err(|_| HubError::internal_db_error("verification count exceeds u32"))
+    }
+
+    fn verification_logical_key_exists(
+        &self,
+        fid: u64,
+        body: &crate::proto::message_data::Body,
+        txn_batch: &RocksDbTransactionBatch,
+    ) -> Result<bool, MessageValidationError> {
+        let address = match body {
+            crate::proto::message_data::Body::VerificationAddAddressBody(body) => &body.address,
+            crate::proto::message_data::Body::VerificationRemoveBody(body) => &body.address,
+            _ => return Ok(false),
+        };
+        let add_exists = VerificationStore::get_verification_add(
+            &self.stores.verification_store,
+            fid,
+            address,
+            Some(txn_batch),
+        )
+        .map_err(MessageValidationError::HubError)?
+        .is_some();
+        if add_exists {
+            return Ok(true);
+        }
+        Ok(VerificationStore::get_verification_remove_with_txn(
+            &self.stores.verification_store,
+            fid,
+            address,
+            Some(txn_batch),
+        )
+        .map_err(MessageValidationError::HubError)?
+        .is_some())
+    }
+
+    fn validate_user_message_with_verification_count(
+        &self,
+        message: &proto::Message,
+        storage_slot: &StorageSlot,
+        timestamp: &FarcasterTime,
+        version: EngineVersion,
+        txn_batch: &mut RocksDbTransactionBatch,
+        verification_count: Option<u32>,
+    ) -> Result<(), MessageValidationError> {
         // Ensure message data is present
         let message_data = message
             .data
@@ -434,6 +517,31 @@ impl BlockEngine {
                     // one. Dropping this check is a one-line revert if that fan-out lands with
                     // conflict-free replay semantics instead.
                     return Err(MessageValidationError::InvalidMessageType);
+                }
+
+                let max_count =
+                    StoreLimits::default().max_messages(storage_slot, StoreType::Verifications);
+                let is_add = matches!(
+                    body,
+                    crate::proto::message_data::Body::VerificationAddAddressBody(_)
+                );
+                // With no active storage, adds are never admitted, including replacements. This
+                // is the spam gate for shard 0's otherwise gasless verification write path.
+                if max_count == 0 && is_add {
+                    return Err(MessageValidationError::InsufficientStorage);
+                }
+                let supersedes_existing =
+                    self.verification_logical_key_exists(message_data.fid, body, txn_batch)?;
+                if !supersedes_existing {
+                    let current_count = match verification_count {
+                        Some(count) => count,
+                        None => self
+                            .verification_message_count(message_data.fid, txn_batch)
+                            .map_err(MessageValidationError::HubError)?,
+                    };
+                    if current_count >= max_count {
+                        return Err(MessageValidationError::InsufficientStorage);
+                    }
                 }
             }
             _ => return Err(MessageValidationError::InvalidMessageType),
@@ -631,10 +739,40 @@ impl BlockEngine {
         let mut storage_slot = self
             .storage_slot_for_transaction(snapchain_txn, version, true, false)
             .unwrap();
+        // Lending validation must exclude borrowed units, but verification quota must include
+        // them exactly as data-shard StoreLimits does. Keep two views and apply any successful
+        // lend in this transaction to both so later verification admission sees the same net
+        // slot on proposal, validation, and commit replay.
+        let verification_feature_enabled =
+            version.is_enabled(ProtocolFeature::VerificationsOnShardZero);
+        let mut verification_storage_slot = if verification_feature_enabled {
+            self.storage_slot_for_transaction(snapchain_txn, version, true, true)
+                .unwrap()
+        } else {
+            storage_slot.clone()
+        };
+        let mut verification_count = if verification_feature_enabled {
+            self.verification_message_count(snapchain_txn.fid, txn_batch)
+                .map_err(BlockEngineError::HubError)?
+        } else {
+            0
+        };
 
         for message in &snapchain_txn.user_messages {
-            match self.validate_user_message(message, &storage_slot, timestamp, version, txn_batch)
-            {
+            let validation_storage_slot = match message.msg_type() {
+                MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => {
+                    &verification_storage_slot
+                }
+                _ => &storage_slot,
+            };
+            match self.validate_user_message_with_verification_count(
+                message,
+                validation_storage_slot,
+                timestamp,
+                version,
+                txn_batch,
+                Some(verification_count),
+            ) {
                 Ok(()) => match message.msg_type() {
                     MessageType::LendStorage => {
                         if version.is_enabled(ProtocolFeature::StorageLending) {
@@ -648,6 +786,16 @@ impl BlockEngine {
                                             &merge_message_body,
                                         )?,
                                         _ => {}
+                                    }
+                                }
+                                for event in &events {
+                                    if let proto::hub_event::Body::MergeMessageBody(body) =
+                                        event.body.as_ref().unwrap()
+                                    {
+                                        self.on_merge_message(
+                                            &mut verification_storage_slot,
+                                            body,
+                                        )?;
                                     }
                                 }
                                 hub_events.extend(events);
@@ -664,39 +812,43 @@ impl BlockEngine {
                             }
                         }
                     }
-                    // Nothing routes verifications here (`route_message` sends them to the fid's
-                    // data shard), so in practice this arm is reached only by tests. Routing is a
-                    // mempool convention, though, not something replay checks: on any network
-                    // where the feature is live, a hand-built block containing a verification
-                    // would merge here. Today that means devnet only — V20 is unscheduled on
-                    // mainnet and testnet.
-                    //
-                    // Before routing flips to shard 0, two obligations beyond the flip itself
-                    // must be satisfied. Fan-out now satisfies the first; the second remains:
-                    //
-                    // 1. Fan-out is mandatory, not optional. Verification merge events are now
-                    //    allowlisted by `generate_block_events`, but routing still prevents
-                    //    production verification merges on shard 0, so the replay leg remains
-                    //    unreachable. Data shards own consumers that read their *local*
-                    //    verification store — notably `ShardEngine::verify_fid_owns_address`,
-                    //    which gates primary-address UserData. Flipping routing without this
-                    //    fan-out would strand every new verification on shard 0 and make
-                    //    primary-address sets fail with `AddressNotPartOfVerification`
-                    //    network-wide.
-                    // 2. Quota has no mechanism here, which is a structural gap rather than a
-                    //    missing call: verifications are storage-limited on data shards
-                    //    (`StoreType::Verifications`, enforced by `ShardEngine`'s post-merge
-                    //    `prune_messages`), but `BlockStores` carries no `StoreLimits` and this
-                    //    engine has no prune driver at all. The `prune_size_limit` handed to
-                    //    `VerificationStore::new` is not that mechanism and enforces nothing —
-                    //    `get_prune_size_limit` has no callers; it is set to the data shard's
-                    //    value only so the two cannot drift. Deferred deliberately — replica-only
-                    //    counts cannot stand in for the fid shard's full history, so the rule is
-                    //    the replay leg's to define.
+                    // Routing still sends verifications to the fid's data shard, so this arm is
+                    // inert outside hand-built blocks until the activation flip. The prerequisites
+                    // for that flip now live on both sides: shard 0 rejects replica growth at its
+                    // storage-derived cap, and successful merges fan out for data-shard replay.
                     MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => {
                         if version.is_enabled(ProtocolFeature::VerificationsOnShardZero) {
                             match self.merge_message(message, txn_batch, version) {
-                                Ok(events) => hub_events.extend(events),
+                                Ok(events) => {
+                                    for event in &events {
+                                        if let Some(proto::hub_event::Body::MergeMessageBody(
+                                            body,
+                                        )) = event.body.as_ref()
+                                        {
+                                            let added = u32::from(body.message.is_some());
+                                            let deleted =
+                                                u32::try_from(body.deleted_messages.len())
+                                                    .map_err(|_| {
+                                                        BlockEngineError::HubError(
+                                                    HubError::internal_db_error(
+                                                        "verification merge deleted too many rows",
+                                                    ),
+                                                )
+                                                    })?;
+                                            verification_count = verification_count
+                                                .checked_add(added)
+                                                .and_then(|count| count.checked_sub(deleted))
+                                                .ok_or_else(|| {
+                                                    BlockEngineError::HubError(
+                                                        HubError::internal_db_error(
+                                                            "verification merge count underflow",
+                                                        ),
+                                                    )
+                                                })?;
+                                        }
+                                    }
+                                    hub_events.extend(events)
+                                }
                                 Err(err) => {
                                     // Surfaced rather than swallowed, unlike the arms above, and
                                     // the asymmetry is deliberate. For those types the routine
