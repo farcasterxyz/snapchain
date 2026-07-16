@@ -469,16 +469,23 @@ mod tests {
         let pre_activation_timestamp = 0;
         let message = verification_add(pre_activation_timestamp, None);
 
-        assert!(matches!(
-            block_engine.validate_user_message(
+        let error = block_engine
+            .validate_user_message(
                 &message,
                 &StorageSlot::new(0, 0, 1, u32::MAX),
                 &FarcasterTime::new(pre_activation_timestamp as u64),
                 EngineVersion::V20,
                 &mut RocksDbTransactionBatch::new(),
-            ),
-            Err(MessageValidationError::InvalidMessageType)
+            )
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            MessageValidationError::VerificationTimestampBeforeActivation
         ));
+        assert_eq!(
+            error.to_string(),
+            "verification timestamp predates shard-zero activation"
+        );
     }
 
     /// A message's `r#type` and its body are independent on the wire, and nothing in

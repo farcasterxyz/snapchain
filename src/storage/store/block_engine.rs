@@ -70,6 +70,9 @@ pub enum MessageValidationError {
     #[error("invalid message type")]
     InvalidMessageType,
 
+    #[error("verification timestamp predates shard-zero activation")]
+    VerificationTimestampBeforeActivation,
+
     #[error("insufficient storage")]
     InsufficientStorage,
 
@@ -517,7 +520,7 @@ impl BlockEngine {
                     // Refusing old-regime messages here means such a replay can never encounter
                     // one. Dropping this check is a one-line revert if that fan-out lands with
                     // conflict-free replay semantics instead.
-                    return Err(MessageValidationError::InvalidMessageType);
+                    return Err(MessageValidationError::VerificationTimestampBeforeActivation);
                 }
 
                 let max_count =
