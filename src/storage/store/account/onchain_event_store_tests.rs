@@ -28,6 +28,13 @@ mod tests {
         )
     }
 
+    // This test deliberately pins historical grant dates, because a unit's cohort (legacy / 2024 /
+    // 2025) is decided by its grant timestamp -- a `now`-dated grant can only ever be the newest
+    // cohort. That makes `is_active()` assertions unusable here: it compares `invalidate_at` against
+    // wall-clock `SystemTime::now()`, so any "still active" assertion on a pinned grant rots once
+    // real time passes grant + validity. Assert `invalidate_at` instead, which pins the same
+    // behaviour deterministically. The one `is_active()` below asserting *false* is safe: that grant
+    // is backdated far enough to be expired under every multiplier, now and forever.
     #[test]
     fn test_storage_slot_from_rent_event() {
         let one_year_in_seconds = 365 * 24 * 60 * 60;
@@ -79,7 +86,6 @@ mod tests {
             EngineVersion::V17,
         )
         .unwrap();
-        assert_eq!(slot.is_active(), true);
         assert_eq!(slot.units_for(StorageUnitType::UnitTypeLegacy), 5);
         assert_eq!(
             slot.invalidate_at,
@@ -91,7 +97,6 @@ mod tests {
             EngineVersion::V18,
         )
         .unwrap();
-        assert_eq!(slot.is_active(), true);
         assert_eq!(slot.units_for(StorageUnitType::UnitTypeLegacy), 5);
         assert_eq!(
             slot.invalidate_at,
@@ -112,7 +117,6 @@ mod tests {
             EngineVersion::V17,
         )
         .unwrap();
-        assert_eq!(slot.is_active(), true);
         assert_eq!(slot.units_for(StorageUnitType::UnitType2024), 9);
         assert_eq!(
             slot.invalidate_at,
@@ -143,7 +147,12 @@ mod tests {
             EngineVersion::V17,
         )
         .unwrap();
-        assert_eq!(slot.is_active(), true);
+        // No `is_active()` assertion here: it compares against wall-clock `SystemTime::now()`, and
+        // this grant is deliberately pinned to a historical date so it classifies as 2025-cohort
+        // (a `now`-dated grant would fall in the new-rental branch instead). Under V17 the unit only
+        // gets 1 year, so `is_active()` here goes false one year after the pinned date and rots the
+        // test. `invalidate_at` below covers the same ground deterministically, and the V18 block
+        // that follows already asserts only that.
         assert_eq!(slot.units_for(StorageUnitType::UnitType2025), 3);
         assert_eq!(
             slot.invalidate_at,
@@ -302,34 +311,43 @@ mod tests {
             FarcasterNetwork::Mainnet,
         );
 
-        let valid_legacy_rent_event = factory::events_factory::create_rent_event(
+        // NOTE: `another_*` events below share their fid, type and timestamp with the event above
+        // them, so `create_rent_event` derives the same block number base for both. The only thing
+        // separating their primary keys (type + fid + block_number + log_index) is the factory's
+        // `rand % 1000` block-number jitter, which collides 1-in-1000 and fails the merge below with
+        // `DuplicateOnchainEvent`. Pin distinct log indices so the keys differ deterministically.
+        let mut valid_legacy_rent_event = factory::events_factory::create_rent_event(
             10,
             5,
             StorageUnitType::UnitTypeLegacy,
             false,
             FarcasterNetwork::Mainnet,
         );
-        let another_valid_legacy_rent_event = factory::events_factory::create_rent_event(
+        valid_legacy_rent_event.log_index = 0;
+        let mut another_valid_legacy_rent_event = factory::events_factory::create_rent_event(
             10,
             7,
             StorageUnitType::UnitTypeLegacy,
             false,
             FarcasterNetwork::Mainnet,
         );
-        let valid_2024_rent_event = factory::events_factory::create_rent_event(
+        another_valid_legacy_rent_event.log_index = 1;
+        let mut valid_2024_rent_event = factory::events_factory::create_rent_event(
             10,
             9,
             StorageUnitType::UnitType2024,
             false,
             FarcasterNetwork::Mainnet,
         );
-        let another_valid_2024_rent_event = factory::events_factory::create_rent_event(
+        valid_2024_rent_event.log_index = 0;
+        let mut another_valid_2024_rent_event = factory::events_factory::create_rent_event(
             10,
             11,
             StorageUnitType::UnitType2024,
             false,
             FarcasterNetwork::Mainnet,
         );
+        another_valid_2024_rent_event.log_index = 1;
 
         let valid_rent_event_different_fid = factory::events_factory::create_rent_event(
             11,
@@ -339,12 +357,15 @@ mod tests {
             FarcasterNetwork::Mainnet,
         );
 
-        // Get timestamp for a date in Sep 2025
-        let september_first_2025_timestamp = 1756710000;
+        // Rolling grant date, not a fixed one. This slot only has to be *active* here (the merge
+        // below skips expired slots outright, so an aged-out grant would zero the unit assertions
+        // further down, not just the `is_active()` one). A `now`-dated grant still classifies as
+        // UnitType2025, which is all this test needs; the cohort-vs-new-rental boundary is covered
+        // deterministically by `test_storage_slot_from_rent_event`.
         let valid_2025_rent_event = factory::events_factory::create_rent_event_with_timestamp(
             12,
             1,
-            september_first_2025_timestamp,
+            factory::time::current_timestamp(),
         );
 
         let mut txn = RocksDbTransactionBatch::new();
