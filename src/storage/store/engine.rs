@@ -666,6 +666,56 @@ impl ShardEngine {
         self.stores.event_handler.set_current_height(0);
     }
 
+    #[cfg(test)]
+    pub(crate) fn commit_replicator_message_for_test(
+        &mut self,
+        message: &proto::Message,
+    ) -> Result<(), EngineError> {
+        let trie_message = ShardTrieEntryWithMessage {
+            trie_message: Some(TrieMessage::UserMessage(message.clone())),
+            ..Default::default()
+        };
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        let merged = self.replay_replicator_message(&mut txn_batch, &trie_message)?;
+        self.update_trie(
+            &merkle_trie::Context::new(),
+            &merged.hub_event,
+            &mut txn_batch,
+        )?;
+        self.db
+            .commit(txn_batch)
+            .map_err(HubError::from)
+            .map_err(EngineError::StoreError)?;
+        self.stores.trie.reload(&self.db)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn commit_verification_with_hints_for_test(
+        &mut self,
+        message: &proto::Message,
+    ) -> Result<(), EngineError> {
+        // The V20 direct-admission arm intentionally makes this legacy user-message hook
+        // unreachable in production. Keep its structural tests precise by exercising the same
+        // successful merge -> trie -> hint sequence while bypassing admission only.
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        let merge_events = self.merge_message(message, &mut txn_batch)?;
+        for event in &merge_events {
+            self.update_trie(&merkle_trie::Context::new(), event, &mut txn_batch)?;
+        }
+        let _hints = self.emit_channel_owner_hints_for_verification(
+            message,
+            &mut txn_batch,
+            EngineVersion::V20,
+        );
+        self.db
+            .commit(txn_batch)
+            .map_err(HubError::from)
+            .map_err(EngineError::StoreError)?;
+        self.stores.trie.reload(&self.db)?;
+        Ok(())
+    }
+
     fn handle_block_event(
         &mut self,
         trie_ctx: &merkle_trie::Context,
@@ -1969,6 +2019,21 @@ impl ShardEngine {
 
         // Don't allow storage lends to be merged directly without going through shard 0
         if message_data.r#type() == MessageType::LendStorage {
+            return Err(MessageValidationError::InvalidMessageType(
+                message_data.r#type,
+            ));
+        }
+
+        // Verifications ordered at V20 and later must enter through shard 0 so quota,
+        // consensus ordering, and fan-out all observe the same write. Historical blocks keep
+        // their block-derived pre-V20 version, and BlockEvent/replicator replay bypasses this
+        // admission function entirely.
+        if version.is_enabled(ProtocolFeature::VerificationsOnShardZero)
+            && matches!(
+                message_data.r#type(),
+                MessageType::VerificationAddEthAddress | MessageType::VerificationRemove
+            )
+        {
             return Err(MessageValidationError::InvalidMessageType(
                 message_data.r#type,
             ));

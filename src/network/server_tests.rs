@@ -2388,7 +2388,9 @@ mod tests {
             None,
         );
 
-        test_helper::commit_message(&mut engine2, &verification_add).await;
+        // This read-path test needs a historical data-shard verification row, not a new direct
+        // submission. V20 rejects the latter by design, so seed the store as pre-activation state.
+        merge_verification(&engine2.get_stores(), &verification_add);
 
         let username_proof = UserNameProof {
             timestamp: messages_factory::farcaster_time() as u64,
