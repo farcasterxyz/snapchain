@@ -4236,6 +4236,7 @@ mod tests {
             let entries = VerificationStore::get_verifications_by_address(
                 &stores.verification_store,
                 &verification_address(),
+                None,
             )
             .unwrap();
             match expected {

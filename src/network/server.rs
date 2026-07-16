@@ -60,7 +60,6 @@ use crate::version::version::{EngineVersion, ProtocolFeature};
 use hex::ToHex;
 use moka::policy::EvictionPolicy;
 use moka::sync::{Cache, CacheBuilder};
-use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -132,22 +131,13 @@ fn resolve_channel_owner_fid(
     shard_stores: &HashMap<u32, Stores>,
     owner_address: &[u8],
 ) -> Result<u64, Status> {
-    // Last-write-wins winner, keyed so that plain tuple ordering encodes the
-    // selection rule. `ts_hash` is a 24-byte big-endian timestamp ++ message
-    // hash, so the higher `ts_hash` wins on timestamp and, at equal timestamps,
-    // on the message-hash bytes — this already resolves any tie between two
-    // distinct verifications. `Reverse(fid)` is only consulted on a full 24-byte
-    // `ts_hash` tie, which cannot occur for two distinct messages (the hash
-    // differs); it exists solely to keep the result total and deterministic.
-    // Strict `>` means an identical key never displaces the incumbent, so the
-    // winner is independent of shard/candidate iteration order (the
-    // `shard_stores` map iterates in an unspecified order).
-    let mut winner: Option<([u8; 24], Reverse<u64>)> = None;
+    let mut authoritative_candidates = Vec::new();
 
     for stores in shard_stores.values() {
         let candidates = VerificationStore::get_verifications_by_address(
             &stores.verification_store,
             owner_address,
+            None,
         )
         .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?;
 
@@ -182,14 +172,16 @@ fn resolve_channel_owner_fid(
             let ts_hash = make_ts_hash(data.timestamp, &primary_add.hash)
                 .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?;
 
-            let candidate = (ts_hash, Reverse(fid));
-            if winner.as_ref().is_none_or(|best| candidate > *best) {
-                winner = Some(candidate);
-            }
+            authoritative_candidates.push((fid, ts_hash));
         }
     }
 
-    Ok(winner.map(|(_ts_hash, fid)| fid.0).unwrap_or(0))
+    Ok(
+        crate::storage::store::account::select_verification_address_winner(
+            authoritative_candidates,
+        )
+        .unwrap_or(0),
+    )
 }
 
 fn onchain_event_storage_error_to_status(err: OnchainEventStorageError) -> Status {

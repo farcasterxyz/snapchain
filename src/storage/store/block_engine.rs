@@ -11,11 +11,11 @@ use crate::proto::{
 };
 use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
-    BlockEventStore, ChannelMemberStore, ChannelMemberStoreDef, ChannelModerateStore,
-    ChannelModerateStoreDef, ChannelPinStore, ChannelPinStoreDef, ChannelUpdateStore,
-    ChannelUpdateStoreDef, IntoU8, MergeContext, OnchainEventStorageError, OnchainEventStore,
-    StorageLendStore, StorageLendStoreDef, StorageSlot, Store, StoreEventHandler,
-    VerificationStore, VerificationStoreDef,
+    make_ts_hash, select_verification_address_winner, BlockEventStore, ChannelMemberStore,
+    ChannelMemberStoreDef, ChannelModerateStore, ChannelModerateStoreDef, ChannelPinStore,
+    ChannelPinStoreDef, ChannelUpdateStore, ChannelUpdateStoreDef, IntoU8, MergeContext,
+    OnchainEventStorageError, OnchainEventStore, StorageLendStore, StorageLendStoreDef,
+    StorageSlot, Store, StoreEventHandler, VerificationStore, VerificationStoreDef,
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
@@ -218,6 +218,38 @@ impl BlockStores {
         self.block_store
             .get_block_by_height(block_event.block_number())
             .ok()?
+    }
+
+    /// Resolves the current shard-0 verification replica for merge-time channel authority.
+    /// The by-address index is candidate-only, so every entry is revalidated against the primary
+    /// add through the same transaction before applying the shared deterministic winner rule.
+    pub fn resolve_channel_owner_fid(
+        &self,
+        owner_address: &[u8],
+        maybe_txn: Option<&RocksDbTransactionBatch>,
+    ) -> Result<u64, HubError> {
+        let candidates = VerificationStore::get_verifications_by_address(
+            &self.verification_store,
+            owner_address,
+            maybe_txn,
+        )?;
+        let mut authoritative = Vec::new();
+        for (fid, _indexed_ts_hash) in candidates {
+            let Some(primary_add) = VerificationStore::get_verification_add(
+                &self.verification_store,
+                fid,
+                owner_address,
+                maybe_txn,
+            )?
+            else {
+                continue;
+            };
+            let Some(data) = primary_add.data.as_ref() else {
+                continue;
+            };
+            authoritative.push((fid, make_ts_hash(data.timestamp, &primary_add.hash)?));
+        }
+        Ok(select_verification_address_winner(authoritative).unwrap_or(0))
     }
 
     pub fn get_storage_slot_for_fid(

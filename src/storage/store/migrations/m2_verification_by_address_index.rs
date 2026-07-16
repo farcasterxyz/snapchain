@@ -341,6 +341,7 @@ mod tests {
         let entries = VerificationStore::get_verifications_by_address(
             &stores.verification_store,
             &verification_address,
+            None,
         )
         .unwrap();
         assert_eq!(entries.len(), 2);
@@ -377,6 +378,7 @@ mod tests {
         let entries = VerificationStore::get_verifications_by_address(
             &stores.verification_store,
             &verification_address,
+            None,
         )
         .unwrap();
         assert_eq!(entries.len(), 2);

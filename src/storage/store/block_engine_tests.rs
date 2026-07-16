@@ -8,7 +8,7 @@ mod tests {
     };
     use crate::storage::db::RocksDbTransactionBatch;
     use crate::storage::store::account::{
-        make_ts_hash, HubEventStorageExt, IntoU8, StorageSlot, VerificationStore,
+        make_ts_hash, HubEventStorageExt, IntoU8, MergeContext, StorageSlot, VerificationStore,
     };
     use crate::storage::store::block_engine::{BlockStateChange, MessageValidationError};
     use crate::storage::store::block_engine_test_helpers::*;
@@ -150,6 +150,7 @@ mod tests {
         let entries = VerificationStore::get_verifications_by_address(
             &stores.verification_store,
             &verification_address(),
+            None,
         )
         .unwrap();
         match expected {
@@ -163,6 +164,65 @@ mod tests {
             }
             None => assert!(entries.is_empty()),
         }
+    }
+
+    #[test]
+    fn channel_owner_fid_resolution_sees_same_transaction_verification_changes() {
+        let (engine, _tmpdir) = setup();
+        let stores = engine.stores();
+        let owner_address = vec![0xAB; 20];
+        let older = messages_factory::verifications::create_verification_add(
+            10,
+            1,
+            owner_address.clone(),
+            vec![],
+            vec![0x11; 32],
+            Some(100),
+            None,
+        );
+        let newer = messages_factory::verifications::create_verification_add(
+            20,
+            1,
+            owner_address.clone(),
+            vec![],
+            vec![0x22; 32],
+            Some(200),
+            None,
+        );
+        let remove_newer = messages_factory::verifications::create_verification_remove(
+            20,
+            owner_address.clone(),
+            Some(300),
+            None,
+        );
+        let mut txn = RocksDbTransactionBatch::new();
+        let ctx = MergeContext {
+            version: EngineVersion::V20,
+        };
+        stores
+            .verification_store
+            .merge(&older, &mut txn, &ctx)
+            .unwrap();
+        stores
+            .verification_store
+            .merge(&newer, &mut txn, &ctx)
+            .unwrap();
+        assert_eq!(
+            stores
+                .resolve_channel_owner_fid(&owner_address, Some(&txn))
+                .unwrap(),
+            20
+        );
+        stores
+            .verification_store
+            .merge(&remove_newer, &mut txn, &ctx)
+            .unwrap();
+        assert_eq!(
+            stores
+                .resolve_channel_owner_fid(&owner_address, Some(&txn))
+                .unwrap(),
+            10
+        );
     }
 
     fn verification_block_event_messages(block: &Block) -> Vec<&Message> {
