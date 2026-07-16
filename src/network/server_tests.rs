@@ -376,6 +376,7 @@ mod tests {
         let (engine2, _) = test_helper::new_engine_with_options(test_helper::EngineOptions {
             limits: Some(limits.clone()),
             messages_request_tx: Some(msgs_request_tx.clone()),
+            shard_id: 2,
             ..Default::default()
         })
         .await;
@@ -3668,6 +3669,149 @@ mod tests {
             state_change.transactions[0].user_messages[0],
             storage_lend_message
         )
+    }
+
+    #[tokio::test]
+    async fn test_verification_activation_pipeline_preserves_primary_address_ownership() {
+        let (
+            _stores,
+            _senders,
+            [_engine1, mut data_engine],
+            mut block_engine,
+            service,
+            shard_decision_tx,
+            block_decision_tx,
+        ) = make_server(None).await;
+        let fid = 2u64; // EvenOddRouterForTest routes this FID's data to shard 2.
+        let signer = test_helper::default_signer();
+        let custody = test_helper::default_custody_address();
+        block_engine_test_helpers::register_user(
+            fid,
+            signer.clone(),
+            custody.clone(),
+            1,
+            &mut block_engine,
+        );
+        test_helper::register_user(fid, signer, custody, &mut data_engine).await;
+
+        let timestamp = messages_factory::farcaster_time();
+        let address = hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap();
+        let verification_add = messages_factory::verifications::create_verification_add(
+            fid,
+            0,
+            address.clone(),
+            hex::decode("b72c63d61f075b36fb66a9a867b50836cef19d653a3c09005628738677bcb25f25b6b6e6d2e1d69cd725327b3c020deef9e2575a22dc8ed08f88bc75718ce1cb1c").unwrap(),
+            hex::decode("d74860c4bbf574d5ad60f03a478a30f990e05ac723e138a5c860cdb3095f4296").unwrap(),
+            Some(timestamp),
+            None,
+        );
+
+        // Submit through the real RPC routing/simulation path, then prove the message was queued
+        // on shard 0 (where floor + quota admission run) rather than on the FID shard.
+        assert_eq!(
+            submit_message(&service, verification_add.clone())
+                .await
+                .unwrap()
+                .into_inner(),
+            verification_add
+        );
+        let block_messages = block_engine
+            .mempool_poller
+            .pull_messages(Duration::from_millis(100))
+            .await
+            .unwrap();
+        assert!(matches!(
+            block_messages.as_slice(),
+            [crate::storage::store::mempool_poller::MempoolMessage::UserMessage(message)]
+                if message == &verification_add
+        ));
+
+        let add_height = block_engine.get_confirmed_height().increment();
+        let add_state = block_engine.propose_state_change(block_messages, add_height, None);
+        let add_block = block_engine_test_helpers::validate_and_commit_state_change(
+            &mut block_engine,
+            &add_state,
+        );
+        let _ = block_decision_tx.send(add_block.clone());
+        let verification_events = add_block
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.data.as_ref().and_then(|data| data.body.as_ref()),
+                    Some(proto::block_event_data::Body::MergeMessageEventBody(body))
+                        if body.message.as_ref() == Some(&verification_add)
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(verification_events.len(), 1);
+
+        // Fan the shard-0 block events into the FID shard through its public replay path.
+        test_helper::commit_block_events(&mut data_engine, add_block.events.iter().collect()).await;
+        assert_eq!(
+            data_engine.get_verifications_by_fid(fid).unwrap().messages,
+            vec![verification_add.clone()]
+        );
+
+        // The primary-address write is admitted only because replay populated the FID shard's
+        // local verification store.
+        let checksummed = alloy_primitives::Address::from_slice(&address).to_checksum(None);
+        let primary_address = messages_factory::user_data::create_user_data_add(
+            fid,
+            UserDataType::UserDataPrimaryAddressEthereum,
+            &checksummed,
+            Some(timestamp + 1),
+            None,
+        );
+        submit_message(&service, primary_address.clone())
+            .await
+            .unwrap();
+        let data_messages = data_engine
+            .mempool_poller
+            .pull_messages(Duration::from_millis(100))
+            .await
+            .unwrap();
+        let primary_state =
+            data_engine.propose_state_change(data_engine.shard_id(), data_messages, None);
+        let primary_chunk =
+            test_helper::validate_and_commit_state_change(&mut data_engine, &primary_state).await;
+        let _ = shard_decision_tx.send(primary_chunk);
+        assert!(test_helper::message_exists_in_trie(
+            &mut data_engine,
+            &primary_address,
+        ));
+
+        let verification_remove = messages_factory::verifications::create_verification_remove(
+            fid,
+            address,
+            Some(timestamp + 2),
+            None,
+        );
+        submit_message(&service, verification_remove.clone())
+            .await
+            .unwrap();
+        let remove_messages = block_engine
+            .mempool_poller
+            .pull_messages(Duration::from_millis(100))
+            .await
+            .unwrap();
+        let remove_height = block_engine.get_confirmed_height().increment();
+        let remove_state = block_engine.propose_state_change(remove_messages, remove_height, None);
+        let remove_block = block_engine_test_helpers::validate_and_commit_state_change(
+            &mut block_engine,
+            &remove_state,
+        );
+        let _ = block_decision_tx.send(remove_block.clone());
+        test_helper::commit_block_events(&mut data_engine, remove_block.events.iter().collect())
+            .await;
+
+        assert!(data_engine
+            .get_user_data_by_fid_and_type(fid, UserDataType::UserDataPrimaryAddressEthereum,)
+            .is_err());
+        assert!(!test_helper::message_exists_in_trie(
+            &mut data_engine,
+            &primary_address,
+        ));
     }
 
     #[tokio::test]

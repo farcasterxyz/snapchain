@@ -3103,7 +3103,10 @@ mod channel_message_inertness_tests {
         for (message_type, body) in messages_factory::channels::all_message_bodies() {
             let message =
                 messages_factory::create_message_with_data(fid, message_type, body, None, None);
-            assert_eq!(route_message(&router, &message, num_shards), expected);
+            assert_eq!(
+                route_message(&router, &message, num_shards, EngineVersion::V20),
+                expected
+            );
         }
     }
 }

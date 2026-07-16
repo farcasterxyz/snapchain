@@ -515,11 +515,11 @@ impl ReadNodeMempool {
         let fid_shard = self
             .message_router
             .route_fid(message.fid(), self.num_shards);
+        let version = EngineVersion::current(self.network);
 
         // Fname transfers are mirrored to both the sender and receiver shard.
         match message {
             MempoolMessage::FnameTransfer(_fname_transfer) => {
-                let version = EngineVersion::current(self.network);
                 // Send the username transfer to all other shards, transfers from a->b->c are
                 // correctly tracked. Due to current limitations of the engine, if we transfer from
                 // shard 1 to shard 2, and then transfer within shard 2, we will keep the transfer
@@ -549,6 +549,7 @@ impl ReadNodeMempool {
                     &self.message_router,
                     message,
                     self.num_shards,
+                    version,
                 )]
             }
         }

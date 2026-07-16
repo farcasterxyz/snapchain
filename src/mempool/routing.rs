@@ -1,5 +1,6 @@
 use crate::core::types::FidOnDisk;
 use crate::proto::{self, MessageType};
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use sha2::{Digest, Sha256};
 
 pub trait MessageRouter: Send + Sync {
@@ -39,6 +40,7 @@ pub fn route_message(
     router: &Box<dyn MessageRouter>,
     message: &proto::Message,
     num_shards: u32,
+    version: EngineVersion,
 ) -> u32 {
     // Shard 0 hosts state that must be coherent across shards before other messages validate:
     // storage lends (accounting), and gasless keys (active-signer set consulted by every shard
@@ -46,6 +48,19 @@ pub fn route_message(
     // by FID hash.
     match message.msg_type() {
         MessageType::LendStorage | MessageType::KeyAdd | MessageType::KeyRemove => 0,
+        // Routing is a wall-clock convention on each node; consensus does not re-check it.
+        // During the mixed V20 window, an in-flight verification routed to a data shard before
+        // cutover can land in a post-cutover block and be deterministically rejected there, then
+        // safely resubmitted. Conversely, a pre-cutover-signed verification first submitted
+        // after cutover is rejected by shard 0's embedded-timestamp floor; that UX edge is the
+        // intentional tombstone-resurrection guard. If the same verification merged live before
+        // cutover and arrives again by shard-0 replay afterwards, replay's self-supersede handling
+        // is idempotent across the store, secondary index, trie, and events.
+        MessageType::VerificationAddEthAddress | MessageType::VerificationRemove
+            if version.is_enabled(ProtocolFeature::VerificationsOnShardZero) =>
+        {
+            0
+        }
         _ => router.route_fid(message.fid(), num_shards),
     }
 }
@@ -75,9 +90,22 @@ mod tests {
         // FID 1 is arbitrary — the point is that KEY_ADD/KEY_REMOVE bypass the FID hash
         // entirely. Try a few FIDs to confirm.
         for fid in [1u64, 42, 1_000_000, u64::MAX] {
-            assert_eq!(route_message(&router, &msg(MessageType::KeyAdd, fid), 2), 0);
             assert_eq!(
-                route_message(&router, &msg(MessageType::KeyRemove, fid), 2),
+                route_message(
+                    &router,
+                    &msg(MessageType::KeyAdd, fid),
+                    2,
+                    EngineVersion::V20
+                ),
+                0
+            );
+            assert_eq!(
+                route_message(
+                    &router,
+                    &msg(MessageType::KeyRemove, fid),
+                    2,
+                    EngineVersion::V20,
+                ),
                 0
             );
         }
@@ -89,7 +117,12 @@ mod tests {
         // match arm changed from an if-expression to a match.
         let router: Box<dyn MessageRouter> = Box::new(ShardRouter {});
         assert_eq!(
-            route_message(&router, &msg(MessageType::LendStorage, 99), 2),
+            route_message(
+                &router,
+                &msg(MessageType::LendStorage, 99),
+                2,
+                EngineVersion::V20,
+            ),
             0
         );
     }
@@ -98,7 +131,12 @@ mod tests {
     fn cast_add_still_routes_by_fid_hash() {
         // Ensure unrelated message types go through the FID router, not shard 0.
         let router: Box<dyn MessageRouter> = Box::new(ShardRouter {});
-        let shard = route_message(&router, &msg(MessageType::CastAdd, 12345), 2);
+        let shard = route_message(
+            &router,
+            &msg(MessageType::CastAdd, 12345),
+            2,
+            EngineVersion::V20,
+        );
         assert!(
             shard == 1 || shard == 2,
             "expected shard 1 or 2, got {shard}"
@@ -106,15 +144,40 @@ mod tests {
     }
 
     #[test]
-    fn verifications_still_route_by_fid_to_data_shards() {
+    fn verifications_route_by_fid_before_activation() {
         let router: Box<dyn MessageRouter> = Box::new(EvenOddRouterForTest {});
 
         for message_type in [
             MessageType::VerificationAddEthAddress,
             MessageType::VerificationRemove,
         ] {
-            assert_eq!(route_message(&router, &msg(message_type, 1), 2), 1);
-            assert_eq!(route_message(&router, &msg(message_type, 2), 2), 2);
+            assert_eq!(
+                route_message(&router, &msg(message_type, 1), 2, EngineVersion::V19),
+                1
+            );
+            assert_eq!(
+                route_message(&router, &msg(message_type, 2), 2, EngineVersion::V19),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn verifications_route_to_shard_zero_after_activation() {
+        let router: Box<dyn MessageRouter> = Box::new(EvenOddRouterForTest {});
+
+        for message_type in [
+            MessageType::VerificationAddEthAddress,
+            MessageType::VerificationRemove,
+        ] {
+            assert_eq!(
+                route_message(&router, &msg(message_type, 1), 2, EngineVersion::V20),
+                0
+            );
+            assert_eq!(
+                route_message(&router, &msg(message_type, 2), 2, EngineVersion::V20),
+                0
+            );
         }
     }
 }
