@@ -70,6 +70,12 @@ pub trait StoreDef: Send + Sync {
     fn is_add_type(&self, message: &Message) -> bool;
     fn is_remove_type(&self, message: &Message) -> bool;
 
+    /// Slot stores whose conflict order comes from an external consensus sequence must not use
+    /// the generic timestamp-LWW merge path. Their dedicated merge entry point overrides this.
+    fn requires_consensus_order_slot_merge(&self) -> bool {
+        false
+    }
+
     // If the store supports remove messages, this should return true
     fn remove_type_supported(&self) -> bool {
         self.remove_message_type() != MessageType::None as u8
@@ -609,7 +615,7 @@ impl<T: StoreDef + Clone> Store<T> {
         delete_message_transaction(txn, message)
     }
 
-    fn delete_many_transaction(
+    pub(super) fn delete_many_transaction(
         &self,
         txn: &mut RocksDbTransactionBatch,
         messages: &Vec<Message>,
@@ -688,6 +694,11 @@ impl<T: StoreDef + Clone> Store<T> {
         txn: &mut RocksDbTransactionBatch,
         ctx: &MergeContext,
     ) -> Result<HubEvent, HubError> {
+        if self.store_def.requires_consensus_order_slot_merge() {
+            return Err(HubError::validation_failure(
+                "slot store requires consensus-order merge",
+            ));
+        }
         if !self.store_def.is_add_type(message)
             && !(self.store_def.remove_type_supported() && self.store_def.is_remove_type(message))
             && !(self.store_def.compact_state_type_supported()
@@ -721,6 +732,11 @@ impl<T: StoreDef + Clone> Store<T> {
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<HubEvent, HubError> {
+        if self.store_def.requires_consensus_order_slot_merge() {
+            return Err(HubError::validation_failure(
+                "slot store requires consensus-order merge",
+            ));
+        }
         if self.store_def.compact_state_type_supported() {
             return Err(HubError::invalid_parameter(
                 "force override is not supported for compact-state stores",
@@ -912,7 +928,7 @@ impl<T: StoreDef + Clone> Store<T> {
         self.merge_add_with_conflicts(ts_hash, message, txn, merge_conflicts)
     }
 
-    fn merge_add_with_conflicts(
+    pub(super) fn merge_add_with_conflicts(
         &self,
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
