@@ -47,7 +47,13 @@ pub fn route_message(
     // during user-message validation). Per-shard state (casts, reactions, links, etc.) routes
     // by FID hash.
     match message.msg_type() {
-        MessageType::LendStorage | MessageType::KeyAdd | MessageType::KeyRemove => 0,
+        MessageType::LendStorage
+        | MessageType::KeyAdd
+        | MessageType::KeyRemove
+        | MessageType::ChannelUpdate
+        | MessageType::ChannelMember
+        | MessageType::ChannelPin
+        | MessageType::ChannelModerate => 0,
         // Routing is a wall-clock convention on each node; consensus does not re-check it.
         // During the mixed V20 window, an in-flight verification routed to a data shard before
         // cutover can land in a post-cutover block, where the data shard's block-ts-gated arm
@@ -187,6 +193,30 @@ mod tests {
                 route_message(&router, &msg(message_type, 2), 2, EngineVersion::V20),
                 0
             );
+        }
+    }
+
+    #[test]
+    fn channel_messages_route_to_shard_zero_before_and_after_activation() {
+        let router: Box<dyn MessageRouter> = Box::new(EvenOddRouterForTest {});
+
+        // Channel types are new at V20, so their routing is unconditional. The mempool's
+        // wall-clock feature gate rejects them before activation; keeping both versions here
+        // pins that routing itself cannot strand an admitted channel message on a data shard.
+        for version in [EngineVersion::V19, EngineVersion::V20] {
+            for message_type in [
+                MessageType::ChannelUpdate,
+                MessageType::ChannelMember,
+                MessageType::ChannelPin,
+                MessageType::ChannelModerate,
+            ] {
+                for fid in [1, 2] {
+                    assert_eq!(
+                        route_message(&router, &msg(message_type, fid), 2, version),
+                        0
+                    );
+                }
+            }
         }
     }
 }

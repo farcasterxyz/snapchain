@@ -68,6 +68,31 @@ mod tests {
         broadcast::Sender<Block>,
         mpsc::Receiver<SystemMessage>,
     ) {
+        setup_for_network(
+            config,
+            enable_rate_limits,
+            num_shards,
+            FarcasterNetwork::Devnet,
+        )
+        .await
+    }
+
+    async fn setup_for_network(
+        config: Option<Config>,
+        enable_rate_limits: bool,
+        num_shards: u32,
+        network: FarcasterNetwork,
+    ) -> (
+        HashMap<u32, ShardEngine>,
+        BlockEngine,
+        Option<SnapchainGossip>,
+        Mempool,
+        mpsc::Sender<MempoolRequest>,
+        mpsc::Sender<MempoolMessagesRequest>,
+        broadcast::Sender<ShardChunk>,
+        broadcast::Sender<Block>,
+        mpsc::Receiver<SystemMessage>,
+    ) {
         let keypair = Keypair::generate();
         let statsd_client = StatsdClientWrapper::new(
             cadence::StatsdClient::builder("", cadence::NopMetricSink {}).build(),
@@ -98,7 +123,7 @@ mod tests {
                     &config,
                     Some(system_tx),
                     false,
-                    proto::FarcasterNetwork::Devnet,
+                    network,
                     statsd_client.clone(),
                 )
                 .await
@@ -115,7 +140,7 @@ mod tests {
         mempool_config.enable_rate_limits = enable_rate_limits;
         let mempool = Mempool::new(
             mempool_config,
-            FarcasterNetwork::Devnet,
+            network,
             mempool_rx,
             messages_request_rx,
             num_shards,
@@ -138,6 +163,21 @@ mod tests {
             block_decision_tx,
             system_rx,
         )
+    }
+
+    #[tokio::test]
+    async fn test_channel_messages_are_rejected_by_mempool_before_activation() {
+        let (_, _, _, mut mempool, _, _, _, _, _) =
+            setup_for_network(None, false, 1, FarcasterNetwork::Mainnet).await;
+
+        for (message_type, body) in messages_factory::channels::all_message_bodies() {
+            let message =
+                messages_factory::create_message_with_data(1234, message_type, body, None, None);
+            let error = mempool
+                .message_is_valid(0, &MempoolMessage::UserMessage(message), true)
+                .unwrap_err();
+            assert_eq!(error.message, "channel messages not yet active");
+        }
     }
 
     async fn pull_message(

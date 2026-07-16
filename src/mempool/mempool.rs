@@ -791,6 +791,20 @@ impl Mempool {
         // hook at mempool admission.
         if let MempoolMessage::UserMessage(user_msg) = message {
             let msg_type = user_msg.msg_type();
+            if matches!(
+                msg_type,
+                MessageType::ChannelUpdate
+                    | MessageType::ChannelMember
+                    | MessageType::ChannelPin
+                    | MessageType::ChannelModerate
+            ) {
+                let version = EngineVersion::current(self.read_node_mempool.network);
+                if !version.is_enabled(ProtocolFeature::ChannelMessages) {
+                    return Err(HubError::validation_failure(
+                        "channel messages not yet active",
+                    ));
+                }
+            }
             if matches!(msg_type, MessageType::KeyAdd | MessageType::KeyRemove) {
                 let version = EngineVersion::current(self.read_node_mempool.network);
                 if !version.is_enabled(ProtocolFeature::GaslessSigners) {

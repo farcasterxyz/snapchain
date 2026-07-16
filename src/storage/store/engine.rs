@@ -3025,15 +3025,8 @@ mod channel_message_inertness_tests {
     use crate::utils::factory::messages_factory;
     use crate::version::version::EngineVersion;
 
-    /// Channel messages route by fid to a data shard (see
-    /// `channel_messages_continue_to_route_by_fid`), so `ShardEngine` — not `BlockEngine` — is the
-    /// admission gate they actually reach. `ShardEngine::validate_user_message`'s body dispatch
-    /// ends in `_ => {}`, which ACCEPTS unrecognized bodies, so the sole thing rejecting a channel
-    /// message here is the arm in `core::validations::message`. Assert the exact error: if a later
-    /// increment installs real body validation without gating admission on
-    /// `ProtocolFeature::ChannelMessages`, channel messages would pass submit and gossip on mainnet
-    /// while dormant. `merge_message` would still refuse them, so this is not a state divergence —
-    /// but it is exactly the accidental wiring these tests exist to catch.
+    /// Routing sends channel messages to shard 0, but ShardEngine still rejects them if they are
+    /// injected directly. Its merge dispatch remains absent until data-shard replay lands.
     #[tokio::test]
     async fn channel_messages_are_rejected_by_shard_engine_validation() {
         let (mut engine, _tmpdir) = test_helper::new_engine().await;
@@ -3087,21 +3080,17 @@ mod channel_message_inertness_tests {
     }
 
     #[test]
-    fn channel_messages_continue_to_route_by_fid() {
+    fn channel_messages_route_to_shard_zero_before_and_after_feature() {
         let router: Box<dyn MessageRouter> = Box::new(ShardRouter {});
         let fid = 1234;
         let num_shards = 2;
-        let expected = router.route_fid(fid, num_shards);
-        // Channel messages must land on a data shard, never shard 0 (the block shard).
-        assert_ne!(expected, 0);
 
-        for (message_type, body) in messages_factory::channels::all_message_bodies() {
-            let message =
-                messages_factory::create_message_with_data(fid, message_type, body, None, None);
-            assert_eq!(
-                route_message(&router, &message, num_shards, EngineVersion::V20),
-                expected
-            );
+        for version in [EngineVersion::V19, EngineVersion::V20] {
+            for (message_type, body) in messages_factory::channels::all_message_bodies() {
+                let message =
+                    messages_factory::create_message_with_data(fid, message_type, body, None, None);
+                assert_eq!(route_message(&router, &message, num_shards, version), 0);
+            }
         }
     }
 }
