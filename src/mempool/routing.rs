@@ -50,12 +50,21 @@ pub fn route_message(
         MessageType::LendStorage | MessageType::KeyAdd | MessageType::KeyRemove => 0,
         // Routing is a wall-clock convention on each node; consensus does not re-check it.
         // During the mixed V20 window, an in-flight verification routed to a data shard before
-        // cutover can land in a post-cutover block and be deterministically rejected there, then
-        // safely resubmitted. Conversely, a pre-cutover-signed verification first submitted
-        // after cutover is rejected by shard 0's embedded-timestamp floor; that UX edge is the
-        // intentional tombstone-resurrection guard. If the same verification merged live before
-        // cutover and arrives again by shard-0 replay afterwards, replay's self-supersede handling
-        // is idempotent across the store, secondary index, trie, and events.
+        // cutover can land in a post-cutover block, where the data shard's block-ts-gated arm
+        // rejects it deterministically.
+        //
+        // Whether the client can then resubmit depends on when the message was SIGNED, and the
+        // two cases below intersect on the likeliest message:
+        //   - signed at/after cutover: resubmitting routes it to shard 0 and it merges.
+        //   - signed before cutover (the common case at the boundary): shard 0's embedded-
+        //     timestamp floor also rejects it, so it must be re-signed with a fresh timestamp.
+        //     That UX edge is the intentional tombstone-resurrection guard, not an oversight.
+        //
+        // If the same verification merged live before cutover and arrives again by shard-0
+        // replay afterwards, self-supersede handling keeps the store, secondary index, trie, and
+        // events mutually consistent. Note the event stream is NOT idempotent: a re-merge emits
+        // a fresh MergeMessage HubEvent with a new id and empty deleted_messages. State converges;
+        // subscribers may see the duplicate.
         MessageType::VerificationAddEthAddress | MessageType::VerificationRemove
             if version.is_enabled(ProtocolFeature::VerificationsOnShardZero) =>
         {

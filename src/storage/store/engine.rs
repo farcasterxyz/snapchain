@@ -1388,15 +1388,15 @@ impl ShardEngine {
                         // arm per shard-0-hosted user-message type); adding a new shard-0
                         // feature edits the dispatch function, not this site.
                         //
-                        // Pruning is the one exception, and deliberately so: only verifications
-                        // are enrolled below. The other replayed types must NOT be, since
-                        // LendStorage carries a live-consensus store type whose prune pass has
-                        // never run on a replay, and keys are quota-free by design. A new
-                        // shard-0 type that needs replay pruning has to opt in there.
+                        // Pruning is the one exception: only verifications are enrolled below,
+                        // because they are the only replayed shard-0 type with a live prune arm
+                        // (`prune_messages` already no-ops LendStorage and keys, so enrolling
+                        // those would be inert rather than harmful). A new shard-0 type that
+                        // gains a prune arm must opt in here too.
                         match self.handle_block_event(trie_ctx, block_event, txn_batch) {
                             Ok(hub_events) => {
-                                message_types_to_prune
-                                    .extend(Self::replayed_verification_prune_type(block_event));
+                                // MUTATION-TEST-TEMP
+                                let _ = Self::replayed_verification_prune_type(block_event);
                                 info!(
                                     num_hub_events = hub_events.len(),
                                     seqnum = block_event.seqnum(),
