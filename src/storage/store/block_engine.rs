@@ -17,7 +17,7 @@ use crate::storage::store::account::{
 };
 use crate::storage::store::engine_metrics::Metrics;
 use crate::storage::store::mempool_poller::{MempoolMessage, MempoolPoller, MempoolPollerError};
-use crate::storage::store::stores::StoreLimits;
+use crate::storage::store::stores::{Limits, StoreLimits};
 use crate::storage::store::BlockStore;
 use crate::storage::trie::merkle_trie::{self, MerkleTrie, TrieKey};
 use crate::storage::trie::{self};
@@ -283,6 +283,13 @@ impl BlockEngine {
         }
     }
 
+    /// Single-message convenience wrapper. TEST-ONLY BY CONSTRUCTION: it derives the verification
+    /// quota count by reading the trie, which is correct only at the START of a transaction.
+    /// Block-engine trie updates are staged after the user-message loop, so a mid-loop caller
+    /// would silently read a pre-transaction count and admit past the cap. Production must go
+    /// through `replay_snapchain_txn`, which threads the transaction-local count instead. Keeping
+    /// this `cfg(test)` stops a future caller from reaching for the shorter name.
+    #[cfg(test)]
     pub fn validate_user_message(
         &self,
         message: &proto::Message,
@@ -291,26 +298,27 @@ impl BlockEngine {
         version: EngineVersion,
         txn_batch: &mut RocksDbTransactionBatch,
     ) -> Result<(), MessageValidationError> {
+        let verification_count = self.verification_message_count(message.fid(), txn_batch)?;
         self.validate_user_message_with_verification_count(
             message,
             storage_slot,
             timestamp,
             version,
             txn_batch,
-            None,
+            verification_count,
         )
     }
 
+    /// Counts the fid's shard-0 verification replica rows from the trie, mirroring the data-shard
+    /// `Stores::get_usage_by_store_type` semantics (adds + removes) so the two enforce the same
+    /// notion of "how many verifications does this fid have".
     fn verification_message_count(
         &self,
         fid: u64,
         txn_batch: &RocksDbTransactionBatch,
     ) -> Result<u32, HubError> {
         let mut count = 0u64;
-        for msg_type in [
-            MessageType::VerificationAddEthAddress,
-            MessageType::VerificationRemove,
-        ] {
+        for msg_type in Limits::store_type_to_message_types(StoreType::Verifications) {
             count = count
                 .checked_add(
                     self.stores
@@ -332,17 +340,14 @@ impl BlockEngine {
             .map_err(|_| HubError::internal_db_error("verification count exceeds u32"))
     }
 
+    /// True when the fid already has a primary record (add or remove) for `address`, meaning an
+    /// incoming message replaces it rather than growing the replica.
     fn verification_logical_key_exists(
         &self,
         fid: u64,
-        body: &crate::proto::message_data::Body,
+        address: &[u8],
         txn_batch: &RocksDbTransactionBatch,
     ) -> Result<bool, MessageValidationError> {
-        let address = match body {
-            crate::proto::message_data::Body::VerificationAddAddressBody(body) => &body.address,
-            crate::proto::message_data::Body::VerificationRemoveBody(body) => &body.address,
-            _ => return Ok(false),
-        };
         let add_exists = VerificationStore::get_verification_add(
             &self.stores.verification_store,
             fid,
@@ -371,7 +376,7 @@ impl BlockEngine {
         timestamp: &FarcasterTime,
         version: EngineVersion,
         txn_batch: &mut RocksDbTransactionBatch,
-        verification_count: Option<u32>,
+        verification_count: u32,
     ) -> Result<(), MessageValidationError> {
         // Ensure message data is present
         let message_data = message
@@ -492,11 +497,19 @@ impl BlockEngine {
                 // to shard 0 and would be admitted here — accepted and gossiped by submit_message
                 // even though merge (dispatching on `r#type`) can never merge it. Require
                 // agreement so such a message stays rejected exactly as before these arms existed.
-                let expected_type = match body {
-                    crate::proto::message_data::Body::VerificationAddAddressBody(_) => {
-                        MessageType::VerificationAddEthAddress
-                    }
-                    _ => MessageType::VerificationRemove,
+                let (expected_type, is_add, address) = match body {
+                    crate::proto::message_data::Body::VerificationAddAddressBody(body) => (
+                        MessageType::VerificationAddEthAddress,
+                        true,
+                        body.address.as_slice(),
+                    ),
+                    crate::proto::message_data::Body::VerificationRemoveBody(body) => (
+                        MessageType::VerificationRemove,
+                        false,
+                        body.address.as_slice(),
+                    ),
+                    // Unreachable: the arm's pattern binds only the two bodies above.
+                    _ => return Err(MessageValidationError::InvalidMessageType),
                 };
                 if msg_type != expected_type {
                     return Err(MessageValidationError::InvalidMessageType);
@@ -523,29 +536,24 @@ impl BlockEngine {
                     return Err(MessageValidationError::VerificationTimestampBeforeActivation);
                 }
 
+                // Production always constructs `Stores`/`BlockStores` with `StoreLimits::default()`,
+                // so this matches the data shard's limits exactly. If store limits ever become
+                // configurable, this must read the same injected value the data-shard prune uses
+                // or the two sides will enforce different caps on the same message.
                 let max_count =
                     StoreLimits::default().max_messages(storage_slot, StoreType::Verifications);
-                let is_add = matches!(
-                    body,
-                    crate::proto::message_data::Body::VerificationAddAddressBody(_)
-                );
                 // With no active storage, adds are never admitted, including replacements. This
                 // is the spam gate for shard 0's otherwise gasless verification write path.
                 if max_count == 0 && is_add {
                     return Err(MessageValidationError::InsufficientStorage);
                 }
+                // A message that replaces an existing record for its address never grows the
+                // replica, so it is admitted even at cap — otherwise a fid at cap could never
+                // shed state via a remove.
                 let supersedes_existing =
-                    self.verification_logical_key_exists(message_data.fid, body, txn_batch)?;
-                if !supersedes_existing {
-                    let current_count = match verification_count {
-                        Some(count) => count,
-                        None => self
-                            .verification_message_count(message_data.fid, txn_batch)
-                            .map_err(MessageValidationError::HubError)?,
-                    };
-                    if current_count >= max_count {
-                        return Err(MessageValidationError::InsufficientStorage);
-                    }
+                    self.verification_logical_key_exists(message_data.fid, address, txn_batch)?;
+                if !supersedes_existing && verification_count >= max_count {
+                    return Err(MessageValidationError::InsufficientStorage);
                 }
             }
             _ => return Err(MessageValidationError::InvalidMessageType),
@@ -666,6 +674,46 @@ impl BlockEngine {
         }
     }
 
+    /// Applies one successful merge to the transaction-local verification replica count. Block-
+    /// engine trie updates are staged only after the user-message loop, so re-reading the trie
+    /// mid-loop would miss earlier merges; this tracks them instead.
+    fn apply_verification_count_delta(
+        count: u32,
+        merge_message_body: &MergeMessageBody,
+    ) -> Result<u32, BlockEngineError> {
+        let added = u32::from(merge_message_body.message.is_some());
+        let deleted = u32::try_from(merge_message_body.deleted_messages.len()).map_err(|_| {
+            BlockEngineError::HubError(HubError::internal_db_error(
+                "verification merge deleted too many rows",
+            ))
+        })?;
+        count
+            .checked_add(added)
+            .and_then(|count| count.checked_sub(deleted))
+            .ok_or_else(|| {
+                BlockEngineError::HubError(HubError::internal_db_error(
+                    "verification merge count underflow",
+                ))
+            })
+    }
+
+    /// Mirrors `HubEventExt::from_validation_error`, which cannot be reused directly because it is
+    /// typed on `engine::MessageValidationError` rather than this module's error enum.
+    fn merge_failure_event(message: &proto::Message, err: &MessageValidationError) -> HubEvent {
+        let merge_error = match err {
+            MessageValidationError::HubError(hub_error) => hub_error.clone(),
+            _ => HubError::validation_failure(&err.to_string()),
+        };
+        HubEvent::new_event(
+            proto::HubEventType::MergeFailure,
+            proto::hub_event::Body::MergeFailure(proto::MergeFailureBody {
+                message: Some(message.clone()),
+                code: merge_error.code,
+                reason: merge_error.message,
+            }),
+        )
+    }
+
     fn on_merge_message(
         &mut self,
         storage_slot: &mut StorageSlot,
@@ -747,15 +795,25 @@ impl BlockEngine {
         // them exactly as data-shard StoreLimits does. Keep two views and apply any successful
         // lend in this transaction to both so later verification admission sees the same net
         // slot on proposal, validation, and commit replay.
-        let verification_feature_enabled =
-            version.is_enabled(ProtocolFeature::VerificationsOnShardZero);
-        let mut verification_storage_slot = if verification_feature_enabled {
+        //
+        // Both are derived up front rather than lazily at the first verification, because the
+        // slot must be snapshotted before any in-transaction lend mutates it via
+        // `on_merge_message`. Shard 0 carries every key rotation and lend, so the prescan keeps
+        // verification-free transactions off the extra storage-rent scan and trie reads.
+        let has_verification = version.is_enabled(ProtocolFeature::VerificationsOnShardZero)
+            && snapchain_txn.user_messages.iter().any(|message| {
+                matches!(
+                    message.msg_type(),
+                    MessageType::VerificationAddEthAddress | MessageType::VerificationRemove
+                )
+            });
+        let mut verification_storage_slot = if has_verification {
             self.storage_slot_for_transaction(snapchain_txn, version, true, true)
                 .unwrap()
         } else {
             storage_slot.clone()
         };
-        let mut verification_count = if verification_feature_enabled {
+        let mut verification_count = if has_verification {
             self.verification_message_count(snapchain_txn.fid, txn_batch)
                 .map_err(BlockEngineError::HubError)?
         } else {
@@ -775,27 +833,19 @@ impl BlockEngine {
                 timestamp,
                 version,
                 txn_batch,
-                Some(verification_count),
+                verification_count,
             ) {
                 Ok(()) => match message.msg_type() {
                     MessageType::LendStorage => {
                         if version.is_enabled(ProtocolFeature::StorageLending) {
                             if let Ok(events) = self.merge_message(message, txn_batch, version) {
                                 for event in &events {
-                                    match event.body.as_ref().unwrap() {
-                                        proto::hub_event::Body::MergeMessageBody(
-                                            merge_message_body,
-                                        ) => self.on_merge_message(
-                                            &mut storage_slot,
-                                            &merge_message_body,
-                                        )?,
-                                        _ => {}
-                                    }
-                                }
-                                for event in &events {
-                                    if let proto::hub_event::Body::MergeMessageBody(body) =
-                                        event.body.as_ref().unwrap()
+                                    if let Some(proto::hub_event::Body::MergeMessageBody(body)) =
+                                        event.body.as_ref()
                                     {
+                                        // Both views must see the same lend, or verification
+                                        // admission and lend validation drift apart.
+                                        self.on_merge_message(&mut storage_slot, body)?;
                                         self.on_merge_message(
                                             &mut verification_storage_slot,
                                             body,
@@ -829,26 +879,11 @@ impl BlockEngine {
                                             body,
                                         )) = event.body.as_ref()
                                         {
-                                            let added = u32::from(body.message.is_some());
-                                            let deleted =
-                                                u32::try_from(body.deleted_messages.len())
-                                                    .map_err(|_| {
-                                                        BlockEngineError::HubError(
-                                                    HubError::internal_db_error(
-                                                        "verification merge deleted too many rows",
-                                                    ),
-                                                )
-                                                    })?;
-                                            verification_count = verification_count
-                                                .checked_add(added)
-                                                .and_then(|count| count.checked_sub(deleted))
-                                                .ok_or_else(|| {
-                                                    BlockEngineError::HubError(
-                                                        HubError::internal_db_error(
-                                                            "verification merge count underflow",
-                                                        ),
-                                                    )
-                                                })?;
+                                            verification_count =
+                                                Self::apply_verification_count_delta(
+                                                    verification_count,
+                                                    body,
+                                                )?;
                                         }
                                     }
                                     hub_events.extend(events)
@@ -875,22 +910,8 @@ impl BlockEngine {
                                         "Error merging shard-0 verification: {:?}",
                                         err
                                     );
-                                    let merge_error = match &err {
-                                        MessageValidationError::HubError(hub_error) => {
-                                            hub_error.clone()
-                                        }
-                                        _ => HubError::validation_failure(&err.to_string()),
-                                    };
-                                    let mut merge_failure = HubEvent::new_event(
-                                        proto::HubEventType::MergeFailure,
-                                        proto::hub_event::Body::MergeFailure(
-                                            proto::MergeFailureBody {
-                                                message: Some(message.clone()),
-                                                code: merge_error.code,
-                                                reason: merge_error.message,
-                                            },
-                                        ),
-                                    );
+                                    let mut merge_failure =
+                                        Self::merge_failure_event(message, &err);
                                     let _ = self
                                         .stores
                                         .event_handler

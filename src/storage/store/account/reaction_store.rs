@@ -338,7 +338,7 @@ impl ReactionStore {
             ..Default::default()
         };
 
-        let r = store.get_remove(&partial_message);
+        let r = store.get_remove(&partial_message, None);
         // println!("got reaction remove: {:?}", r);
 
         r

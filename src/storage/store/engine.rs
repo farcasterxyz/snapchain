@@ -716,6 +716,25 @@ impl ShardEngine {
         Ok(())
     }
 
+    /// The verification message types successfully merged by a block-event replay, which must
+    /// feed the same post-loop prune pass as live merges so a fid's combined pre-V20 + replayed
+    /// rows converge to its storage cap.
+    ///
+    /// Read from the replayed `BlockEvent` rather than from the emitted events, mirroring the
+    /// live-merge site, which enrolls `msg.msg_type()` on a successful merge without inspecting
+    /// what that merge emitted. Callers must only apply this on the dispatch's `Ok` arm.
+    fn replayed_verification_prune_type(block_event: &proto::BlockEvent) -> Option<MessageType> {
+        let message = match block_event.data.as_ref()?.body.as_ref()? {
+            proto::block_event_data::Body::MergeMessageEventBody(body) => body.message.as_ref()?,
+            _ => return None,
+        };
+        match message.msg_type() {
+            msg_type @ (MessageType::VerificationAddEthAddress
+            | MessageType::VerificationRemove) => Some(msg_type),
+            _ => None,
+        }
+    }
+
     fn handle_block_event(
         &mut self,
         trie_ctx: &merkle_trie::Context,
@@ -1365,33 +1384,19 @@ impl ShardEngine {
                             last_block_event_seqnum += 1;
                         }
 
-                        // Per-feature gating lives inside `handle_block_event` (one match arm
-                        // per shard-0-hosted user-message type). The call site stays
-                        // feature-agnostic — adding a new shard-0 feature only edits the
-                        // dispatch function, not this site.
+                        // Per-feature merge gating lives inside `handle_block_event` (one match
+                        // arm per shard-0-hosted user-message type); adding a new shard-0
+                        // feature edits the dispatch function, not this site.
+                        //
+                        // Pruning is the one exception, and deliberately so: only verifications
+                        // are enrolled below. The other replayed types must NOT be, since
+                        // LendStorage carries a live-consensus store type whose prune pass has
+                        // never run on a replay, and keys are quota-free by design. A new
+                        // shard-0 type that needs replay pruning has to opt in there.
                         match self.handle_block_event(trie_ctx, block_event, txn_batch) {
                             Ok(hub_events) => {
-                                if let Some(proto::block_event_data::Body::MergeMessageEventBody(
-                                    body,
-                                )) = block_event
-                                    .data
-                                    .as_ref()
-                                    .and_then(|data| data.body.as_ref())
-                                {
-                                    if let Some(message) = body.message.as_ref() {
-                                        if matches!(
-                                            message.msg_type(),
-                                            MessageType::VerificationAddEthAddress
-                                                | MessageType::VerificationRemove
-                                        ) {
-                                            // Reuse the same deterministic post-loop prune pass
-                                            // as live user-message merges. The replay itself has
-                                            // already succeeded, so its combined pre-V20 +
-                                            // replayed state is what get_usage observes below.
-                                            message_types_to_prune.insert(message.msg_type());
-                                        }
-                                    }
-                                }
+                                message_types_to_prune
+                                    .extend(Self::replayed_verification_prune_type(block_event));
                                 info!(
                                     num_hub_events = hub_events.len(),
                                     seqnum = block_event.seqnum(),

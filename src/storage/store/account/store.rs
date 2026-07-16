@@ -417,7 +417,11 @@ impl<T: StoreDef + Clone> Store<T> {
         )
     }
 
-    pub fn get_remove(&self, partial_message: &Message) -> Result<Option<Message>, HubError> {
+    pub fn get_remove(
+        &self,
+        partial_message: &Message,
+        maybe_txn: Option<&RocksDbTransactionBatch>,
+    ) -> Result<Option<Message>, HubError> {
         if !self.store_def.remove_type_supported() {
             return Err(HubError {
                 code: "bad_request.validation_failure".to_string(),
@@ -433,7 +437,10 @@ impl<T: StoreDef + Clone> Store<T> {
             });
         }
 
-        let txn = &RocksDbTransactionBatch::new();
+        let txn = match maybe_txn {
+            Some(txn) => txn,
+            None => &RocksDbTransactionBatch::new(),
+        };
         let removes_key = self.store_def.make_remove_key(partial_message)?;
         let message_ts_hash = get_from_db_or_txn(&self.db, txn, &removes_key)?;
 

@@ -157,7 +157,7 @@ impl Limits {
         }
     }
 
-    fn store_type_to_message_types(store_type: StoreType) -> Vec<MessageType> {
+    pub(crate) fn store_type_to_message_types(store_type: StoreType) -> Vec<MessageType> {
         match store_type {
             StoreType::Casts => vec![MessageType::CastAdd, MessageType::CastRemove],
             StoreType::Links => vec![
