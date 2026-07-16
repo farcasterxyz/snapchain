@@ -756,12 +756,17 @@ impl ShardEngine {
                         Some(ProtocolFeature::VerificationsOnShardZero),
                         ReplayMerge::Forced,
                     ),
-                    // The channel message types belong here, mapped to
-                    // `ProtocolFeature::ChannelMessages`, as soon as anything can merge them.
-                    // They are omitted only because `merge_message` rejects them outright today,
-                    // so this gate would be unreachable. That makes the wildcard fail-OPEN for
-                    // them: wire up merge dispatch without revisiting this arm and a channel
-                    // message replayed via a BlockEvent merges with no version gate at all.
+                    // Intentionally gated but undispatchable in this increment. Shard 0 can merge
+                    // channel messages, but its BlockEvent allowlist does not emit them yet and
+                    // ShardEngine::merge_message still has no channel stores. Inc 7 adds both;
+                    // keeping ReplayMerge::Normal here closes the wildcard fail-open without
+                    // wiring data-shard state early.
+                    MessageType::ChannelUpdate
+                    | MessageType::ChannelMember
+                    | MessageType::ChannelPin
+                    | MessageType::ChannelModerate => {
+                        (Some(ProtocolFeature::ChannelMessages), ReplayMerge::Normal)
+                    }
                     _ => (None, ReplayMerge::Normal),
                 };
                 if let Some(feature) = feature_gate {
@@ -2967,6 +2972,38 @@ mod verification_replay_gate_tests {
             Err(EngineError::EngineMessageValidationError(
                 MessageValidationError::InvalidMessageType(value)
             )) if value == MessageType::VerificationRemove as i32
+        ));
+    }
+
+    #[tokio::test]
+    async fn channel_block_event_is_gated_but_has_no_data_shard_dispatch() {
+        let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        let (message_type, body) = messages_factory::channels::all_message_bodies()
+            .into_iter()
+            .next()
+            .unwrap();
+        let message = messages_factory::create_message_with_data(
+            FID3_FOR_TEST,
+            message_type,
+            body,
+            None,
+            None,
+        );
+        let block_event = events_factory::create_merge_message_event(message, 1);
+
+        // Devnet resolves the event timestamp with ChannelMessages active, so this passes the
+        // new replay gate and reaches the deliberately absent ShardEngine dispatch.
+        let result = engine.handle_block_event(
+            trie_ctx(),
+            &block_event,
+            &mut RocksDbTransactionBatch::new(),
+            crate::version::version::EngineVersion::V20,
+        );
+        assert!(matches!(
+            result,
+            Err(EngineError::EngineMessageValidationError(
+                MessageValidationError::InvalidMessageType(value)
+            )) if value == MessageType::ChannelUpdate as i32
         ));
     }
 }

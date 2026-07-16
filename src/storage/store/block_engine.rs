@@ -1181,6 +1181,38 @@ impl BlockEngine {
                     .verification_store
                     .merge(message, txn_batch, &ctx)?])
             }
+            MessageType::ChannelUpdate
+            | MessageType::ChannelMember
+            | MessageType::ChannelPin
+            | MessageType::ChannelModerate
+                if block_version.is_enabled(ProtocolFeature::ChannelMessages) =>
+            {
+                // One passed-in block-version gate owns all four dispatches. Keep this grouped:
+                // splitting the gate from the type dispatch can make validation and merge
+                // disagree under replay.
+                let event = match msg_type {
+                    MessageType::ChannelUpdate => ChannelUpdateStore::merge(
+                        &self.stores.channel_update_store,
+                        message,
+                        txn_batch,
+                    )?,
+                    MessageType::ChannelMember => ChannelMemberStore::merge(
+                        &self.stores.channel_member_store,
+                        message,
+                        txn_batch,
+                    )?,
+                    MessageType::ChannelPin => {
+                        ChannelPinStore::merge(&self.stores.channel_pin_store, message, txn_batch)?
+                    }
+                    MessageType::ChannelModerate => ChannelModerateStore::merge(
+                        &self.stores.channel_moderate_store,
+                        message,
+                        txn_batch,
+                    )?,
+                    _ => unreachable!(),
+                };
+                Ok(vec![event])
+            }
             _ => return Err(MessageValidationError::InvalidMessageType),
         }
     }
@@ -1472,6 +1504,46 @@ impl BlockEngine {
                             }
                         }
                     }
+                    MessageType::ChannelUpdate
+                    | MessageType::ChannelMember
+                    | MessageType::ChannelPin
+                    | MessageType::ChannelModerate => {
+                        if version.is_enabled(ProtocolFeature::ChannelMessages) {
+                            match self.merge_message(message, txn_batch, version) {
+                                Ok(events) => hub_events.extend(events),
+                                Err(err) => {
+                                    // State-aware admission catches ordinary authority failures,
+                                    // but duplicate/current-incumbent and store-integrity errors
+                                    // arise only during merge. Surface and persist them with the
+                                    // same deterministic MERGE_FAILURE behavior as shard-0
+                                    // verifications so simulate_message cannot report success for
+                                    // a message that was not stored.
+                                    warn!(
+                                        fid = message.fid(),
+                                        hash = message.hex_hash(),
+                                        "Error merging shard-0 channel message: {:?}",
+                                        err
+                                    );
+                                    let mut merge_failure =
+                                        Self::merge_failure_event(message, &err);
+                                    if let Err(event_err) = self
+                                        .stores
+                                        .event_handler
+                                        .commit_transaction(txn_batch, &mut merge_failure)
+                                    {
+                                        error!(
+                                            fid = message.fid(),
+                                            hash = message.hex_hash(),
+                                            "Failed to persist shard-0 channel merge failure event: {:?}",
+                                            event_err
+                                        );
+                                    }
+                                    hub_events.push(merge_failure);
+                                    validation_errors.push(err);
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 },
                 Err(err) => {
@@ -1564,6 +1636,10 @@ impl BlockEngine {
                                 let event = Self::build_block_event(data);
                                 events.push(event);
                             }
+                            // Channel messages deliberately do not fan out until inc 7 wires the
+                            // data-shard stores and replay dispatch. Devnet messages merged before
+                            // that increment will not be emitted retroactively; the testbed is
+                            // ephemeral, so stranding those early messages is acceptable.
                             _ => {}
                         }
                     }
@@ -2305,21 +2381,31 @@ mod channel_message_inertness_tests {
     }
 
     #[test]
-    fn channel_messages_have_no_block_engine_merge_dispatch() {
+    fn channel_messages_have_gated_block_engine_merge_dispatch() {
         let (engine, _tmpdir) = block_engine_test_helpers::setup();
 
         for (message_type, body) in messages_factory::channels::all_message_bodies() {
             let message =
                 messages_factory::create_message_with_data(1234, message_type, body, None, None);
-            let result = engine.merge_message(
+            let pre_feature = engine.merge_message(
+                &message,
+                &mut RocksDbTransactionBatch::new(),
+                EngineVersion::V19,
+            );
+            assert!(matches!(
+                pre_feature,
+                Err(MessageValidationError::InvalidMessageType)
+            ));
+
+            let active = engine.merge_message(
                 &message,
                 &mut RocksDbTransactionBatch::new(),
                 EngineVersion::V20,
             );
-            assert!(matches!(
-                result,
-                Err(MessageValidationError::InvalidMessageType)
-            ));
+            assert!(
+                active.is_ok(),
+                "{message_type:?} dispatch failed: {active:?}"
+            );
         }
     }
 }
