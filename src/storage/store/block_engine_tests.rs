@@ -661,6 +661,25 @@ mod tests {
         assert_no_verification_block_events(&old_add_block);
         assert_verification_index(&block_engine, None);
         assert!(message_exists_in_trie(&mut block_engine, &remove));
+        let merge_failure_id =
+            crate::storage::store::account::HubEventIdGenerator::make_event_id_for_block_number(
+                old_add_block
+                    .header
+                    .as_ref()
+                    .unwrap()
+                    .height
+                    .unwrap()
+                    .block_number,
+            ) + 1;
+        let merge_failure =
+            HubEvent::get_event(block_engine.stores().db, merge_failure_id).unwrap();
+        assert!(matches!(
+            merge_failure.body,
+            Some(crate::proto::hub_event::Body::MergeFailure(body))
+                if body.message.as_ref() == Some(&add)
+                    && body.code == "bad_request.conflict"
+                    && !body.reason.is_empty()
+        ));
     }
 
     #[tokio::test]

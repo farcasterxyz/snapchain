@@ -1,5 +1,6 @@
 use crate::consensus::proposer::ProposalSource;
 use crate::core::error::HubError;
+use crate::core::message::HubEventExt;
 use crate::core::validations;
 use crate::core::{types::Height, util::FarcasterTime};
 use crate::mempool::mempool::MempoolMessagesRequest;
@@ -871,6 +872,27 @@ impl BlockEngine {
                                         "Error merging shard-0 verification: {:?}",
                                         err
                                     );
+                                    let merge_error = match &err {
+                                        MessageValidationError::HubError(hub_error) => {
+                                            hub_error.clone()
+                                        }
+                                        _ => HubError::validation_failure(&err.to_string()),
+                                    };
+                                    let mut merge_failure = HubEvent::new_event(
+                                        proto::HubEventType::MergeFailure,
+                                        proto::hub_event::Body::MergeFailure(
+                                            proto::MergeFailureBody {
+                                                message: Some(message.clone()),
+                                                code: merge_error.code,
+                                                reason: merge_error.message,
+                                            },
+                                        ),
+                                    );
+                                    let _ = self
+                                        .stores
+                                        .event_handler
+                                        .commit_transaction(txn_batch, &mut merge_failure);
+                                    hub_events.push(merge_failure);
                                     validation_errors.push(err);
                                 }
                             }
