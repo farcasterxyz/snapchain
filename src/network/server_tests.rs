@@ -1860,26 +1860,40 @@ mod tests {
                     })
                     .collect::<Vec<_>>();
 
-                // S6 reaches the real 8k/16k caps. Replay the same contiguous BlockEvent stream
-                // in one real proposal per replica so scale coverage does not manufacture tens
-                // of thousands of one-event blocks.
+                // S6 reaches the real 8k/16k caps. Replay the same contiguous, mixed-fid
+                // BlockEvent stream in batched proposals so scale coverage does not manufacture
+                // tens of thousands of one-event blocks. This direct-engine harness sits below
+                // BlockReceiver, so it must emulate BlockReceiver's durable confirmation and
+                // bounded tail re-drive guarantee when HashMap transaction grouping transiently
+                // reorders different fids and strict seqnum replay skips the unconfirmed tail.
                 for replica in &mut self.replicas {
                     let shard_id = replica.shard_id();
-                    let state_change = replica.propose_state_change(
-                        shard_id,
-                        events
+                    let mut submissions = 0;
+                    loop {
+                        let confirmed =
+                            replica.get_stores().block_event_store.max_seqnum().unwrap();
+                        if confirmed >= max_seqnum {
+                            break;
+                        }
+                        assert!(
+                            submissions <= 3,
+                            "replica shard {shard_id} did not confirm BlockEvent {max_seqnum} after the initial submission and three tail re-drives; stopped at {confirmed}"
+                        );
+                        let pending = events
                             .iter()
+                            .filter(|event| event.seqnum() > confirmed)
                             .cloned()
                             .map(|message| MempoolMessage::BlockEvent {
                                 for_shard: shard_id,
                                 message,
                             })
-                            .collect(),
-                        None,
-                    );
-                    let proposed_root = state_change.new_state_root.clone();
-                    test_helper::validate_and_commit_state_change(replica, &state_change).await;
-                    assert_eq!(replica.trie_root_hash(), proposed_root);
+                            .collect();
+                        let state_change = replica.propose_state_change(shard_id, pending, None);
+                        let proposed_root = state_change.new_state_root.clone();
+                        test_helper::validate_and_commit_state_change(replica, &state_change).await;
+                        assert_eq!(replica.trie_root_hash(), proposed_root);
+                        submissions += 1;
+                    }
                 }
                 assert_eq!(
                     self.replicas[0].trie_root_hash(),
