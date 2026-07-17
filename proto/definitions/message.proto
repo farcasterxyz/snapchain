@@ -275,10 +275,11 @@ enum CastingMode {
 }
 
 /**
- * Protocol-relevant, unlike CastingMode: this is intended to gate whether an fid
- * may add itself as a member (a ChannelMemberBody with CHANNEL_MEMBER_ACTION_ADD_MEMBER
+ * Protocol-relevant, unlike CastingMode: this gates whether an fid may add
+ * itself as a member (a ChannelMemberBody with CHANNEL_MEMBER_ACTION_ADD_MEMBER
  * whose fid equals the sending message's fid). OPEN admits self-adds; APPROVAL
- * requires a moderator. Not enforced yet — no channel message merges on any network.
+ * requires a moderator. Enforced at shard-0 admission wherever channel messages
+ * are active (they are version-gated and inert on networks below that version).
  */
 enum MembershipMode {
   MEMBERSHIP_MODE_NONE = 0;

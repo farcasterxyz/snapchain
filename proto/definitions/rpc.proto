@@ -72,8 +72,10 @@ service HubService {
 
   rpc GetOnChainEvents(OnChainEventRequest) returns (OnChainEventResponse);
   // Resolves the current channel registry owner address to an fid using the
-  // shard-0 verification replica. The owner is the last-write-wins verifier of
-  // the address across all shards. An fid of 0 means the channel is registered
+  // shard-0 verification replica. The owner is the winning verifier of the
+  // address in that replica (greatest ts_hash, ties to the lower fid);
+  // verifications that exist only in pre-activation data-shard history do not
+  // participate. An fid of 0 means the channel is registered
   // but no verified owner is present in shard-0 consensus state ("parked").
   // This read is not consensus.
   //

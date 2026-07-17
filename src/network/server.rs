@@ -2885,9 +2885,13 @@ impl HubService for MyHubService {
         }
         owner_addresses.sort();
 
-        // Keep only the addresses this fid currently wins under read-time LWW.
-        // This is what makes the invariant hold: a channel appears here iff
-        // GetChannelOwner resolves it to `req.fid`.
+        // Keep only the addresses this fid currently wins under the shard-0
+        // winner rule, so a channel appears here only if GetChannelOwner
+        // resolves it to `req.fid`. The converse does not quite hold: shard-0
+        // replica rows are permanent, but the home-shard rows enumerated above
+        // prune to the fid's local storage cap, so a winning verification the
+        // home shard has pruned keeps the owner resolvable without the channel
+        // being listed here.
         let mut winning_addresses = Vec::new();
         for owner_address in owner_addresses {
             if self
