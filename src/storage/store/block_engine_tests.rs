@@ -630,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn same_block_verification_then_channel_action_commits_on_devnet() {
+    fn same_block_verification_then_channel_action_commits_and_fans_out_on_devnet() {
         let (mut engine, _tmpdir) = setup();
         let fid = 44;
         let owner_address = vec![0x44; 20];
@@ -687,17 +687,20 @@ mod tests {
         .expect("channel update must merge in the full propose/validate/commit pipeline");
         assert_eq!(state.body.name.as_deref(), Some("same block"));
         assert_eq!(state.membership_mode, MembershipMode::Open);
-        assert!(state_change.events.iter().all(|event| {
-            event
-                .data
-                .as_ref()
-                .and_then(|data| data.body.as_ref())
-                .and_then(|body| match body {
-                    block_event_data::Body::MergeMessageEventBody(body) => body.message.as_ref(),
-                    _ => None,
-                })
-                .is_none_or(|message| message.msg_type() != MessageType::ChannelUpdate)
-        }));
+        let channel_events = state_change
+            .events
+            .iter()
+            .filter_map(|event| {
+                let block_event_data::Body::MergeMessageEventBody(body) =
+                    event.data.as_ref()?.body.as_ref()?
+                else {
+                    return None;
+                };
+                let message = body.message.as_ref()?;
+                (message.msg_type() == MessageType::ChannelUpdate).then_some(message)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(channel_events, vec![&update]);
     }
 
     #[test]

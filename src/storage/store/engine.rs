@@ -19,7 +19,8 @@ use crate::proto::{
 };
 use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
 use crate::storage::store::account::{
-    BlockEventStorageError, CastStore, MergeContext, MessagesPage, StorageLendStore, StoreOptions,
+    BlockEventStorageError, CastStore, ChannelMemberStore, ChannelModerateStore, ChannelPinStore,
+    ChannelUpdateStore, MergeContext, MessagesPage, StorageLendStore, StoreOptions,
     VerificationStore,
 };
 use crate::storage::store::engine_metrics::Metrics;
@@ -756,11 +757,9 @@ impl ShardEngine {
                         Some(ProtocolFeature::VerificationsOnShardZero),
                         ReplayMerge::Forced,
                     ),
-                    // Intentionally gated but undispatchable in this increment. Shard 0 can merge
-                    // channel messages, but its BlockEvent allowlist does not emit them yet and
-                    // ShardEngine::merge_message still has no channel stores. Inc 7 adds both;
-                    // keeping ReplayMerge::Normal here closes the wildcard fail-open without
-                    // wiring data-shard state early.
+                    // Channel messages replay through their slot stores' consensus-order merge.
+                    // The BlockEvent timestamp is the authoritative feature-gate input; the
+                    // original message timestamp never decides replay reachability.
                     MessageType::ChannelUpdate
                     | MessageType::ChannelMember
                     | MessageType::ChannelPin
@@ -1790,6 +1789,26 @@ impl ShardEngine {
                     txn_batch,
                 )?]
             }
+            MessageType::ChannelUpdate => vec![ChannelUpdateStore::merge(
+                &self.stores.channel_update_store,
+                msg,
+                txn_batch,
+            )?],
+            MessageType::ChannelMember => vec![ChannelMemberStore::merge(
+                &self.stores.channel_member_store,
+                msg,
+                txn_batch,
+            )?],
+            MessageType::ChannelPin => vec![ChannelPinStore::merge(
+                &self.stores.channel_pin_store,
+                msg,
+                txn_batch,
+            )?],
+            MessageType::ChannelModerate => vec![ChannelModerateStore::merge(
+                &self.stores.channel_moderate_store,
+                msg,
+                txn_batch,
+            )?],
             unhandled_type => {
                 return Err(MessageValidationError::InvalidMessageType(
                     unhandled_type as i32,

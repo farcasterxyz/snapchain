@@ -1669,6 +1669,7 @@ impl BlockEngine {
     ) -> (Vec<BlockEvent>, Vec<u8>) {
         let version = EngineVersion::version_for(timestamp, self.network);
         let gasless_enabled = version.is_enabled(ProtocolFeature::GaslessSigners);
+        let channel_messages_enabled = version.is_enabled(ProtocolFeature::ChannelMessages);
         let mut events = vec![];
         let mut max_block_event_seqnum = self.stores.block_event_store.max_seqnum().unwrap();
         for hub_event in hub_events {
@@ -1708,10 +1709,30 @@ impl BlockEngine {
                                 let event = Self::build_block_event(data);
                                 events.push(event);
                             }
-                            // Channel messages deliberately do not fan out until inc 7 wires the
-                            // data-shard stores and replay dispatch. Devnet messages merged before
-                            // that increment will not be emitted retroactively; the testbed is
-                            // ephemeral, so stranding those early messages is acceptable.
+                            MessageType::ChannelUpdate
+                            | MessageType::ChannelMember
+                            | MessageType::ChannelPin
+                            | MessageType::ChannelModerate
+                                if channel_messages_enabled =>
+                            {
+                                // Channel rows fan out only after the same feature gate that admits
+                                // them on shard 0. Data shards replay the original message in this
+                                // consensus order and derive superseded rows locally.
+                                max_block_event_seqnum += 1;
+                                let data = BlockEventData {
+                                    seqnum: max_block_event_seqnum,
+                                    r#type: BlockEventType::MergeMessage as i32,
+                                    block_number: height.block_number,
+                                    event_index: events.len() as u64,
+                                    block_timestamp: timestamp.to_u64(),
+                                    body: Some(block_event_data::Body::MergeMessageEventBody(
+                                        proto::MergeMessageEventBody {
+                                            message: Some(message),
+                                        },
+                                    )),
+                                };
+                                events.push(Self::build_block_event(data));
+                            }
                             _ => {}
                         }
                     }

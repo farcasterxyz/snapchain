@@ -1,6 +1,6 @@
 use super::{
     get_from_db_or_txn, get_message, make_ts_hash, make_user_key, read_fid_key, Store, StoreDef,
-    StoreEventHandler, TS_HASH_LENGTH,
+    StoreEventHandler, StoreOptions, TS_HASH_LENGTH,
 };
 use crate::core::error::HubError;
 use crate::proto::{
@@ -675,6 +675,20 @@ macro_rules! define_channel_store {
                 prune_size_limit: u32,
             ) -> Store<$def> {
                 Store::new_with_store_def(db, store_event_handler, $def { prune_size_limit })
+            }
+
+            pub fn new_with_opts(
+                db: Arc<RocksDB>,
+                store_event_handler: Arc<StoreEventHandler>,
+                prune_size_limit: u32,
+                store_opts: StoreOptions,
+            ) -> Store<$def> {
+                Store::new_with_store_def_opts(
+                    db,
+                    store_event_handler,
+                    $def { prune_size_limit },
+                    store_opts,
+                )
             }
         }
     };
