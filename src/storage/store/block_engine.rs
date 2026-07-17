@@ -122,6 +122,18 @@ pub(crate) enum ChannelAuthorityDecision {
     OwnerUnbannable,
 }
 
+/// Author fid == target fid. Must stay a distinct type from `TargetIsOwner`: the two are both
+/// boolean and sit in nearby argument slots of `channel_member_authority`, and transposing them
+/// disarms the owner-unbannable floor — `target_is_owner` would then read "author banned itself",
+/// admitting a moderator's ban of the channel owner. Tests cannot backstop this: the only
+/// end-to-end owner-ban case is a self-ban, where both values are `true` and a swap is invisible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct IsSelf(pub bool);
+
+/// Target fid == the registry-resolved owner fid. See `IsSelf` for why this is not a bare `bool`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TargetIsOwner(pub bool);
+
 enum ChannelAdmissionBody<'a> {
     Update(&'a proto::ChannelUpdateBody),
     Member(&'a proto::ChannelMemberBody),
@@ -156,9 +168,9 @@ pub(crate) fn channel_member_authority(
     action: proto::ChannelMemberAction,
     author_role: ChannelAuthorRole,
     target_state: Option<ChannelMemberState>,
-    is_self: bool,
+    IsSelf(is_self): IsSelf,
     membership_mode: proto::MembershipMode,
-    target_is_owner: bool,
+    TargetIsOwner(target_is_owner): TargetIsOwner,
 ) -> ChannelAuthorityDecision {
     use proto::ChannelMemberAction::{
         AddMember, AddModerator, Ban, None as NoAction, RemoveMember, RemoveModerator, Unban,
@@ -167,6 +179,9 @@ pub(crate) fn channel_member_authority(
     if action == NoAction {
         return ChannelAuthorityDecision::InvalidTargetState;
     }
+    // NOTE: `target_is_owner` is false whenever the owner fid is unresolvable (the channel is
+    // "parked"), so this floor does not hold in that window. That is a known T1 gap pending a
+    // decision on parked-channel semantics, not an oversight — see the increment review.
     if action == Ban && target_is_owner {
         return ChannelAuthorityDecision::OwnerUnbannable;
     }
@@ -793,9 +808,9 @@ impl BlockEngine {
                     action,
                     author_role,
                     target_state,
-                    message_data.fid == member.fid,
+                    IsSelf(message_data.fid == member.fid),
                     membership_mode,
-                    owner_fid == Some(member.fid),
+                    TargetIsOwner(owner_fid == Some(member.fid)),
                 );
                 let reason = match decision {
                     ChannelAuthorityDecision::Allowed => None,
@@ -917,6 +932,17 @@ impl BlockEngine {
             .as_ref()
             .ok_or(MessageValidationError::NoMessageData)?
         {
+            // BOTH halves of this `||` are load-bearing; do not "simplify" it to a body-only
+            // match. A message's `r#type` and its body are independent on the wire, and this arm
+            // must claim a message if EITHER looks channel-shaped:
+            //   - body-only: a `{type: ChannelUpdate, body: LendStorageBody}` message would fall
+            //     into the LendStorage arm, validate as a lend, and return `Ok(None)` — then the
+            //     merge arm below, which dispatches on `msg_type`, hits the channel branch with
+            //     no dispatch token and hard-errors, aborting the whole transaction replay.
+            //   - type-only: a `{type: LendStorage, body: ChannelUpdateBody}` message would skip
+            //     channel validation entirely.
+            // Claiming both directions here lets `validate_channel_message` reject the mismatch
+            // as `InvalidMessageType`, which is the only outcome that is safe on every path.
             body if matches!(
                 msg_type,
                 MessageType::ChannelUpdate
@@ -1520,6 +1546,11 @@ impl BlockEngine {
                     | MessageType::ChannelMember
                     | MessageType::ChannelPin
                     | MessageType::ChannelModerate => {
+                        // Invariant guard, not routine error handling: the gated validation arm
+                        // claims every channel-typed message (see the `||` guard there), so a
+                        // channel `msg_type` always yields `Some(dispatch)` or an error. This is
+                        // unreachable today and fails closed on purpose — the alternative to a
+                        // loud abort is silently skipping the merge of an admitted message.
                         let dispatch = channel_dispatch.ok_or_else(|| {
                             BlockEngineError::HubError(HubError::invalid_internal_state(
                                 "validated channel message is missing merge dispatch",
@@ -2343,7 +2374,7 @@ mod error_conversion_tests {
 }
 
 #[cfg(test)]
-mod channel_message_inertness_tests {
+mod channel_message_gate_tests {
     use super::{ChannelMergeDispatch, MessageValidationError};
     use crate::core::util::FarcasterTime;
     use crate::core::validations::error::ValidationError;

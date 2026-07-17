@@ -14,7 +14,7 @@ mod tests {
     };
     use crate::storage::store::block_engine::{
         channel_member_authority, BlockStateChange, ChannelAuthorRole, ChannelAuthorityDecision,
-        MessageValidationError,
+        IsSelf, MessageValidationError, TargetIsOwner,
     };
     use crate::storage::store::block_engine_test_helpers::*;
     use crate::storage::store::mempool_poller::MempoolMessage;
@@ -322,9 +322,9 @@ mod tests {
                             action,
                             role,
                             state,
-                            is_self,
+                            IsSelf(is_self),
                             MembershipMode::Open,
-                            false,
+                            TargetIsOwner(false),
                         ) == ChannelAuthorityDecision::Allowed;
                         assert_eq!(
                             actual, expected,
@@ -345,27 +345,171 @@ mod tests {
                         ChannelMemberAction::AddMember,
                         ChannelAuthorRole::Other,
                         state,
-                        true,
+                        IsSelf(true),
                         mode,
-                        false,
+                        TargetIsOwner(false),
                     ),
                     ChannelAuthorityDecision::Unauthorized
                 );
             }
         }
 
+        // The owner is unbannable by EVERY author role, from every target state, whether or not
+        // the ban is a self-ban. The non-self rows are the ones that matter: they are the only
+        // place the `target_is_owner` input is observed independently of `is_self`.
         for state in states {
-            assert_eq!(
-                channel_member_authority(
-                    ChannelMemberAction::Ban,
-                    ChannelAuthorRole::Owner,
-                    state,
-                    false,
-                    MembershipMode::Open,
-                    true,
-                ),
-                ChannelAuthorityDecision::OwnerUnbannable
+            for role in roles {
+                for is_self in [false, true] {
+                    assert_eq!(
+                        channel_member_authority(
+                            ChannelMemberAction::Ban,
+                            role,
+                            state,
+                            IsSelf(is_self),
+                            MembershipMode::Open,
+                            TargetIsOwner(true),
+                        ),
+                        ChannelAuthorityDecision::OwnerUnbannable,
+                        "owner must be unbannable by role={role:?}, state={state:?}, self={is_self}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// T1's three non-member rows (ChannelUpdate = owner only; ChannelPin / ChannelModerate =
+    /// owner or moderator) are enforced inline in `validate_channel_message`, NOT by
+    /// `channel_member_authority`, so the exhaustive matrix above does not reach them. This
+    /// drives every (row x author role) cell through the real admission path, which also makes
+    /// it the only coverage of `channel_author_role`'s store-lookup branch: the pipeline tests
+    /// all author as the owner and short-circuit on the registry check before reading a slot.
+    #[test]
+    fn channel_pin_update_and_moderate_rows_enforce_t1_author_roles() {
+        use crate::proto::message_data::Body;
+
+        let (mut engine, _tmpdir) = setup();
+        let owner_fid = 61;
+        let moderator_fid = 62;
+        let member_fid = 63;
+        let stranger_fid = 64;
+        let owner_address = vec![0x61; 20];
+        let channel_key = "role-channel";
+        let channel_id = channel_label(channel_key);
+
+        for fid in [owner_fid, moderator_fid, member_fid, stranger_fid] {
+            register_user(
+                fid,
+                default_signer(),
+                default_custody_address(),
+                1,
+                &mut engine,
             );
+        }
+        commit_event(
+            &mut engine,
+            &events_factory::create_channel_register_event(
+                channel_key,
+                channel_id.clone(),
+                owner_address.clone(),
+                1_000,
+                ChannelRegisterEventType::Register,
+                61,
+                1,
+            ),
+        );
+        let timestamp = messages_factory::farcaster_time();
+        commit_message(
+            &mut engine,
+            &verification_contract_add_for_fid(owner_fid, owner_address, timestamp),
+            Validity::Valid,
+        );
+
+        // Seed a real moderator row and a real member row so author roles resolve from the store
+        // rather than from the owner short-circuit.
+        let stores = engine.stores();
+        let mut txn = RocksDbTransactionBatch::new();
+        for (target, action) in [
+            (moderator_fid, ChannelMemberAction::AddModerator),
+            (member_fid, ChannelMemberAction::AddMember),
+        ] {
+            let grant = channel_member_message(
+                owner_fid,
+                channel_id.clone(),
+                target,
+                action,
+                timestamp + 1,
+            );
+            assert!(
+                validate_channel_for_test(&engine, &grant, &mut txn).is_ok(),
+                "owner must be able to seed {action:?}"
+            );
+            ChannelMemberStore::merge(&stores.channel_member_store, &grant, &mut txn).unwrap();
+        }
+
+        let pin_body = |channel_id: Vec<u8>| {
+            Body::ChannelPinBody(crate::proto::ChannelPinBody {
+                channel_id,
+                cast_hash: vec![0x77; 20],
+            })
+        };
+        let moderate_body = |channel_id: Vec<u8>| {
+            Body::ChannelModerateBody(crate::proto::ChannelModerateBody {
+                channel_id,
+                cast_hash: vec![0x88; 20],
+                action: crate::proto::ChannelModerateAction::Hide as i32,
+            })
+        };
+
+        // (message type, body builder, whether a moderator is authorized for this row)
+        let rows: Vec<(MessageType, Box<dyn Fn(Vec<u8>) -> Body>, bool)> = vec![
+            (
+                MessageType::ChannelUpdate,
+                Box::new(|channel_id| {
+                    Body::ChannelUpdateBody(crate::proto::ChannelUpdateBody {
+                        channel_id,
+                        name: Some("role".to_string()),
+                        ..Default::default()
+                    })
+                }),
+                false,
+            ),
+            (MessageType::ChannelPin, Box::new(pin_body), true),
+            (MessageType::ChannelModerate, Box::new(moderate_body), true),
+        ];
+
+        for (index, (message_type, body, moderator_allowed)) in rows.iter().enumerate() {
+            for (author, is_owner_or_allowed_mod) in [
+                (owner_fid, true),
+                (moderator_fid, *moderator_allowed),
+                (member_fid, false),
+                (stranger_fid, false),
+            ] {
+                let message = messages_factory::create_message_with_data(
+                    author,
+                    *message_type,
+                    body(channel_id.clone()),
+                    Some(timestamp + 10 + index as u32),
+                    None,
+                );
+                let result = validate_channel_for_test(&engine, &message, &mut txn);
+                if is_owner_or_allowed_mod {
+                    assert!(
+                        result.is_ok(),
+                        "{message_type:?} must admit author {author}: {result:?}"
+                    );
+                } else {
+                    let error =
+                        result.expect_err(&format!("{message_type:?} must reject author {author}"));
+                    assert!(
+                        matches!(
+                            error,
+                            MessageValidationError::HubError(ref hub_error)
+                                if hub_error.message == "unauthorized channel action"
+                        ),
+                        "{message_type:?} author {author} rejected for the wrong reason: {error:?}"
+                    );
+                }
+            }
         }
     }
 
@@ -636,7 +780,18 @@ mod tests {
             Some(MembershipMode::Approval),
             timestamp + 3,
         );
-        assert!(engine.simulate_message(&stale_owner_update).is_err());
+        // Pin the reason, not just the failure: a bare `is_err()` here would also pass if the
+        // transfer had broken owner resolution outright (unknown channel, duplicate hash), which
+        // is exactly the bug this test is named for.
+        let stale_error = engine.simulate_message(&stale_owner_update).unwrap_err();
+        assert!(
+            matches!(
+                stale_error,
+                MessageValidationError::HubError(ref hub_error)
+                    if hub_error.message == "unauthorized channel action"
+            ),
+            "old owner must lose authority as unauthorized, got {stale_error:?}"
+        );
 
         let new_owner_update = channel_update_message(
             new_fid,
@@ -645,7 +800,15 @@ mod tests {
             Some(MembershipMode::Open),
             timestamp + 4,
         );
-        assert!(engine.simulate_message(&new_owner_update).is_err());
+        let unverified_error = engine.simulate_message(&new_owner_update).unwrap_err();
+        assert!(
+            matches!(
+                unverified_error,
+                MessageValidationError::HubError(ref hub_error)
+                    if hub_error.message == "unauthorized channel action"
+            ),
+            "new owner must stay unauthorized until the new address is verified on shard 0, got {unverified_error:?}"
+        );
         commit_message(
             &mut engine,
             &verification_contract_add_for_fid(new_fid, new_address, timestamp + 3),
