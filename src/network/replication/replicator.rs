@@ -529,13 +529,7 @@ impl Replicator {
             }
         };
 
-        let snapshot_timestamp = self.stores.get_timestamp(shard_id, height).ok_or_else(|| {
-            ReplicationError::StoreNotFound(
-                shard_id,
-                height,
-                "No timestamp found for the snapshot".to_string(),
-            )
-        })?;
+        let snapshot_timestamp = self.stores.get_timestamp(shard_id, height)?;
         let channel_messages_enabled =
             EngineVersion::version_for(&FarcasterTime::new(snapshot_timestamp), self.network())
                 .is_enabled(ProtocolFeature::ChannelMessages);

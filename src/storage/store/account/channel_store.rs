@@ -904,6 +904,10 @@ impl ChannelMemberStore {
                 }
                 let fid = read_fid_key(key, prefix.len());
                 let message = read_slot(store, key.to_vec(), None)?.ok_or_else(|| {
+                    warn!(
+                        channel_id = hex::encode(channel_id),
+                        fid, "channel member slot is missing for an enumerated index key",
+                    );
                     HubError::invalid_internal_state("channel member slot is missing")
                 })?;
                 let state = member_state_for_message(&message)?;
@@ -956,6 +960,11 @@ impl ChannelMemberStore {
                 let channel_id = key[prefix.len()..].to_vec();
                 let state =
                     Self::member_state(store, &channel_id, target_fid, None)?.ok_or_else(|| {
+                        warn!(
+                            target_fid,
+                            channel_id = hex::encode(&channel_id),
+                            "channel member by-fid index points to a missing slot",
+                        );
                         HubError::invalid_internal_state(
                             "channel member by-fid index points to a missing slot",
                         )
@@ -1095,6 +1104,10 @@ impl ChannelModerateStore {
                     ));
                 }
                 let message = read_slot(store, key.to_vec(), None)?.ok_or_else(|| {
+                    warn!(
+                        channel_id = hex::encode(channel_id),
+                        "channel moderate slot is missing for an enumerated index key",
+                    );
                     HubError::invalid_internal_state("channel moderate slot is missing")
                 })?;
                 let body = match message.data.as_ref().and_then(|data| data.body.as_ref()) {

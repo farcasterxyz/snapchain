@@ -57,13 +57,26 @@ impl ReplicationStores {
         }
     }
 
-    pub fn get_timestamp(&self, shard: u32, height: u64) -> Option<u64> {
-        self.read_only_stores
-            .read()
-            .ok()?
-            .get(&shard)?
-            .get(&height)
+    pub fn get_timestamp(&self, shard: u32, height: u64) -> Result<u64, ReplicationError> {
+        // Distinguish a poisoned lock (a bug worth surfacing as an internal error, mirroring
+        // `get_metadata`) from a genuinely absent snapshot. Collapsing both to `None` here made a
+        // lock-poisoning panic look like a missing snapshot to the caller.
+        let stores = self.read_only_stores.read().map_err(|_| {
+            ReplicationError::InternalError(
+                "Failed to acquire read lock on read_only_stores".to_string(),
+            )
+        })?;
+        stores
+            .get(&shard)
+            .and_then(|snapshots| snapshots.get(&height))
             .map(|(timestamp, _)| *timestamp)
+            .ok_or_else(|| {
+                ReplicationError::StoreNotFound(
+                    shard,
+                    height,
+                    "No timestamp found for the snapshot".to_string(),
+                )
+            })
     }
 
     // Returns a list of (height, farcaster timestamp) pairs for the given shard.
