@@ -2996,6 +2996,8 @@ impl HubService for MyHubService {
             None,
         )
         .map_err(|err| Status::internal(format!("Store error: {err:?}")))?;
+        // An unpin (empty cast_hash, permitted by validate_channel_pin_body) and a
+        // channel that was never pinned intentionally read identically as "no pin".
         Ok(Response::new(match pin {
             Some(pin) if !pin.body.cast_hash.is_empty() => ChannelPinResponse {
                 cast_hash: Some(pin.body.cast_hash),

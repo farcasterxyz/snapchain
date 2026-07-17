@@ -227,6 +227,7 @@ message ChannelMemberResponse {
 
 message ChannelMembersRequest {
   bytes channel_id = 1;
+  // Absent OR CHANNEL_MEMBER_STATE_NONE both mean "no filter" (return all states).
   optional ChannelMemberState state_filter = 2;
   optional uint32 page_size = 3;
   optional bytes page_token = 4;
@@ -266,6 +267,10 @@ message ChannelModerationsResponse {
   optional bytes next_page_token = 2;
 }
 
+// casting_mode/membership_mode are the RESOLVED effective policy: for a registered
+// channel with no ChannelUpdate yet, the server returns the restrictive defaults
+// (MEMBERS_ONLY / APPROVAL), never the NONE=0 sentinel. Clients cannot distinguish
+// "never configured" from "explicitly set to the default" here — that is intentional.
 message ChannelMetadataResponse {
   optional string name = 1;
   optional string description = 2;
