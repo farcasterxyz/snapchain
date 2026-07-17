@@ -5,7 +5,7 @@ mod tests {
     use async_trait::async_trait;
     use base64::Engine;
     use prost::Message;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use tokio::time::{sleep, timeout};
@@ -28,11 +28,12 @@ mod tests {
         UsernameProofRequest, VerificationAddAddressBody,
     };
     use crate::proto::{FidRequest, SignersByFidRequest, SubscribeRequest};
-    use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
+    use crate::storage::constants::RootPrefix;
+    use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{
-        make_message_primary_key, make_ts_hash, ChannelMemberStore, ChannelMemberStoreDef,
-        ChannelModerateStore, ChannelPinStore, ChannelUpdateStore, HubEventIdGenerator,
-        HubEventStorageExt, VerificationStoreDef, SEQUENCE_BITS,
+        make_message_primary_key, make_ts_hash, ChannelMemberStore, ChannelModerateStore,
+        ChannelPinStore, ChannelUpdateStore, HubEventIdGenerator, HubEventStorageExt,
+        VerificationStoreDef, SEQUENCE_BITS,
     };
     use crate::storage::store::block_engine::BlockEngine;
     use crate::storage::store::block_engine_test_helpers::{BlockEngineOptions, Validity};
@@ -41,6 +42,7 @@ mod tests {
     use crate::storage::store::test_helper::{commit_event, register_user};
     use crate::storage::store::{block_engine_test_helpers, test_helper};
     use crate::storage::trie::merkle_trie;
+    use crate::storage::util::increment_vec_u8;
     use crate::utils::factory::signers::generate_signer;
     use crate::utils::factory::{events_factory, messages_factory};
     use crate::utils::statsd_wrapper::StatsdClientWrapper;
@@ -1578,20 +1580,24 @@ mod tests {
         let replica_a_stores = replica_a.get_stores();
         let replica_b_stores = replica_b.get_stores();
 
-        let slot_keys = vec![
-            ChannelUpdateStore::slot_key(&channel_id),
-            ChannelMemberStore::slot_key(&channel_id, MODERATOR_FID).unwrap(),
-            ChannelMemberStore::slot_key(&channel_id, TARGET_FID).unwrap(),
-            ChannelPinStore::slot_key(&channel_id),
-            ChannelModerateStore::slot_key(&channel_id, &moderated_hash),
-            ChannelMemberStoreDef::make_member_by_fid_key(MODERATOR_FID, &channel_id).unwrap(),
-            ChannelMemberStoreDef::make_member_by_fid_key(TARGET_FID, &channel_id).unwrap(),
-        ];
-        for key in slot_keys {
-            let expected = block_stores.db.get(&key).unwrap();
-            assert_eq!(replica_a.db.get(&key).unwrap(), expected);
-            assert_eq!(replica_b.db.get(&key).unwrap(), expected);
-        }
+        let channel_rows = |db: &RocksDB| {
+            let prefix = vec![RootPrefix::Channel as u8];
+            let mut rows = BTreeMap::new();
+            db.for_each_iterator_by_prefix(
+                Some(prefix.clone()),
+                Some(increment_vec_u8(&prefix)),
+                &PageOptions::default(),
+                |key, value| {
+                    rows.insert(key.to_vec(), value.to_vec());
+                    Ok(false)
+                },
+            )
+            .unwrap();
+            rows
+        };
+        let shard_zero_channel_rows = channel_rows(&block_stores.db);
+        assert_eq!(channel_rows(&replica_a.db), shard_zero_channel_rows);
+        assert_eq!(channel_rows(&replica_b.db), shard_zero_channel_rows);
 
         for message in [&update, &add_moderator, &pin, &moderation, &ban_target] {
             let postfix = match message.msg_type() {
@@ -1695,6 +1701,46 @@ mod tests {
             .into_inner();
         assert_eq!(memberships.memberships.len(), 1);
         assert_eq!(memberships.memberships[0].channel_id, channel_id);
+
+        let members_zero = service
+            .get_channel_members(Request::new(ChannelMembersRequest {
+                channel_id: channel_id.clone(),
+                state_filter: None,
+                page_size: Some(0),
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(members_zero.members.is_empty());
+        assert_eq!(members_zero.next_page_token, None);
+
+        let moderations_zero = service
+            .get_channel_moderations(Request::new(ChannelModerationsRequest {
+                channel_id: channel_id.clone(),
+                page_size: Some(0),
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(moderations_zero.moderations.is_empty());
+        assert_eq!(moderations_zero.next_page_token, None);
+
+        let memberships_zero = service
+            .get_channel_memberships_by_fid(Request::new(ChannelMembershipsByFidRequest {
+                fid: TARGET_FID,
+                page_size: Some(0),
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(memberships_zero.memberships.is_empty());
+        assert_eq!(memberships_zero.next_page_token, None);
     }
 
     // Registers `channel_key` to `owner_address` at a distinct chain position so

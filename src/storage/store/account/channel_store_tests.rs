@@ -266,6 +266,185 @@ mod tests {
     }
 
     #[test]
+    fn channel_read_pagination_round_trips_tokens_and_terminates_after_boundary_page() {
+        let stores = test_stores();
+        let members_channel = channel_id(0x30);
+        let memberships_channels = [channel_id(0x40), channel_id(0x41)];
+        let memberships_fid = 30;
+        let moderated_hashes = [cast_hash(1), cast_hash(2)];
+        let mut txn = RocksDbTransactionBatch::new();
+
+        for (timestamp, fid) in [(1, 10), (2, 20)] {
+            ChannelMemberStore::merge_with_gated_by_fid_index(
+                &stores.member,
+                &member_message(
+                    1,
+                    members_channel.clone(),
+                    fid,
+                    ChannelMemberAction::AddMember,
+                    timestamp,
+                ),
+                &mut txn,
+                true,
+            )
+            .unwrap();
+        }
+        for (index, channel) in memberships_channels.iter().enumerate() {
+            ChannelMemberStore::merge_with_gated_by_fid_index(
+                &stores.member,
+                &member_message(
+                    1,
+                    channel.clone(),
+                    memberships_fid,
+                    ChannelMemberAction::AddMember,
+                    index as u32 + 3,
+                ),
+                &mut txn,
+                true,
+            )
+            .unwrap();
+        }
+        for (index, moderated_hash) in moderated_hashes.iter().enumerate() {
+            ChannelModerateStore::merge(
+                &stores.moderate,
+                &moderate_message(
+                    1,
+                    members_channel.clone(),
+                    moderated_hash.clone(),
+                    ChannelModerateAction::Hide,
+                    index as u32 + 5,
+                ),
+                &mut txn,
+            )
+            .unwrap();
+        }
+        stores.db.commit(txn).unwrap();
+
+        let members_first = ChannelMemberStore::members_by_channel(
+            &stores.member,
+            &members_channel,
+            None,
+            &PageOptions {
+                page_size: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(members_first.entries.len(), 1);
+        assert_eq!(members_first.entries[0].fid, 10);
+        assert!(members_first.next_page_token.is_some());
+        let members_second = ChannelMemberStore::members_by_channel(
+            &stores.member,
+            &members_channel,
+            None,
+            &PageOptions {
+                page_size: Some(1),
+                page_token: members_first.next_page_token,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(members_second.entries.len(), 1);
+        assert_eq!(members_second.entries[0].fid, 20);
+        assert!(members_second.next_page_token.is_some());
+        let members_boundary = ChannelMemberStore::members_by_channel(
+            &stores.member,
+            &members_channel,
+            None,
+            &PageOptions {
+                page_size: Some(1),
+                page_token: members_second.next_page_token,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(members_boundary.entries.is_empty());
+        assert_eq!(members_boundary.next_page_token, None);
+
+        let moderations_first = ChannelModerateStore::moderations_by_channel(
+            &stores.moderate,
+            &members_channel,
+            &PageOptions {
+                page_size: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(moderations_first.entries.len(), 1);
+        assert_eq!(moderations_first.entries[0].cast_hash, moderated_hashes[0]);
+        assert!(moderations_first.next_page_token.is_some());
+        let moderations_second = ChannelModerateStore::moderations_by_channel(
+            &stores.moderate,
+            &members_channel,
+            &PageOptions {
+                page_size: Some(1),
+                page_token: moderations_first.next_page_token,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(moderations_second.entries.len(), 1);
+        assert_eq!(moderations_second.entries[0].cast_hash, moderated_hashes[1]);
+        assert!(moderations_second.next_page_token.is_some());
+        let moderations_boundary = ChannelModerateStore::moderations_by_channel(
+            &stores.moderate,
+            &members_channel,
+            &PageOptions {
+                page_size: Some(1),
+                page_token: moderations_second.next_page_token,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(moderations_boundary.entries.is_empty());
+        assert_eq!(moderations_boundary.next_page_token, None);
+
+        let memberships_first = ChannelMemberStore::memberships_by_fid(
+            &stores.member,
+            memberships_fid,
+            &PageOptions {
+                page_size: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(memberships_first.entries.len(), 1);
+        assert_eq!(
+            memberships_first.entries[0].channel_id,
+            memberships_channels[0]
+        );
+        assert!(memberships_first.next_page_token.is_some());
+        let memberships_second = ChannelMemberStore::memberships_by_fid(
+            &stores.member,
+            memberships_fid,
+            &PageOptions {
+                page_size: Some(1),
+                page_token: memberships_first.next_page_token,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(memberships_second.entries.len(), 1);
+        assert_eq!(
+            memberships_second.entries[0].channel_id,
+            memberships_channels[1]
+        );
+        assert!(memberships_second.next_page_token.is_some());
+        let memberships_boundary = ChannelMemberStore::memberships_by_fid(
+            &stores.member,
+            memberships_fid,
+            &PageOptions {
+                page_size: Some(1),
+                page_token: memberships_second.next_page_token,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(memberships_boundary.entries.is_empty());
+        assert_eq!(memberships_boundary.next_page_token, None);
+    }
+
+    #[test]
     fn cross_author_same_block_supersede_keeps_store_index_trie_and_event_in_agreement() {
         let stores = test_stores();
         let mut trie = MerkleTrie::new().unwrap();
