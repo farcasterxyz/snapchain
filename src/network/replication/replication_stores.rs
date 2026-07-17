@@ -57,6 +57,15 @@ impl ReplicationStores {
         }
     }
 
+    pub fn get_timestamp(&self, shard: u32, height: u64) -> Option<u64> {
+        self.read_only_stores
+            .read()
+            .ok()?
+            .get(&shard)?
+            .get(&height)
+            .map(|(timestamp, _)| *timestamp)
+    }
+
     // Returns a list of (height, farcaster timestamp) pairs for the given shard.
     pub fn get_metadata(&self, shard: u32) -> Result<Vec<ShardMetadata>, ReplicationError> {
         let results = match self.read_only_stores.read() {
