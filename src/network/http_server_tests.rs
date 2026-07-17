@@ -576,6 +576,30 @@ pub mod tests {
         assert_eq!(metadata["membershipMode"], "MEMBERSHIP_MODE_APPROVAL");
     }
 
+    #[test]
+    fn channel_members_request_accepts_camel_and_snake_case_state_filter() {
+        use crate::network::http_server::{ChannelMemberState, ChannelMembersRequest};
+
+        let channel_id = format!("0x{}", "11".repeat(32));
+        let camel: ChannelMembersRequest = serde_qs::from_str(&format!(
+            "channelId={channel_id}&stateFilter=CHANNEL_MEMBER_STATE_MODERATOR"
+        ))
+        .unwrap();
+        assert!(matches!(
+            camel.state_filter,
+            Some(ChannelMemberState::CHANNEL_MEMBER_STATE_MODERATOR)
+        ));
+
+        let snake: ChannelMembersRequest = serde_qs::from_str(&format!(
+            "channelId={channel_id}&state_filter=CHANNEL_MEMBER_STATE_BANNED"
+        ))
+        .unwrap();
+        assert!(matches!(
+            snake.state_filter,
+            Some(ChannelMemberState::CHANNEL_MEMBER_STATE_BANNED)
+        ));
+    }
+
     #[tokio::test]
     async fn test_current_peers() {
         let mut mock_hub_service = MockHubService::new();

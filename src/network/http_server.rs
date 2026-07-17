@@ -1567,7 +1567,12 @@ pub struct ChannelMemberResponse {
 pub struct ChannelMembersRequest {
     #[serde(with = "serdehex", rename = "channelId")]
     pub channel_id: Vec<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "stateFilter",
+        alias = "state_filter",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub state_filter: Option<ChannelMemberState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
