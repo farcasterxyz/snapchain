@@ -1505,7 +1505,7 @@ impl BlockEngine {
                     // THE live path for verifications once V20 is enabled: routing sends them
                     // here, admission has already applied the timestamp floor and the replica
                     // quota, and successful merges fan out as BlockEvents for force-override
-                    // replay onto the fid's data shard. Below V20 this arm is unreachable —
+                    // replay onto every data shard. Below V20 this arm is unreachable —
                     // `validate_user_message` rejects verification bodies outright, so the merge
                     // is never attempted and nothing here can perturb pre-V20 streams.
                     MessageType::VerificationAddEthAddress | MessageType::VerificationRemove => {
