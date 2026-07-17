@@ -290,41 +290,26 @@ impl EngineVersion {
             // are kept in one arm so they share the V20 boundary; the lock-step invariant is
             // enforced by `test_channel_features_activate_together`.
             //
-            // VerificationsOnShardZero rides the same arm for a WEAKER reason, and the difference
-            // matters: it is bundled to share the single V20 rollout boundary, NOT because a
-            // present coupling forces it. Nothing reads the shard-0 verification replica today
-            // (every `verification_store` reader goes through `Stores`, never `BlockStores`).
-            // That is not the same as the feature being inert once V20 is live — a shard-0
-            // verification merge folds into the shard-0 trie like any other, so it moves the
-            // state root.
+            // VerificationsOnShardZero shares the V20 boundary because channel authority consumes
+            // the shard-0 verification set. Post-V20 verification admission routes to shard 0;
+            // accepted rows enter its trie, drive channel-owner resolution, and fan out in shard-0
+            // consensus order to every data shard. The admission timestamp floor deliberately
+            // excludes pre-V20 verification history, so authority begins from post-activation
+            // state rather than a backfill.
             //
-            // Note what this boundary implies for whatever eventually does read the replica.
-            // Verifications route to the fid's data shard (`route_message`), so in practice the
-            // replica stays empty — but that is a property of honest proposers building from
-            // routed mempools, not something replay enforces. And shard-0 admission deliberately
-            // rejects verifications whose embedded timestamp predates the feature (see
-            // `BlockEngine::validate_user_message`), so the replica never holds pre-V20 history.
-            // A consumer needing a fid's full verification set must read the fid shard; a
-            // consumer co-activating with this feature reads an empty store on day one. Revisit
-            // this bundling if a consumer needs history at first read.
+            // ChannelMessages has consumers on both sides of the fan-out. BlockEngine validates
+            // authority and merges the four slot stores on shard 0, then emits gated MergeMessage
+            // BlockEvents. Every data shard replays those events through the same StoreDefs using
+            // consensus-order slot replacement, updates its trie, emits its locally derived
+            // HubEvents, and exposes the rows to state-root-verified replication. Direct channel
+            // admission on a data shard remains rejected; replay and replication are its only
+            // writers.
             //
-            // ChannelMessages now HAS a shard-0 consumer: `BlockEngine::validate_channel_message`
-            // admits the four channel types under this gate and `merge_channel_message` merges
-            // them into the four channel slot stores. It has no DATA-SHARD consumer — shard 0's
-            // BlockEvent allowlist still excludes channel types, so they never fan out and a
-            // fid's data shard never sees them. `ShardEngine` rejects direct channel admission
-            // and has no channel merge dispatch; its replay gate arm is deliberately
-            // gated-but-undispatchable until that fan-out lands.
-            //
-            // The rule that got us here still binds anything added next: whatever widens this
-            // (data-shard dispatch, fan-out) must gate it on this feature in the SAME change.
-            // Nothing will remind you: `merge_message` ends in a catch-all arm, so new handling
-            // raises no exhaustiveness error, and no compiler check can demand a runtime gate.
-            // A type that can merge before its gate is a permanent replay divergence.
-            //
-            // Owner authority for channel messages resolves through the SHARD-0 verification
-            // replica, which the paragraph above notes is empty at activation. That coupling is
-            // load-bearing and unresolved — see `BlockStores::resolve_channel_owner_fid`.
+            // Keep every future widening of this topology gated in the same change that makes it
+            // reachable. The allowlist, replay dispatch, replication cache, and derived index
+            // writes each require an explicit ChannelMessages check; catch-all match arms and
+            // StoreType::None provide no compiler-enforced reminder. A type or index that mutates
+            // before its gate creates permanent replay divergence.
             ProtocolFeature::ChannelRegistrations
             | ProtocolFeature::SortedBlockEngineEvents
             | ProtocolFeature::ChannelOwnershipEvents
