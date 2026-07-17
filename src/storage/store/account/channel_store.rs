@@ -320,6 +320,14 @@ fn merge_slot<T: ChannelSlotStoreDef + Clone>(
     message: &Message,
     txn: &mut RocksDbTransactionBatch,
 ) -> Result<HubEvent, HubError> {
+    // DATA-SHARD ADMISSION PROVENANCE: a channel message reaches this shared slot merge on a data
+    // shard only as (1) a ChannelMessages-gated BlockEvent that shard 0 minted after its authority
+    // and policy checks succeeded, or (2) a replication row whose trie key is verified against a
+    // decided state root. Direct ShardEngine admission rejects all four channel types. Therefore
+    // authority and admission-only policy caps (notably the live-moderator cap) must not be
+    // re-evaluated here: doing so would turn evaluator drift into a silently missing replica row.
+    // The permanent slot-count checks below are structural store invariants, not a second
+    // admission-policy evaluation.
     let store_def = store.store_def();
     if !store_def.is_add_type(message) {
         return Err(HubError::validation_failure("invalid channel message type"));

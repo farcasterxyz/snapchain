@@ -2057,9 +2057,9 @@ impl ShardEngine {
             ));
         }
 
-        // Channel state is shard-0-only in this increment. Keep direct data-shard admission
-        // rejected even after stateless channel validation activates; the replay gate below is
-        // intentionally gated-but-undispatchable until data-shard stores land.
+        // Channel state is admitted only on shard 0. Data-shard replica stores are writable solely
+        // through gated BlockEvent replay or state-root-verified replication; direct admission
+        // remains rejected so every replica merge inherits shard-0 authority and cap provenance.
         if matches!(
             message_data.r#type(),
             MessageType::ChannelUpdate
@@ -2960,8 +2960,10 @@ mod verification_replay_gate_tests {
     use super::{EngineError, MessageValidationError};
     use crate::proto::{FarcasterNetwork, MessageType};
     use crate::storage::db::RocksDbTransactionBatch;
+    use crate::storage::store::account::ChannelUpdateStore;
     use crate::storage::store::test_helper::{self, trie_ctx, EngineOptions, FID3_FOR_TEST};
     use crate::utils::factory::{events_factory, messages_factory};
+    use crate::{core::util::FarcasterTime, version::version::EngineVersion};
 
     #[tokio::test]
     async fn pre_feature_verification_block_event_returns_invalid_message_type() {
@@ -2995,8 +2997,15 @@ mod verification_replay_gate_tests {
     }
 
     #[tokio::test]
-    async fn channel_block_event_is_gated_but_has_no_data_shard_dispatch() {
+    async fn channel_replica_merge_requires_gated_replay_provenance() {
         let (mut engine, _tmpdir) = test_helper::new_engine().await;
+        test_helper::register_user(
+            FID3_FOR_TEST,
+            test_helper::default_signer(),
+            test_helper::default_custody_address(),
+            &mut engine,
+        )
+        .await;
         let (message_type, body) = messages_factory::channels::all_message_bodies()
             .into_iter()
             .next()
@@ -3008,22 +3017,86 @@ mod verification_replay_gate_tests {
             None,
             None,
         );
-        let block_event = events_factory::create_merge_message_event(message, 1);
+        let block_event = events_factory::create_merge_message_event(message.clone(), 1);
 
-        // Devnet resolves the event timestamp with ChannelMessages active, so this passes the
-        // new replay gate and reaches the deliberately absent ShardEngine dispatch.
+        let direct_error = engine
+            .validate_user_message(
+                &message,
+                &FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64),
+                EngineVersion::V20,
+                &mut RocksDbTransactionBatch::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            direct_error,
+            MessageValidationError::InvalidMessageType(value)
+                if value == MessageType::ChannelUpdate as i32
+        ));
+
+        // The identical message is writable only when wrapped in the shard-0 BlockEvent provenance
+        // envelope. Keep the transaction uncommitted and read through it to pin the exact hop.
+        let mut replay_txn = RocksDbTransactionBatch::new();
         let result = engine.handle_block_event(
             trie_ctx(),
             &block_event,
-            &mut RocksDbTransactionBatch::new(),
-            crate::version::version::EngineVersion::V20,
+            &mut replay_txn,
+            EngineVersion::V20,
         );
+        assert_eq!(result.unwrap().len(), 1);
+        let channel_id = match message.data.unwrap().body.unwrap() {
+            crate::proto::message_data::Body::ChannelUpdateBody(body) => body.channel_id,
+            _ => unreachable!(),
+        };
+        assert!(ChannelUpdateStore::get_channel_update(
+            &engine.get_stores().channel_update_store,
+            &channel_id,
+            Some(&replay_txn),
+        )
+        .unwrap()
+        .is_some());
+    }
+
+    #[tokio::test]
+    async fn pre_v20_channel_block_event_cannot_reach_replica_store() {
+        let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
+            network: Some(FarcasterNetwork::Mainnet),
+            ..Default::default()
+        })
+        .await;
+        let (message_type, body) = messages_factory::channels::all_message_bodies()
+            .into_iter()
+            .next()
+            .unwrap();
+        let channel_id = match &body {
+            crate::proto::message_data::Body::ChannelUpdateBody(body) => body.channel_id.clone(),
+            _ => unreachable!(),
+        };
+        let message = messages_factory::create_message_with_data(
+            FID3_FOR_TEST,
+            message_type,
+            body,
+            None,
+            None,
+        );
+        // Factory BlockEvents carry timestamp zero. The replay gate must use that passed-in
+        // consensus timestamp, not the data-shard block version supplied below.
+        let block_event = events_factory::create_merge_message_event(message, 1);
+        let mut txn = RocksDbTransactionBatch::new();
+        let result =
+            engine.handle_block_event(trie_ctx(), &block_event, &mut txn, EngineVersion::V20);
         assert!(matches!(
             result,
             Err(EngineError::EngineMessageValidationError(
                 MessageValidationError::InvalidMessageType(value)
             )) if value == MessageType::ChannelUpdate as i32
         ));
+        assert!(ChannelUpdateStore::get_channel_update(
+            &engine.get_stores().channel_update_store,
+            &channel_id,
+            Some(&txn),
+        )
+        .unwrap()
+        .is_none());
     }
 }
 
