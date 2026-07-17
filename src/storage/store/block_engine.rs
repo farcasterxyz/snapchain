@@ -180,8 +180,11 @@ pub(crate) fn channel_member_authority(
         return ChannelAuthorityDecision::InvalidTargetState;
     }
     // NOTE: `target_is_owner` is false whenever the owner fid is unresolvable (the channel is
-    // "parked"), so this floor does not hold in that window. That is a known T1 gap pending a
-    // decision on parked-channel semantics, not an oversight — see the increment review.
+    // "parked"), so this floor does NOT hold in that window — a moderator may ban the true owner.
+    // Known T1 gap, not an oversight: closing it is a semantics decision, and the leading proposal
+    // is to reject every member action while the owner is unresolvable, which makes this
+    // unreachable rather than conditional. Do not paper over it here; authority for a parked
+    // channel has to be settled at admission, not inside the table.
     if action == Ban && target_is_owner {
         return ChannelAuthorityDecision::OwnerUnbannable;
     }
