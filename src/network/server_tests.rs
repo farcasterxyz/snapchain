@@ -81,6 +81,22 @@ mod tests {
         vec![byte; 20]
     }
 
+    fn channel_rows(db: &RocksDB) -> BTreeMap<Vec<u8>, Vec<u8>> {
+        let prefix = vec![RootPrefix::Channel as u8];
+        let mut rows = BTreeMap::new();
+        db.for_each_iterator_by_prefix(
+            Some(prefix.clone()),
+            Some(increment_vec_u8(&prefix)),
+            &PageOptions::default(),
+            |key, value| {
+                rows.insert(key.to_vec(), value.to_vec());
+                Ok(false)
+            },
+        )
+        .unwrap();
+        rows
+    }
+
     fn merge_channel_registration(
         block_engine: &BlockEngine,
         channel_key: &str,
@@ -1580,21 +1596,6 @@ mod tests {
         let replica_a_stores = replica_a.get_stores();
         let replica_b_stores = replica_b.get_stores();
 
-        let channel_rows = |db: &RocksDB| {
-            let prefix = vec![RootPrefix::Channel as u8];
-            let mut rows = BTreeMap::new();
-            db.for_each_iterator_by_prefix(
-                Some(prefix.clone()),
-                Some(increment_vec_u8(&prefix)),
-                &PageOptions::default(),
-                |key, value| {
-                    rows.insert(key.to_vec(), value.to_vec());
-                    Ok(false)
-                },
-            )
-            .unwrap();
-            rows
-        };
         let shard_zero_channel_rows = channel_rows(&block_stores.db);
         assert_eq!(channel_rows(&replica_a.db), shard_zero_channel_rows);
         assert_eq!(channel_rows(&replica_b.db), shard_zero_channel_rows);
@@ -1741,6 +1742,1089 @@ mod tests {
             .into_inner();
         assert!(memberships_zero.memberships.is_empty());
         assert_eq!(memberships_zero.next_page_token, None);
+    }
+
+    mod channel_scenario_tests {
+        use super::*;
+        use crate::core::util::FarcasterTime;
+        use crate::proto::{
+            hub_event, message_data::Body, ChannelMemberAction, ChannelModerateAction,
+            MembershipMode, MessageType,
+        };
+        use crate::storage::store::mempool_poller::MempoolMessage;
+        use crate::storage::trie::merkle_trie::TrieKey;
+        use alloy_signer_local::PrivateKeySigner;
+
+        struct ReadSnapshot {
+            member: proto::ChannelMemberResponse,
+            members: proto::ChannelMembersResponse,
+            pin: proto::ChannelPinResponse,
+            moderations: proto::ChannelModerationsResponse,
+            metadata: proto::ChannelMetadataResponse,
+            memberships: proto::ChannelMembershipsResponse,
+        }
+
+        struct ScenarioDriver {
+            replicas: [ShardEngine; 2],
+            block_engine: BlockEngine,
+            service: MyHubService,
+            replayed_seqnum: u64,
+        }
+
+        impl ScenarioDriver {
+            async fn new() -> Self {
+                let (
+                    _stores,
+                    _senders,
+                    replicas,
+                    block_engine,
+                    service,
+                    _shard_decision_tx,
+                    _block_decision_tx,
+                ) = make_server(None).await;
+                Self {
+                    replicas,
+                    block_engine,
+                    service,
+                    replayed_seqnum: 0,
+                }
+            }
+
+            fn register_user(&mut self, fid: u64, custody: Vec<u8>, storage_units: u32) {
+                block_engine_test_helpers::register_user(
+                    fid,
+                    block_engine_test_helpers::default_signer(),
+                    custody,
+                    storage_units,
+                    &mut self.block_engine,
+                );
+            }
+
+            async fn sync_new_block_events(&mut self) {
+                let event_store = self.block_engine.stores().block_event_store;
+                let max_seqnum = event_store.max_seqnum().unwrap();
+                if max_seqnum == self.replayed_seqnum {
+                    return;
+                }
+                let events = ((self.replayed_seqnum + 1)..=max_seqnum)
+                    .map(|seqnum| {
+                        event_store
+                            .get_block_event_by_seqnum(seqnum)
+                            .unwrap()
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+
+                for event in events {
+                    for replica in &mut self.replicas {
+                        let shard_id = replica.shard_id();
+                        let state_change = replica.propose_state_change(
+                            shard_id,
+                            vec![MempoolMessage::BlockEvent {
+                                for_shard: shard_id,
+                                message: event.clone(),
+                            }],
+                            None,
+                        );
+                        let proposed_root = state_change.new_state_root.clone();
+                        test_helper::validate_and_commit_state_change(replica, &state_change).await;
+                        assert_eq!(replica.trie_root_hash(), proposed_root);
+                    }
+                    assert_eq!(
+                        self.replicas[0].trie_root_hash(),
+                        self.replicas[1].trie_root_hash(),
+                        "replicas must converge after every replayed shard-0 BlockEvent"
+                    );
+                }
+                self.replayed_seqnum = max_seqnum;
+            }
+
+            async fn commit(&mut self, inputs: Vec<MempoolMessage>, timestamp: u32) -> Block {
+                let height = self.block_engine.get_confirmed_height().increment();
+                let state_change = self.block_engine.propose_state_change(
+                    inputs,
+                    height,
+                    Some(FarcasterTime::new(timestamp as u64)),
+                );
+                let proposed_root = state_change.new_state_root.clone();
+                let block = block_engine_test_helpers::validate_and_commit_state_change(
+                    &mut self.block_engine,
+                    &state_change,
+                );
+                assert_eq!(self.block_engine.trie_root_hash(), proposed_root);
+                self.sync_new_block_events().await;
+                block
+            }
+
+            async fn commit_messages(&mut self, messages: Vec<proto::Message>) -> Block {
+                let timestamp = messages
+                    .iter()
+                    .filter_map(|message| message.data.as_ref().map(|data| data.timestamp))
+                    .max()
+                    .unwrap_or_else(messages_factory::farcaster_time);
+                self.commit(
+                    messages
+                        .into_iter()
+                        .map(MempoolMessage::UserMessage)
+                        .collect(),
+                    timestamp,
+                )
+                .await
+            }
+
+            fn replicated_event_bodies(db: Arc<RocksDB>) -> Vec<hub_event::Body> {
+                HubEvent::get_events(db, 0, None, None)
+                    .unwrap()
+                    .events
+                    .into_iter()
+                    .filter_map(|event| {
+                        let body = event.body?;
+                        let replicated = match &body {
+                            hub_event::Body::MergeMessageBody(merge) => {
+                                merge.message.as_ref().is_some_and(|message| {
+                                    matches!(
+                                        message.msg_type(),
+                                        MessageType::LendStorage
+                                            | MessageType::KeyAdd
+                                            | MessageType::KeyRemove
+                                            | MessageType::VerificationAddEthAddress
+                                            | MessageType::VerificationRemove
+                                            | MessageType::ChannelUpdate
+                                            | MessageType::ChannelMember
+                                            | MessageType::ChannelPin
+                                            | MessageType::ChannelModerate
+                                    )
+                                })
+                            }
+                            _ => false,
+                        };
+                        replicated.then_some(body)
+                    })
+                    .collect()
+            }
+
+            fn event_bodies(db: Arc<RocksDB>) -> Vec<hub_event::Body> {
+                HubEvent::get_events(db, 0, None, None)
+                    .unwrap()
+                    .events
+                    .into_iter()
+                    .filter_map(|event| match event.body {
+                        Some(hub_event::Body::BlockConfirmedBody(_)) | None => None,
+                        body => body,
+                    })
+                    .collect()
+            }
+
+            fn assert_converged(&mut self) {
+                let shard_zero_stores = self.block_engine.stores();
+                let expected_rows = channel_rows(&shard_zero_stores.db);
+                let expected_events = Self::replicated_event_bodies(shard_zero_stores.db.clone());
+                for replica in &self.replicas {
+                    assert_eq!(channel_rows(&replica.db), expected_rows);
+                    assert_eq!(
+                        Self::replicated_event_bodies(replica.db.clone()),
+                        expected_events,
+                        "shard 0 and replicas must expose the same consensus merge bodies"
+                    );
+                }
+                assert_eq!(
+                    Self::event_bodies(self.replicas[0].db.clone()),
+                    Self::event_bodies(self.replicas[1].db.clone()),
+                    "replica HubEvent body streams must be byte-identical"
+                );
+                assert_eq!(
+                    self.replicas[0].trie_root_hash(),
+                    self.replicas[1].trie_root_hash()
+                );
+            }
+
+            async fn reads(&self, channel_id: &[u8], fid: u64) -> ReadSnapshot {
+                let member = self
+                    .service
+                    .get_channel_member(Request::new(ChannelMemberRequest {
+                        channel_id: channel_id.to_vec(),
+                        fid,
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                let members = self
+                    .service
+                    .get_channel_members(Request::new(ChannelMembersRequest {
+                        channel_id: channel_id.to_vec(),
+                        state_filter: None,
+                        page_size: None,
+                        page_token: None,
+                        reverse: None,
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                let pin = self
+                    .service
+                    .get_channel_pin(Request::new(ChannelRequest {
+                        channel_id: channel_id.to_vec(),
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                let moderations = self
+                    .service
+                    .get_channel_moderations(Request::new(ChannelModerationsRequest {
+                        channel_id: channel_id.to_vec(),
+                        page_size: None,
+                        page_token: None,
+                        reverse: None,
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                let metadata = self
+                    .service
+                    .get_channel_metadata(Request::new(ChannelRequest {
+                        channel_id: channel_id.to_vec(),
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                let memberships = self
+                    .service
+                    .get_channel_memberships_by_fid(Request::new(ChannelMembershipsByFidRequest {
+                        fid,
+                        page_size: None,
+                        page_token: None,
+                        reverse: None,
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                ReadSnapshot {
+                    member,
+                    members,
+                    pin,
+                    moderations,
+                    metadata,
+                    memberships,
+                }
+            }
+
+            fn state_fingerprint(
+                &mut self,
+            ) -> (Vec<u8>, Vec<u8>, usize, BTreeMap<Vec<u8>, Vec<u8>>) {
+                let shard_zero = self.block_engine.stores();
+                (
+                    self.block_engine.trie_root_hash(),
+                    self.replicas[0].trie_root_hash(),
+                    Self::replicated_event_bodies(shard_zero.db.clone()).len(),
+                    channel_rows(&shard_zero.db),
+                )
+            }
+        }
+
+        fn channel_update(
+            fid: u64,
+            channel_id: &[u8],
+            name: &str,
+            membership_mode: Option<MembershipMode>,
+            timestamp: u32,
+        ) -> proto::Message {
+            messages_factory::create_message_with_data(
+                fid,
+                MessageType::ChannelUpdate,
+                Body::ChannelUpdateBody(proto::ChannelUpdateBody {
+                    channel_id: channel_id.to_vec(),
+                    name: Some(name.to_string()),
+                    membership_mode: membership_mode.map(|mode| mode as i32),
+                    ..Default::default()
+                }),
+                Some(timestamp),
+                None,
+            )
+        }
+
+        fn verification_contract_add(fid: u64, address: Vec<u8>, timestamp: u32) -> proto::Message {
+            messages_factory::verifications::create_verification_add(
+                fid,
+                1,
+                address,
+                vec![],
+                vec![0xB6; 32],
+                Some(timestamp),
+                None,
+            )
+        }
+
+        fn channel_member(
+            author_fid: u64,
+            channel_id: &[u8],
+            target_fid: u64,
+            action: ChannelMemberAction,
+            timestamp: u32,
+        ) -> proto::Message {
+            messages_factory::create_message_with_data(
+                author_fid,
+                MessageType::ChannelMember,
+                Body::ChannelMemberBody(proto::ChannelMemberBody {
+                    channel_id: channel_id.to_vec(),
+                    fid: target_fid,
+                    action: action as i32,
+                }),
+                Some(timestamp),
+                None,
+            )
+        }
+
+        fn channel_pin(
+            fid: u64,
+            channel_id: &[u8],
+            cast_hash: Vec<u8>,
+            timestamp: u32,
+        ) -> proto::Message {
+            messages_factory::create_message_with_data(
+                fid,
+                MessageType::ChannelPin,
+                Body::ChannelPinBody(proto::ChannelPinBody {
+                    channel_id: channel_id.to_vec(),
+                    cast_hash,
+                }),
+                Some(timestamp),
+                None,
+            )
+        }
+
+        fn channel_moderate(
+            fid: u64,
+            channel_id: &[u8],
+            cast_hash: Vec<u8>,
+            timestamp: u32,
+        ) -> proto::Message {
+            messages_factory::create_message_with_data(
+                fid,
+                MessageType::ChannelModerate,
+                Body::ChannelModerateBody(proto::ChannelModerateBody {
+                    channel_id: channel_id.to_vec(),
+                    cast_hash,
+                    action: ChannelModerateAction::Hide as i32,
+                }),
+                Some(timestamp),
+                None,
+            )
+        }
+
+        async fn transfer_order_driver(
+            channel_key: &str,
+            owner_fid: u64,
+            new_owner_fid: u64,
+            register_block: u32,
+        ) -> (ScenarioDriver, Vec<u8>, Vec<u8>, u32) {
+            let mut driver = ScenarioDriver::new().await;
+            let old_owner_address = owner_address(0xC1);
+            let new_owner_address = owner_address(0xC2);
+            driver.register_user(owner_fid, old_owner_address.clone(), 1);
+            driver.register_user(new_owner_fid, new_owner_address.clone(), 1);
+            driver.sync_new_block_events().await;
+
+            let channel_id = channel_label(channel_key);
+            let timestamp = messages_factory::farcaster_time();
+            driver
+                .commit(
+                    vec![MempoolMessage::OnchainEvent(
+                        events_factory::create_channel_register_event(
+                            channel_key,
+                            channel_id.clone(),
+                            old_owner_address.clone(),
+                            now_unix_seconds() + 3_600,
+                            ChannelRegisterEventType::Register,
+                            register_block,
+                            1,
+                        ),
+                    )],
+                    timestamp,
+                )
+                .await;
+            driver
+                .commit_messages(vec![
+                    verification_contract_add(owner_fid, old_owner_address, timestamp + 1),
+                    channel_update(
+                        owner_fid,
+                        &channel_id,
+                        "before transfer",
+                        Some(MembershipMode::Open),
+                        timestamp + 2,
+                    ),
+                ])
+                .await;
+            driver.assert_converged();
+            (driver, channel_id, new_owner_address, timestamp + 3)
+        }
+
+        #[tokio::test]
+        async fn s1_full_channel_lifecycle_keeps_replicas_events_and_six_reads_in_sync() {
+            const OWNER_FID: u64 = 7_201;
+            const NEW_OWNER_FID: u64 = 7_202;
+            const MODERATOR_FID: u64 = 7_203;
+            const MEMBER_FID: u64 = 7_204;
+            const LEAVER_FID: u64 = 7_205;
+
+            let mut driver = ScenarioDriver::new().await;
+            let old_owner_address = owner_address(0x81);
+            let new_owner_address = owner_address(0x82);
+            for (fid, address) in [
+                (OWNER_FID, old_owner_address.clone()),
+                (NEW_OWNER_FID, new_owner_address.clone()),
+                (MODERATOR_FID, owner_address(0x83)),
+                (MEMBER_FID, owner_address(0x84)),
+                (LEAVER_FID, owner_address(0x85)),
+            ] {
+                driver.register_user(fid, address, 1);
+            }
+            driver.sync_new_block_events().await;
+
+            let channel_key = "scenario-lifecycle";
+            let channel_id = channel_label(channel_key);
+            let mut timestamp = messages_factory::farcaster_time();
+            driver
+                .commit(
+                    vec![MempoolMessage::OnchainEvent(
+                        events_factory::create_channel_register_event(
+                            channel_key,
+                            channel_id.clone(),
+                            old_owner_address.clone(),
+                            now_unix_seconds() + 3_600,
+                            ChannelRegisterEventType::Register,
+                            100,
+                            1,
+                        ),
+                    )],
+                    timestamp,
+                )
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, MEMBER_FID).await;
+            assert_eq!(reads.member.state, proto::ChannelMemberState::None as i32);
+            assert!(reads.members.members.is_empty());
+            assert_eq!(reads.pin.cast_hash, None);
+            assert!(reads.moderations.moderations.is_empty());
+            assert_eq!(reads.metadata.name, None);
+            assert!(reads.memberships.memberships.is_empty());
+
+            timestamp += 1;
+            driver
+                .commit_messages(vec![verification_contract_add(
+                    OWNER_FID,
+                    old_owner_address.clone(),
+                    timestamp,
+                )])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, MEMBER_FID).await;
+            assert_eq!(reads.member.state, proto::ChannelMemberState::None as i32);
+            assert!(reads.members.members.is_empty());
+            assert_eq!(reads.pin.cast_hash, None);
+            assert!(reads.moderations.moderations.is_empty());
+            assert_eq!(reads.metadata.name, None);
+            assert!(reads.memberships.memberships.is_empty());
+
+            timestamp += 1;
+            driver
+                .commit_messages(vec![channel_update(
+                    OWNER_FID,
+                    &channel_id,
+                    "open",
+                    Some(MembershipMode::Open),
+                    timestamp,
+                )])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, MEMBER_FID).await;
+            assert_eq!(reads.metadata.name.as_deref(), Some("open"));
+            assert_eq!(reads.metadata.membership_mode, MembershipMode::Open as i32);
+            assert_eq!(reads.member.state, proto::ChannelMemberState::None as i32);
+            assert!(reads.members.members.is_empty());
+            assert_eq!(reads.pin.cast_hash, None);
+            assert!(reads.moderations.moderations.is_empty());
+            assert!(reads.memberships.memberships.is_empty());
+
+            timestamp += 1;
+            driver
+                .commit_messages(vec![channel_member(
+                    MEMBER_FID,
+                    &channel_id,
+                    MEMBER_FID,
+                    ChannelMemberAction::AddMember,
+                    timestamp,
+                )])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, MEMBER_FID).await;
+            assert_eq!(reads.member.state, proto::ChannelMemberState::Member as i32);
+            assert_eq!(reads.members.members.len(), 1);
+            assert_eq!(reads.memberships.memberships.len(), 1);
+            assert_eq!(reads.metadata.name.as_deref(), Some("open"));
+            assert_eq!(reads.pin.cast_hash, None);
+            assert!(reads.moderations.moderations.is_empty());
+
+            timestamp += 1;
+            driver
+                .commit_messages(vec![
+                    channel_member(
+                        OWNER_FID,
+                        &channel_id,
+                        MODERATOR_FID,
+                        ChannelMemberAction::AddModerator,
+                        timestamp,
+                    ),
+                    channel_member(
+                        OWNER_FID,
+                        &channel_id,
+                        LEAVER_FID,
+                        ChannelMemberAction::AddMember,
+                        timestamp + 1,
+                    ),
+                ])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, MODERATOR_FID).await;
+            assert_eq!(
+                reads.member.state,
+                proto::ChannelMemberState::Moderator as i32
+            );
+            assert_eq!(reads.members.members.len(), 3);
+            assert_eq!(reads.memberships.memberships.len(), 1);
+            assert_eq!(reads.metadata.name.as_deref(), Some("open"));
+            assert_eq!(reads.pin.cast_hash, None);
+            assert!(reads.moderations.moderations.is_empty());
+
+            timestamp += 2;
+            let pin_hash = vec![0x91; 20];
+            let moderated_hash = vec![0x92; 20];
+            driver
+                .commit_messages(vec![
+                    channel_pin(MODERATOR_FID, &channel_id, pin_hash.clone(), timestamp),
+                    channel_moderate(
+                        MODERATOR_FID,
+                        &channel_id,
+                        moderated_hash.clone(),
+                        timestamp + 1,
+                    ),
+                ])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, MEMBER_FID).await;
+            assert_eq!(reads.member.state, proto::ChannelMemberState::Member as i32);
+            assert_eq!(reads.members.members.len(), 3);
+            assert_eq!(reads.pin.cast_hash.as_deref(), Some(pin_hash.as_slice()));
+            assert_eq!(reads.moderations.moderations.len(), 1);
+            assert_eq!(reads.moderations.moderations[0].cast_hash, moderated_hash);
+            assert_eq!(reads.metadata.name.as_deref(), Some("open"));
+            assert_eq!(reads.memberships.memberships.len(), 1);
+
+            timestamp += 2;
+            driver
+                .commit_messages(vec![channel_member(
+                    MODERATOR_FID,
+                    &channel_id,
+                    MEMBER_FID,
+                    ChannelMemberAction::Ban,
+                    timestamp,
+                )])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, MEMBER_FID).await;
+            assert_eq!(reads.member.state, proto::ChannelMemberState::Banned as i32);
+            assert_eq!(reads.members.members.len(), 3);
+            assert_eq!(reads.pin.cast_hash.as_deref(), Some(pin_hash.as_slice()));
+            assert_eq!(reads.moderations.moderations.len(), 1);
+            assert_eq!(reads.metadata.name.as_deref(), Some("open"));
+            assert_eq!(reads.memberships.memberships.len(), 1);
+
+            timestamp += 1;
+            driver
+                .commit_messages(vec![channel_member(
+                    OWNER_FID,
+                    &channel_id,
+                    LEAVER_FID,
+                    ChannelMemberAction::RemoveMember,
+                    timestamp,
+                )])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, LEAVER_FID).await;
+            assert_eq!(
+                reads.member.state,
+                proto::ChannelMemberState::Removed as i32
+            );
+            assert_eq!(reads.members.members.len(), 3);
+            assert_eq!(reads.pin.cast_hash.as_deref(), Some(pin_hash.as_slice()));
+            assert_eq!(reads.moderations.moderations.len(), 1);
+            assert_eq!(reads.metadata.name.as_deref(), Some("open"));
+            assert_eq!(reads.memberships.memberships.len(), 1);
+
+            timestamp += 1;
+            driver
+                .commit(
+                    vec![MempoolMessage::OnchainEvent(
+                        events_factory::create_channel_register_event(
+                            "",
+                            channel_id.clone(),
+                            new_owner_address.clone(),
+                            0,
+                            ChannelRegisterEventType::Transfer,
+                            101,
+                            1,
+                        ),
+                    )],
+                    timestamp,
+                )
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, MODERATOR_FID).await;
+            assert_eq!(
+                reads.member.state,
+                proto::ChannelMemberState::Moderator as i32
+            );
+            assert_eq!(reads.members.members.len(), 3);
+            assert_eq!(reads.pin.cast_hash.as_deref(), Some(pin_hash.as_slice()));
+            assert_eq!(reads.moderations.moderations.len(), 1);
+            assert_eq!(reads.metadata.name.as_deref(), Some("open"));
+            assert_eq!(reads.memberships.memberships.len(), 1);
+
+            let frozen_messages = [
+                channel_update(OWNER_FID, &channel_id, "stale", None, timestamp + 1),
+                channel_pin(MODERATOR_FID, &channel_id, vec![0x93; 20], timestamp + 2),
+                channel_update(
+                    NEW_OWNER_FID,
+                    &channel_id,
+                    "unverified",
+                    None,
+                    timestamp + 3,
+                ),
+            ];
+            let before_rejections = driver.state_fingerprint();
+            for message in &frozen_messages {
+                let error = driver.block_engine.simulate_message(message).unwrap_err();
+                assert!(error.to_string().contains("channel is parked"), "{error:?}");
+                assert_eq!(driver.state_fingerprint(), before_rejections);
+            }
+            driver
+                .commit_messages(vec![channel_member(
+                    MODERATOR_FID,
+                    &channel_id,
+                    MODERATOR_FID,
+                    ChannelMemberAction::RemoveMember,
+                    timestamp + 4,
+                )])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, MODERATOR_FID).await;
+            assert_eq!(
+                reads.member.state,
+                proto::ChannelMemberState::Removed as i32
+            );
+            assert_eq!(reads.members.members.len(), 3);
+            assert_eq!(reads.pin.cast_hash.as_deref(), Some(pin_hash.as_slice()));
+            assert_eq!(reads.moderations.moderations.len(), 1);
+            assert_eq!(reads.metadata.name.as_deref(), Some("open"));
+            assert_eq!(reads.memberships.memberships.len(), 1);
+
+            timestamp += 5;
+            driver
+                .commit_messages(vec![verification_contract_add(
+                    NEW_OWNER_FID,
+                    new_owner_address,
+                    timestamp,
+                )])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, NEW_OWNER_FID).await;
+            assert_eq!(reads.member.state, proto::ChannelMemberState::None as i32);
+            assert_eq!(reads.members.members.len(), 3);
+            assert_eq!(reads.pin.cast_hash.as_deref(), Some(pin_hash.as_slice()));
+            assert_eq!(reads.moderations.moderations.len(), 1);
+            assert_eq!(reads.metadata.name.as_deref(), Some("open"));
+            assert!(reads.memberships.memberships.is_empty());
+
+            driver
+                .commit_messages(vec![channel_update(
+                    NEW_OWNER_FID,
+                    &channel_id,
+                    "managed by new owner",
+                    Some(MembershipMode::Approval),
+                    timestamp + 1,
+                )])
+                .await;
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, NEW_OWNER_FID).await;
+            assert_eq!(reads.member.state, proto::ChannelMemberState::None as i32);
+            assert_eq!(reads.members.members.len(), 3);
+            assert_eq!(reads.pin.cast_hash.as_deref(), Some(pin_hash.as_slice()));
+            assert_eq!(reads.moderations.moderations.len(), 1);
+            assert_eq!(reads.metadata.name.as_deref(), Some("managed by new owner"));
+            assert_eq!(
+                reads.metadata.membership_mode,
+                MembershipMode::Approval as i32
+            );
+            assert!(reads.memberships.memberships.is_empty());
+        }
+
+        #[tokio::test]
+        async fn s3_mixed_blocks_without_lend_are_deterministic_across_authority_transitions() {
+            // LendStorage is excluded from this mix; its replay interactions are
+            // tracked separately.
+            const OWNER_FID: u64 = 7_401;
+            const REQUEST_FID: u64 = 7_402;
+            const NEW_OWNER_FID: u64 = 7_403;
+
+            let mut driver = ScenarioDriver::new().await;
+            let owner_custody = PrivateKeySigner::random();
+            let request_custody = PrivateKeySigner::random();
+            let new_owner_address = owner_address(0xB3);
+            let owner_address = owner_custody.address().as_slice().to_vec();
+            driver.register_user(OWNER_FID, owner_address.clone(), 1);
+            driver.register_user(
+                REQUEST_FID,
+                request_custody.address().as_slice().to_vec(),
+                1,
+            );
+            driver.register_user(NEW_OWNER_FID, new_owner_address.clone(), 1);
+            driver.sync_new_block_events().await;
+
+            let channel_key = "scenario-determinism-green";
+            let channel_id = channel_label(channel_key);
+            let mut timestamp = messages_factory::farcaster_time();
+            driver
+                .commit(
+                    vec![MempoolMessage::OnchainEvent(
+                        events_factory::create_channel_register_event(
+                            channel_key,
+                            channel_id.clone(),
+                            owner_address.clone(),
+                            now_unix_seconds() + 3_600,
+                            ChannelRegisterEventType::Register,
+                            210,
+                            1,
+                        ),
+                    )],
+                    timestamp,
+                )
+                .await;
+
+            timestamp += 1;
+            let mixed = vec![
+                verification_contract_add(OWNER_FID, owner_address.clone(), timestamp),
+                channel_update(
+                    OWNER_FID,
+                    &channel_id,
+                    "mixed",
+                    Some(MembershipMode::Open),
+                    timestamp + 1,
+                ),
+                channel_member(
+                    OWNER_FID,
+                    &channel_id,
+                    OWNER_FID,
+                    ChannelMemberAction::AddMember,
+                    timestamp + 2,
+                ),
+                channel_pin(OWNER_FID, &channel_id, vec![0xB4; 20], timestamp + 3),
+                channel_moderate(OWNER_FID, &channel_id, vec![0xB5; 20], timestamp + 4),
+                messages_factory::keys::create_key_add(
+                    OWNER_FID,
+                    &owner_custody,
+                    REQUEST_FID,
+                    &request_custody,
+                    &generate_signer(),
+                    vec![MessageType::CastAdd],
+                    3_600,
+                    1,
+                    timestamp + 1_000_000,
+                    Some(timestamp + 5),
+                ),
+            ];
+            let mixed_block = driver.commit_messages(mixed.clone()).await;
+            for message in &mixed {
+                assert_eq!(
+                    mixed_block
+                        .events
+                        .iter()
+                        .filter(|event| matches!(
+                            event.data.as_ref().and_then(|data| data.body.as_ref()),
+                            Some(proto::block_event_data::Body::MergeMessageEventBody(body))
+                                if body.message.as_ref() == Some(message)
+                        ))
+                        .count(),
+                    1,
+                    "mixed block must fan out exactly one event for {:?}",
+                    message.msg_type()
+                );
+                assert!(
+                    TrieKey::for_message(message).iter().all(|key| driver
+                        .block_engine
+                        .trie_key_exists(&merkle_trie::Context::new(), key)),
+                    "mixed message {:?} must land in the proposed and committed shard-0 root",
+                    message.msg_type()
+                );
+            }
+            driver.assert_converged();
+
+            timestamp += 6;
+            let remove = verification_remove(OWNER_FID, owner_address.clone(), timestamp);
+            let parked_update = channel_update(
+                OWNER_FID,
+                &channel_id,
+                "must not merge while parked",
+                None,
+                timestamp + 1,
+            );
+            let park_block = driver
+                .commit_messages(vec![remove.clone(), parked_update.clone()])
+                .await;
+            assert!(TrieKey::for_message(&remove).iter().all(|key| driver
+                .block_engine
+                .trie_key_exists(&merkle_trie::Context::new(), key)));
+            assert!(TrieKey::for_message(&parked_update)
+                .iter()
+                .any(|key| !driver
+                    .block_engine
+                    .trie_key_exists(&merkle_trie::Context::new(), key)));
+            assert!(park_block.events.iter().all(|event| !matches!(
+                event.data.as_ref().and_then(|data| data.body.as_ref()),
+                Some(proto::block_event_data::Body::MergeMessageEventBody(body))
+                    if body.message.as_ref() == Some(&parked_update)
+            )));
+            driver.assert_converged();
+
+            timestamp += 2;
+            let reverify = verification_contract_add(OWNER_FID, owner_address.clone(), timestamp);
+            let thawed_update = channel_update(
+                OWNER_FID,
+                &channel_id,
+                "thawed",
+                Some(MembershipMode::Approval),
+                timestamp + 1,
+            );
+            let thaw_block = driver
+                .commit_messages(vec![reverify.clone(), thawed_update.clone()])
+                .await;
+            for message in [&reverify, &thawed_update] {
+                assert_eq!(
+                    thaw_block
+                        .events
+                        .iter()
+                        .filter(|event| matches!(
+                            event.data.as_ref().and_then(|data| data.body.as_ref()),
+                            Some(proto::block_event_data::Body::MergeMessageEventBody(body))
+                                if body.message.as_ref() == Some(message)
+                        ))
+                        .count(),
+                    1
+                );
+            }
+            driver.assert_converged();
+
+            timestamp += 2;
+            let stale_owner_update =
+                channel_update(OWNER_FID, &channel_id, "stale owner", None, timestamp + 1);
+            let transfer = events_factory::create_channel_register_event(
+                "",
+                channel_id.clone(),
+                new_owner_address,
+                0,
+                ChannelRegisterEventType::Transfer,
+                211,
+                1,
+            );
+            let transfer_block = driver
+                .commit(
+                    vec![
+                        MempoolMessage::OnchainEvent(transfer),
+                        MempoolMessage::UserMessage(stale_owner_update.clone()),
+                    ],
+                    timestamp + 1,
+                )
+                .await;
+            let old_owner_txn = transfer_block
+                .transactions
+                .iter()
+                .position(|txn| txn.fid == OWNER_FID)
+                .unwrap();
+            let transfer_txn = transfer_block
+                .transactions
+                .iter()
+                .position(|txn| txn.fid == 0)
+                .unwrap();
+            let update_landed = TrieKey::for_message(&stale_owner_update).iter().all(|key| {
+                driver
+                    .block_engine
+                    .trie_key_exists(&merkle_trie::Context::new(), key)
+            });
+            assert_eq!(
+                update_landed,
+                old_owner_txn < transfer_txn,
+                "the frozen transaction order must decide whether the old-owner action lands"
+            );
+            assert_eq!(
+                transfer_block.events.iter().any(|event| matches!(
+                    event.data.as_ref().and_then(|data| data.body.as_ref()),
+                    Some(proto::block_event_data::Body::MergeMessageEventBody(body))
+                        if body.message.as_ref() == Some(&stale_owner_update)
+                )),
+                update_landed
+            );
+            driver.assert_converged();
+            let reads = driver.reads(&channel_id, OWNER_FID).await;
+            assert_eq!(
+                reads.metadata.name.as_deref(),
+                Some(if update_landed {
+                    "stale owner"
+                } else {
+                    "thawed"
+                })
+            );
+
+            let after_transfer = driver.state_fingerprint();
+            let next_block_old_owner =
+                channel_update(OWNER_FID, &channel_id, "next block", None, timestamp + 2);
+            let error = driver
+                .block_engine
+                .simulate_message(&next_block_old_owner)
+                .unwrap_err();
+            assert!(error.to_string().contains("channel is parked"), "{error:?}");
+            assert_eq!(driver.state_fingerprint(), after_transfer);
+        }
+
+        #[tokio::test]
+        async fn s3_transfer_transaction_orders_are_explicitly_bounded_by_the_next_block() {
+            // The public proposal harness does not expose a way to supply a hand-ordered
+            // Transaction Vec and recompute its roots. These two pipelines therefore split the
+            // order-sensitive applications across blocks, while the mixed S3 test above pins that
+            // a real same-block proposal freezes one order and validators accept that exact root.
+            const TRANSFER_FIRST_OWNER: u64 = 7_501;
+            const TRANSFER_FIRST_NEW_OWNER: u64 = 7_502;
+            const ACTION_FIRST_OWNER: u64 = 7_511;
+            const ACTION_FIRST_NEW_OWNER: u64 = 7_512;
+
+            // Order A: transfer applies before the old-owner action. The new address is
+            // deliberately unverified, so the old owner is rejected as parked with no state,
+            // event-stream, row, or trie side effect.
+            let (mut transfer_first, channel_id, new_address, timestamp) = transfer_order_driver(
+                "scenario-transfer-first",
+                TRANSFER_FIRST_OWNER,
+                TRANSFER_FIRST_NEW_OWNER,
+                220,
+            )
+            .await;
+            transfer_first
+                .commit(
+                    vec![MempoolMessage::OnchainEvent(
+                        events_factory::create_channel_register_event(
+                            "",
+                            channel_id.clone(),
+                            new_address.clone(),
+                            0,
+                            ChannelRegisterEventType::Transfer,
+                            221,
+                            1,
+                        ),
+                    )],
+                    timestamp,
+                )
+                .await;
+            transfer_first.assert_converged();
+            let owner =
+                get_channel_owner_response(&transfer_first.service, "scenario-transfer-first")
+                    .await;
+            assert_eq!(owner.owner_address, new_address);
+            assert_eq!(owner.fid, 0);
+            let before_rejection = transfer_first.state_fingerprint();
+            let rejected = channel_update(
+                TRANSFER_FIRST_OWNER,
+                &channel_id,
+                "must stay parked",
+                None,
+                timestamp + 1,
+            );
+            let error = transfer_first
+                .block_engine
+                .simulate_message(&rejected)
+                .unwrap_err();
+            assert!(error.to_string().contains("channel is parked"), "{error:?}");
+            assert_eq!(transfer_first.state_fingerprint(), before_rejection);
+            let reads = transfer_first
+                .reads(&channel_id, TRANSFER_FIRST_OWNER)
+                .await;
+            assert_eq!(reads.metadata.name.as_deref(), Some("before transfer"));
+
+            // Order B: the still-authorized old-owner update applies first, then the transfer.
+            // Both commits pass proposal validation/root equality; the very next old-owner action
+            // is parked, bounding the proposer-order freedom to the transfer block.
+            let (mut action_first, channel_id, new_address, timestamp) = transfer_order_driver(
+                "scenario-action-first",
+                ACTION_FIRST_OWNER,
+                ACTION_FIRST_NEW_OWNER,
+                230,
+            )
+            .await;
+            let accepted = channel_update(
+                ACTION_FIRST_OWNER,
+                &channel_id,
+                "old owner landed first",
+                None,
+                timestamp,
+            );
+            let accepted_block = action_first.commit_messages(vec![accepted.clone()]).await;
+            assert!(TrieKey::for_message(&accepted)
+                .iter()
+                .all(|key| action_first
+                    .block_engine
+                    .trie_key_exists(&merkle_trie::Context::new(), key)));
+            assert!(accepted_block.events.iter().any(|event| matches!(
+                event.data.as_ref().and_then(|data| data.body.as_ref()),
+                Some(proto::block_event_data::Body::MergeMessageEventBody(body))
+                    if body.message.as_ref() == Some(&accepted)
+            )));
+            action_first
+                .commit(
+                    vec![MempoolMessage::OnchainEvent(
+                        events_factory::create_channel_register_event(
+                            "",
+                            channel_id.clone(),
+                            new_address.clone(),
+                            0,
+                            ChannelRegisterEventType::Transfer,
+                            231,
+                            1,
+                        ),
+                    )],
+                    timestamp + 1,
+                )
+                .await;
+            action_first.assert_converged();
+            let owner =
+                get_channel_owner_response(&action_first.service, "scenario-action-first").await;
+            assert_eq!(owner.owner_address, new_address);
+            assert_eq!(owner.fid, 0);
+            let reads = action_first.reads(&channel_id, ACTION_FIRST_OWNER).await;
+            assert_eq!(
+                reads.metadata.name.as_deref(),
+                Some("old owner landed first")
+            );
+
+            let after_transfer = action_first.state_fingerprint();
+            let rejected = channel_update(
+                ACTION_FIRST_OWNER,
+                &channel_id,
+                "too late",
+                None,
+                timestamp + 2,
+            );
+            let error = action_first
+                .block_engine
+                .simulate_message(&rejected)
+                .unwrap_err();
+            assert!(error.to_string().contains("channel is parked"), "{error:?}");
+            assert_eq!(action_first.state_fingerprint(), after_transfer);
+        }
     }
 
     // Registers `channel_key` to `owner_address` at a distinct chain position so
