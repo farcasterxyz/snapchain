@@ -110,6 +110,27 @@ mod serdehex {
     }
 }
 
+mod serdehexopt {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(value) => format!("0x{}", hex::encode(value)).serialize(s),
+            None => Option::<String>::None.serialize(s),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
+        let value = Option::<String>::deserialize(d)?;
+        value
+            .map(|value| {
+                let hex = value.strip_prefix("0x").unwrap_or(&value);
+                hex::decode(hex).map_err(serde::de::Error::custom)
+            })
+            .transpose()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Message {
     pub data: MessageData,
@@ -1352,7 +1373,7 @@ impl ChannelOwnerRequest {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChannelOwnerResponse {
-    /// 0 = registered but no verified owner found on this node's hosted shards
+    /// 0 = registered but no verified owner in shard-0 consensus state
     /// ("parked"). Parking is computed at read time, never stored.
     pub fid: u64,
     /// Raw 20-byte EVM address from the channel registry fold, hex-encoded.
@@ -1477,6 +1498,252 @@ impl From<proto::ChannelsResponse> for ChannelsResponse {
                 .map(|token| BASE64_STANDARD.encode(token)),
         }
     }
+}
+
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+pub enum ChannelMemberState {
+    CHANNEL_MEMBER_STATE_NONE = 0,
+    CHANNEL_MEMBER_STATE_MEMBER = 1,
+    CHANNEL_MEMBER_STATE_MODERATOR = 2,
+    CHANNEL_MEMBER_STATE_REMOVED = 3,
+    CHANNEL_MEMBER_STATE_BANNED = 4,
+}
+
+fn channel_member_state_from_proto(state: i32) -> Result<ChannelMemberState, ErrorResponse> {
+    match proto::ChannelMemberState::try_from(state).map_err(|_| ErrorResponse {
+        error: "Invalid channel member state".to_string(),
+        error_detail: Some(state.to_string()),
+    })? {
+        proto::ChannelMemberState::None => Ok(ChannelMemberState::CHANNEL_MEMBER_STATE_NONE),
+        proto::ChannelMemberState::Member => Ok(ChannelMemberState::CHANNEL_MEMBER_STATE_MEMBER),
+        proto::ChannelMemberState::Moderator => {
+            Ok(ChannelMemberState::CHANNEL_MEMBER_STATE_MODERATOR)
+        }
+        proto::ChannelMemberState::Removed => Ok(ChannelMemberState::CHANNEL_MEMBER_STATE_REMOVED),
+        proto::ChannelMemberState::Banned => Ok(ChannelMemberState::CHANNEL_MEMBER_STATE_BANNED),
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelIdRequest {
+    #[serde(with = "serdehex", rename = "channelId")]
+    pub channel_id: Vec<u8>,
+}
+
+impl ChannelIdRequest {
+    fn to_proto(self) -> proto::ChannelRequest {
+        proto::ChannelRequest {
+            channel_id: self.channel_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelMemberRequest {
+    #[serde(with = "serdehex", rename = "channelId")]
+    pub channel_id: Vec<u8>,
+    pub fid: u64,
+}
+
+impl ChannelMemberRequest {
+    fn to_proto(self) -> proto::ChannelMemberRequest {
+        proto::ChannelMemberRequest {
+            channel_id: self.channel_id,
+            fid: self.fid,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelMemberResponse {
+    pub state: ChannelMemberState,
+    #[serde(rename = "lastActionTs", skip_serializing_if = "Option::is_none")]
+    pub last_action_ts: Option<u32>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelMembersRequest {
+    #[serde(with = "serdehex", rename = "channelId")]
+    pub channel_id: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_filter: Option<ChannelMemberState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub page_token: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageSize: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pageToken: Option<Vec<u8>>,
+}
+
+impl ChannelMembersRequest {
+    fn to_proto(self) -> proto::ChannelMembersRequest {
+        proto::ChannelMembersRequest {
+            channel_id: self.channel_id,
+            state_filter: self.state_filter.map(|state| state as i32),
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+            reverse: self.reverse,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelMember {
+    pub fid: u64,
+    pub state: ChannelMemberState,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelMembersResponse {
+    pub members: Vec<ChannelMember>,
+    #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelPinResponse {
+    #[serde(
+        default,
+        with = "serdehexopt",
+        rename = "castHash",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cast_hash: Option<Vec<u8>>,
+    #[serde(rename = "authorFid", skip_serializing_if = "Option::is_none")]
+    pub author_fid: Option<u64>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelModerationsRequest {
+    #[serde(with = "serdehex", rename = "channelId")]
+    pub channel_id: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub page_token: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageSize: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pageToken: Option<Vec<u8>>,
+}
+
+impl ChannelModerationsRequest {
+    fn to_proto(self) -> proto::ChannelModerationsRequest {
+        proto::ChannelModerationsRequest {
+            channel_id: self.channel_id,
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+            reverse: self.reverse,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelModeration {
+    #[serde(with = "serdehex", rename = "castHash")]
+    pub cast_hash: Vec<u8>,
+    pub action: ChannelModerateAction,
+    #[serde(rename = "authorFid")]
+    pub author_fid: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelModerationsResponse {
+    pub moderations: Vec<ChannelModeration>,
+    #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelMetadataResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(rename = "imageUrl", skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<String>,
+    #[serde(rename = "castingMode")]
+    pub casting_mode: CastingMode,
+    #[serde(rename = "membershipMode")]
+    pub membership_mode: MembershipMode,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelMembershipsByFidRequest {
+    pub fid: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub page_token: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageSize: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pageToken: Option<Vec<u8>>,
+}
+
+impl ChannelMembershipsByFidRequest {
+    fn to_proto(self) -> proto::ChannelMembershipsByFidRequest {
+        proto::ChannelMembershipsByFidRequest {
+            fid: self.fid,
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+            reverse: self.reverse,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelMembership {
+    #[serde(with = "serdehex", rename = "channelId")]
+    pub channel_id: Vec<u8>,
+    pub state: ChannelMemberState,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelMembershipsResponse {
+    pub memberships: Vec<ChannelMembership>,
+    #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
 }
 
 #[allow(non_camel_case_types)]
@@ -3349,6 +3616,30 @@ pub trait HubHttpService {
         &self,
         req: ChannelsByFidRequest,
     ) -> Result<ChannelsResponse, ErrorResponse>;
+    async fn get_channel_member(
+        &self,
+        req: ChannelMemberRequest,
+    ) -> Result<ChannelMemberResponse, ErrorResponse>;
+    async fn get_channel_members(
+        &self,
+        req: ChannelMembersRequest,
+    ) -> Result<ChannelMembersResponse, ErrorResponse>;
+    async fn get_channel_pin(
+        &self,
+        req: ChannelIdRequest,
+    ) -> Result<ChannelPinResponse, ErrorResponse>;
+    async fn get_channel_moderations(
+        &self,
+        req: ChannelModerationsRequest,
+    ) -> Result<ChannelModerationsResponse, ErrorResponse>;
+    async fn get_channel_metadata(
+        &self,
+        req: ChannelIdRequest,
+    ) -> Result<ChannelMetadataResponse, ErrorResponse>;
+    async fn get_channel_memberships_by_fid(
+        &self,
+        req: ChannelMembershipsByFidRequest,
+    ) -> Result<ChannelMembershipsResponse, ErrorResponse>;
     async fn get_fid_address_type(
         &self,
         req: FidAddressTypeRequest,
@@ -4150,6 +4441,169 @@ where
         Ok(response.into_inner().into())
     }
 
+    /// GET /v1/channelMember
+    async fn get_channel_member(
+        &self,
+        req: ChannelMemberRequest,
+    ) -> Result<ChannelMemberResponse, ErrorResponse> {
+        let response = self
+            .service
+            .get_channel_member(tonic::Request::new(req.to_proto()))
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get channel member".to_string(),
+                error_detail: Some(e.to_string()),
+            })?
+            .into_inner();
+        Ok(ChannelMemberResponse {
+            state: channel_member_state_from_proto(response.state)?,
+            last_action_ts: response.last_action_ts,
+        })
+    }
+
+    /// GET /v1/channelMembers
+    async fn get_channel_members(
+        &self,
+        req: ChannelMembersRequest,
+    ) -> Result<ChannelMembersResponse, ErrorResponse> {
+        let response = self
+            .service
+            .get_channel_members(tonic::Request::new(req.to_proto()))
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get channel members".to_string(),
+                error_detail: Some(e.to_string()),
+            })?
+            .into_inner();
+        Ok(ChannelMembersResponse {
+            members: response
+                .members
+                .into_iter()
+                .map(|member| {
+                    Ok(ChannelMember {
+                        fid: member.fid,
+                        state: channel_member_state_from_proto(member.state)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, ErrorResponse>>()?,
+            next_page_token: response
+                .next_page_token
+                .map(|token| BASE64_STANDARD.encode(token)),
+        })
+    }
+
+    /// GET /v1/channelPin
+    async fn get_channel_pin(
+        &self,
+        req: ChannelIdRequest,
+    ) -> Result<ChannelPinResponse, ErrorResponse> {
+        let response = self
+            .service
+            .get_channel_pin(tonic::Request::new(req.to_proto()))
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get channel pin".to_string(),
+                error_detail: Some(e.to_string()),
+            })?
+            .into_inner();
+        Ok(ChannelPinResponse {
+            cast_hash: response.cast_hash,
+            author_fid: response.author_fid,
+        })
+    }
+
+    /// GET /v1/channelModerations
+    async fn get_channel_moderations(
+        &self,
+        req: ChannelModerationsRequest,
+    ) -> Result<ChannelModerationsResponse, ErrorResponse> {
+        let response = self
+            .service
+            .get_channel_moderations(tonic::Request::new(req.to_proto()))
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get channel moderations".to_string(),
+                error_detail: Some(e.to_string()),
+            })?
+            .into_inner();
+        Ok(ChannelModerationsResponse {
+            moderations: response
+                .moderations
+                .into_iter()
+                .map(|moderation| {
+                    Ok(ChannelModeration {
+                        cast_hash: moderation.cast_hash,
+                        action: map_proto_channel_moderate_action_to_json_channel_moderate_action(
+                            moderation.action,
+                        )?,
+                        author_fid: moderation.author_fid,
+                    })
+                })
+                .collect::<Result<Vec<_>, ErrorResponse>>()?,
+            next_page_token: response
+                .next_page_token
+                .map(|token| BASE64_STANDARD.encode(token)),
+        })
+    }
+
+    /// GET /v1/channelMetadata
+    async fn get_channel_metadata(
+        &self,
+        req: ChannelIdRequest,
+    ) -> Result<ChannelMetadataResponse, ErrorResponse> {
+        let response = self
+            .service
+            .get_channel_metadata(tonic::Request::new(req.to_proto()))
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get channel metadata".to_string(),
+                error_detail: Some(e.to_string()),
+            })?
+            .into_inner();
+        Ok(ChannelMetadataResponse {
+            name: response.name,
+            description: response.description,
+            image_url: response.image_url,
+            header: response.header,
+            rules: response.rules,
+            casting_mode: map_proto_casting_mode_to_json_casting_mode(response.casting_mode)?,
+            membership_mode: map_proto_membership_mode_to_json_membership_mode(
+                response.membership_mode,
+            )?,
+        })
+    }
+
+    /// GET /v1/channelMembershipsByFid
+    async fn get_channel_memberships_by_fid(
+        &self,
+        req: ChannelMembershipsByFidRequest,
+    ) -> Result<ChannelMembershipsResponse, ErrorResponse> {
+        let response = self
+            .service
+            .get_channel_memberships_by_fid(tonic::Request::new(req.to_proto()))
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get channel memberships by fid".to_string(),
+                error_detail: Some(e.to_string()),
+            })?
+            .into_inner();
+        Ok(ChannelMembershipsResponse {
+            memberships: response
+                .memberships
+                .into_iter()
+                .map(|membership| {
+                    Ok(ChannelMembership {
+                        channel_id: membership.channel_id,
+                        state: channel_member_state_from_proto(membership.state)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, ErrorResponse>>()?,
+            next_page_token: response
+                .next_page_token
+                .map(|token| BASE64_STANDARD.encode(token)),
+        })
+    }
+
     async fn get_events(&self, req: EventsRequest) -> Result<EventsResponse, ErrorResponse> {
         let service = &self.service;
 
@@ -4466,6 +4920,51 @@ where
                 )
                 .await
             }
+            (&Method::GET, "/v1/channelMember") => {
+                self.handle_request::<ChannelMemberRequest, ChannelMemberResponse, _>(
+                    req,
+                    |service, req| Box::pin(async move { service.get_channel_member(req).await }),
+                )
+                .await
+            }
+            (&Method::GET, "/v1/channelMembers") => {
+                self.handle_request::<ChannelMembersRequest, ChannelMembersResponse, _>(
+                    req,
+                    |service, req| Box::pin(async move { service.get_channel_members(req).await }),
+                )
+                .await
+            }
+            (&Method::GET, "/v1/channelPin") => {
+                self.handle_request::<ChannelIdRequest, ChannelPinResponse, _>(
+                    req,
+                    |service, req| Box::pin(async move { service.get_channel_pin(req).await }),
+                )
+                .await
+            }
+            (&Method::GET, "/v1/channelModerations") => {
+                self.handle_request::<ChannelModerationsRequest, ChannelModerationsResponse, _>(
+                    req,
+                    |service, req| {
+                        Box::pin(async move { service.get_channel_moderations(req).await })
+                    },
+                )
+                .await
+            }
+            (&Method::GET, "/v1/channelMetadata") => {
+                self.handle_request::<ChannelIdRequest, ChannelMetadataResponse, _>(
+                    req,
+                    |service, req| Box::pin(async move { service.get_channel_metadata(req).await }),
+                )
+                .await
+            }
+            (&Method::GET, "/v1/channelMembershipsByFid") => self
+                .handle_request::<ChannelMembershipsByFidRequest, ChannelMembershipsResponse, _>(
+                    req,
+                    |service, req| {
+                        Box::pin(async move { service.get_channel_memberships_by_fid(req).await })
+                    },
+                )
+                .await,
             (&Method::GET, "/v1/onChainIdRegistryEventByAddress") => {
                 self.handle_request::<IdRegistryEventByAddressRequest, OnChainEvent, _>(
                     req,

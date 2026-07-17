@@ -600,10 +600,11 @@ impl ShardEngine {
         &self,
         txn_batch: &mut RocksDbTransactionBatch,
         trie_message: &ShardTrieEntryWithMessage,
+        channel_messages_enabled: bool,
     ) -> Result<MergedReplicatorMessage, EngineError> {
         let (hub_event, fid) = match &trie_message.trie_message {
             Some(TrieMessage::UserMessage(m)) => {
-                let events = self.merge_message(m, txn_batch)?;
+                let events = self.merge_message(m, txn_batch, channel_messages_enabled)?;
                 // This is only expected for deleted
                 if events.len() != 1 {
                     return Err(EngineError::ReplicatorError(format!(
@@ -671,13 +672,18 @@ impl ShardEngine {
     pub(crate) fn commit_replicator_message_for_test(
         &mut self,
         message: &proto::Message,
+        channel_messages_enabled: bool,
     ) -> Result<(), EngineError> {
         let trie_message = ShardTrieEntryWithMessage {
             trie_message: Some(TrieMessage::UserMessage(message.clone())),
             ..Default::default()
         };
         let mut txn_batch = RocksDbTransactionBatch::new();
-        let merged = self.replay_replicator_message(&mut txn_batch, &trie_message)?;
+        let merged = self.replay_replicator_message(
+            &mut txn_batch,
+            &trie_message,
+            channel_messages_enabled,
+        )?;
         self.update_trie(
             &merkle_trie::Context::new(),
             &merged.hub_event,
@@ -768,6 +774,7 @@ impl ShardEngine {
                     }
                     _ => (None, ReplayMerge::Normal),
                 };
+                let mut channel_messages_enabled = false;
                 if let Some(feature) = feature_gate {
                     let block_ts = block_event.block_timestamp();
                     let version =
@@ -783,10 +790,19 @@ impl ShardEngine {
                             MessageValidationError::InvalidMessageType(msg_type as i32).into()
                         );
                     }
+                    channel_messages_enabled = matches!(
+                        msg_type,
+                        MessageType::ChannelUpdate
+                            | MessageType::ChannelMember
+                            | MessageType::ChannelPin
+                            | MessageType::ChannelModerate
+                    );
                 }
                 let mut hub_events = match merge_strategy {
                     ReplayMerge::Forced => self.merge_replayed_verification(message, txn_batch)?,
-                    ReplayMerge::Normal => self.merge_message(message, txn_batch)?,
+                    ReplayMerge::Normal => {
+                        self.merge_message(message, txn_batch, channel_messages_enabled)?
+                    }
                 };
                 for event in &hub_events {
                     self.update_trie(trie_ctx, event, txn_batch)?;
@@ -1493,7 +1509,11 @@ impl ShardEngine {
             // Errors are validated based on the shard root
             match self.validate_user_message(msg, timestamp, version, txn_batch) {
                 Ok(()) => {
-                    let result = self.merge_message(msg, txn_batch);
+                    let result = self.merge_message(
+                        msg,
+                        txn_batch,
+                        version.is_enabled(ProtocolFeature::ChannelMessages),
+                    );
                     match result {
                         Ok(merge_events) => {
                             for event in &merge_events {
@@ -1710,6 +1730,7 @@ impl ShardEngine {
         &self,
         msg: &proto::Message,
         txn_batch: &mut RocksDbTransactionBatch,
+        channel_messages_enabled: bool,
     ) -> Result<Vec<proto::HubEvent>, MessageValidationError> {
         let now = std::time::Instant::now();
         let data = msg
@@ -1789,26 +1810,33 @@ impl ShardEngine {
                     txn_batch,
                 )?]
             }
-            MessageType::ChannelUpdate => vec![ChannelUpdateStore::merge(
-                &self.stores.channel_update_store,
-                msg,
-                txn_batch,
-            )?],
-            MessageType::ChannelMember => vec![ChannelMemberStore::merge(
-                &self.stores.channel_member_store,
-                msg,
-                txn_batch,
-            )?],
-            MessageType::ChannelPin => vec![ChannelPinStore::merge(
+            MessageType::ChannelUpdate if channel_messages_enabled => {
+                vec![ChannelUpdateStore::merge(
+                    &self.stores.channel_update_store,
+                    msg,
+                    txn_batch,
+                )?]
+            }
+            MessageType::ChannelMember if channel_messages_enabled => {
+                vec![ChannelMemberStore::merge_with_gated_by_fid_index(
+                    &self.stores.channel_member_store,
+                    msg,
+                    txn_batch,
+                    channel_messages_enabled,
+                )?]
+            }
+            MessageType::ChannelPin if channel_messages_enabled => vec![ChannelPinStore::merge(
                 &self.stores.channel_pin_store,
                 msg,
                 txn_batch,
             )?],
-            MessageType::ChannelModerate => vec![ChannelModerateStore::merge(
-                &self.stores.channel_moderate_store,
-                msg,
-                txn_batch,
-            )?],
+            MessageType::ChannelModerate if channel_messages_enabled => {
+                vec![ChannelModerateStore::merge(
+                    &self.stores.channel_moderate_store,
+                    msg,
+                    txn_batch,
+                )?]
+            }
             unhandled_type => {
                 return Err(MessageValidationError::InvalidMessageType(
                     unhandled_type as i32,
@@ -3226,7 +3254,7 @@ mod channel_message_inertness_tests {
         for (message_type, body) in messages_factory::channels::all_message_bodies() {
             let message =
                 messages_factory::create_message_with_data(1234, message_type, body, None, None);
-            let result = engine.merge_message(&message, &mut RocksDbTransactionBatch::new());
+            let result = engine.merge_message(&message, &mut RocksDbTransactionBatch::new(), false);
             assert!(matches!(
                 result,
                 Err(MessageValidationError::InvalidMessageType(value))

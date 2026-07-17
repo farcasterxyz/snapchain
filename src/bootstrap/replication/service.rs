@@ -2,6 +2,7 @@ use crate::bootstrap::replication::error::BootstrapError;
 use crate::bootstrap::replication::peer_discovery::PeerDiscoverer;
 use crate::bootstrap::replication::rpc_client::RpcClientsManager;
 use crate::cfg::Config;
+use crate::core::util::FarcasterTime;
 use crate::core::validations;
 use crate::core::validations::message::validate_message_hash;
 use crate::network::gossip;
@@ -23,6 +24,7 @@ use crate::storage::{
     util::increment_vec_u8,
 };
 use crate::utils::statsd_wrapper::StatsdClientWrapper;
+use crate::version::version::{EngineVersion, ProtocolFeature};
 use ed25519_dalek::{Signature, VerifyingKey};
 use futures::future;
 use prost::Message as _;
@@ -857,6 +859,10 @@ impl ReplicatorBootstrap {
 
         // 1. Create the engine and trie objects
         let mut status = work_item.current_status;
+        let snapshot_timestamp = work_item.rpc_client_manager.get_metadata().timestamp;
+        let channel_messages_enabled =
+            EngineVersion::version_for(&FarcasterTime::new(snapshot_timestamp), self.fc_network)
+                .is_enabled(ProtocolFeature::ChannelMessages);
 
         loop {
             let mut last_fid = status.last_fid;
@@ -903,10 +909,11 @@ impl ReplicatorBootstrap {
                 trie_keys.insert(trie_key.clone());
                 let decoded_trie_key = TrieKey::decode(&trie_key)?;
 
-                match work_item
-                    .thread_engine
-                    .replay_replicator_message(&mut txn_batch, trie_message_entry)
-                {
+                match work_item.thread_engine.replay_replicator_message(
+                    &mut txn_batch,
+                    trie_message_entry,
+                    channel_messages_enabled,
+                ) {
                     Ok(m) => {
                         // For storage lend messages, we insert 2 keys per message
                         let generated_trie_keys = m.trie_keys;

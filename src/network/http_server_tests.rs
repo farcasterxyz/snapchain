@@ -313,6 +313,48 @@ pub mod tests {
             Ok(Response::new(response))
         }
 
+        async fn get_channel_member(
+            &self,
+            _request: Request<ChannelMemberRequest>,
+        ) -> Result<Response<ChannelMemberResponse>, Status> {
+            Ok(Response::new(ChannelMemberResponse::default()))
+        }
+
+        async fn get_channel_members(
+            &self,
+            _request: Request<ChannelMembersRequest>,
+        ) -> Result<Response<ChannelMembersResponse>, Status> {
+            Ok(Response::new(ChannelMembersResponse::default()))
+        }
+
+        async fn get_channel_pin(
+            &self,
+            _request: Request<ChannelRequest>,
+        ) -> Result<Response<ChannelPinResponse>, Status> {
+            Ok(Response::new(ChannelPinResponse::default()))
+        }
+
+        async fn get_channel_moderations(
+            &self,
+            _request: Request<ChannelModerationsRequest>,
+        ) -> Result<Response<ChannelModerationsResponse>, Status> {
+            Ok(Response::new(ChannelModerationsResponse::default()))
+        }
+
+        async fn get_channel_metadata(
+            &self,
+            _request: Request<ChannelRequest>,
+        ) -> Result<Response<ChannelMetadataResponse>, Status> {
+            Ok(Response::new(ChannelMetadataResponse::default()))
+        }
+
+        async fn get_channel_memberships_by_fid(
+            &self,
+            _request: Request<ChannelMembershipsByFidRequest>,
+        ) -> Result<Response<ChannelMembershipsResponse>, Status> {
+            Ok(Response::new(ChannelMembershipsResponse::default()))
+        }
+
         async fn get_id_registry_on_chain_event(
             &self,
             _request: Request<FidRequest>,
@@ -495,6 +537,43 @@ pub mod tests {
         );
         // The raw snake_case key must not leak onto the wire.
         assert!(json.get("owner_address").is_none());
+    }
+
+    #[test]
+    fn channel_message_read_response_json_shapes() {
+        use crate::network::http_server::{
+            CastingMode, ChannelMemberResponse, ChannelMemberState, ChannelMetadataResponse,
+            ChannelPinResponse, MembershipMode,
+        };
+
+        let member = serde_json::to_value(ChannelMemberResponse {
+            state: ChannelMemberState::CHANNEL_MEMBER_STATE_MODERATOR,
+            last_action_ts: Some(42),
+        })
+        .unwrap();
+        assert_eq!(member["state"], "CHANNEL_MEMBER_STATE_MODERATOR");
+        assert_eq!(member["lastActionTs"], 42);
+
+        let pin = serde_json::to_value(ChannelPinResponse {
+            cast_hash: Some(vec![0xAB; 20]),
+            author_fid: Some(123),
+        })
+        .unwrap();
+        assert_eq!(pin["castHash"], format!("0x{}", "ab".repeat(20)));
+        assert_eq!(pin["authorFid"], 123);
+
+        let metadata = serde_json::to_value(ChannelMetadataResponse {
+            name: None,
+            description: None,
+            image_url: None,
+            header: None,
+            rules: None,
+            casting_mode: CastingMode::CASTING_MODE_MEMBERS_ONLY,
+            membership_mode: MembershipMode::MEMBERSHIP_MODE_APPROVAL,
+        })
+        .unwrap();
+        assert_eq!(metadata["castingMode"], "CASTING_MODE_MEMBERS_ONLY");
+        assert_eq!(metadata["membershipMode"], "MEMBERSHIP_MODE_APPROVAL");
     }
 
     #[tokio::test]

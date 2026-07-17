@@ -19,16 +19,20 @@ mod tests {
     use crate::network::server::MyHubService;
     use crate::proto::hub_service_server::HubService;
     use crate::proto::{
-        self, Block, ChannelOwnerRequest, ChannelOwnerResponse, ChannelRegisterEventType,
-        ChannelsByAddressRequest, ChannelsByFidRequest, EventRequest, EventsRequest,
-        FarcasterNetwork, FnameTransfer, HubEvent, HubEventType, OnChainEventType, ShardChunk,
-        StorageUnitType, SubmitBulkMessagesRequest, SubmitBulkMessagesResponse, UserDataType,
-        UserNameProof, UserNameType, UsernameProofRequest, VerificationAddAddressBody,
+        self, Block, ChannelMemberRequest, ChannelMembersRequest, ChannelMembershipsByFidRequest,
+        ChannelModerationsRequest, ChannelOwnerRequest, ChannelOwnerResponse,
+        ChannelRegisterEventType, ChannelRequest, ChannelsByAddressRequest, ChannelsByFidRequest,
+        EventRequest, EventsRequest, FarcasterNetwork, FnameTransfer, HubEvent, HubEventType,
+        OnChainEventType, ShardChunk, StorageUnitType, SubmitBulkMessagesRequest,
+        SubmitBulkMessagesResponse, UserDataType, UserNameProof, UserNameType,
+        UsernameProofRequest, VerificationAddAddressBody,
     };
     use crate::proto::{FidRequest, SignersByFidRequest, SubscribeRequest};
     use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{
-        make_ts_hash, HubEventIdGenerator, HubEventStorageExt, VerificationStoreDef, SEQUENCE_BITS,
+        make_ts_hash, ChannelMemberStore, ChannelModerateStore, ChannelPinStore,
+        ChannelUpdateStore, HubEventIdGenerator, HubEventStorageExt, VerificationStoreDef,
+        SEQUENCE_BITS,
     };
     use crate::storage::store::block_engine::BlockEngine;
     use crate::storage::store::block_engine_test_helpers::{BlockEngineOptions, Validity};
@@ -123,6 +127,39 @@ mod tests {
             .merge_onchain_event(event, &mut txn)
             .unwrap();
         block_stores.onchain_event_store.db.commit(txn).unwrap();
+    }
+
+    fn merge_channel_message(block_engine: &BlockEngine, message: &proto::Message) {
+        let block_stores = block_engine.stores();
+        let mut txn = RocksDbTransactionBatch::new();
+        match message.msg_type() {
+            proto::MessageType::ChannelUpdate => {
+                ChannelUpdateStore::merge(&block_stores.channel_update_store, message, &mut txn)
+                    .unwrap();
+            }
+            proto::MessageType::ChannelMember => {
+                ChannelMemberStore::merge_with_gated_by_fid_index(
+                    &block_stores.channel_member_store,
+                    message,
+                    &mut txn,
+                    true,
+                )
+                .unwrap();
+            }
+            proto::MessageType::ChannelPin => {
+                ChannelPinStore::merge(&block_stores.channel_pin_store, message, &mut txn).unwrap();
+            }
+            proto::MessageType::ChannelModerate => {
+                ChannelModerateStore::merge(
+                    &block_stores.channel_moderate_store,
+                    message,
+                    &mut txn,
+                )
+                .unwrap();
+            }
+            other => panic!("unexpected channel message type: {other:?}"),
+        }
+        block_stores.db.commit(txn).unwrap();
     }
 
     async fn get_channel_owner_response(
@@ -1117,6 +1154,211 @@ mod tests {
             .into_inner();
         assert!(by_address.channels.is_empty());
         assert_eq!(by_address.next_page_token, None);
+    }
+
+    #[tokio::test]
+    async fn test_channel_message_read_surface_uses_shard_zero_folds_and_indexes() {
+        let (
+            _stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None).await;
+        let channel_key = "message_reads";
+        let channel_id = channel_label(channel_key);
+        merge_channel_registration(
+            &block_engine,
+            channel_key,
+            owner_address(55),
+            now_unix_seconds() + 3600,
+        );
+
+        let empty_member = service
+            .get_channel_member(Request::new(ChannelMemberRequest {
+                channel_id: channel_id.clone(),
+                fid: 101,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(empty_member.state, proto::ChannelMemberState::None as i32);
+        assert_eq!(empty_member.last_action_ts, None);
+
+        let update = messages_factory::create_message_with_data(
+            500,
+            proto::MessageType::ChannelUpdate,
+            proto::message_data::Body::ChannelUpdateBody(proto::ChannelUpdateBody {
+                channel_id: channel_id.clone(),
+                name: Some("Channel name".to_string()),
+                image_url: Some("https://example.com/image.png".to_string()),
+                ..Default::default()
+            }),
+            Some(9),
+            None,
+        );
+        let moderator = messages_factory::create_message_with_data(
+            500,
+            proto::MessageType::ChannelMember,
+            proto::message_data::Body::ChannelMemberBody(proto::ChannelMemberBody {
+                channel_id: channel_id.clone(),
+                fid: 101,
+                action: proto::ChannelMemberAction::AddModerator as i32,
+            }),
+            Some(10),
+            None,
+        );
+        let banned = messages_factory::create_message_with_data(
+            500,
+            proto::MessageType::ChannelMember,
+            proto::message_data::Body::ChannelMemberBody(proto::ChannelMemberBody {
+                channel_id: channel_id.clone(),
+                fid: 102,
+                action: proto::ChannelMemberAction::Ban as i32,
+            }),
+            Some(11),
+            None,
+        );
+        let pin_hash = vec![0xAB; 20];
+        let pin = messages_factory::create_message_with_data(
+            501,
+            proto::MessageType::ChannelPin,
+            proto::message_data::Body::ChannelPinBody(proto::ChannelPinBody {
+                channel_id: channel_id.clone(),
+                cast_hash: pin_hash.clone(),
+            }),
+            Some(12),
+            None,
+        );
+        let moderated_hash = vec![0xCD; 20];
+        let moderation = messages_factory::create_message_with_data(
+            502,
+            proto::MessageType::ChannelModerate,
+            proto::message_data::Body::ChannelModerateBody(proto::ChannelModerateBody {
+                channel_id: channel_id.clone(),
+                cast_hash: moderated_hash.clone(),
+                action: proto::ChannelModerateAction::Hide as i32,
+            }),
+            Some(13),
+            None,
+        );
+        for message in [&update, &moderator, &banned, &pin, &moderation] {
+            merge_channel_message(&block_engine, message);
+        }
+
+        let member = service
+            .get_channel_member(Request::new(ChannelMemberRequest {
+                channel_id: channel_id.clone(),
+                fid: 101,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(member.state, proto::ChannelMemberState::Moderator as i32);
+        assert_eq!(member.last_action_ts, Some(10));
+
+        let members = service
+            .get_channel_members(Request::new(ChannelMembersRequest {
+                channel_id: channel_id.clone(),
+                state_filter: None,
+                page_size: Some(1),
+                page_token: None,
+                reverse: Some(false),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(members.members.len(), 1);
+        assert!(members.next_page_token.is_some());
+
+        let moderators = service
+            .get_channel_members(Request::new(ChannelMembersRequest {
+                channel_id: channel_id.clone(),
+                state_filter: Some(proto::ChannelMemberState::Moderator as i32),
+                page_size: None,
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(moderators.members.len(), 1);
+        assert_eq!(moderators.members[0].fid, 101);
+
+        let memberships = service
+            .get_channel_memberships_by_fid(Request::new(ChannelMembershipsByFidRequest {
+                fid: 101,
+                page_size: None,
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(memberships.memberships.len(), 1);
+        assert_eq!(memberships.memberships[0].channel_id, channel_id);
+        assert_eq!(
+            memberships.memberships[0].state,
+            proto::ChannelMemberState::Moderator as i32
+        );
+
+        let pin_response = service
+            .get_channel_pin(Request::new(ChannelRequest {
+                channel_id: channel_label(channel_key),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(pin_response.cast_hash, Some(pin_hash));
+        assert_eq!(pin_response.author_fid, Some(501));
+
+        let moderations = service
+            .get_channel_moderations(Request::new(ChannelModerationsRequest {
+                channel_id: channel_label(channel_key),
+                page_size: None,
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(moderations.moderations.len(), 1);
+        assert_eq!(moderations.moderations[0].cast_hash, moderated_hash);
+        assert_eq!(moderations.moderations[0].author_fid, 502);
+
+        let metadata = service
+            .get_channel_metadata(Request::new(ChannelRequest {
+                channel_id: channel_label(channel_key),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(metadata.name.as_deref(), Some("Channel name"));
+        assert_eq!(
+            metadata.casting_mode,
+            proto::CastingMode::MembersOnly as i32
+        );
+        assert_eq!(
+            metadata.membership_mode,
+            proto::MembershipMode::Approval as i32
+        );
+
+        let malformed = service
+            .get_channel_pin(Request::new(ChannelRequest {
+                channel_id: vec![1; 31],
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(malformed.code(), tonic::Code::InvalidArgument);
+        let unregistered = service
+            .get_channel_pin(Request::new(ChannelRequest {
+                channel_id: vec![9; 32],
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(unregistered.code(), tonic::Code::NotFound);
     }
 
     // Registers `channel_key` to `owner_address` at a distinct chain position so

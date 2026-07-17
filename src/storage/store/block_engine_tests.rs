@@ -573,7 +573,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             error,
-            MessageValidationError::HubError(ref hub_error)
+            MessageValidationError::MessageValidationError(ValidationError::HubError(ref hub_error))
                 if hub_error.message == "channel id must be 32 bytes"
         ));
 
@@ -599,7 +599,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             error,
-            MessageValidationError::HubError(ref hub_error)
+            MessageValidationError::MessageValidationError(ValidationError::HubError(ref hub_error))
                 if hub_error.message == "channel moderate cast hash must be 20 bytes"
         ));
 

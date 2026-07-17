@@ -4289,7 +4289,7 @@ mod tests {
             let (mut engine, _temp_dir) = test_helper::new_engine().await;
             let add = verification_add(messages_factory::farcaster_time());
             engine
-                .commit_replicator_message_for_test(&add)
+                .commit_replicator_message_for_test(&add, false)
                 .expect("replicator must bypass direct admission");
             assert!(message_exists_in_trie(&mut engine, &add));
         }
@@ -4486,7 +4486,7 @@ mod tests {
             let timestamp = messages_factory::farcaster_time();
             let existing_add = verification_add(timestamp + 10);
             engine
-                .commit_replicator_message_for_test(&existing_add)
+                .commit_replicator_message_for_test(&existing_add, false)
                 .unwrap();
 
             let replayed_remove = verification_remove(timestamp);
@@ -4539,7 +4539,7 @@ mod tests {
             let timestamp = messages_factory::farcaster_time();
             let existing_remove = verification_remove(timestamp + 10);
             engine
-                .commit_replicator_message_for_test(&existing_remove)
+                .commit_replicator_message_for_test(&existing_remove, false)
                 .unwrap();
 
             let replayed_add = verification_add(timestamp);
@@ -4595,7 +4595,9 @@ mod tests {
             .await;
             let timestamp = messages_factory::farcaster_time();
             let add = verification_add(timestamp);
-            engine.commit_replicator_message_for_test(&add).unwrap();
+            engine
+                .commit_replicator_message_for_test(&add, false)
+                .unwrap();
 
             let checksummed =
                 alloy_primitives::Address::from_slice(&verification_address()).to_checksum(None);
@@ -4658,7 +4660,9 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             for message in &pre_activation_rows {
-                engine.commit_replicator_message_for_test(message).unwrap();
+                engine
+                    .commit_replicator_message_for_test(message, false)
+                    .unwrap();
             }
 
             let replayed_add = verification_add(timestamp + 10);

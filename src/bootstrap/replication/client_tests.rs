@@ -855,7 +855,7 @@ mod tests {
         let mut txn_batch = RocksDbTransactionBatch::new();
         for trie_message in trie_messages {
             let inserted = dest_engine
-                .replay_replicator_message(&mut txn_batch, &trie_message)
+                .replay_replicator_message(&mut txn_batch, &trie_message, false)
                 .expect("Failed to replay replicator message");
             assert!(fids.contains(&inserted.fid));
             assert!(all_trie_keys.contains(&inserted.trie_keys[0]));

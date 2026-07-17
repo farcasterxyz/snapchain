@@ -1164,6 +1164,7 @@ impl BlockEngine {
         message: &proto::Message,
         txn_batch: &mut RocksDbTransactionBatch,
         dispatch: ChannelMergeDispatch,
+        channel_messages_enabled: bool,
     ) -> Result<Vec<proto::HubEvent>, MessageValidationError> {
         // `dispatch` is minted only by the gated validation arm after type/body agreement. Merge
         // does not re-read a version or re-dispatch on the wire type, so those decisions are
@@ -1172,9 +1173,12 @@ impl BlockEngine {
             ChannelMergeDispatch::Update => {
                 ChannelUpdateStore::merge(&self.stores.channel_update_store, message, txn_batch)?
             }
-            ChannelMergeDispatch::Member => {
-                ChannelMemberStore::merge(&self.stores.channel_member_store, message, txn_batch)?
-            }
+            ChannelMergeDispatch::Member => ChannelMemberStore::merge_with_gated_by_fid_index(
+                &self.stores.channel_member_store,
+                message,
+                txn_batch,
+                channel_messages_enabled,
+            )?,
             ChannelMergeDispatch::Pin => {
                 ChannelPinStore::merge(&self.stores.channel_pin_store, message, txn_batch)?
             }
@@ -1583,7 +1587,12 @@ impl BlockEngine {
                                 "validated channel message is missing merge dispatch",
                             ))
                         })?;
-                        match self.merge_channel_message(message, txn_batch, dispatch) {
+                        match self.merge_channel_message(
+                            message,
+                            txn_batch,
+                            dispatch,
+                            version.is_enabled(ProtocolFeature::ChannelMessages),
+                        ) {
                             Ok(events) => hub_events.extend(events),
                             Err(err) => {
                                 // State-aware admission catches ordinary authority failures,
@@ -2497,11 +2506,61 @@ mod channel_message_gate_tests {
                 &message,
                 &mut RocksDbTransactionBatch::new(),
                 dispatch,
+                true,
             );
             assert!(
                 active.is_ok(),
                 "{message_type:?} dispatch failed: {active:?}"
             );
         }
+    }
+
+    #[test]
+    fn block_engine_channel_width_checks_remain_independent() {
+        use crate::proto::message_data::Body;
+
+        let (engine, _tmpdir) = block_engine_test_helpers::setup();
+        let txn = RocksDbTransactionBatch::new();
+
+        let mut update = messages_factory::create_message_with_data(
+            1234,
+            MessageType::ChannelUpdate,
+            Body::ChannelUpdateBody(crate::proto::ChannelUpdateBody {
+                channel_id: vec![1; 31],
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        let error = engine
+            .validate_channel_message(update.data.as_ref().unwrap(), &txn)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MessageValidationError::HubError(ref error)
+                if error.message == "channel id must be 32 bytes"
+        ));
+
+        if let Some(Body::ChannelUpdateBody(body)) =
+            update.data.as_mut().and_then(|data| data.body.as_mut())
+        {
+            body.channel_id = vec![1; 32];
+        }
+        update.data.as_mut().unwrap().r#type = MessageType::ChannelModerate as i32;
+        update.data.as_mut().unwrap().body = Some(Body::ChannelModerateBody(
+            crate::proto::ChannelModerateBody {
+                channel_id: vec![1; 32],
+                cast_hash: vec![2; 19],
+                action: crate::proto::ChannelModerateAction::Hide as i32,
+            },
+        ));
+        let error = engine
+            .validate_channel_message(update.data.as_ref().unwrap(), &txn)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MessageValidationError::HubError(ref error)
+                if error.message == "channel moderate cast hash must be 20 bytes"
+        ));
     }
 }

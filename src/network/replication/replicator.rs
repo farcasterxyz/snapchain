@@ -837,8 +837,8 @@ mod tests {
         ChannelUpdateBody,
     };
     use crate::storage::store::account::{
-        ChannelMemberState, ChannelMemberStore, ChannelModerateStore, ChannelModerationState,
-        ChannelPinStore, ChannelUpdateStore,
+        ChannelMemberState, ChannelMemberStore, ChannelMemberStoreDef, ChannelModerateStore,
+        ChannelModerationState, ChannelPinStore, ChannelUpdateStore,
     };
     use crate::storage::store::mempool_poller::MempoolMessage;
     use crate::storage::store::test_helper;
@@ -987,7 +987,7 @@ mod tests {
         let (mut destination, _destination_tmp) = test_helper::new_engine().await;
         for message in &exported {
             destination
-                .commit_replicator_message_for_test(message)
+                .commit_replicator_message_for_test(message, true)
                 .unwrap();
         }
 
@@ -1015,6 +1015,23 @@ mod tests {
             )
             .unwrap(),
             Some(ChannelMemberState::Member)
+        );
+        let member_index_key =
+            ChannelMemberStoreDef::make_member_by_fid_key(MEMBER_FID, &channel_id()).unwrap();
+        assert_eq!(
+            source.get_stores().db.get(&member_index_key).unwrap(),
+            destination.get_stores().db.get(&member_index_key).unwrap()
+        );
+        assert_eq!(
+            ChannelMemberStore::memberships_by_fid(
+                &stores.channel_member_store,
+                MEMBER_FID,
+                &PageOptions::default(),
+            )
+            .unwrap()
+            .entries
+            .len(),
+            1
         );
         assert_eq!(
             ChannelPinStore::get_channel_pin(&stores.channel_pin_store, &channel_id(), None)

@@ -109,6 +109,16 @@ service HubService {
   // (a boundary-aligned page may return one final empty page). There is no
   // `reverse` (addresses iterate ascending only).
   rpc GetChannelsByFid(ChannelsByFidRequest) returns (ChannelsResponse);
+  // Channel-message reads use shard-0 stores. All channel_id values are the
+  // raw 32-byte registry labels. An unregistered channel returns NOT_FOUND;
+  // a registered channel with no matching state returns an empty/default
+  // response or page.
+  rpc GetChannelMember(ChannelMemberRequest) returns (ChannelMemberResponse);
+  rpc GetChannelMembers(ChannelMembersRequest) returns (ChannelMembersResponse);
+  rpc GetChannelPin(ChannelRequest) returns (ChannelPinResponse);
+  rpc GetChannelModerations(ChannelModerationsRequest) returns (ChannelModerationsResponse);
+  rpc GetChannelMetadata(ChannelRequest) returns (ChannelMetadataResponse);
+  rpc GetChannelMembershipsByFid(ChannelMembershipsByFidRequest) returns (ChannelMembershipsResponse);
   rpc GetIdRegistryOnChainEvent(FidRequest) returns (OnChainEvent);
   rpc GetIdRegistryOnChainEventByAddress(IdRegistryEventByAddressRequest) returns (OnChainEvent);
   rpc GetCurrentStorageLimitsByFid(FidRequest) returns (StorageLimitsResponse);

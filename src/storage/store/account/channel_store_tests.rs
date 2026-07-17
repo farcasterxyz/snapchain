@@ -6,7 +6,7 @@ mod tests {
         MembershipMode, Message, MessageType,
     };
     use crate::storage::constants::RootPrefix;
-    use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
+    use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{
         ChannelMemberState, ChannelMemberStore, ChannelMemberStoreDef, ChannelModerateStore,
         ChannelModerateStoreDef, ChannelModerationState, ChannelPinStore, ChannelPinStoreDef,
@@ -181,6 +181,87 @@ mod tests {
         assert_eq!(
             ChannelModerateStore::slot_key(&channel, &moderated_cast),
             moderate
+        );
+    }
+
+    #[test]
+    fn member_by_fid_index_is_gated_and_shared_with_channel_reads() {
+        let stores = test_stores();
+        let target_fid = 77;
+        let pre_gate_channel = channel_id(0x10);
+        let active_channel = channel_id(0x20);
+
+        let mut txn = RocksDbTransactionBatch::new();
+        ChannelMemberStore::merge_with_gated_by_fid_index(
+            &stores.member,
+            &member_message(
+                1,
+                pre_gate_channel.clone(),
+                target_fid,
+                ChannelMemberAction::AddMember,
+                1,
+            ),
+            &mut txn,
+            false,
+        )
+        .unwrap();
+        stores.db.commit(txn).unwrap();
+
+        let pre_gate_index =
+            ChannelMemberStoreDef::make_member_by_fid_key(target_fid, &pre_gate_channel).unwrap();
+        assert!(stores.db.get(&pre_gate_index).unwrap().is_none());
+        assert!(ChannelMemberStore::memberships_by_fid(
+            &stores.member,
+            target_fid,
+            &PageOptions::default(),
+        )
+        .unwrap()
+        .entries
+        .is_empty());
+
+        let mut txn = RocksDbTransactionBatch::new();
+        ChannelMemberStore::merge_with_gated_by_fid_index(
+            &stores.member,
+            &member_message(
+                2,
+                active_channel.clone(),
+                target_fid,
+                ChannelMemberAction::AddModerator,
+                2,
+            ),
+            &mut txn,
+            true,
+        )
+        .unwrap();
+        stores.db.commit(txn).unwrap();
+
+        let active_index =
+            ChannelMemberStoreDef::make_member_by_fid_key(target_fid, &active_channel).unwrap();
+        assert_eq!(stores.db.get(&active_index).unwrap(), Some(Vec::new()));
+        assert_eq!(
+            ChannelMemberStore::memberships_by_fid(
+                &stores.member,
+                target_fid,
+                &PageOptions::default(),
+            )
+            .unwrap()
+            .entries,
+            vec![crate::storage::store::account::ChannelMembershipEntry {
+                channel_id: active_channel.clone(),
+                state: ChannelMemberState::Moderator,
+            }]
+        );
+        assert_eq!(
+            ChannelMemberStore::members_by_channel(
+                &stores.member,
+                &active_channel,
+                Some(ChannelMemberState::Moderator),
+                &PageOptions::default(),
+            )
+            .unwrap()
+            .entries[0]
+                .last_action_ts,
+            2
         );
     }
 

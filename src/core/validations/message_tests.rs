@@ -783,4 +783,80 @@ mod tests {
         );
         assert!(validate_with_version(&msg, EngineVersion::V17).is_ok());
     }
+
+    #[test]
+    fn test_channel_bodies_validate_stateless_fields() {
+        use proto::message_data::Body;
+        use proto::{ChannelMemberAction, ChannelModerateAction, MessageType};
+
+        for (message_type, body) in messages_factory::channels::all_message_bodies() {
+            let message =
+                messages_factory::create_message_with_data(1234, message_type, body, None, None);
+            assert_valid(&message);
+        }
+
+        let invalid = |reason: &str| {
+            ValidationError::HubError(crate::core::error::HubError::validation_failure(reason))
+        };
+
+        let mut member = messages_factory::create_message_with_data(
+            1234,
+            MessageType::ChannelMember,
+            Body::ChannelMemberBody(proto::ChannelMemberBody {
+                channel_id: vec![1; 32],
+                fid: 0,
+                action: ChannelMemberAction::AddMember as i32,
+            }),
+            None,
+            None,
+        );
+        assert_mutated_invalid(
+            &mut member,
+            invalid("channel member fid must fit in a non-zero u32"),
+        );
+
+        if let Some(Body::ChannelMemberBody(body)) =
+            member.data.as_mut().and_then(|data| data.body.as_mut())
+        {
+            body.fid = 99;
+            body.action = ChannelMemberAction::None as i32;
+        }
+        assert_mutated_invalid(&mut member, invalid("invalid channel member action"));
+
+        let mut pin = messages_factory::create_message_with_data(
+            1234,
+            MessageType::ChannelPin,
+            Body::ChannelPinBody(proto::ChannelPinBody {
+                channel_id: vec![1; 32],
+                cast_hash: vec![2; 19],
+            }),
+            None,
+            None,
+        );
+        assert_mutated_invalid(
+            &mut pin,
+            invalid("channel pin cast hash must be empty or 20 bytes"),
+        );
+
+        let mut moderate = messages_factory::create_message_with_data(
+            1234,
+            MessageType::ChannelModerate,
+            Body::ChannelModerateBody(proto::ChannelModerateBody {
+                channel_id: vec![1; 31],
+                cast_hash: vec![2; 20],
+                action: ChannelModerateAction::Hide as i32,
+            }),
+            None,
+            None,
+        );
+        assert_mutated_invalid(&mut moderate, invalid("channel id must be 32 bytes"));
+
+        if let Some(Body::ChannelModerateBody(body)) =
+            moderate.data.as_mut().and_then(|data| data.body.as_mut())
+        {
+            body.channel_id = vec![1; 32];
+            body.action = ChannelModerateAction::None as i32;
+        }
+        assert_mutated_invalid(&mut moderate, invalid("invalid channel moderate action"));
+    }
 }

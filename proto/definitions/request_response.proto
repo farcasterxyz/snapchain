@@ -203,6 +203,96 @@ message ChannelsResponse {
   optional bytes next_page_token = 2;
 }
 
+enum ChannelMemberState {
+  CHANNEL_MEMBER_STATE_NONE = 0;
+  CHANNEL_MEMBER_STATE_MEMBER = 1;
+  CHANNEL_MEMBER_STATE_MODERATOR = 2;
+  CHANNEL_MEMBER_STATE_REMOVED = 3;
+  CHANNEL_MEMBER_STATE_BANNED = 4;
+}
+
+message ChannelRequest {
+  bytes channel_id = 1;
+}
+
+message ChannelMemberRequest {
+  bytes channel_id = 1;
+  uint64 fid = 2;
+}
+
+message ChannelMemberResponse {
+  ChannelMemberState state = 1;
+  optional uint32 last_action_ts = 2;
+}
+
+message ChannelMembersRequest {
+  bytes channel_id = 1;
+  optional ChannelMemberState state_filter = 2;
+  optional uint32 page_size = 3;
+  optional bytes page_token = 4;
+  optional bool reverse = 5;
+}
+
+message ChannelMember {
+  uint64 fid = 1;
+  ChannelMemberState state = 2;
+}
+
+message ChannelMembersResponse {
+  repeated ChannelMember members = 1;
+  optional bytes next_page_token = 2;
+}
+
+message ChannelPinResponse {
+  optional bytes cast_hash = 1;
+  optional uint64 author_fid = 2;
+}
+
+message ChannelModerationsRequest {
+  bytes channel_id = 1;
+  optional uint32 page_size = 2;
+  optional bytes page_token = 3;
+  optional bool reverse = 4;
+}
+
+message ChannelModeration {
+  bytes cast_hash = 1;
+  ChannelModerateAction action = 2;
+  uint64 author_fid = 3;
+}
+
+message ChannelModerationsResponse {
+  repeated ChannelModeration moderations = 1;
+  optional bytes next_page_token = 2;
+}
+
+message ChannelMetadataResponse {
+  optional string name = 1;
+  optional string description = 2;
+  optional string image_url = 3;
+  optional string header = 4;
+  optional string rules = 5;
+  CastingMode casting_mode = 6;
+  MembershipMode membership_mode = 7;
+}
+
+message ChannelMembershipsByFidRequest {
+  uint64 fid = 1;
+  optional uint32 page_size = 2;
+  optional bytes page_token = 3;
+  optional bool reverse = 4;
+}
+
+message ChannelMembership {
+  bytes channel_id = 1;
+  ChannelMemberState state = 2;
+}
+
+message ChannelMembershipsResponse {
+  repeated ChannelMembership memberships = 1;
+  optional bytes next_page_token = 2;
+}
+
 message TierDetails {
   TierType tier_type = 1;
   uint64 expires_at = 2;

@@ -7,8 +7,9 @@ use crate::proto::{
     message_data::Body, CastingMode, ChannelMemberAction, ChannelModerateAction, ChannelPinBody,
     ChannelUpdateBody, HubEvent, MembershipMode, Message, MessageType, SignatureScheme,
 };
-use crate::storage::constants::{RootPrefix, UserPostfix};
-use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
+use crate::storage::constants::{RootPrefix, UserPostfix, PAGE_SIZE_MAX};
+use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
+use crate::storage::util::increment_vec_u8;
 use std::sync::Arc;
 use tracing::warn;
 
@@ -41,6 +42,7 @@ enum ChannelIndex {
     MemberSlotCount = 5,
     ModerateSlotCount = 6,
     LiveModeratorCount = 7,
+    MemberByFid = 8,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -62,6 +64,38 @@ pub enum ChannelMemberState {
 pub enum ChannelModerationState {
     Hidden,
     Visible,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelMemberEntry {
+    pub fid: u64,
+    pub state: ChannelMemberState,
+    pub last_action_ts: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelMembershipEntry {
+    pub channel_id: Vec<u8>,
+    pub state: ChannelMemberState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelModerationEntry {
+    pub cast_hash: Vec<u8>,
+    pub action: ChannelModerateAction,
+    pub author_fid: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChannelPinState {
+    pub body: ChannelPinBody,
+    pub author_fid: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelPage<T> {
+    pub entries: Vec<T>,
+    pub next_page_token: Option<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -254,6 +288,15 @@ trait ChannelSlotStoreDef: StoreDef {
     fn is_live_moderator(&self, _message: &Message) -> Result<Option<bool>, HubError> {
         Ok(None)
     }
+
+    fn build_gated_secondary_indices(
+        &self,
+        _txn: &mut RocksDbTransactionBatch,
+        _message: &Message,
+        _channel_messages_enabled: bool,
+    ) -> Result<(), HubError> {
+        Ok(())
+    }
 }
 
 /// The D3 fold for the two policy modes, shared by merge-time validation and the read fold so
@@ -319,6 +362,7 @@ fn merge_slot<T: ChannelSlotStoreDef + Clone>(
     store: &Store<T>,
     message: &Message,
     txn: &mut RocksDbTransactionBatch,
+    channel_messages_enabled: bool,
 ) -> Result<HubEvent, HubError> {
     // DATA-SHARD ADMISSION PROVENANCE: a channel message reaches this shared slot merge on a data
     // shard only as (1) a ChannelMessages-gated BlockEvent that shard 0 minted after its authority
@@ -419,6 +463,7 @@ fn merge_slot<T: ChannelSlotStoreDef + Clone>(
     }
     let event =
         store.merge_add_with_conflicts(&ts_hash, message, &mut slot_txn, deleted_messages)?;
+    store_def.build_gated_secondary_indices(&mut slot_txn, message, channel_messages_enabled)?;
     txn.merge(slot_txn);
     Ok(event)
 }
@@ -605,6 +650,39 @@ impl ChannelSlotStoreDef for ChannelMemberStoreDef {
             member_state_for_message(message)? == ChannelMemberState::Moderator,
         ))
     }
+
+    fn build_gated_secondary_indices(
+        &self,
+        txn: &mut RocksDbTransactionBatch,
+        message: &Message,
+        channel_messages_enabled: bool,
+    ) -> Result<(), HubError> {
+        if !channel_messages_enabled {
+            return Ok(());
+        }
+        let body = match message.data.as_ref().and_then(|data| data.body.as_ref()) {
+            Some(Body::ChannelMemberBody(body)) => body,
+            _ => return Err(invalid_body("ChannelMember")),
+        };
+        txn.put(
+            ChannelMemberStoreDef::make_member_by_fid_key(body.fid, &body.channel_id)?,
+            Vec::new(),
+        );
+        Ok(())
+    }
+}
+
+impl ChannelMemberStoreDef {
+    pub fn make_member_by_fid_key(target_fid: u64, channel_id: &[u8]) -> Result<Vec<u8>, HubError> {
+        let target_fid = u32::try_from(target_fid)
+            .map_err(|_| HubError::invalid_parameter("channel member fid exceeds u32"))?;
+        let mut key = Vec::with_capacity(2 + 4 + channel_id.len());
+        key.push(RootPrefix::Channel as u8);
+        key.push(ChannelIndex::MemberByFid as u8);
+        key.extend_from_slice(&target_fid.to_be_bytes());
+        key.extend_from_slice(channel_id);
+        Ok(key)
+    }
 }
 
 impl ChannelSlotStoreDef for ChannelPinStoreDef {
@@ -713,7 +791,7 @@ impl ChannelUpdateStore {
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<HubEvent, HubError> {
-        merge_slot(store, message, txn)
+        merge_slot(store, message, txn, false)
     }
 
     pub fn slot_key(channel_id: &[u8]) -> Vec<u8> {
@@ -749,7 +827,16 @@ impl ChannelMemberStore {
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<HubEvent, HubError> {
-        merge_slot(store, message, txn)
+        merge_slot(store, message, txn, false)
+    }
+
+    pub fn merge_with_gated_by_fid_index(
+        store: &Store<ChannelMemberStoreDef>,
+        message: &Message,
+        txn: &mut RocksDbTransactionBatch,
+        channel_messages_enabled: bool,
+    ) -> Result<HubEvent, HubError> {
+        merge_slot(store, message, txn, channel_messages_enabled)
     }
 
     pub fn slot_key(channel_id: &[u8], target_fid: u64) -> Result<Vec<u8>, HubError> {
@@ -771,6 +858,117 @@ impl ChannelMemberStore {
         read_slot(store, Self::slot_key(channel_id, target_fid)?, maybe_txn)?
             .map(|message| member_state_for_message(&message))
             .transpose()
+    }
+
+    pub fn member(
+        store: &Store<ChannelMemberStoreDef>,
+        channel_id: &[u8],
+        target_fid: u64,
+        maybe_txn: Option<&RocksDbTransactionBatch>,
+    ) -> Result<Option<ChannelMemberEntry>, HubError> {
+        read_slot(store, Self::slot_key(channel_id, target_fid)?, maybe_txn)?
+            .map(|message| {
+                let last_action_ts = message
+                    .data
+                    .as_ref()
+                    .ok_or_else(|| HubError::invalid_internal_state("channel member missing data"))?
+                    .timestamp;
+                Ok(ChannelMemberEntry {
+                    fid: target_fid,
+                    state: member_state_for_message(&message)?,
+                    last_action_ts,
+                })
+            })
+            .transpose()
+    }
+
+    pub fn members_by_channel(
+        store: &Store<ChannelMemberStoreDef>,
+        channel_id: &[u8],
+        state_filter: Option<ChannelMemberState>,
+        page_options: &PageOptions,
+    ) -> Result<ChannelPage<ChannelMemberEntry>, HubError> {
+        let prefix = channel_index_key(ChannelIndex::MemberSlot, channel_id, &[]);
+        let page_size = page_options.page_size.unwrap_or(PAGE_SIZE_MAX);
+        let mut entries = Vec::new();
+        let mut last_key = None;
+        let all_done = store.db().for_each_iterator_by_prefix(
+            Some(prefix.clone()),
+            Some(increment_vec_u8(&prefix)),
+            page_options,
+            |key, _| {
+                if key.len() != prefix.len() + 4 {
+                    return Err(HubError::invalid_internal_state(
+                        "channel member slot key has invalid length",
+                    ));
+                }
+                let fid = read_fid_key(key, prefix.len());
+                let message = read_slot(store, key.to_vec(), None)?.ok_or_else(|| {
+                    HubError::invalid_internal_state("channel member slot is missing")
+                })?;
+                let state = member_state_for_message(&message)?;
+                if state_filter.is_none_or(|filter| filter == state) {
+                    let last_action_ts = message
+                        .data
+                        .as_ref()
+                        .ok_or_else(|| {
+                            HubError::invalid_internal_state("channel member missing data")
+                        })?
+                        .timestamp;
+                    entries.push(ChannelMemberEntry {
+                        fid,
+                        state,
+                        last_action_ts,
+                    });
+                    last_key = Some(key.to_vec());
+                    if entries.len() >= page_size {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            },
+        )?;
+        Ok(ChannelPage {
+            entries,
+            next_page_token: (!all_done).then_some(last_key).flatten(),
+        })
+    }
+
+    pub fn memberships_by_fid(
+        store: &Store<ChannelMemberStoreDef>,
+        target_fid: u64,
+        page_options: &PageOptions,
+    ) -> Result<ChannelPage<ChannelMembershipEntry>, HubError> {
+        let prefix = ChannelMemberStoreDef::make_member_by_fid_key(target_fid, &[])?;
+        let page_size = page_options.page_size.unwrap_or(PAGE_SIZE_MAX);
+        let mut entries = Vec::new();
+        let mut last_key = None;
+        let all_done = store.db().for_each_iterator_by_prefix(
+            Some(prefix.clone()),
+            Some(increment_vec_u8(&prefix)),
+            page_options,
+            |key, _| {
+                if key.len() != prefix.len() + CHANNEL_ID_LENGTH {
+                    return Err(HubError::invalid_internal_state(
+                        "channel member by-fid key has invalid length",
+                    ));
+                }
+                let channel_id = key[prefix.len()..].to_vec();
+                let state =
+                    Self::member_state(store, &channel_id, target_fid, None)?.ok_or_else(|| {
+                        HubError::invalid_internal_state(
+                            "channel member by-fid index points to a missing slot",
+                        )
+                    })?;
+                entries.push(ChannelMembershipEntry { channel_id, state });
+                last_key = Some(key.to_vec());
+                Ok(entries.len() >= page_size)
+            },
+        )?;
+        Ok(ChannelPage {
+            entries,
+            next_page_token: (!all_done).then_some(last_key).flatten(),
+        })
     }
 
     pub fn slot_count(
@@ -804,7 +1002,7 @@ impl ChannelPinStore {
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<HubEvent, HubError> {
-        merge_slot(store, message, txn)
+        merge_slot(store, message, txn, false)
     }
 
     pub fn slot_key(channel_id: &[u8]) -> Vec<u8> {
@@ -823,6 +1021,22 @@ impl ChannelPinStore {
             })
             .transpose()
     }
+
+    pub fn get_channel_pin_state(
+        store: &Store<ChannelPinStoreDef>,
+        channel_id: &[u8],
+        maybe_txn: Option<&RocksDbTransactionBatch>,
+    ) -> Result<Option<ChannelPinState>, HubError> {
+        read_slot(store, Self::slot_key(channel_id), maybe_txn)?
+            .map(|message| {
+                let author_fid = message.fid();
+                match message.data.and_then(|data| data.body) {
+                    Some(Body::ChannelPinBody(body)) => Ok(ChannelPinState { body, author_fid }),
+                    _ => Err(invalid_body("ChannelPin")),
+                }
+            })
+            .transpose()
+    }
 }
 
 impl ChannelModerateStore {
@@ -831,7 +1045,7 @@ impl ChannelModerateStore {
         message: &Message,
         txn: &mut RocksDbTransactionBatch,
     ) -> Result<HubEvent, HubError> {
-        merge_slot(store, message, txn)
+        merge_slot(store, message, txn, false)
     }
 
     pub fn slot_key(channel_id: &[u8], cast_hash: &[u8]) -> Vec<u8> {
@@ -859,5 +1073,48 @@ impl ChannelModerateStore {
             channel_index_key(ChannelIndex::ModerateSlotCount, channel_id, &[]),
             maybe_txn,
         )
+    }
+
+    pub fn moderations_by_channel(
+        store: &Store<ChannelModerateStoreDef>,
+        channel_id: &[u8],
+        page_options: &PageOptions,
+    ) -> Result<ChannelPage<ChannelModerationEntry>, HubError> {
+        let prefix = channel_index_key(ChannelIndex::ModerateSlot, channel_id, &[]);
+        let page_size = page_options.page_size.unwrap_or(PAGE_SIZE_MAX);
+        let mut entries = Vec::new();
+        let mut last_key = None;
+        let all_done = store.db().for_each_iterator_by_prefix(
+            Some(prefix.clone()),
+            Some(increment_vec_u8(&prefix)),
+            page_options,
+            |key, _| {
+                if key.len() != prefix.len() + CHANNEL_MODERATE_CAST_HASH_LENGTH {
+                    return Err(HubError::invalid_internal_state(
+                        "channel moderate slot key has invalid length",
+                    ));
+                }
+                let message = read_slot(store, key.to_vec(), None)?.ok_or_else(|| {
+                    HubError::invalid_internal_state("channel moderate slot is missing")
+                })?;
+                let body = match message.data.as_ref().and_then(|data| data.body.as_ref()) {
+                    Some(Body::ChannelModerateBody(body)) => body,
+                    _ => return Err(invalid_body("ChannelModerate")),
+                };
+                let action = ChannelModerateAction::try_from(body.action)
+                    .map_err(|_| HubError::validation_failure("invalid channel moderate action"))?;
+                entries.push(ChannelModerationEntry {
+                    cast_hash: body.cast_hash.clone(),
+                    action,
+                    author_fid: message.fid(),
+                });
+                last_key = Some(key.to_vec());
+                Ok(entries.len() >= page_size)
+            },
+        )?;
+        Ok(ChannelPage {
+            entries,
+            next_page_token: (!all_done).then_some(last_key).flatten(),
+        })
     }
 }

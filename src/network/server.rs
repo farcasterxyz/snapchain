@@ -19,19 +19,22 @@ use crate::proto::hub_service_server::HubService;
 use crate::proto::{
     self, cast_add_body, casts_by_parent_request, link_body, links_by_target_request, message_data,
     on_chain_event::Body, reaction_body, reactions_by_target_request, Block, BlocksRequest, CastId,
-    CastsByParentRequest, ChannelInfo, ChannelOwnerRequest, ChannelOwnerResponse,
-    ChannelsByAddressRequest, ChannelsByFidRequest, ChannelsResponse, DbStats, EventRequest,
-    EventsRequest, EventsResponse, FidAddressTypeRequest, FidAddressTypeResponse, FidRequest,
-    FidTimestampRequest, FidsRequest, FidsResponse, GetConnectedPeersRequest,
-    GetConnectedPeersResponse, GetInfoRequest, GetInfoResponse, GetMeshViewRequest, Height,
-    HubEvent, IdRegistryEventByAddressRequest, LinkRequest, LinksByFidRequest,
-    LinksByTargetRequest, MeshTopology, MeshView, Message, MessageType, MessagesResponse,
-    OnChainEvent, OnChainEventRequest, OnChainEventResponse, ReactionRequest, ReactionType,
-    ReactionsByFidRequest, ReactionsByTargetRequest, ShardChunk, ShardChunksRequest,
-    ShardChunksResponse, Signer, SignerEventType, SignerRequest, SignerResponse, SignerSource,
-    SignersByFidRequest, SignersByFidResponse, StorageLimitsResponse, SubscribeRequest,
-    TrieNodeMetadataRequest, TrieNodeMetadataResponse, UserDataRequest, UserNameProof,
-    UserNameType, UsernameProofRequest, UsernameProofsResponse, ValidationResponse,
+    CastsByParentRequest, ChannelInfo, ChannelMember, ChannelMemberRequest, ChannelMemberResponse,
+    ChannelMembersRequest, ChannelMembersResponse, ChannelMembership,
+    ChannelMembershipsByFidRequest, ChannelMembershipsResponse, ChannelMetadataResponse,
+    ChannelModeration, ChannelModerationsRequest, ChannelModerationsResponse, ChannelOwnerRequest,
+    ChannelOwnerResponse, ChannelPinResponse, ChannelRequest, ChannelsByAddressRequest,
+    ChannelsByFidRequest, ChannelsResponse, DbStats, EventRequest, EventsRequest, EventsResponse,
+    FidAddressTypeRequest, FidAddressTypeResponse, FidRequest, FidTimestampRequest, FidsRequest,
+    FidsResponse, GetConnectedPeersRequest, GetConnectedPeersResponse, GetInfoRequest,
+    GetInfoResponse, GetMeshViewRequest, Height, HubEvent, IdRegistryEventByAddressRequest,
+    LinkRequest, LinksByFidRequest, LinksByTargetRequest, MeshTopology, MeshView, Message,
+    MessageType, MessagesResponse, OnChainEvent, OnChainEventRequest, OnChainEventResponse,
+    ReactionRequest, ReactionType, ReactionsByFidRequest, ReactionsByTargetRequest, ShardChunk,
+    ShardChunksRequest, ShardChunksResponse, Signer, SignerEventType, SignerRequest,
+    SignerResponse, SignerSource, SignersByFidRequest, SignersByFidResponse, StorageLimitsResponse,
+    SubscribeRequest, TrieNodeMetadataRequest, TrieNodeMetadataResponse, UserDataRequest,
+    UserNameProof, UserNameType, UsernameProofRequest, UsernameProofsResponse, ValidationResponse,
     VerificationAddAddressBody, VerificationRequest,
 };
 use crate::storage::constants::OnChainEventPostfix;
@@ -43,8 +46,10 @@ use crate::storage::store::account::MessagesPage;
 use crate::storage::store::account::UsernameProofStore;
 use crate::storage::store::account::{
     get_app_nonce, get_gasless_key_count, get_gasless_key_record, get_last_used_at, get_user_nonce,
-    list_gasless_keys_by_fid, CastStore, GaslessKeyRecord, LinkStore, OnchainEventStorageError,
-    ReactionStore, UserDataStore, VerificationStore,
+    list_gasless_keys_by_fid, CastStore, ChannelMemberState as StoredChannelMemberState,
+    ChannelMemberStore, ChannelModerateStore, ChannelPinStore, ChannelUpdateStore,
+    GaslessKeyRecord, LinkStore, OnchainEventStorageError, ReactionStore, UserDataStore,
+    VerificationStore, CHANNEL_ID_LENGTH,
 };
 use crate::storage::store::account::{
     get_channel_keys_by_owner_address, get_channel_keys_for_owner_addresses,
@@ -135,6 +140,44 @@ fn onchain_event_storage_error_to_status(err: OnchainEventStorageError) -> Statu
             Status::invalid_argument(hub_error.to_string())
         }
         other => Status::internal(format!("Store error: {:?}", other)),
+    }
+}
+
+fn channel_member_state_to_proto(state: StoredChannelMemberState) -> proto::ChannelMemberState {
+    match state {
+        StoredChannelMemberState::Member => proto::ChannelMemberState::Member,
+        StoredChannelMemberState::Moderator => proto::ChannelMemberState::Moderator,
+        StoredChannelMemberState::Removed => proto::ChannelMemberState::Removed,
+        StoredChannelMemberState::Banned => proto::ChannelMemberState::Banned,
+    }
+}
+
+fn channel_member_state_from_proto(
+    state: proto::ChannelMemberState,
+) -> Option<StoredChannelMemberState> {
+    match state {
+        proto::ChannelMemberState::None => None,
+        proto::ChannelMemberState::Member => Some(StoredChannelMemberState::Member),
+        proto::ChannelMemberState::Moderator => Some(StoredChannelMemberState::Moderator),
+        proto::ChannelMemberState::Removed => Some(StoredChannelMemberState::Removed),
+        proto::ChannelMemberState::Banned => Some(StoredChannelMemberState::Banned),
+    }
+}
+
+fn channel_page_options(
+    page_size: Option<u32>,
+    page_token: Option<Vec<u8>>,
+    reverse: Option<bool>,
+) -> PageOptions {
+    PageOptions {
+        page_size: Some(
+            page_size
+                .map(|size| size as usize)
+                .unwrap_or(PAGE_SIZE_MAX)
+                .min(PAGE_SIZE_MAX),
+        ),
+        page_token,
+        reverse: reverse.unwrap_or(false),
     }
 }
 
@@ -860,6 +903,24 @@ impl MyHubService {
     fn get_stores_for(&self, fid: u64) -> Result<&Stores, Status> {
         let shard_id = self.message_router.route_fid(fid, self.num_shards);
         self.get_stores_for_shard(shard_id)
+    }
+
+    fn require_registered_channel(&self, channel_id: &[u8]) -> Result<(), Status> {
+        if channel_id.len() != CHANNEL_ID_LENGTH {
+            return Err(Status::invalid_argument("channel_id must be 32 bytes"));
+        }
+        let channel_key = self
+            .block_stores
+            .onchain_event_store
+            .get_channel_key_by_label(channel_id, None)
+            .map_err(|err| Status::internal(format!("Store error: {err:?}")))?
+            .ok_or_else(|| Status::not_found("channel not registered"))?;
+        self.block_stores
+            .onchain_event_store
+            .get_channel_owner(&channel_key, None)
+            .map_err(|err| Status::internal(format!("Store error: {err:?}")))?
+            .ok_or_else(|| Status::not_found("channel not registered"))?;
+        Ok(())
     }
 
     /// Replays `message` against a read-only engine for `shard_id` and returns the
@@ -2852,6 +2913,197 @@ impl HubService for MyHubService {
         Ok(Response::new(ChannelsResponse {
             channels,
             next_page_token,
+        }))
+    }
+
+    async fn get_channel_member(
+        &self,
+        request: Request<ChannelMemberRequest>,
+    ) -> Result<Response<ChannelMemberResponse>, Status> {
+        let req = request.into_inner();
+        self.require_registered_channel(&req.channel_id)?;
+        if req.fid == 0 || u32::try_from(req.fid).is_err() {
+            return Err(Status::invalid_argument("fid must fit in a non-zero u32"));
+        }
+        let member = ChannelMemberStore::member(
+            &self.block_stores.channel_member_store,
+            &req.channel_id,
+            req.fid,
+            None,
+        )
+        .map_err(|err| Status::internal(format!("Store error: {err:?}")))?;
+        Ok(Response::new(match member {
+            Some(member) => ChannelMemberResponse {
+                state: channel_member_state_to_proto(member.state) as i32,
+                last_action_ts: Some(member.last_action_ts),
+            },
+            None => ChannelMemberResponse {
+                state: proto::ChannelMemberState::None as i32,
+                last_action_ts: None,
+            },
+        }))
+    }
+
+    async fn get_channel_members(
+        &self,
+        request: Request<ChannelMembersRequest>,
+    ) -> Result<Response<ChannelMembersResponse>, Status> {
+        let req = request.into_inner();
+        self.require_registered_channel(&req.channel_id)?;
+        if req.page_size == Some(0) {
+            return Ok(Response::new(ChannelMembersResponse {
+                members: Vec::new(),
+                next_page_token: None,
+            }));
+        }
+        let state_filter = req
+            .state_filter
+            .map(|value| {
+                proto::ChannelMemberState::try_from(value)
+                    .map_err(|_| Status::invalid_argument("invalid channel member state"))
+            })
+            .transpose()?
+            .and_then(channel_member_state_from_proto);
+        let page = ChannelMemberStore::members_by_channel(
+            &self.block_stores.channel_member_store,
+            &req.channel_id,
+            state_filter,
+            &channel_page_options(req.page_size, req.page_token, req.reverse),
+        )
+        .map_err(|err| Status::internal(format!("Store error: {err:?}")))?;
+        Ok(Response::new(ChannelMembersResponse {
+            members: page
+                .entries
+                .into_iter()
+                .map(|member| ChannelMember {
+                    fid: member.fid,
+                    state: channel_member_state_to_proto(member.state) as i32,
+                })
+                .collect(),
+            next_page_token: page.next_page_token,
+        }))
+    }
+
+    async fn get_channel_pin(
+        &self,
+        request: Request<ChannelRequest>,
+    ) -> Result<Response<ChannelPinResponse>, Status> {
+        let req = request.into_inner();
+        self.require_registered_channel(&req.channel_id)?;
+        let pin = ChannelPinStore::get_channel_pin_state(
+            &self.block_stores.channel_pin_store,
+            &req.channel_id,
+            None,
+        )
+        .map_err(|err| Status::internal(format!("Store error: {err:?}")))?;
+        Ok(Response::new(match pin {
+            Some(pin) if !pin.body.cast_hash.is_empty() => ChannelPinResponse {
+                cast_hash: Some(pin.body.cast_hash),
+                author_fid: Some(pin.author_fid),
+            },
+            _ => ChannelPinResponse {
+                cast_hash: None,
+                author_fid: None,
+            },
+        }))
+    }
+
+    async fn get_channel_moderations(
+        &self,
+        request: Request<ChannelModerationsRequest>,
+    ) -> Result<Response<ChannelModerationsResponse>, Status> {
+        let req = request.into_inner();
+        self.require_registered_channel(&req.channel_id)?;
+        if req.page_size == Some(0) {
+            return Ok(Response::new(ChannelModerationsResponse {
+                moderations: Vec::new(),
+                next_page_token: None,
+            }));
+        }
+        let page = ChannelModerateStore::moderations_by_channel(
+            &self.block_stores.channel_moderate_store,
+            &req.channel_id,
+            &channel_page_options(req.page_size, req.page_token, req.reverse),
+        )
+        .map_err(|err| Status::internal(format!("Store error: {err:?}")))?;
+        Ok(Response::new(ChannelModerationsResponse {
+            moderations: page
+                .entries
+                .into_iter()
+                .map(|moderation| ChannelModeration {
+                    cast_hash: moderation.cast_hash,
+                    action: moderation.action as i32,
+                    author_fid: moderation.author_fid,
+                })
+                .collect(),
+            next_page_token: page.next_page_token,
+        }))
+    }
+
+    async fn get_channel_metadata(
+        &self,
+        request: Request<ChannelRequest>,
+    ) -> Result<Response<ChannelMetadataResponse>, Status> {
+        let req = request.into_inner();
+        self.require_registered_channel(&req.channel_id)?;
+        let update = ChannelUpdateStore::get_channel_update(
+            &self.block_stores.channel_update_store,
+            &req.channel_id,
+            None,
+        )
+        .map_err(|err| Status::internal(format!("Store error: {err:?}")))?;
+        Ok(Response::new(match update {
+            Some(update) => ChannelMetadataResponse {
+                name: update.body.name,
+                description: update.body.description,
+                image_url: update.body.image_url,
+                header: update.body.header,
+                rules: update.body.rules,
+                casting_mode: update.casting_mode as i32,
+                membership_mode: update.membership_mode as i32,
+            },
+            None => ChannelMetadataResponse {
+                name: None,
+                description: None,
+                image_url: None,
+                header: None,
+                rules: None,
+                casting_mode: proto::CastingMode::MembersOnly as i32,
+                membership_mode: proto::MembershipMode::Approval as i32,
+            },
+        }))
+    }
+
+    async fn get_channel_memberships_by_fid(
+        &self,
+        request: Request<ChannelMembershipsByFidRequest>,
+    ) -> Result<Response<ChannelMembershipsResponse>, Status> {
+        let req = request.into_inner();
+        if req.fid == 0 || u32::try_from(req.fid).is_err() {
+            return Err(Status::invalid_argument("fid must fit in a non-zero u32"));
+        }
+        if req.page_size == Some(0) {
+            return Ok(Response::new(ChannelMembershipsResponse {
+                memberships: Vec::new(),
+                next_page_token: None,
+            }));
+        }
+        let page = ChannelMemberStore::memberships_by_fid(
+            &self.block_stores.channel_member_store,
+            req.fid,
+            &channel_page_options(req.page_size, req.page_token, req.reverse),
+        )
+        .map_err(|err| Status::internal(format!("Store error: {err:?}")))?;
+        Ok(Response::new(ChannelMembershipsResponse {
+            memberships: page
+                .entries
+                .into_iter()
+                .map(|membership| ChannelMembership {
+                    channel_id: membership.channel_id,
+                    state: channel_member_state_to_proto(membership.state) as i32,
+                })
+                .collect(),
+            next_page_token: page.next_page_token,
         }))
     }
 
