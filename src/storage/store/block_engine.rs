@@ -1946,6 +1946,77 @@ impl BlockEngine {
         state_change
     }
 
+    /// Test-only proposal path for scenarios that must pin both valid cross-fid transaction
+    /// orderings. Production proposal order is intentionally proposer-chosen via HashMap
+    /// grouping, so tests cannot request a particular order through `propose_state_change`.
+    #[cfg(test)]
+    pub(crate) fn propose_state_change_with_transaction_order_for_test(
+        &mut self,
+        messages: Vec<MempoolMessage>,
+        ordered_fids: &[u64],
+        height: Height,
+        timestamp: FarcasterTime,
+    ) -> BlockStateChange {
+        let version = EngineVersion::version_for(&timestamp, self.network);
+        assert!(version.is_enabled(ProtocolFeature::WriteDataToShardZero));
+
+        let mut txn_batch = RocksDbTransactionBatch::new();
+        let mut snapchain_txns = MempoolPoller::create_transactions_from_mempool(messages)
+            .unwrap()
+            .into_iter()
+            .filter_map(|mut transaction| {
+                let storage_slot =
+                    self.storage_slot_for_transaction(&transaction, version, true, true)?;
+                if !storage_slot.is_active() {
+                    transaction.user_messages.clear();
+                }
+                (!transaction.system_messages.is_empty() || !transaction.user_messages.is_empty())
+                    .then_some(transaction)
+            })
+            .collect_vec();
+        let mut actual_fids = snapchain_txns
+            .iter()
+            .map(|transaction| transaction.fid)
+            .collect_vec();
+        actual_fids.sort_unstable();
+        let mut expected_fids = ordered_fids.to_vec();
+        expected_fids.sort_unstable();
+        assert_eq!(actual_fids, expected_fids);
+        snapchain_txns.sort_by_key(|transaction| {
+            ordered_fids
+                .iter()
+                .position(|fid| *fid == transaction.fid)
+                .unwrap()
+        });
+
+        self.set_height(&version, height);
+        let mut all_hub_events = Vec::new();
+        for snapchain_txn in &mut snapchain_txns {
+            let (account_root, hub_events, _) = self
+                .replay_snapchain_txn(
+                    &merkle_trie::Context::new(),
+                    snapchain_txn,
+                    &mut txn_batch,
+                    &timestamp,
+                    version,
+                )
+                .unwrap();
+            snapchain_txn.account_root = account_root;
+            all_hub_events.extend(hub_events);
+        }
+        let (events, events_hash) =
+            self.generate_block_events(height, &timestamp, all_hub_events, &mut txn_batch);
+        let state_change = BlockStateChange {
+            timestamp,
+            new_state_root: self.stores.trie.root_hash().unwrap(),
+            events_hash,
+            transactions: snapchain_txns,
+            events,
+        };
+        self.stores.trie.reload(&self.db).unwrap();
+        state_change
+    }
+
     fn replay_proposal(
         &mut self,
         txn_batch: &mut RocksDbTransactionBatch,

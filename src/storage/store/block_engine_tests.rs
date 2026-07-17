@@ -1922,6 +1922,22 @@ mod tests {
         let resurrect = verification_contract_add(existing_address.clone(), timestamp + 6);
         commit_message(&mut engine, &resurrect, Validity::Valid);
         assert_eq!(verification_replica_counts(&engine), (1, 260));
+
+        // The other row-neutral admission arm is add-over-add. It must also remain available at
+        // row_cap so a live owner can rotate the incumbent verification without minting a row.
+        let supersede = verification_contract_add(existing_address.clone(), timestamp + 7);
+        commit_message(&mut engine, &supersede, Validity::Valid);
+        assert_eq!(verification_replica_counts(&engine), (1, 260));
+        assert_eq!(
+            VerificationStore::get_verification_add(
+                &engine.stores().verification_store,
+                VERIFICATION_FID,
+                &existing_address,
+                None,
+            )
+            .unwrap(),
+            Some(supersede)
+        );
         commit_message(&mut engine, &existing_action, Validity::Valid);
 
         let new_action = channel_update_message(
@@ -1929,7 +1945,7 @@ mod tests {
             new_channel_id.clone(),
             "new owner escaped",
             Some(MembershipMode::Open),
-            timestamp + 7,
+            timestamp + 8,
         );
         let parked_error = engine.simulate_message(&new_action).unwrap_err();
         assert!(matches!(
@@ -1938,7 +1954,7 @@ mod tests {
                 if hub_error.message == "channel is parked"
         ));
 
-        let rejected_new_add = verification_contract_add(new_address.clone(), timestamp + 8);
+        let rejected_new_add = verification_contract_add(new_address.clone(), timestamp + 9);
         let counts_before = verification_replica_counts(&engine);
         let root_before = engine.trie_root_hash();
         let events_before = HubEvent::get_events(engine.stores().db.clone(), 0, None, None)
@@ -2863,25 +2879,63 @@ mod tests {
             never_v20.trie_root_hash()
         );
 
-        let pre_v20_channel_id = vec![0xC4; 32];
-        let pre_v20_channel = channel_update_message(
-            VERIFICATION_FID,
-            pre_v20_channel_id.clone(),
-            "must stay inert",
-            Some(MembershipMode::Open),
-            messages_factory::farcaster_time(),
-        );
+        let pre_v20_channels = messages_factory::channels::all_message_bodies()
+            .into_iter()
+            .map(|(message_type, body)| {
+                messages_factory::create_message_with_data(
+                    VERIFICATION_FID,
+                    message_type,
+                    body,
+                    Some(0),
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
+        let pre_v20_channel_id = match pre_v20_channels[0]
+            .data
+            .as_ref()
+            .and_then(|data| data.body.as_ref())
+            .unwrap()
+        {
+            crate::proto::message_data::Body::ChannelUpdateBody(body) => body.channel_id.clone(),
+            _ => unreachable!(),
+        };
         let root_before = with_rejected_channels.trie_root_hash();
         let events_before =
             HubEvent::get_events(with_rejected_channels.stores().db.clone(), 0, None, None)
                 .unwrap()
                 .events;
-        let rejected_block = commit_message(
-            &mut with_rejected_channels,
-            &pre_v20_channel,
-            Validity::Invalid,
-        );
-        assert!(rejected_block.events.is_empty());
+        for pre_v20_channel in &pre_v20_channels {
+            let mut validation_txn = RocksDbTransactionBatch::new();
+            let validation_result = with_rejected_channels.validate_user_message(
+                pre_v20_channel,
+                &StorageSlot::new(0, 0, 1, u32::MAX),
+                &FarcasterTime::new(pre_v20_channel.data.as_ref().unwrap().timestamp as u64),
+                EngineVersion::V19,
+                &mut validation_txn,
+            );
+            assert!(
+                matches!(
+                    validation_result,
+                    Err(MessageValidationError::MessageValidationError(
+                        ValidationError::InvalidMessageType
+                    ))
+                ),
+                "unexpected pre-V20 {:?} result: {validation_result:?}",
+                pre_v20_channel.msg_type()
+            );
+            assert!(validation_txn.batch.is_empty());
+            let rejected_block = commit_message(
+                &mut with_rejected_channels,
+                pre_v20_channel,
+                Validity::Invalid,
+            );
+            assert!(
+                rejected_block.events.is_empty(),
+                "pre-V20 {:?} unexpectedly produced a BlockEvent",
+                pre_v20_channel.msg_type()
+            );
+        }
         assert_eq!(with_rejected_channels.trie_root_hash(), root_before);
         assert_eq!(
             HubEvent::get_events(with_rejected_channels.stores().db.clone(), 0, None, None,)
@@ -2908,6 +2962,41 @@ mod tests {
             HubEvent::get_events(never_v20.stores().db.clone(), 0, None, None)
                 .unwrap()
                 .events
+        );
+
+        let pre_v20_verification = verification_add(messages_factory::farcaster_time(), None);
+        let mut pre_v20_verification_txn = RocksDbTransactionBatch::new();
+        assert!(matches!(
+            with_rejected_channels.validate_user_message(
+                &pre_v20_verification,
+                &StorageSlot::new(0, 0, 1, u32::MAX),
+                &FarcasterTime::new(pre_v20_verification.data.as_ref().unwrap().timestamp as u64),
+                EngineVersion::V19,
+                &mut pre_v20_verification_txn,
+            ),
+            Err(MessageValidationError::InvalidMessageType)
+        ));
+        assert!(pre_v20_verification_txn.batch.is_empty());
+        let verification_root_before = with_rejected_channels.trie_root_hash();
+        let verification_events_before =
+            HubEvent::get_events(with_rejected_channels.stores().db.clone(), 0, None, None)
+                .unwrap()
+                .events;
+        let rejected_verification_block = commit_message(
+            &mut with_rejected_channels,
+            &pre_v20_verification,
+            Validity::Invalid,
+        );
+        assert_no_verification_block_events(&rejected_verification_block);
+        assert_eq!(
+            with_rejected_channels.trie_root_hash(),
+            verification_root_before
+        );
+        assert_eq!(
+            HubEvent::get_events(with_rejected_channels.stores().db.clone(), 0, None, None)
+                .unwrap()
+                .events,
+            verification_events_before
         );
 
         let (mut v20_engine, _v20_tmp) = setup();
@@ -2967,13 +3056,14 @@ mod tests {
             HubEvent::get_events(with_rejected_channels.stores().db.clone(), 0, None, None)
                 .unwrap()
                 .events;
+        let mut rejected_verification_txn = RocksDbTransactionBatch::new();
         let error = with_rejected_channels
             .validate_user_message(
                 &pre_cutover_verification,
                 &StorageSlot::new(0, 0, 1, u32::MAX),
                 &FarcasterTime::new(now as u64),
                 EngineVersion::V20,
-                &mut RocksDbTransactionBatch::new(),
+                &mut rejected_verification_txn,
             )
             .unwrap_err();
         assert!(matches!(
@@ -2987,6 +3077,7 @@ mod tests {
                 .events,
             verification_events
         );
+        assert!(rejected_verification_txn.batch.is_empty());
 
         let resigned_verification = verification_add(now + 1, None);
         commit_message(&mut v20_engine, &resigned_verification, Validity::Valid);

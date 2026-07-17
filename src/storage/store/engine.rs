@@ -3091,42 +3091,44 @@ mod verification_replay_gate_tests {
             ..Default::default()
         })
         .await;
-        let (message_type, body) = messages_factory::channels::all_message_bodies()
-            .into_iter()
-            .next()
-            .unwrap();
-        let channel_id = match &body {
-            crate::proto::message_data::Body::ChannelUpdateBody(body) => body.channel_id.clone(),
-            _ => unreachable!(),
-        };
-        let message = messages_factory::create_message_with_data(
-            FID3_FOR_TEST,
-            message_type,
-            body,
-            None,
-            None,
-        );
-        // Factory BlockEvents carry timestamp zero. The replay gate must use that passed-in
-        // consensus timestamp, not the data-shard block version supplied below.
-        let block_event = events_factory::create_merge_message_event(message, 1);
-        let mut txn = RocksDbTransactionBatch::new();
         let root_before = engine.trie_root_hash();
-        let result =
-            engine.handle_block_event(trie_ctx(), &block_event, &mut txn, EngineVersion::V20);
-        assert!(matches!(
-            result,
-            Err(EngineError::EngineMessageValidationError(
-                MessageValidationError::InvalidMessageType(value)
-            )) if value == MessageType::ChannelUpdate as i32
-        ));
-        assert!(ChannelUpdateStore::get_channel_update(
-            &engine.get_stores().channel_update_store,
-            &channel_id,
-            Some(&txn),
-        )
-        .unwrap()
-        .is_none());
-        assert!(txn.batch.is_empty());
+        for (message_type, body) in messages_factory::channels::all_message_bodies() {
+            let channel_id = match &body {
+                crate::proto::message_data::Body::ChannelUpdateBody(body) => {
+                    Some(body.channel_id.clone())
+                }
+                _ => None,
+            };
+            let message = messages_factory::create_message_with_data(
+                FID3_FOR_TEST,
+                message_type,
+                body,
+                None,
+                None,
+            );
+            // Factory BlockEvents carry timestamp zero. The replay gate must use that passed-in
+            // consensus timestamp, not the data-shard block version supplied below.
+            let block_event = events_factory::create_merge_message_event(message, 1);
+            let mut txn = RocksDbTransactionBatch::new();
+            let result =
+                engine.handle_block_event(trie_ctx(), &block_event, &mut txn, EngineVersion::V20);
+            assert!(matches!(
+                result,
+                Err(EngineError::EngineMessageValidationError(
+                    MessageValidationError::InvalidMessageType(value)
+                )) if value == message_type as i32
+            ));
+            if let Some(channel_id) = channel_id {
+                assert!(ChannelUpdateStore::get_channel_update(
+                    &engine.get_stores().channel_update_store,
+                    &channel_id,
+                    Some(&txn),
+                )
+                .unwrap()
+                .is_none());
+            }
+            assert!(txn.batch.is_empty());
+        }
         assert_eq!(engine.trie_root_hash(), root_before);
     }
 }
