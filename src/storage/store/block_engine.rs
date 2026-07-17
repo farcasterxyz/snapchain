@@ -180,11 +180,11 @@ pub(crate) fn channel_member_authority(
         return ChannelAuthorityDecision::InvalidTargetState;
     }
     // NOTE: `target_is_owner` is false whenever the owner fid is unresolvable (the channel is
-    // "parked"), so this floor does NOT hold in that window — a moderator may ban the true owner.
-    // Known T1 gap, not an oversight: closing it is a semantics decision, and the leading proposal
-    // is to reject every member action while the owner is unresolvable, which makes this
-    // unreachable rather than conditional. Do not paper over it here; authority for a parked
-    // channel has to be settled at admission, not inside the table.
+    // "parked"), so this floor alone does NOT hold in that window. It is made total by the
+    // admission-level freeze in `validate_channel_message`: while parked, the only action that
+    // reaches this table is self-leave, which is never a Ban — so every Ban evaluated here has a
+    // resolved owner behind `target_is_owner`. That freeze is load-bearing for this guard; do not
+    // weaken it without revisiting this rule.
     if action == Ban && target_is_owner {
         return ChannelAuthorityDecision::OwnerUnbannable;
     }
@@ -762,6 +762,30 @@ impl BlockEngine {
             .stores
             .resolve_channel_owner_fid(&channel_owner.owner_address, Some(txn_batch))
             .map_err(MessageValidationError::HubError)?;
+        // FREEZE WHILE PARKED. `None` means this node cannot prove who the owner is: the
+        // registry names an owner address, but no live shard-0 verification binds it to a fid.
+        // Reject authority-bearing writes outright instead of evaluating them against the
+        // authority table — evaluated as-is, the parked state is strictly MORE permissive than
+        // the resolved one (`target_is_owner` collapses to false, disarming owner-ban immunity,
+        // while moderators keep every power). The sole exception is self-leave, the one action
+        // whose authority is self-contained (author == target, no owner grant involved);
+        // freezing it would let an owner trap members' public membership rows indefinitely by
+        // deliberately unverifying. Self-add is NOT exempt even under OPEN: that mode is the
+        // owner's standing grant, unaccountable while parked, and joins mint permanent
+        // member-slot rows that a frozen moderator set cannot police.
+        if owner_fid.is_none() {
+            let is_self_leave = match &body {
+                ChannelAdmissionBody::Member(member) => {
+                    proto::ChannelMemberAction::try_from(member.action)
+                        == Ok(proto::ChannelMemberAction::RemoveMember)
+                        && member.fid == message_data.fid
+                }
+                _ => false,
+            };
+            if !is_self_leave {
+                return Err(Self::channel_validation_error("channel is parked"));
+            }
+        }
         let author_role =
             self.channel_author_role(channel_id, message_data.fid, owner_fid, txn_batch)?;
         let dispatch = match &body {

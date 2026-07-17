@@ -782,15 +782,17 @@ mod tests {
         );
         // Pin the reason, not just the failure: a bare `is_err()` here would also pass if the
         // transfer had broken owner resolution outright (unknown channel, duplicate hash), which
-        // is exactly the bug this test is named for.
+        // is exactly the bug this test is named for. The transfer moved ownership to an address
+        // with no shard-0 verification, so the channel is parked and the freeze rejects everyone
+        // — including the stale owner — until the new address verifies.
         let stale_error = engine.simulate_message(&stale_owner_update).unwrap_err();
         assert!(
             matches!(
                 stale_error,
                 MessageValidationError::HubError(ref hub_error)
-                    if hub_error.message == "unauthorized channel action"
+                    if hub_error.message == "channel is parked"
             ),
-            "old owner must lose authority as unauthorized, got {stale_error:?}"
+            "old owner must lose authority via the parked freeze, got {stale_error:?}"
         );
 
         let new_owner_update = channel_update_message(
@@ -805,9 +807,9 @@ mod tests {
             matches!(
                 unverified_error,
                 MessageValidationError::HubError(ref hub_error)
-                    if hub_error.message == "unauthorized channel action"
+                    if hub_error.message == "channel is parked"
             ),
-            "new owner must stay unauthorized until the new address is verified on shard 0, got {unverified_error:?}"
+            "new owner must stay frozen until the new address is verified on shard 0, got {unverified_error:?}"
         );
         commit_message(
             &mut engine,
@@ -816,6 +818,239 @@ mod tests {
         );
         assert!(engine.simulate_message(&new_owner_update).is_ok());
         commit_message(&mut engine, &new_owner_update, Validity::Valid);
+    }
+
+    #[test]
+    fn parked_channel_freezes_all_actions_except_self_leave() {
+        let (mut engine, _tmpdir) = setup();
+        let owner_fid = 71;
+        let mod_fid = 72;
+        let member_fid = 73;
+        let outsider_fid = 74;
+        let owner_address = vec![0x71; 20];
+        let channel_key = "parked-channel";
+        let channel_id = channel_label(channel_key);
+        for fid in [owner_fid, mod_fid, member_fid, outsider_fid] {
+            register_user(
+                fid,
+                default_signer(),
+                default_custody_address(),
+                1,
+                &mut engine,
+            );
+        }
+        commit_event(
+            &mut engine,
+            &events_factory::create_channel_register_event(
+                channel_key,
+                channel_id.clone(),
+                owner_address.clone(),
+                1_000,
+                ChannelRegisterEventType::Register,
+                70,
+                1,
+            ),
+        );
+        let timestamp = messages_factory::farcaster_time();
+        let assert_parked = |engine: &mut crate::storage::store::block_engine::BlockEngine,
+                             message: &Message,
+                             what: &str| {
+            let error = engine.simulate_message(message).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    MessageValidationError::HubError(ref hub_error)
+                        if hub_error.message == "channel is parked"
+                ),
+                "{what} must be rejected as parked, got {error:?}"
+            );
+        };
+
+        // Day-one shape: registered channel, owner address never verified on shard 0.
+        assert_parked(
+            &mut engine,
+            &channel_update_message(
+                owner_fid,
+                channel_id.clone(),
+                "day one",
+                Some(MembershipMode::Open),
+                timestamp,
+            ),
+            "the owner's first action before any verification",
+        );
+
+        // Verify the owner, open the channel, and seed a moderator and a member.
+        commit_message(
+            &mut engine,
+            &verification_contract_add_for_fid(owner_fid, owner_address.clone(), timestamp),
+            Validity::Valid,
+        );
+        commit_message(
+            &mut engine,
+            &channel_update_message(
+                owner_fid,
+                channel_id.clone(),
+                "open",
+                Some(MembershipMode::Open),
+                timestamp + 1,
+            ),
+            Validity::Valid,
+        );
+        commit_message(
+            &mut engine,
+            &channel_member_message(
+                owner_fid,
+                channel_id.clone(),
+                mod_fid,
+                ChannelMemberAction::AddModerator,
+                timestamp + 2,
+            ),
+            Validity::Valid,
+        );
+        commit_message(
+            &mut engine,
+            &channel_member_message(
+                owner_fid,
+                channel_id.clone(),
+                member_fid,
+                ChannelMemberAction::AddMember,
+                timestamp + 3,
+            ),
+            Validity::Valid,
+        );
+
+        // Park the channel: the owner's verification is removed, so the owner address no longer
+        // resolves to a fid.
+        commit_message(
+            &mut engine,
+            &messages_factory::verifications::create_verification_remove(
+                owner_fid,
+                owner_address.clone(),
+                Some(timestamp + 4),
+                None,
+            ),
+            Validity::Valid,
+        );
+
+        // Every authority-bearing action is frozen — including the true owner's own, the
+        // moderator's still-seeded powers, and the previously-admitted moderator ban of the
+        // unresolvable owner (the fail-open this freeze closes).
+        assert_parked(
+            &mut engine,
+            &channel_update_message(
+                owner_fid,
+                channel_id.clone(),
+                "parked owner",
+                None,
+                timestamp + 5,
+            ),
+            "the unresolvable owner's update",
+        );
+        assert_parked(
+            &mut engine,
+            &messages_factory::create_message_with_data(
+                mod_fid,
+                MessageType::ChannelPin,
+                crate::proto::message_data::Body::ChannelPinBody(crate::proto::ChannelPinBody {
+                    channel_id: channel_id.clone(),
+                    cast_hash: vec![0x77; 20],
+                }),
+                Some(timestamp + 6),
+                None,
+            ),
+            "a moderator pin while parked (the availability cost, pinned deliberately)",
+        );
+        assert_parked(
+            &mut engine,
+            &channel_member_message(
+                mod_fid,
+                channel_id.clone(),
+                member_fid,
+                ChannelMemberAction::Ban,
+                timestamp + 7,
+            ),
+            "a moderator ban of a member while parked",
+        );
+        assert_parked(
+            &mut engine,
+            &channel_member_message(
+                mod_fid,
+                channel_id.clone(),
+                owner_fid,
+                ChannelMemberAction::Ban,
+                timestamp + 8,
+            ),
+            "a moderator ban of the unresolvable owner (fail-open closure)",
+        );
+        assert_parked(
+            &mut engine,
+            &channel_member_message(
+                outsider_fid,
+                channel_id.clone(),
+                outsider_fid,
+                ChannelMemberAction::AddMember,
+                timestamp + 9,
+            ),
+            "an OPEN self-add while parked (joins mint slots nobody can police)",
+        );
+
+        // Self-leave is the sole exception: its authority is self-contained, so a member and a
+        // moderator can still remove themselves. A never-seen fid's self-leave falls through to
+        // the authority table and is rejected on target state — the carve-out mints nothing.
+        let outsider_leave = channel_member_message(
+            outsider_fid,
+            channel_id.clone(),
+            outsider_fid,
+            ChannelMemberAction::RemoveMember,
+            timestamp + 10,
+        );
+        let outsider_error = engine.simulate_message(&outsider_leave).unwrap_err();
+        assert!(
+            matches!(
+                outsider_error,
+                MessageValidationError::HubError(ref hub_error)
+                    if hub_error.message == "invalid channel target state"
+            ),
+            "a never-seen fid's self-leave must fail on target state, not mint a row, got {outsider_error:?}"
+        );
+        assert!(engine
+            .simulate_message(&channel_member_message(
+                mod_fid,
+                channel_id.clone(),
+                mod_fid,
+                ChannelMemberAction::RemoveMember,
+                timestamp + 11,
+            ))
+            .is_ok());
+        commit_message(
+            &mut engine,
+            &channel_member_message(
+                member_fid,
+                channel_id.clone(),
+                member_fid,
+                ChannelMemberAction::RemoveMember,
+                timestamp + 12,
+            ),
+            Validity::Valid,
+        );
+
+        // Unparking is the owner re-verifying; full authority returns.
+        commit_message(
+            &mut engine,
+            &verification_contract_add_for_fid(owner_fid, owner_address, timestamp + 13),
+            Validity::Valid,
+        );
+        commit_message(
+            &mut engine,
+            &channel_update_message(
+                owner_fid,
+                channel_id.clone(),
+                "unparked",
+                Some(MembershipMode::Approval),
+                timestamp + 14,
+            ),
+            Validity::Valid,
+        );
     }
 
     #[test]
@@ -925,6 +1160,25 @@ mod tests {
                 80,
                 1,
             ),
+        );
+        // The owner address must resolve, or the parked freeze rejects everything before the
+        // fold/ban logic under test is ever reached.
+        let owner_fid = 72;
+        register_user(
+            owner_fid,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+        commit_message(
+            &mut engine,
+            &verification_contract_add_for_fid(
+                owner_fid,
+                vec![0x72; 20],
+                messages_factory::farcaster_time(),
+            ),
+            Validity::Valid,
         );
 
         let stores = engine.stores();
