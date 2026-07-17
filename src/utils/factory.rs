@@ -861,10 +861,11 @@ pub mod messages_factory {
     }
 
     pub mod channels {
-        //! Bodies for the dormant channel message types. Shared by the ShardEngine and
-        //! BlockEngine inertness tests so both pin the same shapes: two copies of this fixture
-        //! could drift apart while still looking identical, leaving one engine asserting
-        //! inertness for a body that no longer matches the wire format.
+        //! Bodies for the channel message types. Shared by the ShardEngine and BlockEngine
+        //! channel tests so both pin the same shapes: two copies of this fixture could drift
+        //! apart while still looking identical, leaving one engine asserting a property for a
+        //! body that no longer matches the wire format. BlockEngine now admits and merges these
+        //! under `ProtocolFeature::ChannelMessages`; ShardEngine still rejects them outright.
         use super::*;
         use message::{ChannelMemberBody, ChannelModerateBody, ChannelPinBody, ChannelUpdateBody};
 

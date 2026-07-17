@@ -360,8 +360,10 @@ impl Replicator {
         let messages = match user_message_type {
             // TODO(NEYN-10568): wire KeyAdd/KeyRemove into replication once shard 0 routing
             // and the signer store land (NEYN-10580, NEYN-10573, NEYN-10574).
-            // Channel messages have no backing store either, and no engine merges them, so they
-            // never enter the trie this lookup is driven by.
+            // Channel state lives only in shard 0's `BlockStores`, never in the per-fid `Stores`
+            // this lookup is driven by, so channel messages never enter its trie. (BlockEngine
+            // DOES merge them on shard 0 — the reason this arm is safe is the store split, not
+            // inertness.) Revisit when channel messages fan out to data shards.
             proto::MessageType::FrameAction
             | proto::MessageType::KeyAdd
             | proto::MessageType::KeyRemove

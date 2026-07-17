@@ -44,8 +44,14 @@ pub fn route_message(
 ) -> u32 {
     // Shard 0 hosts state that must be coherent across shards before other messages validate:
     // storage lends (accounting), and gasless keys (active-signer set consulted by every shard
-    // during user-message validation). Per-shard state (casts, reactions, links, etc.) routes
-    // by FID hash.
+    // during user-message validation). Channel messages are here for a different reason: their
+    // authority inputs — the channel registry fold and the verification replica that resolves an
+    // owner address to a fid — are shard-0-only, so admission can only be decided there. Per-shard
+    // state (casts, reactions, links, etc.) routes by FID hash.
+    //
+    // The channel arms are unconditional because these types are new at V20 and no pre-V20
+    // traffic exists; the feature gate lives at admission (mempool, wall-clock; engines,
+    // block-ts), not here.
     match message.msg_type() {
         MessageType::LendStorage
         | MessageType::KeyAdd
