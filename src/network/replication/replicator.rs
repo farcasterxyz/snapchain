@@ -832,7 +832,7 @@ mod tests {
     };
     use crate::storage::store::account::{
         ChannelMemberState, ChannelMemberStore, ChannelMemberStoreDef, ChannelModerateStore,
-        ChannelModerationState, ChannelPinStore, ChannelUpdateStore,
+        ChannelModerationState, ChannelPinStore, ChannelUpdateStore, HubEventStorageExt,
     };
     use crate::storage::store::mempool_poller::MempoolMessage;
     use crate::storage::store::test_helper;
@@ -1047,10 +1047,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pre_v20_snapshot_rejects_channel_cache_reads() {
+    async fn s4_pre_v20_snapshot_rejects_channel_cache_reads_without_state_changes() {
         let messages = channel_messages();
         let (mut source, _source_tmp) = test_helper::new_engine().await;
         replay_messages(&mut source, &messages[..1]).await;
+        let root_before = source.trie_root_hash();
+        let events_before =
+            proto::HubEvent::get_events(source.get_stores().db.clone(), 0, None, None)
+                .unwrap()
+                .events;
         let replicator =
             snapshot_replicator(&source, proto::FarcasterNetwork::Testnet, 1_784_124_000);
         let virtual_shard = TrieKey::for_message(&messages[0])[0][0];
@@ -1058,5 +1063,19 @@ mod tests {
             .messages_for_trie_prefix(SHARD_ID, SNAPSHOT_HEIGHT, virtual_shard, None)
             .unwrap_err();
         assert!(matches!(error, ReplicationError::InvalidMessage(_)));
+        assert_eq!(source.trie_root_hash(), root_before);
+        assert_eq!(
+            proto::HubEvent::get_events(source.get_stores().db.clone(), 0, None, None)
+                .unwrap()
+                .events,
+            events_before
+        );
+        assert!(ChannelUpdateStore::get_channel_update(
+            &source.get_stores().channel_update_store,
+            &channel_id(),
+            None,
+        )
+        .unwrap()
+        .is_some());
     }
 }

@@ -3085,7 +3085,7 @@ mod verification_replay_gate_tests {
     }
 
     #[tokio::test]
-    async fn pre_v20_channel_block_event_cannot_reach_replica_store() {
+    async fn s4_pre_v20_channel_block_event_cannot_reach_replica_store() {
         let (mut engine, _tmpdir) = test_helper::new_engine_with_options(EngineOptions {
             network: Some(FarcasterNetwork::Mainnet),
             ..Default::default()
@@ -3110,6 +3110,7 @@ mod verification_replay_gate_tests {
         // consensus timestamp, not the data-shard block version supplied below.
         let block_event = events_factory::create_merge_message_event(message, 1);
         let mut txn = RocksDbTransactionBatch::new();
+        let root_before = engine.trie_root_hash();
         let result =
             engine.handle_block_event(trie_ctx(), &block_event, &mut txn, EngineVersion::V20);
         assert!(matches!(
@@ -3125,6 +3126,8 @@ mod verification_replay_gate_tests {
         )
         .unwrap()
         .is_none());
+        assert!(txn.batch.is_empty());
+        assert_eq!(engine.trie_root_hash(), root_before);
     }
 }
 
@@ -3192,7 +3195,9 @@ mod channel_message_inertness_tests {
     use crate::core::util::FarcasterTime;
     use crate::core::validations::error::ValidationError;
     use crate::mempool::routing::{route_message, MessageRouter, ShardRouter};
+    use crate::proto::HubEvent;
     use crate::storage::db::RocksDbTransactionBatch;
+    use crate::storage::store::account::HubEventStorageExt;
     use crate::storage::store::test_helper;
     use crate::utils::factory::messages_factory;
     use crate::version::version::EngineVersion;
@@ -3200,7 +3205,7 @@ mod channel_message_inertness_tests {
     /// Routing sends channel messages to shard 0, but ShardEngine still rejects them if they are
     /// injected directly. Its merge dispatch remains absent until data-shard replay lands.
     #[tokio::test]
-    async fn channel_messages_are_rejected_by_shard_engine_validation() {
+    async fn s4_channel_messages_are_rejected_by_shard_engine_validation() {
         let (mut engine, _tmpdir) = test_helper::new_engine().await;
         let fid = 1234;
         test_helper::register_user(
@@ -3210,16 +3215,21 @@ mod channel_message_inertness_tests {
             &mut engine,
         )
         .await;
+        let root_before = engine.trie_root_hash();
+        let events_before = HubEvent::get_events(engine.get_stores().db.clone(), 0, None, None)
+            .unwrap()
+            .events;
 
         for (message_type, body) in messages_factory::channels::all_message_bodies() {
             let message =
                 messages_factory::create_message_with_data(fid, message_type, body, None, None);
             let timestamp = FarcasterTime::new(message.data.as_ref().unwrap().timestamp as u64);
+            let mut v20_txn = RocksDbTransactionBatch::new();
             let result = engine.validate_user_message(
                 &message,
                 &timestamp,
                 EngineVersion::V20,
-                &mut RocksDbTransactionBatch::new(),
+                &mut v20_txn,
             );
             assert!(
                 matches!(
@@ -3231,12 +3241,14 @@ mod channel_message_inertness_tests {
                 message_type,
                 result
             );
+            assert!(v20_txn.batch.is_empty());
 
+            let mut pre_feature_txn = RocksDbTransactionBatch::new();
             let pre_feature = engine.validate_user_message(
                 &message,
                 &timestamp,
                 EngineVersion::V19,
-                &mut RocksDbTransactionBatch::new(),
+                &mut pre_feature_txn,
             );
             assert!(matches!(
                 pre_feature,
@@ -3244,7 +3256,15 @@ mod channel_message_inertness_tests {
                     ValidationError::InvalidMessageType
                 ))
             ));
+            assert!(pre_feature_txn.batch.is_empty());
         }
+        assert_eq!(engine.trie_root_hash(), root_before);
+        assert_eq!(
+            HubEvent::get_events(engine.get_stores().db.clone(), 0, None, None)
+                .unwrap()
+                .events,
+            events_before
+        );
     }
 
     #[tokio::test]

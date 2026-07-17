@@ -730,7 +730,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_data_shard_verification_admission_splits_at_v20() {
+    async fn s4_data_shard_verification_admission_splits_at_v20() {
         let pre_v20_block_time = pre_v20_testnet_time(0);
         let timestamp = pre_v20_block_time.to_u64() as u32;
         let verification_add = messages_factory::verifications::create_verification_add(

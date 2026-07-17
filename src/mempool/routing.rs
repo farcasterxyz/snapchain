@@ -165,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn verifications_route_by_fid_before_activation() {
+    fn s4_verifications_route_by_fid_before_activation() {
         let router: Box<dyn MessageRouter> = Box::new(EvenOddRouterForTest {});
 
         for message_type in [
@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn verifications_route_to_shard_zero_after_activation() {
+    fn s4_verifications_route_to_shard_zero_after_activation() {
         let router: Box<dyn MessageRouter> = Box::new(EvenOddRouterForTest {});
 
         for message_type in [
@@ -203,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn channel_messages_route_to_shard_zero_before_and_after_activation() {
+    fn s4_channel_messages_route_to_shard_zero_before_and_after_activation() {
         let router: Box<dyn MessageRouter> = Box::new(EvenOddRouterForTest {});
 
         // Channel types are new at V20, so their routing is unconditional. The mempool's
