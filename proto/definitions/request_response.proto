@@ -160,7 +160,7 @@ message ChannelOwnerRequest {
 }
 
 message ChannelOwnerResponse {
-  // 0 = registered but no verified owner found on this node's hosted shards
+  // 0 = registered but no verified owner in shard-0 consensus state
   // ("parked"). Parking is computed at read time, never stored.
   uint64 fid = 1;
   // Raw 20-byte EVM address from the channel registry fold.

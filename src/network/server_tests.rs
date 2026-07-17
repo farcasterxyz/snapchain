@@ -222,6 +222,25 @@ mod tests {
         stores.db.commit(txn).unwrap();
     }
 
+    fn merge_shard_zero_verification(block_engine: &BlockEngine, verification: &proto::Message) {
+        let stores = block_engine.stores();
+        let mut txn = RocksDbTransactionBatch::new();
+        stores
+            .verification_store
+            .merge(verification, &mut txn, &test_helper::default_merge_ctx())
+            .unwrap();
+        stores.db.commit(txn).unwrap();
+    }
+
+    fn merge_channel_owner_verification(
+        stores: &Stores,
+        block_engine: &BlockEngine,
+        verification: &proto::Message,
+    ) {
+        merge_verification(stores, verification);
+        merge_shard_zero_verification(block_engine, verification);
+    }
+
     struct MockL1Client {}
 
     #[async_trait]
@@ -528,6 +547,7 @@ mod tests {
             None,
         );
         merge_verification(stores.get(&1).unwrap(), &verification);
+        merge_shard_zero_verification(&block_engine, &verification);
 
         let response = service
             .get_channel_owner(Request::new(ChannelOwnerRequest {
@@ -571,7 +591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_channel_owner_resolves_single_verification() {
+    async fn test_get_channel_owner_ignores_pre_v20_data_shard_verification() {
         let (
             stores,
             _senders,
@@ -595,6 +615,27 @@ mod tests {
         );
         merge_verification(stores.get(&1).unwrap(), &verification_add);
 
+        assert!(
+            crate::storage::store::account::VerificationStore::get_verification_add(
+                &stores.get(&1).unwrap().verification_store,
+                SHARD1_FID,
+                &address,
+                None,
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            crate::storage::store::account::VerificationStore::get_verification_add(
+                &block_engine.stores().verification_store,
+                SHARD1_FID,
+                &address,
+                None,
+            )
+            .unwrap()
+            .is_none()
+        );
+
         let response = service
             .get_channel_owner(Request::new(ChannelOwnerRequest {
                 channel_key: "verified".to_string(),
@@ -603,15 +644,15 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        assert_eq!(response.fid, SHARD1_FID);
+        assert_eq!(response.fid, 0);
         assert_eq!(response.owner_address, address);
         assert_eq!(response.expiry, expiry);
     }
 
     #[tokio::test]
-    async fn test_get_channel_owner_lww_across_hosted_shards() {
+    async fn test_get_channel_owner_lww_in_shard_zero_replica() {
         let (
-            stores,
+            _stores,
             _senders,
             _engines,
             block_engine,
@@ -644,8 +685,8 @@ mod tests {
             Some(10),
             None,
         );
-        merge_verification(stores.get(&2).unwrap(), &later);
-        merge_verification(stores.get(&1).unwrap(), &earlier);
+        merge_shard_zero_verification(&block_engine, &later);
+        merge_shard_zero_verification(&block_engine, &earlier);
 
         let response = service
             .get_channel_owner(Request::new(ChannelOwnerRequest {
@@ -664,9 +705,9 @@ mod tests {
     // "last shard iterated wins" — one direction alone could pass by luck of the
     // hash order.
     #[tokio::test]
-    async fn test_get_channel_owner_lww_across_hosted_shards_reversed() {
+    async fn test_get_channel_owner_lww_in_shard_zero_replica_reversed() {
         let (
-            stores,
+            _stores,
             _senders,
             _engines,
             block_engine,
@@ -699,8 +740,8 @@ mod tests {
             Some(10),
             None,
         );
-        merge_verification(stores.get(&1).unwrap(), &later);
-        merge_verification(stores.get(&2).unwrap(), &earlier);
+        merge_shard_zero_verification(&block_engine, &later);
+        merge_shard_zero_verification(&block_engine, &earlier);
 
         let response = service
             .get_channel_owner(Request::new(ChannelOwnerRequest {
@@ -720,7 +761,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_channel_owner_reverts_to_parked_after_verification_remove() {
         let (
-            stores,
+            _stores,
             _senders,
             _engines,
             block_engine,
@@ -740,7 +781,7 @@ mod tests {
             Some(10),
             None,
         );
-        merge_verification(stores.get(&1).unwrap(), &verification_add);
+        merge_shard_zero_verification(&block_engine, &verification_add);
 
         // Sanity: resolves to the verifier before the remove.
         let resolved = service
@@ -759,7 +800,7 @@ mod tests {
             Some(20),
             None,
         );
-        merge_verification(stores.get(&1).unwrap(), &verification_remove);
+        merge_shard_zero_verification(&block_engine, &verification_remove);
 
         let response = service
             .get_channel_owner(Request::new(ChannelOwnerRequest {
@@ -777,7 +818,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_channel_owner_drops_orphan_index_candidate() {
         let (
-            stores,
+            _stores,
             _senders,
             _engines,
             block_engine,
@@ -796,7 +837,7 @@ mod tests {
             VerificationStoreDef::make_verification_by_address_key(&address, SHARD1_FID),
             orphan_ts_hash.to_vec(),
         );
-        stores.get(&1).unwrap().db.commit(txn).unwrap();
+        block_engine.stores().db.commit(txn).unwrap();
 
         let response = service
             .get_channel_owner(Request::new(ChannelOwnerRequest {
@@ -842,8 +883,9 @@ mod tests {
         assert_eq!(by_address_parked.channels[0].fid, 0);
         assert_eq!(by_address_parked.channels[0].channel_key, "delayed_flip");
 
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_add(SHARD1_FID, address.clone(), 10),
         );
 
@@ -876,8 +918,9 @@ mod tests {
         let address = owner_address(9);
         let expiry = now_unix_seconds() - 1;
         merge_channel_registration(&block_engine, "lapsed_list", address.clone(), expiry);
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_add(SHARD1_FID, address.clone(), 10),
         );
 
@@ -918,8 +961,8 @@ mod tests {
 
         let later = verification_add(SHARD2_FID, address.clone(), 20);
         let earlier = verification_add(SHARD1_FID, address, 10);
-        merge_verification(stores.get(&2).unwrap(), &later);
-        merge_verification(stores.get(&1).unwrap(), &earlier);
+        merge_channel_owner_verification(stores.get(&2).unwrap(), &block_engine, &later);
+        merge_channel_owner_verification(stores.get(&1).unwrap(), &block_engine, &earlier);
 
         assert_channel_owner_fid_invariant(
             &service,
@@ -948,12 +991,14 @@ mod tests {
             address.clone(),
             now_unix_seconds() + 3600,
         );
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_add(SHARD1_FID, address.clone(), 10),
         );
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&2).unwrap(),
+            &block_engine,
             &verification_add(SHARD2_FID, address.clone(), 20),
         );
         assert_channel_owner_fid_invariant(
@@ -964,8 +1009,9 @@ mod tests {
         )
         .await;
 
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&2).unwrap(),
+            &block_engine,
             &verification_remove(SHARD2_FID, address.clone(), 30),
         );
         assert_channel_owner_fid_invariant(
@@ -976,8 +1022,9 @@ mod tests {
         )
         .await;
 
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_remove(SHARD1_FID, address, 40),
         );
         let parked = get_channel_owner_response(&service, "remove_fallback").await;
@@ -1011,8 +1058,9 @@ mod tests {
         assert_eq!(parked.owner_address, address_a);
         assert_eq!(parked.expiry, expiry);
 
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_add(SHARD1_FID, address_a, 10),
         );
         assert_channel_owner_fid_invariant(&service, "cold_wallet", SHARD1_FID, None).await;
@@ -1028,8 +1076,9 @@ mod tests {
         assert_eq!(transferred.owner_address, address_b);
         assert_eq!(transferred.expiry, expiry);
 
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&2).unwrap(),
+            &block_engine,
             &verification_add(SHARD2_FID, address_b, 20),
         );
         assert_channel_owner_fid_invariant(&service, "cold_wallet", SHARD2_FID, Some(SHARD1_FID))
@@ -1134,12 +1183,14 @@ mod tests {
         register_channel_at(&block_engine, "rt_a2", address_a.clone(), expiry, 2);
         register_channel_at(&block_engine, "rt_b1", address_b.clone(), expiry, 3);
         register_channel_at(&block_engine, "rt_b2", address_b.clone(), expiry, 4);
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_add(SHARD1_FID, address_a.clone(), 10),
         );
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_add(SHARD1_FID, address_b.clone(), 20),
         );
 
@@ -1203,8 +1254,9 @@ mod tests {
         register_channel_at(&block_engine, "pa_1", address.clone(), expiry, 1);
         register_channel_at(&block_engine, "pa_2", address.clone(), expiry, 2);
         register_channel_at(&block_engine, "pa_3", address.clone(), expiry, 3);
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_add(SHARD1_FID, address.clone(), 10),
         );
 
@@ -1288,8 +1340,9 @@ mod tests {
         let expiry = now_unix_seconds() + 3600;
         register_channel_at(&block_engine, "evm_owned", evm_address.clone(), expiry, 1);
 
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_add(SHARD1_FID, evm_address, 10),
         );
         // The Solana verification's 32-byte address must be filtered out before
@@ -1350,8 +1403,9 @@ mod tests {
         let expiry = now_unix_seconds() + 3600;
         register_channel_at(&block_engine, "eb_1", address.clone(), expiry, 1);
         register_channel_at(&block_engine, "eb_2", address.clone(), expiry, 2);
-        merge_verification(
+        merge_channel_owner_verification(
             stores.get(&1).unwrap(),
+            &block_engine,
             &verification_add(SHARD1_FID, address, 10),
         );
 

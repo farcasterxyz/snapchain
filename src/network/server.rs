@@ -39,6 +39,7 @@ use crate::storage::constants::RootPrefix;
 use crate::storage::constants::PAGE_SIZE_MAX;
 use crate::storage::db::PageOptions;
 use crate::storage::db::RocksDbTransactionBatch;
+use crate::storage::store::account::MessagesPage;
 use crate::storage::store::account::UsernameProofStore;
 use crate::storage::store::account::{
     get_app_nonce, get_gasless_key_count, get_gasless_key_record, get_last_used_at, get_user_nonce,
@@ -48,7 +49,6 @@ use crate::storage::store::account::{
 use crate::storage::store::account::{
     get_channel_keys_by_owner_address, get_channel_keys_for_owner_addresses,
 };
-use crate::storage::store::account::{make_ts_hash, MessagesPage};
 use crate::storage::store::account::{message_bytes_decode, IntoI32};
 use crate::storage::store::account::{EventsPage, HubEventIdGenerator};
 use crate::storage::store::block_engine::{self, BlockStores};
@@ -125,62 +125,6 @@ fn signer_store_error_to_status(err: HubError) -> Status {
     } else {
         Status::internal(format!("Store error: {:?}", err))
     }
-}
-
-fn resolve_channel_owner_fid(
-    shard_stores: &HashMap<u32, Stores>,
-    owner_address: &[u8],
-) -> Result<Option<u64>, Status> {
-    let mut authoritative_candidates = Vec::new();
-
-    for stores in shard_stores.values() {
-        let candidates = VerificationStore::get_verifications_by_address(
-            &stores.verification_store,
-            owner_address,
-            None,
-        )
-        .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?;
-
-        // The by-address index yields best-effort candidates; re-validate each
-        // against the primary VerificationAdds and take the authoritative
-        // `ts_hash` from the surviving primary message, never the index value.
-        for (fid, _indexed_ts_hash) in candidates {
-            let Some(primary_add) = VerificationStore::get_verification_add(
-                &stores.verification_store,
-                fid,
-                owner_address,
-                None,
-            )
-            .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
-            else {
-                continue;
-            };
-
-            let Some(data) = primary_add.data.as_ref() else {
-                // Unlike a missing primary add (a benign stale/orphan index entry),
-                // a surviving primary VerificationAdd with no `data` is a data-integrity
-                // anomaly: messages carry `data` by construction once merged. Skip it
-                // so one bad record can't fail the read, but log it so the anomaly is
-                // observable rather than silently under-reporting the owner as parked.
-                warn!(
-                    fid,
-                    owner_address = hex::encode(owner_address),
-                    "channel owner resolution skipped a VerificationAdd with no data",
-                );
-                continue;
-            };
-            let ts_hash = make_ts_hash(data.timestamp, &primary_add.hash)
-                .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?;
-
-            authoritative_candidates.push((fid, ts_hash));
-        }
-    }
-
-    Ok(
-        crate::storage::store::account::select_verification_address_winner(
-            authoritative_candidates,
-        ),
-    )
 }
 
 fn onchain_event_storage_error_to_status(err: OnchainEventStorageError) -> Status {
@@ -2752,7 +2696,10 @@ impl HubService for MyHubService {
             .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
             .ok_or_else(|| Status::not_found("channel not registered"))?;
 
-        let fid = resolve_channel_owner_fid(&self.shard_stores, &channel_owner.owner_address)?
+        let fid = self
+            .block_stores
+            .resolve_channel_owner_fid(&channel_owner.owner_address, None)
+            .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
             .unwrap_or(0);
 
         Ok(Response::new(ChannelOwnerResponse {
@@ -2789,8 +2736,11 @@ impl HubService for MyHubService {
         )?;
 
         if !channels.is_empty() {
-            let fid =
-                resolve_channel_owner_fid(&self.shard_stores, &req.owner_address)?.unwrap_or(0);
+            let fid = self
+                .block_stores
+                .resolve_channel_owner_fid(&req.owner_address, None)
+                .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
+                .unwrap_or(0);
             for channel in &mut channels {
                 channel.fid = fid;
             }
@@ -2879,7 +2829,12 @@ impl HubService for MyHubService {
         // GetChannelOwner resolves it to `req.fid`.
         let mut winning_addresses = Vec::new();
         for owner_address in owner_addresses {
-            if resolve_channel_owner_fid(&self.shard_stores, &owner_address)? == Some(req.fid) {
+            if self
+                .block_stores
+                .resolve_channel_owner_fid(&owner_address, None)
+                .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
+                == Some(req.fid)
+            {
                 winning_addresses.push(owner_address);
             }
         }
