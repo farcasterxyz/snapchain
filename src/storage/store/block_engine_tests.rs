@@ -1054,6 +1054,92 @@ mod tests {
     }
 
     #[test]
+    fn parked_freeze_transitions_within_a_single_block_are_deterministic() {
+        // The freeze resolves the owner THROUGH the transaction batch, so a verification remove or
+        // add earlier in a block parks or unparks the channel for a later message in the SAME
+        // block. Both interleavings are now reachable states. Keep the verification and the channel
+        // action under one fid so they share a per-fid transaction whose `user_messages` replay in
+        // input order in propose AND validate; `commit_messages` asserts both produced identical
+        // state roots, so a mid-block transition is deterministic, not a propose/validate split.
+        let (mut engine, _tmpdir) = setup();
+        let owner_fid = 81;
+        let owner_address = vec![0x81; 20];
+        let channel_key = "midblock-channel";
+        let channel_id = channel_label(channel_key);
+        register_user(
+            owner_fid,
+            default_signer(),
+            default_custody_address(),
+            1,
+            &mut engine,
+        );
+        commit_event(
+            &mut engine,
+            &events_factory::create_channel_register_event(
+                channel_key,
+                channel_id.clone(),
+                owner_address.clone(),
+                1_000,
+                ChannelRegisterEventType::Register,
+                80,
+                1,
+            ),
+        );
+        let timestamp = messages_factory::farcaster_time();
+        // Resolve the owner first: the channel starts UNparked and the owner is authorized.
+        commit_message(
+            &mut engine,
+            &verification_contract_add_for_fid(owner_fid, owner_address.clone(), timestamp),
+            Validity::Valid,
+        );
+
+        // PARK MID-BLOCK. The identical owner update is authorized against the current unparked
+        // state, so the only thing that can freeze it is the remove landing ahead of it.
+        let frozen_update =
+            channel_update_message(owner_fid, channel_id.clone(), "frozen", None, timestamp + 2);
+        assert!(
+            engine.simulate_message(&frozen_update).is_ok(),
+            "owner update must be valid while the channel is unparked",
+        );
+        let park_remove = messages_factory::verifications::create_verification_remove(
+            owner_fid,
+            owner_address.clone(),
+            Some(timestamp + 1),
+            None,
+        );
+        // One block: the remove parks the channel, then the owner's own update in the same block
+        // resolves to `None` and is frozen — rejected, never written to the trie — even though the
+        // same author committed successfully one block earlier.
+        commit_messages(
+            &mut engine,
+            vec![
+                (&park_remove, Validity::Valid),
+                (&frozen_update, Validity::Invalid),
+            ],
+        );
+
+        // UNPARK MID-BLOCK. One block: the owner re-verifies, then the owner's update lands behind
+        // it — the add resolves the owner and the update is admitted in the same block that thawed
+        // the channel.
+        let unpark_add =
+            verification_contract_add_for_fid(owner_fid, owner_address.clone(), timestamp + 3);
+        let thawed_update = channel_update_message(
+            owner_fid,
+            channel_id.clone(),
+            "thawed",
+            Some(MembershipMode::Approval),
+            timestamp + 4,
+        );
+        commit_messages(
+            &mut engine,
+            vec![
+                (&unpark_add, Validity::Valid),
+                (&thawed_update, Validity::Valid),
+            ],
+        );
+    }
+
+    #[test]
     fn channel_moderator_cap_is_enforced_at_ten_through_the_txn() {
         let (mut engine, _tmpdir) = setup();
         let owner_fid = 61;
