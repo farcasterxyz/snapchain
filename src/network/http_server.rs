@@ -1536,6 +1536,27 @@ pub struct ErrorResponse {
     pub error_detail: Option<String>,
 }
 
+/// Build the in-process gRPC mesh request, forwarding the caller's
+/// `authorization` header into gRPC metadata so the service's admin check runs.
+fn mesh_grpc_request(
+    headers: &HeaderMap,
+    validators_only: bool,
+) -> tonic::Request<proto::GetMeshViewRequest> {
+    let mut grpc_req = tonic::Request::new(proto::GetMeshViewRequest {
+        validators_only,
+        ttl: 0,
+        visited_peer_ids: vec![],
+    });
+    if let Some(auth) = headers.get("authorization") {
+        if let Ok(s) = auth.to_str() {
+            if let Ok(v) = MetadataValue::from_str(s) {
+                grpc_req.metadata_mut().insert("authorization", v);
+            }
+        }
+    }
+    grpc_req
+}
+
 // Shared response builders for the mesh endpoints (local view + crawl topology).
 fn text_plain_ok(body: String) -> Response<BoxBody<Bytes, Infallible>> {
     Response::builder()
@@ -1553,8 +1574,20 @@ fn json_ok(json: serde_json::Value) -> Response<BoxBody<Bytes, Infallible>> {
         .unwrap()
 }
 
+fn html_ok(body: &'static str) -> Response<BoxBody<Bytes, Infallible>> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/html; charset=utf-8")
+        // The page is static, but the data it fetches is admin-gated — don't let
+        // a shared cache hold it.
+        .header("cache-control", "no-store")
+        .body(Full::new(Bytes::from(body)).boxed())
+        .unwrap()
+}
+
 fn mesh_error_response(status: tonic::Status) -> Response<BoxBody<Bytes, Infallible>> {
-    let code = if status.code() == tonic::Code::Unauthenticated {
+    let unauthorized = status.code() == tonic::Code::Unauthenticated;
+    let code = if unauthorized {
         StatusCode::UNAUTHORIZED
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
@@ -1563,9 +1596,15 @@ fn mesh_error_response(status: tonic::Status) -> Response<BoxBody<Bytes, Infalli
         error: status.message().to_string(),
         error_detail: None,
     };
-    Response::builder()
+    let mut builder = Response::builder()
         .status(code)
-        .header("content-type", "application/json")
+        .header("content-type", "application/json");
+    // Prompt the browser for credentials when navigating to an admin-gated
+    // mesh endpoint (e.g. /v1/mesh/ui). Harmless for CLI clients.
+    if unauthorized {
+        builder = builder.header("www-authenticate", "Basic realm=\"snapchain-mesh\"");
+    }
+    builder
         .body(Full::new(Bytes::from(serde_json::to_vec(&err).unwrap())).boxed())
         .unwrap()
 }
@@ -3772,6 +3811,7 @@ where
                 .await
             }
             (&Method::GET, "/v1/mesh") => self.handle_mesh_view(req).await,
+            (&Method::GET, "/v1/mesh/ui") => self.handle_mesh_ui(req).await,
             _ => Ok(Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .body(Full::new(Bytes::from("Not Found")).boxed())
@@ -3895,19 +3935,7 @@ where
         // consensus,mempool); the JSON always carries every topic.
         let topics = crate::network::mesh::render::parse_topics(topics_param.as_deref());
 
-        let auth = req.headers().get("authorization").cloned();
-        let mut grpc_req = tonic::Request::new(proto::GetMeshViewRequest {
-            validators_only,
-            ttl: 0,
-            visited_peer_ids: vec![],
-        });
-        if let Some(auth) = auth {
-            if let Ok(s) = auth.to_str() {
-                if let Ok(v) = MetadataValue::from_str(s) {
-                    grpc_req.metadata_mut().insert("authorization", v);
-                }
-            }
-        }
+        let grpc_req = mesh_grpc_request(req.headers(), validators_only);
 
         // `?crawl=true` assembles the network-wide topology over the gossip port;
         // otherwise return this node's local view.
@@ -3939,6 +3967,24 @@ where
                 }
                 Err(status) => Ok(mesh_error_response(status)),
             }
+        }
+    }
+
+    /// Serve the self-contained mesh dashboard HTML at `/v1/mesh/ui`. Admin-gated
+    /// by reusing the auth check on `get_mesh_view` (the `Router` has no direct
+    /// access to the credential map): the payload is discarded, but a failed auth
+    /// yields a 401 with a `WWW-Authenticate` header so the browser prompts. The
+    /// page then fetches the mesh JSON itself using in-page credentials. Thanks to
+    /// the response cache, this probe shares the same `(local view, validators
+    /// only)` slot the page's first data fetch will hit.
+    async fn handle_mesh_ui(
+        &self,
+        req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
+        let grpc_req = mesh_grpc_request(req.headers(), true);
+        match self.service.service.get_mesh_view(grpc_req).await {
+            Ok(_) => Ok(html_ok(crate::network::mesh::ui::UI_HTML)),
+            Err(status) => Ok(mesh_error_response(status)),
         }
     }
 

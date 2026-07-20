@@ -2638,6 +2638,24 @@ async fn test_http_server_smoke() {
         "/v1/info numShards mismatch: {info_json}"
     );
 
+    // /v1/mesh/ui — the admin-gated dashboard. Auth is open in this harness
+    // (no admin_rpc_auth), so it should serve the HTML page.
+    let ui = client
+        .get(format!("{base}/v1/mesh/ui"))
+        .send()
+        .await
+        .expect("GET /v1/mesh/ui failed");
+    assert_eq!(ui.status(), reqwest::StatusCode::OK, "/v1/mesh/ui status");
+    assert_eq!(
+        ui.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("text/html; charset=utf-8"),
+        "/v1/mesh/ui content-type"
+    );
+    let ui_body = ui.text().await.expect("/v1/mesh/ui body");
+    assert!(ui_body.contains("Snapchain"), "/v1/mesh/ui body");
+
     // /v1/castById — pull back the cast we previously submitted via gRPC. Hash
     // is sent hex-encoded with the 0x prefix per the JSON encoding the HTTP
     // layer expects.

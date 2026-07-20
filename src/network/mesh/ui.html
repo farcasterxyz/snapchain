@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Snapchain Mesh</title>
+    <style>
+      :root {
+        --bg: #0d1117;
+        --panel: #161b22;
+        --panel-2: #1c2230;
+        --border: #30363d;
+        --fg: #e6edf3;
+        --muted: #8b949e;
+        --accent: #58a6ff;
+        --green: #3fb950;
+        --amber: #d29922;
+        --red: #f85149;
+        --grey: #484f58;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        background: var(--bg);
+        color: var(--fg);
+      }
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px 16px;
+        padding: 10px 16px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+      }
+      header h1 { font-size: 15px; margin: 0 12px 0 0; font-weight: 600; }
+      header .spacer { flex: 1; }
+      .status { color: var(--muted); }
+      .status b { color: var(--fg); font-weight: 600; }
+      main { padding: 16px; max-width: 1400px; margin: 0 auto; }
+      section { margin-bottom: 22px; }
+      section > h2 {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 4px;
+        margin: 0 0 10px;
+      }
+      button, select, input {
+        font: inherit;
+        color: var(--fg);
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 4px 10px;
+      }
+      button { cursor: pointer; }
+      button:hover { border-color: var(--accent); }
+      button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+      button.primary:hover { background: #2b7cff; }
+      input { min-width: 120px; }
+      label.inline { color: var(--muted); }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px 14px;
+      }
+      .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+      .kv { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+      .kv .k { color: var(--muted); }
+      .chip {
+        display: inline-block;
+        padding: 1px 7px;
+        margin: 1px 3px 1px 0;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        font-size: 11px;
+        background: var(--panel-2);
+      }
+      .chip.green { border-color: var(--green); color: var(--green); }
+      .chip.amber { border-color: var(--amber); color: var(--amber); }
+      .chip.grey { border-color: var(--grey); color: var(--muted); }
+      .badge { font-size: 10px; padding: 1px 6px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+      .badge.neynar { background: #1f3a5f; color: #79c0ff; }
+      .badge.merkle { background: #3a2f5f; color: #d2a8ff; }
+      .badge.community { background: #1f5f3a; color: #7ee787; }
+      table { border-collapse: collapse; width: 100%; }
+      .scroll { overflow-x: auto; }
+      th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+      th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+      tr:hover td { background: var(--panel-2); }
+      .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--grey); }
+      .dot.on { background: var(--green); }
+      .mono-sm { font-size: 11px; color: var(--muted); }
+      .copy { cursor: pointer; border-bottom: 1px dotted var(--muted); }
+      .banner { padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; display: none; }
+      .banner.err { display: block; background: #3d1416; border: 1px solid var(--red); color: #ffb4ab; }
+      .banner.warn { display: block; background: #3a2d0f; border: 1px solid var(--amber); color: #f1d18a; }
+      .matrix td, .matrix th { text-align: center; padding: 3px 6px; font-size: 11px; }
+      .matrix th.rowhdr, .matrix td.rowhdr { text-align: right; color: var(--muted); }
+      .cell-yes { color: var(--green); }
+      .cell-no { color: var(--grey); }
+      .cell-asym { color: var(--amber); font-weight: 700; }
+      .cell-self { color: var(--border); }
+      .info-ok { color: var(--green); }
+      .info-behind { color: var(--red); font-weight: 600; }
+      .info-bad { color: var(--muted); }
+      footer { color: var(--muted); font-size: 11px; padding: 16px; border-top: 1px solid var(--border); }
+      .muted { color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Snapchain&nbsp;Mesh</h1>
+      <div class="status" id="topStatus">not loaded</div>
+      <div class="spacer"></div>
+      <label class="inline">auto
+        <select id="autoRefresh">
+          <option value="0">off</option>
+          <option value="10">10s</option>
+          <option value="30">30s</option>
+        </select>
+      </label>
+      <button id="refreshBtn" class="primary">Refresh</button>
+      <button id="crawlBtn">Crawl topology</button>
+    </header>
+
+    <main>
+      <div class="banner" id="banner"></div>
+
+      <section id="credsSection">
+        <h2>Admin credentials</h2>
+        <div class="card" style="display:flex; flex-wrap:wrap; gap:10px; align-items:center;">
+          <input id="user" placeholder="username" autocomplete="username" />
+          <input id="pass" type="password" placeholder="password" autocomplete="current-password" />
+          <button id="saveCreds" class="primary">Save</button>
+          <button id="clearCreds">Clear</button>
+          <span class="muted" id="credsHint"></span>
+        </div>
+        <p class="mono-sm">
+          Stored in this tab's sessionStorage only and sent as an HTTP Basic
+          header to this node. Leave blank if the node has no admin auth.
+        </p>
+      </section>
+
+      <section id="selfSection">
+        <h2>This node</h2>
+        <div class="card" id="selfCard"><span class="muted">Press Refresh to load.</span></div>
+      </section>
+
+      <section id="peersSection">
+        <h2>Peers <span class="muted" id="peersCount"></span></h2>
+        <div class="scroll"><table id="peersTable"><tbody></tbody></table></div>
+      </section>
+
+      <section id="topoSection" style="display:none;">
+        <h2>Topology</h2>
+        <div id="topoBanner" class="banner"></div>
+        <div id="topoMatrixWrap" class="scroll"></div>
+        <div id="topoNodes" class="grid" style="margin-top:12px;"></div>
+        <div id="topoUnreachable" style="margin-top:12px;"></div>
+      </section>
+    </main>
+
+    <footer>
+      Names from the compiled-in known-node table plus any <code>[[mesh.nodes]]</code>
+      config. Mesh data is cached server-side (default 5s TTL), so
+      <span class="muted">generated</span> times may lag slightly.
+      <code>/v1/info</code> is fetched directly from each node by your browser;
+      nodes behind private addresses or blocking CORS show as unreachable.
+    </footer>
+
+    <script>
+      "use strict";
+
+      const AUTH_KEY = "snapchain_mesh_auth";
+      const BEHIND_THRESHOLD = 10; // shard-height delta before flagging a node behind
+      const INFO_CONCURRENCY = 8;
+
+      const $ = (id) => document.getElementById(id);
+      const el = (tag, cls, text) => {
+        const n = document.createElement(tag);
+        if (cls) n.className = cls;
+        if (text != null) n.textContent = text;
+        return n;
+      };
+
+      // ---- credentials ---------------------------------------------------
+      function authToken() {
+        return sessionStorage.getItem(AUTH_KEY) || "";
+      }
+      function setCredsHint() {
+        $("credsHint").textContent = authToken() ? "credentials saved" : "no credentials set";
+      }
+      $("saveCreds").onclick = () => {
+        const u = $("user").value;
+        const p = $("pass").value;
+        if (u === "" && p === "") {
+          sessionStorage.removeItem(AUTH_KEY);
+        } else {
+          sessionStorage.setItem(AUTH_KEY, btoa(u + ":" + p));
+        }
+        setCredsHint();
+        refreshAll();
+      };
+      $("clearCreds").onclick = () => {
+        sessionStorage.removeItem(AUTH_KEY);
+        $("user").value = "";
+        $("pass").value = "";
+        setCredsHint();
+      };
+
+      // ---- banners -------------------------------------------------------
+      function showError(msg) {
+        const b = $("banner");
+        b.className = "banner err";
+        b.textContent = msg;
+      }
+      function clearBanner() {
+        $("banner").className = "banner";
+      }
+
+      // ---- same-origin API (admin-gated) --------------------------------
+      // credentials:'omit' so the browser's own cached Basic creds don't leak
+      // in — the in-page token is the single source of truth.
+      async function api(path) {
+        const token = authToken();
+        const headers = token ? { Authorization: "Basic " + token } : {};
+        const resp = await fetch(path, { credentials: "omit", headers });
+        if (resp.status === 401) {
+          const e = new Error("Unauthorized — check admin credentials.");
+          e.unauthorized = true;
+          throw e;
+        }
+        if (!resp.ok) throw new Error(path + " → HTTP " + resp.status);
+        return resp.json();
+      }
+
+      // ---- helpers -------------------------------------------------------
+      const shortId = (pid) => (pid && pid.length > 7 ? pid.slice(-7) : pid || "?");
+      const nameFor = (o) => o.name || shortId(o.peer_id);
+      function ago(ms) {
+        if (!ms) return "?";
+        const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+        return s + "s ago";
+      }
+      function opBadge(operator) {
+        if (!operator) return "";
+        const b = el("span", "badge " + operator, operator);
+        return b.outerHTML;
+      }
+      function copySpan(text, label) {
+        const s = el("span", "copy", label || text);
+        s.title = "click to copy: " + text;
+        s.onclick = () => navigator.clipboard && navigator.clipboard.writeText(text);
+        return s;
+      }
+      function topicChip(t) {
+        let cls = "grey";
+        if (t.in_mesh) cls = "green";
+        else if (t.subscribed) cls = "amber";
+        return el("span", "chip " + cls, t.topic);
+      }
+      function rateFor(peer, topic) {
+        const r = (peer.gossip_rates || []).find((x) => x.topic === topic);
+        return r ? r.msgs_per_sec.toFixed(1) : "—";
+      }
+
+      // ---- /v1/info fan-out (browser-side, best effort) ------------------
+      // IMPORTANT: no Authorization header here. /v1/info is ungated, and a
+      // custom header would make the request CORS-preflighted; snapchain nodes
+      // have no OPTIONS route, so the preflight would 404. Keep it a simple GET.
+      const infoCache = new Map(); // base url -> {ok, version, shards} | {error}
+      async function fetchInfo(base) {
+        if (infoCache.has(base)) return infoCache.get(base);
+        let result;
+        try {
+          const url = base.replace(/\/+$/, "") + "/v1/info";
+          const resp = await fetch(url, {
+            mode: "cors",
+            credentials: "omit",
+            signal: AbortSignal.timeout(4000),
+          });
+          if (!resp.ok) throw new Error("HTTP " + resp.status);
+          const j = await resp.json();
+          const shards = {};
+          (j.shardInfos || []).forEach((s) => {
+            shards[s.shardId] = s.maxHeight;
+          });
+          result = { ok: true, version: j.version, shards };
+        } catch (e) {
+          result = { error: String(e.message || e) };
+        }
+        infoCache.set(base, result);
+        return result;
+      }
+      // Bounded-concurrency fan-out; never rejects (per-item errors captured).
+      async function fanOut(bases, onEach) {
+        const queue = [...new Set(bases)];
+        let i = 0;
+        async function worker() {
+          while (i < queue.length) {
+            const base = queue[i++];
+            const info = await fetchInfo(base);
+            onEach(base, info);
+          }
+        }
+        const workers = [];
+        for (let w = 0; w < Math.min(INFO_CONCURRENCY, queue.length); w++) workers.push(worker());
+        await Promise.allSettled(workers);
+      }
+      function renderInfoCell(cell, info, localShards) {
+        cell.textContent = "";
+        if (!info || info.error) {
+          const s = el("span", "info-bad", "unreachable");
+          if (info && info.error) s.title = info.error;
+          cell.appendChild(s);
+          return;
+        }
+        cell.appendChild(el("span", "info-ok", "v" + (info.version || "?")));
+        const parts = Object.keys(info.shards)
+          .sort((a, b) => a - b)
+          .map((sid) => {
+            const h = info.shards[sid];
+            const local = localShards ? localShards[sid] : undefined;
+            const behind = local != null && local - h > BEHIND_THRESHOLD;
+            const span = el("span", behind ? "info-behind" : "", " " + sid + ":" + h);
+            if (behind) span.title = (local - h) + " blocks behind this node";
+            return span;
+          });
+        parts.forEach((p) => cell.appendChild(p));
+      }
+
+      // ---- rendering: self + peers --------------------------------------
+      let localShards = {}; // shard -> height, from this node's /v1/info baseline
+
+      function renderSelf(self) {
+        const card = $("selfCard");
+        card.textContent = "";
+        if (!self) {
+          card.appendChild(el("span", "muted", "no local view"));
+          return;
+        }
+        const rows = [
+          ["name", nameFor(self) + (self.operator ? " " + self.operator : "")],
+          ["role", self.role || (self.is_validator ? "validator" : "non-validator")],
+          ["network", self.network],
+          ["version", self.snapchain_version],
+          ["height", self.current_height],
+          ["consensus mesh", self.consensus_mesh_size],
+          ["peer id", null],
+          ["pubkey", null],
+        ];
+        const grid = el("div", "grid");
+        rows.forEach(([k, v]) => {
+          const kv = el("div", "kv");
+          kv.appendChild(el("span", "k", k));
+          if (k === "peer id") {
+            const val = el("span");
+            val.appendChild(copySpan(self.peer_id, shortId(self.peer_id)));
+            kv.appendChild(val);
+          } else if (k === "pubkey") {
+            const val = el("span");
+            val.appendChild(
+              self.consensus_public_key
+                ? copySpan(self.consensus_public_key, self.consensus_public_key.slice(0, 10) + "…")
+                : el("span", "muted", "—")
+            );
+            kv.appendChild(val);
+          } else {
+            kv.appendChild(el("span", "v", String(v == null ? "—" : v)));
+          }
+          grid.appendChild(kv);
+        });
+        card.appendChild(grid);
+        const topics = el("div", null);
+        topics.style.marginTop = "8px";
+        (self.subscribed_topics || []).forEach((t) => topics.appendChild(el("span", "chip", t)));
+        card.appendChild(topics);
+      }
+
+      function renderPeers(peers) {
+        $("peersCount").textContent = "(" + peers.length + ")";
+        const tbody = $("peersTable").querySelector("tbody");
+        tbody.textContent = "";
+        const head = el("tr");
+        ["node", "type", "conn", "direct", "contact", "topics", "cons/s", "mempool/s", "observed", "live /v1/info"].forEach(
+          (h) => head.appendChild(el("th", null, h))
+        );
+        tbody.appendChild(head);
+
+        const infoCells = []; // [base, cell]
+        peers.forEach((p) => {
+          const tr = el("tr");
+          const nameCell = el("td");
+          nameCell.appendChild(document.createTextNode(nameFor(p) + " "));
+          if (p.operator) nameCell.insertAdjacentHTML("beforeend", opBadge(p.operator));
+          if (p.known_offline) nameCell.appendChild(el("span", "chip amber", "offline"));
+          tr.appendChild(nameCell);
+
+          tr.appendChild(el("td", null, (p.node_type || "").replace("MESH_NODE_TYPE_", "").toLowerCase() || p.node_type));
+
+          const conn = el("td");
+          conn.appendChild(el("span", "dot" + (p.connected ? " on" : "")));
+          tr.appendChild(conn);
+          const dir = el("td");
+          dir.appendChild(el("span", "dot" + (p.direct_peer ? " on" : "")));
+          tr.appendChild(dir);
+
+          tr.appendChild(el("td", "mono-sm", p.contact_source || ""));
+
+          const topicsCell = el("td");
+          (p.topics || []).forEach((t) => topicsCell.appendChild(topicChip(t)));
+          tr.appendChild(topicsCell);
+
+          tr.appendChild(el("td", null, rateFor(p, "consensus")));
+          tr.appendChild(el("td", null, rateFor(p, "mempool")));
+          tr.appendChild(el("td", "mono-sm", p.observed_address || "—"));
+
+          const infoCell = el("td");
+          if (p.http_api_url) {
+            infoCell.appendChild(el("span", "muted", "…"));
+            infoCells.push([p.http_api_url, infoCell]);
+          } else {
+            const dash = el("span", "muted", "—");
+            dash.title = "no public HTTP address known";
+            infoCell.appendChild(dash);
+          }
+          tr.appendChild(infoCell);
+          tbody.appendChild(tr);
+        });
+
+        // Fan out /v1/info for peers that have a reachable URL.
+        fanOut(
+          infoCells.map(([b]) => b),
+          (base, info) => infoCells.filter(([b]) => b === base).forEach(([, cell]) => renderInfoCell(cell, info, localShards))
+        );
+      }
+
+      // ---- rendering: topology ------------------------------------------
+      function consensusMeshSet(node) {
+        // peer ids this node has an in-mesh consensus link to.
+        const set = new Set();
+        (node.peers || []).forEach((p) => {
+          if ((p.topics || []).some((t) => t.topic === "consensus" && t.in_mesh)) {
+            set.add(p.peer_id);
+          }
+        });
+        return set;
+      }
+      function renderTopology(topo) {
+        $("topoSection").style.display = "";
+        const nodes = (topo.nodes || []).filter((n) => n.self);
+        const meshSets = new Map();
+        nodes.forEach((n) => meshSets.set(n.self.peer_id, consensusMeshSet(n)));
+        const ids = nodes.map((n) => n.self.peer_id);
+
+        // Consensus reachability matrix; asymmetric edges highlighted.
+        const wrap = $("topoMatrixWrap");
+        wrap.textContent = "";
+        wrap.appendChild(el("div", "mono-sm", "Consensus in-mesh matrix — row sees column. Amber = one-way (asymmetric) link."));
+        const table = el("table", "matrix");
+        const header = el("tr");
+        header.appendChild(el("th", "rowhdr", "row \\ col"));
+        nodes.forEach((n) => header.appendChild(el("th", null, nameFor(n.self))));
+        table.appendChild(header);
+        nodes.forEach((rowNode) => {
+          const tr = el("tr");
+          tr.appendChild(el("td", "rowhdr", nameFor(rowNode.self)));
+          const rowSet = meshSets.get(rowNode.self.peer_id);
+          ids.forEach((colId) => {
+            if (colId === rowNode.self.peer_id) {
+              tr.appendChild(el("td", "cell-self", "·"));
+              return;
+            }
+            const rc = rowSet.has(colId);
+            const cr = (meshSets.get(colId) || new Set()).has(rowNode.self.peer_id);
+            let cls = "cell-no", ch = "·";
+            if (rc && cr) { cls = "cell-yes"; ch = "●"; }
+            else if (rc || cr) { cls = "cell-asym"; ch = rc ? "▸" : "◂"; }
+            tr.appendChild(el("td", cls, ch));
+          });
+          table.appendChild(tr);
+        });
+        wrap.appendChild(table);
+
+        // Per-node cards + /v1/info.
+        const cards = $("topoNodes");
+        cards.textContent = "";
+        const infoCells = [];
+        nodes.forEach((n) => {
+          const s = n.self;
+          const card = el("div", "card");
+          const title = el("div");
+          title.appendChild(document.createTextNode(nameFor(s) + " "));
+          if (s.operator) title.insertAdjacentHTML("beforeend", opBadge(s.operator));
+          card.appendChild(title);
+          card.appendChild(el("div", "kv")).append(el("span", "k", "height"), el("span", null, String(s.current_height ?? "—")));
+          card.appendChild(el("div", "kv")).append(el("span", "k", "version"), el("span", null, s.snapchain_version || "—"));
+          card.appendChild(el("div", "kv")).append(el("span", "k", "peers"), el("span", null, String((n.peers || []).length)));
+          const infoLine = el("div", "kv");
+          infoLine.appendChild(el("span", "k", "/v1/info"));
+          const infoVal = el("span");
+          if (s.http_api_url) { infoVal.appendChild(el("span", "muted", "…")); infoCells.push([s.http_api_url, infoVal]); }
+          else infoVal.appendChild(el("span", "muted", "—"));
+          infoLine.appendChild(infoVal);
+          card.appendChild(infoLine);
+          cards.appendChild(card);
+        });
+        fanOut(
+          infoCells.map(([b]) => b),
+          (base, info) => infoCells.filter(([b]) => b === base).forEach(([, cell]) => renderInfoCell(cell, info, localShards))
+        );
+
+        // Unreachable list.
+        const un = $("topoUnreachable");
+        un.textContent = "";
+        const list = topo.unreachable || [];
+        if (list.length) {
+          const b = $("topoBanner");
+          b.className = "banner warn";
+          b.textContent = list.length + " validator(s) unreachable in this crawl.";
+          const t = el("table");
+          const h = el("tr");
+          ["node", "reason", "pubkey"].forEach((x) => h.appendChild(el("th", null, x)));
+          t.appendChild(h);
+          list.forEach((u) => {
+            const tr = el("tr");
+            const nc = el("td");
+            nc.appendChild(document.createTextNode(nameFor(u) + " "));
+            if (u.operator) nc.insertAdjacentHTML("beforeend", opBadge(u.operator));
+            tr.appendChild(nc);
+            tr.appendChild(el("td", null, u.reason));
+            tr.appendChild(el("td", "mono-sm", u.consensus_public_key ? u.consensus_public_key.slice(0, 12) + "…" : "—"));
+            t.appendChild(tr);
+          });
+          un.appendChild(t);
+        } else {
+          $("topoBanner").className = "banner";
+        }
+      }
+
+      // ---- orchestration -------------------------------------------------
+      let lastView = null;
+      let topologyLoaded = false;
+
+      async function refreshAll() {
+        try {
+          clearBanner();
+          $("topStatus").textContent = "loading…";
+          const view = await api("/v1/mesh?format=json&validators_only=false");
+          lastView = view;
+          // Baseline shard heights from this node's own info (used for Δ).
+          if (view.self && view.self.http_api_url) {
+            const info = await fetchInfo(view.self.http_api_url);
+            if (info.ok) localShards = info.shards;
+          }
+          renderSelf(view.self);
+          renderPeers(view.peers || []);
+          const self = view.self || {};
+          $("topStatus").innerHTML =
+            "<b>" + (self.name ? self.name : shortId(self.peer_id)) +
+            "</b> · " + (self.network || "?") +
+            " · height <b>" + (self.current_height ?? "?") + "</b>" +
+            " · " + ago(view.generated_at);
+          if (topologyLoaded) await loadTopology();
+        } catch (e) {
+          $("topStatus").textContent = "error";
+          showError(e.message);
+          if (e.unauthorized) $("user").focus();
+        }
+      }
+
+      async function loadTopology() {
+        try {
+          clearBanner();
+          $("crawlBtn").textContent = "Crawling…";
+          const topo = await api("/v1/mesh?format=json&crawl=true&validators_only=false");
+          topologyLoaded = true;
+          renderTopology(topo);
+        } catch (e) {
+          showError(e.message);
+          if (e.unauthorized) $("user").focus();
+        } finally {
+          $("crawlBtn").textContent = "Crawl topology";
+        }
+      }
+
+      // ---- controls ------------------------------------------------------
+      $("refreshBtn").onclick = () => { infoCache.clear(); refreshAll(); };
+      $("crawlBtn").onclick = () => { infoCache.clear(); loadTopology(); };
+
+      let autoTimer = null;
+      $("autoRefresh").onchange = (e) => {
+        if (autoTimer) clearInterval(autoTimer);
+        const secs = parseInt(e.target.value, 10);
+        if (secs > 0) autoTimer = setInterval(() => { infoCache.clear(); refreshAll(); }, secs * 1000);
+      };
+
+      // ---- boot ----------------------------------------------------------
+      setCredsHint();
+      refreshAll();
+    </script>
+  </body>
+</html>
