@@ -2609,7 +2609,12 @@ async fn test_http_server_smoke() {
     let http_service = HubHttpServiceImpl {
         service: network.first_live_node().hub_service(),
     };
-    let _http_handle = spawn_http_server(listener, http_service, HttpConfig::default());
+    let _http_handle = spawn_http_server(
+        listener,
+        http_service,
+        HttpConfig::default(),
+        std::sync::Arc::new(snapchain::network::mesh::nodes::NodeRegistry::builtin()),
+    );
 
     // Tiny settle delay so the spawned accept loop is ready before the first request.
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;

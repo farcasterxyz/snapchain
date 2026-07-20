@@ -19,6 +19,7 @@ use tonic::async_trait;
 use tonic::metadata::MetadataValue;
 use tracing::error;
 
+use crate::network::mesh::nodes::NodeRegistry;
 use crate::proto::{
     self, embed, hub_service_server::HubService, link_body::Target, message_data::Body, CastType,
     FarcasterNetwork, HashScheme, MessageType, ReactionType, SignatureScheme, UserDataType,
@@ -3535,15 +3536,18 @@ where
 // Router implementation
 pub struct Router<Service: HubService> {
     service: Arc<HubHttpServiceImpl<Service>>,
+    /// Known-node metadata for annotating mesh JSON with human-readable names.
+    nodes: Arc<NodeRegistry>,
 }
 
 impl<Service> Router<Service>
 where
     Service: HubService,
 {
-    pub fn new(service: HubHttpServiceImpl<Service>) -> Self {
+    pub fn new(service: HubHttpServiceImpl<Service>, nodes: Arc<NodeRegistry>) -> Self {
         Self {
             service: Arc::new(service),
+            nodes,
         }
     }
 
@@ -3915,7 +3919,7 @@ where
                         let body = crate::network::mesh::render::render_topology(&topo, &topics);
                         Ok(text_plain_ok(body))
                     } else {
-                        let json = crate::network::mesh::render::topology_json(&topo);
+                        let json = crate::network::mesh::render::topology_json(&topo, &self.nodes);
                         Ok(json_ok(json))
                     }
                 }
@@ -3929,7 +3933,7 @@ where
                         let body = crate::network::mesh::render::render_mesh_view(&view, &topics);
                         Ok(text_plain_ok(body))
                     } else {
-                        let json = crate::network::mesh::render::mesh_view_json(&view);
+                        let json = crate::network::mesh::render::mesh_view_json(&view, &self.nodes);
                         Ok(json_ok(json))
                     }
                 }
@@ -4115,6 +4119,7 @@ pub fn spawn_http_server<S>(
     listener: TcpListener,
     http_service: HubHttpServiceImpl<S>,
     config: Config,
+    nodes: Arc<NodeRegistry>,
 ) -> tokio::task::JoinHandle<()>
 where
     S: HubService + 'static,
@@ -4126,8 +4131,9 @@ where
                     let io = TokioIo::new(stream);
                     let config = config.clone();
                     let service_clone = http_service.clone();
+                    let nodes = nodes.clone();
                     tokio::spawn(async move {
-                        let router = Router::new(service_clone);
+                        let router = Router::new(service_clone, nodes);
                         if let Err(err) = http1::Builder::new()
                             .serve_connection(io, service_fn(|r| router.handle(r, &config)))
                             .await
