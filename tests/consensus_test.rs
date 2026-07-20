@@ -19,9 +19,7 @@ use snapchain::node::snapchain_node::SnapchainNode;
 use snapchain::node::snapchain_read_node::SnapchainReadNode;
 use snapchain::proto::hub_service_client::HubServiceClient;
 use snapchain::proto::hub_service_server::HubServiceServer;
-use snapchain::proto::{
-    self, CastId, Height, HubEventType, StorageUnitType, SubscribeRequest, UserDataRequest,
-};
+use snapchain::proto::{self, CastId, Height, HubEventType, SubscribeRequest, UserDataRequest};
 use snapchain::proto::{
     Block, FarcasterNetwork, IdRegisterEventType, MessageType, SignerEventType,
 };
@@ -1232,12 +1230,14 @@ impl TestNetwork {
         let address = factory::address::generate_random_address();
 
         let on_chain_events = vec![
-            factory::events_factory::create_rent_event(
+            // Rolling grant date, not a fixed historical one: `StorageSlot::is_active` compares
+            // `invalidate_at` against wall-clock `SystemTime::now()`, so a fixed grant ages out of
+            // its validity window and the engine silently drops this fid's messages -- which
+            // surfaces here as unrelated consensus timeouts. See `test_helper::default_storage_event`.
+            factory::events_factory::create_rent_event_with_timestamp(
                 fid,
                 100,
-                StorageUnitType::UnitType2025,
-                false,
-                FarcasterNetwork::Devnet,
+                factory::time::current_timestamp(),
             ),
             factory::events_factory::create_signer_event(
                 fid,
@@ -1367,12 +1367,11 @@ impl TestNetwork {
         let address = custody.address().as_slice().to_vec();
 
         let on_chain_events = vec![
-            factory::events_factory::create_rent_event(
+            // Rolling grant date -- see the note in `register_fid`.
+            factory::events_factory::create_rent_event_with_timestamp(
                 fid,
                 100,
-                StorageUnitType::UnitType2025,
-                false,
-                FarcasterNetwork::Devnet,
+                factory::time::current_timestamp(),
             ),
             factory::events_factory::create_signer_event(
                 fid,

@@ -12,12 +12,12 @@ mod tests {
     #[tokio::test]
     async fn test_trie_updated_only_on_commit() {
         let (mut block_engine, _temp_dir) = setup();
-        let onchain_event = events_factory::create_rent_event(
+        // Rolling grant date; a fixed one ages out against wall-clock `is_active`.
+        // See `test_helper::default_storage_event`.
+        let onchain_event = events_factory::create_rent_event_with_timestamp(
             FID_FOR_TEST,
             1,
-            StorageUnitType::UnitType2025,
-            false,
-            FarcasterNetwork::Devnet,
+            crate::utils::factory::time::current_timestamp(),
         );
         let height = block_engine.get_confirmed_height().increment();
         let state_change = block_engine.propose_state_change(
@@ -112,12 +112,12 @@ mod tests {
     #[tokio::test]
     async fn test_user_messages_put_in_block_if_storage_purchased() {
         let (mut block_engine, _temp_dir) = setup();
-        let onchain_event = events_factory::create_rent_event(
+        // Rolling grant date; a fixed one ages out against wall-clock `is_active`.
+        // See `test_helper::default_storage_event`.
+        let onchain_event = events_factory::create_rent_event_with_timestamp(
             FID_FOR_TEST,
             1,
-            StorageUnitType::UnitType2025,
-            false,
-            FarcasterNetwork::Devnet,
+            crate::utils::factory::time::current_timestamp(),
         );
         commit_event(&mut block_engine, &onchain_event);
 
@@ -177,12 +177,12 @@ mod tests {
     #[tokio::test]
     async fn test_merge_onchain_event() {
         let (mut block_engine, _temp_dir) = setup();
-        let onchain_event = events_factory::create_rent_event(
+        // Rolling grant date; a fixed one ages out against wall-clock `is_active`.
+        // See `test_helper::default_storage_event`.
+        let onchain_event = events_factory::create_rent_event_with_timestamp(
             FID_FOR_TEST,
             1,
-            StorageUnitType::UnitType2025,
-            false,
-            FarcasterNetwork::Devnet,
+            crate::utils::factory::time::current_timestamp(),
         );
         let block = commit_event(&mut block_engine, &onchain_event);
         // Don't generate any block events for onchain events
