@@ -302,6 +302,7 @@ mod tests {
                 "0.1.2".to_string(),
                 "asddef".to_string(),
                 None,
+                Default::default(),
             ),
             shard_decision_tx,
             block_decision_tx,

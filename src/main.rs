@@ -105,6 +105,7 @@ async fn start_servers(
         VERSION.unwrap_or("unknown").to_string(),
         local_peer_id_str,
         fname_lookup,
+        app_config.mesh.clone(),
     ));
 
     let replication_service = if let Some(replicator) = replicator {
