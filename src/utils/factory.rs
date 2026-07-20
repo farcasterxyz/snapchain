@@ -865,7 +865,8 @@ pub mod messages_factory {
         //! channel tests so both pin the same shapes: two copies of this fixture could drift
         //! apart while still looking identical, leaving one engine asserting a property for a
         //! body that no longer matches the wire format. BlockEngine now admits and merges these
-        //! under `ProtocolFeature::ChannelMessages`; ShardEngine still rejects them outright.
+        //! under `ProtocolFeature::ChannelMessages`; ShardEngine rejects their direct admission
+        //! and merges them only via shard-0 replay and replication.
         use super::*;
         use message::{ChannelMemberBody, ChannelModerateBody, ChannelPinBody, ChannelUpdateBody};
 

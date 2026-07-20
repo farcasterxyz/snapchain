@@ -415,7 +415,8 @@ impl BlockStores {
             };
             let Some(data) = primary_add.data.as_ref() else {
                 // A data-integrity anomaly, not an expected state: log it rather than silently
-                // under-reporting the owner as parked. Mirrors the RPC resolver.
+                // under-reporting the owner as parked. The RPC reads delegate here, so this
+                // is the only site that needs to log it.
                 warn!(
                     fid = fid,
                     address = hex::encode(owner_address),
