@@ -207,6 +207,35 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_mesh_config_default_and_env_override() {
+        // Default cache TTL is 5s.
+        run_test(vec![], || {
+            let (_tmpdir, file_path) = write_config_file(r#"log_format = "text""#);
+            let args = vec![
+                "test_binary".to_string(),
+                "--config-path".to_string(),
+                file_path.to_string(),
+            ];
+            let config = load_and_merge_config(args).expect("Failed to load config");
+            assert_eq!(config.mesh.cache_ttl_secs, 5);
+            assert!(config.mesh.nodes.is_empty());
+        });
+
+        // Env override changes the TTL.
+        run_test(vec![set("SNAPCHAIN_MESH__CACHE_TTL_SECS", "0")], || {
+            let (_tmpdir, file_path) = write_config_file(r#"log_format = "text""#);
+            let args = vec![
+                "test_binary".to_string(),
+                "--config-path".to_string(),
+                file_path.to_string(),
+            ];
+            let config = load_and_merge_config(args).expect("Failed to load config");
+            assert_eq!(config.mesh.cache_ttl_secs, 0);
+        });
+    }
+
+    #[test]
+    #[serial]
     fn test_missing_config_file() {
         run_test(vec![], || {
             let args = vec![

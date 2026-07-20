@@ -183,6 +183,7 @@ mod tests {
 
     async fn make_server(
         rpc_auth: Option<String>,
+        admin_rpc_auth: Option<String>,
     ) -> (
         HashMap<u32, Stores>,
         HashMap<u32, Senders>,
@@ -287,7 +288,7 @@ mod tests {
             block_engine,
             MyHubService::new(
                 auth,
-                "".to_string(),
+                admin_rpc_auth.unwrap_or_default(),
                 vec![],
                 block_stores,
                 stores,
@@ -319,7 +320,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
 
         let num_shard1_pre_existing_events = 10;
         let num_shard2_pre_existing_events = 20;
@@ -382,7 +383,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
 
         let num_shard1_pre_existing_events = 10;
         let num_shard2_pre_existing_events = 20;
@@ -440,7 +441,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let event_id = 12345;
         let hub_event = HubEvent {
             r#type: HubEventType::MergeMessage as i32,
@@ -479,7 +480,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
 
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 1).await;
 
@@ -505,7 +506,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
 
         let event_id = 12345;
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 1).await;
@@ -533,7 +534,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
 
         let event_id = 12345;
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 1).await;
@@ -560,7 +561,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
 
         // Write some test events to the DB
         write_events_to_db(stores.get(&1u32).unwrap().shard_store.db.clone(), 10).await;
@@ -632,7 +633,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
 
         // Message with no fid registration
         let invalid_message = messages_factory::casts::create_cast_add(123, "test", None, None);
@@ -701,7 +702,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(Some(auth_config)).await;
+        ) = make_server(Some(auth_config), None).await;
         let message = messages_factory::casts::create_cast_add(123, "test", None, None);
 
         let no_auth_request = Request::new(message.clone());
@@ -733,6 +734,60 @@ mod tests {
         );
     }
 
+    // The mesh diagnostic endpoints are admin-gated, and that gate must run
+    // BEFORE the response cache — a cached view/topology must never reach an
+    // unauthenticated caller. We can't easily prime the cache with a success in
+    // this harness (the gossip receiver is dropped), but asserting that an
+    // unauthenticated call returns Unauthenticated (rather than a cached value
+    // or an internal gossip error) proves the auth check is ordered first.
+    #[tokio::test]
+    async fn test_mesh_endpoints_authenticate_before_cache() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let admin = format!("admin:secret-{now}");
+        let (
+            _stores,
+            _senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, Some(admin)).await;
+
+        let mesh_req = || {
+            Request::new(proto::GetMeshViewRequest {
+                validators_only: true,
+                ttl: 0,
+                visited_peer_ids: vec![],
+            })
+        };
+
+        // No credentials -> Unauthenticated (not a cached value, not internal).
+        assert_eq!(
+            service.get_mesh_view(mesh_req()).await.unwrap_err().code(),
+            tonic::Code::Unauthenticated
+        );
+        assert_eq!(
+            service
+                .get_mesh_topology(mesh_req())
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+
+        // Wrong credentials -> still Unauthenticated.
+        let mut bad = mesh_req();
+        add_auth_header(&mut bad, "admin", "wrong");
+        assert_eq!(
+            service.get_mesh_view(bad).await.unwrap_err().code(),
+            tonic::Code::Unauthenticated
+        );
+    }
+
     // Tests for submit_bulk_messages RPC endpoint
 
     #[tokio::test]
@@ -745,7 +800,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
 
         // Test submitting 0 messages
         let response = submit_bulk_messages(&service, vec![]).await.unwrap();
@@ -763,7 +818,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
 
         // Register a user
         register_user(
@@ -816,7 +871,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
 
         // Register a user for the valid message
         register_user(
@@ -876,7 +931,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
 
         test_helper::register_user(
             SHARD1_FID,
@@ -998,7 +1053,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let signer = test_helper::default_signer();
         let owner = hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap();
         let fid = SHARD1_FID;
@@ -1031,7 +1086,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let signer = test_helper::default_signer();
         let owner = hex::decode("849151d7D0bF1F34b70d5caD5149D28CC2308bf1").unwrap();
         let fid = SHARD1_FID;
@@ -1104,7 +1159,7 @@ mod tests {
             mut service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
 
         // FID_FOR_TEST is 1234 — even, so EvenOddRouterForTest routes it to shard 2,
         // which is backed by engine2's RocksDB.
@@ -1183,7 +1238,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let signer = test_helper::default_signer();
         let owner = test_helper::default_custody_address();
         let fid = SHARD1_FID;
@@ -1216,7 +1271,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let signer = test_helper::default_signer();
         let owner = test_helper::default_custody_address();
         let fid = SHARD1_FID;
@@ -1255,7 +1310,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let signer = test_helper::default_signer();
         let fid = 2;
         let owner = test_helper::default_custody_address();
@@ -1301,7 +1356,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let engine1 = &mut engine1;
         let engine2 = &mut engine2;
         test_helper::register_user(
@@ -1465,7 +1520,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let engine1 = &mut engine1;
         let engine2 = &mut engine2;
         test_helper::register_user(
@@ -1602,7 +1657,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
 
         let response = service
             .get_current_storage_limits_by_fid(fid_request(SHARD1_FID))
@@ -1742,7 +1797,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
 
         test_helper::register_user(
             SHARD1_FID,
@@ -1811,7 +1866,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let fid = SHARD1_FID;
         let signer = test_helper::default_signer();
         let owner = hex::decode("91031dcfdea024b4d51e775486111d2b2a715871").unwrap();
@@ -1864,7 +1919,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
 
         test_helper::register_user(
             SHARD1_FID,
@@ -1937,7 +1992,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let owner = test_helper::default_custody_address();
         let fid = SHARD1_FID;
         // Should we write a bunch of users to test the iteration or is this sufficient?
@@ -1974,7 +2029,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let fid = SHARD1_FID;
         let signer = test_helper::default_signer();
         let custody_address = test_helper::default_custody_address();
@@ -2040,7 +2095,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let fid = SHARD1_FID;
         let signer = test_helper::default_signer();
         let owner = test_helper::default_custody_address();
@@ -2164,7 +2219,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let fid = SHARD1_FID;
         let signer_key = test_helper::default_signer();
         let signer_pubkey = signer_key.verifying_key().as_bytes().to_vec();
@@ -2207,7 +2262,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let fid = SHARD1_FID;
         let envelope = generate_signer();
         let pubkey: Vec<u8> = envelope.verifying_key().as_bytes().to_vec();
@@ -2297,7 +2352,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let fid = SHARD1_FID;
 
         let onchain_key = test_helper::default_signer();
@@ -2402,7 +2457,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let fid = SHARD1_FID;
         let requester_fid: u64 = 7_777;
         let shard_stores = stores.get(&1).expect("shard 1 stores");
@@ -2511,7 +2566,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
 
         block_engine_test_helpers::register_user(
             SHARD1_FID,
@@ -2563,7 +2618,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         block_engine_test_helpers::register_user(
             SHARD1_FID,
             test_helper::default_signer(),
