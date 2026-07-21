@@ -199,13 +199,18 @@
       function setCredsHint() {
         $("credsHint").textContent = authToken() ? "credentials saved" : "no credentials set";
       }
+      // UTF-8 → base64. Plain btoa() throws on non-Latin1 (e.g. a unicode
+      // password), which would abort the save; encode the bytes first.
+      function b64utf8(s) {
+        return btoa(Array.from(new TextEncoder().encode(s), (b) => String.fromCharCode(b)).join(""));
+      }
       $("saveCreds").onclick = () => {
         const u = $("user").value;
         const p = $("pass").value;
         if (u === "" && p === "") {
           sessionStorage.removeItem(AUTH_KEY);
         } else {
-          sessionStorage.setItem(AUTH_KEY, btoa(u + ":" + p));
+          sessionStorage.setItem(AUTH_KEY, b64utf8(u + ":" + p));
         }
         setCredsHint();
         refreshAll();
@@ -294,6 +299,14 @@
       const infoCache = new Map(); // base url -> {ok, version, shards} | {error}
       async function fetchInfo(base) {
         if (infoCache.has(base)) return infoCache.get(base);
+        // A page served over HTTPS cannot fetch an http:// node (mixed content is
+        // blocked by the browser). Flag it distinctly instead of a generic
+        // "unreachable" so a healthy HTTP node isn't mistaken for a down one.
+        if (location.protocol === "https:" && /^http:\/\//i.test(base)) {
+          const result = { blocked: true, error: "blocked: dashboard is HTTPS but this node is HTTP (mixed content)" };
+          infoCache.set(base, result);
+          return result;
+        }
         let result;
         try {
           const url = base.replace(/\/+$/, "") + "/v1/info";
@@ -333,7 +346,7 @@
       function renderInfoCell(cell, info, localShards) {
         cell.textContent = "";
         if (!info || info.error) {
-          const s = el("span", "info-bad", "unreachable");
+          const s = el("span", "info-bad", info && info.blocked ? "blocked" : "unreachable");
           if (info && info.error) s.title = info.error;
           cell.appendChild(s);
           return;
@@ -565,7 +578,12 @@
           title.appendChild(document.createTextNode(nameFor(s) + " "));
           if (s.operator) title.insertAdjacentHTML("beforeend", opBadge(s.operator));
           card.appendChild(title);
-          card.appendChild(el("div", "kv")).append(el("span", "k", "height"), el("span", null, String(s.current_height ?? "—")));
+          // Crawl reports a real block height only for the serving node; other
+          // nodes come back as 0 (unknown). Show "—" for those and rely on the
+          // per-node /v1/info line below for their real heights.
+          const heightVal = el("span", null, s.current_height ? String(s.current_height) : "—");
+          if (!s.current_height) heightVal.title = "unknown from crawl — see /v1/info";
+          card.appendChild(el("div", "kv")).append(el("span", "k", "height"), heightVal);
           card.appendChild(el("div", "kv")).append(el("span", "k", "version"), el("span", null, s.snapchain_version || "—"));
           card.appendChild(el("div", "kv")).append(el("span", "k", "peers"), el("span", null, String((n.peers || []).length)));
           const infoLine = el("div", "kv");
@@ -632,11 +650,19 @@
           renderSelf(view.self, view.peers || []);
           renderPeers(view.peers || []);
           const self = view.self || {};
-          $("topStatus").innerHTML =
-            "<b>" + (self.name ? self.name : shortId(self.peer_id)) +
-            "</b> · " + (self.network || "?") +
-            " · height <b>" + (self.current_height ?? "?") + "</b>" +
-            " · " + ago(view.generated_at);
+          // Build with DOM nodes / textContent — never innerHTML — so a node
+          // name (from the known-node registry / [[mesh.nodes]] config) can't
+          // inject markup into the admin page holding the auth token.
+          const status = $("topStatus");
+          status.textContent = "";
+          status.appendChild(el("b", null, self.name ? self.name : shortId(self.peer_id)));
+          status.appendChild(
+            document.createTextNode(
+              " · " + (self.network || "?") + " · height "
+            )
+          );
+          status.appendChild(el("b", null, self.current_height != null ? String(self.current_height) : "?"));
+          status.appendChild(document.createTextNode(" · " + ago(view.generated_at)));
           if (topologyLoaded) await loadTopology();
         } catch (e) {
           if (e.unauthorized) { $("topStatus").textContent = "auth required"; showAuthPrompt(); $("user").focus(); }
@@ -648,6 +674,13 @@
         try {
           clearBanner();
           $("crawlBtn").textContent = "Crawling…";
+          // Ensure we know which node serves this page so its topology card
+          // fetches /v1/info same-origin — Crawl can be clicked before the first
+          // refreshAll sets localPeerId.
+          if (!localPeerId) {
+            const local = await api("/v1/mesh?format=json");
+            localPeerId = (local.self && local.self.peer_id) || null;
+          }
           const topo = await api("/v1/mesh?format=json&crawl=true&validators_only=false");
           topologyLoaded = true;
           renderTopology(topo);

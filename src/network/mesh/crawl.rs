@@ -101,12 +101,13 @@ pub async fn crawl_mesh(
     for (pid, result) in responses {
         match result {
             Ok(Ok(Ok(view))) => {
-                nodes.push(classify_mesh_view(
-                    view,
-                    validators,
-                    current_height,
-                    validators_only,
-                ));
+                // Height 0 for remote responders: the diagnostics response does
+                // not carry the responder's own block height (gossip has no block
+                // store), and stamping the crawler's height here would make every
+                // node in the topology report the SAME height. 0 means "unknown
+                // from the crawl" — the UI shows real per-node heights via
+                // /v1/info instead. Only the local root (above) has a real height.
+                nodes.push(classify_mesh_view(view, validators, 0, validators_only));
             }
             Ok(Ok(Err(err))) => {
                 unreachable.push(unreachable_node(&pid, validators, format!("error: {err}")))
@@ -255,5 +256,19 @@ mod tests {
             .unreachable
             .iter()
             .any(|u| u.peer_id == r_pid.to_bytes()));
+
+        // Only the local root (self = A) carries the crawler's real height (100);
+        // remote responders report 0 (unknown from the crawl), not the crawler's
+        // height — otherwise every node would show the same height.
+        let height_of = |pid: &PeerId| {
+            topo.nodes
+                .iter()
+                .find(|n| n.local.as_ref().map(|l| l.peer_id.clone()) == Some(pid.to_bytes()))
+                .and_then(|n| n.local.as_ref())
+                .map(|l| l.current_height)
+        };
+        assert_eq!(height_of(&a_pid), Some(100));
+        assert_eq!(height_of(&b_pid), Some(0));
+        assert_eq!(height_of(&c_pid), Some(0));
     }
 }
