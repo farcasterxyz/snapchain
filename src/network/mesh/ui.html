@@ -364,25 +364,32 @@
         return obj.http_api_url || null;
       }
 
-      function renderSelf(self) {
+      function renderSelf(self, peers) {
         const card = $("selfCard");
         card.textContent = "";
         if (!self) {
           card.appendChild(el("span", "muted", "no local view"));
           return;
         }
+        // Effective consensus connectivity: validator peers we have a real link
+        // to (emergent mesh OR direct/explicit), which is what "am I connected
+        // for consensus" actually means — unlike the raw emergent-mesh count.
+        const validatorPeers = (peers || []).filter((p) => p.node_type === "validator");
+        const linkedCount = validatorPeers.filter((p) => peerLink(p, "consensus")).length;
+        const linksStr = validatorPeers.length ? linkedCount + "/" + validatorPeers.length : "—";
         const rows = [
           ["name", nameFor(self) + (self.operator ? " " + self.operator : "")],
           ["role", self.role || (self.is_validator ? "validator" : "non-validator")],
           ["network", self.network],
           ["version", self.snapchain_version],
           ["height", self.current_height],
-          ["consensus mesh", self.consensus_mesh_size],
+          ["consensus links", linksStr, "validator peers with an effective consensus link (emergent mesh + direct/explicit peers)"],
+          ["emergent mesh", self.consensus_mesh_size, "gossipsub emergent-mesh peers on the consensus topic; excludes direct/explicit peers, so 0 is normal when validators are wired as direct peers"],
           ["peer id", null],
           ["pubkey", null],
         ];
         const grid = el("div", "grid");
-        rows.forEach(([k, v]) => {
+        rows.forEach(([k, v, title]) => {
           const kv = el("div", "kv");
           kv.appendChild(el("span", "k", k));
           if (k === "peer id") {
@@ -398,7 +405,13 @@
             );
             kv.appendChild(val);
           } else {
-            kv.appendChild(el("span", "v", String(v == null ? "—" : v)));
+            let cls = null;
+            if (k === "consensus links" && validatorPeers.length) {
+              cls = linkedCount === validatorPeers.length ? "info-ok" : "cell-asym";
+            }
+            const val = el("span", cls, String(v == null ? "—" : v));
+            if (title) val.title = title;
+            kv.appendChild(val);
           }
           grid.appendChild(kv);
         });
@@ -469,17 +482,20 @@
       }
 
       // ---- rendering: topology ------------------------------------------
-      // Effective consensus link from a node to a given peer, mirroring the
-      // ASCII renderer's link_state: an explicit/direct peering counts as a link
-      // even though gossipsub excludes it from the emergent mesh (in_mesh=false).
+      // Effective link a peer has on a topic, mirroring the ASCII renderer's
+      // link_state: an explicit/direct peering counts as a link even though
+      // gossipsub excludes it from the emergent mesh (in_mesh=false).
       // Returns "mesh" | "direct" | null (sub-only / no link => null).
-      function linkTo(node, peerId, topic) {
-        const p = (node.peers || []).find((x) => x.peer_id === peerId);
-        if (!p) return null;
+      function peerLink(p, topic) {
         const t = (p.topics || []).find((x) => x.topic === topic);
         if (t && t.in_mesh) return "mesh";
         if (p.direct_peer && t && t.subscribed) return "direct";
-        return null; // subscribed-only or absent — not an effective link
+        return null;
+      }
+      // Same, but resolved from a node's peer list by peer id.
+      function linkTo(node, peerId, topic) {
+        const p = (node.peers || []).find((x) => x.peer_id === peerId);
+        return p ? peerLink(p, topic) : null;
       }
       function renderTopology(topo) {
         $("topoSection").style.display = "";
@@ -615,7 +631,7 @@
           // when the node has no public http_api_url, e.g. devnet).
           const info = await fetchInfo("");
           if (info.ok) localShards = info.shards;
-          renderSelf(view.self);
+          renderSelf(view.self, view.peers || []);
           renderPeers(view.peers || []);
           const self = view.self || {};
           $("topStatus").innerHTML =
