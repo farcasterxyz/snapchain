@@ -394,7 +394,7 @@
           ["name", nameFor(self) + (self.operator ? " " + self.operator : "")],
           ["role", self.role || (self.is_validator ? "validator" : "non-validator")],
           ["network", self.network],
-          ["version", self.snapchain_version],
+          ["protocol version", self.snapchain_version, "wire/consensus protocol version (EngineVersion.protocol_version) — a mismatch across nodes means incompatible engines; distinct from the app release shown by /v1/info"],
           ["height", self.current_height],
           ["consensus links", linksStr, "validator peers with an effective consensus link (emergent mesh + direct/explicit peers)"],
           ["emergent mesh", self.consensus_mesh_size, "gossipsub emergent-mesh peers on the consensus topic; excludes direct/explicit peers, so 0 is normal when validators are wired as direct peers"],
@@ -584,7 +584,9 @@
           const heightVal = el("span", null, s.current_height ? String(s.current_height) : "—");
           if (!s.current_height) heightVal.title = "unknown from crawl — see /v1/info";
           card.appendChild(el("div", "kv")).append(el("span", "k", "height"), heightVal);
-          card.appendChild(el("div", "kv")).append(el("span", "k", "version"), el("span", null, s.snapchain_version || "—"));
+          const protoVal = el("span", null, s.snapchain_version || "—");
+          protoVal.title = "wire/consensus protocol version — distinct from the app release in /v1/info";
+          card.appendChild(el("div", "kv")).append(el("span", "k", "protocol version"), protoVal);
           card.appendChild(el("div", "kv")).append(el("span", "k", "peers"), el("span", null, String((n.peers || []).length)));
           const infoLine = el("div", "kv");
           infoLine.appendChild(el("span", "k", "/v1/info"));
