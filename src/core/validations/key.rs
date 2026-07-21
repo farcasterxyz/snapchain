@@ -1,5 +1,5 @@
 use alloy_dyn_abi::TypedData;
-use alloy_primitives::{Address, PrimitiveSignature};
+use alloy_primitives::{Address, Signature};
 use alloy_sol_types::{sol, SolType};
 use serde_json::{json, Value};
 
@@ -186,7 +186,7 @@ fn recover_from_typed_data(
     let prehash = typed_data
         .eip712_signing_hash()
         .map_err(|_| ValidationError::InvalidHash)?;
-    let sig = PrimitiveSignature::from_bytes_and_parity(
+    let sig = Signature::from_bytes_and_parity(
         &signature[0..64],
         signature[64] != 0x1b && signature[64] != 0x00,
     );
@@ -309,7 +309,7 @@ pub fn verify_signed_key_request_metadata(
         return Err(ValidationError::InvalidSignedKeyRequest);
     }
 
-    let decoded = SignedKeyRequestMetadata::abi_decode(metadata, true)
+    let decoded = SignedKeyRequestMetadata::abi_decode(metadata)
         .map_err(|_| ValidationError::InvalidSignedKeyRequest)?;
 
     let deadline =

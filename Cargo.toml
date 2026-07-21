@@ -55,17 +55,17 @@ figment = { version = "0.10.19", features = ["env", "toml"] }
 futures-util = "0.3.31"
 indicatif = "0.17.7"
 url = "2.5.3"
-alloy-transport = "0.8.0"
-alloy-dyn-abi = { version = "0.8.15", features = ["eip712"] }
+alloy-transport = "2.0"
+alloy-dyn-abi = { version = "1", features = ["eip712"] }
 alloy-rlp = "0.3.9"
-alloy-transport-http = "0.8.0"
-alloy-sol-types = { version = "0.8.15", features = ["json"] }
-alloy-provider = "0.8.0"
-alloy-rpc-types = "0.8.0"
-alloy-primitives = "0.8.14"
-alloy-contract = "0.8.0"
-alloy-signer = "0.8.0"
-alloy-signer-local = { version = "0.8.0", features = ["mnemonic"] }
+alloy-transport-http = "2.0"
+alloy-sol-types = { version = "1", features = ["json"] }
+alloy-provider = "2.0"
+alloy-rpc-types = "2.0"
+alloy-primitives = "1"
+alloy-contract = "2.0"
+alloy-signer = "2.0"
+alloy-signer-local = { version = "2.0", features = ["mnemonic"] }
 ed25519-dalek = { version = "2.1.1", features = ["batch"] }
 pre-commit = "0.5.2"
 rocksdb = {git = "https://github.com/rust-rocksdb/rust-rocksdb.git", rev="a4f178d0ca668c4b48d993ab8aef6f4004780f23", features=["multi-threaded-cf", "jemalloc"]}
@@ -97,12 +97,6 @@ strum = "0.27.1"
 strum_macros = "0.27.1"
 governor = "0.10.0"
 moka = { version = "0.12.10", features = ["future"] }
-# Foundry sets the version of solar-parse to 0.1.1 and these need to be consistent for compilation to succeed. Foundry doesn't have a cargo crate that we can use.
-solar-interface = "=0.1.1"
-solar-ast = "=0.1.1"
-solar-data-structures = "=0.1.1"
-solar-macros = "=0.1.1"
-solar-config = "=0.1.1"
 nix = { version = "0.29", features = ["resource"] }
 tikv-jemallocator = "0.6"
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
@@ -116,8 +110,8 @@ insta = { version = "1.40", features = ["json"] }
 # ErrorPayload), the RpcClient builder, and `tower::Service` so
 # contract_signature tests can build a MockTransport without spinning up an
 # HTTP server or anvil.
-alloy-json-rpc = "0.8.3"
-alloy-rpc-client = "0.8.0"
+alloy-json-rpc = "2.0"
+alloy-rpc-client = "2.0"
 tower = { version = "0.5", default-features = false }
 filetime = "0.2"
 
