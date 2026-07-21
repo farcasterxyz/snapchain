@@ -12,6 +12,7 @@ use crate::core::validations::verification::VerificationAddressClaim;
 use crate::mempool::mempool::{MempoolRequest, MempoolSource};
 use crate::mempool::routing;
 use crate::network::gossip::GossipEvent;
+use crate::network::mesh::cache::MeshCache;
 use crate::network::mesh::crawl::crawl_mesh;
 use crate::network::mesh::view::{build_validator_peer_ids, classify_mesh_view, ValidatorPeerIds};
 use crate::proto::hub_service_server::HubService;
@@ -374,6 +375,9 @@ pub struct MyHubService {
     version: String,
     peer_id: String,
     id_registry_cache: Cache<Vec<u8>, OnChainEvent>,
+    /// Short-TTL cache for the admin mesh view / topology responses. Consulted
+    /// only *after* the admin auth check in each handler.
+    mesh_cache: MeshCache,
     // Synchronous lookup against the fname registry. Used to recover from the
     // race condition where a client submits a UserDataAdd for a username before
     // the background fname connector has polled the corresponding transfer. None
@@ -399,6 +403,7 @@ impl MyHubService {
         version: String,
         peer_id: String,
         fname_lookup: Option<Arc<dyn FnameTransferLookup>>,
+        mesh_config: crate::network::mesh::config::Config,
     ) -> Self {
         let parse_auth = |auth_str: &str| {
             let mut users = HashMap::new();
@@ -438,6 +443,16 @@ impl MyHubService {
             .eviction_policy(EvictionPolicy::lru())
             .build();
 
+        let mesh_cache = MeshCache::new(Duration::from_secs(mesh_config.cache_ttl_secs));
+        if mesh_config.cache_ttl_secs == 0 {
+            info!("Mesh view/topology cache disabled (cache_ttl_secs = 0)");
+        } else {
+            info!(
+                "Mesh view/topology cache enabled with {}s TTL",
+                mesh_config.cache_ttl_secs
+            );
+        }
+
         let service = Self {
             allowed_users,
             admin_allowed_users,
@@ -455,6 +470,7 @@ impl MyHubService {
             version,
             peer_id,
             id_registry_cache,
+            mesh_cache,
             fname_lookup,
         };
         service
@@ -2872,86 +2888,98 @@ impl HubService for MyHubService {
         &self,
         request: Request<GetMeshViewRequest>,
     ) -> Result<Response<MeshView>, Status> {
-        // Admin-gated diagnostic endpoint.
+        // Admin-gated diagnostic endpoint. Authenticate BEFORE touching the
+        // cache — a cached view must never be served to an unauthenticated
+        // caller.
         authenticate_request(&request, &self.admin_allowed_users)?;
         let validators_only = request.into_inner().validators_only;
 
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .gossip_tx
-            .send(GossipEvent::GetMeshView(tx))
-            .await
-            .map_err(|err| {
-                error!(
-                    { err = err.to_string() },
-                    "[get_mesh_view] error sending mesh view request"
-                );
-            });
+        self.mesh_cache
+            .view(validators_only, || async {
+                let (tx, rx) = oneshot::channel();
+                let _ = self
+                    .gossip_tx
+                    .send(GossipEvent::GetMeshView(tx))
+                    .await
+                    .map_err(|err| {
+                        error!(
+                            { err = err.to_string() },
+                            "[get_mesh_view] error sending mesh view request"
+                        );
+                    });
 
-        match timeout(DEFAULT_REQUEST_TIMEOUT, rx).await {
-            Ok(Ok(view)) => {
-                // Classify peers against the validator set effective at the current
-                // block height (this is the only place public-key -> validator-set
-                // mapping happens).
-                let current_height = self
-                    .block_stores
-                    .block_store
-                    .max_block_number()
-                    .unwrap_or(0);
-                let view = classify_mesh_view(
-                    view,
-                    &self.validator_peer_ids,
-                    current_height,
-                    validators_only,
-                );
-                Ok(Response::new(view))
-            }
-            Ok(Err(err)) => {
-                error!(
-                    { err = err.to_string() },
-                    "[get_mesh_view] error receiving mesh view response"
-                );
-                Err(Status::internal("Unable to retrieve mesh view."))
-            }
-            Err(_) => {
-                error!("[get_mesh_view] timeout receiving mesh view response");
-                Err(Status::internal("Unable to retrieve mesh view."))
-            }
-        }
+                match timeout(DEFAULT_REQUEST_TIMEOUT, rx).await {
+                    Ok(Ok(view)) => {
+                        // Classify peers against the validator set effective at the
+                        // current block height (this is the only place public-key ->
+                        // validator-set mapping happens).
+                        let current_height = self
+                            .block_stores
+                            .block_store
+                            .max_block_number()
+                            .unwrap_or(0);
+                        let view = classify_mesh_view(
+                            view,
+                            &self.validator_peer_ids,
+                            current_height,
+                            validators_only,
+                        );
+                        Ok(view)
+                    }
+                    Ok(Err(err)) => {
+                        error!(
+                            { err = err.to_string() },
+                            "[get_mesh_view] error receiving mesh view response"
+                        );
+                        Err(Status::internal("Unable to retrieve mesh view."))
+                    }
+                    Err(_) => {
+                        error!("[get_mesh_view] timeout receiving mesh view response");
+                        Err(Status::internal("Unable to retrieve mesh view."))
+                    }
+                }
+            })
+            .await
+            .map(Response::new)
     }
 
     async fn get_mesh_topology(
         &self,
         request: Request<GetMeshViewRequest>,
     ) -> Result<Response<MeshTopology>, Status> {
-        // Admin-gated diagnostic endpoint.
+        // Admin-gated diagnostic endpoint. Authenticate BEFORE touching the
+        // cache — a cached topology must never be served to an unauthenticated
+        // caller. The cache also single-flights concurrent misses, so a burst of
+        // requests triggers only one (expensive) crawl.
         authenticate_request(&request, &self.admin_allowed_users)?;
         let validators_only = request.into_inner().validators_only;
 
-        let current_height = self
-            .block_stores
-            .block_store
-            .max_block_number()
-            .unwrap_or(0);
-        let generated_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        self.mesh_cache
+            .topology(validators_only, || async {
+                let current_height = self
+                    .block_stores
+                    .block_store
+                    .max_block_number()
+                    .unwrap_or(0);
+                let generated_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
 
-        match crawl_mesh(
-            &self.gossip_tx,
-            &self.validator_peer_ids,
-            current_height,
-            validators_only,
-            generated_at,
-        )
-        .await
-        {
-            Ok(topology) => Ok(Response::new(topology)),
-            Err(err) => {
-                error!({ err = err }, "[get_mesh_topology] crawl failed");
-                Err(Status::internal("Unable to crawl mesh topology."))
-            }
-        }
+                crawl_mesh(
+                    &self.gossip_tx,
+                    &self.validator_peer_ids,
+                    current_height,
+                    validators_only,
+                    generated_at,
+                )
+                .await
+                .map_err(|err| {
+                    error!({ err = err }, "[get_mesh_topology] crawl failed");
+                    Status::internal("Unable to crawl mesh topology.")
+                })
+            })
+            .await
+            .map(Response::new)
     }
 }

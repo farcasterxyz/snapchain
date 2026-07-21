@@ -19,6 +19,7 @@ use tonic::async_trait;
 use tonic::metadata::MetadataValue;
 use tracing::error;
 
+use crate::network::mesh::nodes::NodeRegistry;
 use crate::proto::{
     self, embed, hub_service_server::HubService, link_body::Target, message_data::Body, CastType,
     FarcasterNetwork, HashScheme, MessageType, ReactionType, SignatureScheme, UserDataType,
@@ -1535,6 +1536,27 @@ pub struct ErrorResponse {
     pub error_detail: Option<String>,
 }
 
+/// Build the in-process gRPC mesh request, forwarding the caller's
+/// `authorization` header into gRPC metadata so the service's admin check runs.
+fn mesh_grpc_request(
+    headers: &HeaderMap,
+    validators_only: bool,
+) -> tonic::Request<proto::GetMeshViewRequest> {
+    let mut grpc_req = tonic::Request::new(proto::GetMeshViewRequest {
+        validators_only,
+        ttl: 0,
+        visited_peer_ids: vec![],
+    });
+    if let Some(auth) = headers.get("authorization") {
+        if let Ok(s) = auth.to_str() {
+            if let Ok(v) = MetadataValue::from_str(s) {
+                grpc_req.metadata_mut().insert("authorization", v);
+            }
+        }
+    }
+    grpc_req
+}
+
 // Shared response builders for the mesh endpoints (local view + crawl topology).
 fn text_plain_ok(body: String) -> Response<BoxBody<Bytes, Infallible>> {
     Response::builder()
@@ -1552,7 +1574,22 @@ fn json_ok(json: serde_json::Value) -> Response<BoxBody<Bytes, Infallible>> {
         .unwrap()
 }
 
+fn html_ok(body: &'static str) -> Response<BoxBody<Bytes, Infallible>> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/html; charset=utf-8")
+        // The page is static, but the data it fetches is admin-gated — don't let
+        // a shared cache hold it.
+        .header("cache-control", "no-store")
+        .body(Full::new(Bytes::from(body)).boxed())
+        .unwrap()
+}
+
 fn mesh_error_response(status: tonic::Status) -> Response<BoxBody<Bytes, Infallible>> {
+    // Deliberately no `WWW-Authenticate` header: the dashboard collects
+    // credentials in its own form, and a challenge header would make the browser
+    // pop a redundant native Basic-auth modal. The page's fetch() handles the
+    // 401 body itself.
     let code = if status.code() == tonic::Code::Unauthenticated {
         StatusCode::UNAUTHORIZED
     } else {
@@ -3535,15 +3572,18 @@ where
 // Router implementation
 pub struct Router<Service: HubService> {
     service: Arc<HubHttpServiceImpl<Service>>,
+    /// Known-node metadata for annotating mesh JSON with human-readable names.
+    nodes: Arc<NodeRegistry>,
 }
 
 impl<Service> Router<Service>
 where
     Service: HubService,
 {
-    pub fn new(service: HubHttpServiceImpl<Service>) -> Self {
+    pub fn new(service: HubHttpServiceImpl<Service>, nodes: Arc<NodeRegistry>) -> Self {
         Self {
             service: Arc::new(service),
+            nodes,
         }
     }
 
@@ -3768,6 +3808,7 @@ where
                 .await
             }
             (&Method::GET, "/v1/mesh") => self.handle_mesh_view(req).await,
+            (&Method::GET, "/v1/mesh/ui") => self.handle_mesh_ui(req).await,
             _ => Ok(Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .body(Full::new(Bytes::from("Not Found")).boxed())
@@ -3891,19 +3932,7 @@ where
         // consensus,mempool); the JSON always carries every topic.
         let topics = crate::network::mesh::render::parse_topics(topics_param.as_deref());
 
-        let auth = req.headers().get("authorization").cloned();
-        let mut grpc_req = tonic::Request::new(proto::GetMeshViewRequest {
-            validators_only,
-            ttl: 0,
-            visited_peer_ids: vec![],
-        });
-        if let Some(auth) = auth {
-            if let Ok(s) = auth.to_str() {
-                if let Ok(v) = MetadataValue::from_str(s) {
-                    grpc_req.metadata_mut().insert("authorization", v);
-                }
-            }
-        }
+        let grpc_req = mesh_grpc_request(req.headers(), validators_only);
 
         // `?crawl=true` assembles the network-wide topology over the gossip port;
         // otherwise return this node's local view.
@@ -3915,7 +3944,7 @@ where
                         let body = crate::network::mesh::render::render_topology(&topo, &topics);
                         Ok(text_plain_ok(body))
                     } else {
-                        let json = crate::network::mesh::render::topology_json(&topo);
+                        let json = crate::network::mesh::render::topology_json(&topo, &self.nodes);
                         Ok(json_ok(json))
                     }
                 }
@@ -3929,13 +3958,29 @@ where
                         let body = crate::network::mesh::render::render_mesh_view(&view, &topics);
                         Ok(text_plain_ok(body))
                     } else {
-                        let json = crate::network::mesh::render::mesh_view_json(&view);
+                        let json = crate::network::mesh::render::mesh_view_json(&view, &self.nodes);
                         Ok(json_ok(json))
                     }
                 }
                 Err(status) => Ok(mesh_error_response(status)),
             }
         }
+    }
+
+    /// Serve the self-contained mesh dashboard HTML at `/v1/mesh/ui`.
+    ///
+    /// The page shell carries no mesh data — every byte of that comes from the
+    /// admin-gated `/v1/mesh` JSON the page fetches with credentials entered in
+    /// its own form. So the shell itself is served ungated: gating it would make
+    /// the browser pop a native Basic-auth modal on navigation (a second,
+    /// redundant credential prompt), and would also make the diagnostics page
+    /// fail to load in exactly the situations — a wedged gossip loop — where an
+    /// operator most needs it. `_req` is unused; auth lives on the data path.
+    async fn handle_mesh_ui(
+        &self,
+        _req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
+        Ok(html_ok(crate::network::mesh::ui::UI_HTML))
     }
 
     async fn handle_request<Req, Resp, F>(
@@ -4115,6 +4160,7 @@ pub fn spawn_http_server<S>(
     listener: TcpListener,
     http_service: HubHttpServiceImpl<S>,
     config: Config,
+    nodes: Arc<NodeRegistry>,
 ) -> tokio::task::JoinHandle<()>
 where
     S: HubService + 'static,
@@ -4126,8 +4172,9 @@ where
                     let io = TokioIo::new(stream);
                     let config = config.clone();
                     let service_clone = http_service.clone();
+                    let nodes = nodes.clone();
                     tokio::spawn(async move {
-                        let router = Router::new(service_clone);
+                        let router = Router::new(service_clone, nodes);
                         if let Err(err) = http1::Builder::new()
                             .serve_connection(io, service_fn(|r| router.handle(r, &config)))
                             .await

@@ -105,6 +105,7 @@ async fn start_servers(
         VERSION.unwrap_or("unknown").to_string(),
         local_peer_id_str,
         fname_lookup,
+        app_config.mesh.clone(),
     ));
 
     let replication_service = if let Some(replicator) = replicator {
@@ -153,6 +154,15 @@ async fn start_servers(
     let http_service = HubHttpServiceImpl {
         service: service.clone(),
     };
+    // Built once and shared across all connections — maps peers to human-readable
+    // names for the mesh JSON / UI.
+    let mesh_nodes = Arc::new(snapchain::network::mesh::nodes::NodeRegistry::from_config(
+        &app_config.mesh,
+    ));
+    info!(
+        known_nodes = mesh_nodes.len(),
+        "Mesh known-node registry loaded"
+    );
     tokio::spawn(async move {
         let listener = TcpListener::bind(http_socket_addr).await.unwrap();
         info!(http_addr = http_addr, "HttpService listening",);
@@ -160,6 +170,7 @@ async fn start_servers(
             listener,
             http_service,
             http_server_config,
+            mesh_nodes,
         );
         // Match the previous behaviour: when the accept loop exits, signal shutdown.
         let _ = accept_handle.await;

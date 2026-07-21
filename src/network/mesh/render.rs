@@ -6,6 +6,7 @@
 //! this only narrows the *display*. See [`DEFAULT_TOPICS`].
 
 use crate::network::gossip::{ALL_TOPICS, CONSENSUS_TOPIC, MEMPOOL_TOPIC};
+use crate::network::mesh::nodes::{resolve_http_api_url, NodeRegistry, NodeRole, Operator};
 use crate::proto;
 use libp2p::PeerId;
 use std::collections::{BTreeMap, HashMap};
@@ -147,55 +148,128 @@ pub fn render_mesh_view(view: &proto::MeshView, topics: &[String]) -> String {
 
 /// Clean JSON representation of a mesh view: peer ids as base58 strings,
 /// public keys as hex, enums as labels (instead of proto's raw bytes/ints).
-pub fn mesh_view_json(view: &proto::MeshView) -> serde_json::Value {
+/// Each node/peer object is annotated with known-node metadata (name, operator,
+/// role) and a browser-reachable `http_api_url` via [`annotate`].
+pub fn mesh_view_json(view: &proto::MeshView, nodes: &NodeRegistry) -> serde_json::Value {
     use serde_json::json;
     let local = view.local.as_ref().map(|l| {
-        json!({
-            "peer_id": peer_str(&l.peer_id),
-            "consensus_public_key": hex_or_null(&l.consensus_public_key),
-            "is_validator": l.is_validator,
-            "gossip_address": l.gossip_address,
-            "rpc_address": l.rpc_address,
-            "snapchain_version": l.snapchain_version,
-            "network": network_name(l.network),
-            "subscribed_topics": l.subscribed_topics,
-            "consensus_mesh_size": l.consensus_mesh_size,
-            "current_height": l.current_height,
-        })
+        let peer_id = peer_str(&l.peer_id);
+        let pubkey = hex_or_null(&l.consensus_public_key);
+        // Derive `self`'s http_api_url from its announced gossip multiaddr
+        // (host + default HTTP port) — the same best-effort derivation used for
+        // peers' observed addresses. This matters for a topology crawl, where
+        // every remote node's `self` runs through here: a remote validator not
+        // in the known-node table still gets a fetchable URL from its public
+        // gossip address. (`rpc_address` is deliberately NOT used — it's the
+        // gRPC address.) The local node is reached same-origin regardless.
+        let annotations = annotate(nodes, &peer_id, pubkey.as_deref(), &l.gossip_address);
+        merge_annotations(
+            json!({
+                "peer_id": peer_id,
+                "consensus_public_key": pubkey,
+                "is_validator": l.is_validator,
+                "gossip_address": l.gossip_address,
+                "rpc_address": l.rpc_address,
+                "snapchain_version": l.snapchain_version,
+                "network": network_name(l.network),
+                "subscribed_topics": l.subscribed_topics,
+                "consensus_mesh_size": l.consensus_mesh_size,
+                "current_height": l.current_height,
+            }),
+            annotations,
+        )
     });
     let peers: Vec<_> = view
         .peers
         .iter()
         .map(|p| {
-            json!({
-                "peer_id": peer_str(&p.peer_id),
-                "node_type": node_type_label(p.node_type),
-                "consensus_public_key": p.consensus_public_key.as_ref().map(hex::encode),
-                "connected": p.connected,
-                "direct_peer": p.direct_peer,
-                "contact_source": contact_source_label(p.contact_source),
-                "observed_address": p.observed_address,
-                "contact_info": p.contact_info.as_ref().map(|c| json!({
-                    "gossip_address": c.gossip_address,
-                    "announce_rpc_address": c.announce_rpc_address,
-                    "snapchain_version": c.snapchain_version,
-                    "network": network_name(c.network),
-                    "timestamp": c.timestamp,
-                })),
-                "topics": p.topics.iter().map(|t| json!({
-                    "topic": t.topic, "subscribed": t.subscribed, "in_mesh": t.in_mesh
-                })).collect::<Vec<_>>(),
-                "gossip_rates": p.gossip_rates.iter().map(|r| json!({
-                    "topic": r.topic,
-                    "msgs_per_sec": r.msgs_per_sec,
-                    "bytes_per_sec": r.bytes_per_sec,
-                    "total_msgs": r.total_msgs,
-                    "total_bytes": r.total_bytes,
-                })).collect::<Vec<_>>(),
-            })
+            let peer_id = peer_str(&p.peer_id);
+            let pubkey = p.consensus_public_key.as_ref().map(hex::encode);
+            let annotations = annotate(nodes, &peer_id, pubkey.as_deref(), &p.observed_address);
+            merge_annotations(
+                json!({
+                    "peer_id": peer_id,
+                    "node_type": node_type_label(p.node_type),
+                    "consensus_public_key": pubkey,
+                    "connected": p.connected,
+                    "direct_peer": p.direct_peer,
+                    "contact_source": contact_source_label(p.contact_source),
+                    "observed_address": p.observed_address,
+                    "contact_info": p.contact_info.as_ref().map(|c| json!({
+                        "gossip_address": c.gossip_address,
+                        "announce_rpc_address": c.announce_rpc_address,
+                        "snapchain_version": c.snapchain_version,
+                        "network": network_name(c.network),
+                        "timestamp": c.timestamp,
+                    })),
+                    "topics": p.topics.iter().map(|t| json!({
+                        "topic": t.topic, "subscribed": t.subscribed, "in_mesh": t.in_mesh
+                    })).collect::<Vec<_>>(),
+                    "gossip_rates": p.gossip_rates.iter().map(|r| json!({
+                        "topic": r.topic,
+                        "msgs_per_sec": r.msgs_per_sec,
+                        "bytes_per_sec": r.bytes_per_sec,
+                        "total_msgs": r.total_msgs,
+                        "total_bytes": r.total_bytes,
+                    })).collect::<Vec<_>>(),
+                }),
+                annotations,
+            )
         })
         .collect();
     json!({ "self": local, "peers": peers, "generated_at": view.generated_at })
+}
+
+/// Known-node annotations attached to each node/peer JSON object: `name`,
+/// `operator`, `role`, `known_offline`, `note`, `http_api_url`, and
+/// `http_api_url_source`. Fields are null when the node isn't in the registry.
+fn annotate(
+    nodes: &NodeRegistry,
+    peer_id: &str,
+    pubkey: Option<&str>,
+    observed: &str,
+) -> serde_json::Value {
+    use serde_json::json;
+    let known = nodes.lookup(peer_id, pubkey);
+    let url = resolve_http_api_url(known, observed);
+    json!({
+        "name": known.map(|k| k.name.clone()),
+        "operator": known.and_then(|k| operator_label(k.operator)),
+        "role": known.and_then(|k| role_label(k.role)),
+        "known_offline": known.map(|k| k.offline).unwrap_or(false),
+        "note": known.and_then(|k| k.note.clone()),
+        "http_api_url": url.as_ref().map(|(u, _)| u.clone()),
+        "http_api_url_source": url.as_ref().map(|(_, s)| s.as_str()),
+    })
+}
+
+/// Merge annotation fields into a node/peer object (both must be JSON objects).
+fn merge_annotations(mut base: serde_json::Value, extra: serde_json::Value) -> serde_json::Value {
+    if let (Some(base_obj), Some(extra_obj)) = (base.as_object_mut(), extra.as_object()) {
+        for (key, value) in extra_obj {
+            base_obj.insert(key.clone(), value.clone());
+        }
+    }
+    base
+}
+
+fn operator_label(operator: Operator) -> Option<&'static str> {
+    match operator {
+        Operator::Neynar => Some("neynar"),
+        Operator::Merkle => Some("merkle"),
+        Operator::Community => Some("community"),
+        Operator::Unknown => None,
+    }
+}
+
+fn role_label(role: NodeRole) -> Option<&'static str> {
+    match role {
+        NodeRole::MainnetValidator => Some("mainnet_validator"),
+        NodeRole::MainnetReader => Some("mainnet_reader"),
+        NodeRole::TestnetValidator => Some("testnet_validator"),
+        NodeRole::TestnetReader => Some("testnet_reader"),
+        NodeRole::Unknown => None,
+    }
 }
 
 fn peer_str(peer_id: &[u8]) -> String {
@@ -474,15 +548,25 @@ pub fn render_topology(topo: &proto::MeshTopology, topics: &[String]) -> String 
 
 /// Clean JSON for an aggregated topology: each node via [`mesh_view_json`], plus
 /// the unreachable list and generation time.
-pub fn topology_json(topo: &proto::MeshTopology) -> serde_json::Value {
+pub fn topology_json(topo: &proto::MeshTopology, nodes: &NodeRegistry) -> serde_json::Value {
     use serde_json::json;
     json!({
-        "nodes": topo.nodes.iter().map(mesh_view_json).collect::<Vec<_>>(),
-        "unreachable": topo.unreachable.iter().map(|u| json!({
-            "peer_id": peer_str(&u.peer_id),
-            "consensus_public_key": hex_or_null(&u.consensus_public_key),
-            "reason": u.reason,
-        })).collect::<Vec<_>>(),
+        "nodes": topo.nodes.iter().map(|v| mesh_view_json(v, nodes)).collect::<Vec<_>>(),
+        "unreachable": topo.unreachable.iter().map(|u| {
+            let peer_id = peer_str(&u.peer_id);
+            let pubkey = hex_or_null(&u.consensus_public_key);
+            // Even an unreachable validator may have a known http_api_url the UI
+            // can still try; annotate with no live address.
+            let annotations = annotate(nodes, &peer_id, pubkey.as_deref(), "");
+            merge_annotations(
+                json!({
+                    "peer_id": peer_id,
+                    "consensus_public_key": pubkey,
+                    "reason": u.reason,
+                }),
+                annotations,
+            )
+        }).collect::<Vec<_>>(),
         "generated_at": topo.generated_at,
     })
 }
@@ -509,6 +593,7 @@ fn col_tag(peer_id: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     fn default_topics() -> Vec<String> {
         DEFAULT_TOPICS.iter().map(|t| t.to_string()).collect()
@@ -683,7 +768,7 @@ mod tests {
         assert!(out.contains("READER SPOKES (1)"));
 
         // JSON carries nodes, unreachable, and the generation time.
-        let json = topology_json(&topo);
+        let json = topology_json(&topo, &NodeRegistry::builtin());
         assert_eq!(json["generated_at"], 7);
         assert_eq!(json["nodes"].as_array().unwrap().len(), 2);
         assert_eq!(json["unreachable"][0]["reason"], "not_connected");
@@ -855,5 +940,147 @@ mod tests {
             mempool.contains('>') || mempool.contains('<'),
             "expected mempool asymmetry:\n{out}"
         );
+    }
+
+    // mordor's peer id / consensus pubkey, from the builtin registry.
+    const MORDOR_PEER_ID: &str = "12D3KooWCc28TYrrXFivwUshyZ8R5HqPMgx4f7AP54iCDLYr7kFR";
+    const MORDOR_PUBKEY: &str = "29696eb40eb900a329a8d2542edef15d552c9ba6ded7882276be1e9eca090970";
+
+    fn mordor_bytes() -> (Vec<u8>, Vec<u8>) {
+        (
+            PeerId::from_str(MORDOR_PEER_ID).unwrap().to_bytes(),
+            hex::decode(MORDOR_PUBKEY).unwrap(),
+        )
+    }
+
+    #[test]
+    fn mesh_view_json_annotates_known_self() {
+        let (peer_id, pubkey) = mordor_bytes();
+        let view = proto::MeshView {
+            local: Some(proto::MeshSelf {
+                peer_id,
+                consensus_public_key: pubkey,
+                ..Default::default()
+            }),
+            peers: vec![],
+            generated_at: 0,
+        };
+        let json = mesh_view_json(&view, &NodeRegistry::builtin());
+        let local = &json["self"];
+        assert_eq!(local["name"], "mordor");
+        assert_eq!(local["operator"], "neynar");
+        assert_eq!(local["role"], "mainnet_validator");
+        assert_eq!(local["http_api_url"], "http://107.20.169.236:3381");
+        assert_eq!(local["http_api_url_source"], "known");
+        assert_eq!(local["known_offline"], false);
+    }
+
+    #[test]
+    fn mesh_view_json_self_derives_url_from_public_gossip_address() {
+        // A `self` not in the known-node table (e.g. a remote validator in a
+        // topology crawl) derives its http_api_url from its announced gossip
+        // multiaddr — host + default HTTP port.
+        let view = proto::MeshView {
+            local: Some(proto::MeshSelf {
+                peer_id: PeerId::random().to_bytes(),
+                gossip_address: "/ip4/198.51.100.7/udp/50051/quic-v1".to_string(),
+                ..Default::default()
+            }),
+            peers: vec![],
+            generated_at: 0,
+        };
+        let json = mesh_view_json(&view, &NodeRegistry::builtin());
+        let local = &json["self"];
+        assert!(local["name"].is_null());
+        assert_eq!(local["http_api_url"], "http://198.51.100.7:3381");
+        assert_eq!(local["http_api_url_source"], "observed");
+    }
+
+    #[test]
+    fn mesh_view_json_self_omits_url_for_private_gossip_address() {
+        // Devnet-style unspecified/listen gossip address → no derived URL.
+        let view = proto::MeshView {
+            local: Some(proto::MeshSelf {
+                peer_id: PeerId::random().to_bytes(),
+                gossip_address: "/ip4/0.0.0.0/udp/50051/quic-v1".to_string(),
+                ..Default::default()
+            }),
+            peers: vec![],
+            generated_at: 0,
+        };
+        let json = mesh_view_json(&view, &NodeRegistry::builtin());
+        assert!(json["self"]["http_api_url"].is_null());
+    }
+
+    #[test]
+    fn mesh_view_json_unknown_peer_has_null_annotations() {
+        let view = proto::MeshView {
+            local: None,
+            peers: vec![proto::MeshPeer {
+                peer_id: PeerId::random().to_bytes(),
+                node_type: proto::MeshNodeType::Validator as i32,
+                ..Default::default()
+            }],
+            generated_at: 0,
+        };
+        let json = mesh_view_json(&view, &NodeRegistry::builtin());
+        let peer = &json["peers"][0];
+        assert!(peer["name"].is_null());
+        assert!(peer["operator"].is_null());
+        assert!(peer["http_api_url"].is_null());
+        assert_eq!(peer["known_offline"], false);
+    }
+
+    #[test]
+    fn mesh_view_json_derives_url_from_public_observed_address() {
+        let view = proto::MeshView {
+            local: None,
+            peers: vec![proto::MeshPeer {
+                peer_id: PeerId::random().to_bytes(),
+                observed_address: "/ip4/203.0.113.9/tcp/3382".to_string(),
+                ..Default::default()
+            }],
+            generated_at: 0,
+        };
+        let json = mesh_view_json(&view, &NodeRegistry::builtin());
+        let peer = &json["peers"][0];
+        assert_eq!(peer["http_api_url"], "http://203.0.113.9:3381");
+        assert_eq!(peer["http_api_url_source"], "observed");
+    }
+
+    #[test]
+    fn mesh_view_json_omits_url_for_private_observed_address() {
+        let view = proto::MeshView {
+            local: None,
+            peers: vec![proto::MeshPeer {
+                peer_id: PeerId::random().to_bytes(),
+                observed_address: "/ip4/172.31.82.100/tcp/3382".to_string(),
+                ..Default::default()
+            }],
+            generated_at: 0,
+        };
+        let json = mesh_view_json(&view, &NodeRegistry::builtin());
+        assert!(json["peers"][0]["http_api_url"].is_null());
+    }
+
+    #[test]
+    fn topology_json_annotates_unreachable_entries() {
+        let (peer_id, pubkey) = mordor_bytes();
+        let topo = proto::MeshTopology {
+            nodes: vec![],
+            unreachable: vec![proto::UnreachableNode {
+                peer_id,
+                consensus_public_key: pubkey,
+                reason: "not_connected".to_string(),
+            }],
+            generated_at: 0,
+        };
+        let json = topology_json(&topo, &NodeRegistry::builtin());
+        let entry = &json["unreachable"][0];
+        assert_eq!(entry["name"], "mordor");
+        assert_eq!(entry["operator"], "neynar");
+        assert_eq!(entry["reason"], "not_connected");
+        // A known-but-unreachable node still surfaces its table URL for the UI.
+        assert_eq!(entry["http_api_url"], "http://107.20.169.236:3381");
     }
 }

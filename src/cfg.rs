@@ -109,6 +109,7 @@ pub struct Config {
     pub read_node: bool,
     pub pruning: PruningConfig,
     pub http_server: http_server::Config,
+    pub mesh: network::mesh::config::Config,
     pub replication: ReplicationConfig,
     pub block_receiver: block_receiver::Config,
 }
@@ -136,6 +137,7 @@ impl Default for Config {
             read_node: false,
             pruning: PruningConfig::default(),
             http_server: http_server::Config::default(),
+            mesh: network::mesh::config::Config::default(),
             replication: ReplicationConfig::default(),
             block_receiver: block_receiver::Config::default(),
         }

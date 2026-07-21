@@ -577,6 +577,7 @@ impl NodeForTest {
             "".to_string(),
             "".to_string(),
             None,
+            Default::default(),
         ));
 
         let grpc_service = hub_service.clone();
@@ -2608,7 +2609,12 @@ async fn test_http_server_smoke() {
     let http_service = HubHttpServiceImpl {
         service: network.first_live_node().hub_service(),
     };
-    let _http_handle = spawn_http_server(listener, http_service, HttpConfig::default());
+    let _http_handle = spawn_http_server(
+        listener,
+        http_service,
+        HttpConfig::default(),
+        std::sync::Arc::new(snapchain::network::mesh::nodes::NodeRegistry::builtin()),
+    );
 
     // Tiny settle delay so the spawned accept loop is ready before the first request.
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -2631,6 +2637,24 @@ async fn test_http_server_smoke() {
         Some(num_shards as u64),
         "/v1/info numShards mismatch: {info_json}"
     );
+
+    // /v1/mesh/ui — the dashboard shell is served ungated (it carries no mesh
+    // data; the data it fetches is admin-gated). Should return the HTML page.
+    let ui = client
+        .get(format!("{base}/v1/mesh/ui"))
+        .send()
+        .await
+        .expect("GET /v1/mesh/ui failed");
+    assert_eq!(ui.status(), reqwest::StatusCode::OK, "/v1/mesh/ui status");
+    assert_eq!(
+        ui.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("text/html; charset=utf-8"),
+        "/v1/mesh/ui content-type"
+    );
+    let ui_body = ui.text().await.expect("/v1/mesh/ui body");
+    assert!(ui_body.contains("Snapchain"), "/v1/mesh/ui body");
 
     // /v1/castById — pull back the cast we previously submitted via gRPC. Hash
     // is sent hex-encoded with the 0x prefix per the JSON encoding the HTTP
