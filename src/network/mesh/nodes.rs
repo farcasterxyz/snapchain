@@ -399,6 +399,14 @@ impl NodeRegistry {
 
     /// Drop any existing entry the incoming config node matches, so a whole
     /// entry (both index keys) is replaced rather than partially merged.
+    ///
+    /// KNOWN EDGE CASE (uncovered): only the *first* match is removed — by
+    /// pubkey, else by peer id. A config entry whose pubkey matches builtin A but
+    /// whose peer id matches a *different* builtin B removes A, then the later
+    /// `insert` overwrites B's peer-id index slot while B's pubkey index entry
+    /// survives — leaving B half-updated (reachable by pubkey but not peer id).
+    /// This requires a pathological config (an entry carrying another node's peer
+    /// id) and is not currently guarded. See GitHub issue (tracked separately).
     fn remove_existing(&mut self, node: &KnownNode) {
         let existing = node
             .consensus_public_key
