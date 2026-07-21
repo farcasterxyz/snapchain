@@ -2638,8 +2638,8 @@ async fn test_http_server_smoke() {
         "/v1/info numShards mismatch: {info_json}"
     );
 
-    // /v1/mesh/ui — the admin-gated dashboard. Auth is open in this harness
-    // (no admin_rpc_auth), so it should serve the HTML page.
+    // /v1/mesh/ui — the dashboard shell is served ungated (it carries no mesh
+    // data; the data it fetches is admin-gated). Should return the HTML page.
     let ui = client
         .get(format!("{base}/v1/mesh/ui"))
         .send()

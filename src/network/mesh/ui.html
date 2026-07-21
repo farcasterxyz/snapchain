@@ -223,6 +223,15 @@
         b.className = "banner err";
         b.textContent = msg;
       }
+      function showAuthPrompt() {
+        // Softer than an error: expected on first load before creds are entered.
+        const b = $("banner");
+        b.className = "banner warn";
+        b.textContent =
+          authToken()
+            ? "Invalid credentials — check the username/password above."
+            : "Enter admin credentials above and click Save to load mesh data (leave blank if this node has no admin auth).";
+      }
       function clearBanner() {
         $("banner").className = "banner";
       }
@@ -262,11 +271,16 @@
         s.onclick = () => navigator.clipboard && navigator.clipboard.writeText(text);
         return s;
       }
-      function topicChip(t) {
-        let cls = "grey";
-        if (t.in_mesh) cls = "green";
-        else if (t.subscribed) cls = "amber";
-        return el("span", "chip " + cls, t.topic);
+      // Chip colour mirrors the effective link state (see linkTo): a direct/
+      // explicit peer is a healthy link (green ◆) even though in_mesh is false.
+      function topicChip(peer, t) {
+        let cls = "grey", label = t.topic, title = "not subscribed";
+        if (t.in_mesh) { cls = "green"; title = "in mesh"; }
+        else if (peer.direct_peer && t.subscribed) { cls = "green"; label = "◆ " + t.topic; title = "direct/explicit peer (healthy, bypasses emergent mesh)"; }
+        else if (t.subscribed) { cls = "amber"; title = "subscribed, not meshed"; }
+        const chip = el("span", "chip " + cls, label);
+        chip.title = title;
+        return chip;
       }
       function rateFor(peer, topic) {
         const r = (peer.gossip_rates || []).find((x) => x.topic === topic);
@@ -417,7 +431,7 @@
           tr.appendChild(el("td", "mono-sm", p.contact_source || ""));
 
           const topicsCell = el("td");
-          (p.topics || []).forEach((t) => topicsCell.appendChild(topicChip(t)));
+          (p.topics || []).forEach((t) => topicsCell.appendChild(topicChip(p, t)));
           tr.appendChild(topicsCell);
 
           tr.appendChild(el("td", null, rateFor(p, "consensus")));
@@ -445,50 +459,73 @@
       }
 
       // ---- rendering: topology ------------------------------------------
-      function consensusMeshSet(node) {
-        // peer ids this node has an in-mesh consensus link to.
-        const set = new Set();
-        (node.peers || []).forEach((p) => {
-          if ((p.topics || []).some((t) => t.topic === "consensus" && t.in_mesh)) {
-            set.add(p.peer_id);
-          }
-        });
-        return set;
+      // Effective consensus link from a node to a given peer, mirroring the
+      // ASCII renderer's link_state: an explicit/direct peering counts as a link
+      // even though gossipsub excludes it from the emergent mesh (in_mesh=false).
+      // Returns "mesh" | "direct" | null (sub-only / no link => null).
+      function linkTo(node, peerId, topic) {
+        const p = (node.peers || []).find((x) => x.peer_id === peerId);
+        if (!p) return null;
+        const t = (p.topics || []).find((x) => x.topic === topic);
+        if (t && t.in_mesh) return "mesh";
+        if (p.direct_peer && t && t.subscribed) return "direct";
+        return null; // subscribed-only or absent — not an effective link
       }
       function renderTopology(topo) {
         $("topoSection").style.display = "";
         const nodes = (topo.nodes || []).filter((n) => n.self);
-        const meshSets = new Map();
-        nodes.forEach((n) => meshSets.set(n.self.peer_id, consensusMeshSet(n)));
+        const byId = new Map();
+        nodes.forEach((n) => byId.set(n.self.peer_id, n));
         const ids = nodes.map((n) => n.self.peer_id);
 
-        // Consensus reachability matrix; asymmetric edges highlighted.
+        // Consensus reachability matrix. Each cell combines both directions,
+        // matching the ASCII endpoint: ● both meshed, ◆ linked (>=1 direct),
+        // ▸/◂ one-way (asymmetric), · no link.
+        let healthy = 0, asym = 0, gaps = 0; // over unordered validator pairs
         const wrap = $("topoMatrixWrap");
         wrap.textContent = "";
-        wrap.appendChild(el("div", "mono-sm", "Consensus in-mesh matrix — row sees column. Amber = one-way (asymmetric) link."));
         const table = el("table", "matrix");
         const header = el("tr");
         header.appendChild(el("th", "rowhdr", "row \\ col"));
         nodes.forEach((n) => header.appendChild(el("th", null, nameFor(n.self))));
         table.appendChild(header);
-        nodes.forEach((rowNode) => {
+        nodes.forEach((rowNode, i) => {
           const tr = el("tr");
           tr.appendChild(el("td", "rowhdr", nameFor(rowNode.self)));
-          const rowSet = meshSets.get(rowNode.self.peer_id);
-          ids.forEach((colId) => {
-            if (colId === rowNode.self.peer_id) {
-              tr.appendChild(el("td", "cell-self", "·"));
+          ids.forEach((colId, j) => {
+            if (i === j) {
+              tr.appendChild(el("td", "cell-self", "—"));
               return;
             }
-            const rc = rowSet.has(colId);
-            const cr = (meshSets.get(colId) || new Set()).has(rowNode.self.peer_id);
+            const a = linkTo(rowNode, colId, "consensus"); // row -> col
+            const b = linkTo(byId.get(colId), rowNode.self.peer_id, "consensus"); // col -> row
             let cls = "cell-no", ch = "·";
-            if (rc && cr) { cls = "cell-yes"; ch = "●"; }
-            else if (rc || cr) { cls = "cell-asym"; ch = rc ? "▸" : "◂"; }
+            if (a && b) { cls = "cell-yes"; ch = a === "mesh" && b === "mesh" ? "●" : "◆"; }
+            else if (a || b) { cls = "cell-asym"; ch = a ? "▸" : "◂"; }
+            // Tally each unordered pair once (upper triangle).
+            if (j > i) { if (a && b) healthy++; else if (a || b) asym++; else gaps++; }
             tr.appendChild(el("td", cls, ch));
           });
           table.appendChild(tr);
         });
+
+        // At-a-glance health line above the matrix.
+        const total = healthy + asym + gaps;
+        const summary = el("div");
+        summary.style.marginBottom = "6px";
+        if (total === 0) {
+          summary.appendChild(el("span", "muted", "single node — no validator pairs"));
+        } else if (asym === 0 && gaps === 0) {
+          summary.appendChild(el("span", "info-ok", "✓ all " + total + " validator pair(s) fully consensus-linked"));
+        } else {
+          const parts = [];
+          if (gaps) parts.push(gaps + " gap");
+          if (asym) parts.push(asym + " asymmetric");
+          const warn = el("span", "cell-asym", "⚠ " + healthy + "/" + total + " pair(s) healthy · " + parts.join(", "));
+          summary.appendChild(warn);
+        }
+        wrap.appendChild(summary);
+        wrap.appendChild(el("div", "mono-sm", "Consensus links — row → column. ● both meshed · ◆ direct/explicit (healthy) · amber ▸◂ one-way (asymmetric) · grey · none. Production wires validators as direct peers, so ◆ is the normal healthy state."));
         wrap.appendChild(table);
 
         // Per-node cards + /v1/info.
@@ -572,9 +609,8 @@
             " · " + ago(view.generated_at);
           if (topologyLoaded) await loadTopology();
         } catch (e) {
-          $("topStatus").textContent = "error";
-          showError(e.message);
-          if (e.unauthorized) $("user").focus();
+          if (e.unauthorized) { $("topStatus").textContent = "auth required"; showAuthPrompt(); $("user").focus(); }
+          else { $("topStatus").textContent = "error"; showError(e.message); }
         }
       }
 
@@ -586,8 +622,8 @@
           topologyLoaded = true;
           renderTopology(topo);
         } catch (e) {
-          showError(e.message);
-          if (e.unauthorized) $("user").focus();
+          if (e.unauthorized) { showAuthPrompt(); $("user").focus(); }
+          else showError(e.message);
         } finally {
           $("crawlBtn").textContent = "Crawl topology";
         }

@@ -1586,8 +1586,11 @@ fn html_ok(body: &'static str) -> Response<BoxBody<Bytes, Infallible>> {
 }
 
 fn mesh_error_response(status: tonic::Status) -> Response<BoxBody<Bytes, Infallible>> {
-    let unauthorized = status.code() == tonic::Code::Unauthenticated;
-    let code = if unauthorized {
+    // Deliberately no `WWW-Authenticate` header: the dashboard collects
+    // credentials in its own form, and a challenge header would make the browser
+    // pop a redundant native Basic-auth modal. The page's fetch() handles the
+    // 401 body itself.
+    let code = if status.code() == tonic::Code::Unauthenticated {
         StatusCode::UNAUTHORIZED
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
@@ -1596,15 +1599,9 @@ fn mesh_error_response(status: tonic::Status) -> Response<BoxBody<Bytes, Infalli
         error: status.message().to_string(),
         error_detail: None,
     };
-    let mut builder = Response::builder()
+    Response::builder()
         .status(code)
-        .header("content-type", "application/json");
-    // Prompt the browser for credentials when navigating to an admin-gated
-    // mesh endpoint (e.g. /v1/mesh/ui). Harmless for CLI clients.
-    if unauthorized {
-        builder = builder.header("www-authenticate", "Basic realm=\"snapchain-mesh\"");
-    }
-    builder
+        .header("content-type", "application/json")
         .body(Full::new(Bytes::from(serde_json::to_vec(&err).unwrap())).boxed())
         .unwrap()
 }
@@ -3970,22 +3967,20 @@ where
         }
     }
 
-    /// Serve the self-contained mesh dashboard HTML at `/v1/mesh/ui`. Admin-gated
-    /// by reusing the auth check on `get_mesh_view` (the `Router` has no direct
-    /// access to the credential map): the payload is discarded, but a failed auth
-    /// yields a 401 with a `WWW-Authenticate` header so the browser prompts. The
-    /// page then fetches the mesh JSON itself using in-page credentials. Thanks to
-    /// the response cache, this probe shares the same `(local view, validators
-    /// only)` slot the page's first data fetch will hit.
+    /// Serve the self-contained mesh dashboard HTML at `/v1/mesh/ui`.
+    ///
+    /// The page shell carries no mesh data — every byte of that comes from the
+    /// admin-gated `/v1/mesh` JSON the page fetches with credentials entered in
+    /// its own form. So the shell itself is served ungated: gating it would make
+    /// the browser pop a native Basic-auth modal on navigation (a second,
+    /// redundant credential prompt), and would also make the diagnostics page
+    /// fail to load in exactly the situations — a wedged gossip loop — where an
+    /// operator most needs it. `_req` is unused; auth lives on the data path.
     async fn handle_mesh_ui(
         &self,
-        req: Request<hyper::body::Incoming>,
+        _req: Request<hyper::body::Incoming>,
     ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
-        let grpc_req = mesh_grpc_request(req.headers(), true);
-        match self.service.service.get_mesh_view(grpc_req).await {
-            Ok(_) => Ok(html_ok(crate::network::mesh::ui::UI_HTML)),
-            Err(status) => Ok(mesh_error_response(status)),
-        }
+        Ok(html_ok(crate::network::mesh::ui::UI_HTML))
     }
 
     async fn handle_request<Req, Resp, F>(
