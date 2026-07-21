@@ -155,10 +155,14 @@ pub fn mesh_view_json(view: &proto::MeshView, nodes: &NodeRegistry) -> serde_jso
     let local = view.local.as_ref().map(|l| {
         let peer_id = peer_str(&l.peer_id);
         let pubkey = hex_or_null(&l.consensus_public_key);
-        // Resolve `self` from the known-node table only. Its `rpc_address` is
-        // the gRPC/RPC address (not an HTTP API URL), so it's not passed as an
-        // announce; the dashboard reaches the local node's HTTP API same-origin.
-        let annotations = annotate(nodes, &peer_id, pubkey.as_deref(), "");
+        // Derive `self`'s http_api_url from its announced gossip multiaddr
+        // (host + default HTTP port) — the same best-effort derivation used for
+        // peers' observed addresses. This matters for a topology crawl, where
+        // every remote node's `self` runs through here: a remote validator not
+        // in the known-node table still gets a fetchable URL from its public
+        // gossip address. (`rpc_address` is deliberately NOT used — it's the
+        // gRPC address.) The local node is reached same-origin regardless.
+        let annotations = annotate(nodes, &peer_id, pubkey.as_deref(), &l.gossip_address);
         merge_annotations(
             json!({
                 "peer_id": peer_id,
@@ -969,6 +973,43 @@ mod tests {
         assert_eq!(local["http_api_url"], "http://107.20.169.236:3381");
         assert_eq!(local["http_api_url_source"], "known");
         assert_eq!(local["known_offline"], false);
+    }
+
+    #[test]
+    fn mesh_view_json_self_derives_url_from_public_gossip_address() {
+        // A `self` not in the known-node table (e.g. a remote validator in a
+        // topology crawl) derives its http_api_url from its announced gossip
+        // multiaddr — host + default HTTP port.
+        let view = proto::MeshView {
+            local: Some(proto::MeshSelf {
+                peer_id: PeerId::random().to_bytes(),
+                gossip_address: "/ip4/198.51.100.7/udp/50051/quic-v1".to_string(),
+                ..Default::default()
+            }),
+            peers: vec![],
+            generated_at: 0,
+        };
+        let json = mesh_view_json(&view, &NodeRegistry::builtin());
+        let local = &json["self"];
+        assert!(local["name"].is_null());
+        assert_eq!(local["http_api_url"], "http://198.51.100.7:3381");
+        assert_eq!(local["http_api_url_source"], "observed");
+    }
+
+    #[test]
+    fn mesh_view_json_self_omits_url_for_private_gossip_address() {
+        // Devnet-style unspecified/listen gossip address → no derived URL.
+        let view = proto::MeshView {
+            local: Some(proto::MeshSelf {
+                peer_id: PeerId::random().to_bytes(),
+                gossip_address: "/ip4/0.0.0.0/udp/50051/quic-v1".to_string(),
+                ..Default::default()
+            }),
+            peers: vec![],
+            generated_at: 0,
+        };
+        let json = mesh_view_json(&view, &NodeRegistry::builtin());
+        assert!(json["self"]["http_api_url"].is_null());
     }
 
     #[test]

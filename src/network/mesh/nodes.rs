@@ -488,14 +488,14 @@ fn host_from_multiaddr(addr: &str) -> Option<String> {
 /// names are treated as public (we can't resolve them here).
 fn is_private_host(host: &str) -> bool {
     match host.parse::<IpAddr>() {
-        Ok(IpAddr::V4(ip)) => {
-            ip.is_private()
-                || ip.is_loopback()
-                || ip.is_link_local()
-                || ip.is_unspecified()
-                || ip.is_broadcast()
-        }
+        Ok(IpAddr::V4(ip)) => is_private_v4(ip),
         Ok(IpAddr::V6(ip)) => {
+            // Dual-stack listeners report IPv4 peers as IPv4-mapped IPv6
+            // (`::ffff:a.b.c.d`); classify those by the embedded IPv4 so a
+            // private/loopback v4 doesn't slip through as a "public" v6.
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return is_private_v4(v4);
+            }
             // fc00::/7 unique-local and fe80::/10 link-local (both `is_*` helpers
             // are unstable in std, so match the prefixes directly).
             let is_unique_local = (ip.octets()[0] & 0xfe) == 0xfc;
@@ -505,6 +505,14 @@ fn is_private_host(host: &str) -> bool {
         // Not an IP literal — assume it's a resolvable public DNS name.
         Err(_) => false,
     }
+}
+
+fn is_private_v4(ip: std::net::Ipv4Addr) -> bool {
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
 }
 
 fn bracket_if_ipv6(host: &str) -> String {
@@ -757,8 +765,11 @@ mod tests {
             "::1",
             "fc00::1",
             "fd12::1",
-            "fe80::1", // IPv6 link-local
-            "febf::1", // top of fe80::/10
+            "fe80::1",           // IPv6 link-local
+            "febf::1",           // top of fe80::/10
+            "::ffff:10.0.0.1",   // IPv4-mapped private
+            "::ffff:127.0.0.1",  // IPv4-mapped loopback
+            "::ffff:172.31.0.1", // IPv4-mapped private
         ] {
             assert!(is_private_host(h), "{h} should be private");
         }
@@ -769,7 +780,8 @@ mod tests {
             "172.32.0.1",
             "203.0.113.1",
             "2001:db8::1",
-            "fec0::1", // deprecated site-local, just past fe80::/10 — not link-local
+            "fec0::1",        // deprecated site-local, just past fe80::/10 — not link-local
+            "::ffff:8.8.8.8", // IPv4-mapped public
             "snap.farcaster.xyz",
         ] {
             assert!(!is_private_host(h), "{h} should be public");
