@@ -65,10 +65,15 @@ mod tests {
                 (None, None) => None,
             };
             let reaction = crate::proto::ReactionBody {
-                r#type: if body.reaction_type == "REACTION_TYPE_LIKE" {
-                    0
-                } else {
-                    1
+                // Map the JSON reaction-type string to its real proto enum value
+                // (NONE=0, LIKE=1, RECAST=2). An earlier version hardcoded `LIKE => 0, else => 1`,
+                // which mislabeled every type (LIKE validated as NONE, RECAST as LIKE) and never fed
+                // RECAST to the validator at all. See #982.
+                r#type: match body.reaction_type.as_str() {
+                    "REACTION_TYPE_NONE" => crate::proto::ReactionType::None as i32,
+                    "REACTION_TYPE_LIKE" => crate::proto::ReactionType::Like as i32,
+                    "REACTION_TYPE_RECAST" => crate::proto::ReactionType::Recast as i32,
+                    other => panic!("unexpected reaction type in fixture: {other}"),
                 },
                 target,
             };
