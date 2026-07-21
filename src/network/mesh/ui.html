@@ -546,7 +546,11 @@
           infoLine.appendChild(el("span", "k", "/v1/info"));
           const infoVal = el("span");
           if (s.http_api_url) { infoVal.appendChild(el("span", "muted", "…")); infoCells.push([s.http_api_url, infoVal]); }
-          else infoVal.appendChild(el("span", "muted", "—"));
+          else {
+            const dash = el("span", "muted", "—");
+            dash.title = "no public HTTP address known — /v1/info not attempted (distinct from 'unreachable', which means a fetch was tried and failed)";
+            infoVal.appendChild(dash);
+          }
           infoLine.appendChild(infoVal);
           card.appendChild(infoLine);
           cards.appendChild(card);
