@@ -8,8 +8,8 @@ use alloy_rpc_types::{Filter, Log};
 use alloy_sol_types::{sol, SolEvent, SolType};
 use alloy_transport_http::{Client, Http};
 use async_trait::async_trait;
-use foundry_common::ens::EnsResolver::EnsResolverInstance;
-use foundry_common::ens::{namehash, EnsError, EnsRegistry};
+use ens::EnsResolver::EnsResolverInstance;
+use ens::{namehash, EnsError, EnsRegistry};
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -35,6 +35,8 @@ use crate::{
     storage::store::node_local_state::LocalStateStore,
     utils::statsd_wrapper::StatsdClientWrapper,
 };
+
+pub(crate) mod ens;
 
 sol!(
     #[allow(missing_docs)]
@@ -292,7 +294,8 @@ impl RealL1Client {
 #[async_trait]
 impl ChainAPI for RealL1Client {
     async fn resolve_ens_name(&self, name: String) -> Result<Address, EnsError> {
-        // Copied from foundry_common::ens so we can support both ETH and Base mainnet
+        // Adapted from the ens module (originally foundry_common::ens) so we can support
+        // both ETH and Base mainnet
         let node = namehash(name.as_str());
         let ens_resolver_address = self.ens_resolver_address.ok_or(EnsError::ResolverNotFound(
             "no resolver address configured for chain".to_string(),
