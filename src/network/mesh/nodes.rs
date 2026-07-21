@@ -82,8 +82,6 @@ pub struct KnownNode {
 pub enum UrlSource {
     /// The known-node table.
     Known,
-    /// The peer's self-announced RPC address.
-    Announce,
     /// Derived from the observed (live-connection) address.
     Observed,
 }
@@ -92,7 +90,6 @@ impl UrlSource {
     pub fn as_str(self) -> &'static str {
         match self {
             UrlSource::Known => "known",
-            UrlSource::Announce => "announce",
             UrlSource::Observed => "observed",
         }
     }
@@ -428,11 +425,15 @@ impl NodeRegistry {
 /// Resolve a browser-reachable HTTP API base URL for a node, or `None` if we
 /// have no address a browser could reach. Precedence:
 ///   1. the known-node table's `http_api_url` (`None` if the node is offline);
-///   2. the peer's self-announced RPC address, if its host is public;
-///   3. a URL derived from the observed (live-connection) multiaddr, if public.
+///   2. a URL derived from the observed (live-connection) multiaddr, if public.
+///
+/// The node's `announce_rpc_address` is intentionally NOT consulted: that field
+/// is canonically the gRPC/RPC address (its name, its auto-detected default of
+/// `DEFAULT_RPC_PORT`, and `peer_discovery`'s use of it all agree), so it is not
+/// a valid source for an HTTP `/v1/info` URL. The known-node table is where a
+/// node's real public HTTP URL belongs.
 pub fn resolve_http_api_url(
     known: Option<&KnownNode>,
-    announce_rpc_address: Option<&str>,
     observed_address: &str,
 ) -> Option<(String, UrlSource)> {
     if let Some(known) = known {
@@ -444,14 +445,6 @@ pub fn resolve_http_api_url(
         }
     }
 
-    if let Some(announce) = announce_rpc_address {
-        if let Some(host) = host_from_url(announce) {
-            if !is_private_host(&host) {
-                return Some((announce.to_string(), UrlSource::Announce));
-            }
-        }
-    }
-
     if let Some(host) = host_from_multiaddr(observed_address) {
         if !is_private_host(&host) {
             let url = format!("http://{}:{}", bracket_if_ipv6(&host), DEFAULT_HTTP_PORT);
@@ -460,28 +453,6 @@ pub fn resolve_http_api_url(
     }
 
     None
-}
-
-/// Extract the host from an `http(s)://host[:port][/...]` URL string.
-fn host_from_url(url: &str) -> Option<String> {
-    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    // Strip userinfo if present.
-    let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    let host = if let Some(stripped) = authority.strip_prefix('[') {
-        // Bracketed IPv6: [::1]:3381
-        stripped.split_once(']').map(|(h, _)| h)?.to_string()
-    } else {
-        authority
-            .rsplit_once(':')
-            .map_or(authority, |(h, _)| h)
-            .to_string()
-    };
-    if host.is_empty() {
-        None
-    } else {
-        Some(host)
-    }
 }
 
 /// Extract the host (IP or DNS name) from a libp2p multiaddr string.
@@ -700,12 +671,8 @@ mod tests {
             )
             .cloned()
             .unwrap();
-        let (url, source) = resolve_http_api_url(
-            Some(&known),
-            Some("http://1.2.3.4:3381"),
-            "/ip4/5.6.7.8/tcp/3382",
-        )
-        .unwrap();
+        // Known table wins over any observed-address derivation.
+        let (url, source) = resolve_http_api_url(Some(&known), "/ip4/5.6.7.8/tcp/3382").unwrap();
         assert_eq!(url, "http://107.20.169.236:3381");
         assert_eq!(source, UrlSource::Known);
     }
@@ -719,45 +686,26 @@ mod tests {
             ) // pow
             .cloned()
             .unwrap();
-        assert!(resolve_http_api_url(Some(&known), None, "/ip4/9.9.9.9/tcp/3382").is_none());
-    }
-
-    #[test]
-    fn resolve_url_uses_public_announce() {
-        let (url, source) =
-            resolve_http_api_url(None, Some("http://203.0.113.5:3381"), "").unwrap();
-        assert_eq!(url, "http://203.0.113.5:3381");
-        assert_eq!(source, UrlSource::Announce);
-    }
-
-    #[test]
-    fn resolve_url_skips_private_announce_falls_to_observed() {
-        let (url, source) = resolve_http_api_url(
-            None,
-            Some("http://10.0.0.5:3381"),
-            "/ip4/203.0.113.9/tcp/3382",
-        )
-        .unwrap();
-        assert_eq!(url, "http://203.0.113.9:3381");
-        assert_eq!(source, UrlSource::Observed);
+        assert!(resolve_http_api_url(Some(&known), "/ip4/9.9.9.9/tcp/3382").is_none());
     }
 
     #[test]
     fn resolve_url_derives_from_public_observed_address() {
-        let (url, source) = resolve_http_api_url(None, None, "/ip4/198.51.100.7/tcp/3382").unwrap();
+        // Best-effort: assumes the default HTTP port for an unknown public node.
+        let (url, source) = resolve_http_api_url(None, "/ip4/198.51.100.7/tcp/3382").unwrap();
         assert_eq!(url, "http://198.51.100.7:3381");
         assert_eq!(source, UrlSource::Observed);
     }
 
     #[test]
     fn resolve_url_omits_private_observed_address() {
-        assert!(resolve_http_api_url(None, None, "/ip4/172.31.82.100/tcp/3382").is_none());
-        assert!(resolve_http_api_url(None, None, "/ip4/10.54.12.187/tcp/3382").is_none());
+        assert!(resolve_http_api_url(None, "/ip4/172.31.82.100/tcp/3382").is_none());
+        assert!(resolve_http_api_url(None, "/ip4/10.54.12.187/tcp/3382").is_none());
     }
 
     #[test]
     fn resolve_url_brackets_ipv6() {
-        let (url, _) = resolve_http_api_url(None, None, "/ip6/2001:db8::1/tcp/3382").unwrap();
+        let (url, _) = resolve_http_api_url(None, "/ip6/2001:db8::1/tcp/3382").unwrap();
         assert_eq!(url, "http://[2001:db8::1]:3381");
     }
 
@@ -789,19 +737,5 @@ mod tests {
         ] {
             assert!(!is_private_host(h), "{h} should be public");
         }
-    }
-
-    #[test]
-    fn host_from_url_parses_variants() {
-        assert_eq!(
-            host_from_url("http://1.2.3.4:3381").as_deref(),
-            Some("1.2.3.4")
-        );
-        assert_eq!(
-            host_from_url("https://snap.farcaster.xyz:3381/v1/info").as_deref(),
-            Some("snap.farcaster.xyz")
-        );
-        assert_eq!(host_from_url("http://[::1]:3381").as_deref(), Some("::1"));
-        assert_eq!(host_from_url("http://host").as_deref(), Some("host"));
     }
 }

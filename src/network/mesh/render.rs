@@ -158,7 +158,7 @@ pub fn mesh_view_json(view: &proto::MeshView, nodes: &NodeRegistry) -> serde_jso
         // Resolve `self` from the known-node table only. Its `rpc_address` is
         // the gRPC/RPC address (not an HTTP API URL), so it's not passed as an
         // announce; the dashboard reaches the local node's HTTP API same-origin.
-        let annotations = annotate(nodes, &peer_id, pubkey.as_deref(), None, "");
+        let annotations = annotate(nodes, &peer_id, pubkey.as_deref(), "");
         merge_annotations(
             json!({
                 "peer_id": peer_id,
@@ -181,18 +181,7 @@ pub fn mesh_view_json(view: &proto::MeshView, nodes: &NodeRegistry) -> serde_jso
         .map(|p| {
             let peer_id = peer_str(&p.peer_id);
             let pubkey = p.consensus_public_key.as_ref().map(hex::encode);
-            let announce = p
-                .contact_info
-                .as_ref()
-                .map(|c| c.announce_rpc_address.as_str())
-                .filter(|a| !a.is_empty());
-            let annotations = annotate(
-                nodes,
-                &peer_id,
-                pubkey.as_deref(),
-                announce,
-                &p.observed_address,
-            );
+            let annotations = annotate(nodes, &peer_id, pubkey.as_deref(), &p.observed_address);
             merge_annotations(
                 json!({
                     "peer_id": peer_id,
@@ -234,12 +223,11 @@ fn annotate(
     nodes: &NodeRegistry,
     peer_id: &str,
     pubkey: Option<&str>,
-    announce: Option<&str>,
     observed: &str,
 ) -> serde_json::Value {
     use serde_json::json;
     let known = nodes.lookup(peer_id, pubkey);
-    let url = resolve_http_api_url(known, announce, observed);
+    let url = resolve_http_api_url(known, observed);
     json!({
         "name": known.map(|k| k.name.clone()),
         "operator": known.and_then(|k| operator_label(k.operator)),
@@ -565,7 +553,7 @@ pub fn topology_json(topo: &proto::MeshTopology, nodes: &NodeRegistry) -> serde_
             let pubkey = hex_or_null(&u.consensus_public_key);
             // Even an unreachable validator may have a known http_api_url the UI
             // can still try; annotate with no live address.
-            let annotations = annotate(nodes, &peer_id, pubkey.as_deref(), None, "");
+            let annotations = annotate(nodes, &peer_id, pubkey.as_deref(), "");
             merge_annotations(
                 json!({
                     "peer_id": peer_id,
