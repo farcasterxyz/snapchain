@@ -174,7 +174,9 @@ const BUILTIN: &[BuiltinNode] = &[
         ),
         peer_id: Some("12D3KooWJVyaQRovV1rjV8TzkN3cRiysACyey86kXDLdvf6JRq5Z"),
         offline: false,
-        note: Some("eu-west-1; promoted to active validator 2026-06-23 (took over pop's slot)"),
+        note: Some(
+            "eu-west-1; promoted to active validator 2026-06-23 (carries the validator key moved from pop)",
+        ),
     },
     BuiltinNode {
         name: "snap",
@@ -210,7 +212,9 @@ const BUILTIN: &[BuiltinNode] = &[
         ),
         peer_id: Some("12D3KooWCpHGJd3WYMY4cnbP8wQk4AK99J8YQfczLTsa7w4HkGDP"),
         offline: false,
-        note: Some("demoted to read node 2026-06-23 (consensus key migrated to erebor)"),
+        note: Some(
+            "demoted to read node 2026-06-23; validator key moved to erebor, pop reissued with a new node key",
+        ),
     },
     BuiltinNode {
         name: "pow",

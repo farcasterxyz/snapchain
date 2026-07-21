@@ -155,8 +155,9 @@ pub fn mesh_view_json(view: &proto::MeshView, nodes: &NodeRegistry) -> serde_jso
     let local = view.local.as_ref().map(|l| {
         let peer_id = peer_str(&l.peer_id);
         let pubkey = hex_or_null(&l.consensus_public_key);
-        // `self` (a MeshSelf) has no observed/announce address, so it resolves
-        // from the known-node table only.
+        // Resolve `self` from the known-node table only. Its `rpc_address` is
+        // the gRPC/RPC address (not an HTTP API URL), so it's not passed as an
+        // announce; the dashboard reaches the local node's HTTP API same-origin.
         let annotations = annotate(nodes, &peer_id, pubkey.as_deref(), None, "");
         merge_annotations(
             json!({
