@@ -1,5 +1,4 @@
 mod tests {
-    use rand::Rng;
     use serde::Deserialize;
 
     use crate::core::validations;
@@ -19,6 +18,11 @@ mod tests {
     struct ReactionBody {
         #[serde(rename = "targetCastId")]
         target_cast_id: Option<CastId>,
+        // Reactions can target a URL instead of a cast (e.g. likes on frames/links). This must be
+        // deserialized too: dropping it makes a valid URL-target reaction look like it has no target,
+        // which then trips `validate_reaction_body`'s `TargetIsMissing` branch. See NEYN-12728.
+        #[serde(rename = "targetUrl")]
+        target_url: Option<String>,
         #[serde(rename = "type")]
         reaction_type: String,
     }
@@ -34,35 +38,44 @@ mod tests {
         messages: Vec<Message>,
     }
 
-    #[tokio::test]
-    async fn test_reaction_validation() {
-        let n: u32 = rand::thread_rng().gen::<u32>() % 10000;
-        // TODO(aditi): Allow no reaction type
-        let resp = reqwest::get(format!(
-            "https://snap.farcaster.xyz:3381/v1/reactionsByFid?fid={}&reaction_type=Like",
-            n
-        ))
-        .await;
-        assert!(!resp.is_err());
+    // Committed sample of a `/v1/reactionsByFid` response. Previously this test fetched a random fid
+    // from live production every run, which made it non-deterministic and flaky: it depended on prod
+    // uptime, CI egress, and whatever reaction data that random fid happened to have. The fixture
+    // pins a representative mix (cast-target and URL-target, LIKE and RECAST) so the test exercises
+    // the validator itself rather than the network. See NEYN-12728.
+    const REACTIONS_FIXTURE: &str = include_str!("testdata/reactions_by_fid.json");
 
-        let response = resp.unwrap();
-        let resp_json = response.text().await;
-
-        let json = serde_json::from_str::<PagedResponse>(&resp_json.unwrap());
-        let page = json.unwrap();
+    #[test]
+    fn test_reaction_validation() {
+        let page = serde_json::from_str::<PagedResponse>(REACTIONS_FIXTURE).unwrap();
+        assert!(
+            !page.messages.is_empty(),
+            "fixture should contain reactions to validate"
+        );
         for msg in page.messages {
+            let body = msg.data.reaction_body;
+            let target = match (body.target_cast_id, body.target_url) {
+                (Some(cast_id), _) => Some(crate::proto::reaction_body::Target::TargetCastId(
+                    crate::proto::CastId {
+                        fid: cast_id.fid,
+                        hash: hex::decode(cast_id.hash.replace("0x", "")).unwrap(),
+                    },
+                )),
+                (None, Some(url)) => Some(crate::proto::reaction_body::Target::TargetUrl(url)),
+                (None, None) => None,
+            };
             let reaction = crate::proto::ReactionBody {
-                r#type: if msg.data.reaction_body.reaction_type == "REACTION_TYPE_LIKE" {
-                    0
-                } else {
-                    1
+                // Map the JSON reaction-type string to its real proto enum value
+                // (NONE=0, LIKE=1, RECAST=2). An earlier version hardcoded `LIKE => 0, else => 1`,
+                // which mislabeled every type (LIKE validated as NONE, RECAST as LIKE) and never fed
+                // RECAST to the validator at all. See #982.
+                r#type: match body.reaction_type.as_str() {
+                    "REACTION_TYPE_NONE" => crate::proto::ReactionType::None as i32,
+                    "REACTION_TYPE_LIKE" => crate::proto::ReactionType::Like as i32,
+                    "REACTION_TYPE_RECAST" => crate::proto::ReactionType::Recast as i32,
+                    other => panic!("unexpected reaction type in fixture: {other}"),
                 },
-                target: msg.data.reaction_body.target_cast_id.map(|p| {
-                    crate::proto::reaction_body::Target::TargetCastId(crate::proto::CastId {
-                        fid: p.fid,
-                        hash: hex::decode(p.hash.replace("0x", "")).unwrap(),
-                    })
-                }),
+                target,
             };
             let result = validations::reaction::validate_reaction_body(&reaction);
             assert!(
