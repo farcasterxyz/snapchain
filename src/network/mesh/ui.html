@@ -354,6 +354,15 @@
 
       // ---- rendering: self + peers --------------------------------------
       let localShards = {}; // shard -> height, from this node's /v1/info baseline
+      let localPeerId = null; // peer id of the node serving this page
+
+      // Base URL for a node's /v1/info: the node serving this page is always
+      // reachable same-origin (base ""), even when it has no public
+      // http_api_url; any other node uses its resolved public URL, or null.
+      function infoBase(obj) {
+        if (obj.peer_id && obj.peer_id === localPeerId) return "";
+        return obj.http_api_url || null;
+      }
 
       function renderSelf(self) {
         const card = $("selfCard");
@@ -439,12 +448,13 @@
           tr.appendChild(el("td", "mono-sm", p.observed_address || "—"));
 
           const infoCell = el("td");
-          if (p.http_api_url) {
+          const base = infoBase(p);
+          if (base !== null) {
             infoCell.appendChild(el("span", "muted", "…"));
-            infoCells.push([p.http_api_url, infoCell]);
+            infoCells.push([base, infoCell]);
           } else {
             const dash = el("span", "muted", "—");
-            dash.title = "no public HTTP address known";
+            dash.title = "no public HTTP address known — /v1/info not attempted (distinct from 'unreachable', a failed fetch)";
             infoCell.appendChild(dash);
           }
           tr.appendChild(infoCell);
@@ -545,7 +555,8 @@
           const infoLine = el("div", "kv");
           infoLine.appendChild(el("span", "k", "/v1/info"));
           const infoVal = el("span");
-          if (s.http_api_url) { infoVal.appendChild(el("span", "muted", "…")); infoCells.push([s.http_api_url, infoVal]); }
+          const base = infoBase(s);
+          if (base !== null) { infoVal.appendChild(el("span", "muted", "…")); infoCells.push([base, infoVal]); }
           else {
             const dash = el("span", "muted", "—");
             dash.title = "no public HTTP address known — /v1/info not attempted (distinct from 'unreachable', which means a fetch was tried and failed)";
@@ -598,11 +609,12 @@
           $("topStatus").textContent = "loading…";
           const view = await api("/v1/mesh?format=json&validators_only=false");
           lastView = view;
-          // Baseline shard heights from this node's own info (used for Δ).
-          if (view.self && view.self.http_api_url) {
-            const info = await fetchInfo(view.self.http_api_url);
-            if (info.ok) localShards = info.shards;
-          }
+          localPeerId = (view.self && view.self.peer_id) || null;
+          // Baseline shard heights from this node's own /v1/info — fetched
+          // same-origin, since this page is served by that node (works even
+          // when the node has no public http_api_url, e.g. devnet).
+          const info = await fetchInfo("");
+          if (info.ok) localShards = info.shards;
           renderSelf(view.self);
           renderPeers(view.peers || []);
           const self = view.self || {};
