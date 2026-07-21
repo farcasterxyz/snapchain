@@ -296,37 +296,40 @@
       // IMPORTANT: no Authorization header here. /v1/info is ungated, and a
       // custom header would make the request CORS-preflighted; snapchain nodes
       // have no OPTIONS route, so the preflight would 404. Keep it a simple GET.
-      const infoCache = new Map(); // base url -> {ok, version, shards} | {error}
-      async function fetchInfo(base) {
+      // Cache the in-flight PROMISE, not just the settled result: renderPeers and
+      // loadTopology fan out over overlapping URL sets concurrently, so keying on
+      // the promise makes concurrent callers share one request and one outcome —
+      // otherwise they'd race and could overwrite a success with an error.
+      const infoCache = new Map(); // base url -> Promise<{ok,version,shards} | {error} | {blocked}>
+      function fetchInfo(base) {
         if (infoCache.has(base)) return infoCache.get(base);
-        // A page served over HTTPS cannot fetch an http:// node (mixed content is
-        // blocked by the browser). Flag it distinctly instead of a generic
-        // "unreachable" so a healthy HTTP node isn't mistaken for a down one.
-        if (location.protocol === "https:" && /^http:\/\//i.test(base)) {
-          const result = { blocked: true, error: "blocked: dashboard is HTTPS but this node is HTTP (mixed content)" };
-          infoCache.set(base, result);
-          return result;
-        }
-        let result;
-        try {
-          const url = base.replace(/\/+$/, "") + "/v1/info";
-          const resp = await fetch(url, {
-            mode: "cors",
-            credentials: "omit",
-            signal: AbortSignal.timeout(4000),
-          });
-          if (!resp.ok) throw new Error("HTTP " + resp.status);
-          const j = await resp.json();
-          const shards = {};
-          (j.shardInfos || []).forEach((s) => {
-            shards[s.shardId] = s.maxHeight;
-          });
-          result = { ok: true, version: j.version, shards };
-        } catch (e) {
-          result = { error: String(e.message || e) };
-        }
-        infoCache.set(base, result);
-        return result;
+        const p = (async () => {
+          // A page served over HTTPS cannot fetch an http:// node (mixed content
+          // is blocked by the browser). Flag it distinctly instead of a generic
+          // "unreachable" so a healthy HTTP node isn't mistaken for a down one.
+          if (location.protocol === "https:" && /^http:\/\//i.test(base)) {
+            return { blocked: true, error: "blocked: dashboard is HTTPS but this node is HTTP (mixed content)" };
+          }
+          try {
+            const url = base.replace(/\/+$/, "") + "/v1/info";
+            const resp = await fetch(url, {
+              mode: "cors",
+              credentials: "omit",
+              signal: AbortSignal.timeout(4000),
+            });
+            if (!resp.ok) throw new Error("HTTP " + resp.status);
+            const j = await resp.json();
+            const shards = {};
+            (j.shardInfos || []).forEach((s) => {
+              shards[s.shardId] = s.maxHeight;
+            });
+            return { ok: true, version: j.version, shards };
+          } catch (e) {
+            return { error: String(e.message || e) };
+          }
+        })();
+        infoCache.set(base, p);
+        return p;
       }
       // Bounded-concurrency fan-out; never rejects (per-item errors captured).
       async function fanOut(bases, onEach) {
@@ -644,8 +647,16 @@
 
       // ---- orchestration -------------------------------------------------
       let topologyLoaded = false;
+      // Reentrancy guards: Refresh/Crawl/auto-refresh can overlap (double-click,
+      // or a 10s tick landing on a slow crawl). Coalesce so concurrent runs
+      // don't race on localPeerId / localShards / infoCache / the DOM.
+      let refreshing = false;
+      let crawling = false;
 
-      async function refreshAll() {
+      async function refreshAll(clearInfo) {
+        if (refreshing) return;
+        refreshing = true;
+        if (clearInfo) infoCache.clear();
         try {
           clearBanner();
           $("topStatus").textContent = "loading…";
@@ -676,10 +687,15 @@
         } catch (e) {
           if (e.unauthorized) { $("topStatus").textContent = "auth required"; showAuthPrompt(); $("user").focus(); }
           else { $("topStatus").textContent = "error"; showError(e.message); }
+        } finally {
+          refreshing = false;
         }
       }
 
-      async function loadTopology() {
+      async function loadTopology(clearInfo) {
+        if (crawling) return;
+        crawling = true;
+        if (clearInfo) infoCache.clear();
         try {
           clearBanner();
           $("crawlBtn").textContent = "Crawling…";
@@ -698,23 +714,26 @@
           else showError(e.message);
         } finally {
           $("crawlBtn").textContent = "Crawl topology";
+          crawling = false;
         }
       }
 
       // ---- controls ------------------------------------------------------
-      $("refreshBtn").onclick = () => { infoCache.clear(); refreshAll(); };
-      $("crawlBtn").onclick = () => { infoCache.clear(); loadTopology(); };
+      // The guards inside refreshAll/loadTopology drop overlapping invocations;
+      // pass clearInfo=true so a fresh /v1/info fan-out runs when one is accepted.
+      $("refreshBtn").onclick = () => refreshAll(true);
+      $("crawlBtn").onclick = () => loadTopology(true);
 
       let autoTimer = null;
       $("autoRefresh").onchange = (e) => {
         if (autoTimer) clearInterval(autoTimer);
         const secs = parseInt(e.target.value, 10);
-        if (secs > 0) autoTimer = setInterval(() => { infoCache.clear(); refreshAll(); }, secs * 1000);
+        if (secs > 0) autoTimer = setInterval(() => refreshAll(true), secs * 1000);
       };
 
       // ---- boot ----------------------------------------------------------
       setCredsHint();
-      refreshAll();
+      refreshAll(true);
     </script>
   </body>
 </html>

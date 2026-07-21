@@ -406,7 +406,8 @@ impl NodeRegistry {
     /// `insert` overwrites B's peer-id index slot while B's pubkey index entry
     /// survives — leaving B half-updated (reachable by pubkey but not peer id).
     /// This requires a pathological config (an entry carrying another node's peer
-    /// id) and is not currently guarded. See GitHub issue (tracked separately).
+    /// id) and is not currently guarded. Tracked in
+    /// https://github.com/farcasterxyz/snapchain/issues/978.
     fn remove_existing(&mut self, node: &KnownNode) {
         let existing = node
             .consensus_public_key
