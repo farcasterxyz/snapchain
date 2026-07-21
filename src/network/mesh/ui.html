@@ -616,7 +616,6 @@
       }
 
       // ---- orchestration -------------------------------------------------
-      let lastView = null;
       let topologyLoaded = false;
 
       async function refreshAll() {
@@ -624,7 +623,6 @@
           clearBanner();
           $("topStatus").textContent = "loading…";
           const view = await api("/v1/mesh?format=json&validators_only=false");
-          lastView = view;
           localPeerId = (view.self && view.self.peer_id) || null;
           // Baseline shard heights from this node's own /v1/info — fetched
           // same-origin, since this page is served by that node (works even

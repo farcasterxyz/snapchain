@@ -448,8 +448,12 @@ pub fn resolve_http_api_url(
         if known.offline {
             return None;
         }
+        // A non-empty table URL is authoritative; an empty string is treated as
+        // "no URL" so we still fall through to the observed-address derivation.
         if let Some(url) = &known.http_api_url {
-            return Some((url.clone(), UrlSource::Known));
+            if !url.is_empty() {
+                return Some((url.clone(), UrlSource::Known));
+            }
         }
     }
 
@@ -492,9 +496,11 @@ fn is_private_host(host: &str) -> bool {
                 || ip.is_broadcast()
         }
         Ok(IpAddr::V6(ip)) => {
-            // fc00::/7 unique-local (is_unique_local is unstable in std).
+            // fc00::/7 unique-local and fe80::/10 link-local (both `is_*` helpers
+            // are unstable in std, so match the prefixes directly).
             let is_unique_local = (ip.octets()[0] & 0xfe) == 0xfc;
-            ip.is_loopback() || ip.is_unspecified() || is_unique_local
+            let is_link_local = (ip.segments()[0] & 0xffc0) == 0xfe80;
+            ip.is_loopback() || ip.is_unspecified() || is_unique_local || is_link_local
         }
         // Not an IP literal — assume it's a resolvable public DNS name.
         Err(_) => false,
@@ -698,6 +704,26 @@ mod tests {
     }
 
     #[test]
+    fn resolve_url_empty_known_url_falls_through_to_observed() {
+        // A table entry with an empty http_api_url is not authoritative; the
+        // observed public address should still yield a derived URL.
+        let known = KnownNode {
+            name: "blank".to_string(),
+            operator: Operator::Unknown,
+            role: NodeRole::Unknown,
+            http_api_url: Some(String::new()),
+            consensus_public_key: None,
+            peer_id: None,
+            offline: false,
+            note: None,
+        };
+        let (url, source) =
+            resolve_http_api_url(Some(&known), "/ip4/198.51.100.7/tcp/3382").unwrap();
+        assert_eq!(url, "http://198.51.100.7:3381");
+        assert_eq!(source, UrlSource::Observed);
+    }
+
+    #[test]
     fn resolve_url_derives_from_public_observed_address() {
         // Best-effort: assumes the default HTTP port for an unknown public node.
         let (url, source) = resolve_http_api_url(None, "/ip4/198.51.100.7/tcp/3382").unwrap();
@@ -731,6 +757,8 @@ mod tests {
             "::1",
             "fc00::1",
             "fd12::1",
+            "fe80::1", // IPv6 link-local
+            "febf::1", // top of fe80::/10
         ] {
             assert!(is_private_host(h), "{h} should be private");
         }
@@ -741,6 +769,7 @@ mod tests {
             "172.32.0.1",
             "203.0.113.1",
             "2001:db8::1",
+            "fec0::1", // deprecated site-local, just past fe80::/10 — not link-local
             "snap.farcaster.xyz",
         ] {
             assert!(!is_private_host(h), "{h} should be public");
