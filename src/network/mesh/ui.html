@@ -512,7 +512,12 @@
       }
       function renderTopology(topo) {
         $("topoSection").style.display = "";
-        const nodes = (topo.nodes || []).filter((n) => n.self);
+        const allNodes = (topo.nodes || []).filter((n) => n.self);
+        // The consensus matrix + health summary are validator-only: readers
+        // aren't on the consensus topic, and a crawl launched from a read node
+        // inserts that reader as the root — including it would score every
+        // reader↔validator cell as a gap and falsely report an unhealthy mesh.
+        const nodes = allNodes.filter((n) => n.self.is_validator);
         const byId = new Map();
         nodes.forEach((n) => byId.set(n.self.peer_id, n));
         const ids = nodes.map((n) => n.self.peer_id);
@@ -567,22 +572,24 @@
         wrap.appendChild(el("div", "mono-sm", "Consensus links — row → column. ● both meshed · ◆ direct/explicit (healthy) · amber ▸◂ one-way (asymmetric) · grey · none. Production wires validators as direct peers, so ◆ is the normal healthy state."));
         wrap.appendChild(table);
 
-        // Per-node cards + /v1/info.
+        // Per-node cards + /v1/info. Cards cover ALL nodes (incl. a reader root),
+        // not just the validators shown in the matrix.
         const cards = $("topoNodes");
         cards.textContent = "";
         const infoCells = [];
-        nodes.forEach((n) => {
+        allNodes.forEach((n) => {
           const s = n.self;
           const card = el("div", "card");
           const title = el("div");
           title.appendChild(document.createTextNode(nameFor(s) + " "));
           if (s.operator) title.insertAdjacentHTML("beforeend", opBadge(s.operator));
           card.appendChild(title);
-          // Crawl reports a real block height only for the serving node; other
-          // nodes come back as 0 (unknown). Show "—" for those and rely on the
-          // per-node /v1/info line below for their real heights.
-          const heightVal = el("span", null, s.current_height ? String(s.current_height) : "—");
-          if (!s.current_height) heightVal.title = "unknown from crawl — see /v1/info";
+          // The crawl carries a real block height only for the serving node (the
+          // root); every other node reports 0 = unknown. Key on the local peer id
+          // so the root's genuine height (even 0 at genesis) isn't shown as "—".
+          const isLocalRoot = s.peer_id && s.peer_id === localPeerId;
+          const heightVal = el("span", null, isLocalRoot ? String(s.current_height) : "—");
+          if (!isLocalRoot) heightVal.title = "unknown from crawl — see /v1/info";
           card.appendChild(el("div", "kv")).append(el("span", "k", "height"), heightVal);
           const protoVal = el("span", null, s.snapchain_version || "—");
           protoVal.title = "wire/consensus protocol version — distinct from the app release in /v1/info";
