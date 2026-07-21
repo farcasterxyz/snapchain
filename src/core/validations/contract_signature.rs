@@ -26,7 +26,7 @@ use alloy_primitives::{Address, Bytes, FixedBytes};
 use alloy_provider::Provider;
 use alloy_rpc_types::{TransactionInput, TransactionRequest};
 use alloy_sol_types::{sol, SolCall, SolConstructor};
-use alloy_transport::{RpcError, Transport, TransportErrorKind};
+use alloy_transport::{RpcError, TransportErrorKind};
 
 /// Counterfactual-deployment helper from AmbireTech's ERC-6492 reference
 /// implementation. See [`contract_signature/README.md`](./contract_signature/README.md).
@@ -82,7 +82,7 @@ fn reverts_mean_invalid(e: SignatureRpcError) -> Result<Verification, SignatureR
 /// * If the address has code, the call is dispatched to `isValidSignature` (ERC-1271).
 /// * Otherwise, the `ValidateSigOffchain` helper is deployed in an `eth_call` to cover
 ///   EOA signatures and counterfactually-deployed ERC-6492 smart wallets.
-pub async fn verify_signature<S, P, T>(
+pub async fn verify_signature<S, P>(
     signature: S,
     address: Address,
     message: FixedBytes<32>,
@@ -90,8 +90,7 @@ pub async fn verify_signature<S, P, T>(
 ) -> Result<Verification, SignatureRpcError>
 where
     S: Into<Bytes>,
-    P: Provider<T>,
-    T: Transport + Clone,
+    P: Provider,
 {
     let has_code = !provider.get_code_at(address).await?.is_empty();
     if has_code {
@@ -106,7 +105,7 @@ where
                 .into(),
             ));
 
-        match provider.call(&call_request).await {
+        match provider.call(call_request).await {
             Ok(result) => {
                 let magic = result.get(..4);
                 if magic == Some(&MAGIC_VALUE.to_be_bytes()[..]) {
@@ -131,7 +130,7 @@ where
 
         let tx = TransactionRequest::default().input(TransactionInput::new(deploy_bytes.into()));
 
-        match provider.call(&tx).await {
+        match provider.call(tx).await {
             Ok(result) => match result.first() {
                 Some(&SUCCESS_RESULT) => Ok(Verification::Valid),
                 _ => Ok(Verification::Invalid),
@@ -241,10 +240,10 @@ pub(crate) mod test_support {
         }
     }
 
-    pub fn mock_provider(get_code: MockReply, call: MockReply) -> RootProvider<MockTransport> {
+    pub fn mock_provider(get_code: MockReply, call: MockReply) -> RootProvider {
         let transport = MockTransport::new(get_code, call);
         let client = RpcClient::new(transport, true);
-        RootProvider::<MockTransport>::new(client)
+        RootProvider::new(client)
     }
 
     /// Construct a JSON-RPC error response with `code=3` for unit-testing

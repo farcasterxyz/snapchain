@@ -3,7 +3,6 @@ use crate::core::validations::error::ValidationError;
 use crate::proto::{self, FarcasterNetwork, VerificationAddAddressBody};
 use alloy_dyn_abi::TypedData;
 use alloy_provider::Provider;
-use alloy_transport::Transport;
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -152,7 +151,7 @@ pub fn validate_fname_transfer(
 
     let hash = prehash.unwrap();
     let fname_signer = signer_address.unwrap_or(FNAME_SIGNER_ADDRESS);
-    let signature = alloy_primitives::PrimitiveSignature::from_bytes_and_parity(
+    let signature = alloy_primitives::Signature::from_bytes_and_parity(
         &proof.signature[0..64],
         proof.signature[64] != 0x1b && proof.signature[64] != 0x00,
     );
@@ -251,7 +250,7 @@ fn validate_verification_eoa_signature(
     }
 
     let hash = prehash.unwrap();
-    let signature = alloy_primitives::PrimitiveSignature::from_bytes_and_parity(
+    let signature = alloy_primitives::Signature::from_bytes_and_parity(
         &body.claim_signature[0..64],
         body.claim_signature[64] != 0x1b && body.claim_signature[64] != 0x00,
     );
@@ -269,14 +268,13 @@ fn validate_verification_eoa_signature(
     Ok(())
 }
 
-pub async fn validate_verification_contract_signature<P, T>(
+pub async fn validate_verification_contract_signature<P>(
     provider: P,
     claim: VerificationAddressClaim,
     body: &VerificationAddAddressBody,
 ) -> Result<(), ValidationError>
 where
-    P: Provider<T>,
-    T: Transport + Clone,
+    P: Provider,
 {
     let json = json!({
         "types": eip_712_farcaster_verification_claim(),
