@@ -1,5 +1,4 @@
 mod tests {
-    use rand::Rng;
     use serde::Deserialize;
 
     use crate::{core::validations, proto::link_body};
@@ -28,21 +27,20 @@ mod tests {
         messages: Vec<Message>,
     }
 
-    #[tokio::test]
-    async fn test_link_validation() {
-        let n: u32 = rand::thread_rng().gen::<u32>() % 10000;
-        let resp = reqwest::get(format!(
-            "https://snap.farcaster.xyz:3381/v1/linksByFid?fid={}",
-            n
-        ))
-        .await;
-        assert!(!resp.is_err());
+    // Committed sample of a `/v1/linksByFid` response. Previously this test fetched a random fid from
+    // live production every run, which made it non-deterministic and flaky: it depended on prod
+    // uptime, CI egress, and whatever link data that random fid happened to have. The fixture pins a
+    // representative mix of real links (`follow` plus a FIP-263 `block`) so the test exercises the
+    // validator itself rather than the network. See NEYN-12730.
+    const LINKS_FIXTURE: &str = include_str!("testdata/links_by_fid.json");
 
-        let response = resp.unwrap();
-        let resp_json = response.text().await;
-
-        let json = serde_json::from_str::<PagedResponse>(&resp_json.unwrap());
-        let page = json.unwrap();
+    #[test]
+    fn test_link_validation() {
+        let page = serde_json::from_str::<PagedResponse>(LINKS_FIXTURE).unwrap();
+        assert!(
+            !page.messages.is_empty(),
+            "fixture should contain links to validate"
+        );
         for msg in page.messages {
             let link = crate::proto::LinkBody {
                 display_timestamp: None,

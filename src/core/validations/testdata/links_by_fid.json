@@ -1,0 +1,36 @@
+{
+  "messages": [
+    {
+      "data": {
+        "linkBody": {
+          "type": "follow",
+          "targetFid": 3
+        }
+      }
+    },
+    {
+      "data": {
+        "linkBody": {
+          "type": "follow",
+          "targetFid": 2
+        }
+      }
+    },
+    {
+      "data": {
+        "linkBody": {
+          "type": "follow",
+          "targetFid": 194
+        }
+      }
+    },
+    {
+      "data": {
+        "linkBody": {
+          "type": "block",
+          "targetFid": 3
+        }
+      }
+    }
+  ]
+}
