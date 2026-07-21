@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
+    use crate::connectors::onchain_events::ens::EnsError;
     use async_trait::async_trait;
     use base64::Engine;
-    use foundry_common::ens::EnsError;
     use prost::Message;
     use std::collections::HashMap;
     use std::sync::Arc;
