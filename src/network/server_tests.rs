@@ -820,7 +820,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let address = owner_address(8);
         let expiry = now_unix_seconds() + 3600;
         merge_channel_registration(&block_engine, "delayed_flip", address.clone(), expiry);
@@ -871,7 +871,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let address = owner_address(9);
         let expiry = now_unix_seconds() - 1;
         merge_channel_registration(&block_engine, "lapsed_list", address.clone(), expiry);
@@ -906,7 +906,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let address = owner_address(9);
         merge_channel_registration(
             &block_engine,
@@ -939,7 +939,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let address = owner_address(10);
         merge_channel_registration(
             &block_engine,
@@ -999,7 +999,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let address_a = owner_address(11);
         let address_b = owner_address(12);
         let expiry = now_unix_seconds() + 3600;
@@ -1045,7 +1045,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let address = owner_address(13);
         merge_verification(
             stores.get(&1).unwrap(),
@@ -1123,7 +1123,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         // owner_address(20) < owner_address(21) lexicographically, so the composite
         // cursor visits address_a's channels before address_b's.
         let address_a = owner_address(20);
@@ -1196,7 +1196,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let address = owner_address(22);
         let expiry = now_unix_seconds() + 3600;
         register_channel_at(&block_engine, "pa_1", address.clone(), expiry, 1);
@@ -1245,7 +1245,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let address = owner_address(24);
         merge_channel_registration(
             &block_engine,
@@ -1281,7 +1281,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let evm_address = owner_address(23);
         let solana_address = vec![7u8; 32];
         let expiry = now_unix_seconds() + 3600;
@@ -1321,7 +1321,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
 
         let status = service
             .get_channels_by_address(channels_by_address_request(vec![0u8; 4]))
@@ -1344,7 +1344,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let address = owner_address(25);
         let expiry = now_unix_seconds() + 3600;
         register_channel_at(&block_engine, "eb_1", address.clone(), expiry, 1);
