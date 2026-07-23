@@ -975,10 +975,10 @@ impl Subscriber {
                 // topic0 and falls through to the silent `_` arm.) fid is always 0; the
                 // owner address is resolved to an fid at read time (see GetChannelOwner).
                 //
-                // NOTE: we decode with validate = true (unlike `event.log_decode()`, which
-                // passes false and would lossily replace non-UTF-8 bytes with U+FFFD and
-                // silently mint a corrupted channel_key). validate = true routes an invalid
-                // UTF-8 name to the Err arm below so it is dropped, honoring the proto's
+                // NOTE: we decode with `decode_log_validate` (unlike plain `decode_log`,
+                // which would lossily replace non-UTF-8 bytes with U+FFFD and silently mint
+                // a corrupted channel_key). `decode_log_validate` routes an invalid UTF-8
+                // name to the Err arm below so it is dropped, honoring the proto's
                 // "non-UTF-8 names are never minted as events" invariant.
                 match ChannelRegistrarAbi::NameRegistered::decode_log_validate(&event.inner) {
                     Ok(decoded) => {
@@ -1019,7 +1019,7 @@ impl Subscriber {
                 Ok(())
             }
             Some(&ChannelRegistrarAbi::NameRenewed::SIGNATURE_HASH) => {
-                // Same non-UTF-8 drop rule as NameRegistered (validate = true; see there).
+                // Same non-UTF-8 drop rule as NameRegistered (decode_log_validate; see there).
                 // NameRenewed carries no owner (`expires` is absolute — the store
                 // overwrites, never adds duration).
                 match ChannelRegistrarAbi::NameRenewed::decode_log_validate(&event.inner) {
@@ -1685,14 +1685,16 @@ mod tests {
         ];
         let log_data = LogData::new_unchecked(topics, Bytes::from(data));
 
-        // validate = false is what `Log::log_decode` uses. It lossily replaces the bad byte
-        // with U+FFFD and succeeds — precisely why the connector must NOT use that path: it
-        // would mint a corrupted channel_key whose keccak no longer equals `label`.
+        // `decode_log_data` (non-validating) is what plain `Log::decode_log` uses. It
+        // lossily replaces the bad byte with U+FFFD and succeeds — precisely why the
+        // connector must NOT use that path: it would mint a corrupted channel_key whose
+        // keccak no longer equals `label`.
         let lossy = ChannelRegistrarAbi::NameRegistered::decode_log_data(&log_data).unwrap();
         assert!(lossy.name.contains('\u{FFFD}'));
 
-        // validate = true is the connector's path: the invalid name is rejected, so the log
-        // is dropped (warn + metric) rather than minted — honoring the proto invariant.
+        // `decode_log_data_validate` is the connector's path: the invalid name is rejected,
+        // so the log is dropped (warn + metric) rather than minted — honoring the proto
+        // invariant.
         assert!(ChannelRegistrarAbi::NameRegistered::decode_log_data_validate(&log_data).is_err());
     }
 }
