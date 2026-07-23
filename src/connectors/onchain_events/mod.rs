@@ -980,7 +980,7 @@ impl Subscriber {
                 // silently mint a corrupted channel_key). validate = true routes an invalid
                 // UTF-8 name to the Err arm below so it is dropped, honoring the proto's
                 // "non-UTF-8 names are never minted as events" invariant.
-                match ChannelRegistrarAbi::NameRegistered::decode_log(&event.inner, true) {
+                match ChannelRegistrarAbi::NameRegistered::decode_log_validate(&event.inner) {
                     Ok(decoded) => {
                         let ChannelRegistrarAbi::NameRegistered {
                             name,
@@ -1022,7 +1022,7 @@ impl Subscriber {
                 // Same non-UTF-8 drop rule as NameRegistered (validate = true; see there).
                 // NameRenewed carries no owner (`expires` is absolute — the store
                 // overwrites, never adds duration).
-                match ChannelRegistrarAbi::NameRenewed::decode_log(&event.inner, true) {
+                match ChannelRegistrarAbi::NameRenewed::decode_log_validate(&event.inner) {
                     Ok(decoded) => {
                         let ChannelRegistrarAbi::NameRenewed {
                             name,
@@ -1616,7 +1616,8 @@ mod tests {
         }
         .encode_log_data();
 
-        let decoded = ChannelRegistrarAbi::NameRegistered::decode_log_data(&encoded, true).unwrap();
+        let decoded =
+            ChannelRegistrarAbi::NameRegistered::decode_log_data_validate(&encoded).unwrap();
         assert_eq!(decoded.name, "pets");
         assert_eq!(decoded.label, label);
         assert_eq!(decoded.owner, owner);
@@ -1636,7 +1637,7 @@ mod tests {
         let id = U256::from_be_bytes([0x11u8; 32]);
         let encoded = ChannelRegistrarAbi::Transfer { from, to, id }.encode_log_data();
 
-        let decoded = ChannelRegistrarAbi::Transfer::decode_log_data(&encoded, true).unwrap();
+        let decoded = ChannelRegistrarAbi::Transfer::decode_log_data_validate(&encoded).unwrap();
         assert_eq!(decoded.to, to);
         assert_eq!(decoded.id, id);
         assert_eq!(decoded.id.to_be_bytes::<32>().to_vec(), vec![0x11u8; 32]);
@@ -1687,11 +1688,11 @@ mod tests {
         // validate = false is what `Log::log_decode` uses. It lossily replaces the bad byte
         // with U+FFFD and succeeds — precisely why the connector must NOT use that path: it
         // would mint a corrupted channel_key whose keccak no longer equals `label`.
-        let lossy = ChannelRegistrarAbi::NameRegistered::decode_log_data(&log_data, false).unwrap();
+        let lossy = ChannelRegistrarAbi::NameRegistered::decode_log_data(&log_data).unwrap();
         assert!(lossy.name.contains('\u{FFFD}'));
 
         // validate = true is the connector's path: the invalid name is rejected, so the log
         // is dropped (warn + metric) rather than minted — honoring the proto invariant.
-        assert!(ChannelRegistrarAbi::NameRegistered::decode_log_data(&log_data, true).is_err());
+        assert!(ChannelRegistrarAbi::NameRegistered::decode_log_data_validate(&log_data).is_err());
     }
 }
