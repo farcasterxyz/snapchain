@@ -289,6 +289,14 @@ pub mod tests {
             Ok(Response::new(response))
         }
 
+        async fn get_channel_owner(
+            &self,
+            _request: Request<ChannelOwnerRequest>,
+        ) -> Result<Response<ChannelOwnerResponse>, Status> {
+            let response = ChannelOwnerResponse::default();
+            Ok(Response::new(response))
+        }
+
         async fn get_id_registry_on_chain_event(
             &self,
             _request: Request<FidRequest>,

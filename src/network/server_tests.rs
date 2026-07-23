@@ -1,12 +1,13 @@
 #[cfg(test)]
 mod tests {
     use crate::connectors::onchain_events::ens::EnsError;
+    use alloy_primitives::keccak256;
     use async_trait::async_trait;
     use base64::Engine;
     use prost::Message;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use tokio::time::{sleep, timeout};
 
     use crate::connectors::fname::{FetchError, FnameTransferLookup};
@@ -18,14 +19,16 @@ mod tests {
     use crate::network::server::MyHubService;
     use crate::proto::hub_service_server::HubService;
     use crate::proto::{
-        self, Block, EventRequest, EventsRequest, FarcasterNetwork, FnameTransfer, HubEvent,
-        HubEventType, OnChainEventType, ShardChunk, StorageUnitType, SubmitBulkMessagesRequest,
-        SubmitBulkMessagesResponse, UserDataType, UserNameProof, UserNameType,
-        UsernameProofRequest, VerificationAddAddressBody,
+        self, Block, ChannelOwnerRequest, ChannelRegisterEventType, EventRequest, EventsRequest,
+        FarcasterNetwork, FnameTransfer, HubEvent, HubEventType, OnChainEventType, ShardChunk,
+        StorageUnitType, SubmitBulkMessagesRequest, SubmitBulkMessagesResponse, UserDataType,
+        UserNameProof, UserNameType, UsernameProofRequest, VerificationAddAddressBody,
     };
     use crate::proto::{FidRequest, SignersByFidRequest, SubscribeRequest};
     use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
-    use crate::storage::store::account::{HubEventIdGenerator, HubEventStorageExt, SEQUENCE_BITS};
+    use crate::storage::store::account::{
+        make_ts_hash, HubEventIdGenerator, HubEventStorageExt, VerificationStoreDef, SEQUENCE_BITS,
+    };
     use crate::storage::store::block_engine::BlockEngine;
     use crate::storage::store::block_engine_test_helpers::{BlockEngineOptions, Validity};
     use crate::storage::store::engine::{Senders, ShardEngine};
@@ -54,6 +57,58 @@ mod tests {
             page_token: None,
             reverse: None,
         })
+    }
+
+    fn now_unix_seconds() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn channel_label(channel_key: &str) -> Vec<u8> {
+        keccak256(channel_key.as_bytes()).to_vec()
+    }
+
+    fn owner_address(byte: u8) -> Vec<u8> {
+        vec![byte; 20]
+    }
+
+    fn merge_channel_registration(
+        block_engine: &BlockEngine,
+        channel_key: &str,
+        owner_address: Vec<u8>,
+        expiry: u64,
+    ) {
+        let event = events_factory::create_channel_register_event(
+            channel_key,
+            channel_label(channel_key),
+            owner_address,
+            expiry,
+            ChannelRegisterEventType::Register,
+            1,
+            1,
+        );
+        let block_stores = block_engine.stores();
+        let mut txn = RocksDbTransactionBatch::new();
+        block_stores
+            .onchain_event_store
+            .merge_onchain_event(event, &mut txn)
+            .unwrap();
+        block_stores.onchain_event_store.db.commit(txn).unwrap();
+    }
+
+    fn merge_verification_add(stores: &Stores, verification_add: &proto::Message) {
+        let mut txn = RocksDbTransactionBatch::new();
+        stores
+            .verification_store
+            .merge(
+                verification_add,
+                &mut txn,
+                &test_helper::default_merge_ctx(),
+            )
+            .unwrap();
+        stores.db.commit(txn).unwrap();
     }
 
     struct MockL1Client {}
@@ -308,6 +363,211 @@ mod tests {
             shard_decision_tx,
             block_decision_tx,
         )
+    }
+
+    #[tokio::test]
+    async fn test_get_channel_owner_unknown_channel_key_returns_not_found() {
+        let (
+            _stores,
+            _senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+
+        let err = service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: "missing".to_string(),
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(err.message(), "channel not registered");
+    }
+
+    #[tokio::test]
+    async fn test_get_channel_owner_expired_registration_returns_not_found() {
+        let (
+            _stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        merge_channel_registration(
+            &block_engine,
+            "expired",
+            owner_address(1),
+            now_unix_seconds() - 1,
+        );
+
+        let err = service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: "expired".to_string(),
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(err.message(), "channel registration expired");
+    }
+
+    #[tokio::test]
+    async fn test_get_channel_owner_registered_without_verification_returns_parked() {
+        let (
+            _stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(2);
+        let expiry = now_unix_seconds() + 3600;
+        merge_channel_registration(&block_engine, "parked", address.clone(), expiry);
+
+        let response = service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: "parked".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.fid, 0);
+        assert_eq!(response.owner_address, address);
+        assert_eq!(response.expiry, expiry);
+    }
+
+    #[tokio::test]
+    async fn test_get_channel_owner_resolves_single_verification() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(3);
+        let expiry = now_unix_seconds() + 3600;
+        merge_channel_registration(&block_engine, "verified", address.clone(), expiry);
+        let verification_add = messages_factory::verifications::create_verification_add(
+            SHARD1_FID,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(1),
+            None,
+        );
+        merge_verification_add(stores.get(&1).unwrap(), &verification_add);
+
+        let response = service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: "verified".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.fid, SHARD1_FID);
+        assert_eq!(response.owner_address, address);
+        assert_eq!(response.expiry, expiry);
+    }
+
+    #[tokio::test]
+    async fn test_get_channel_owner_lww_across_hosted_shards() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(4);
+        merge_channel_registration(
+            &block_engine,
+            "lww",
+            address.clone(),
+            now_unix_seconds() + 3600,
+        );
+        let later = messages_factory::verifications::create_verification_add(
+            SHARD2_FID,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(20),
+            None,
+        );
+        let earlier = messages_factory::verifications::create_verification_add(
+            SHARD1_FID,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(10),
+            None,
+        );
+        merge_verification_add(stores.get(&2).unwrap(), &later);
+        merge_verification_add(stores.get(&1).unwrap(), &earlier);
+
+        let response = service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: "lww".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.fid, SHARD2_FID);
+    }
+
+    #[tokio::test]
+    async fn test_get_channel_owner_drops_orphan_index_candidate() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(5);
+        let expiry = now_unix_seconds() + 3600;
+        merge_channel_registration(&block_engine, "orphan", address.clone(), expiry);
+
+        let mut txn = RocksDbTransactionBatch::new();
+        let orphan_hash = vec![9; 20];
+        let orphan_ts_hash = make_ts_hash(100, &orphan_hash).unwrap();
+        txn.put(
+            VerificationStoreDef::make_verification_by_address_key(&address, SHARD1_FID),
+            orphan_ts_hash.to_vec(),
+        );
+        stores.get(&1).unwrap().db.commit(txn).unwrap();
+
+        let response = service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: "orphan".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.fid, 0);
+        assert_eq!(response.owner_address, address);
+        assert_eq!(response.expiry, expiry);
     }
 
     #[tokio::test]

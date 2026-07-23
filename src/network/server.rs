@@ -19,30 +19,31 @@ use crate::proto::hub_service_server::HubService;
 use crate::proto::{
     self, cast_add_body, casts_by_parent_request, link_body, links_by_target_request, message_data,
     on_chain_event::Body, reaction_body, reactions_by_target_request, Block, BlocksRequest, CastId,
-    CastsByParentRequest, DbStats, EventRequest, EventsRequest, EventsResponse,
-    FidAddressTypeRequest, FidAddressTypeResponse, FidRequest, FidTimestampRequest, FidsRequest,
-    FidsResponse, GetConnectedPeersRequest, GetConnectedPeersResponse, GetInfoRequest,
-    GetInfoResponse, GetMeshViewRequest, Height, HubEvent, IdRegistryEventByAddressRequest,
-    LinkRequest, LinksByFidRequest, LinksByTargetRequest, MeshTopology, MeshView, Message,
-    MessageType, MessagesResponse, OnChainEvent, OnChainEventRequest, OnChainEventResponse,
-    ReactionRequest, ReactionType, ReactionsByFidRequest, ReactionsByTargetRequest, ShardChunk,
-    ShardChunksRequest, ShardChunksResponse, Signer, SignerEventType, SignerRequest,
-    SignerResponse, SignerSource, SignersByFidRequest, SignersByFidResponse, StorageLimitsResponse,
-    SubscribeRequest, TrieNodeMetadataRequest, TrieNodeMetadataResponse, UserDataRequest,
-    UserNameProof, UserNameType, UsernameProofRequest, UsernameProofsResponse, ValidationResponse,
+    CastsByParentRequest, ChannelOwnerRequest, ChannelOwnerResponse, DbStats, EventRequest,
+    EventsRequest, EventsResponse, FidAddressTypeRequest, FidAddressTypeResponse, FidRequest,
+    FidTimestampRequest, FidsRequest, FidsResponse, GetConnectedPeersRequest,
+    GetConnectedPeersResponse, GetInfoRequest, GetInfoResponse, GetMeshViewRequest, Height,
+    HubEvent, IdRegistryEventByAddressRequest, LinkRequest, LinksByFidRequest,
+    LinksByTargetRequest, MeshTopology, MeshView, Message, MessageType, MessagesResponse,
+    OnChainEvent, OnChainEventRequest, OnChainEventResponse, ReactionRequest, ReactionType,
+    ReactionsByFidRequest, ReactionsByTargetRequest, ShardChunk, ShardChunksRequest,
+    ShardChunksResponse, Signer, SignerEventType, SignerRequest, SignerResponse, SignerSource,
+    SignersByFidRequest, SignersByFidResponse, StorageLimitsResponse, SubscribeRequest,
+    TrieNodeMetadataRequest, TrieNodeMetadataResponse, UserDataRequest, UserNameProof,
+    UserNameType, UsernameProofRequest, UsernameProofsResponse, ValidationResponse,
     VerificationAddAddressBody, VerificationRequest,
 };
 use crate::storage::constants::OnChainEventPostfix;
 use crate::storage::constants::RootPrefix;
 use crate::storage::db::PageOptions;
 use crate::storage::db::RocksDbTransactionBatch;
-use crate::storage::store::account::MessagesPage;
 use crate::storage::store::account::UsernameProofStore;
 use crate::storage::store::account::{
     get_app_nonce, get_gasless_key_count, get_gasless_key_record, get_last_used_at, get_user_nonce,
     list_gasless_keys_by_fid, CastStore, GaslessKeyRecord, LinkStore, ReactionStore, UserDataStore,
     VerificationStore,
 };
+use crate::storage::store::account::{make_ts_hash, MessagesPage};
 use crate::storage::store::account::{message_bytes_decode, IntoI32};
 use crate::storage::store::account::{EventsPage, HubEventIdGenerator};
 use crate::storage::store::block_engine::{self, BlockStores};
@@ -57,7 +58,7 @@ use moka::sync::{Cache, CacheBuilder};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, timeout};
 use tokio_stream::wrappers::ReceiverStream;
@@ -119,6 +120,59 @@ fn signer_store_error_to_status(err: HubError) -> Status {
     } else {
         Status::internal(format!("Store error: {:?}", err))
     }
+}
+
+fn unix_timestamp_seconds() -> Result<u64, Status> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|err| Status::internal(format!("System time error: {}", err)))
+}
+
+fn resolve_channel_owner_fid(
+    shard_stores: &HashMap<u32, Stores>,
+    owner_address: &[u8],
+) -> Result<u64, Status> {
+    let mut winner: Option<(u64, [u8; 24])> = None;
+
+    for stores in shard_stores.values() {
+        let candidates = VerificationStore::get_verifications_by_address(
+            &stores.verification_store,
+            owner_address,
+        )
+        .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?;
+
+        for (fid, _indexed_ts_hash) in candidates {
+            let Some(primary_add) = VerificationStore::get_verification_add(
+                &stores.verification_store,
+                fid,
+                owner_address,
+                None,
+            )
+            .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
+            else {
+                continue;
+            };
+
+            let Some(data) = primary_add.data.as_ref() else {
+                continue;
+            };
+            let ts_hash = make_ts_hash(data.timestamp, &primary_add.hash)
+                .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?;
+
+            if winner
+                .as_ref()
+                .map(|(winner_fid, winner_ts_hash)| {
+                    ts_hash > *winner_ts_hash || (ts_hash == *winner_ts_hash && fid < *winner_fid)
+                })
+                .unwrap_or(true)
+            {
+                winner = Some((fid, ts_hash));
+            }
+        }
+    }
+
+    Ok(winner.map(|(fid, _ts_hash)| fid).unwrap_or(0))
 }
 
 /// Build a unified `Signer` record from an on-chain `OnChainEvent` whose body is a
@@ -2601,6 +2655,31 @@ impl HubService for MyHubService {
             next_page_token: None,
         };
         Ok(Response::new(response))
+    }
+
+    async fn get_channel_owner(
+        &self,
+        request: Request<ChannelOwnerRequest>,
+    ) -> Result<Response<ChannelOwnerResponse>, Status> {
+        let req = request.into_inner();
+        let channel_owner = self
+            .block_stores
+            .onchain_event_store
+            .get_channel_owner(&req.channel_key, None)
+            .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
+            .ok_or_else(|| Status::not_found("channel not registered"))?;
+
+        if channel_owner.expiry <= unix_timestamp_seconds()? {
+            return Err(Status::not_found("channel registration expired"));
+        }
+
+        let fid = resolve_channel_owner_fid(&self.shard_stores, &channel_owner.owner_address)?;
+
+        Ok(Response::new(ChannelOwnerResponse {
+            fid,
+            owner_address: channel_owner.owner_address,
+            expiry: channel_owner.expiry,
+        }))
     }
 
     async fn get_id_registry_on_chain_event(

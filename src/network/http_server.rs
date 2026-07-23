@@ -1244,6 +1244,27 @@ impl OnChainEventRequest {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelOwnerRequest {
+    pub channel_key: String,
+}
+
+impl ChannelOwnerRequest {
+    pub fn to_proto(self) -> proto::ChannelOwnerRequest {
+        proto::ChannelOwnerRequest {
+            channel_key: self.channel_key,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelOwnerResponse {
+    pub fid: u64,
+    #[serde(with = "serdehex", rename = "ownerAddress")]
+    pub owner_address: Vec<u8>,
+    pub expiry: u64,
+}
+
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum HubEventType {
@@ -2777,6 +2798,10 @@ pub trait HubHttpService {
         &self,
         req: OnChainEventRequest,
     ) -> Result<OnChainEventResponse, ErrorResponse>;
+    async fn get_channel_owner(
+        &self,
+        req: ChannelOwnerRequest,
+    ) -> Result<ChannelOwnerResponse, ErrorResponse>;
     async fn get_fid_address_type(
         &self,
         req: FidAddressTypeRequest,
@@ -3522,6 +3547,28 @@ where
         })
     }
 
+    /// GET /v1/channelOwner
+    async fn get_channel_owner(
+        &self,
+        req: ChannelOwnerRequest,
+    ) -> Result<ChannelOwnerResponse, ErrorResponse> {
+        let service = &self.service;
+        let grpc_req = tonic::Request::new(req.to_proto());
+        let response = service
+            .get_channel_owner(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get channel owner".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+        let channel_owner = response.into_inner();
+        Ok(ChannelOwnerResponse {
+            fid: channel_owner.fid,
+            owner_address: channel_owner.owner_address,
+            expiry: channel_owner.expiry,
+        })
+    }
+
     async fn get_events(&self, req: EventsRequest) -> Result<EventsResponse, ErrorResponse> {
         let service = &self.service;
 
@@ -3812,6 +3859,13 @@ where
                     |service, req| {
                         Box::pin(async move { service.get_on_chain_events_by_fid(req).await })
                     },
+                )
+                .await
+            }
+            (&Method::GET, "/v1/channelOwner") => {
+                self.handle_request::<ChannelOwnerRequest, ChannelOwnerResponse, _>(
+                    req,
+                    |service, req| Box::pin(async move { service.get_channel_owner(req).await }),
                 )
                 .await
             }
