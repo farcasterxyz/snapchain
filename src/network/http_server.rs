@@ -888,6 +888,7 @@ pub enum OnChainEventType {
     EVENT_TYPE_ID_REGISTER = 3,
     EVENT_TYPE_STORAGE_RENT = 4,
     EVENT_TYPE_TIER_PURCHASE = 5,
+    EVENT_TYPE_CHANNEL_REGISTER = 6,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -960,6 +961,28 @@ pub struct TierPurchaseEventBody {
     pub tier_type: TierType,
 }
 
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum ChannelRegisterEventType {
+    CHANNEL_REGISTER_EVENT_TYPE_NONE = 0,
+    CHANNEL_REGISTER_EVENT_TYPE_REGISTER = 1,
+    CHANNEL_REGISTER_EVENT_TYPE_RENEW = 2,
+    CHANNEL_REGISTER_EVENT_TYPE_TRANSFER = 3,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelRegisterEventBody {
+    #[serde(rename = "channelKey")]
+    pub channel_key: String,
+    pub expiry: u64,
+    #[serde(with = "serdehex", rename = "ownerAddress")]
+    pub owner_address: Vec<u8>,
+    #[serde(rename = "eventType")]
+    pub event_type: ChannelRegisterEventType,
+    #[serde(with = "serdehex")]
+    pub label: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OnChainEvent {
     pub r#type: OnChainEventType,
@@ -994,6 +1017,11 @@ pub struct OnChainEvent {
     )]
     pub storage_rent_event_body: Option<StorageRentEventBody>,
     pub tier_purchase_event_body: Option<TierPurchaseEventBody>,
+    #[serde(
+        rename = "channelRegisterEventBody",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub channel_register_event_body: Option<ChannelRegisterEventBody>,
     #[serde(rename = "txIndex")]
     pub tx_index: u32,
     pub version: u32,
@@ -2429,8 +2457,23 @@ fn map_proto_on_chain_event_to_json_on_chain_event(
     let mut id_register_event_body: Option<IdRegisterEventBody> = None;
     let mut storage_rent_event_body: Option<StorageRentEventBody> = None;
     let mut tier_purchase_event_body: Option<TierPurchaseEventBody> = None;
+    let mut channel_register_event_body: Option<ChannelRegisterEventBody> = None;
     match &onchain_event.body {
         None => {}
+        Some(on_chain_event::Body::ChannelRegisterEventBody(body)) => {
+            channel_register_event_body = Some(ChannelRegisterEventBody {
+                channel_key: body.channel_key.clone(),
+                expiry: body.expiry,
+                owner_address: body.owner_address.clone(),
+                event_type: match body.event_type {
+                    1 => ChannelRegisterEventType::CHANNEL_REGISTER_EVENT_TYPE_REGISTER,
+                    2 => ChannelRegisterEventType::CHANNEL_REGISTER_EVENT_TYPE_RENEW,
+                    3 => ChannelRegisterEventType::CHANNEL_REGISTER_EVENT_TYPE_TRANSFER,
+                    _ => ChannelRegisterEventType::CHANNEL_REGISTER_EVENT_TYPE_NONE,
+                },
+                label: body.label.clone(),
+            });
+        }
         Some(on_chain_event::Body::SignerEventBody(body)) => {
             signer_event_body = Some(SignerEventBody {
                 key: body.key.clone(),
@@ -2488,6 +2531,7 @@ fn map_proto_on_chain_event_to_json_on_chain_event(
             3 => OnChainEventType::EVENT_TYPE_ID_REGISTER,
             4 => OnChainEventType::EVENT_TYPE_STORAGE_RENT,
             5 => OnChainEventType::EVENT_TYPE_TIER_PURCHASE,
+            6 => OnChainEventType::EVENT_TYPE_CHANNEL_REGISTER,
             _ => OnChainEventType::EVENT_TYPE_NONE,
         },
         chain_id: onchain_event.chain_id,
@@ -2504,6 +2548,7 @@ fn map_proto_on_chain_event_to_json_on_chain_event(
         id_register_event_body,
         storage_rent_event_body,
         tier_purchase_event_body,
+        channel_register_event_body,
     })
 }
 
@@ -4262,6 +4307,77 @@ mod tests {
         assert_eq!(body["keyType"], 1);
         assert_eq!(body["metadataType"], 1);
         assert_eq!(body["ttl"], 86_400);
+    }
+
+    #[test]
+    fn channel_register_event_round_trips_to_json_on_chain_event() {
+        let proto_event = proto::OnChainEvent {
+            r#type: 6, // EVENT_TYPE_CHANNEL_REGISTER
+            chain_id: 8453,
+            block_number: 100,
+            block_hash: vec![0x0A; 32],
+            block_timestamp: 1_800_000_000,
+            transaction_hash: vec![0x0B; 32],
+            log_index: 3,
+            fid: 0,
+            tx_index: 1,
+            version: 0,
+            body: Some(proto::on_chain_event::Body::ChannelRegisterEventBody(
+                proto::ChannelRegisterBody {
+                    channel_key: "pets".to_string(),
+                    expiry: 1_900_000_000,
+                    owner_address: vec![0xCC; 20],
+                    event_type: 1, // CHANNEL_REGISTER_EVENT_TYPE_REGISTER
+                    label: vec![0xDD; 32],
+                },
+            )),
+        };
+        let json = map_proto_on_chain_event_to_json_on_chain_event(proto_event)
+            .expect("channel register event must map cleanly");
+
+        assert!(matches!(
+            json.r#type,
+            OnChainEventType::EVENT_TYPE_CHANNEL_REGISTER
+        ));
+        assert!(json.signer_event_body.is_none());
+        let body = json
+            .channel_register_event_body
+            .clone()
+            .expect("channel_register_event_body present");
+        assert_eq!(body.channel_key, "pets");
+        assert_eq!(body.expiry, 1_900_000_000);
+        assert_eq!(body.owner_address, vec![0xCC; 20]);
+        assert!(matches!(
+            body.event_type,
+            ChannelRegisterEventType::CHANNEL_REGISTER_EVENT_TYPE_REGISTER
+        ));
+        assert_eq!(body.label, vec![0xDD; 32]);
+
+        // Confirm wire shape: camelCase wrapper key, 0x-prefixed hex bytes, enum as
+        // its variant name, and absent sibling bodies omitted via skip_serializing_if.
+        let serialized = serde_json::to_value(&json).expect("serialize OnChainEvent");
+        let body_json = &serialized["channelRegisterEventBody"];
+        assert_eq!(body_json["channelKey"], "pets");
+        assert_eq!(body_json["expiry"], 1_900_000_000u64);
+        assert_eq!(body_json["ownerAddress"], format!("0x{}", "cc".repeat(20)));
+        assert_eq!(
+            body_json["eventType"],
+            "CHANNEL_REGISTER_EVENT_TYPE_REGISTER"
+        );
+        assert_eq!(body_json["label"], format!("0x{}", "dd".repeat(32)));
+        assert!(serialized.get("signerEventBody").is_none());
+
+        // Deserialize leg: the emitted wire shape parses back into the same body,
+        // so the Deserialize derives (serdehex included) stay symmetric.
+        let parsed: OnChainEvent =
+            serde_json::from_value(serialized).expect("deserialize OnChainEvent");
+        let parsed_body = parsed
+            .channel_register_event_body
+            .expect("body survives round trip");
+        assert_eq!(parsed_body.channel_key, "pets");
+        assert_eq!(parsed_body.expiry, 1_900_000_000);
+        assert_eq!(parsed_body.owner_address, vec![0xCC; 20]);
+        assert_eq!(parsed_body.label, vec![0xDD; 32]);
     }
 
     #[test]

@@ -162,4 +162,13 @@ pub enum OnChainEventPostfix {
 
     #[allow(dead_code)] // TODO
     IdRegisterByCustodyAddress = 53,
+
+    // Reserved: no by-fid channel index is materialized — the record stores the owner
+    // address only, and resolving it to an fid is left to the read/query layer. Kept to
+    // reserve the discriminant against accidental reuse.
+    #[allow(dead_code)]
+    ChannelRegisterByFid = 54,
+    ChannelRegisterByChannelKey = 55,
+    ChannelRegisterChannelKeyByLabel = 56,
+    ChannelRegisterByOwnerAddress = 57,
 }
