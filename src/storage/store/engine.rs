@@ -978,6 +978,12 @@ impl ShardEngine {
                 // once and stop the scan; the merge is unaffected and consumers
                 // reconcile the untruncated ownership set via `GetChannelOwner`.
                 if hints.len() >= max {
+                    // Signal that a verified address owns more channels than the
+                    // per-verification cap, so the aggregate-budget pressure behind
+                    // this cap is observable before it ever approaches a block-level
+                    // event-id exhaustion (see `block_hub_event_total`).
+                    self.metrics
+                        .count("channel_owner_hints.truncated", 1, vec![]);
                     warn!(
                         fid = msg.fid(),
                         hash = msg.hex_hash(),
@@ -1028,6 +1034,15 @@ impl ShardEngine {
                 None => break,
             }
         }
+
+        // Fan-out size of this single emission (channels owned by the verified
+        // address, capped at `max`). Emitted as a distribution so p95/max show how
+        // large real emissions get — the leading indicator for aggregate event-id
+        // budget pressure, and a superset of the truncation counter (max nears the
+        // cap before anything truncates). Recorded on every reached-scan emission,
+        // including the common zero-hint case (address owns no channels).
+        self.metrics
+            .time_with_shard("channel_owner_hints.per_emission", hints.len() as u64);
 
         hints
     }
@@ -2125,6 +2140,12 @@ impl ShardEngine {
 
         self.metrics
             .gauge("block_event_seqnum", max_block_event_seqnum);
+        // Per-block HubEvent total (BlockConfirmed already inserted above, so this is
+        // the full count). The block-scoped id sequence caps at 2^SEQUENCE_BITS
+        // (16384); watching this gauge's headroom against that ceiling is the early
+        // warning for aggregate hint fan-out before it trips the id generator.
+        self.metrics
+            .gauge("block_hub_event_total", events.len() as u64);
 
         _ = self.emit_commit_metrics(&shard_chunk, &events);
 
