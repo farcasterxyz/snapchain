@@ -96,6 +96,13 @@ impl AsyncMigration for M2VerificationByAddressIndex {
             // writes the primary and the by-address entry together, so the index
             // converges regardless of ordering. Per-entry transactions keep the
             // lock hold time (and any live-path stall) to a minimum.
+            //
+            // Lock order matters: we take the primary key first, then the
+            // by-address key. The primary key is under RootPrefix::User (3) and
+            // the by-address key under RootPrefix::VerificationByAddress (14), so
+            // this is ascending byte order — the same global order `commit` sorts
+            // live merges into. Acquiring them in any other order here could
+            // deadlock against a concurrent merge until the lock timeout.
             for address in &addresses {
                 let primary_key = VerificationStoreDef::make_verification_adds_key(fid, address);
                 let fixed = context
