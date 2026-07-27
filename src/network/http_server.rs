@@ -1244,6 +1244,148 @@ impl OnChainEventRequest {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelOwnerRequest {
+    pub channel_key: String,
+}
+
+impl ChannelOwnerRequest {
+    pub fn to_proto(self) -> proto::ChannelOwnerRequest {
+        proto::ChannelOwnerRequest {
+            channel_key: self.channel_key,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelOwnerResponse {
+    /// 0 = registered but no verified owner found on this node's hosted shards
+    /// ("parked"). Parking is computed at read time, never stored.
+    pub fid: u64,
+    /// Raw 20-byte EVM address from the channel registry fold, hex-encoded.
+    #[serde(with = "serdehex", rename = "ownerAddress")]
+    pub owner_address: Vec<u8>,
+    /// Absolute expiry, unix seconds, as emitted by the registry contract.
+    pub expiry: u64,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelsByAddressRequest {
+    #[serde(with = "serdehex", rename = "address")]
+    pub owner_address: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub page_token: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse: Option<bool>,
+
+    // For backwards compatibility
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageSize: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pageToken: Option<Vec<u8>>,
+}
+
+impl ChannelsByAddressRequest {
+    pub fn to_proto(self) -> proto::ChannelsByAddressRequest {
+        proto::ChannelsByAddressRequest {
+            owner_address: self.owner_address,
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+            reverse: self.reverse,
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelsByFidRequest {
+    pub fid: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub page_token: Option<Vec<u8>>,
+
+    // For backwards compatibility
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pageSize: Option<u32>,
+    #[serde(
+        default,
+        with = "serdebase64opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pageToken: Option<Vec<u8>>,
+}
+
+impl ChannelsByFidRequest {
+    pub fn to_proto(self) -> proto::ChannelsByFidRequest {
+        proto::ChannelsByFidRequest {
+            fid: self.fid,
+            page_size: self.page_size.or(self.pageSize),
+            page_token: self.page_token.or(self.pageToken),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelInfo {
+    #[serde(rename = "channelKey")]
+    pub channel_key: String,
+    /// Resolved winner; 0 = parked.
+    pub fid: u64,
+    #[serde(with = "serdehex", rename = "ownerAddress")]
+    pub owner_address: Vec<u8>,
+    /// Absolute expiry, unix seconds, as emitted by the registry contract.
+    pub expiry: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelsResponse {
+    pub channels: Vec<ChannelInfo>,
+    #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
+}
+
+impl From<proto::ChannelInfo> for ChannelInfo {
+    fn from(channel: proto::ChannelInfo) -> Self {
+        ChannelInfo {
+            channel_key: channel.channel_key,
+            fid: channel.fid,
+            owner_address: channel.owner_address,
+            expiry: channel.expiry,
+        }
+    }
+}
+
+impl From<proto::ChannelsResponse> for ChannelsResponse {
+    fn from(response: proto::ChannelsResponse) -> Self {
+        ChannelsResponse {
+            channels: response
+                .channels
+                .into_iter()
+                .map(ChannelInfo::from)
+                .collect(),
+            next_page_token: response
+                .next_page_token
+                .map(|token| BASE64_STANDARD.encode(token)),
+        }
+    }
+}
+
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum HubEventType {
@@ -2777,6 +2919,18 @@ pub trait HubHttpService {
         &self,
         req: OnChainEventRequest,
     ) -> Result<OnChainEventResponse, ErrorResponse>;
+    async fn get_channel_owner(
+        &self,
+        req: ChannelOwnerRequest,
+    ) -> Result<ChannelOwnerResponse, ErrorResponse>;
+    async fn get_channels_by_address(
+        &self,
+        req: ChannelsByAddressRequest,
+    ) -> Result<ChannelsResponse, ErrorResponse>;
+    async fn get_channels_by_fid(
+        &self,
+        req: ChannelsByFidRequest,
+    ) -> Result<ChannelsResponse, ErrorResponse>;
     async fn get_fid_address_type(
         &self,
         req: FidAddressTypeRequest,
@@ -3522,6 +3676,62 @@ where
         })
     }
 
+    /// GET /v1/channelOwner
+    async fn get_channel_owner(
+        &self,
+        req: ChannelOwnerRequest,
+    ) -> Result<ChannelOwnerResponse, ErrorResponse> {
+        let service = &self.service;
+        let grpc_req = tonic::Request::new(req.to_proto());
+        let response = service
+            .get_channel_owner(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get channel owner".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+        let channel_owner = response.into_inner();
+        Ok(ChannelOwnerResponse {
+            fid: channel_owner.fid,
+            owner_address: channel_owner.owner_address,
+            expiry: channel_owner.expiry,
+        })
+    }
+
+    /// GET /v1/channelsByAddress
+    async fn get_channels_by_address(
+        &self,
+        req: ChannelsByAddressRequest,
+    ) -> Result<ChannelsResponse, ErrorResponse> {
+        let service = &self.service;
+        let grpc_req = tonic::Request::new(req.to_proto());
+        let response = service
+            .get_channels_by_address(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get channels by address".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+        Ok(response.into_inner().into())
+    }
+
+    /// GET /v1/channelsByFid
+    async fn get_channels_by_fid(
+        &self,
+        req: ChannelsByFidRequest,
+    ) -> Result<ChannelsResponse, ErrorResponse> {
+        let service = &self.service;
+        let grpc_req = tonic::Request::new(req.to_proto());
+        let response = service
+            .get_channels_by_fid(grpc_req)
+            .await
+            .map_err(|e| ErrorResponse {
+                error: "Failed to get channels by fid".to_string(),
+                error_detail: Some(e.to_string()),
+            })?;
+        Ok(response.into_inner().into())
+    }
+
     async fn get_events(&self, req: EventsRequest) -> Result<EventsResponse, ErrorResponse> {
         let service = &self.service;
 
@@ -3812,6 +4022,29 @@ where
                     |service, req| {
                         Box::pin(async move { service.get_on_chain_events_by_fid(req).await })
                     },
+                )
+                .await
+            }
+            (&Method::GET, "/v1/channelOwner") => {
+                self.handle_request::<ChannelOwnerRequest, ChannelOwnerResponse, _>(
+                    req,
+                    |service, req| Box::pin(async move { service.get_channel_owner(req).await }),
+                )
+                .await
+            }
+            (&Method::GET, "/v1/channelsByAddress") => {
+                self.handle_request::<ChannelsByAddressRequest, ChannelsResponse, _>(
+                    req,
+                    |service, req| {
+                        Box::pin(async move { service.get_channels_by_address(req).await })
+                    },
+                )
+                .await
+            }
+            (&Method::GET, "/v1/channelsByFid") => {
+                self.handle_request::<ChannelsByFidRequest, ChannelsResponse, _>(
+                    req,
+                    |service, req| Box::pin(async move { service.get_channels_by_fid(req).await }),
                 )
                 .await
             }

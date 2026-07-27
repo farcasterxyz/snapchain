@@ -19,30 +19,36 @@ use crate::proto::hub_service_server::HubService;
 use crate::proto::{
     self, cast_add_body, casts_by_parent_request, link_body, links_by_target_request, message_data,
     on_chain_event::Body, reaction_body, reactions_by_target_request, Block, BlocksRequest, CastId,
-    CastsByParentRequest, DbStats, EventRequest, EventsRequest, EventsResponse,
-    FidAddressTypeRequest, FidAddressTypeResponse, FidRequest, FidTimestampRequest, FidsRequest,
-    FidsResponse, GetConnectedPeersRequest, GetConnectedPeersResponse, GetInfoRequest,
-    GetInfoResponse, GetMeshViewRequest, Height, HubEvent, IdRegistryEventByAddressRequest,
-    LinkRequest, LinksByFidRequest, LinksByTargetRequest, MeshTopology, MeshView, Message,
-    MessageType, MessagesResponse, OnChainEvent, OnChainEventRequest, OnChainEventResponse,
-    ReactionRequest, ReactionType, ReactionsByFidRequest, ReactionsByTargetRequest, ShardChunk,
-    ShardChunksRequest, ShardChunksResponse, Signer, SignerEventType, SignerRequest,
-    SignerResponse, SignerSource, SignersByFidRequest, SignersByFidResponse, StorageLimitsResponse,
-    SubscribeRequest, TrieNodeMetadataRequest, TrieNodeMetadataResponse, UserDataRequest,
-    UserNameProof, UserNameType, UsernameProofRequest, UsernameProofsResponse, ValidationResponse,
+    CastsByParentRequest, ChannelInfo, ChannelOwnerRequest, ChannelOwnerResponse,
+    ChannelsByAddressRequest, ChannelsByFidRequest, ChannelsResponse, DbStats, EventRequest,
+    EventsRequest, EventsResponse, FidAddressTypeRequest, FidAddressTypeResponse, FidRequest,
+    FidTimestampRequest, FidsRequest, FidsResponse, GetConnectedPeersRequest,
+    GetConnectedPeersResponse, GetInfoRequest, GetInfoResponse, GetMeshViewRequest, Height,
+    HubEvent, IdRegistryEventByAddressRequest, LinkRequest, LinksByFidRequest,
+    LinksByTargetRequest, MeshTopology, MeshView, Message, MessageType, MessagesResponse,
+    OnChainEvent, OnChainEventRequest, OnChainEventResponse, ReactionRequest, ReactionType,
+    ReactionsByFidRequest, ReactionsByTargetRequest, ShardChunk, ShardChunksRequest,
+    ShardChunksResponse, Signer, SignerEventType, SignerRequest, SignerResponse, SignerSource,
+    SignersByFidRequest, SignersByFidResponse, StorageLimitsResponse, SubscribeRequest,
+    TrieNodeMetadataRequest, TrieNodeMetadataResponse, UserDataRequest, UserNameProof,
+    UserNameType, UsernameProofRequest, UsernameProofsResponse, ValidationResponse,
     VerificationAddAddressBody, VerificationRequest,
 };
 use crate::storage::constants::OnChainEventPostfix;
 use crate::storage::constants::RootPrefix;
+use crate::storage::constants::PAGE_SIZE_MAX;
 use crate::storage::db::PageOptions;
 use crate::storage::db::RocksDbTransactionBatch;
-use crate::storage::store::account::MessagesPage;
 use crate::storage::store::account::UsernameProofStore;
 use crate::storage::store::account::{
     get_app_nonce, get_gasless_key_count, get_gasless_key_record, get_last_used_at, get_user_nonce,
-    list_gasless_keys_by_fid, CastStore, GaslessKeyRecord, LinkStore, ReactionStore, UserDataStore,
-    VerificationStore,
+    list_gasless_keys_by_fid, CastStore, GaslessKeyRecord, LinkStore, OnchainEventStorageError,
+    ReactionStore, UserDataStore, VerificationStore,
 };
+use crate::storage::store::account::{
+    get_channel_keys_by_owner_address, get_channel_keys_for_owner_addresses,
+};
+use crate::storage::store::account::{make_ts_hash, MessagesPage};
 use crate::storage::store::account::{message_bytes_decode, IntoI32};
 use crate::storage::store::account::{EventsPage, HubEventIdGenerator};
 use crate::storage::store::block_engine::{self, BlockStores};
@@ -54,7 +60,8 @@ use crate::version::version::{EngineVersion, ProtocolFeature};
 use hex::ToHex;
 use moka::policy::EvictionPolicy;
 use moka::sync::{Cache, CacheBuilder};
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,7 +70,7 @@ use tokio::time::{sleep, timeout};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::{Request, Response, Status};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 pub const MEMPOOL_ADD_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
@@ -119,6 +126,142 @@ fn signer_store_error_to_status(err: HubError) -> Status {
     } else {
         Status::internal(format!("Store error: {:?}", err))
     }
+}
+
+fn resolve_channel_owner_fid(
+    shard_stores: &HashMap<u32, Stores>,
+    owner_address: &[u8],
+) -> Result<u64, Status> {
+    // Last-write-wins winner, keyed so that plain tuple ordering encodes the
+    // selection rule. `ts_hash` is a 24-byte big-endian timestamp ++ message
+    // hash, so the higher `ts_hash` wins on timestamp and, at equal timestamps,
+    // on the message-hash bytes — this already resolves any tie between two
+    // distinct verifications. `Reverse(fid)` is only consulted on a full 24-byte
+    // `ts_hash` tie, which cannot occur for two distinct messages (the hash
+    // differs); it exists solely to keep the result total and deterministic.
+    // Strict `>` means an identical key never displaces the incumbent, so the
+    // winner is independent of shard/candidate iteration order (the
+    // `shard_stores` map iterates in an unspecified order).
+    let mut winner: Option<([u8; 24], Reverse<u64>)> = None;
+
+    for stores in shard_stores.values() {
+        let candidates = VerificationStore::get_verifications_by_address(
+            &stores.verification_store,
+            owner_address,
+        )
+        .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?;
+
+        // The by-address index yields best-effort candidates; re-validate each
+        // against the primary VerificationAdds and take the authoritative
+        // `ts_hash` from the surviving primary message, never the index value.
+        for (fid, _indexed_ts_hash) in candidates {
+            let Some(primary_add) = VerificationStore::get_verification_add(
+                &stores.verification_store,
+                fid,
+                owner_address,
+                None,
+            )
+            .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
+            else {
+                continue;
+            };
+
+            let Some(data) = primary_add.data.as_ref() else {
+                // Unlike a missing primary add (a benign stale/orphan index entry),
+                // a surviving primary VerificationAdd with no `data` is a data-integrity
+                // anomaly: messages carry `data` by construction once merged. Skip it
+                // so one bad record can't fail the read, but log it so the anomaly is
+                // observable rather than silently under-reporting the owner as parked.
+                warn!(
+                    fid,
+                    owner_address = hex::encode(owner_address),
+                    "channel owner resolution skipped a VerificationAdd with no data",
+                );
+                continue;
+            };
+            let ts_hash = make_ts_hash(data.timestamp, &primary_add.hash)
+                .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?;
+
+            let candidate = (ts_hash, Reverse(fid));
+            if winner.as_ref().is_none_or(|best| candidate > *best) {
+                winner = Some(candidate);
+            }
+        }
+    }
+
+    Ok(winner.map(|(_ts_hash, fid)| fid.0).unwrap_or(0))
+}
+
+fn onchain_event_storage_error_to_status(err: OnchainEventStorageError) -> Status {
+    match err {
+        OnchainEventStorageError::HubError(hub_error)
+            if hub_error.code.starts_with("bad_request") =>
+        {
+            Status::invalid_argument(hub_error.to_string())
+        }
+        other => Status::internal(format!("Store error: {:?}", other)),
+    }
+}
+
+/// Resolves `(owner_address, channel_key)` index entries into [`ChannelInfo`]s,
+/// stamping `fid` onto each. Lapsed records (expiry in the past) are included:
+/// release state is not computable from chain events, so callers interpret
+/// `expiry` themselves (see GetChannelOwner in rpc.proto). An index entry whose
+/// primary `ChannelOwner` disagrees on the owner address is dropped with a
+/// `warn!`, since the fold writes both sides in one transaction so a mismatch
+/// signals index corruption.
+fn channel_infos_for_index_keys(
+    block_stores: &BlockStores,
+    index_keys: impl IntoIterator<Item = (Vec<u8>, String)>,
+    fid: u64,
+) -> Result<Vec<ChannelInfo>, Status> {
+    let mut channels = Vec::new();
+
+    for (owner_address, channel_key) in index_keys {
+        let Some(channel_owner) = block_stores
+            .onchain_event_store
+            .get_channel_owner(&channel_key, None)
+            .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
+        else {
+            continue;
+        };
+
+        if channel_owner.owner_address != owner_address {
+            warn!(
+                channel_key,
+                indexed_owner_address = hex::encode(&owner_address),
+                primary_owner_address = hex::encode(&channel_owner.owner_address),
+                "channel list skipped an owner-address index entry that disagrees with its primary record",
+            );
+            continue;
+        }
+
+        channels.push(ChannelInfo {
+            channel_key,
+            fid,
+            owner_address: channel_owner.owner_address,
+            expiry: channel_owner.expiry,
+        });
+    }
+
+    Ok(channels)
+}
+
+fn channel_infos_by_owner_address(
+    block_stores: &BlockStores,
+    owner_address: &[u8],
+    fid: u64,
+    page_options: &PageOptions,
+) -> Result<(Vec<ChannelInfo>, Option<Vec<u8>>), Status> {
+    let (channel_keys, next_page_token) =
+        get_channel_keys_by_owner_address(&block_stores.db, owner_address, page_options)
+            .map_err(onchain_event_storage_error_to_status)?;
+    let index_keys = channel_keys
+        .into_iter()
+        .map(|channel_key| (owner_address.to_vec(), channel_key));
+    let channels = channel_infos_for_index_keys(block_stores, index_keys, fid)?;
+
+    Ok((channels, next_page_token))
 }
 
 /// Build a unified `Signer` record from an on-chain `OnChainEvent` whose body is a
@@ -2601,6 +2744,164 @@ impl HubService for MyHubService {
             next_page_token: None,
         };
         Ok(Response::new(response))
+    }
+
+    async fn get_channel_owner(
+        &self,
+        request: Request<ChannelOwnerRequest>,
+    ) -> Result<Response<ChannelOwnerResponse>, Status> {
+        let req = request.into_inner();
+        let channel_owner = self
+            .block_stores
+            .onchain_event_store
+            .get_channel_owner(&req.channel_key, None)
+            .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?
+            .ok_or_else(|| Status::not_found("channel not registered"))?;
+
+        let fid = resolve_channel_owner_fid(&self.shard_stores, &channel_owner.owner_address)?;
+
+        Ok(Response::new(ChannelOwnerResponse {
+            fid,
+            owner_address: channel_owner.owner_address,
+            expiry: channel_owner.expiry,
+        }))
+    }
+
+    async fn get_channels_by_address(
+        &self,
+        request: Request<ChannelsByAddressRequest>,
+    ) -> Result<Response<ChannelsResponse>, Status> {
+        let req = request.into_inner();
+        // Match GetChannelsByFid's page-size contract on this public read: 0
+        // returns an empty page, and an omitted or oversized value is clamped
+        // to the server-side maximum so it can't trigger an unbounded scan.
+        let mut page_options = req.page_options();
+        page_options.page_size = match page_options.page_size {
+            Some(0) => {
+                return Ok(Response::new(ChannelsResponse {
+                    channels: vec![],
+                    next_page_token: None,
+                }));
+            }
+            Some(size) => Some(size.min(PAGE_SIZE_MAX)),
+            None => Some(PAGE_SIZE_MAX),
+        };
+        let (mut channels, next_page_token) = channel_infos_by_owner_address(
+            &self.block_stores,
+            &req.owner_address,
+            0,
+            &page_options,
+        )?;
+
+        if !channels.is_empty() {
+            let fid = resolve_channel_owner_fid(&self.shard_stores, &req.owner_address)?;
+            for channel in &mut channels {
+                channel.fid = fid;
+            }
+        }
+
+        Ok(Response::new(ChannelsResponse {
+            channels,
+            next_page_token,
+        }))
+    }
+
+    async fn get_channels_by_fid(
+        &self,
+        request: Request<ChannelsByFidRequest>,
+    ) -> Result<Response<ChannelsResponse>, Status> {
+        let req = request.into_inner();
+        let stores = self.get_stores_for(req.fid)?;
+
+        // Clamp the page size to a server-side maximum so an omitted or oversized
+        // request can't trigger an unbounded scan on this public read.
+        let page_size = match req.page_size {
+            Some(0) => {
+                return Ok(Response::new(ChannelsResponse {
+                    channels: vec![],
+                    next_page_token: None,
+                }));
+            }
+            Some(size) => (size as usize).min(PAGE_SIZE_MAX),
+            None => PAGE_SIZE_MAX,
+        };
+
+        // Collect the fid's verified Ethereum addresses (deduped), then sort them
+        // ascending so the by-owner-address index key is a globally ordered
+        // composite cursor across the whole join.
+        let mut verification_page_token = None;
+        let mut owner_addresses = Vec::new();
+        let mut seen_owner_addresses = HashSet::new();
+
+        loop {
+            let verification_page_options = PageOptions {
+                page_size: None,
+                page_token: verification_page_token.clone(),
+                reverse: false,
+            };
+            let page = VerificationStore::get_verification_adds_by_fid(
+                &stores.verification_store,
+                req.fid,
+                &verification_page_options,
+            )
+            .map_err(|err| Status::internal(format!("Store error: {:?}", err)))?;
+
+            for message in page.messages {
+                let message_hash = message.hash.clone();
+                let Some(data) = message.data else {
+                    // A merged message always carries `data`; a missing one is a
+                    // storage anomaly, not a benign state. Skip it (one bad record
+                    // must not fail the read) but log so it stays observable.
+                    warn!(
+                        fid = req.fid,
+                        message_hash = hex::encode(&message_hash),
+                        "channels-by-fid skipped a VerificationAdd with no data",
+                    );
+                    continue;
+                };
+                let Some(proto::message_data::Body::VerificationAddAddressBody(body)) = data.body
+                else {
+                    continue;
+                };
+                if body.protocol != proto::Protocol::Ethereum as i32 || body.address.len() != 20 {
+                    continue;
+                }
+                if seen_owner_addresses.insert(body.address.clone()) {
+                    owner_addresses.push(body.address);
+                }
+            }
+
+            let Some(next_page_token) = page.next_page_token else {
+                break;
+            };
+            verification_page_token = Some(next_page_token);
+        }
+        owner_addresses.sort();
+
+        // Keep only the addresses this fid currently wins under read-time LWW.
+        // This is what makes the invariant hold: a channel appears here iff
+        // GetChannelOwner resolves it to `req.fid`.
+        let mut winning_addresses = Vec::new();
+        for owner_address in owner_addresses {
+            if resolve_channel_owner_fid(&self.shard_stores, &owner_address)? == req.fid {
+                winning_addresses.push(owner_address);
+            }
+        }
+
+        // Page across the winning addresses using the composite cursor.
+        let (index_keys, next_page_token) = get_channel_keys_for_owner_addresses(
+            &self.block_stores.db,
+            &winning_addresses,
+            req.page_token.as_deref(),
+            page_size,
+        )
+        .map_err(onchain_event_storage_error_to_status)?;
+        let channels = channel_infos_for_index_keys(&self.block_stores, index_keys, req.fid)?;
+
+        Ok(Response::new(ChannelsResponse {
+            channels,
+            next_page_token,
+        }))
     }
 
     async fn get_id_registry_on_chain_event(

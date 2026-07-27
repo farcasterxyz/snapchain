@@ -219,25 +219,27 @@ fn set_channel_owner_event_position(owner: &mut ChannelOwner, onchain_event: &On
     owner.log_index = onchain_event.log_index;
 }
 
+// Routes through the shared `put_/delete_channel_key_by_owner_address` helpers,
+// which validate the 20-byte EVM address. On the merge path this validation is
+// unreachable: callers gate the new owner on `validate_channel_owner_address`
+// first (Register/Transfer, early-return on failure), and the old owner is read
+// back from a `ChannelOwner` record that was itself written only through that
+// same gate. So the `?` never fires on a validly-constructed DB, keeping this
+// behavior-identical to the pre-consolidation inline writes.
 fn move_channel_owner_address_index(
     txn: &mut RocksDbTransactionBatch,
     channel_key: &str,
     old_owner_address: Option<&[u8]>,
     new_owner_address: &[u8],
-) {
+) -> Result<(), OnchainEventStorageError> {
     if let Some(old_owner_address) = old_owner_address {
         if old_owner_address != new_owner_address {
-            txn.delete(make_channel_register_by_owner_address_key(
-                old_owner_address,
-                channel_key,
-            ));
+            delete_channel_key_by_owner_address(txn, old_owner_address, channel_key)?;
         }
     }
 
-    txn.put(
-        make_channel_register_by_owner_address_key(new_owner_address, channel_key),
-        vec![TRUE_VALUE],
-    );
+    put_channel_key_by_owner_address(txn, new_owner_address, channel_key)?;
+    Ok(())
 }
 
 fn validate_channel_label(label: &[u8]) -> bool {
@@ -329,7 +331,7 @@ fn build_secondary_indices_for_channel_register(
                     .as_ref()
                     .map(|owner| owner.owner_address.as_slice()),
                 &channel_owner.owner_address,
-            );
+            )?;
             txn.put(by_channel_key, channel_owner.encode_to_vec());
         }
         ChannelRegisterEventType::Renew => {
@@ -397,7 +399,7 @@ fn build_secondary_indices_for_channel_register(
                 &channel_key,
                 Some(&old_owner_address),
                 &channel_owner.owner_address,
-            );
+            )?;
             txn.put(
                 make_channel_register_by_channel_key(&channel_key),
                 channel_owner.encode_to_vec(),
@@ -553,11 +555,9 @@ fn build_secondary_indices(
     Ok(())
 }
 
-// Read/write surface for the by-owner-address index, used by the later
-// resolution/binding increment. The production merge path maintains this same index via
-// `move_channel_owner_address_index`; both go through
-// `make_channel_register_by_owner_address_key`, which is the single source of truth for
-// the key layout.
+// Read/write surface for the by-owner-address index. The production merge path
+// goes through these helpers so validation, key layout, and values stay
+// centralized.
 pub fn put_channel_key_by_owner_address(
     txn: &mut RocksDbTransactionBatch,
     owner_address: &[u8],
@@ -622,6 +622,82 @@ pub fn get_channel_keys_by_owner_address(
     };
 
     Ok((channel_keys, next_page_token))
+}
+
+/// Composite paged scan across a sorted, ascending, deduped list of owner
+/// addresses. The by-owner-address index key (`address ++ channel_key`) is
+/// treated as one globally ordered cursor over the whole sequence, so this pages
+/// across an address boundary transparently. Returns up to `page_size`
+/// `(owner_address, channel_key)` pairs and a `next_page_token` equal to the last
+/// index key scanned whenever the page filled. A `None` token means the sequence
+/// was fully enumerated; a present token means "call again" but does not
+/// guarantee more results — a page that fills exactly on the last entry yields one
+/// final empty page. This matches `get_channel_keys_by_owner_address`, whose
+/// single-address token has the same boundary behavior.
+///
+/// Winner resolution is the caller's job: `owner_addresses` must already be
+/// sorted ascending and deduped. A stored `page_token` is routed to a single
+/// address — addresses fully below it are skipped, the token's own address
+/// resumes strictly after it, and addresses above it start fresh — so a token
+/// minted from one address can never mis-scan another.
+///
+/// There is no snapshot isolation across pages: `owner_addresses` is re-derived
+/// per request, so if the set changes between pages the cursor follows standard
+/// paging semantics — an address removed after the token was minted stops
+/// contributing (its earlier entries were already returned), and an address
+/// added below the token is not revisited until a fresh enumeration.
+pub fn get_channel_keys_for_owner_addresses(
+    db: &RocksDB,
+    owner_addresses: &[Vec<u8>],
+    page_token: Option<&[u8]>,
+    page_size: usize,
+) -> Result<(Vec<(Vec<u8>, String)>, Option<Vec<u8>>), OnchainEventStorageError> {
+    let mut results: Vec<(Vec<u8>, String)> = Vec::new();
+    let mut last_key: Option<Vec<u8>> = None;
+
+    for owner_address in owner_addresses {
+        if results.len() >= page_size {
+            break;
+        }
+
+        // Route the composite cursor to this single address.
+        let address_token = match page_token {
+            Some(token) => {
+                let prefix = make_channel_register_by_owner_address_prefix(owner_address);
+                if token.starts_with(&prefix) {
+                    Some(token.to_vec()) // resume within the token's own address
+                } else if token < prefix.as_slice() {
+                    None // address sorts above the token: scan from the start
+                } else {
+                    continue; // address sorts below the token: already returned
+                }
+            }
+            None => None,
+        };
+
+        let page_options = PageOptions {
+            page_size: Some(page_size - results.len()),
+            page_token: address_token,
+            reverse: false,
+        };
+        let (channel_keys, next_token) =
+            get_channel_keys_by_owner_address(db, owner_address, &page_options)?;
+        for channel_key in channel_keys {
+            results.push((owner_address.clone(), channel_key));
+        }
+        // A non-empty token means this address stopped at `page_size`; carry it so
+        // it becomes `next_page_token` once the page is full.
+        if next_token.is_some() {
+            last_key = next_token;
+        }
+    }
+
+    let next_page_token = if results.len() >= page_size {
+        last_key
+    } else {
+        None
+    };
+    Ok((results, next_page_token))
 }
 
 fn validate_evm_address(owner_address: &[u8]) -> Result<(), OnchainEventStorageError> {

@@ -71,6 +71,56 @@ service HubService {
   rpc GetSignersByFid(SignersByFidRequest) returns (SignersByFidResponse);
 
   rpc GetOnChainEvents(OnChainEventRequest) returns (OnChainEventResponse);
+  // Resolves the current channel registry owner address to an fid using the
+  // same node-local consistency class as GetOnChainEvents: resolution covers
+  // only the verification shards this node hosts, and shard-0 ownership state
+  // and verification shards progress independently, so transient skew is
+  // possible. This read is not consensus.
+  //
+  // Because the owner is the last-write-wins verifier of the address across ALL
+  // shards, a node that does not host every data shard can return an fid that is
+  // stale (an older verifier whose home shard it hosts, when the true latest
+  // verifier lives on a shard it does not host) or 0/"parked" (when no hosted
+  // shard holds any verifier). Only a node hosting all data shards is guaranteed
+  // to return the globally-correct owner. Callers that need an authoritative
+  // answer must query a full node.
+  //
+  // Expiry is returned as-is and may be in the past. The registry contract
+  // emits no onchain event when a lapsed registration's grace period ends, so
+  // this endpoint reports the last known registration (owner address + expiry)
+  // until a later registration supersedes it; it never computes grace or
+  // release state. Callers interpret `expiry` themselves (e.g. against the
+  // deployed grace period). NOT_FOUND is returned only for a channel key with
+  // no registration record at all.
+  rpc GetChannelOwner(ChannelOwnerRequest) returns (ChannelOwnerResponse);
+  // Lists channels for a raw 20-byte EVM owner address, including lapsed
+  // registrations (expiry in the past) until a later registration supersedes
+  // them — see GetChannelOwner's expiry note; callers interpret `expiry`
+  // themselves. Uses the same node-local consistency class as GetChannelOwner:
+  // resolution covers only the verification shards this node hosts, and
+  // shard-0 ownership state and verification shards progress independently,
+  // so transient skew is possible.
+  // This read is not consensus. `page_token` is opaque bytes; callers page until
+  // `next_page_token` is unset, which marks the end of enumeration. A page that
+  // lands exactly on the last entry may return a token that yields one final
+  // empty page, so a present token means "page again", not "results guaranteed".
+  rpc GetChannelsByAddress(ChannelsByAddressRequest) returns (ChannelsResponse);
+  // Lists channels that currently resolve to `fid`, including lapsed
+  // registrations (see GetChannelOwner's expiry note). The node must host the
+  // fid's home shard, following existing fid-routed read behavior.
+  // Address resolution uses the same node-local consistency class as
+  // GetChannelOwner: resolution covers only the verification shards this node
+  // hosts, and shard-0 ownership state and verification shards progress
+  // independently, so transient skew is possible. This read is not consensus.
+  //
+  // This is a joined read over the fid's verified EVM addresses and the channel
+  // owner-address index. The verified addresses are enumerated in ascending
+  // order, making the owner-address index key a globally ordered composite
+  // cursor across the join. `page_token` is opaque bytes and the paging contract
+  // is identical to GetChannelsByAddress: page until `next_page_token` is unset
+  // (a boundary-aligned page may return one final empty page). There is no
+  // `reverse` (addresses iterate ascending only).
+  rpc GetChannelsByFid(ChannelsByFidRequest) returns (ChannelsResponse);
   rpc GetIdRegistryOnChainEvent(FidRequest) returns (OnChainEvent);
   rpc GetIdRegistryOnChainEventByAddress(IdRegistryEventByAddressRequest) returns (OnChainEvent);
   rpc GetCurrentStorageLimitsByFid(FidRequest) returns (StorageLimitsResponse);

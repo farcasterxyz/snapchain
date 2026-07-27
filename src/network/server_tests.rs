@@ -1,12 +1,13 @@
 #[cfg(test)]
 mod tests {
     use crate::connectors::onchain_events::ens::EnsError;
+    use alloy_primitives::keccak256;
     use async_trait::async_trait;
     use base64::Engine;
     use prost::Message;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use tokio::time::{sleep, timeout};
 
     use crate::connectors::fname::{FetchError, FnameTransferLookup};
@@ -18,14 +19,17 @@ mod tests {
     use crate::network::server::MyHubService;
     use crate::proto::hub_service_server::HubService;
     use crate::proto::{
-        self, Block, EventRequest, EventsRequest, FarcasterNetwork, FnameTransfer, HubEvent,
-        HubEventType, OnChainEventType, ShardChunk, StorageUnitType, SubmitBulkMessagesRequest,
-        SubmitBulkMessagesResponse, UserDataType, UserNameProof, UserNameType,
-        UsernameProofRequest, VerificationAddAddressBody,
+        self, Block, ChannelOwnerRequest, ChannelOwnerResponse, ChannelRegisterEventType,
+        ChannelsByAddressRequest, ChannelsByFidRequest, EventRequest, EventsRequest,
+        FarcasterNetwork, FnameTransfer, HubEvent, HubEventType, OnChainEventType, ShardChunk,
+        StorageUnitType, SubmitBulkMessagesRequest, SubmitBulkMessagesResponse, UserDataType,
+        UserNameProof, UserNameType, UsernameProofRequest, VerificationAddAddressBody,
     };
     use crate::proto::{FidRequest, SignersByFidRequest, SubscribeRequest};
     use crate::storage::db::{RocksDB, RocksDbTransactionBatch};
-    use crate::storage::store::account::{HubEventIdGenerator, HubEventStorageExt, SEQUENCE_BITS};
+    use crate::storage::store::account::{
+        make_ts_hash, HubEventIdGenerator, HubEventStorageExt, VerificationStoreDef, SEQUENCE_BITS,
+    };
     use crate::storage::store::block_engine::BlockEngine;
     use crate::storage::store::block_engine_test_helpers::{BlockEngineOptions, Validity};
     use crate::storage::store::engine::{Senders, ShardEngine};
@@ -54,6 +58,168 @@ mod tests {
             page_token: None,
             reverse: None,
         })
+    }
+
+    fn now_unix_seconds() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn channel_label(channel_key: &str) -> Vec<u8> {
+        keccak256(channel_key.as_bytes()).to_vec()
+    }
+
+    fn owner_address(byte: u8) -> Vec<u8> {
+        vec![byte; 20]
+    }
+
+    fn merge_channel_registration(
+        block_engine: &BlockEngine,
+        channel_key: &str,
+        owner_address: Vec<u8>,
+        expiry: u64,
+    ) {
+        merge_channel_event(
+            block_engine,
+            events_factory::create_channel_register_event(
+                channel_key,
+                channel_label(channel_key),
+                owner_address,
+                expiry,
+                ChannelRegisterEventType::Register,
+                1,
+                1,
+            ),
+        );
+    }
+
+    fn merge_channel_transfer(
+        block_engine: &BlockEngine,
+        channel_key: &str,
+        owner_address: Vec<u8>,
+        expiry: u64,
+    ) {
+        merge_channel_event(
+            block_engine,
+            events_factory::create_channel_register_event(
+                channel_key,
+                channel_label(channel_key),
+                owner_address,
+                expiry,
+                ChannelRegisterEventType::Transfer,
+                2,
+                1,
+            ),
+        );
+    }
+
+    fn merge_channel_event(block_engine: &BlockEngine, event: proto::OnChainEvent) {
+        let block_stores = block_engine.stores();
+        let mut txn = RocksDbTransactionBatch::new();
+        block_stores
+            .onchain_event_store
+            .merge_onchain_event(event, &mut txn)
+            .unwrap();
+        block_stores.onchain_event_store.db.commit(txn).unwrap();
+    }
+
+    async fn get_channel_owner_response(
+        service: &MyHubService,
+        channel_key: &str,
+    ) -> ChannelOwnerResponse {
+        service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: channel_key.to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+    }
+
+    async fn get_channels_by_fid_keys(service: &MyHubService, fid: u64) -> Vec<String> {
+        service
+            .get_channels_by_fid(Request::new(ChannelsByFidRequest {
+                fid,
+                page_size: None,
+                page_token: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .channels
+            .into_iter()
+            .map(|channel| channel.channel_key)
+            .collect()
+    }
+
+    async fn assert_channel_owner_fid_invariant(
+        service: &MyHubService,
+        channel_key: &str,
+        winner_fid: u64,
+        loser_fid: Option<u64>,
+    ) {
+        let owner = get_channel_owner_response(service, channel_key).await;
+        assert_eq!(owner.fid, winner_fid);
+
+        if winner_fid != 0 {
+            assert!(get_channels_by_fid_keys(service, winner_fid)
+                .await
+                .contains(&channel_key.to_string()));
+        }
+        if let Some(loser_fid) = loser_fid {
+            assert!(!get_channels_by_fid_keys(service, loser_fid)
+                .await
+                .contains(&channel_key.to_string()));
+        }
+    }
+
+    fn verification_add(fid: u64, address: Vec<u8>, timestamp: u32) -> proto::Message {
+        messages_factory::verifications::create_verification_add(
+            fid,
+            0,
+            address,
+            vec![],
+            vec![],
+            Some(timestamp),
+            None,
+        )
+    }
+
+    fn verification_remove(fid: u64, address: Vec<u8>, timestamp: u32) -> proto::Message {
+        messages_factory::verifications::create_verification_remove(
+            fid,
+            address,
+            Some(timestamp),
+            None,
+        )
+    }
+
+    fn channels_by_address_request(address: Vec<u8>) -> Request<ChannelsByAddressRequest> {
+        Request::new(ChannelsByAddressRequest {
+            owner_address: address,
+            page_size: None,
+            page_token: None,
+            reverse: None,
+        })
+    }
+
+    fn channels_by_fid_request(fid: u64, page_size: Option<u32>) -> Request<ChannelsByFidRequest> {
+        Request::new(ChannelsByFidRequest {
+            fid,
+            page_size,
+            page_token: None,
+        })
+    }
+
+    fn merge_verification(stores: &Stores, verification: &proto::Message) {
+        let mut txn = RocksDbTransactionBatch::new();
+        stores
+            .verification_store
+            .merge(verification, &mut txn, &test_helper::default_merge_ctx())
+            .unwrap();
+        stores.db.commit(txn).unwrap();
     }
 
     struct MockL1Client {}
@@ -308,6 +474,900 @@ mod tests {
             shard_decision_tx,
             block_decision_tx,
         )
+    }
+
+    #[tokio::test]
+    async fn test_get_channel_owner_unknown_channel_key_returns_not_found() {
+        let (
+            _stores,
+            _senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+
+        let err = service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: "missing".to_string(),
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(err.message(), "channel not registered");
+    }
+
+    // The registry emits no onchain event when a lapsed registration's grace
+    // period ends, so the endpoint reports the last known registration as-is
+    // (owner still resolvable, expiry visibly in the past) and callers
+    // interpret expiry themselves.
+    #[tokio::test]
+    async fn test_get_channel_owner_lapsed_registration_returns_record() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(1);
+        let expiry = now_unix_seconds() - 1;
+        merge_channel_registration(&block_engine, "lapsed", address.clone(), expiry);
+        let verification = messages_factory::verifications::create_verification_add(
+            SHARD1_FID,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(10),
+            None,
+        );
+        merge_verification(stores.get(&1).unwrap(), &verification);
+
+        let response = service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: "lapsed".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.fid, SHARD1_FID);
+        assert_eq!(response.owner_address, address);
+        assert_eq!(response.expiry, expiry);
+    }
+
+    #[tokio::test]
+    async fn test_get_channel_owner_registered_without_verification_returns_parked() {
+        let (
+            _stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(2);
+        let expiry = now_unix_seconds() + 3600;
+        merge_channel_registration(&block_engine, "parked", address.clone(), expiry);
+
+        let response = service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: "parked".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.fid, 0);
+        assert_eq!(response.owner_address, address);
+        assert_eq!(response.expiry, expiry);
+    }
+
+    #[tokio::test]
+    async fn test_get_channel_owner_resolves_single_verification() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(3);
+        let expiry = now_unix_seconds() + 3600;
+        merge_channel_registration(&block_engine, "verified", address.clone(), expiry);
+        let verification_add = messages_factory::verifications::create_verification_add(
+            SHARD1_FID,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(1),
+            None,
+        );
+        merge_verification(stores.get(&1).unwrap(), &verification_add);
+
+        let response = service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: "verified".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.fid, SHARD1_FID);
+        assert_eq!(response.owner_address, address);
+        assert_eq!(response.expiry, expiry);
+    }
+
+    #[tokio::test]
+    async fn test_get_channel_owner_lww_across_hosted_shards() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(4);
+        merge_channel_registration(
+            &block_engine,
+            "lww",
+            address.clone(),
+            now_unix_seconds() + 3600,
+        );
+        let later = messages_factory::verifications::create_verification_add(
+            SHARD2_FID,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(20),
+            None,
+        );
+        let earlier = messages_factory::verifications::create_verification_add(
+            SHARD1_FID,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(10),
+            None,
+        );
+        merge_verification(stores.get(&2).unwrap(), &later);
+        merge_verification(stores.get(&1).unwrap(), &earlier);
+
+        let response = service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: "lww".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.fid, SHARD2_FID);
+    }
+
+    // Mirror of the test above with the later verification on the OTHER shard.
+    // `shard_stores` is a `HashMap` iterated in an unspecified order, so running
+    // both directions pins "latest ts_hash wins" rather than an accidental
+    // "last shard iterated wins" — one direction alone could pass by luck of the
+    // hash order.
+    #[tokio::test]
+    async fn test_get_channel_owner_lww_across_hosted_shards_reversed() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(6);
+        merge_channel_registration(
+            &block_engine,
+            "lww_reversed",
+            address.clone(),
+            now_unix_seconds() + 3600,
+        );
+        let later = messages_factory::verifications::create_verification_add(
+            SHARD1_FID,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(20),
+            None,
+        );
+        let earlier = messages_factory::verifications::create_verification_add(
+            SHARD2_FID,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(10),
+            None,
+        );
+        merge_verification(stores.get(&1).unwrap(), &later);
+        merge_verification(stores.get(&2).unwrap(), &earlier);
+
+        let response = service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: "lww_reversed".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.fid, SHARD1_FID);
+    }
+
+    // A verification remove deletes both the primary add and its by-address index
+    // entry, so a channel that resolved to an fid must fall back to parked once
+    // the owner removes their verification. This exercises the real
+    // add-then-remove path end to end, distinct from the artificial orphan seed.
+    #[tokio::test]
+    async fn test_get_channel_owner_reverts_to_parked_after_verification_remove() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(7);
+        let expiry = now_unix_seconds() + 3600;
+        merge_channel_registration(&block_engine, "removed", address.clone(), expiry);
+        let verification_add = messages_factory::verifications::create_verification_add(
+            SHARD1_FID,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(10),
+            None,
+        );
+        merge_verification(stores.get(&1).unwrap(), &verification_add);
+
+        // Sanity: resolves to the verifier before the remove.
+        let resolved = service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: "removed".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resolved.fid, SHARD1_FID);
+
+        // Later remove wins the CRDT and clears both the add and the index entry.
+        let verification_remove = messages_factory::verifications::create_verification_remove(
+            SHARD1_FID,
+            address.clone(),
+            Some(20),
+            None,
+        );
+        merge_verification(stores.get(&1).unwrap(), &verification_remove);
+
+        let response = service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: "removed".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.fid, 0);
+        assert_eq!(response.owner_address, address);
+        assert_eq!(response.expiry, expiry);
+    }
+
+    #[tokio::test]
+    async fn test_get_channel_owner_drops_orphan_index_candidate() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(5);
+        let expiry = now_unix_seconds() + 3600;
+        merge_channel_registration(&block_engine, "orphan", address.clone(), expiry);
+
+        let mut txn = RocksDbTransactionBatch::new();
+        let orphan_hash = vec![9; 20];
+        let orphan_ts_hash = make_ts_hash(100, &orphan_hash).unwrap();
+        txn.put(
+            VerificationStoreDef::make_verification_by_address_key(&address, SHARD1_FID),
+            orphan_ts_hash.to_vec(),
+        );
+        stores.get(&1).unwrap().db.commit(txn).unwrap();
+
+        let response = service
+            .get_channel_owner(Request::new(ChannelOwnerRequest {
+                channel_key: "orphan".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.fid, 0);
+        assert_eq!(response.owner_address, address);
+        assert_eq!(response.expiry, expiry);
+    }
+
+    #[tokio::test]
+    async fn test_channel_reads_delayed_flip_from_parked_to_verified() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(8);
+        let expiry = now_unix_seconds() + 3600;
+        merge_channel_registration(&block_engine, "delayed_flip", address.clone(), expiry);
+
+        let parked = get_channel_owner_response(&service, "delayed_flip").await;
+        assert_eq!(parked.fid, 0);
+        assert_eq!(parked.owner_address, address);
+        assert_eq!(
+            get_channels_by_fid_keys(&service, SHARD1_FID).await,
+            Vec::<String>::new()
+        );
+        let by_address_parked = service
+            .get_channels_by_address(channels_by_address_request(address.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(by_address_parked.channels.len(), 1);
+        assert_eq!(by_address_parked.channels[0].fid, 0);
+        assert_eq!(by_address_parked.channels[0].channel_key, "delayed_flip");
+
+        merge_verification(
+            stores.get(&1).unwrap(),
+            &verification_add(SHARD1_FID, address.clone(), 10),
+        );
+
+        assert_channel_owner_fid_invariant(&service, "delayed_flip", SHARD1_FID, None).await;
+        let by_address_resolved = service
+            .get_channels_by_address(channels_by_address_request(address))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(by_address_resolved.channels.len(), 1);
+        assert_eq!(by_address_resolved.channels[0].fid, SHARD1_FID);
+        assert_eq!(by_address_resolved.next_page_token, None);
+    }
+
+    // Lapsed registrations stay listed (with their past expiry) for the same
+    // reason GetChannelOwner returns them: release state is not computable
+    // from chain events, and a renewal prompt needs the owner to still see
+    // the channel.
+    #[tokio::test]
+    async fn test_channel_lists_include_lapsed_registrations() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(9);
+        let expiry = now_unix_seconds() - 1;
+        merge_channel_registration(&block_engine, "lapsed_list", address.clone(), expiry);
+        merge_verification(
+            stores.get(&1).unwrap(),
+            &verification_add(SHARD1_FID, address.clone(), 10),
+        );
+
+        let by_address = service
+            .get_channels_by_address(channels_by_address_request(address.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(by_address.channels.len(), 1);
+        assert_eq!(by_address.channels[0].channel_key, "lapsed_list");
+        assert_eq!(by_address.channels[0].fid, SHARD1_FID);
+        assert_eq!(by_address.channels[0].expiry, expiry);
+
+        assert_eq!(
+            get_channels_by_fid_keys(&service, SHARD1_FID).await,
+            vec!["lapsed_list".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_channel_reads_last_verifier_wins_regardless_of_merge_order() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(9);
+        merge_channel_registration(
+            &block_engine,
+            "last_verifier_wins",
+            address.clone(),
+            now_unix_seconds() + 3600,
+        );
+
+        let later = verification_add(SHARD2_FID, address.clone(), 20);
+        let earlier = verification_add(SHARD1_FID, address, 10);
+        merge_verification(stores.get(&2).unwrap(), &later);
+        merge_verification(stores.get(&1).unwrap(), &earlier);
+
+        assert_channel_owner_fid_invariant(
+            &service,
+            "last_verifier_wins",
+            SHARD2_FID,
+            Some(SHARD1_FID),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_channel_reads_remove_fallback_then_parked() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(10);
+        merge_channel_registration(
+            &block_engine,
+            "remove_fallback",
+            address.clone(),
+            now_unix_seconds() + 3600,
+        );
+        merge_verification(
+            stores.get(&1).unwrap(),
+            &verification_add(SHARD1_FID, address.clone(), 10),
+        );
+        merge_verification(
+            stores.get(&2).unwrap(),
+            &verification_add(SHARD2_FID, address.clone(), 20),
+        );
+        assert_channel_owner_fid_invariant(
+            &service,
+            "remove_fallback",
+            SHARD2_FID,
+            Some(SHARD1_FID),
+        )
+        .await;
+
+        merge_verification(
+            stores.get(&2).unwrap(),
+            &verification_remove(SHARD2_FID, address.clone(), 30),
+        );
+        assert_channel_owner_fid_invariant(
+            &service,
+            "remove_fallback",
+            SHARD1_FID,
+            Some(SHARD2_FID),
+        )
+        .await;
+
+        merge_verification(
+            stores.get(&1).unwrap(),
+            &verification_remove(SHARD1_FID, address, 40),
+        );
+        let parked = get_channel_owner_response(&service, "remove_fallback").await;
+        assert_eq!(parked.fid, 0);
+        assert!(!get_channels_by_fid_keys(&service, SHARD1_FID)
+            .await
+            .contains(&"remove_fallback".to_string()));
+        assert!(!get_channels_by_fid_keys(&service, SHARD2_FID)
+            .await
+            .contains(&"remove_fallback".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_channel_reads_cold_wallet_round_trip() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address_a = owner_address(11);
+        let address_b = owner_address(12);
+        let expiry = now_unix_seconds() + 3600;
+        merge_channel_registration(&block_engine, "cold_wallet", address_a.clone(), expiry);
+
+        let parked = get_channel_owner_response(&service, "cold_wallet").await;
+        assert_eq!(parked.fid, 0);
+        assert_eq!(parked.owner_address, address_a);
+        assert_eq!(parked.expiry, expiry);
+
+        merge_verification(
+            stores.get(&1).unwrap(),
+            &verification_add(SHARD1_FID, address_a, 10),
+        );
+        assert_channel_owner_fid_invariant(&service, "cold_wallet", SHARD1_FID, None).await;
+
+        merge_channel_transfer(
+            &block_engine,
+            "cold_wallet",
+            address_b.clone(),
+            expiry + 999,
+        );
+        let transferred = get_channel_owner_response(&service, "cold_wallet").await;
+        assert_eq!(transferred.fid, 0);
+        assert_eq!(transferred.owner_address, address_b);
+        assert_eq!(transferred.expiry, expiry);
+
+        merge_verification(
+            stores.get(&2).unwrap(),
+            &verification_add(SHARD2_FID, address_b, 20),
+        );
+        assert_channel_owner_fid_invariant(&service, "cold_wallet", SHARD2_FID, Some(SHARD1_FID))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_channel_reads_verify_with_no_channels_noop() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(13);
+        merge_verification(
+            stores.get(&1).unwrap(),
+            &verification_add(SHARD1_FID, address.clone(), 10),
+        );
+
+        let by_fid = service
+            .get_channels_by_fid(channels_by_fid_request(SHARD1_FID, None))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(by_fid.channels.is_empty());
+        assert_eq!(by_fid.next_page_token, None);
+
+        let by_address = service
+            .get_channels_by_address(channels_by_address_request(address))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(by_address.channels.is_empty());
+        assert_eq!(by_address.next_page_token, None);
+    }
+
+    // Registers `channel_key` to `owner_address` at a distinct chain position so
+    // several channels can coexist under one or more owner addresses.
+    fn register_channel_at(
+        block_engine: &BlockEngine,
+        channel_key: &str,
+        owner_address: Vec<u8>,
+        expiry: u64,
+        log_index: u32,
+    ) {
+        merge_channel_event(
+            block_engine,
+            events_factory::create_channel_register_event(
+                channel_key,
+                channel_label(channel_key),
+                owner_address,
+                expiry,
+                ChannelRegisterEventType::Register,
+                1,
+                log_index,
+            ),
+        );
+    }
+
+    async fn channels_by_fid_page(
+        service: &MyHubService,
+        fid: u64,
+        page_size: Option<u32>,
+        page_token: Option<Vec<u8>>,
+    ) -> proto::ChannelsResponse {
+        service
+            .get_channels_by_fid(Request::new(ChannelsByFidRequest {
+                fid,
+                page_size,
+                page_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+    }
+
+    // Scenario (g): a fid with two verified addresses owning four channels total,
+    // walked with page_size smaller than the total. Asserts the paged union equals
+    // the unpaginated result with no duplicates, that a page crosses an address
+    // boundary, and that the final page's token is unset (== enumeration complete).
+    #[tokio::test]
+    async fn test_channel_reads_by_fid_cursor_round_trip() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        // owner_address(20) < owner_address(21) lexicographically, so the composite
+        // cursor visits address_a's channels before address_b's.
+        let address_a = owner_address(20);
+        let address_b = owner_address(21);
+        let expiry = now_unix_seconds() + 3600;
+        register_channel_at(&block_engine, "rt_a1", address_a.clone(), expiry, 1);
+        register_channel_at(&block_engine, "rt_a2", address_a.clone(), expiry, 2);
+        register_channel_at(&block_engine, "rt_b1", address_b.clone(), expiry, 3);
+        register_channel_at(&block_engine, "rt_b2", address_b.clone(), expiry, 4);
+        merge_verification(
+            stores.get(&1).unwrap(),
+            &verification_add(SHARD1_FID, address_a.clone(), 10),
+        );
+        merge_verification(
+            stores.get(&1).unwrap(),
+            &verification_add(SHARD1_FID, address_b.clone(), 20),
+        );
+
+        // Unpaginated baseline: all four channels, no token.
+        let full = channels_by_fid_page(&service, SHARD1_FID, None, None).await;
+        let full_keys: Vec<String> = full
+            .channels
+            .iter()
+            .map(|c| c.channel_key.clone())
+            .collect();
+        assert_eq!(full_keys, vec!["rt_a1", "rt_a2", "rt_b1", "rt_b2"]);
+        assert_eq!(full.next_page_token, None);
+
+        // Page 1 of 2 (page_size 3) must cross the address_a -> address_b boundary.
+        let page1 = channels_by_fid_page(&service, SHARD1_FID, Some(3), None).await;
+        assert_eq!(page1.channels.len(), 3);
+        assert!(page1.next_page_token.is_some());
+        let page1_owners: HashSet<Vec<u8>> = page1
+            .channels
+            .iter()
+            .map(|c| c.owner_address.clone())
+            .collect();
+        assert_eq!(page1_owners.len(), 2, "page 1 should span both addresses");
+
+        // Page 2 resumes strictly after the token and completes.
+        let page2 =
+            channels_by_fid_page(&service, SHARD1_FID, Some(3), page1.next_page_token.clone())
+                .await;
+        assert_eq!(page2.next_page_token, None);
+
+        let mut walked: Vec<String> = page1
+            .channels
+            .iter()
+            .chain(page2.channels.iter())
+            .map(|c| c.channel_key.clone())
+            .collect();
+        let deduped: HashSet<String> = walked.iter().cloned().collect();
+        assert_eq!(deduped.len(), walked.len(), "pages must not duplicate");
+        walked.sort();
+        assert_eq!(walked, vec!["rt_a1", "rt_a2", "rt_b1", "rt_b2"]);
+        for channel in page1.channels.iter().chain(page2.channels.iter()) {
+            assert_eq!(channel.fid, SHARD1_FID);
+        }
+    }
+
+    // The composite cursor round-trips at the single-address level too, and the
+    // page-size clamp caps an omitted/oversized request without dropping results.
+    #[tokio::test]
+    async fn test_channel_reads_by_address_pagination_round_trip() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(22);
+        let expiry = now_unix_seconds() + 3600;
+        register_channel_at(&block_engine, "pa_1", address.clone(), expiry, 1);
+        register_channel_at(&block_engine, "pa_2", address.clone(), expiry, 2);
+        register_channel_at(&block_engine, "pa_3", address.clone(), expiry, 3);
+        merge_verification(
+            stores.get(&1).unwrap(),
+            &verification_add(SHARD1_FID, address.clone(), 10),
+        );
+
+        let mut walked = Vec::new();
+        let mut page_token = None;
+        loop {
+            let response = service
+                .get_channels_by_address(Request::new(ChannelsByAddressRequest {
+                    owner_address: address.clone(),
+                    page_size: Some(2),
+                    page_token: page_token.clone(),
+                    reverse: None,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            for channel in &response.channels {
+                assert_eq!(channel.fid, SHARD1_FID);
+                walked.push(channel.channel_key.clone());
+            }
+            match response.next_page_token {
+                Some(token) => page_token = Some(token),
+                None => break,
+            }
+        }
+
+        assert_eq!(walked, vec!["pa_1", "pa_2", "pa_3"]);
+    }
+
+    // Pins the page-size contract shared with GetChannelsByFid: 0 is an empty
+    // page with no token, not "at least one row".
+    #[tokio::test]
+    async fn test_channel_reads_by_address_zero_page_size_returns_empty_page() {
+        let (
+            _stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(24);
+        merge_channel_registration(
+            &block_engine,
+            "zero_page",
+            address.clone(),
+            now_unix_seconds() + 3600,
+        );
+
+        let response = service
+            .get_channels_by_address(Request::new(ChannelsByAddressRequest {
+                owner_address: address,
+                page_size: Some(0),
+                page_token: None,
+                reverse: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(response.channels.is_empty());
+        assert_eq!(response.next_page_token, None);
+    }
+
+    // Non-EVM (Solana) and malformed verifications must never contribute an
+    // owner address to the EVM-only channel resolution.
+    #[tokio::test]
+    async fn test_channel_reads_by_fid_excludes_non_ethereum() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let evm_address = owner_address(23);
+        let solana_address = vec![7u8; 32];
+        let expiry = now_unix_seconds() + 3600;
+        register_channel_at(&block_engine, "evm_owned", evm_address.clone(), expiry, 1);
+
+        merge_verification(
+            stores.get(&1).unwrap(),
+            &verification_add(SHARD1_FID, evm_address, 10),
+        );
+        // The Solana verification's 32-byte address must be filtered out before
+        // resolution. Without the protocol/length filter it would be treated as an
+        // owner address and fail the 20-byte EVM validation, erroring the request.
+        let solana_verification = messages_factory::verifications::create_verification_add(
+            SHARD1_FID,
+            2, // Protocol::Solana
+            solana_address,
+            vec![],
+            vec![],
+            Some(20),
+            None,
+        );
+        merge_verification(stores.get(&1).unwrap(), &solana_verification);
+
+        let keys = get_channels_by_fid_keys(&service, SHARD1_FID).await;
+        assert_eq!(keys, vec!["evm_owned"]);
+    }
+
+    // A non-20-byte address is a client error, mapped to INVALID_ARGUMENT rather
+    // than surfacing as an opaque internal error.
+    #[tokio::test]
+    async fn test_channel_reads_by_address_rejects_malformed_address() {
+        let (
+            _stores,
+            _senders,
+            _engines,
+            _block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+
+        let status = service
+            .get_channels_by_address(channels_by_address_request(vec![0u8; 4]))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    // Pins the accepted last-key cursor contract (shared with by-address): when a
+    // page fills exactly on the final entry, a token is still returned and the
+    // next request returns an empty final page with the token unset. Callers page
+    // until the token is unset; a present token does not guarantee more results.
+    #[tokio::test]
+    async fn test_channel_reads_by_fid_exact_boundary_yields_final_empty_page() {
+        let (
+            stores,
+            _senders,
+            _engines,
+            block_engine,
+            service,
+            _shard_decision_tx,
+            _block_decision_tx,
+        ) = make_server(None, None).await;
+        let address = owner_address(25);
+        let expiry = now_unix_seconds() + 3600;
+        register_channel_at(&block_engine, "eb_1", address.clone(), expiry, 1);
+        register_channel_at(&block_engine, "eb_2", address.clone(), expiry, 2);
+        merge_verification(
+            stores.get(&1).unwrap(),
+            &verification_add(SHARD1_FID, address, 10),
+        );
+
+        // Two channels, page_size 2: the page fills exactly on the last entry.
+        let page1 = channels_by_fid_page(&service, SHARD1_FID, Some(2), None).await;
+        assert_eq!(page1.channels.len(), 2);
+        assert!(
+            page1.next_page_token.is_some(),
+            "boundary-aligned page still returns a token"
+        );
+
+        // Resuming yields the final empty page with no token.
+        let page2 =
+            channels_by_fid_page(&service, SHARD1_FID, Some(2), page1.next_page_token.clone())
+                .await;
+        assert!(page2.channels.is_empty());
+        assert_eq!(page2.next_page_token, None);
     }
 
     #[tokio::test]

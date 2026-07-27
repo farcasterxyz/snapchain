@@ -1,8 +1,8 @@
 use crate::core::error::HubError;
 use crate::proto;
 use crate::proto::{
-    CastsByParentRequest, FidRequest, FidTimestampRequest, LinksByFidRequest,
-    ReactionsByFidRequest, SignersByFidRequest,
+    CastsByParentRequest, ChannelsByAddressRequest, FidRequest, FidTimestampRequest,
+    LinksByFidRequest, ReactionsByFidRequest, SignersByFidRequest,
 };
 use crate::storage::db::PageOptions;
 use crate::storage::store::account::MessagesPage;
@@ -90,6 +90,12 @@ impl FidRequestExt for FidRequest {
 }
 
 impl FidRequestExt for SignersByFidRequest {
+    fn page_options(&self) -> PageOptions {
+        page_options(self.page_size, self.page_token.clone(), self.reverse)
+    }
+}
+
+impl FidRequestExt for ChannelsByAddressRequest {
     fn page_options(&self) -> PageOptions {
         page_options(self.page_size, self.page_token.clone(), self.reverse)
     }

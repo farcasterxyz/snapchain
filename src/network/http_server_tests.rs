@@ -289,6 +289,30 @@ pub mod tests {
             Ok(Response::new(response))
         }
 
+        async fn get_channel_owner(
+            &self,
+            _request: Request<ChannelOwnerRequest>,
+        ) -> Result<Response<ChannelOwnerResponse>, Status> {
+            let response = ChannelOwnerResponse::default();
+            Ok(Response::new(response))
+        }
+
+        async fn get_channels_by_address(
+            &self,
+            _request: Request<ChannelsByAddressRequest>,
+        ) -> Result<Response<ChannelsResponse>, Status> {
+            let response = ChannelsResponse::default();
+            Ok(Response::new(response))
+        }
+
+        async fn get_channels_by_fid(
+            &self,
+            _request: Request<ChannelsByFidRequest>,
+        ) -> Result<Response<ChannelsResponse>, Status> {
+            let response = ChannelsResponse::default();
+            Ok(Response::new(response))
+        }
+
         async fn get_id_registry_on_chain_event(
             &self,
             _request: Request<FidRequest>,
@@ -444,6 +468,33 @@ pub mod tests {
         assert_eq!(nonces.len(), 2);
         assert_eq!(nonces.get("7777"), Some(&serde_json::json!(9)));
         assert_eq!(nonces.get("8888"), Some(&serde_json::json!(0)));
+    }
+
+    /// Pins the JSON-on-the-wire shape for `ChannelOwnerResponse`. The address
+    /// field must serialize as a "0x"-prefixed lowercase hex string under the
+    /// camelCase key `ownerAddress` (via `serdehex` + `rename`); `fid` and
+    /// `expiry` are plain numbers. The stub-based HTTP test elsewhere only
+    /// exercises the default (all-zero) response, so this pins the encoding of a
+    /// real 20-byte address.
+    #[test]
+    fn channel_owner_response_json_shape() {
+        use crate::network::http_server::ChannelOwnerResponse;
+
+        let response = ChannelOwnerResponse {
+            fid: 1234,
+            owner_address: vec![0x11u8; 20],
+            expiry: 1_700_000_000,
+        };
+
+        let json = serde_json::to_value(&response).expect("serialize");
+        assert_eq!(json["fid"], 1234);
+        assert_eq!(json["expiry"], 1_700_000_000u64);
+        assert_eq!(
+            json["ownerAddress"],
+            serde_json::json!(format!("0x{}", "11".repeat(20)))
+        );
+        // The raw snake_case key must not leak onto the wire.
+        assert!(json.get("owner_address").is_none());
     }
 
     #[tokio::test]

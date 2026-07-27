@@ -155,6 +155,54 @@ message OnChainEventResponse {
   optional bytes next_page_token = 2;
 }
 
+message ChannelOwnerRequest {
+  string channel_key = 1;
+}
+
+message ChannelOwnerResponse {
+  // 0 = registered but no verified owner found on this node's hosted shards
+  // ("parked"). Parking is computed at read time, never stored.
+  uint64 fid = 1;
+  // Raw 20-byte EVM address from the channel registry fold.
+  bytes owner_address = 2;
+  // Absolute expiry, unix seconds, as emitted by the registry contract. May be
+  // in the past: lapsed registrations are returned until superseded (see
+  // GetChannelOwner in rpc.proto).
+  uint64 expiry = 3;
+}
+
+message ChannelsByAddressRequest {
+  // Raw 20-byte EVM address.
+  bytes owner_address = 1;
+  optional uint32 page_size = 2;
+  optional bytes page_token = 3;
+  optional bool reverse = 4;
+}
+
+message ChannelsByFidRequest {
+  uint64 fid = 1;
+  optional uint32 page_size = 2;
+  // Opaque composite cursor over the fid's verified addresses joined with the
+  // channel owner-address index. No reverse cursor (addresses iterate ascending).
+  optional bytes page_token = 3;
+}
+
+message ChannelInfo {
+  string channel_key = 1;
+  // Resolved winner; 0 = parked.
+  uint64 fid = 2;
+  bytes owner_address = 3;
+  // Absolute expiry, unix seconds, as emitted by the registry contract. May be
+  // in the past: lapsed registrations are listed until superseded (see
+  // GetChannelOwner in rpc.proto).
+  uint64 expiry = 4;
+}
+
+message ChannelsResponse {
+  repeated ChannelInfo channels = 1;
+  optional bytes next_page_token = 2;
+}
+
 message TierDetails {
   TierType tier_type = 1;
   uint64 expires_at = 2;
@@ -497,4 +545,3 @@ message MeshTopology {
   repeated UnreachableNode unreachable = 2;
   uint64 generated_at = 3; // unix millis
 }
-
