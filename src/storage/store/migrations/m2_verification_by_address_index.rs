@@ -60,12 +60,19 @@ impl AsyncMigration for M2VerificationByAddressIndex {
                 );
             }
 
-            let mut txn = RocksDbTransactionBatch::new();
             let mut fixed_count = 0;
             let mut prefix = make_user_key(fid);
             prefix.push(UserPostfix::VerificationAdds as u8);
             let stop_prefix = increment_vec_u8(&prefix);
 
+            // Phase 1 collects only the addresses; the authoritative ts_hash is
+            // (re)read under a write-lock inside the transaction below, never
+            // trusted from this iterator snapshot. That is what makes the
+            // backfill safe against live merges running concurrently with this
+            // background migration: a bare iterator read + deferred `put` could
+            // resurrect an entry a concurrent remove just deleted, or overwrite
+            // a newer ts_hash a concurrent re-verify just wrote.
+            let mut addresses: Vec<Vec<u8>> = Vec::new();
             context
                 .stores
                 .db
@@ -73,8 +80,36 @@ impl AsyncMigration for M2VerificationByAddressIndex {
                     Some(prefix.clone()),
                     Some(stop_prefix),
                     &PageOptions::default(),
-                    |key, value| {
-                        if value.len() != TS_HASH_LENGTH {
+                    |key, _value| {
+                        let address = &key[prefix.len()..];
+                        if !address.is_empty() {
+                            addresses.push(address.to_vec());
+                        }
+                        Ok(false)
+                    },
+                )
+                .map_err(|e| MigrationError::InternalError(e.to_string()))?;
+
+            // One transaction per (fid, address): `get_for_update` locks the
+            // primary VerificationAdds key, so a concurrent add/remove that
+            // writes that key must serialize against us — and the live merge
+            // writes the primary and the by-address entry together, so the index
+            // converges regardless of ordering. Per-entry transactions keep the
+            // lock hold time (and any live-path stall) to a minimum.
+            for address in &addresses {
+                let primary_key = VerificationStoreDef::make_verification_adds_key(fid, address);
+                let fixed = context
+                    .stores
+                    .db
+                    .transaction_with(|txn| {
+                        let ts_hash = match txn.get_for_update(&primary_key, true)? {
+                            // Removed by a concurrent merge after phase 1 scanned
+                            // it: nothing to backfill, and writing anyway would
+                            // resurrect a phantom entry.
+                            None => return Ok(false),
+                            Some(value) => value,
+                        };
+                        if ts_hash.len() != TS_HASH_LENGTH {
                             // A primary VerificationAdds value is always a
                             // 24-byte ts_hash; a malformed one means local DB
                             // corruption for this entry. Skip and log it (M1's
@@ -84,33 +119,25 @@ impl AsyncMigration for M2VerificationByAddressIndex {
                             warn!(
                                 fid,
                                 shard_id,
-                                value_len = value.len(),
+                                value_len = ts_hash.len(),
                                 "Skipping verification add with unexpected ts_hash length during migration."
                             );
                             return Ok(false);
                         }
 
-                        let address = &key[prefix.len()..];
-                        if address.is_empty() {
-                            return Ok(false);
-                        }
-
                         let by_address_key =
                             VerificationStoreDef::make_verification_by_address_key(address, fid);
-                        txn.put(by_address_key, value.to_vec());
-                        fixed_count += 1;
+                        txn.put(&by_address_key, &ts_hash)?;
+                        Ok(true)
+                    })
+                    .map_err(MigrationError::DbError)?;
 
-                        Ok(false)
-                    },
-                )
-                .map_err(|e| MigrationError::InternalError(e.to_string()))?;
+                if fixed {
+                    fixed_count += 1;
+                }
+            }
 
             if fixed_count > 0 {
-                context
-                    .stores
-                    .db
-                    .commit(txn)
-                    .map_err(MigrationError::DbError)?;
                 info!(
                     shard_id = context.stores.shard_id,
                     fid,

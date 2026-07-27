@@ -1,6 +1,6 @@
 use crate::core::error::HubError;
 use crate::storage::util::increment_vec_u8;
-use rocksdb::{Options, TransactionDB, DB};
+use rocksdb::{Options, Transaction, TransactionDB, DB};
 use std::collections::HashMap;
 use std::fs::{self};
 use std::path::Path;
@@ -388,6 +388,30 @@ impl RocksDB {
                 }
 
                 txn.commit().map_err(|e| RocksdbError::InternalError(e))
+            }
+            Some(DBProvider::ReadOnly(_)) => Err(RocksdbError::ReadOnly),
+            None => Err(RocksdbError::DbNotOpen),
+        }
+    }
+
+    /// Run `f` inside a single pessimistic transaction and commit iff it returns
+    /// `Ok`. Unlike [`commit`](Self::commit), which flushes a pre-built batch,
+    /// this exposes the live transaction so `f` can call
+    /// `txn.get_for_update(key, true)` to take a write-lock on keys it reads. A
+    /// concurrent writer to a locked key between the read and the commit is then
+    /// serialized against this transaction instead of silently overwriting it —
+    /// the read-modify-write primitive `commit` cannot express. On any `Err` the
+    /// transaction is dropped without committing (auto-rollback).
+    pub fn transaction_with<R>(
+        &self,
+        f: impl FnOnce(&Transaction<'_, TransactionDB>) -> Result<R, RocksdbError>,
+    ) -> Result<R, RocksdbError> {
+        match self.db().as_ref() {
+            Some(DBProvider::Transaction(db)) => {
+                let txn = db.transaction();
+                let out = f(&txn)?;
+                txn.commit()?;
+                Ok(out)
             }
             Some(DBProvider::ReadOnly(_)) => Err(RocksdbError::ReadOnly),
             None => Err(RocksdbError::DbNotOpen),
