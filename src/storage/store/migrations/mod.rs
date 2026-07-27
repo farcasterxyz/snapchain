@@ -5,8 +5,9 @@ use crate::storage::store::stores::Stores;
 use crate::{core::error::HubError, storage::constants::RootPrefix};
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::time::Instant;
 use thiserror::Error;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 mod m1_fix_fname_index;
 mod m2_verification_by_address_index;
@@ -38,6 +39,18 @@ pub struct MigrationContext {
 
 /// Trait that all migration implementations must adhere to. Note that these are all non-blocking migrations
 /// i.e. they don't block engine startup.
+///
+/// IDEMPOTENCY CONTRACT — every migration MUST be safe to (a) run to completion
+/// more than once and (b) re-run from the start after a partial, interrupted
+/// run. The runner re-runs a migration after any handled error, and — because a
+/// process can crash or be restarted mid-migration, leaving the in-progress flag
+/// set with the schema version un-bumped — it also re-runs a migration whose
+/// flag was left set by such an interrupted run (see `run_pending_migrations`).
+/// A migration that is not idempotent can therefore corrupt data. Achieve
+/// idempotency by making each write derive its value so that a repeat is a no-op
+/// (e.g. read-under-lock / last-write-wins) and by making any destructive
+/// cleanup discriminate the new state from the old before deleting (e.g. M2's
+/// value-length check), never by assuming it runs exactly once.
 #[async_trait]
 pub trait AsyncMigration: Send + Sync {
     /// Returns the schema version this migration upgrades the DB to.
@@ -117,8 +130,25 @@ impl MigrationRunner {
         self,
     ) -> Result<Option<tokio::task::JoinHandle<Result<(), MigrationError>>>, MigrationError> {
         let db_version = self.context.stores.get_schema_version()?;
+        let shard_id = self.context.stores.shard_id;
+
+        // Publish the current schema version unconditionally so a node that
+        // needs no migration still reports where it is. A migration has finished
+        // rolling across the fleet once every shard's gauge reads
+        // LATEST_SCHEMA_VERSION.
+        self.context.stores.statsd.gauge_with_shard(
+            shard_id,
+            "migration.schema_version",
+            db_version as u64,
+        );
 
         if db_version >= LATEST_SCHEMA_VERSION {
+            info!(
+                shard_id,
+                db_version,
+                code_version = LATEST_SCHEMA_VERSION,
+                "DB schema is up to date; no migrations to run."
+            );
             return Ok(None);
         }
 
@@ -140,18 +170,43 @@ impl MigrationRunner {
             ));
         }
 
-        // Don't run more than 1 migration at a time
+        // Guard against running the same migration twice concurrently. In
+        // practice the DB is opened by a single process (RocksDB's TransactionDB
+        // holds an exclusive directory lock) and this runs once per shard at
+        // startup, so a still-set flag here does NOT mean a migration is actively
+        // running. The flag is cleared on both success and handled failure, and
+        // db_version is known to be < LATEST_SCHEMA_VERSION at this point, so a
+        // set flag means a prior run started this migration and never finished —
+        // the process crashed or was restarted mid-migration. Re-run it rather
+        // than skipping: leaving it set would strand this shard at the old schema
+        // version until an operator manually cleared the flag. This recovery is
+        // safe ONLY because migrations honor the idempotency contract documented
+        // on AsyncMigration (re-runnable from scratch after a partial run).
         let context = self.context.clone();
         if Self::get_migration_running(&context, start_migrations_at as u32)? {
-            return Ok(None);
+            warn!(
+                shard_id,
+                start_migrations_at,
+                db_version,
+                "Detected an interrupted migration (in-progress flag still set with an \
+                 un-bumped schema version); re-running it from the start. Migrations must \
+                 be idempotent for this recovery to be safe."
+            );
+            context.stores.statsd.count_with_shard(
+                shard_id,
+                "migration.recovered_interrupted",
+                1,
+                vec![],
+            );
         }
         Self::set_migration_running(&context, start_migrations_at as u32, true)?;
 
         info!(
-            shard_id = self.context.stores.shard_id,
+            shard_id,
             db_version,
             code_version = LATEST_SCHEMA_VERSION,
             start_migrations_at,
+            pending = self.all_migrations.len() - start_migrations_at,
             "DB needs migrations. Running pending DB migrations..."
         );
 
@@ -166,44 +221,61 @@ impl MigrationRunner {
 
         let handle = tokio::spawn(async move {
             for migration in migrations_to_run {
+                let version = migration.to_db_version();
+                let statsd = &context.stores.statsd;
+
+                statsd.count_with_shard(shard_id, "migration.started", 1, vec![]);
                 info!(
-                    shard_id = context.stores.shard_id,
-                    version = migration.to_db_version(),
+                    shard_id,
+                    version,
                     description = migration.description(),
                     "Starting background migration..."
                 );
 
                 // We will await the background migration, but we're inside a tokio::spawn, so not blocking engine startup
                 // This is done so that only one background migration runs at a time, and the SCHEMA_VERSION is updated correctly
+                let started_at = Instant::now();
                 if let Err(e) = migration.run(context.clone()).await {
                     // The JoinHandle is dropped by the caller, so this is the only
                     // place a background-migration failure surfaces — log it loudly
                     // rather than letting it vanish into a detached task.
                     error!(
-                        shard_id = context.stores.shard_id,
-                        version = migration.to_db_version(),
+                        shard_id,
+                        version,
                         description = migration.description(),
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
                         error = %e,
                         "Background migration failed."
                     );
+                    context
+                        .stores
+                        .statsd
+                        .count_with_shard(shard_id, "migration.failed", 1, vec![]);
                     // If a migration fails, we'll write to DB that the migration is no longer running
                     Self::set_migration_running(&context, start_migrations_at as u32, false)?;
                     return Err(e);
                 }
 
                 // Update the schema version in the DB transactionally with the migration
-                context
-                    .stores
-                    .set_schema_version(migration.to_db_version())?;
+                context.stores.set_schema_version(version)?;
 
+                let statsd = &context.stores.statsd;
+                statsd.count_with_shard(shard_id, "migration.completed", 1, vec![]);
+                statsd.gauge_with_shard(shard_id, "migration.schema_version", version as u64);
                 info!(
-                    shard_id = context.stores.shard_id,
-                    version = migration.to_db_version(),
+                    shard_id,
+                    version,
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
                     "Background migration completed successfully."
                 );
             }
 
             Self::set_migration_running(&context, start_migrations_at as u32, false)?;
+            info!(
+                shard_id,
+                db_version = LATEST_SCHEMA_VERSION,
+                "All pending background migrations complete; DB is now at the latest schema version."
+            );
             Ok(())
         });
         Ok(Some(handle))
@@ -264,6 +336,41 @@ mod tests {
         handle.unwrap().await.unwrap().unwrap();
 
         // Assert that the migration ran and the DB version was updated
+        assert_eq!(*run_tracker.lock().await, vec![1]);
+        assert_eq!(stores.get_schema_version().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_runner_reruns_interrupted_migration_instead_of_wedging() {
+        let (engine, _tmpdir) = test_helper::new_engine().await;
+        let stores = engine.get_stores();
+        let context = MigrationContext {
+            db: engine.db.clone(),
+            stores: stores.clone(),
+        };
+        assert_eq!(stores.get_schema_version().unwrap(), 0);
+
+        // Simulate a prior run that set the in-progress flag but crashed before
+        // bumping the schema version — the classic wedge state.
+        MigrationRunner::set_migration_running(&context, 0, true).unwrap();
+
+        let run_tracker = Arc::new(Mutex::new(Vec::new()));
+        let migrations: Vec<Box<dyn AsyncMigration>> = vec![Box::new(TestMigration {
+            version: 1,
+            run_tracker: run_tracker.clone(),
+        })];
+
+        let runner = MigrationRunner::new_with_list(context.clone(), migrations);
+        // A wedge would skip and return Ok(None); recovery returns a handle that
+        // re-runs the interrupted migration.
+        let handle = runner
+            .run_pending_migrations()
+            .await
+            .unwrap()
+            .expect("interrupted migration should re-run, not be skipped");
+        handle.await.unwrap().unwrap();
+
+        // The migration re-ran and the schema advanced past the wedge.
         assert_eq!(*run_tracker.lock().await, vec![1]);
         assert_eq!(stores.get_schema_version().unwrap(), 1);
     }
