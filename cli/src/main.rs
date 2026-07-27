@@ -339,6 +339,7 @@ enum EventTypeArg {
     MergeOnChainEvent,
     MergeFailure,
     BlockConfirmed,
+    ChannelOwnerChangeHint,
 }
 
 impl EventTypeArg {
@@ -351,6 +352,7 @@ impl EventTypeArg {
             EventTypeArg::MergeOnChainEvent => HubEventType::MergeOnChainEvent,
             EventTypeArg::MergeFailure => HubEventType::MergeFailure,
             EventTypeArg::BlockConfirmed => HubEventType::BlockConfirmed,
+            EventTypeArg::ChannelOwnerChangeHint => HubEventType::ChannelOwnerChangeHint,
         }
     }
 }
@@ -364,6 +366,7 @@ fn default_event_types() -> Vec<HubEventType> {
         HubEventType::MergeOnChainEvent,
         HubEventType::MergeFailure,
         HubEventType::BlockConfirmed,
+        HubEventType::ChannelOwnerChangeHint,
     ]
 }
 
