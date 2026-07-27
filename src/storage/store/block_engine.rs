@@ -22,6 +22,8 @@ use crate::utils::statsd_wrapper::StatsdClientWrapper;
 use crate::version::version::{EngineVersion, ProtocolFeature};
 use itertools::Itertools;
 use prost::Message;
+use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::sync::Arc;
 use std::u32;
 use thiserror::Error;
@@ -182,6 +184,36 @@ pub struct BlockStateChange {
     pub events_hash: Vec<u8>,
     pub transactions: Vec<Transaction>,
     pub events: Vec<BlockEvent>,
+}
+
+pub(crate) fn block_engine_system_messages_for_replay<'a>(
+    system_messages: &'a [proto::ValidatorMessage],
+    version: EngineVersion,
+) -> Cow<'a, [proto::ValidatorMessage]> {
+    if !version.is_enabled(ProtocolFeature::SortedBlockEngineEvents) {
+        return Cow::Borrowed(system_messages);
+    }
+
+    let mut sorted_system_messages = system_messages.to_vec();
+    // CONSENSUS-CRITICAL: the ordering semantics here must stay identical to ShardEngine's
+    // comparator in engine.rs (`replay_snapchain_txn`, its `sorted_system_messages.sort_by`
+    // block). Both engines replay the same onchain events and must canonicalize their order
+    // the same way; if the two diverge, block-shard and data-shard replay fold shard-0 state
+    // differently. Change both together, or extract a shared comparator.
+    sorted_system_messages.sort_by(|a, b| {
+        match (&a.on_chain_event, &b.on_chain_event) {
+            (Some(event_a), Some(event_b)) => {
+                // Both are OnChainEvents: order by block_number then log_index.
+                (event_a.block_number, event_a.log_index)
+                    .cmp(&(event_b.block_number, event_b.log_index))
+            }
+            (Some(_), None) => Ordering::Less, // OnChainEvents sort before other system messages.
+            (None, Some(_)) => Ordering::Greater, // Other system messages sort after OnChainEvents.
+            (None, None) => Ordering::Equal, // Neither is an OnChainEvent; keep input order (stable sort).
+        }
+    });
+
+    Cow::Owned(sorted_system_messages)
 }
 
 impl BlockEngine {
@@ -479,7 +511,9 @@ impl BlockEngine {
     ) -> Result<(Vec<u8>, Vec<HubEvent>, Vec<MessageValidationError>), BlockEngineError> {
         let mut hub_events = vec![];
         let mut validation_errors = vec![];
-        for message in &snapchain_txn.system_messages {
+        let system_messages =
+            block_engine_system_messages_for_replay(&snapchain_txn.system_messages, version);
+        for message in system_messages.as_ref() {
             if let Some(ref onchain_event) = message.on_chain_event {
                 if onchain_event.r#type() == proto::OnChainEventType::EventTypeChannelRegister
                     && !version.is_enabled(ProtocolFeature::ChannelRegistrations)
@@ -1118,6 +1152,47 @@ impl BlockEngine {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod ordering_tests {
+    use super::block_engine_system_messages_for_replay;
+    use crate::proto::{OnChainEvent, ValidatorMessage};
+    use crate::version::version::EngineVersion;
+
+    fn validator_message(block_number: u32, log_index: u32) -> ValidatorMessage {
+        ValidatorMessage {
+            on_chain_event: Some(OnChainEvent {
+                block_number,
+                log_index,
+                ..Default::default()
+            }),
+            fname_transfer: None,
+            block_event: None,
+        }
+    }
+
+    fn log_indexes(messages: &[ValidatorMessage]) -> Vec<u32> {
+        messages
+            .iter()
+            .map(|message| message.on_chain_event.as_ref().unwrap().log_index)
+            .collect()
+    }
+
+    #[test]
+    fn sorted_block_engine_events_gate_controls_system_message_order() {
+        let messages = vec![
+            validator_message(7, 20),
+            validator_message(7, 10),
+            validator_message(6, 30),
+        ];
+
+        let off = block_engine_system_messages_for_replay(&messages, EngineVersion::V19);
+        assert_eq!(log_indexes(off.as_ref()), vec![20, 10, 30]);
+
+        let on = block_engine_system_messages_for_replay(&messages, EngineVersion::V20);
+        assert_eq!(log_indexes(on.as_ref()), vec![30, 10, 20]);
     }
 }
 

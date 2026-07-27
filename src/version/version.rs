@@ -54,6 +54,7 @@ pub enum ProtocolFeature {
     StorageExpiryExtension2026,
     BlockLinks,
     ChannelRegistrations,
+    SortedBlockEngineEvents,
 }
 
 pub struct VersionSchedule {
@@ -271,7 +272,17 @@ impl EngineVersion {
             ProtocolFeature::LiveAt => self >= &EngineVersion::V17,
             ProtocolFeature::StorageExpiryExtension2026 => self >= &EngineVersion::V18,
             ProtocolFeature::BlockLinks => self >= &EngineVersion::V19,
-            ProtocolFeature::ChannelRegistrations => self >= &EngineVersion::V20,
+            // Distinct features, but their activation boundaries MUST stay identical.
+            // ChannelRegistrations gates *acceptance* of channel-register events (which build the
+            // order-dependent shard-0 channel-owner index); SortedBlockEngineEvents gates the
+            // *canonical ordering* of shard-0 system messages. If SortedBlockEngineEvents ever
+            // lagged ChannelRegistrations, BlockEngine would accept channel-register events but
+            // replay them unsorted, reintroducing the same-eth-block owner divergence this fix
+            // closes. Kept in one arm so they share the V20 boundary; the lock-step invariant is
+            // enforced by `test_channel_registrations_and_sorted_events_activate_together`.
+            ProtocolFeature::ChannelRegistrations | ProtocolFeature::SortedBlockEngineEvents => {
+                self >= &EngineVersion::V20
+            }
         }
     }
 
@@ -689,6 +700,55 @@ mod version_test {
             EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet)
                 .is_enabled(ProtocolFeature::ChannelRegistrations)
         );
+    }
+
+    #[test]
+    fn test_sorted_block_engine_events_feature_gate() {
+        // Gate closed below V20, open at V20+. BlockEngine replay consults this
+        // boundary before canonicalizing shard-0 onchain-event order.
+        assert_eq!(
+            EngineVersion::V19.is_enabled(ProtocolFeature::SortedBlockEngineEvents),
+            false
+        );
+        assert_eq!(
+            EngineVersion::V20.is_enabled(ProtocolFeature::SortedBlockEngineEvents),
+            true
+        );
+        assert_eq!(
+            EngineVersion::latest().is_enabled(ProtocolFeature::SortedBlockEngineEvents),
+            true
+        );
+    }
+
+    #[test]
+    fn test_sorted_block_engine_events_activation_schedule() {
+        let far_future = FarcasterTime::from_unix_seconds(4102444800); // 2100-01-01 UTC
+        for network in [FarcasterNetwork::Mainnet, FarcasterNetwork::Testnet] {
+            assert!(!EngineVersion::version_for(&far_future, network)
+                .is_enabled(ProtocolFeature::SortedBlockEngineEvents));
+        }
+        assert!(
+            EngineVersion::version_for(&FarcasterTime::new(0), FarcasterNetwork::Devnet)
+                .is_enabled(ProtocolFeature::SortedBlockEngineEvents)
+        );
+    }
+
+    #[test]
+    fn test_channel_registrations_and_sorted_events_activate_together() {
+        // CONSENSUS INVARIANT: these two features must be enabled at the exact same versions.
+        // If SortedBlockEngineEvents ever lagged ChannelRegistrations, BlockEngine would accept
+        // channel-register events but replay them unsorted, reintroducing the same-eth-block
+        // channel-owner divergence this fix closes. This test fails CI if a future change splits
+        // their activation boundaries.
+        use strum::IntoEnumIterator;
+        for version in EngineVersion::iter() {
+            assert_eq!(
+                version.is_enabled(ProtocolFeature::ChannelRegistrations),
+                version.is_enabled(ProtocolFeature::SortedBlockEngineEvents),
+                "ChannelRegistrations and SortedBlockEngineEvents must co-activate; they differ at {:?}",
+                version
+            );
+        }
     }
 
     #[test]
