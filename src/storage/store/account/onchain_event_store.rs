@@ -1221,6 +1221,7 @@ pub struct FIDIterator {
     db: Arc<RocksDB>,
     last_fid: u64,
     fids: VecDeque<u64>,
+    error: Option<OnchainEventStorageError>,
 }
 
 impl FIDIterator {
@@ -1231,7 +1232,16 @@ impl FIDIterator {
             db,
             last_fid: start_fid,
             fids: VecDeque::new(),
+            error: None,
         }
+    }
+
+    /// Returns the error that ended iteration, if any. `next()` cannot surface
+    /// fetch failures — it ends iteration exactly like normal exhaustion — so a
+    /// caller that must distinguish "complete" from "failed" (e.g. a migration
+    /// that deletes data only after a full pass) checks this after the loop.
+    pub fn take_error(&mut self) -> Option<OnchainEventStorageError> {
+        self.error.take()
     }
 
     fn fetch(&mut self) -> Result<Option<u64>, OnchainEventStorageError> {
@@ -1294,8 +1304,14 @@ impl Iterator for FIDIterator {
     fn next(&mut self) -> Option<Self::Item> {
         if self.fids.is_empty() {
             match self.fetch() {
-                Ok(None) | Err(_) => {
+                Ok(None) => {
                     // Done fetching, no more FIDs
+                    return None;
+                }
+                Err(err) => {
+                    // Iteration ends indistinguishably from exhaustion here;
+                    // callers that need the distinction use take_error().
+                    self.error = Some(err);
                     return None;
                 }
                 Ok(Some(_fid)) => {}

@@ -4,7 +4,8 @@ mod tests {
     use crate::proto::{self as message, hub_event, HubEventType, ReactionType};
     use crate::storage::db::{PageOptions, RocksDB, RocksDbTransactionBatch};
     use crate::storage::store::account::{
-        Store, StoreEventHandler, VerificationStore, VerificationStoreDef,
+        make_fid_key, make_ts_hash, Store, StoreEventHandler, VerificationStore,
+        VerificationStoreDef, TS_HASH_LENGTH,
     };
     use crate::storage::util::{decrement_vec_u8, increment_vec_u8};
     use crate::utils::factory::{address, messages_factory};
@@ -176,6 +177,210 @@ mod tests {
 
         let retrieved = VerificationStore::get_verification_remove(&store, FID_FOR_TEST, &address);
         assert_eq!(retrieved.unwrap().unwrap(), verification_remove);
+    }
+
+    #[test]
+    fn test_get_verifications_by_address_returns_all_fid_entries() {
+        let (store, db, _temp_dir) = create_test_store();
+        let address = address::generate_random_address();
+        let fid1 = FID_FOR_TEST;
+        let fid2 = FID_FOR_TEST + 1;
+
+        let verification_add1 = messages_factory::verifications::create_verification_add(
+            fid1,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(1),
+            None,
+        );
+        let verification_add2 = messages_factory::verifications::create_verification_add(
+            fid2,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(2),
+            None,
+        );
+
+        merge_message_success(&store, &db, &verification_add1);
+        merge_message_success(&store, &db, &verification_add2);
+
+        let entries = VerificationStore::get_verifications_by_address(&store, &address).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|(fid, ts_hash)| {
+            *fid == fid1
+                && *ts_hash
+                    == make_ts_hash(
+                        verification_add1.data.as_ref().unwrap().timestamp,
+                        &verification_add1.hash,
+                    )
+                    .unwrap()
+        }));
+        assert!(entries.iter().any(|(fid, ts_hash)| {
+            *fid == fid2
+                && *ts_hash
+                    == make_ts_hash(
+                        verification_add2.data.as_ref().unwrap().timestamp,
+                        &verification_add2.hash,
+                    )
+                    .unwrap()
+        }));
+    }
+
+    #[test]
+    fn test_verification_remove_deletes_only_own_by_address_entry() {
+        let (store, db, _temp_dir) = create_test_store();
+        let address = address::generate_random_address();
+        let fid1 = FID_FOR_TEST;
+        let fid2 = FID_FOR_TEST + 1;
+
+        let verification_add1 = messages_factory::verifications::create_verification_add(
+            fid1,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(1),
+            None,
+        );
+        let verification_add2 = messages_factory::verifications::create_verification_add(
+            fid2,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(2),
+            None,
+        );
+        let verification_remove1 = messages_factory::verifications::create_verification_remove(
+            fid1,
+            address.clone(),
+            Some(3),
+            None,
+        );
+
+        merge_message_success(&store, &db, &verification_add1);
+        merge_message_success(&store, &db, &verification_add2);
+        merge_message_with_conflicts(&store, &db, &verification_remove1, vec![verification_add1]);
+
+        let entries = VerificationStore::get_verifications_by_address(&store, &address).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, fid2);
+        assert_eq!(
+            entries[0].1,
+            make_ts_hash(
+                verification_add2.data.as_ref().unwrap().timestamp,
+                &verification_add2.hash
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_reverify_updates_own_by_address_ts_hash() {
+        let (store, db, _temp_dir) = create_test_store();
+        let address = address::generate_random_address();
+
+        let verification_add = messages_factory::verifications::create_verification_add(
+            FID_FOR_TEST,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(1),
+            None,
+        );
+        let verification_add_later = messages_factory::verifications::create_verification_add(
+            FID_FOR_TEST,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(2),
+            None,
+        );
+
+        merge_message_success(&store, &db, &verification_add);
+        merge_message_with_conflicts(&store, &db, &verification_add_later, vec![verification_add]);
+
+        let entries = VerificationStore::get_verifications_by_address(&store, &address).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, FID_FOR_TEST);
+        assert_eq!(
+            entries[0].1,
+            make_ts_hash(
+                verification_add_later.data.as_ref().unwrap().timestamp,
+                &verification_add_later.hash
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_get_verifications_by_address_skips_legacy_slot() {
+        let (store, db, _temp_dir) = create_test_store();
+        let address = address::generate_random_address();
+
+        // Simulate the pre-migration on-disk state: a legacy address-only slot
+        // (key == prefix, value == a bare 4-byte fid).
+        let mut txn = RocksDbTransactionBatch::new();
+        txn.put(
+            VerificationStoreDef::make_verification_by_address_prefix(&address),
+            make_fid_key(999),
+        );
+        db.commit(txn).unwrap();
+
+        // The reader tolerates the transitional shape: it skips the legacy slot
+        // rather than erroring the whole read.
+        let entries = VerificationStore::get_verifications_by_address(&store, &address).unwrap();
+        assert!(entries.is_empty());
+
+        // A real (new-format) verification coexisting with the legacy slot is
+        // still returned; the legacy slot stays skipped.
+        let verification_add = messages_factory::verifications::create_verification_add(
+            FID_FOR_TEST,
+            0,
+            address.clone(),
+            vec![],
+            vec![],
+            Some(1),
+            None,
+        );
+        merge_message_success(&store, &db, &verification_add);
+
+        let entries = VerificationStore::get_verifications_by_address(&store, &address).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, FID_FOR_TEST);
+    }
+
+    #[test]
+    fn test_get_verifications_by_address_isolates_addresses_of_different_lengths() {
+        let (store, db, _temp_dir) = create_test_store();
+        // A 20-byte ETH-length address and a 32-byte Solana-length address whose
+        // prefix scans must not bleed into each other.
+        let addr_eth = vec![0x11u8; 20];
+        let addr_sol = vec![0x22u8; 32];
+        let ts_eth = [0xAAu8; TS_HASH_LENGTH];
+        let ts_sol = [0xBBu8; TS_HASH_LENGTH];
+
+        let mut txn = RocksDbTransactionBatch::new();
+        txn.put(
+            VerificationStoreDef::make_verification_by_address_key(&addr_eth, 10),
+            ts_eth.to_vec(),
+        );
+        txn.put(
+            VerificationStoreDef::make_verification_by_address_key(&addr_sol, 20),
+            ts_sol.to_vec(),
+        );
+        db.commit(txn).unwrap();
+
+        let eth = VerificationStore::get_verifications_by_address(&store, &addr_eth).unwrap();
+        assert_eq!(eth, vec![(10u64, ts_eth)]);
+        let sol = VerificationStore::get_verifications_by_address(&store, &addr_sol).unwrap();
+        assert_eq!(sol, vec![(20u64, ts_sol)]);
     }
 
     // getVerificationAddsByFid tests

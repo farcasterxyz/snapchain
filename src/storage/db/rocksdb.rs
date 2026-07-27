@@ -1,6 +1,6 @@
 use crate::core::error::HubError;
 use crate::storage::util::increment_vec_u8;
-use rocksdb::{Options, TransactionDB, DB};
+use rocksdb::{Options, Transaction, TransactionDB, DB};
 use std::collections::HashMap;
 use std::fs::{self};
 use std::path::Path;
@@ -379,7 +379,22 @@ impl RocksDB {
             Some(DBProvider::Transaction(db)) => {
                 let txn = db.transaction();
 
-                for (key, value) in batch.batch {
+                // Apply the batch in ascending key order. RocksDB's pessimistic
+                // TransactionDB takes a row lock on each key as it is written and
+                // holds it until commit (two-phase locking), so the write order
+                // *is* the lock-acquisition order. Committing in the batch's
+                // HashMap (i.e. random) order lets two transactions that touch
+                // the same keys acquire them in opposite orders and deadlock
+                // until the lock timeout. Sorting gives every transaction one
+                // global lock order, which makes such cycles impossible. It is
+                // state-neutral: each key appears once, so ordering changes only
+                // lock acquisition, never the committed values. Any reader/writer
+                // that hand-rolls a transaction (see `transaction_with`) must
+                // acquire its keys in the same ascending order to stay compatible.
+                let mut entries: Vec<_> = batch.batch.into_iter().collect();
+                entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+                for (key, value) in entries {
                     if value.is_none() {
                         txn.delete(key)?;
                     } else {
@@ -388,6 +403,35 @@ impl RocksDB {
                 }
 
                 txn.commit().map_err(|e| RocksdbError::InternalError(e))
+            }
+            Some(DBProvider::ReadOnly(_)) => Err(RocksdbError::ReadOnly),
+            None => Err(RocksdbError::DbNotOpen),
+        }
+    }
+
+    /// Run `f` inside a single pessimistic transaction and commit iff it returns
+    /// `Ok`. Unlike [`commit`](Self::commit), which flushes a pre-built batch,
+    /// this exposes the live transaction so `f` can call
+    /// `txn.get_for_update(key, true)` to take a write-lock on keys it reads. A
+    /// concurrent writer to a locked key between the read and the commit is then
+    /// serialized against this transaction instead of silently overwriting it —
+    /// the read-modify-write primitive `commit` cannot express. On any `Err` the
+    /// transaction is dropped without committing (auto-rollback).
+    ///
+    /// Locks (via `get_for_update` or writes) are held until commit. To avoid
+    /// deadlocking against other transactions, `f` MUST acquire keys in ascending
+    /// byte order — the same global order [`commit`](Self::commit) enforces by
+    /// sorting its batch.
+    pub fn transaction_with<R>(
+        &self,
+        f: impl FnOnce(&Transaction<'_, TransactionDB>) -> Result<R, RocksdbError>,
+    ) -> Result<R, RocksdbError> {
+        match self.db().as_ref() {
+            Some(DBProvider::Transaction(db)) => {
+                let txn = db.transaction();
+                let out = f(&txn)?;
+                txn.commit()?;
+                Ok(out)
             }
             Some(DBProvider::ReadOnly(_)) => Err(RocksdbError::ReadOnly),
             None => Err(RocksdbError::DbNotOpen),
