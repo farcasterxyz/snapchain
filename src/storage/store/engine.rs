@@ -769,11 +769,35 @@ impl ShardEngine {
                 // the hint consumer contract documents (see hub_event.proto): the latest update
                 // hints everywhere, but no single shard's stream is guaranteed to carry every
                 // hint — consumers subscribe to all shards and treat hints as re-read triggers.
-                match fold_channel_register_replica(
+                let fold_outcome = match fold_channel_register_replica(
                     &self.stores.onchain_event_store.db,
                     txn_batch,
                     on_chain_event,
-                )? {
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(err) => {
+                        // Off-trie replica fold: unlike the trie-backed MergeMessage arm, a
+                        // failure here leaves NO shard-root mismatch, so consensus can't flag
+                        // the resulting ownership-index drift. Count it and log at error! so
+                        // silent divergence is detectable in aggregate rather than buried in
+                        // the caller's generic block-event warn. Still propagates to the
+                        // caller's warn-and-continue path (control flow unchanged); whether a
+                        // fold failure should instead force block-event re-replay is a separate,
+                        // consensus-sensitive decision left out of this change.
+                        self.metrics
+                            .count("channel_owner_replica_fold_failed", 1, vec![]);
+                        error!(
+                            seqnum = block_event.seqnum(),
+                            block_number = on_chain_event.block_number,
+                            log_index = on_chain_event.log_index,
+                            onchain_event_type = on_chain_event.r#type,
+                            "channel-owner replica fold failed; ownership index may be stale on this shard: {}",
+                            err.to_string()
+                        );
+                        return Err(err.into());
+                    }
+                };
+                match fold_outcome {
                     None => Ok(vec![]),
                     Some(change) => {
                         // Emit exactly one hint. `commit_transaction` assigns its event id
@@ -790,10 +814,30 @@ impl ShardEngine {
                                 },
                             ),
                         );
-                        let id = self
+                        let id = match self
                             .stores
                             .event_handler
-                            .commit_transaction(txn_batch, &mut hint)?;
+                            .commit_transaction(txn_batch, &mut hint)
+                        {
+                            Ok(id) => id,
+                            Err(err) => {
+                                // The owner index already advanced in this txn_batch, but the
+                                // hint — the re-read trigger — failed to persist. If nothing
+                                // else touches this channel, consumers get no signal to re-read,
+                                // so surface it at error! with a distinct counter. Propagates as
+                                // before (caller warns and continues).
+                                self.metrics
+                                    .count("channel_owner_hint_commit_failed", 1, vec![]);
+                                error!(
+                                    seqnum = block_event.seqnum(),
+                                    block_number = on_chain_event.block_number,
+                                    log_index = on_chain_event.log_index,
+                                    "channel-owner hint persist failed; owner index advanced but no hint emitted on this shard: {}",
+                                    err.to_string()
+                                );
+                                return Err(err.into());
+                            }
+                        };
                         hint.id = id;
                         Ok(vec![hint])
                     }
@@ -811,7 +855,7 @@ impl ShardEngine {
     /// well below the block-safety threshold. An address owning more than this has its
     /// hint set truncated in ascending key order (deterministic across nodes);
     /// consumers reconcile the full set via `GetChannelOwner`.
-    const MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION: usize = 256;
+    pub(crate) const MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION: usize = 256;
 
     /// Emit `ChannelOwnerChangeHint` HubEvents for a just-merged Ethereum
     /// verification whose verified address owns one or more channels, by scanning

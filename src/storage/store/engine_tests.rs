@@ -5493,6 +5493,37 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn test_production_wrapper_caps_fan_out_at_the_constant() {
+            // The truncation tests above drive the `_capped` seam with a small max, so they
+            // pass regardless of what the PUBLIC wrapper forwards — a regression that made the
+            // wrapper pass `usize::MAX` (removing the very budget bound this feature adds) would
+            // leave them green. This test guards the one production seam: register CAP+1 channels
+            // to a single address, call the public wrapper (no explicit max), and assert it
+            // truncates to exactly `MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION`. Uses the constant
+            // (not a literal) so the expectation follows any future change to the cap.
+            let cap = ShardEngine::MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION;
+            let (mut engine, _tmp) = new_verifier_engine().await;
+            for i in 0..(cap + 1) {
+                // Zero-padded so ascending byte order is stable and distinct per channel.
+                register_channel(&mut engine, &format!("chan_{:04}", i), verified_address()).await;
+            }
+
+            let add = verification_add(messages_factory::farcaster_time());
+            let mut txn = RocksDbTransactionBatch::new();
+            let hints = engine.emit_channel_owner_hints_for_verification(
+                &add,
+                &mut txn,
+                EngineVersion::V20,
+            );
+
+            assert_eq!(
+                hints.len(),
+                cap,
+                "public wrapper must truncate fan-out to MAX_CHANNEL_OWNER_HINTS_PER_VERIFICATION",
+            );
+        }
+
+        #[tokio::test]
         async fn test_truncated_hints_do_not_touch_the_trie() {
             // Truncation must be as trie-inert as normal emission: capping the fan-out
             // mutates zero trie state, so it can never move the shard root (and thus can
