@@ -1184,7 +1184,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         let channel_key = "message_reads";
         let channel_id = channel_label(channel_key);
         merge_channel_registration(
@@ -1389,7 +1389,7 @@ mod tests {
             service,
             _shard_decision_tx,
             _block_decision_tx,
-        ) = make_server(None).await;
+        ) = make_server(None, None).await;
         const OWNER_FID: u64 = 7101;
         const MODERATOR_FID: u64 = 7102;
         const TARGET_FID: u64 = 7103;
@@ -1796,7 +1796,7 @@ mod tests {
                     service,
                     _shard_decision_tx,
                     _block_decision_tx,
-                ) = make_server(None).await;
+                ) = make_server(None, None).await;
                 Self {
                     replicas,
                     block_engine,
